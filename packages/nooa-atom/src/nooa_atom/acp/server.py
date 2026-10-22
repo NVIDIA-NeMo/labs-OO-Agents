@@ -44,7 +44,6 @@ from acp.schema import (
     ConfigOptionUpdate,
     ElicitationFormSessionMode,
     ElicitationSchema,
-    ElicitationStringPropertySchema,
     HttpMcpServer,
     Implementation,
     ListSessionsResponse,
@@ -59,6 +58,7 @@ from acp.schema import (
     UnstructuredCommandInput,
 )
 
+from nooa.elicit import ElicitationRequest, ElicitationUnavailable, Elicited
 from nooa.errors import GenerationError
 from nooa.mcp import MCPManager, MCPTool
 from nooa.slash_dispatch import CoercionError
@@ -769,48 +769,40 @@ class AtomACPAgent:
             return PromptResponse(stop_reason="cancelled")
         return PromptResponse(stop_reason="end_turn")
 
-    async def _ask_verbosity(self, session: Session, question: str) -> Any:
-        """Ask the client to pick a verbosity level in a form of its own.
+    async def _send_form(
+        self,
+        session: Session,
+        message: str,
+        *,
+        pool_schema: dict[str, Any],
+        schema: dict[str, Any],
+    ) -> tuple[str | None, dict[str, Any] | None] | object | None:
+        """Show a form in the client and wait for the answer.
 
-        Pool's ``_poolside/elicitation`` when the client is Pool, else a
-        standard ``elicitation/create`` form when the client advertised
-        ``elicitation.form``. Returns the chosen level, ``_DISMISSED`` when
-        the person declined or dismissed it, ``_CANCELLED`` when Stop ended
-        it, or ``None`` when no form could be shown or the answer is not a
-        level. A failed Pool request turns Pool forms off for this connection.
+        Pool's ``_poolside/elicitation`` with ``pool_schema`` (string fields
+        only) when the client is Pool, else a standard ``elicitation/create``
+        form with ``schema`` when the client advertised ``elicitation.form``.
+        Returns ``(action, content)``, ``_CANCELLED`` when Stop ended it, or
+        ``None`` when no form could be shown. A failed Pool request turns
+        Pool forms off for this connection.
         """
         conn = self._require_conn()
         via_pool = self._pool_forms
         if via_pool:
-            # Pool declines non-string inputs: one required string picker.
-            picker = {
-                "type": "string",
-                "title": "Verbosity",
-                "description": _VERBOSITY_HELP,
-                "oneOf": [{"const": level, "title": level} for level in VERBOSITY_LEVELS],
-            }
             params = {
                 "sessionId": session.id,
                 "mode": "form",
-                "message": question,
-                "requestedSchema": {
-                    "type": "object",
-                    "properties": {"verbosity": picker},
-                    "required": ["verbosity"],
-                },
+                "message": message,
+                "requestedSchema": pool_schema,
             }
             request = conn.ext_method(_POOL_FORM_METHOD, params)
         elif self._client_shows_forms():
-            field = ElicitationStringPropertySchema(
-                type="string",
-                title="Verbosity",
-                description=_VERBOSITY_HELP,
-                enum=list(VERBOSITY_LEVELS),
-            )
-            schema = ElicitationSchema(properties={"verbosity": field}, required=["verbosity"])
             request = conn.create_elicitation(
-                message=question,
-                mode=ElicitationFormSessionMode(session_id=session.id, requested_schema=schema),
+                message=message,
+                mode=ElicitationFormSessionMode(
+                    session_id=session.id,
+                    requested_schema=ElicitationSchema.model_validate(schema),
+                ),
             )
         else:
             return None
@@ -825,9 +817,77 @@ class AtomACPAgent:
             action, content = response.get("action"), response.get("content")
         else:
             action, content = getattr(response, "action", None), getattr(response, "content", None)
+        return action, content if isinstance(content, dict) else None
+
+    def _can_show_forms(self) -> bool:
+        return self._pool_forms or self._client_shows_forms()
+
+    async def _elicit(
+        self, session: Session, bridge: ACPEventBridge, request: ElicitationRequest
+    ) -> Elicited:
+        """The session's asker: ``nooa.elicit.ask`` from its turns and commands.
+
+        Stop answers ``cancel`` (a late answer is dropped); a client without
+        forms, or one that fails the request, raises ``ElicitationUnavailable``.
+        """
+        if self._bridges.get(session.id) is not bridge or not self._can_show_forms():
+            raise ElicitationUnavailable("This client cannot show forms.")
+        epoch = self._ask_epochs.get(session.id, 0)
+        answer = await self._send_form(
+            session,
+            request.message,
+            pool_schema=request.to_string_schema(),
+            schema=request.to_schema(),
+        )
+        if answer is _CANCELLED or not self._client_answer_is_current(session, bridge, epoch):
+            return Elicited(action="cancel")
+        if answer is None:
+            raise ElicitationUnavailable("The client could not show the form.")
+        action, content = answer  # type: ignore[misc]
+        if action == "accept":
+            return Elicited(action="accept", values=content or {})
+        return Elicited(action="decline" if action == "decline" else "cancel")
+
+    async def _ask_verbosity(self, session: Session, question: str) -> Any:
+        """Ask the client to pick a verbosity level in a form of its own.
+
+        Returns the chosen level, ``_DISMISSED`` when the person declined or
+        dismissed it, ``_CANCELLED`` when Stop ended it, or ``None`` when no
+        form could be shown or the answer is not a level (see ``_send_form``).
+        """
+        # Pool declines non-string inputs: one required string picker.
+        picker = {
+            "type": "string",
+            "title": "Verbosity",
+            "description": _VERBOSITY_HELP,
+            "oneOf": [{"const": level, "title": level} for level in VERBOSITY_LEVELS],
+        }
+        field = {
+            "type": "string",
+            "title": "Verbosity",
+            "description": _VERBOSITY_HELP,
+            "enum": list(VERBOSITY_LEVELS),
+        }
+        answer = await self._send_form(
+            session,
+            question,
+            pool_schema={
+                "type": "object",
+                "properties": {"verbosity": picker},
+                "required": ["verbosity"],
+            },
+            schema={
+                "type": "object",
+                "properties": {"verbosity": field},
+                "required": ["verbosity"],
+            },
+        )
+        if answer is _CANCELLED or answer is None:
+            return answer
+        action, content = answer  # type: ignore[misc]
         if action != "accept":
             return _DISMISSED
-        level = content.get("verbosity") if isinstance(content, dict) else None
+        level = content.get("verbosity") if content else None
         return level if level in VERBOSITY_LEVELS else None
 
     def _client_shows_forms(self) -> bool:
@@ -1233,6 +1293,12 @@ class AtomACPAgent:
         bridge = ACPEventBridge(session, conn, resolve_child=self.session)
         bridge.set_verbosity(load_acp_verbosity(session.options.workspace))
         self._bridges[session.id] = bridge
+
+        async def asker(request: ElicitationRequest) -> Elicited:
+            return await self._elicit(session, bridge, request)
+
+        # Forms for nooa.elicit.ask; the session binds it for root sessions only.
+        session.set_asker(asker)
 
         def on_update(update: Any) -> None:
             if isinstance(update, CommandsChangedUpdate):
