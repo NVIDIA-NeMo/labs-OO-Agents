@@ -47,7 +47,7 @@ async def test_a_question_ends_the_turn_as_text_and_the_next_prompt_answers_it(
     response = await asyncio.wait_for(adapter.prompt(session_id, [text_block("dev")]), TIMEOUT)
     assert response.stop_reason == "end_turn"
     assert "dev" in str(models.llms[None].calls[1].messages[-2:])
-    assert client.texts(AgentMessageChunk, session_id)[-2] == "Using dev.\n\n"
+    assert client.texts(AgentMessageChunk, session_id)[-1] == "Using dev.\n\n"
     assert [e.content for e in adapter.session(session_id).transcript() if e.role == "user"] == [
         "push it",
         "dev",
@@ -82,13 +82,13 @@ async def test_a_done_message_reaches_the_client_before_the_prompt_answers(
     adapter = await make_adapter(models)
     session_id, response = await _run(adapter, workspace)
     client.log.append(("response", "prompt", response))
-    assert client.texts(AgentMessageChunk, session_id) == ["All set.\n\n", "> **Done:** x\n\n"]
+    assert client.texts(AgentMessageChunk, session_id) == ["All set.\n\n"]
     kinds = [
         "message" if entry[0] == "update" and isinstance(entry[2], AgentMessageChunk) else entry[0]
         for entry in client.log
         if entry[0] == "response" or isinstance(entry[2], AgentMessageChunk)
     ]
-    assert kinds == ["message", "message", "response"]
+    assert kinds == ["message", "response"]
 
 
 async def test_mcp_sign_in_callback_is_not_admitted_or_echoed(

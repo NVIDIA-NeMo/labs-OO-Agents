@@ -219,23 +219,19 @@ def question_text(question: str, reason: str | None = None) -> str:
     return text
 
 
-def result_text(kind: str, outcome: dict[str, Any]) -> str | None:
-    """The status line that ends a ``Done``/``Waiting`` turn, else ``None``.
+def result_card(kind: str, outcome: dict[str, Any]) -> tuple[str, str | None] | None:
+    """The title and body of the card that ends a ``Done``/``Waiting`` turn, else ``None``.
 
-    A Markdown blockquote, so it reads as a status and not as chat text:
-    ``> **Done:** <explanation>`` or ``> **Waiting:** <explanation>``. Every
-    line of a longer explanation stays inside the quote.
+    The title is ``Done: <first line of the explanation>`` (``Waiting: ...``),
+    or just ``Done``; a longer explanation is the body.
     """
-    explanation = str(outcome.get("explanation") or "").strip()
-    if kind == "done":
-        label = "Done"
-    elif kind == "waiting":
-        label = "Waiting"
-    else:
+    labels = {"done": "Done", "waiting": "Waiting"}
+    if kind not in labels:
         return None
+    explanation = str(outcome.get("explanation") or "").strip()
     first, *rest = explanation.splitlines() or [""]
-    head = f"**{label}:** {first}" if first else f"**{label}.**"
-    return "\n".join(f"> {line}" if line else ">" for line in [head, *rest])
+    title = f"{labels[kind]}: {first}" if first else labels[kind]
+    return title, (explanation if rest else None)
 
 
 def end_line(update: Any) -> Any:
@@ -662,10 +658,10 @@ class ACPEventBridge:
                 )
             )
         elif update.outcome_kind in {"done", "waiting"}:
-            # The chat says the turn ended, and what it waits on.
-            text = result_text(update.outcome_kind, update.outcome)
-            if text:
-                self._enqueue(update_agent_message(text_block(text)))
+            # A card, not chat text: the turn's last message stays its reply.
+            card = result_card(update.outcome_kind, update.outcome)
+            if card is not None:
+                self._status_card(*card)
         elif update.outcome_kind == "error":
             # A turn ending on an error does not always write the PythonOutput
             # for a cell it announced; close its card rather than leave it
@@ -940,8 +936,22 @@ class ACPEventBridge:
     def _on_summary(self, event: EventBase) -> None:
         if not isinstance(event, Summary) or event.summary_text is None:
             return
-        line = f"Summarized context ({event.summary_tag})."
-        self._activity_text(f"{line}\n\n{event.summary_text}", line)
+        body = event.summary_text if self.verbosity == "verbose" else None
+        self._status_card(f"Summarized context ({event.summary_tag})", body)
+
+    def _status_card(self, title: str, body: str | None = None) -> None:
+        """A finished card for something the agent did, not said; none when silent."""
+        if self.verbosity == "silent":
+            return
+        self._enqueue(
+            start_tool_call(
+                f"status-{uuid4()}",
+                title,
+                kind="other",
+                status="completed",
+                content=[tool_content(text_block(body))] if body else None,
+            )
+        )
 
     # ---- derived updates ---------------------------------------------
 
