@@ -1496,7 +1496,7 @@ def _available_commands_update(commands: list[CommandInfo]) -> Any:
     names = {command.name for command in commands}
     verbosity = CommandInfo(
         name="verbosity",
-        description="Set ACP activity detail (default verbose); no argument opens a picker when supported.",
+        description="Set how much agent activity is shown: silent, concise, or verbose.",
         input_hint="[silent|concise|verbose]",
     )
     # The ACP-local command wins over a skill command with the same name.

@@ -71,7 +71,7 @@ RESERVED_COMMAND_NAMES = frozenset(
 # with its own tools. A host control with the same name replaces one.
 COMPACT = SlashCommand(
     name="compact",
-    description="Ask the agent to compact its history with self.events.collapse()",
+    description="Summarize older conversation history to free up context while preserving key details.",
     argument_hint="[instructions]",
     body=(
         "Please compact your history now using self.events.collapse(start_tag, end_tag, "

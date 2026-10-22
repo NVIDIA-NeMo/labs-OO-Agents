@@ -131,7 +131,7 @@ class BehaviorControl:
 
 
 class SkillsControl(BehaviorControl):
-    """Discover skills and save workspace activation preferences."""
+    """Browse skills, add skill folders, and choose which skills the agent can use in this workspace."""
 
     @property
     def name(self) -> str:
@@ -323,7 +323,7 @@ class SkillsControl(BehaviorControl):
 
 
 class MCPControl(BehaviorControl):
-    """Review, approve, sign in to, and revoke MCP server configurations."""
+    """Review MCP server configurations, approve access, sign in, or revoke approval."""
 
     usage = "[status|approve NAME [CODE]|auth NAME ADDRESS|revoke NAME]"
 
@@ -400,7 +400,7 @@ class MCPControl(BehaviorControl):
 
 
 class TraceUrlControl(BehaviorControl):
-    """Show the viewer URL of the current trace session."""
+    """Show the link to this session in the trace viewer."""
 
     @property
     def name(self) -> str:
@@ -454,7 +454,7 @@ _USAGE_ROWS = (
 
 
 class UsageControl(BehaviorControl):
-    """Token usage for this session so far."""
+    """Show token usage for this session, including subagents when available."""
 
     @property
     def name(self) -> str:
