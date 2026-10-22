@@ -314,7 +314,8 @@ def test_unknown_chat_failure_plain_format_recovery_cumulative_budget(monkeypatc
     result = CliRunner().invoke(
         command,
         args(path, style="chat") + ["--no-catalogue", "--budget-tokens", "9216"],
-        input="32768\n32768\ntest\nstructured\nanthropic\ntest\ny\n",
+        # A failed baseline offers one retry; the answer format lives under Change settings.
+        input="32768\n32768\ntest\ny\nchange\nstructured\nanthropic\ntest\ny\n",
     )
     assert result.exit_code == 0, result.output
     assert len(posts) == 2
@@ -335,7 +336,7 @@ def test_retry_exhaustion_sends_zero_extra_posts(monkeypatch, tmp_path):
     result = CliRunner().invoke(
         command,
         args(path, style="chat") + ["--no-catalogue", "--budget-tokens", "4608"],
-        input="32768\n32768\ntest\nreview\ntest\ncancel\n",
+        input="32768\n32768\ntest\ny\ntest\nn\n",
     )
     assert result.exit_code != 0, result.output
     assert len(posts) == 1 and not path.exists()
@@ -371,7 +372,8 @@ def test_discovery_failure_changed_unknown_route_requires_new_manual_review(
         reviews = [
             answer for label, answer in events if label == "Would you like to test these settings?"
         ]
-        assert reviews == ["test", "test"] or reviews == ["test", "test", "test"]
+        # Discover approved the a.test checks; b.test needs its own fresh review.
+        assert reviews in (["test"], ["test", "test"])
         assert "PRIVATE-KEY" not in str(request.headers)
         if request.url.path == "/v1/chat/completions":
             return httpx.Response(200, json=response_body("chat"))
@@ -396,7 +398,7 @@ def test_discovery_failure_changed_unknown_route_requires_new_manual_review(
         "--output",
         str(path),
     ]
-    answers = "discover\ntest\nserver\nhttps://b.test/v1\nB\n\n32768\n16384\n" + (
+    answers = "discover\nserver\nhttps://b.test/v1\nB\n\n32768\n16384\n" + (
         "save\ny\nchat\nsave\ny\n" if save_untested else "test\ntest\ny\n"
     )
     result = CliRunner().invoke(command, flags, input=answers)
@@ -408,7 +410,8 @@ def test_discovery_failure_changed_unknown_route_requires_new_manual_review(
     assert "Previous source, context and test proof no longer apply" in " ".join(
         result.output.split()
     )
-    assert result.output.count("Would you like to test these settings?") == 3
+    # The replacement route's review, then the review of the selected interface.
+    assert result.output.count("Would you like to test these settings?") == 2
     bposts = [r for r in calls if r.method == "POST" and r.url.host == "b.test"]
     assert not bposts if save_untested else bool(bposts)
     assert all(json.loads(r.content)["model"] == "B" for r in bposts)
@@ -473,7 +476,7 @@ def test_plain_native_recommendation_can_be_overridden_explicitly(monkeypatch, t
     mock_http(monkeypatch, handle)
     path = tmp_path / "models.yaml"
     result = CliRunner().invoke(
-        command, args(path), input="default\nstructured\n" + mode + "\nsave\ny\n"
+        command, args(path), input="default\nchange\nstructured\n" + mode + "\nsave\ny\n"
     )
     assert result.exit_code == 0, result.output
     entry = yaml.safe_load(path.read_text())["models"]["local"]
@@ -598,7 +601,7 @@ def test_manual_on_reselection_keeps_owned_budget_and_never_adds_level_cap(
 
     mock_http(monkeypatch, handle)
     path = tmp_path / "models.yaml"
-    answers = "on\n2048\nchange\n32768\n8192\ncustom\n1024\non\n\n" + action
+    answers = "on\n2048\nchange\nchange\n32768\n8192\ncustom\n1024\non\n\n" + action
     answers += "\ncustom\n4096\nsave\ny\n" if action == "adjust" else "\n"
     result = CliRunner().invoke(command, args(path), input=answers)
     assert result.exit_code == 0, result.output
@@ -651,10 +654,8 @@ def test_discovered_native_carrier_requires_current_review_without_reasoning_met
         if request.url.path == "/v1/messages":
             body = json.loads(request.content)
             if "format" in body.get("output_config", {}):
-                assert reviews == [
-                    "test",
-                    "test",
-                ]  # native carrier was reviewed before configured POST
+                # Discover ran routing first; the native carrier was then reviewed.
+                assert reviews == ["test"]
             return httpx.Response(200, json=response_body("anthropic"))
         return httpx.Response(400, json={"error": {"message": "unsupported"}})
 
@@ -663,9 +664,9 @@ def test_discovered_native_carrier_requires_current_review_without_reasoning_met
     flags = args(path)
     index = flags.index("--api-style")
     del flags[index : index + 2]
-    result = CliRunner().invoke(command, flags, input="discover\ntest\ntest\ny\n")
+    result = CliRunner().invoke(command, flags, input="discover\ntest\ny\n")
     assert result.exit_code == 0, result.output
-    assert len(reviews) == 2
+    assert len(reviews) == 1
     assert result.output.count("Model details\n") == 1
     entry = yaml.safe_load(path.read_text())["models"]["local"]
     assert entry["structured_output_mode"] == "anthropic"

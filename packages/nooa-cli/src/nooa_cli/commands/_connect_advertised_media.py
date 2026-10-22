@@ -37,16 +37,17 @@ def offer_suggestions(state, previous):
             "No media is listed.",
         }:
             view.note(scrub_setup(state, note))
-    if report["unavailable_checks"]:
-        view.fields(
-            scrub_setup(
-                state,
-                [
-                    (view.media_label(kind) + " test", reason)
-                    for kind, reason in report["unavailable_checks"].items()
-                ],
-            )
-        )
+    from ._connect_input_policy import available_media
+
+    supported = available_media(state)
+    # Formats this interface can't send are already excluded from the choices.
+    explained = [
+        (view.media_label(kind) + " test", reason)
+        for kind, reason in report["unavailable_checks"].items()
+        if kind in supported
+    ]
+    if explained:
+        view.fields(scrub_setup(state, explained))
 
     def input_label(kind):
         return {"audio": "Audio clips", "video": "Videos"}.get(kind, view.media_label(kind))
@@ -106,8 +107,9 @@ def offer_suggestions(state, previous):
         state.media_inputs = list(previous)
         state.inherit_media_inputs = True
         if action == "test-all":
+            supported = available_media(state)
             for kind, reason in all_report["unavailable_checks"].items():
-                if kind not in report["unavailable_checks"]:
+                if kind not in report["unavailable_checks"] and kind in supported:
                     view.fields(scrub_setup(state, [(view.media_label(kind) + " test", reason)]))
     elif action == "manual":
         from ._connect_wizard import select_manual_media

@@ -10,6 +10,7 @@ import pytest
 import yaml
 from click.testing import CliRunner
 from nooa_cli.commands import _connect_prompts as prompts
+from nooa_cli.commands import _connect_view as view
 from nooa_cli.commands import _connect_wizard as wizard
 from nooa_cli.commands.connect import command
 
@@ -221,7 +222,12 @@ def test_manual_selection_plans_only_and_off_has_no_extra_prompt(monkeypatch, se
     def choose(label, options, *, default):
         choices.append(label)
         assert default == "test"
-        assert dict(options) == {"test": "Test selected inputs", "enable": "Enable without testing"}
+        names = ", ".join(view.media_label(kind) for kind in selected)
+        assert label == f"Would you like to test these media types: {names}?"
+        assert dict(options) == {
+            "test": f"Test {names}",
+            "enable": f"Enable {names} without testing",
+        }
         return action
 
     monkeypatch.setattr(prompts, "labelled_choice", choose)
@@ -321,7 +327,7 @@ def test_actual_guided_manual_and_listed_consent_save_and_partial_results(
     original = prompts.labelled_choice
 
     def choose(label, options, **kwargs):
-        if label == "How would you like to use the selected inputs?":
+        if label.startswith("Would you like to test these media types:"):
             assert all(r.method == "GET" for r in calls)
             selected_prompts.append(options)
         if label == "Would you like to test these settings?":
@@ -512,6 +518,7 @@ def test_guided_test_all_proposal_marks_unimplemented_checks_before_consent(
         in text
     )
     assert "Video: Off; interface doesn’t support this format" in text
-    assert "Unsupported media input" in text
+    # The row already explains unsupported formats; no separate test reason.
+    assert "Audio test:" not in text and "Video test:" not in text
     assert "Use Chat" not in text
     assert current.proposal.entry["media_inputs"] == previous

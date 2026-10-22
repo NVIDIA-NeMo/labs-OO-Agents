@@ -426,10 +426,14 @@ def test_recovery_edit_server_preserves_budget_and_saves_only_new_route(tmp_path
             "--output",
             str(path),
         ],
-        input="262144\n262144\ndiscover\ntest\nserver\nhttps://new.example/v1\nnew-model\n"
+        # Discover runs interface checks at once; the server edit precedes the proposal.
+        input="262144\n262144\ndiscover\nserver\nhttps://new.example/v1\nnew-model\n"
         "65536\n32768\ntest\ntest\ny\n",
     )
     assert result.exit_code == 0, result.output
+    # The replacement route asks before rediscovery, then reviews the chosen route.
+    assert result.output.count("Would you like to test these settings?") == 2
+    assert "Choose an available value" not in result.output
     assert [r.url.host for r in sent] == ["old.example"] * 3 + ["new.example"] * 4
     assert "response_format" not in json.loads(sent[3].content)  # Plain discovery acceptance.
     assert "response_format" in json.loads(sent[-1].content)  # Fresh configured baseline.
@@ -828,7 +832,11 @@ def test_bare_command_walks_through_setup_and_checks_inline(tmp_path, monkeypatc
             return httpx.Response(200, json={"data": [{"id": "example-model"}]})
         # Feedback appears before the HTTP operation, not only at the end.
         assert any("— checking" in line for line in output)
-        assert any("Would you like to test these settings?" in line for line in output)
+        # Discover approves interface checks; everything later follows Test now.
+        proposed = any("Proposed configuration" in line for line in output)
+        assert not proposed or any(
+            "Would you like to test these settings?" in line for line in output
+        )
         assert not any("may incur charges" in line for line in output)
         if request.url.path != "/v1/chat/completions":
             return httpx.Response(404)
@@ -860,7 +868,7 @@ def test_bare_command_walks_through_setup_and_checks_inline(tmp_path, monkeypatc
         [],
         input=(
             "custom\nhttps://api.test/v1\nCONNECT_WIZARD_KEY\ntemporary-secret\n"
-            "example-model\ndiscover\ntest\ntest\nmy-model\ny\nn\n"
+            "example-model\ndiscover\ntest\nmy-model\ny\nn\n"
         ),
     )
     assert result.exit_code == 0, result.output
@@ -987,12 +995,14 @@ def test_authentication_recovery_keeps_budget_and_secrets(tmp_path, monkeypatch,
             "--output",
             str(path),
         ],
-        input="262144\n262144\ndiscover\nchange\n262144\n262144\nrecommended\ntest\nkey\nCONNECT_GOOD\ntest\ny\n"
+        # Discover runs interface checks at once, so key recovery precedes the proposal.
+        input="262144\n262144\ndiscover\nkey\nCONNECT_GOOD\n"
+        "change\nchange\n262144\n262144\nrecommended\ntest\ny\n"
         if recover
-        else "262144\n262144\ndiscover\ntest\ncancel\n",
+        else "262144\n262144\ndiscover\ncancel\n",
     )
     assert result.exit_code == (0 if recover else 1), result.output
-    assert result.output.count("Would you like to test these settings?") == (3 if recover else 1)
+    assert result.output.count("Would you like to test these settings?") == (2 if recover else 0)
     assert "Approve setup" not in result.output
     assert "Key rejected by this server" in result.output
     assert "Give Feedback" not in result.output
@@ -1049,12 +1059,13 @@ def test_retry_stops_when_original_budget_is_exhausted(tmp_path, monkeypatch):
             "--output",
             str(path),
         ],
-        input="262144\n262144\ndiscover\ntest\nretry\n",
+        input="262144\n262144\ndiscover\nretry\n",
     )
     assert result.exit_code != 0, result.output
     assert len(sent) == 4
     assert "Check budget used up" in result.output
-    assert result.output.count("Would you like to test these settings?") == 1
+    # Discover approves the interface checks; their failure precedes any proposal.
+    assert result.output.count("Would you like to test these settings?") == 0
     assert "Approve setup" not in result.output
     assert not path.exists()
 
@@ -1111,13 +1122,14 @@ def test_interface_and_later_checks_share_the_cli_budget(tmp_path, monkeypatch):
             "--output",
             str(path),
         ],
-        input="262144\n262144\ndiscover\ntest\ndefault\ntest\ny\n",
+        input="262144\n262144\ndiscover\ndefault\ntest\nn\n",
     )
     assert result.exit_code != 0, result.output
     assert len(sent) == 3  # All of the budget was spent testing interfaces.
     assert not path.exists()  # Discovery consumed approval; no typed baseline ran.
     assert "Nothing was saved" in result.output
-    assert "Connection test failed" in result.output
+    assert "Agent diagnostic prompt:" in result.output
+    assert "Try again with different settings?" in result.output
     assert "Write model entry" not in result.output
     assert "Some tests will be skipped" in result.output
     assert "setup is incomplete; check budget used up before Connection" in result.output
@@ -1242,9 +1254,9 @@ def test_model_settings_can_be_edited_skipped_or_cancelled(
     path = tmp_path / "models.yaml"
     options = [arg for arg in args(path) if arg != "--no-catalogue"]
     answers = {
-        "edit": "change\n0\n64000\n2048\nrecommended\nsave\ny\n",
-        "keep_context": "change\n\n2048\nrecommended\nsave\ny\n",
-        "skip": "change\n-\n-\n-\nsave\ny\n",
+        "edit": "change\nchange\n0\n64000\n2048\nrecommended\nsave\ny\n",
+        "keep_context": "change\nchange\n\n2048\nrecommended\nsave\ny\n",
+        "skip": "change\nchange\n-\n-\n-\nsave\ny\n",
         "cancel": "",
     }
     result = CliRunner().invoke(command, options, input=answers[action])

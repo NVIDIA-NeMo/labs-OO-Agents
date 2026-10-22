@@ -99,8 +99,7 @@ def test_normal_wizard_transcript(monkeypatch, tmp_path, columns, save):
         ["--output", str(path), "--reasoning-template", "effort", "--levels", "low,high"],
         input=(
             "custom\nhttps://api.test/v1\nnew\nUX_KEY\ntemporary-secret\n"
-            "model\ndiscover\ntest\ntest\ndefault\ntest\nkeep\nlocal\n"
-            + ("y\nn\n" if save else "n\n")
+            "model\ndiscover\ntest\ndefault\ntest\nkeep\nlocal\n" + ("y\nn\n" if save else "n\n")
         ),
     )
     assert result.exit_code == 0, result.output
@@ -118,10 +117,10 @@ def test_normal_wizard_transcript(monkeypatch, tmp_path, columns, save):
         "API key",
         "Search available models",
         "Request interface",
+        "OpenAI-compatible Chat: Passed",
         "configure media inputs",
         "Proposed configuration",
         "Would you like to test these settings?",
-        "OpenAI-compatible Chat: Passed",
         "Connection: Passed",
         "Tool use: Passed",
         "Reasoning (low): Passed",

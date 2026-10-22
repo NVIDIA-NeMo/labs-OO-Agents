@@ -9,6 +9,7 @@ import pytest
 import yaml
 from click.testing import CliRunner
 from nooa_cli.commands import _connect_prompts as prompts
+from nooa_cli.commands import _connect_wizard as wizard
 from nooa_cli.commands.connect import command
 
 from nooa import llm_config
@@ -23,16 +24,29 @@ def guided(monkeypatch, tmp_path):
     monkeypatch.setenv("NEMO_OO_PROJECT_DIR", str(tmp_path / "project"))
     calls = []
     decisions = []
+    discovering, active = [], []
     original = prompts.labelled_choice
+    check_interfaces = wizard.check_interfaces
 
     def choose(label, options, **kwargs):
         if label == "Would you like to test these settings?":
             if not decisions:
-                assert calls and all(r.method == "GET" for r in calls)
+                # Only checks approved by choosing Discover may precede this review.
+                assert calls and all(r.method == "GET" or r in discovering for r in calls)
             decisions.append(tuple(options))
         return original(label, options, **kwargs)
 
+    def discover(state):
+        start = len(calls)
+        active.append(True)
+        try:
+            return check_interfaces(state)
+        finally:
+            active.clear()
+            discovering.extend(calls[start:])
+
     monkeypatch.setattr(prompts, "labelled_choice", choose)
+    monkeypatch.setattr(wizard, "check_interfaces", discover)
 
     def handle(request):
         calls.append(request)
@@ -51,7 +65,8 @@ def guided(monkeypatch, tmp_path):
                     ]
                 },
             )
-        assert decisions  # Model-call consent preceded every inference request.
+        # Model-call consent (Test now, or Discover for interface checks) came first.
+        assert decisions or active
         if request.url.path.endswith("/chat/completions"):
             body = json.loads(request.content)
             return httpx.Response(
@@ -92,9 +107,6 @@ def test_metadata_precedes_consent_and_save_without_testing_has_zero_post(guided
             ("test", "Test now"),
             ("save", "Save without testing"),
             ("change", "Change settings"),
-            ("skip", "Continue without catalogue settings"),
-            ("structured", "Change answer format"),
-            ("cancel", "Cancel without saving"),
         )
     ]
     assert [r.method for r in calls] == ["GET", "GET"] + (["POST"] if action == "test" else [])
@@ -113,7 +125,7 @@ def test_change_then_test_uses_actual_configured_controls(guided):
     result = CliRunner().invoke(
         command,
         [*flags, "--api-style", "chat"],
-        input="change\n48000\n8192\ncustom\n3000\ntest\ny\n",
+        input="change\nchange\n48000\n8192\ncustom\n3000\ntest\ny\n",
     )
     assert result.exit_code == 0, result.output
     assert len(decisions) == 2
@@ -135,9 +147,9 @@ def test_change_then_test_uses_actual_configured_controls(guided):
 
 def test_deferred_style_tests_bounded_interfaces_after_metadata(guided):
     flags, path, calls, decisions = guided
-    result = CliRunner().invoke(command, flags, input="discover\ntest\ntest\ny\n")
+    result = CliRunner().invoke(command, flags, input="discover\ntest\ny\n")
     assert result.exit_code == 0, result.output
-    assert len(decisions) == 2
+    assert len(decisions) == 1  # Discover runs its checks before the only review.
     posts = [r for r in calls if r.method == "POST"]
     assert [r.method for r in calls[:2]] == ["GET", "GET"]
     assert {r.url.path for r in posts} == {"/v1/chat/completions", "/v1/responses", "/v1/messages"}
@@ -155,7 +167,10 @@ def test_deferred_style_tests_bounded_interfaces_after_metadata(guided):
 
 def test_deferred_style_manual_save_selects_style_without_invented_evidence(guided):
     flags, path, calls, decisions = guided
-    result = CliRunner().invoke(command, flags, input="discover\nsave\nresponses\nsave\ny\n")
+    # Choosing Discover approves interface checks; --no-probe keeps this save offline.
+    result = CliRunner().invoke(
+        command, [*flags, "--no-probe"], input="discover\nsave\nresponses\nsave\ny\n"
+    )
     assert result.exit_code == 0, result.output
     assert all(r.method == "GET" for r in calls)
     assert "Working API formats" not in result.output
@@ -174,9 +189,6 @@ def test_no_probe_allows_metadata_but_never_offers_model_calls(guided):
         (
             ("save", "Save without testing"),
             ("change", "Change settings"),
-            ("skip", "Continue without catalogue settings"),
-            ("structured", "Change answer format"),
-            ("cancel", "Cancel without saving"),
         )
     ]
     assert path.exists()
@@ -373,7 +385,7 @@ def test_change_preserves_explicit_level_request_blocks_caps_and_media(guided):
     result = CliRunner().invoke(
         command,
         [*flags, "--api-style", "chat", "--levels-file", str(levels), "--media-inputs", "pdf"],
-        input="default\nchange\n\n\nrecommended\ndefault\nsave\ny\n",
+        input="default\nchange\nchange\n\n\nrecommended\ndefault\nsave\ny\n",
     )
     assert result.exit_code == 0, result.output
     assert all(r.method == "GET" for r in calls)
@@ -437,7 +449,11 @@ def test_deferred_decision_revises_default_all_media_with_explicit_review(
     original = prompts.labelled_choice
 
     def choose(label, options, **kwargs):
-        if label == "Review media for the selected decision interface":
+        # Discover runs routing first, so media is reviewed for the decision route.
+        if label in {
+            "Review media for the selected decision interface",
+            "Should this decision model receive images?",
+        }:
             assert len(calls) == 4  # Only bounded routing discovery has run.
             reviews.append(options)
         return original(label, options, **kwargs)
@@ -453,9 +469,12 @@ def test_deferred_decision_revises_default_all_media_with_explicit_review(
     monkeypatch.setattr(prompts, "labelled_choice", choose)
     mock_http(monkeypatch, handle)
     path = tmp_path / "models.yaml"
-    tail = "y\ny\n" if revision == "image" else ""
+    if not explicit:
+        # The default all-media test is offered as the decision image question.
+        revision = {"off": "text", "image": "test"}.get(revision, revision)
+    tail = "y\ny\n" if revision in {"image", "test"} else ""
     if finish:
-        tail += finish + "\n" + ("keep\n" if revision == "image" else "") + "y\n"
+        tail += finish + "\n" + ("keep\n" if revision in {"image", "test"} else "") + "y\n"
     result = CliRunner().invoke(
         command,
         [
@@ -475,25 +494,26 @@ def test_deferred_decision_revises_default_all_media_with_explicit_review(
             str(path),
             *(["--test-media-inputs", "image,audio,video,pdf"] if explicit else []),
         ],
-        input="262144\n262144\ndiscover\n"
-        + ("" if explicit else "test\n")
-        + "test\n"
-        + revision
-        + "\n"
-        + tail,
+        input="262144\n262144\ndiscover\n" + revision + "\n" + tail,
     )
-    assert result.exit_code == (2 if explicit and revision == "cancel" else 0), result.output
+    # Without explicit tests the image question has no cancel; Ctrl-C (EOF) cancels.
+    assert result.exit_code == ((2 if explicit else 1) if revision == "cancel" else 0), (
+        result.output
+    )
     assert reviews and len(calls) == count
     assert path.exists() is (enabled is not None)
     if enabled is not None:
         entry = yaml.safe_load(path.read_text())["models"]["local"]
         assert entry["media_inputs"] == enabled
-        updated = result.output.index("Proposed configuration (updated)")
+        # One proposal, already for the discovered decision route.
+        assert result.output.count("Would you like to test these settings?") == 1
+        assert "Proposed configuration (updated)" not in result.output
+        updated = result.output.index("Proposed configuration")
         consent = result.output.index("Would you like to test these settings?", updated)
         proposal = result.output[updated:consent]
         assert "System One Decisions" in proposal
         assert "audio" not in proposal and "video" not in proposal and "pdf" not in proposal
-        if revision == "image":
+        if revision in {"image", "test"}:
             assert "TypeSafe multipart" in proposal and "experimental images on" in proposal
             assert "Media samples: Images" in " ".join(proposal.split())
             assert "Images: Test before enabling" in " ".join(proposal.split())

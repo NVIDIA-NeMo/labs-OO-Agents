@@ -45,8 +45,7 @@ def terminal_menu(monkeypatch):
                         sent = True
                         pipe.send_text(
                             "\x1b[B\r"
-                            if "How would you like to use the selected inputs?"
-                            in str(choice.message)
+                            if "Would you like to test these media types:" in str(choice.message)
                             else keys
                         )
 

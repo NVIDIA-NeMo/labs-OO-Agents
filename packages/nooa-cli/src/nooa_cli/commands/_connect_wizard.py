@@ -1879,14 +1879,19 @@ def select_manual_media(state: WizardState, previous, *, available=None):
         decision_image_transport=state.decision_image_transport or "json",
         typesafe_danger_zone_images=state.typesafe_danger_zone_images,
     )
+    from ._connect_input_policy import available_media
+
+    supported = available_media(state)
     for kind, reason in report["unavailable_checks"].items():
-        view.fields([(view.media_label(kind) + " test", reason)])
+        if kind in supported:
+            view.fields([(view.media_label(kind) + " test", reason)])
     can_test = not state.no_probe and state.approval == "all" and bool(report["checkable"])
     if not can_test:
         return
+    names = ", ".join(view.media_label(kind) for kind in selected)
     action = prompts.labelled_choice(
-        "How would you like to use the selected inputs?",
-        (("test", "Test selected inputs"), ("enable", "Enable without testing")),
+        f"Would you like to test these media types: {names}?",
+        (("test", f"Test {names}"), ("enable", f"Enable {names} without testing")),
         default="test",
     )
     if action == "test":
@@ -2705,11 +2710,13 @@ def run_checks(state: WizardState) -> bool:
         **state.result.entry["provenance"]["probes"],
         **state.result.entry["provenance"].get("session_checks", {}),
     }
+    baseline_ok = baseline_allows_save(state)
     if state.approval != "none" and (
         decision.needs_attention
         or any(checks[name].get("reason") != "not approved" for name in decision.skipped)
     ):
-        if state.show_diagnostics:
+        # A failed baseline always gets the agent prompt; optional gaps keep the hint.
+        if state.show_diagnostics or not baseline_ok:
             click.echo(
                 "Agent diagnostic prompt:\n"
                 + setup_diagnostic(
@@ -2750,7 +2757,7 @@ def run_checks(state: WizardState) -> bool:
             ),
             err=True,
         )
-    return baseline_allows_save(state)
+    return baseline_ok
 
 
 def save_model(state: WizardState) -> bool:
@@ -2811,7 +2818,14 @@ def save_model(state: WizardState) -> bool:
     state.result.entry["media_inputs"] = repaired
     connect.configure_entry(state.result.entry)  # local policy gate before any save side effect
     tested_media_inputs = list(state.result.entry.get("media_inputs", []))
-    if not state.yes and state.test_media_inputs:
+    media_facts = state.result.entry.get("provenance", {}).get("probes", {})
+    all_passed = bool(state.test_media_inputs) and all(
+        media_facts.get(f"media:{kind}", {}).get("outcome") == "passed"
+        and kind in state.result.entry.get("media_inputs", [])
+        for kind in state.test_media_inputs
+    )
+    # Nothing to decide when every tested format passed and is enabled.
+    if not state.yes and state.test_media_inputs and not all_passed:
         action = prompts.review_media_inputs(state.result.entry["media_inputs"])
         if action == "manual":
             view.line(
@@ -3210,8 +3224,10 @@ def show_guided_proposal(state: WizardState, *, deferred_style=False, updated=Fa
             value = "Enabled; test unavailable" if kind in enabled else "Off; test unavailable"
         media_rows.append((view.media_label(kind), value))
     view.fields(scrub_setup(state, media_rows))
+    # Rows above already say when the interface doesn't support a format.
     for kind, reason in unavailable.items():
-        view.fields(scrub_setup(state, [(view.media_label(kind) + " test", reason)]))
+        if kind in available_media(state, entry=entry):
+            view.fields(scrub_setup(state, [(view.media_label(kind) + " test", reason)]))
     view.section("Tests")
     if state.no_probe or state.probe == "none":
         view.fields(scrub_setup(state, [("Status", "Off")]))
@@ -3244,18 +3260,19 @@ def review_guided_proposal(state: WizardState, *, deferred_style=False):
             and not state.manual_limits
             else ()
         )
+        # Keep the main decision short; rarer edits live under Change settings.
+        # Ctrl-C cancels without saving.
         action = prompts.labelled_choice(
             "Would you like to test these settings?",
-            (
-                *options,
-                ("save", "Save without testing"),
-                ("change", "Change settings"),
-                *skip_options,
-                *profile_options,
-                ("cancel", "Cancel without saving"),
-            ),
+            (*options, ("save", "Save without testing"), ("change", "Change settings")),
             default="test" if options else "save",
         )
+        if action == "change" and (skip_options or profile_options):
+            action = prompts.labelled_choice(
+                "What would you like to change?",
+                (("change", "Limits, reasoning and media"), *profile_options, *skip_options),
+                default="change",
+            )
         if action == "cancel":
             view.note("Setup cancelled. Nothing was saved.")
             return None
@@ -3383,6 +3400,16 @@ def guided_setup(state: WizardState) -> bool:
             "--structured-output-mode requires --api-style chat or anthropic, not interface discovery"
         )
     explicit_reply_tokens = state.reply_tokens
+    if deferred_style and not state.no_probe and state.probe != "none":
+        # Choosing Discover approves these small interface checks. Run them now
+        # so media and reasoning are set up for the interface actually chosen.
+        state.approval = state.probe
+        if not check_interfaces(state):
+            return False
+        if state.api_style in connect.DECISION_API_STYLES:
+            state.reply_tokens = explicit_reply_tokens
+            discard_chat_limits(state)
+        deferred_style = False
     # A provider preset is a proposal, never evidence of supported interfaces.
     state.api_style = state.api_style or state.default_style
     # Unknown interfaces already have their provisional literal limits upfront.
@@ -3393,6 +3420,9 @@ def guided_setup(state: WizardState) -> bool:
         or not configure_checks(state)
     ):
         return False
+    # Revisions made before this first proposal are already shown in it; only
+    # later revisions need a second review.
+    state.route_revised = state.guided_media_revised = False
     show_guided_proposal(state, deferred_style=deferred_style)
     action = review_guided_proposal(state, deferred_style=deferred_style)
     if action is None:
@@ -3436,35 +3466,12 @@ def guided_setup(state: WizardState) -> bool:
         if not configure_checks(state):
             return False
     while not run_checks(state):
-        options = [("review", "Review settings"), ("server", "Edit server/model")]
-        if state.api_style in {"chat", "anthropic"}:
-            options.append(("structured", "Change answer format"))
-        options.append(("cancel", "Cancel without saving"))
-        choice = prompts.labelled_choice(
-            "Connection test failed — what next?", tuple(options), default="cancel"
-        )
-        if choice == "cancel":
-            view.note("Setup cancelled after a failed test. No model or key was saved.")
+        # The failure and an agent prompt are already shown; offer one retry path.
+        if not prompts.confirm("Try again with different settings?", default=False):
+            view.note(
+                "Nothing was saved. Give the prompt above to an agent, or run nooa connect again."
+            )
             return False
-        if choice == "server":
-            previous = (state.endpoint, state.model)
-            state.endpoint = connect.normalize_endpoint(
-                prompts.prompt("Model server URL", default=state.endpoint)
-            )
-            state.model = prompts.prompt("Exact model ID", default=state.model)
-            if not review_replacement_route(state, previous):
-                return False
-            if replacement_route_scope(state, *previous) != replacement_route_scope(
-                state, state.endpoint, state.model
-            ):
-                if not configure_checks(state):
-                    return False
-                continue  # the replacement proposal already obtained fresh consent
-        if choice == "structured":
-            state.structured_output_mode = prompts.choose_structured_output_mode(
-                state.proposal.entry.get("structured_output_mode")
-            )
-            state.structured_output_mode_set = True
         if not configure_checks(state):
             return False
         show_guided_proposal(state, updated=True)

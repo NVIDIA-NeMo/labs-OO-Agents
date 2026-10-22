@@ -161,7 +161,7 @@ def test_full_check_transcript_and_failure_no_save(monkeypatch, tmp_path, column
             "--output",
             str(target),
         ],
-        input="262144\n262144\ntest\n" + ("cancel\n" if failure else "y\n"),
+        input="262144\n262144\ntest\n" + ("n\n" if failure else "y\n"),
         color=bool(color),
     )
     assert result.exit_code == (1 if failure else 0), result.output
@@ -171,7 +171,14 @@ def test_full_check_transcript_and_failure_no_save(monkeypatch, tmp_path, column
     assert target.exists() is not failure
     assert len(calls) == 1
     assert "No media is listed." in output
-    assert all(len(row) <= columns for row in click.unstyle(result.output).splitlines())
+    rows = click.unstyle(result.output).splitlines()
+    if failure:
+        # A failed baseline always prints the copyable agent prompt verbatim.
+        assert "Agent diagnostic prompt:" in output and "Try again with" in output
+        start = next(i for i, row in enumerate(rows) if "Agent diagnostic prompt:" in row)
+        end = next(i for i, row in enumerate(rows) if "Try again with" in row)
+        rows = rows[:start] + rows[end:]
+    assert all(len(row) <= columns for row in rows)
     if color == "no_color" or color is False:
         assert "\x1b[" not in result.output
 

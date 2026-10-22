@@ -155,7 +155,7 @@ def test_later_decision_discards_provisional_pair_and_context_provenance(
     options += ["--no-catalogue", "--media-inputs", ""]
     if deferred:
         options += ["--systemone-endpoint", "https://api.test/exact-decision"]
-        answers = "128000\n64000\ndiscover\ntest\nsystemone\ntest\ny\n"
+        answers = "128000\n64000\ndiscover\nsystemone\ntest\ny\n"
     else:
         options[options.index("--endpoint") + 1] = "https://api.test/exact-decision"
         answers = "128000\n64000\nsystemone\ntest\ny\n"
@@ -177,7 +177,8 @@ def test_later_decision_discards_provisional_pair_and_context_provenance(
     assert len(decision) == 1
     assert set(json.loads(decision[0].content)) == {"model", "state", "questions"}
     assert result.output.count("Context window (tokens)") == (0 if prefill else 1)
-    assert result.output.count("Would you like to test these settings?") == (2 if deferred else 1)
+    # Discover now runs interface checks before the single proposal review.
+    assert result.output.count("Would you like to test these settings?") == 1
 
 
 @pytest.mark.parametrize("type_fact", [{"model_type": "decision"}, {"mode": "evaluation"}])

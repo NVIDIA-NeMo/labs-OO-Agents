@@ -128,7 +128,7 @@ def test_cancel_reasoning_writes_nothing(native):
 def test_guided_change_reasoning_and_test_same_selected_setting(native):
     flags, path, calls, choices = native
     result = CliRunner().invoke(
-        command, flags, input="low\nchange\n1000000\n128000\ncustom\n4096\nhigh\ntest\ny\n"
+        command, flags, input="low\nchange\nchange\n1000000\n128000\ncustom\n4096\nhigh\ntest\ny\n"
     )
     assert result.exit_code == 0, result.output
     assert "Reasoning levels (comma-separated)" not in result.output

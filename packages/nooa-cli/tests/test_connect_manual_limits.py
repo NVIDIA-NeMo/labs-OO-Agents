@@ -165,7 +165,7 @@ def test_change_revises_both_raw_limits_and_keeps_reply_separate(manual_setup):
     result = CliRunner().invoke(
         command,
         flags + ["--no-catalogue"],
-        input="128000\n64000\nchange\n48000\n24000\nrecommended\nsave\ny\n",
+        input="128000\n64000\nchange\nchange\n48000\n24000\nrecommended\nsave\ny\n",
     )
     assert result.exit_code == 0, result.output
     assert len(decisions) == 2 and not calls
@@ -418,11 +418,13 @@ def test_cancelled_reedit_does_not_apply_partial_raw_values(monkeypatch):
 def test_actual_guided_skip_discards_public_guesses_and_requires_manual_numbers(manual_setup):
     flags, path, calls, proposals, decisions = manual_setup
     result = CliRunner().invoke(
-        command, flags, input="gateway/wired-model\nskip\n128000\n64000\nsave\ny\n"
+        command, flags, input="gateway/wired-model\nchange\nskip\n128000\n64000\nsave\ny\n"
     )
     assert result.exit_code == 0, result.output
     assert len(decisions) == 2 and all(r.method == "GET" for r in calls)
-    assert dict(decisions[0])["skip"] == "Continue without catalogue settings"
+    # Skip now lives under Change settings, offered only while catalogue data is used.
+    assert "What would you like to change?" in result.output
+    assert " ".join(result.output.split()).count("Continue without catalogue settings") == 1
     assert "skip" not in dict(decisions[1])
     assert len(proposals) == 2
     final = proposals[1]
@@ -438,7 +440,7 @@ def test_actual_guided_skip_discards_public_guesses_and_requires_manual_numbers(
 def test_one_token_bound_reprompts_in_initial_setup_and_reedit(manual_setup, field, edit):
     flags, path, calls, proposals, decisions = manual_setup
     numbers = "1\n128000\n64000\n" if field == "context" else "128000\n1\n64000\n"
-    answers = "128000\n64000\nchange\n" if edit else ""
+    answers = "128000\n64000\nchange\nchange\n" if edit else ""
     answers += numbers + ("recommended\n" if edit else "") + "save\ny\n"
     result = CliRunner().invoke(command, flags + ["--no-catalogue"], input=answers)
     assert result.exit_code == 0, result.output
@@ -456,7 +458,7 @@ def test_deferred_completion_reviews_raw_limits_and_preserves_edited_reply(
     monkeypatch.setenv("NEMO_OO_USER_DIR", str(tmp_path / "user"))
     monkeypatch.setenv("NEMO_OO_PROJECT_DIR", str(tmp_path / "project"))
     path = tmp_path / "models.yaml"
-    calls, proposals, decisions = [], [], []
+    calls, proposals, decisions, discovery = [], [], [], []
     show, choose = wizard.show_guided_proposal, prompts.labelled_choice
 
     def show_proposal(state, **kwargs):
@@ -468,6 +470,8 @@ def test_deferred_completion_reviews_raw_limits_and_preserves_edited_reply(
             # There may be approved discovery requests before the final review,
             # but no configured 1234-token baseline can precede that review.
             assert all(json.loads(r.content).get("max_tokens") != 1234 for r in calls)
+            if not decisions:
+                discovery.extend(calls)  # Discover ran its approved checks first.
             decisions.append(tuple(options))
         return choose(label, options, **kwargs)
 
@@ -503,19 +507,18 @@ def test_deferred_completion_reviews_raw_limits_and_preserves_edited_reply(
     ]
     # Literal limits precede even an undecided interface; intentional edits still
     # have their own current review, without a second automatic limit collection.
+    # Discover runs its interface checks at once, so later edits target chat.
     answers = (
         "128000\n64000\ndiscover\n"
-        "change\n128000\n64000\ncustom\n1234\n"
-        "change\n128000\n64000\nrecommended\n"
-        "change\n48000\n24000\nrecommended\n" + action + "\n"
+        "change\nchange\n128000\n64000\ncustom\n1234\n"
+        "change\nchange\n128000\n64000\nrecommended\n"
+        "change\nchange\n48000\n24000\nrecommended\n" + action + "\ny\n"
     )
-    if action == "save":
-        answers += "chat\n"
-    answers += ("test\n" if action == "test" else "") + "y\n"
     result = CliRunner().invoke(command, flags, input=answers)
     assert result.exit_code == 0, result.output
-    assert len(decisions) == (5 if action == "test" else 4)
-    assert proposals[-3 if action == "test" else -2]["context_window"] == 64000
+    assert len(decisions) == 4
+    assert discovery
+    assert proposals[-2]["context_window"] == 64000
     assert proposals[-1]["context_window"] == 24000
     assert proposals[-1]["max_tokens"] == 1234  # Not the original 2000 or a default.
     saved = yaml.safe_load(path.read_text())["models"]["local"]
@@ -527,7 +530,7 @@ def test_deferred_completion_reviews_raw_limits_and_preserves_edited_reply(
         action == "test"
     )
     if action == "save":
-        assert not calls
+        assert calls == discovery  # Only the discovery checks; no other model calls.
 
 
 def test_guided_skip_after_edit_discards_generated_reasoning_and_context(manual_setup):
@@ -535,7 +538,7 @@ def test_guided_skip_after_edit_discards_generated_reasoning_and_context(manual_
     result = CliRunner().invoke(
         command,
         flags,
-        input="gateway/wired-model\nchange\n\n\nrecommended\nskip\n128000\n64000\nsave\ny\n",
+        input="gateway/wired-model\nchange\nchange\n\n\nrecommended\nchange\nskip\n128000\n64000\nsave\ny\n",
     )
     assert result.exit_code == 0, result.output
     assert len(proposals) == 3 and all(r.method == "GET" for r in calls)
@@ -555,7 +558,7 @@ def test_guided_skip_after_edit_restores_explicit_context_flag_prefill(manual_se
     result = CliRunner().invoke(
         command,
         flags + ["--context-window", "48000"],
-        input="gateway/wired-model\nchange\n96000\n\nrecommended\nskip\n24000\nsave\ny\n",
+        input="gateway/wired-model\nchange\nchange\n96000\n\nrecommended\nchange\nskip\n24000\nsave\ny\n",
     )
     assert result.exit_code == 0, result.output
     assert all(r.method == "GET" for r in calls)
@@ -568,7 +571,24 @@ def test_final_manual_reedit_can_increase_a_provisional_context_and_reply(monkey
     monkeypatch.setattr(llm_config, "llm_config_chain", lambda: [])
     monkeypatch.setenv("NEMO_OO_USER_DIR", str(tmp_path / "user"))
     monkeypatch.setenv("NEMO_OO_PROJECT_DIR", str(tmp_path / "project"))
-    mock_http(monkeypatch, lambda request: pytest.fail("Save without testing is offline"))
+    calls, reviews = [], []
+    choose = prompts.labelled_choice
+
+    def consent(label, options, **kwargs):
+        if label == "Would you like to test these settings?":
+            reviews.append(len(calls))
+        return choose(label, options, **kwargs)
+
+    def handle(request):
+        # Choosing Discover approves the interface checks; nothing else is sent.
+        calls.append(request)
+        assert request.method == "POST"
+        if request.url.path.endswith("chat/completions"):
+            return httpx.Response(200, json=response_body("chat"))
+        return httpx.Response(404)
+
+    monkeypatch.setattr(prompts, "labelled_choice", consent)
+    mock_http(monkeypatch, handle)
     path = tmp_path / "models.yaml"
     flags = [
         "model",
@@ -589,9 +609,10 @@ def test_final_manual_reedit_can_increase_a_provisional_context_and_reply(monkey
     result = CliRunner().invoke(
         command,
         flags,
-        input="8000\n64000\ndiscover\nchange\n128000\n64000\ncustom\n10000\nsave\nchat\ny\n",
+        input="8000\n64000\ndiscover\nchange\nchange\n128000\n64000\ncustom\n10000\nsave\ny\n",
     )
     assert result.exit_code == 0, result.output
+    assert calls and reviews == [len(calls), len(calls)]  # Save without testing adds none.
     saved = yaml.safe_load(path.read_text())["models"]["local"]
     assert saved["context_window"] == 64000  # Not the stale provisional 8000.
     assert saved["max_tokens"] == 10000

@@ -314,7 +314,8 @@ def test_openrouter_discovery_offers_chat_responses_and_decision_without_name_cl
     def choose(text, options, **kwargs):
         if text == "Would you like to test these settings?":
             if not reviews:
-                assert calls == []
+                # Choosing Discover approved the interface checks; nothing else ran.
+                assert all(r.method == "POST" for r in calls)
             reviews.append(options)
         return original_choice(text, options, **kwargs)
 
@@ -324,7 +325,7 @@ def test_openrouter_discovery_offers_chat_responses_and_decision_without_name_cl
 
     def handle(request):
         calls.append(request)
-        assert reviews and request.method == "POST"
+        assert request.method == "POST"
         assert request.headers["authorization"] == "Bearer approved-work-key"
         body = json.loads(request.content)
         assert body["model"] == ROUTER_MODEL
@@ -339,9 +340,7 @@ def test_openrouter_discovery_offers_chat_responses_and_decision_without_name_cl
     monkeypatch.setattr(prompts, "labelled_choice", choose)
     monkeypatch.setattr(connect, "write", write)
     mock_http(monkeypatch, handle)
-    answers = (
-        "262144\n262144\ndiscover\ntest\n" + ("systemone\n" if budget > 512 else "") + "test\ny\n"
-    )
+    answers = "262144\n262144\ndiscover\n" + ("systemone\n" if budget > 512 else "") + "test\ny\n"
     result = CliRunner().invoke(
         command,
         [

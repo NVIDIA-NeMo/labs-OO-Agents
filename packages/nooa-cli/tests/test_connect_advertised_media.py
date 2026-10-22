@@ -54,11 +54,11 @@ def test_explicit_suggestion_review_preserves_or_changes_only_on_choice(
     seen = []
 
     def choose(label, options, *, default):
-        if label == "How would you like to use the selected inputs?":
+        if label == "Would you like to test these media types: Audio?":
             assert default == "test"
             assert dict(options) == {
-                "test": "Test selected inputs",
-                "enable": "Enable without testing",
+                "test": "Test Audio",
+                "enable": "Enable Audio without testing",
             }
             return "enable"
         seen.append(options)

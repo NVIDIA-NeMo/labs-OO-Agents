@@ -173,10 +173,42 @@ def _reasoning_values(response):
                 yield from payloads(child)
 
     for part in response.parts:
-        if part.kind == "reasoning" and part.text:
-            yield part.text
         native = json_containers(part.native) if part.native else {}
+        if part.kind == "reasoning" and part.text:
+            # Responses summaries are captured as one joined string but sent
+            # back as separate blocks; compare the blocks the wire carries.
+            summary = native.get("summary") if isinstance(native, dict) else None
+            if (
+                isinstance(summary, list)
+                and summary
+                and all(isinstance(b, dict) and "_text_length" in b for b in summary)
+            ):
+                offset = 0
+                for block in summary:
+                    length = block["_text_length"]
+                    if length:
+                        yield part.text[offset : offset + length]
+                    offset += length + 1  # matches the "\n" used when capturing
+            else:
+                yield part.text
         yield from payloads(native)
+
+
+LITELLM_ENVELOPE = "litellm_enc:"
+
+
+def _replayed(value, actual):
+    """True when ``value`` reached the follow-up request.
+
+    A LiteLLM proxy wraps encrypted reasoning as ``litellm_enc:<routing>;<state>``
+    and a LiteLLM client unwraps it before sending, so the request carries the
+    original state inside the envelope rather than the envelope itself.
+    """
+    if value in actual:
+        return True
+    return value.startswith(LITELLM_ENVELOPE) and any(
+        len(sent) >= 32 and sent in value for sent in actual
+    )
 
 
 async def _session_steps(alias, entry, *, api_key, budget_tokens):
@@ -528,7 +560,7 @@ async def _session_steps(alias, entry, *, api_key, budget_tokens):
         )
         expected = list(_reasoning_values(first))
         actual = list(_wire_reasoning(successful_bodies[1]))
-        retained = bool(expected) and all(value in actual for value in expected)
+        retained = bool(expected) and all(_replayed(value, actual) for value in expected)
         yield ProbeUpdate(
             "reasoning_retention",
             {

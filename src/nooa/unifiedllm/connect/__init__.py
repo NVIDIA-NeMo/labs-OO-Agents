@@ -123,6 +123,39 @@ def _include_rejected(exc: Exception) -> bool:
     )
 
 
+CACHE_PARAMS = ("prompt_cache_options", "prompt_cache_breakpoint", "cache_control")
+
+
+def _cache_options_rejected(exc: Exception) -> bool:
+    """Recognize a server that refuses explicit prompt-cache fields."""
+    if getattr(exc, "status_code", None) not in {400, 422}:
+        return False
+    body = getattr(exc, "body", None)
+    error = body.get("error", body) if isinstance(body, dict) else {}
+    param = error.get("param") if isinstance(error, dict) else None
+    message = str(exc).lower()
+    if isinstance(param, str) and param in CACHE_PARAMS:
+        return True
+    return any(name in message for name in CACHE_PARAMS) and bool(
+        re.search(
+            r"unsupported|unknown|unrecognized|not supported|not allowed|invalid|extra", message
+        )
+    )
+
+
+def _disable_explicit_cache(entry: dict, status: int) -> dict:
+    entry["cache_breakpoint"] = None
+    record = {
+        "source": "connect",
+        "outcome": "rejected",
+        "status_code": status,
+        "reason": "The endpoint rejected explicit prompt caching; it is turned off for this model.",
+        "checked_at": datetime.now(UTC).isoformat(),
+    }
+    entry["provenance"]["explicit_cache"] = record
+    return record
+
+
 def _disable_encrypted_reasoning(entry: dict, status: int) -> dict:
     # Explicit empty include suppresses the runtime's native-endpoint default too.
     entry["include"] = []
@@ -2900,6 +2933,18 @@ async def run_steps(
                 rejection = _disable_encrypted_reasoning(entry, status)
                 yield ProbeUpdate("encrypted_reasoning", deepcopy(rejection))
                 # A different candidate, once, charged as another capped request.
+                pending.appendleft(probe)
+                yield ProbeUpdate(probe.name, deepcopy(record))
+                continue
+            if (
+                probe.name == "routing"
+                and entry.get("cache_breakpoint", "auto") is not None
+                and "explicit_cache" not in entry["provenance"]
+                and _cache_options_rejected(exc)
+            ):
+                rejection = _disable_explicit_cache(entry, status)
+                yield ProbeUpdate("explicit_cache", deepcopy(rejection))
+                # Retry once without cache fields; the saved entry keeps caching off.
                 pending.appendleft(probe)
                 yield ProbeUpdate(probe.name, deepcopy(record))
                 continue
