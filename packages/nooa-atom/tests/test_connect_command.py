@@ -84,7 +84,6 @@ def scripted(*answers):
 
 HAPPY = (
     {"provider": "nvidia"},
-    {"endpoint": "https://integrate.api.nvidia.com/v1"},
     {"api_key_env": "NVIDIA_API_KEY"},
     {"filter": "llama"},
     {"model": "acme/llama-big"},
@@ -114,7 +113,6 @@ async def test_the_happy_path_writes_the_config(fake, tmp_path):
     fields = [names for _message, names, _request in asker.forms]
     assert fields == [
         ["provider"],
-        ["endpoint"],
         ["api_key_env"],
         ["filter"],
         ["model"],
@@ -123,13 +121,14 @@ async def test_the_happy_path_writes_the_config(fake, tmp_path):
     ]
     requests = [request for *_rest, request in asker.forms]
     assert "custom" in requests[0].fields["provider"].values
-    assert requests[1].fields["endpoint"].default == "https://integrate.api.nvidia.com/v1"
-    assert requests[2].fields["api_key_env"].default == "NVIDIA_API_KEY"
-    assert requests[4].fields["model"].values == ("acme/llama-big",)
-    assert requests[5].fields["context_window"].default == 131072
-    assert requests[6].fields["alias"].default == "llama-big"
+    assert requests[1].fields["api_key_env"].default == "NVIDIA_API_KEY"
+    assert requests[3].fields["model"].values == ("acme/llama-big",)
+    assert requests[4].fields["context_window"].default == 131072
+    assert requests[5].fields["alias"].default == "llama-big"
     # No form ever asks for a key, and the key came from the environment.
+    # Only the variable's name is asked; the key itself comes from the environment.
     assert not any("key" in name and name != "api_key_env" for names in fields for name in names)
+    assert "Found an API key in NVIDIA_API_KEY" in text
     assert set(fake.keys) == {"sk-test-secret"}
     assert fake.calls == ["discover", "check_interfaces", "catalogue", "run_steps:all"]
 
@@ -205,3 +204,23 @@ async def test_the_registry_runs_connect_without_the_agent(fake, tmp_path, monke
     result = await registry.invoke("connect", "")
     assert result.output_to_agent is False
     assert result.text == CONNECT_FALLBACK
+
+
+async def test_a_named_provider_uses_its_server_without_asking(fake, tmp_path):
+    asker = scripted(*HAPPY)
+    await _run(asker, tmp_path / "llm_config.yaml")
+    assert not any("endpoint" in names for _message, names, _request in asker.forms)
+
+
+async def test_a_custom_endpoint_asks_for_the_server(fake, tmp_path):
+    path = tmp_path / "llm_config.yaml"
+    asker = scripted(
+        {"provider": "custom"},
+        {"endpoint": "https://models.example.com/v1"},
+        *HAPPY[1:],
+    )
+    text = await _run(asker, path)
+    assert "Saved big" in text
+    assert [names for _m, names, _r in asker.forms][1] == ["endpoint"]
+    saved = yaml.safe_load(path.read_text())["models"]["big"]
+    assert saved["api_base"] == "https://models.example.com/v1"

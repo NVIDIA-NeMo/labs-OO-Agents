@@ -113,26 +113,29 @@ class _Wizard:
         )
         provider = values["provider"]
         preset = connect.PROVIDERS.get(provider)
-        values = await _form(
-            f"Server for {options[provider]}.",
-            endpoint=Text(
-                title="Model server URL",
-                description="The API base, for example https://host/v1.",
-                default=preset.api_base if preset else None,
-            ),
-        )
+        if preset is not None:
+            # A named provider has a fixed server, as in the CLI wizard.
+            url = preset.api_base
+        else:
+            values = await _form(
+                "Server for your custom endpoint.",
+                endpoint=Text(
+                    title="Model server URL",
+                    description="The API base, for example https://host/v1.",
+                ),
+            )
+            url = values["endpoint"]
         try:
-            endpoint = connect.normalize_endpoint(values["endpoint"])
+            endpoint = connect.normalize_endpoint(url)
         except ValueError as exc:
             raise _Stop(f"That server URL cannot be used: {exc}. Nothing written.") from None
         style = preset.api_style if preset else "chat"
-        default_env = preset.api_key_env if preset else "OPENAI_API_KEY"
         values = await _form(
             "Which environment variable holds the API key? Enter its name, not the key; "
             "- means no authentication.",
             api_key_env=Text(
                 title="Key environment variable",
-                default=default_env,
+                default=preset.api_key_env if preset else "OPENAI_API_KEY",
                 pattern=r"^([A-Za-z_][A-Za-z0-9_]*|-)$",
             ),
         )
@@ -145,14 +148,13 @@ class _Wizard:
             key = self.environ.get(key_env)
             if not key:
                 raise _Stop(
-                    f"{key_env} is not set in the environment NOOA runs in, so the server "
-                    "cannot be reached with a key. Set it where you start your editor or "
-                    f"agent (for example `export {key_env}=...`), restart it, and run "
-                    "/connect again; or run `nooa connect` in a shell, which can take the "
-                    "key there. Nothing written."
+                    f"No API key found: {key_env} is not set in the environment NOOA runs "
+                    f"in. Please set this environment variable (for example `export "
+                    f"{key_env}=...` where you start your editor or agent), restart it, "
+                    "and run /connect again. Nothing written."
                 )
             self.api_key = key
-            self.note(f"Using the key in {key_env}.")
+            self.note(f"Found an API key in {key_env}.")
         return provider, endpoint, style, key_env
 
     async def model(self, endpoint: str, style: str) -> tuple[str, str, dict[str, Any] | None]:
