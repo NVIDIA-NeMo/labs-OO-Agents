@@ -1745,7 +1745,9 @@ def ingest_journal_messages(items: list[dict[str, Any]]) -> dict[str, Any]:
     return {"stored": 0}
 
 
-def ingest_journal_blocks(session_id: str, items: list[dict[str, Any]]) -> dict[str, Any]:
+def ingest_journal_blocks(
+    session_id: str, items: list[dict[str, Any]], *, commit: bool = True
+) -> dict[str, Any]:
     """Persist a batch of content-addressed blocks for *session_id*.
 
     Each item is ``{"hash": "<sha256:...>", "content": "<utf-8 string>"}``.
@@ -1771,7 +1773,8 @@ def ingest_journal_blocks(session_id: str, items: list[dict[str, Any]]) -> dict[
         "INSERT OR IGNORE INTO msg_blocks (session_id, hash, content) VALUES (?, ?, ?)",
         rows,
     )
-    db.commit()
+    if commit:
+        db.commit()
     return {"stored": len(rows)}
 
 
@@ -1794,7 +1797,7 @@ def get_session_blocks(session_id: str) -> dict[str, str]:
     return {r["hash"]: r["content"] for r in rows}
 
 
-def ingest_journal_call(call: dict[str, Any]) -> dict[str, Any]:
+def ingest_journal_call(call: dict[str, Any], *, commit: bool = True) -> dict[str, Any]:
     """Upsert a single LLM call record.
 
     Expected keys: ``call_id``, ``session_id``, ``model``, ``ts_start``,
@@ -1844,7 +1847,8 @@ def ingest_journal_call(call: dict[str, Any]) -> dict[str, Any]:
             tokens_json,
         ),
     )
-    db.commit()
+    if commit:
+        db.commit()
     elapsed_ms = (_time.monotonic() - t0) * 1000
     if elapsed_ms > 200:
         log.warning(
@@ -1853,6 +1857,34 @@ def ingest_journal_call(call: dict[str, Any]) -> dict[str, Any]:
             call.get("call_id", "?"),
         )
     return {"ok": True}
+
+
+def ingest_session_with_journal(body: dict, journals: list[dict[str, Any]]) -> dict[str, Any]:
+    """Publish a complete imported trace atomically on the writer executor.
+
+    Reject cross-session journal call collisions, including collisions with
+    native calls, before replacing any records. All failures roll back so an
+    interrupted import can retry without holding a SQLite write lock.
+    """
+    db = _get_write_db()
+    try:
+        for journal in journals:
+            if journal["type"] == "blocks":
+                ingest_journal_blocks(journal["session_id"], journal["blocks"], commit=False)
+            else:
+                call = journal["call"]
+                existing = db.execute(
+                    "SELECT session_id FROM llm_calls WHERE call_id = ?", (call["call_id"],)
+                ).fetchone()
+                if existing and existing["session_id"] != call["session_id"]:
+                    raise ValueError("Imported journal call belongs to another session")
+                ingest_journal_call(call, commit=False)
+        result = _ingest_one(body, db)
+        db.commit()
+        return result
+    except BaseException:
+        db.rollback()
+        raise
 
 
 def get_session_calls(session_id: str) -> list[dict[str, Any]]:

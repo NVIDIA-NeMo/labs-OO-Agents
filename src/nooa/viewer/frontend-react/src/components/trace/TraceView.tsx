@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
-import { fetchTrace, convertOtlpSpansToEvents } from "@/api/traces";
+import { fetchTrace, convertOtlpSpansToEvents, otlpAttrsToDict } from "@/api/traces";
 import {
   fetchAnnotations,
   createAnnotation,
@@ -97,6 +97,7 @@ export function TraceView({ sessionId, onBack }: TraceViewProps) {
   const [events, setEvents] = useState<TraceEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [traceUnavailable, setTraceUnavailable] = useState(false);
   const [eventStates, setEventStates] = useState<Map<number, ViewState>>(
     () => new Map(),
   );
@@ -158,11 +159,15 @@ export function TraceView({ sessionId, onBack }: TraceViewProps) {
     (async () => {
       setLoading(true);
       setError(null);
+      setTraceUnavailable(false);
       setEventStates(new Map());
       setSelectedIndex(null);
       try {
         const data = await fetchTrace(sessionId);
         if (cancelled) return;
+        setTraceUnavailable(data.events.some((span) =>
+          otlpAttrsToDict(span._resource?.attributes ?? [])["eval.trace_available"] === false,
+        ));
         const converted = convertOtlpSpansToEvents(data.events);
         setEvents(converted);
         const types = new Set(converted.map((e) => e.type));
@@ -331,6 +336,11 @@ export function TraceView({ sessionId, onBack }: TraceViewProps) {
 
   return (
     <PlaygroundProvider sessionId={sessionId}>
+      {traceUnavailable && (
+        <div className="mb-4 rounded border border-yellow-800 bg-yellow-900/20 p-3 text-sm text-yellow-200">
+          Execution trace unavailable. This record contains task metadata but no captured execution events.
+        </div>
+      )}
       <div className="flex items-center gap-3 mb-4">
         <span className="text-sm text-gray-500">
           {filterActive
