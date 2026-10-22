@@ -29,6 +29,8 @@ from nooa_atom.session.events import (
     SnapshotRestoreFailed,
 )
 from nooa_atom.session.items import (
+    CHILD_MESSAGE_CHARS,
+    CHILD_MESSAGE_CUT,
     AgentEventUpdate,
     ChildCreatedUpdate,
     ChildFailed,
@@ -637,6 +639,7 @@ class SessionRegistry:
         parent before the result of the same turn. The message stays in the
         child's own events too. A ``Done``'s message (marked
         ``is_result_text``) is not sent: it arrives with the ``ChildResult``.
+        Text over ``CHILD_MESSAGE_CHARS`` is cut, with a note saying so.
         A closing or closed parent drops it.
         """
         if getattr(event, "is_result_text", False):
@@ -644,7 +647,10 @@ class SessionRegistry:
         parent = self.sessions.get(child.parent_id) if child.parent_id else None
         if parent is None or parent.closing:
             return
-        item = ChildMessage(child=self.child_ref(child), text=str(event.content))
+        text = str(event.content)
+        if len(text) > CHILD_MESSAGE_CHARS:
+            text = text[:CHILD_MESSAGE_CHARS] + CHILD_MESSAGE_CUT
+        item = ChildMessage(child=self.child_ref(child), text=text)
         with suppress(SessionClosedError):
             _admit_delegate(parent, item, f"child:{child.name or child.id}")
 

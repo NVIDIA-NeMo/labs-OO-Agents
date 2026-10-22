@@ -297,6 +297,12 @@ class ChildFailed(BaseModel):
         return self.path
 
 
+# Longest ``self.message()`` text a child's parent receives, in characters.
+# A progress note is short; the full report belongs in the child's result.
+CHILD_MESSAGE_CHARS = 1_000
+CHILD_MESSAGE_CUT = "\n[cut: the full report belongs in the result]"
+
+
 class ChildMessage(BaseModel):
     """A progress note a child sent with ``self.message()``, not its result; read ``item.text``."""
 

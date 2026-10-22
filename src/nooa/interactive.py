@@ -734,7 +734,9 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
         - ``Waiting(explanation=..., on=[...])`` only while a job you started
           is still running.
 
-        ``self.message()`` sends your parent a progress note (a
-        ``ChildMessage``); it does not replace the result.
+        Your parent reads your result: do not send routine progress notes.
+        Use ``self.message()`` (it reaches your parent as a ``ChildMessage``)
+        only for a short note your parent needs before you finish, never the
+        report. The full report goes only in ``TaskResult.report``.
         """
         ...

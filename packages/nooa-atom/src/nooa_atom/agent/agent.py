@@ -32,6 +32,7 @@ from nooa_atom.agent.slash_commands import SlashCommandRegistry
 # builds TaskResult for unattended turns, matches what arrives on the
 # ``delegates`` channel and catches the delegation errors.
 from nooa_atom.session.items import (
+    CHILD_MESSAGE_CHARS,
     ChildFailed,
     ChildFailedError,
     ChildMessage,
@@ -439,8 +440,8 @@ class AtomAgent(InteractiveAgent):
         """Send a Markdown message to the user.
 
         In a child session the text goes to the parent instead, as a
-        ``ChildMessage`` on its ``delegates`` channel: a progress note, not
-        the child's result.
+        ``ChildMessage`` on its ``delegates`` channel: a short progress note
+        (cut at 1,000 characters), not the child's result.
 
         Each call renders as an independent block — so every call must be a
         complete, self-contained Markdown document.  In particular, never split
@@ -456,6 +457,18 @@ class AtomAgent(InteractiveAgent):
                 subsequent cells.
         """
         super().message(text, echo=echo)
+        if len(text) > CHILD_MESSAGE_CHARS and self._is_child_session():
+            print(
+                f"Note: your parent gets only the first {CHILD_MESSAGE_CHARS:,} characters "
+                "of this message. Put the full report in your result (TaskResult.report)."
+            )
+
+    @hidden
+    @no_trace
+    def _is_child_session(self) -> bool:
+        """Whether this agent runs as a child session (its messages go to a parent)."""
+        port = self.session
+        return port is not None and port.info().parent_id is not None
 
     @hidden
     @no_trace
@@ -807,8 +820,8 @@ class AtomAgent(InteractiveAgent):
         - ``Waiting(explanation=..., on=[...])`` only while a job you started
           is still running.
 
-        ``self.message()`` sends your parent a progress note; it does not
-        replace the result.
+        No routine progress notes: ``self.message()`` is for a short note
+        (cut at 1,000 chars), never the report; that goes in the result.
 
         Python locals live for one method call; when the call returns they
         are gone. Anything you need later goes in ``self.v`` (durable,

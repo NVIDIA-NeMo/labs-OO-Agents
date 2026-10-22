@@ -239,3 +239,64 @@ def test_child_message_is_exported():
     assert "ChildMessage" in nooa_atom.__all__ and "ChildMessage" in agent.__all__
     ref = ChildRef(id="x", name="x", depth=1, status="running")
     assert ChildMessage.model_validate_json(ChildMessage(child=ref, text="t").model_dump_json())
+
+
+async def test_a_long_child_message_is_cut_for_the_parent_and_the_child_is_told(
+    registry, root_options, models
+):
+    from nooa_atom.session.items import CHILD_MESSAGE_CHARS, CHILD_MESSAGE_CUT
+
+    models.scripts[None] = [
+        cell(
+            "await self.session.delegate('kid', 'work', name='kid')\n"
+            "return_result(Waiting(explanation='child working', on=['delegates']))"
+        ),
+        collect(),
+        collect(),
+    ]
+    models.scripts["kid"] = [
+        cell("self.message('x' * 3000)"),
+        cell(
+            "return_result(Done(explanation='kid done', result=TaskResult("
+            "solution_description='s', evidence='e', how_to_verify='v')))"
+        ),
+    ]
+    root = await registry.create(root_options)
+    await asyncio.wait_for(root.prompt("go"), TIMEOUT)
+    kind, text = _delegates(registry, root.id)[0]
+    assert kind == "ChildMessage"
+    assert text == "x" * CHILD_MESSAGE_CHARS + CHILD_MESSAGE_CUT
+
+
+async def test_an_atom_child_is_told_when_its_message_is_cut(tmp_path, sessions_dir):
+    from atom_test_agents import ATOM_SPEC, AtomModels
+    from nooa_atom import SessionOptions, SessionStore
+    from nooa_atom.session.registry import SessionRegistry
+
+    models = AtomModels()
+    models.scripts[None] = [
+        cell(
+            "self.v.kid = await self.spawn('Kid', 'work', name='kid')\n"
+            "await self.v.kid.wait()\n"
+            "return_result(Done(explanation='done'))"
+        )
+    ]
+    models.scripts["kid"] = [
+        cell("self.message('x' * 3000)"),
+        cell(
+            "return_result(Done(explanation='kid done', result=TaskResult("
+            "solution_description='s', evidence='e', how_to_verify='v')))"
+        ),
+    ]
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    options = SessionOptions(workspace=workspace, agent_spec=ATOM_SPEC, sessions_dir=sessions_dir)
+    registry = SessionRegistry(SessionStore(sessions_dir), agent_factory=models)
+    try:
+        root = await registry.create(options)
+        await asyncio.wait_for(root.prompt("go"), TIMEOUT)
+    finally:
+        await registry.close_all()
+    kid_calls = models.llms["kid"].calls
+    after_message = str(kid_calls[1].messages[len(kid_calls[0].messages) :])
+    assert "your parent gets only the first 1,000 characters" in after_message
