@@ -808,3 +808,36 @@ def test_unrelated_content_part_rejection_does_not_reject_other_formats():
         body = {"error": {"message": "Unsupported chat content part type: 'file'."}}
 
     assert not explicitly_rejected(Error("x"), "image")
+
+
+@pytest.mark.parametrize(
+    "message,kind",
+    [
+        ("Unsupported media type: audio_url. Supported types: image_url", "audio"),
+        ('messages[1]: unsupported content part type \\"input_audio\\"', "audio"),
+        ("model deepseek does not support video inputs", "video"),
+        (
+            "Failed to deserialize the JSON body into the target type: data did not match any "
+            "variant of untagged enum ChatCompletionRequestUserMessageContent at line 1",
+            "pdf",
+        ),
+    ],
+)
+def test_more_hub_media_refusal_phrasings(message, kind):
+    from nooa.unifiedllm.connect._media import explicitly_rejected
+
+    class Error(Exception):
+        status_code = 400
+        body = {"error": {"message": message}}
+
+    assert explicitly_rejected(Error(message), kind)
+
+
+def test_internal_errors_stay_inconclusive():
+    from nooa.unifiedllm.connect._media import explicitly_rejected
+
+    class Error(Exception):
+        status_code = 400
+        body = {"error": {"message": "an internal error occurred"}}
+
+    assert not explicitly_rejected(Error("x"), "image")

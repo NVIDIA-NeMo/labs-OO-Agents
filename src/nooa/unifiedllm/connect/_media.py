@@ -221,7 +221,9 @@ def explicitly_rejected(exc, kind):
     if re.search(r"\bnot a multimodal model\b|\bdoes(?: not|n't) support multimodal", text):
         return True
     # "Unsupported content part type: 'file'" names the wire part for this format.
-    part = re.search(r"unsupported (?:chat )?content(?: part)? type:? '?([a-z_]+)", text)
+    part = re.search(
+        r"unsupported (?:chat )?(?:content(?: part)?|media) type:?\s*[\\'\"]*([a-z_]+)", text
+    )
     parts = {
         "image": {"image_url", "input_image"},
         "audio": {"input_audio", "audio_url"},
@@ -229,6 +231,9 @@ def explicitly_rejected(exc, kind):
         "pdf": {"file", "input_file", "document"},
     }[kind]
     if part and part.group(1) in parts:
+        return True
+    # A strict server whose message schema has no variant for this media part.
+    if "did not match any variant of untagged enum" in text and "messagecontent" in text:
         return True
     return bool(
         re.search(
