@@ -864,7 +864,11 @@ def configure_entry(
         or structured_output_mode is not STRUCTURED_OUTPUT_UNSET
         or snapshot is not None
     ):
-        result.setdefault("provenance", {})["structured_output_profile"] = {"mode": effective_mode}
+        result.setdefault("provenance", {})["structured_output_profile"] = (
+            {**deepcopy(snapshot), "mode": effective_mode}
+            if isinstance(snapshot, dict) and snapshot.get("mode") == effective_mode
+            else {"mode": effective_mode}
+        )
     if structured_output_mode is not STRUCTURED_OUTPUT_UNSET:
         result["structured_output_mode"] = structured_output_mode
     from nooa.media_policy import entry_input_interface, validate_implemented_media_inputs
@@ -1889,12 +1893,38 @@ def plan(
                 "source": "catalogue_recommendation",
                 "value": entry["max_tokens"],
             }
+    # Exact native Messages metadata can recommend its implemented carrier.
+    # Unknown gateways and explicit declarations (including None/auto) stay untouched.
+    from ._reasoning import native_metadata_matches
+
+    native_format = (
+        structured_output_mode is STRUCTURED_OUTPUT_UNSET
+        and "structured_output_mode" not in entry
+        and native_metadata_matches(
+            endpoint_model,
+            model_id=model,
+            api_style=api_style,
+            source=endpoint_models_url,
+            endpoint=api_base,
+        )
+        and endpoint_model.get("capabilities", {}).get("structured_outputs", {}).get("supported")
+        is True
+    )
+    if native_format:
+        structured_output_mode = "anthropic"
     entry = configure_entry(
         entry,
         reply_tokens=reply_tokens,
         cache_enabled=cache_enabled,
         structured_output_mode=structured_output_mode,
     )
+    if native_format:
+        entry["provenance"]["structured_output_profile"].update(
+            source=endpoint_models_url,
+            model_id=model,
+            field="data[].capabilities.structured_outputs.supported",
+            recommended=True,
+        )
     provenance = entry["provenance"]
     for probe in probes:
         if probe.name.startswith("level:"):

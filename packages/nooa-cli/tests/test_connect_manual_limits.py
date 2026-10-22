@@ -511,11 +511,11 @@ def test_deferred_completion_reviews_raw_limits_and_preserves_edited_reply(
     )
     if action == "save":
         answers += "chat\n"
-    answers += "y\n"
+    answers += ("test\n" if action == "test" else "") + "y\n"
     result = CliRunner().invoke(command, flags, input=answers)
     assert result.exit_code == 0, result.output
-    assert len(decisions) == 4
-    assert proposals[-2]["context_window"] == 64000
+    assert len(decisions) == (5 if action == "test" else 4)
+    assert proposals[-3 if action == "test" else -2]["context_window"] == 64000
     assert proposals[-1]["context_window"] == 24000
     assert proposals[-1]["max_tokens"] == 1234  # Not the original 2000 or a default.
     saved = yaml.safe_load(path.read_text())["models"]["local"]

@@ -313,7 +313,8 @@ def test_openrouter_discovery_offers_chat_responses_and_decision_without_name_cl
 
     def choose(text, options, **kwargs):
         if text == "Would you like to test these settings?":
-            assert calls == []
+            if not reviews:
+                assert calls == []
             reviews.append(options)
         return original_choice(text, options, **kwargs)
 
@@ -338,7 +339,9 @@ def test_openrouter_discovery_offers_chat_responses_and_decision_without_name_cl
     monkeypatch.setattr(prompts, "labelled_choice", choose)
     monkeypatch.setattr(connect, "write", write)
     mock_http(monkeypatch, handle)
-    answers = "262144\n262144\ndiscover\ntest\n" + ("systemone\n" if budget > 512 else "") + "y\n"
+    answers = (
+        "262144\n262144\ndiscover\ntest\n" + ("systemone\n" if budget > 512 else "") + "test\ny\n"
+    )
     result = CliRunner().invoke(
         command,
         [

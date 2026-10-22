@@ -209,7 +209,9 @@ def test_hub_shared_listing_and_default_full_systemone_url(monkeypatch, tmp_path
             "--output",
             str(path),
         ],
-        input=f"exact/model\n262144\n262144\n{choice}\ntest\ny\n",
+        input=f"exact/model\n262144\n262144\n{choice}\ntest\n"
+        + ("test\n" if choice == "discover" else "")
+        + "y\n",
     )
     assert result.exit_code == 0, result.output
     entry = yaml.safe_load(path.read_text())["models"]["local"]
@@ -268,7 +270,7 @@ def test_custom_discovery_never_guesses_decision_url_and_reuses_selected_request
     result = CliRunner().invoke(
         command,
         flags,
-        input="262144\n262144\ndiscover\ntest\ny\n",
+        input="262144\n262144\ndiscover\ntest\ntest\ny\n",
     )
     assert result.exit_code == 0, result.output
     assert path.exists(), result.output
@@ -319,7 +321,7 @@ def test_known_decision_cannot_save_without_budgeted_baseline(monkeypatch, tmp_p
         [*options(path), "--api-style", "systemone", "--budget-tokens", str(budget)],
         input="test\n",
     )
-    assert result.exit_code == 0, result.output
+    assert result.exit_code != 0, result.output
     assert "Nothing was saved" in result.output
     assert "check budget used up" in result.output
     assert not path.exists()
@@ -392,7 +394,7 @@ def test_rejected_decision_key_does_not_save_or_repeat_request(monkeypatch, tmp_
         ],
         input="test\n",
     )
-    assert result.exit_code == 0, result.output
+    assert result.exit_code != 0, result.output
     assert len(requests) == 1
     assert "Nothing was saved" in result.output
     assert "decision-secret-canary" not in result.output
@@ -433,7 +435,7 @@ def test_user_selects_decision_among_multiple_successes_and_reuses_full_route(
             "--budget-tokens",
             "20000",
         ],
-        input="262144\n262144\ndiscover\ntest\nsystemone\ny\n",
+        input="262144\n262144\ndiscover\ntest\nsystemone\ntest\ny\n",
     )
     assert result.exit_code == 0, result.output
     assert "Working API formats: OpenAI-compatible Chat, System One Decisions" in result.output
@@ -476,7 +478,7 @@ def test_custom_cross_origin_interface_key_requires_explicit_flag(monkeypatch, t
     ]
     if opt_in:
         flags += ["--share-interface-key"]
-    result = CliRunner().invoke(command, flags, input="262144\n262144\ndiscover\ntest\ny\n")
+    result = CliRunner().invoke(command, flags, input="262144\n262144\ndiscover\ntest\ntest\ny\n")
     assert "interface-secret-canary" not in result.output
     if opt_in:
         assert result.exit_code == 0, result.output
@@ -703,7 +705,7 @@ def test_picker_discover_anthropic_retains_endpoint_limits(
         flags += ["--no-catalogue"]
     if listing_url:
         flags += ["--models-url", listing_url, "--discovery-api-key-env", "-"]
-    result = CliRunner().invoke(command, flags, input="exact/model\ndiscover\ntest\ny\n")
+    result = CliRunner().invoke(command, flags, input="exact/model\ndiscover\ntest\ntest\ny\n")
     assert result.exit_code == 0, result.output
     assert "Found 1 models" in result.output
     assert path.exists(), result.output

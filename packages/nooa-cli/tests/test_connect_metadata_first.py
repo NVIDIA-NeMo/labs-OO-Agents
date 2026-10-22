@@ -27,7 +27,8 @@ def guided(monkeypatch, tmp_path):
 
     def choose(label, options, **kwargs):
         if label == "Would you like to test these settings?":
-            assert calls and all(r.method == "GET" for r in calls)
+            if not decisions:
+                assert calls and all(r.method == "GET" for r in calls)
             decisions.append(tuple(options))
         return original(label, options, **kwargs)
 
@@ -92,6 +93,8 @@ def test_metadata_precedes_consent_and_save_without_testing_has_zero_post(guided
             ("save", "Save without testing"),
             ("change", "Change settings"),
             ("skip", "Continue without catalogue settings"),
+            ("structured", "Change answer format"),
+            ("cancel", "Cancel without saving"),
         )
     ]
     assert [r.method for r in calls] == ["GET", "GET"] + (["POST"] if action == "test" else [])
@@ -132,9 +135,9 @@ def test_change_then_test_uses_actual_configured_controls(guided):
 
 def test_deferred_style_tests_bounded_interfaces_after_metadata(guided):
     flags, path, calls, decisions = guided
-    result = CliRunner().invoke(command, flags, input="discover\ntest\ny\n")
+    result = CliRunner().invoke(command, flags, input="discover\ntest\ntest\ny\n")
     assert result.exit_code == 0, result.output
-    assert len(decisions) == 1
+    assert len(decisions) == 2
     posts = [r for r in calls if r.method == "POST"]
     assert [r.method for r in calls[:2]] == ["GET", "GET"]
     assert {r.url.path for r in posts} == {"/v1/chat/completions", "/v1/responses", "/v1/messages"}
@@ -152,7 +155,7 @@ def test_deferred_style_tests_bounded_interfaces_after_metadata(guided):
 
 def test_deferred_style_manual_save_selects_style_without_invented_evidence(guided):
     flags, path, calls, decisions = guided
-    result = CliRunner().invoke(command, flags, input="discover\nsave\nresponses\ny\n")
+    result = CliRunner().invoke(command, flags, input="discover\nsave\nresponses\nsave\ny\n")
     assert result.exit_code == 0, result.output
     assert all(r.method == "GET" for r in calls)
     assert "Working API formats" not in result.output
@@ -172,6 +175,8 @@ def test_no_probe_allows_metadata_but_never_offers_model_calls(guided):
             ("save", "Save without testing"),
             ("change", "Change settings"),
             ("skip", "Continue without catalogue settings"),
+            ("structured", "Change answer format"),
+            ("cancel", "Cancel without saving"),
         )
     ]
     assert path.exists()

@@ -343,7 +343,7 @@ def test_edit_retest_preserves_prior_permissions_even_if_not_passed(
             "--yes",
         ],
     )
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == (1 if budget == 1 else 0), result.output
     assert yaml.safe_load(path.read_text())["models"]["local"]["media_inputs"] == [
         "image",
         "audio",
@@ -387,7 +387,7 @@ def test_guided_edit_all_formats_retains_prior_declarations(
         # Approval, TEST, keep context/ceiling/levels, declarations, replace, write.
         input="test\ntest\nkeep\ny\ny\n",
     )
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == (1 if budget == 1 else 0), result.output
     assert len(calls) == count
     assert "Formats to TEST" not in result.output
     assert "Media samples: Images, Audio, Video, PDFs" in " ".join(result.output.split())

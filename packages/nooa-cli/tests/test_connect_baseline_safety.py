@@ -102,11 +102,10 @@ def test_failed_configured_baseline_stops_before_save(monkeypatch, tmp_path, edi
         + ("" if yes else ("" if editing else "262144\n262144\n") + "test\n")
         + "\n" * 12,
     )
-    assert result.exit_code == 0, result.output
+    assert result.exit_code != 0, result.output
     assert "Nothing was saved" in result.output
-    assert "--no-probe" in result.output and "save without testing" in " ".join(
-        result.output.split()
-    )
+    assert "Approved connection test failed" in result.output
+    assert "explicitly saving untested" in " ".join(result.output.split())
     assert "Write model entry" not in result.output
     assert "Save this key" not in result.output and "Save model" not in result.output
     assert "PRIVATE-ANSWER" not in result.output and "PRIVATE-KEY" not in result.output
@@ -167,8 +166,10 @@ def test_missing_baseline_evidence_cannot_reach_wizard_save(
         + ("" if yes else ("" if editing else "262144\n262144\n") + "test\n")
         + "\n" * 12,
     )
-    assert result.exit_code == 0, result.output
-    assert "Nothing was saved" in result.output and "--no-probe" in result.output
+    assert result.exit_code != 0, result.output
+    assert (
+        "Nothing was saved" in result.output and "Approved connection test failed" in result.output
+    )
     assert "Save model" not in result.output and "Write model entry" not in result.output
     assert path.read_bytes() == before if editing else not path.exists()
 

@@ -53,6 +53,8 @@ def test_local_media_skips_do_not_warn_or_consume_budget(monkeypatch, capsys, st
     # A genuinely insufficient runnable budget still warns.
     state.proposal = replace(proposal, budget_tokens=3023)
     state.remaining_estimate = state.proposal.token_estimate
-    assert wizard.run_checks(state)
+    assert not wizard.run_checks(state)  # the earlier attempts exhausted this wizard's allowance
     output = capsys.readouterr()
     assert "Some tests will be skipped" in output.err + output.out
+    assert len(sent) == 2  # another Test now never resets the allowance
+    assert state.tokens_spent == 3024

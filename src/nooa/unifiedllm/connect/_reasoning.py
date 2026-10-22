@@ -40,6 +40,9 @@ def reasoning_metadata(model):
         else:
             clean.update(modes)
         result[key] = clean
+    structured = caps.get("structured_outputs")
+    if isinstance(structured, dict) and isinstance(structured.get("supported"), bool):
+        result["structured_outputs"] = {"supported": structured["supported"]}
     return {"capabilities": result} if result else {}
 
 
@@ -59,16 +62,28 @@ def metadata_fields(model):
     return fields
 
 
+def native_metadata_matches(model, *, model_id, api_style, source, endpoint):
+    """Exact native ID and same Messages base, allowing its equivalent /v1 spelling."""
+    return (
+        api_style == "anthropic"
+        and isinstance(model, dict)
+        and model.get("id") == model_id
+        and isinstance(endpoint, str)
+        and source
+        in {
+            endpoint.rstrip("/") + "/models",
+            endpoint.rstrip("/").removesuffix("/v1") + "/v1/models",
+        }
+    )
+
+
 def native_levels(model, *, model_id, api_style, source, endpoint):
     """Compile exact selected, same-source native facts, not foreign catalogues.
 
-    Manual-only thinking stays model-default: no invented budgets or efforts.
+    Manual-only thinking offers a minimal On patch, never invented effort levels.
     """
-    if (
-        api_style != "anthropic"
-        or not isinstance(model, dict)
-        or model.get("id") != model_id
-        or source != endpoint.rstrip("/") + "/models"
+    if not native_metadata_matches(
+        model, model_id=model_id, api_style=api_style, source=source, endpoint=endpoint
     ):
         return None
     caps = reasoning_metadata(model).get("capabilities", {})
@@ -87,6 +102,12 @@ def native_levels(model, *, model_id, api_style, source, endpoint):
                     "thinking": {"type": "adaptive"},
                     "output_config": {"effort": label},
                 }
+    if (
+        thinking.get("supported") is True
+        and modes.get("enabled", {}).get("supported") is True
+        and modes.get("adaptive", {}).get("supported") is False
+    ):
+        levels["on"] = {"thinking": {"type": "enabled", "budget_tokens": 1024}}
     if thinking.get("supported") is True and modes.get("disabled", {}).get("supported") is True:
         levels["off"] = {"thinking": {"type": "disabled"}}
     if thinking.get("supported") is False:

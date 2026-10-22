@@ -28,7 +28,11 @@ def test_real_pty_offline_save_help_and_cancel(tmp_path, columns, no_color, canc
     child = tmp_path / "pty_connect.py"
     child.write_text("""
 import os
+os.environ["PYTHON_DOTENV_DISABLED"] = "1"
 os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
+os.environ["LITELLM_LOCAL_ANTHROPIC_BETA_HEADERS"] = "True"
+import dotenv
+dotenv.load_dotenv = lambda *a, **k: False
 import socket
 attempts = []
 def blocked(self, address):
@@ -46,7 +50,10 @@ if os.environ.get("PTY_NATIVE_REASONING") == "1":
     from nooa.unifiedllm.connect._server_details import listing_facts
     from tests.unifiedllm.connect.reasoning_fixture import MODEL_ID, NATIVE_MODEL
     async def details(endpoint, model, **kwargs):
-        facts = listing_facts(NATIVE_MODEL)
+        from copy import deepcopy
+        model = deepcopy(NATIVE_MODEL)
+        model["capabilities"]["structured_outputs"] = {"supported": True}
+        facts = listing_facts(model)
         return connect.ModelDetails(model, facts, ({"source": endpoint + "/models",
                                                   "schema": "models", "id": model,
                                                   "facts": facts, "fields": {}},))
@@ -156,6 +163,9 @@ finally:
         entry = yaml.safe_load(target.read_text())["models"]["local"]
         assert entry["media_inputs"] == []
         if native:
+            assert (
+                entry["structured_output_mode"] == "anthropic"
+            )  # ordinary recommended UI, no expert flag
             assert entry["reasoning_level"] == "high"
             assert entry["reasoning_levels"]["high"] == {
                 "thinking": {"type": "adaptive"},

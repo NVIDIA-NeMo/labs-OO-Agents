@@ -161,10 +161,10 @@ def test_full_check_transcript_and_failure_no_save(monkeypatch, tmp_path, column
             "--output",
             str(target),
         ],
-        input="262144\n262144\ndefault\ntest\ny\n",
+        input="262144\n262144\ntest\n" + ("cancel\n" if failure else "y\n"),
         color=bool(color),
     )
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == (1 if failure else 0), result.output
     output = plain(result.output)
     assert "Connection: Failed" in output if failure else "Connection: Passed" in output
     assert "PRIVATE_PROVIDER_BODY" not in output

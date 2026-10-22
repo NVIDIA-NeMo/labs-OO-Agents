@@ -18,14 +18,14 @@ from . import _connect_view as view
 def choose_structured_output_mode(current=None):
     """Explicit connection profile, never provider catalogue metadata."""
     view.note(
-        "Native Anthropic structured output is opt-in; gateway acceptance must be tested. None/auto use the existing carrier."
+        "Choose how NOOA requests typed JSON answers. Native JSON uses Anthropic’s format; unknown servers must be tested. Standard keeps the existing carrier."
     )
     choice = labelled_choice(
-        "Structured output profile",
+        "Answer format",
         (
-            ("none", "None (legacy carrier)"),
-            ("auto", "Auto (legacy carrier)"),
-            ("anthropic", "Anthropic native (output_config.format)"),
+            ("none", "Standard JSON (existing carrier)"),
+            ("auto", "Auto (existing carrier)"),
+            ("anthropic", "Native JSON (Anthropic format)"),
         ),
         default=current or "none",
     )

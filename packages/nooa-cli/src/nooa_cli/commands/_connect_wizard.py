@@ -40,6 +40,7 @@ class WizardState:
     manual_limits_required: bool = False
     manual_limits_deferred: bool = False
     settings_prefill: Any = field(default_factory=dict, init=False)
+    route_settings_prefill: Any = field(default_factory=dict, init=False)
     data: Any = None
     default_style: Any = None
     discovery_endpoint: Any = None
@@ -61,6 +62,12 @@ class WizardState:
     existing: Any = None
     explicit_key_env: Any = None
     interface_spent: Any = None
+    tokens_spent: int = 0
+    test_failed: bool = False
+    failure_ack_snapshot: Any = None
+    route_revised: bool = False
+    manual_reasoning_owned: bool = False
+    manual_reasoning_origin: bool = False
     share_interface_key: bool = False
     connection_endpoint_explicit: bool = False
     interfaces: Any = None
@@ -121,6 +128,19 @@ class WizardState:
         self.settings_prefill = {
             key: getattr(self, key)
             for key in ("context_window", "levels_file", "levels", "reasoning_template")
+        }
+        self.route_settings_prefill = {
+            **self.settings_prefill,
+            **{
+                key: getattr(self, key)
+                for key in (
+                    "reply_tokens",
+                    "media_inputs",
+                    "test_media_inputs",
+                    "reasoning_level",
+                    "structured_output_mode",
+                )
+            },
         }
 
 
@@ -719,6 +739,165 @@ def select_request_interface(state: WizardState) -> bool:
     return True
 
 
+def replacement_route_scope(state: WizardState, endpoint, model):
+    """Use the core's route identity, including equivalent native Messages bases."""
+    decision = state.api_style in connect.DECISION_API_STYLES
+    return connect.effective_route_scope(
+        {
+            "model_name": model,
+            "endpoint" if decision else "api_base": endpoint,
+            "client_type": "decision"
+            if decision
+            else "responses"
+            if state.api_style == "responses"
+            else "completion",
+            "api_style": state.api_style or "chat",
+            "api_key_env": state.api_key_env,
+        }
+    )
+
+
+def bound_replacement_reply_limit(state: WizardState) -> bool:
+    """Offer explicit repair, never silently replace a route's requested reply cap."""
+    if state.reply_tokens is None or state.api_style in connect.DECISION_API_STYLES:
+        return True
+    base = connect.plan(
+        state.alias or "candidate",
+        state.model,
+        state.api_style,
+        state.endpoint,
+        state.api_key_env,
+        catalogue=state.candidate,
+        endpoint_model=state.selected_endpoint_model,
+        endpoint_models_url=state.endpoint_models_url,
+        context_window=state.context_window,
+        media_inputs=[],
+    ).entry
+    maximum = base.get("provenance", {}).get("catalogue_limits", {}).get("max_completion_tokens")
+    bounds = [
+        v
+        for v in (maximum, base.get("context_window", 0) - 1)
+        if isinstance(v, int) and not isinstance(v, bool) and v > 0
+    ]
+    ceiling = min(bounds) if bounds else None
+    if ceiling is None or state.reply_tokens <= ceiling:
+        return True
+    view.note(
+        f"Your requested reply limit ({state.reply_tokens:,}) exceeds the new model's bound ({ceiling:,}). No cap was changed."
+    )
+    if (
+        prompts.labelled_choice(
+            "Review the replacement reply limit",
+            (("adjust", "Adjust reply limit"), ("cancel", "Cancel setup")),
+            default="cancel",
+        )
+        == "cancel"
+    ):
+        return False
+    state.reply_tokens = prompts.choose_reply_limit(ceiling, ceiling, output_ceiling=maximum)
+    return True
+
+
+def review_replacement_route(state: WizardState, previous, *, discovering=False) -> bool:
+    """Discard route-local facts and obtain consent for the CURRENT replacement.
+
+    Explicit flags are intent, not facts. Preserve them for normal bound helpers;
+    never carry inferred context, catalogue mappings, credentials or old proof.
+    """
+    if replacement_route_scope(state, *previous) == replacement_route_scope(
+        state, state.endpoint, state.model
+    ):
+        return True
+    from urllib.parse import urlsplit
+
+    old_url, new_url = urlsplit(previous[0]), urlsplit(state.endpoint)
+    if (old_url.scheme, old_url.netloc) != (new_url.scheme, new_url.netloc):
+        had_key = bool(state.api_key or state.api_key_env)
+        state.api_key = None
+        state.api_key_env = (
+            prompts.prompt(
+                "Key environment variable for the new server (blank for no authentication)",
+                default="",
+                suggestions=prompts.environment_names(),
+            )
+            if had_key
+            else ""
+        )
+        state.api_key = os.environ.get(state.api_key_env) if state.api_key_env else None
+        if state.api_key_env and not state.api_key:
+            raise click.ClickException("The new server key variable is unset or empty.")
+        state.share_interface_key = False
+    for name in (
+        "candidate",
+        "media_hints",
+        "selected_endpoint_model",
+        "server_details",
+        "discovery_endpoint",
+        "endpoint_models_url",
+        "discovery_succeeded",
+        "public_details_status",
+        "proposal",
+        "configured",
+        "result",
+        "interfaces",
+        "manual_limits",
+        "edited_level_patches",
+        "guided_reasoning_choice",
+        "guided_reasoning_levels",
+        "guided_reasoning_route",
+        "guided_reasoning_active",
+        "guided_reasoning_current",
+        "catalogue_model",
+        "editing",
+        "existing",
+        "discovery_api_key",
+        "discovery_api_key_env",
+        "models_url",
+        "listing_api_base",
+        "discovery_style",
+        "listing_style",
+    ):
+        setattr(state, name, None)
+    state.endpoint_models = ()
+    state.interface_endpoints = {}
+    state.provider = "custom"
+    state.metadata_prepared = state.metadata_displayed = False
+    state.edited_settings = state.inherit_media_inputs = False
+    state.manual_limits_required = True
+    state.manual_limits_deferred = False
+    state.manual_reasoning_owned = state.manual_reasoning_origin = False
+    for name, value in state.route_settings_prefill.items():
+        if name == "structured_output_mode" and state.structured_output_mode_set:
+            continue  # a CLI or UI declaration is explicit intent, not route metadata
+        setattr(state, name, deepcopy(value))
+    state.route_revised = True
+    view.note("Server/model changed. Previous source, context and test proof no longer apply.")
+    style = state.api_style
+    if discovering:
+        state.api_style = None
+    if not prepare_metadata(state):
+        return False
+    state.api_style = style or state.default_style or "chat"
+    if not bound_replacement_reply_limit(state):
+        return False
+    if (
+        not configure_media_inputs(state)
+        or not choose_reasoning(state, deferred=discovering)
+        or not configure_checks(state)
+    ):
+        return False
+    show_guided_proposal(state, deferred_style=discovering, updated=True)
+    action = review_guided_proposal(state, deferred_style=discovering)
+    if action is None:
+        return False
+    state.approval = state.probe if action == "test" else "none"
+    if action == "save":
+        state.test_media_inputs = None
+    if discovering:
+        state.api_style = None
+    return True
+
+
 def check_interfaces(state: WizardState) -> bool:
     """Check interfaces; return False when the user cancels."""
     if state.structured_output_mode_set and not state.api_style:
@@ -736,7 +915,7 @@ def check_interfaces(state: WizardState) -> bool:
     if not state.api_style:
         available = ("chat", "responses", "anthropic", *state.interface_endpoints)
         if state.approval != "none":
-            state.interface_spent = 0
+            state.interface_spent = state.interface_spent or 0
             retry_styles = available
             interface_timeout = 30
             while True:
@@ -757,7 +936,7 @@ def check_interfaces(state: WizardState) -> bool:
                             state.model,
                             state.endpoint,
                             state.api_key_env,
-                            budget_tokens=max(0, state.budget_tokens - state.interface_spent),
+                            budget_tokens=max(0, state.budget_tokens - state.tokens_spent),
                             output_tokens=state.output_tokens,
                             api_key=state.api_key,
                             styles=retry_styles,
@@ -775,6 +954,7 @@ def check_interfaces(state: WizardState) -> bool:
                         diagnostics=state.show_diagnostics,
                     )
                 )
+                state.tokens_spent += state.interfaces.tokens_charged_to_budget
                 state.interface_spent += state.interfaces.tokens_charged_to_budget
                 state.interfaces = replace(
                     state.interfaces, tokens_charged_to_budget=state.interface_spent
@@ -784,6 +964,7 @@ def check_interfaces(state: WizardState) -> bool:
                     if state.interfaces.recommended_style in available:
                         state.default_style = state.interfaces.recommended_style
                     break
+                state.test_failed = True
                 failed_checks = {
                     style: r.entry["provenance"]["probes"]["routing"]
                     for style, r in state.interfaces.results.items()
@@ -823,7 +1004,7 @@ def check_interfaces(state: WizardState) -> bool:
                                 api_key_env=state.api_key_env,
                                 api_key=state.api_key,
                                 budget=state.budget_tokens,
-                                remaining=max(0, state.budget_tokens - state.interface_spent),
+                                remaining=max(0, state.budget_tokens - state.tokens_spent),
                                 output_tokens=state.output_tokens,
                                 reasoning_output_tokens=state.reasoning_output_tokens,
                                 stage="interfaces",
@@ -845,7 +1026,7 @@ def check_interfaces(state: WizardState) -> bool:
                     raise click.ClickException(
                         "Check credentials and endpoint, or run without --yes to correct them interactively."
                     )
-                remaining = max(0, state.budget_tokens - state.interface_spent)
+                remaining = max(0, state.budget_tokens - state.tokens_spent)
                 if remaining < state.output_tokens + 512:
                     view.line(
                         scrub_setup(
@@ -910,8 +1091,7 @@ def check_interfaces(state: WizardState) -> bool:
                                 "API key (used only for this setup)", hide_input=True
                             )
                 elif action == "server":
-                    state.interface_endpoints = {}  # Never carry decision routes to another server.
-                    retry_styles = ("chat", "responses", "anthropic")
+                    previous = (state.endpoint, state.model)
                     state.endpoint = connect.normalize_endpoint(
                         prompts.prompt(
                             "Model server URL",
@@ -921,41 +1101,41 @@ def check_interfaces(state: WizardState) -> bool:
                         )
                     )
                     state.model = prompts.prompt("Exact model ID", default=state.model)
-                    if state.guided:
-                        state.candidate = state.media_hints = state.selected_endpoint_model = None
-                        state.endpoint_models = ()
-                        state.discovery_endpoint = state.endpoint_models_url = None
-                        view.line(
-                            scrub_setup(
-                                state,
-                                "Server/model changed; previous metadata no longer applies. Explicit settings are retained.",
-                            )
-                        )
-            view.note(
-                scrub_setup(
-                    state,
-                    "Working API formats: "
-                    + ", ".join(prompts.choice_label(style) for style in available),
+                    if not review_replacement_route(state, previous, discovering=True):
+                        return False
+                    retry_styles = ("chat", "responses", "anthropic")
+                    if state.approval == "none":
+                        available = retry_styles
+                        break
+            if state.interfaces is None:
+                view.note("Replacement API formats have not been tested; choose one explicitly.")
+            else:
+                view.note(
+                    scrub_setup(
+                        state,
+                        "Working API formats: "
+                        + ", ".join(prompts.choice_label(style) for style in available),
+                    )
                 )
-            )
-            view.note(
-                scrub_setup(
-                    state,
-                    "Accepted client types: " + ", ".join(state.interfaces.accepted_client_types),
+                view.note(
+                    scrub_setup(
+                        state,
+                        "Accepted client types: "
+                        + ", ".join(state.interfaces.accepted_client_types),
+                    )
                 )
-            )
-            observed = [s for s in available if state.interfaces.reasoning_observed.get(s)]
-            view.note(
-                scrub_setup(
-                    state,
-                    "API formats that returned reasoning: "
-                    + (
-                        ", ".join(prompts.choice_label(style) for style in observed)
-                        if observed
-                        else "none"
-                    ),
+                observed = [s for s in available if state.interfaces.reasoning_observed.get(s)]
+                view.note(
+                    scrub_setup(
+                        state,
+                        "API formats that returned reasoning: "
+                        + (
+                            ", ".join(prompts.choice_label(style) for style in observed)
+                            if observed
+                            else "none"
+                        ),
+                    )
                 )
-            )
         if state.interfaces and len(available) == 1:
             state.api_style = available[0]
             view.note(
@@ -1838,6 +2018,12 @@ def choose_reasoning(state: WizardState, *, deferred=False, edit=False) -> bool:
     from nooa.unifiedllm.connect._reasoning import native_levels
 
     route = (state.model, state.api_style, state.endpoint)
+    if (
+        not edit
+        and state.guided_reasoning_route == route
+        and state.guided_reasoning_choice is not None
+    ):
+        return True
     saved = state.editing or state.existing or {}
     routed = {
         "model_name": ("anthropic/" if state.api_style == "anthropic" else "openai/") + state.model,
@@ -1863,7 +2049,13 @@ def choose_reasoning(state: WizardState, *, deferred=False, edit=False) -> bool:
         }
     elif levels is None and saved:
         levels = deepcopy(saved.get("reasoning_levels"))
-    if levels is None:
+    native_manual = (
+        state.manual_reasoning_origin
+        and same_previous_route
+        and not (state.levels_file or state.levels or state.reasoning_template)
+    )
+    if levels is None or native_manual:
+        previous_on = deepcopy((levels or {}).get("on")) if native_manual else None
         levels = native_levels(
             state.selected_endpoint_model,
             model_id=state.model,
@@ -1871,6 +2063,10 @@ def choose_reasoning(state: WizardState, *, deferred=False, edit=False) -> bool:
             source=state.endpoint_models_url,
             endpoint=state.endpoint,
         )
+        native_manual = bool(levels and "on" in levels)
+        state.manual_reasoning_origin = native_manual
+        if native_manual and previous_on is not None:
+            levels["on"] = previous_on  # retain the wizard's reviewed allowance across edits
     if levels is None:
         # Only exact OpenRouter metadata retains known effort templates here.
         candidate = state.candidate or {}
@@ -1888,6 +2084,11 @@ def choose_reasoning(state: WizardState, *, deferred=False, edit=False) -> bool:
 
         ReasoningConfig(levels=levels)
     current = state.proposal.entry if edit and state.proposal else saved
+    if state.reasoning_level is not None and not edit:
+        from nooa.unifiedllm.reasoning import ReasoningConfig
+
+        ReasoningConfig(levels=levels).settings(state.reasoning_level)
+        current = {**current, "reasoning_level": state.reasoning_level, "reasoning_levels": levels}
     if state.guided_reasoning_route not in {None, route}:
         current = {}
         state.guided_reasoning_active = None
@@ -1944,9 +2145,97 @@ def choose_reasoning(state: WizardState, *, deferred=False, edit=False) -> bool:
     )
     if choice == "keep" and current.get("reasoning_levels"):
         levels = deepcopy(current["reasoning_levels"])
+    if native_manual and (
+        choice == "on" or choice == "keep" and current.get("reasoning_level") == "on"
+    ):
+        state.manual_reasoning_owned = True
+        current_budget = levels["on"]["thinking"]["budget_tokens"]
+        budget = prompts.prompt(
+            "Reasoning token allowance (minimum 1,024)", default=str(current_budget)
+        )
+        try:
+            budget = int(budget)
+        except (TypeError, ValueError):
+            raise click.UsageError(
+                "Reasoning token allowance must be an integer of at least 1,024."
+            ) from None
+        if budget < 1024:
+            raise click.UsageError("Reasoning token allowance must be at least 1,024.")
+        levels["on"] = {"thinking": {"type": "enabled", "budget_tokens": budget}}
+    elif choice != "keep":
+        state.manual_reasoning_owned = False
+        if native_manual:
+            levels.pop("on", None)  # materialize a manual budget only after selecting On
     state.guided_reasoning_choice = choice
     state.guided_reasoning_levels = levels
     state.guided_reasoning_route = route
+    return True
+
+
+def bound_simple_reasoning(state: WizardState, levels) -> bool:
+    """Only wizard-owned manual On uses this UI; advanced profiles stay untouched."""
+    if not state.manual_reasoning_owned or state.guided_reasoning_active != "on":
+        return True
+    budget = levels["on"]["thinking"]["budget_tokens"]
+    # Resolve the ordinary reply recommendation without thinking patches first.
+    base = connect.plan(
+        state.alias or "candidate",
+        state.model,
+        state.api_style,
+        state.endpoint,
+        state.api_key_env,
+        catalogue=state.candidate,
+        endpoint_model=state.selected_endpoint_model,
+        endpoint_models_url=state.endpoint_models_url,
+        context_window=state.context_window,
+        reply_tokens=state.reply_tokens,
+        media_inputs=[],
+        existing_entry=None,
+    ).entry
+    cap = connect.effective_config_snapshot(base)["params"]["max_tokens"]
+    while budget >= cap:
+        view.note(
+            f"Reasoning needs at least 1,024 tokens and must be below the saved reply limit "
+            f"({cap:,}); reasoning and the answer share that limit. No cap was changed."
+        )
+        if (
+            prompts.labelled_choice(
+                "The reply limit cannot fit this reasoning allowance",
+                (("adjust", "Adjust reply limit"), ("cancel", "Cancel setup")),
+                default="cancel",
+            )
+            == "cancel"
+        ):
+            return False
+        maximum = (
+            base.get("provenance", {}).get("catalogue_limits", {}).get("max_completion_tokens")
+        )
+        bounds = [
+            v
+            for v in (maximum, base.get("context_window", 0) - 1)
+            if isinstance(v, int) and not isinstance(v, bool) and v > 0
+        ]
+        ceiling = min(bounds) if bounds else None
+        if ceiling is not None and budget >= ceiling:
+            view.note(
+                f"The server limit ({ceiling:,}) cannot fit that allowance. Choose a smaller allowance or cancel."
+            )
+            action = prompts.labelled_choice(
+                "Reasoning allowance exceeds the server limit",
+                (("allowance", "Change reasoning allowance"), ("cancel", "Cancel setup")),
+                default="cancel",
+            )
+            if action == "cancel":
+                return False
+            budget = int(
+                prompts.prompt("Reasoning token allowance (minimum 1,024)", default="1024")
+            )
+            if budget < 1024:
+                raise click.UsageError("Reasoning token allowance must be at least 1,024.")
+            levels["on"]["thinking"]["budget_tokens"] = budget
+            continue
+        cap = prompts.choose_reply_limit(cap, ceiling, output_ceiling=maximum)
+        state.reply_tokens = cap
     return True
 
 
@@ -2032,6 +2321,8 @@ def configure_checks(state: WizardState) -> bool:
         }
     if state.guided_reasoning_levels is not None and state.guided_reasoning_choice is not None:
         state.patches = deepcopy(state.guided_reasoning_levels)
+    if not bound_simple_reasoning(state, state.patches):
+        return False
     planning_candidate = state.candidate
     if state.manual_limits and planning_candidate is not None:
         # User edits must use the current manual bound, not a stale provisional
@@ -2056,6 +2347,7 @@ def configure_checks(state: WizardState) -> bool:
         decision_image_transport=state.decision_image_transport,
         typesafe_danger_zone_images=state.typesafe_danger_zone_images,
         reasoning_levels=state.patches,
+        **({"reasoning_level": state.reasoning_level} if state.reasoning_level is not None else {}),
         budget_tokens=state.budget_tokens,
         output_tokens=state.output_tokens,
         reasoning_output_tokens=state.reasoning_output_tokens,
@@ -2165,7 +2457,7 @@ def configure_checks(state: WizardState) -> bool:
     state.interface_spent = state.interfaces.tokens_charged_to_budget if state.interfaces else 0
     state.proposal = replace(
         state.proposal,
-        budget_tokens=max(0, state.budget_tokens - state.interface_spent),
+        budget_tokens=max(0, state.budget_tokens - state.tokens_spent),
     )
     if state.interfaces:
         state.proposal.entry["provenance"]["interfaces"] = {
@@ -2282,6 +2574,7 @@ def baseline_allows_save(state: WizardState) -> bool:
         entry, configured
     ):
         return True
+    state.test_failed = True
     reason = view.connection_detail(record)
     # Only sanitized display facts: never echo raw provider errors or replies.
     view.note(
@@ -2289,7 +2582,7 @@ def baseline_allows_save(state: WizardState) -> bool:
             state,
             "Nothing was saved. Connection: " + reason.rstrip(".") + ". "
             "Review the server URL and settings, or increase --budget-tokens if checks were skipped. "
-            "Rerun with --no-probe to save without testing. "
+            "Review the current configuration before retrying or explicitly saving untested. "
             "Add --no-catalogue and an explicit model ID to avoid listing/metadata requests. "
             "See docs/model-configuration.md. No model entry or key was written.",
         ),
@@ -2324,6 +2617,11 @@ def run_checks(state: WizardState) -> bool:
             ),
             err=True,
         )
+    if state.budget_tokens is None:
+        state.budget_tokens = state.proposal.budget_tokens
+    state.proposal = replace(
+        state.proposal, budget_tokens=max(0, state.budget_tokens - state.tokens_spent)
+    )
     state.result = asyncio.run(
         show_checks(
             connect.run_steps(state.proposal, approved=state.approval, api_key=state.api_key),
@@ -2332,9 +2630,8 @@ def run_checks(state: WizardState) -> bool:
             diagnostics=state.show_diagnostics,
         )
     )
-    state.result.entry["provenance"]["tokens_charged_to_budget"] = (
-        state.result.entry["provenance"].get("tokens_charged_to_budget", 0) + state.interface_spent
-    )
+    state.tokens_spent += state.result.entry["provenance"].get("tokens_charged_to_budget", 0)
+    state.result.entry["provenance"]["tokens_charged_to_budget"] = state.tokens_spent
     skipped = [
         name
         for name, record in state.result.entry["provenance"]["probes"].items()
@@ -2393,8 +2690,7 @@ def run_checks(state: WizardState) -> bool:
                         budget=state.budget_tokens,
                         remaining=max(
                             0,
-                            state.proposal.budget_tokens
-                            - state.result.entry["provenance"].get("tokens_charged_to_budget", 0),
+                            state.budget_tokens - state.tokens_spent,
                         ),
                         output_tokens=state.output_tokens,
                         reasoning_output_tokens=state.reasoning_output_tokens,
@@ -2675,11 +2971,23 @@ def structured_output_rows(entry):
     if "structured_output_mode" not in entry:
         return []
     mode = entry["structured_output_mode"]
-    rows = [("Structured output", f"{mode or 'none'} (declared)")]
+    profile = entry.get("provenance", {}).get("structured_output_profile", {})
+    rows = [
+        (
+            "Answer format",
+            "Native JSON (recommended by this server)"
+            if mode == "anthropic" and profile.get("recommended")
+            else "Native JSON (your choice)"
+            if mode == "anthropic"
+            else "Standard JSON (existing carrier)",
+        ),
+        ("Structured output", f"{mode or 'none'} (declared)"),
+    ]
     if mode == "anthropic":
         baseline = entry.get("provenance", {}).get("probes", {}).get("routing", {})
         observed = (
-            baseline.get("structured_output_schema_observed") is True
+            connect.verification_is_current(baseline, entry)
+            and baseline.get("structured_output_schema_observed") is True
             and baseline.get("structured_output_conflicts_observed") is False
             and baseline.get("settings_sent") is True
         )
@@ -2845,11 +3153,8 @@ def review_guided_proposal(state: WizardState, *, deferred_style=False):
     while True:
         options = (("test", "Test now"),) if not state.no_probe and state.probe != "none" else ()
         profile_options = (
-            (("structured", "Change structured output profile"),)
+            (("structured", "Change answer format"),)
             if state.api_style in {"chat", "anthropic"}
-            and (
-                state.structured_output_mode_set or "structured_output_mode" in state.proposal.entry
-            )
             else ()
         )
         skip_options = (
@@ -2869,9 +3174,22 @@ def review_guided_proposal(state: WizardState, *, deferred_style=False):
                 ("change", "Change settings"),
                 *skip_options,
                 *profile_options,
+                ("cancel", "Cancel without saving"),
             ),
             default="test" if options else "save",
         )
+        if action == "cancel":
+            view.note("Setup cancelled. Nothing was saved.")
+            return None
+        if action == "save" and state.test_failed:
+            snapshot = connect.effective_config_snapshot(state.proposal.entry)
+            if state.failure_ack_snapshot != snapshot:
+                if not prompts.confirm(
+                    "An approved connection test failed. Save current settings explicitly as untested anyway?",
+                    default=False,
+                ):
+                    continue
+                state.failure_ack_snapshot = snapshot
         if action == "structured":
             state.structured_output_mode = prompts.choose_structured_output_mode(
                 state.proposal.entry.get("structured_output_mode")
@@ -3001,6 +3319,7 @@ def guided_setup(state: WizardState) -> bool:
     action = review_guided_proposal(state, deferred_style=deferred_style)
     if action is None:
         return False
+    approved_snapshot = connect.effective_config_snapshot(state.proposal.entry)
     state.approval = state.probe if action == "test" else "none"
     if action == "save":
         state.test_media_inputs = None
@@ -3023,7 +3342,12 @@ def guided_setup(state: WizardState) -> bool:
     elif action == "save":
         if not configure_checks(state):
             return False
-    if state.guided_media_revised or (deferred_style and state.guided_reasoning_choice):
+    if (
+        state.route_revised
+        or state.guided_media_revised
+        or deferred_style
+        and connect.effective_config_snapshot(state.proposal.entry) != approved_snapshot
+    ):
         show_guided_proposal(state, updated=True)
         action = review_guided_proposal(state)
         if action is None:
@@ -3033,7 +3357,48 @@ def guided_setup(state: WizardState) -> bool:
             state.test_media_inputs = None
         if not configure_checks(state):
             return False
-    return run_checks(state) and save_model(state)
+    while not run_checks(state):
+        options = [("review", "Review settings"), ("server", "Edit server/model")]
+        if state.api_style in {"chat", "anthropic"}:
+            options.append(("structured", "Change answer format"))
+        options.append(("cancel", "Cancel without saving"))
+        choice = prompts.labelled_choice(
+            "Connection test failed — what next?", tuple(options), default="cancel"
+        )
+        if choice == "cancel":
+            view.note("Setup cancelled after a failed test. No model or key was saved.")
+            return False
+        if choice == "server":
+            previous = (state.endpoint, state.model)
+            state.endpoint = connect.normalize_endpoint(
+                prompts.prompt("Model server URL", default=state.endpoint)
+            )
+            state.model = prompts.prompt("Exact model ID", default=state.model)
+            if not review_replacement_route(state, previous):
+                return False
+            if replacement_route_scope(state, *previous) != replacement_route_scope(
+                state, state.endpoint, state.model
+            ):
+                if not configure_checks(state):
+                    return False
+                continue  # the replacement proposal already obtained fresh consent
+        if choice == "structured":
+            state.structured_output_mode = prompts.choose_structured_output_mode(
+                state.proposal.entry.get("structured_output_mode")
+            )
+            state.structured_output_mode_set = True
+        if not configure_checks(state):
+            return False
+        show_guided_proposal(state, updated=True)
+        action = review_guided_proposal(state)
+        if action is None:
+            return False
+        state.approval = state.probe if action == "test" else "none"
+        if action == "save":
+            state.test_media_inputs = None
+        if not configure_checks(state):
+            return False
+    return save_model(state)
 
 
 def run_wizard(**options):
@@ -3049,7 +3414,12 @@ def run_wizard(**options):
             state.guided_media_explicit = (
                 state.media_inputs is not None or state.test_media_inputs is not None
             )
-            guided_setup(state)
+            succeeded = guided_setup(state)
+            if not succeeded and state.test_failed:
+                view.note(
+                    "Approved connection test failed or was cancelled. Nothing saved.", err=True
+                )
+                raise click.ClickException("Test failed.")
             return
         for step in (
             select_connection,
@@ -3063,6 +3433,9 @@ def run_wizard(**options):
             save_model,
         ):
             if not step(state):
+                if state.test_failed:
+                    view.note("Approved connection test failed. Nothing saved.", err=True)
+                    raise click.ClickException("Test failed.")
                 return
     except (ValueError, OSError, yaml.YAMLError, httpx.HTTPError) as exc:
         detail = scrub_setup(

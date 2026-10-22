@@ -418,9 +418,39 @@ inspect its checks before choosing to save.
 
 The baseline uses your exact settings and one request with no retry. It fails if
 the answer is wrong, cut off, or not in the structured format. If your endpoint
-cannot return structured output, save it without checks (`--no-probe`) instead.
+rejects the answer carrier, the human wizard offers **Review settings**, **Change
+answer format** (on Completion routes), or **Cancel**. Review the current proposal
+and choose **Test now** before another request. Saving untested after a failed
+baseline requires an explicit failure acknowledgement; it is not a successful test.
+With `--yes`, an approved baseline failure exits nonzero and writes neither a
+model entry nor a key. Cancellation after a failed approved test also exits
+nonzero; successful saving and an explicitly untested save exit successfully.
 
 ## Profile controls, token budget and reply limit
+
+Changing the server/model after a failed check discards the old source, context,
+reasoning proposal and current test proof. Connect prepares only permitted
+metadata for the replacement, or collects the existing manual context/input pair
+when those facts are missing. New-origin credentials must be explicitly selected;
+listing credentials are not implicitly reused. The replacement proposal is
+reviewed and consented before its configured baseline or save. Explicit settings
+remain intent, bounded by the new model's actual facts.
+
+The wizard's approved token allowance is cumulative: interface checks, configured
+checks, failures and session checks all charge one ledger. Another **Test now**,
+format change, replan or server/model correction does not reset it. At exhaustion,
+additional requests are skipped rather than sent. Reservations are estimates,
+not hard provider billing limits; reported usage can increase a charge.
+
+For exact native thinking metadata advertising manual `enabled: true` and
+`adaptive: false`, the plain reasoning choice offers **On**/**Off**, not invented
+effort levels. **On** asks for a reasoning token allowance of at least 1,024,
+strictly below the saved reply cap because reasoning and the answer share it.
+If the current cap cannot fit, explicitly adjust it within known limits or cancel;
+Connect does not silently raise it or add a per-level cap override. An inactive
+manual On patch is not generated. Adaptive effort choices are unchanged, and
+advanced existing/custom reasoning profiles retain their current behavior.
+
 
 ### Explicit native structured-output profile
 
@@ -430,9 +460,17 @@ provider catalogue or a successful discovery ping. Responses and Decision routes
 reject explicit profile controls (including `none` and `auto`) before checks.
 Metadata/interface discovery stages reject the option; select an explicit
 Completion interface for wizard use. Plan, configured check and save stages carry
-it. Once explicitly declared, guided review offers **Change structured output
-profile** as a connection setting, separately from model catalogue details; the
-default wizard choices are unchanged.
+it. Guided review offers **Change answer format** on every eligible Completion
+route, even without a prior flag. **Standard JSON** retains the existing carrier;
+**Native JSON** selects the implemented Anthropic carrier, including on a gateway
+when you explicitly choose and test it. Connect never silently tries all formats.
+
+Exact native Anthropic Models API metadata with
+`capabilities.structured_outputs.supported: true` and a known Messages interface
+can recommend Native JSON by default. Only that bounded same-model, same-endpoint
+fact and its provenance are used—never a model-name guess or foreign catalogue.
+Explicit `none`, `auto`, or `anthropic` declarations win until you change them.
+Responses and Decisions do not offer this native-carrier choice.
 
 The library equivalents are `connect.plan(..., structured_output_mode="anthropic")`
 and `connect.configure_entry(entry, structured_output_mode="anthropic")`.
