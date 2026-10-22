@@ -184,6 +184,10 @@ class ChildResult(BaseModel):
             done = done.model_copy(update={"result": result})
         return done
 
+    def status_preview(self) -> str:
+        """One line for the pending ``delegates`` list."""
+        return f"{self.child.name} finished: {self.done.explanation}"
+
 
 class ChildQuestion(BaseModel):
     """A kept child asked you a question (its ``NeedInput``); reply with ``await item.child.send(...)``.
@@ -225,6 +229,10 @@ class ChildFailed(BaseModel):
     child: ChildRef
     error: str
 
+    def status_preview(self) -> str:
+        """One line for the pending ``delegates`` list."""
+        return f"{self.child.name} failed: {self.error}"
+
 
 class ChildMessage(BaseModel):
     """A child sent a message with ``self.message()``; delivered on the parent's ``delegates`` channel.
@@ -236,6 +244,10 @@ class ChildMessage(BaseModel):
 
     child: ChildRef
     text: str
+
+    def status_preview(self) -> str:
+        """One line for the pending ``delegates`` list."""
+        return f"{self.child.name} says: {self.text}"
 
 
 class TurnCancelledOutcome(BaseModel):

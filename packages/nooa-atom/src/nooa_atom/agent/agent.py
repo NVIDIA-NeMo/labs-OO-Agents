@@ -383,9 +383,11 @@ class AtomAgent(InteractiveAgent):
     @no_trace
     def _queue_status(self) -> str:
         """The ``queues`` block: pending items, then jobs and live children as "Background work"."""
-        from nooa_atom.agent.background import child_status_lines
+        from nooa_atom.agent.background import CLOSE_HINT, child_status_lines
 
-        return self.queue_manager.status(more_work=child_status_lines(self))
+        children = child_status_lines(self)
+        status = self.queue_manager.status(more_work=children)
+        return f"{status}\n{CLOSE_HINT}" if children else status
 
     @hidden
     def after_restore(self) -> None:

@@ -8,6 +8,9 @@ from pydantic import BaseModel
 
 from nooa_atom.session.items import ChildQuestion
 
+# One line under "Background work" while a child is listed, like the jobs cancel line.
+CLOSE_HINT = "Close a child: await next(c for c in self.children() if c.name == '<name>').close()"
+
 # Shown for a child per status; ``working``: its last turn ended Waiting on its own job.
 _SHOWN = {"running": "running", "working": "waiting on its own job", "retained": "retained"}
 
