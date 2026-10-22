@@ -138,7 +138,11 @@ def test_guided_yes_edit_cache_off_no_metadata_or_probe(tmp_path, monkeypatch, y
             "--media-inputs",
             "",
         ]
-    result = CliRunner().invoke(command, args + (["--yes"] if yes else []), input="save\ny\ny\n")
+    result = CliRunner().invoke(
+        command,
+        args + (["--yes"] if yes else []),
+        input=("" if editing or yes else "262144\n262144\n") + "save\ny\ny\n",
+    )
     assert result.exit_code == 0, result.output
     entry = yaml.safe_load(target.read_text())["models"]["local"]
     assert_entry(entry)

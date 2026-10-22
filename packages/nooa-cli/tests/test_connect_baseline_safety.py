@@ -96,7 +96,11 @@ def test_failed_configured_baseline_stops_before_save(monkeypatch, tmp_path, edi
         args += ["--yes"]
     # Extra default-yes answers must not be consumed by ordinary save/key prompts.
     result = CliRunner().invoke(
-        command, args, input="PRIVATE-KEY\n" + ("" if yes else "test\n") + "\n" * 12
+        command,
+        args,
+        input="PRIVATE-KEY\n"
+        + ("" if yes else ("" if editing else "262144\n262144\n") + "test\n")
+        + "\n" * 12,
     )
     assert result.exit_code == 0, result.output
     assert "Nothing was saved" in result.output
@@ -159,7 +163,9 @@ def test_missing_baseline_evidence_cannot_reach_wizard_save(
     result = CliRunner().invoke(
         command,
         args + (["--yes"] if yes else []),
-        input="PRIVATE-KEY\n" + ("" if yes else "test\n") + "\n" * 12,
+        input="PRIVATE-KEY\n"
+        + ("" if yes else ("" if editing else "262144\n262144\n") + "test\n")
+        + "\n" * 12,
     )
     assert result.exit_code == 0, result.output
     assert "Nothing was saved" in result.output and "--no-probe" in result.output
@@ -201,7 +207,7 @@ def test_explicit_manual_offline_save_remains_available(monkeypatch, tmp_path, f
     result = CliRunner().invoke(
         command,
         args + flag + ["--media-inputs", "image,pdf"] + (["--yes"] if yes else []),
-        input=("save\ny\ny\n" if editing else "save\ny\n"),
+        input=("save\ny\ny\n" if editing else "262144\n262144\nsave\ny\n"),
     )
     assert result.exit_code == 0, result.output
     entry = yaml.safe_load(path.read_text())["models"]["local"]

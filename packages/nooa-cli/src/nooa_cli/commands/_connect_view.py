@@ -698,7 +698,7 @@ def model_details(
         displayed.append(
             (
                 "Source",
-                "Your edits"
+                "Your settings"
                 if edited
                 else "This server"
                 if model.get("endpoint_limits")

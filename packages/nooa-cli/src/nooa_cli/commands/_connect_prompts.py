@@ -223,6 +223,34 @@ def confirm(text, *, default):
     return default if not value else value in {"yes", "y"}
 
 
+def manual_model_limits(context=None, input_limit=None, *, edit=False):
+    """Require literal positive integer declarations; collect atomically before applying."""
+    view.note("Enter your server limits. Ctrl-C cancels setup.")
+
+    def count(label, current):
+        if not edit and isinstance(current, int) and not isinstance(current, bool) and current > 1:
+            return current
+        while True:
+            value = prompt(
+                label, default=str(current) if current else "", show_default=bool(current)
+            ).strip()
+            if value.isascii() and value.isdecimal() and int(value) > 0:
+                number = int(value)
+                if number > 1:
+                    return number
+                view.note(
+                    "The context bound must leave room for input and a positive reply: enter at least 2 tokens.",
+                    err=True,
+                )
+                continue
+            view.note("Enter a positive whole number.", err=True)
+
+    return (
+        count("Context window (tokens)", context),
+        count("Input token limit (tokens)", input_limit),
+    )
+
+
 def edit_model_details(model):
     """Edit a detached copy of published settings; no request or file writes."""
     from copy import deepcopy

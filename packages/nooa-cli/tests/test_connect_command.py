@@ -352,7 +352,7 @@ def test_enabled_reasoning_without_evidence_warns_once_before_save(
             str(path),
             *(["--no-probe"] if mode == "unprobed" else []),
         ],
-        input=("save\ny\n" if mode == "unprobed" else "test\ny\n"),
+        input="262144\n262144\n" + ("save\ny\n" if mode == "unprobed" else "test\ny\n"),
     )
     assert result.exit_code == 0, result.output
     warning = "Warning: no reasoning information was returned for: high."
@@ -422,7 +422,7 @@ def test_recovery_edit_server_preserves_budget_and_saves_only_new_route(tmp_path
             "--output",
             str(path),
         ],
-        input="discover\ntest\nserver\nhttps://new.example/v1\nnew-model\ny\n",
+        input="discover\ntest\nserver\nhttps://new.example/v1\nnew-model\n262144\n262144\ntest\ny\n",
     )
     assert result.exit_code == 0, result.output
     assert [r.url.host for r in sent] == ["old.example"] * 3 + ["new.example"] * 4
@@ -465,7 +465,7 @@ def test_multiple_saved_key_variables_require_an_explicit_choice(tmp_path, monke
         str(path),
     ]
     result = CliRunner().invoke(
-        command, options + (["--yes"] if yes else []), input="KEY_TWO\nsave\ny\n"
+        command, options + (["--yes"] if yes else []), input="KEY_TWO\n262144\n262144\nsave\ny\n"
     )
     assert result.exit_code == (2 if yes else 0), result.output
     if yes:
@@ -512,7 +512,9 @@ def test_saved_key_message_says_using_only_when_a_value_is_actually_set(tmp_path
     path = tmp_path / "models.yaml"
     _write_single_saved_key_entry(path)
     monkeypatch.setenv("CONNECT_SAVED_KEY", "sk-already-set")
-    result = CliRunner().invoke(command, _single_saved_key_options(path), input="save\ny\n")
+    result = CliRunner().invoke(
+        command, _single_saved_key_options(path), input="262144\n262144\nsave\ny\n"
+    )
     assert result.exit_code == 0, result.output
     normalized_output = " ".join(result.output.split())
     assert "Using saved key variable CONNECT_SAVED_KEY for this endpoint." in normalized_output
@@ -527,7 +529,7 @@ def test_saved_key_message_is_honest_and_still_prompts_when_no_value_is_set(tmp_
     result = CliRunner().invoke(
         command,
         [*_single_saved_key_options(path), "--prompt-key"],
-        input="sk-freshly-entered\nsave\ny\nn\n",
+        input="sk-freshly-entered\n262144\n262144\nsave\ny\nn\n",
     )
     assert result.exit_code == 0, result.output
     normalized_output = " ".join(result.output.split())
@@ -550,7 +552,7 @@ def test_new_key_path_persists_only_after_separate_confirmation(tmp_path, monkey
     result = CliRunner().invoke(
         command,
         [*args(path), "--api-key-env", "new"],
-        input="\nnew-private-test-key\nsave\ny\n" + ("y\n" if save_key else "n\n"),
+        input="\nnew-private-test-key\n262144\n262144\nsave\ny\n" + ("y\n" if save_key else "n\n"),
     )
     assert result.exit_code == 0, result.output
     assert (
@@ -595,7 +597,7 @@ def test_a_rejected_listing_key_continues_manually_without_retry(tmp_path, monke
             "--output",
             str(path),
         ],
-        input="wire/model\ndiscover\nsave\nchat\nlocal\ny\n",
+        input="wire/model\ndiscover\nsave\nchat\n262144\n262144\nsave\nlocal\ny\n",
     )
     assert result.exit_code == 0, result.output
     assert "Continue with an exact model ID" in result.output
@@ -637,7 +639,9 @@ def test_full_yaml_preview_is_explicit_and_does_not_change_saved_entry(
     monkeypatch.delenv("CONNECT_TEST_KEY", raising=False)
     path = tmp_path / "models.yaml"
     result = CliRunner().invoke(
-        command, [*args(path), *(["--show-config"] if show_config else [])], input="save\ny\n"
+        command,
+        [*args(path), *(["--show-config"] if show_config else [])],
+        input="262144\n262144\nsave\ny\n",
     )
     assert result.exit_code == 0, result.output
     assert ("provenance:" in result.output) is show_config
@@ -652,7 +656,7 @@ def test_full_yaml_preview_is_explicit_and_does_not_change_saved_entry(
 
 def test_declining_final_write_leaves_no_file(tmp_path):
     path = tmp_path / "connected.yaml"
-    result = CliRunner().invoke(command, args(path), input="save\nn\n")
+    result = CliRunner().invoke(command, args(path), input="262144\n262144\nsave\nn\n")
     assert result.exit_code == 0, result.output
     assert not path.exists()
 
@@ -724,7 +728,9 @@ def test_endpoint_first_flow_uses_shared_discovery(tmp_path, monkeypatch):
     monkeypatch.setattr(connect, "discover", discover)
     monkeypatch.setenv("CONNECT_TEST_KEY", "discovery-key")
     path = tmp_path / "models.yaml"
-    result = CliRunner().invoke(command, args(path)[1:], input="wire/model\nsave\ny\n")
+    result = CliRunner().invoke(
+        command, args(path)[1:], input="wire/model\n262144\n262144\nsave\ny\n"
+    )
     assert result.exit_code == 0, result.output
     assert calls == [("https://api.test/v1", {"api_style": "chat", "api_key": "discovery-key"})]
     assert yaml.safe_load(path.read_text())["models"]["local"]["model_name"] == "openai/wire/model"
@@ -765,7 +771,7 @@ def test_declining_replace_after_checks_keeps_original_entry(tmp_path, monkeypat
     path = tmp_path / "models.yaml"
     original = "models: {local: {model_name: openai/old}}\n"
     path.write_text(original)
-    result = CliRunner().invoke(command, args(path), input="save\nn\n")
+    result = CliRunner().invoke(command, args(path), input="262144\n262144\nsave\nn\n")
     assert result.exit_code == 0, result.output
     assert result.output.index("Results ·") < result.output.index("Replace this model?")
     assert path.read_text() == original
@@ -921,7 +927,9 @@ def test_interface_menu_only_offers_successes_or_explicit_manual_escape(
             "--output",
             str(path),
         ],
-        input="discover\ntest\nresponses\ny\n" if responses_ok else "discover\ntest\ncancel\n",
+        input="discover\ntest\nresponses\n262144\n262144\ntest\ny\n"
+        if responses_ok
+        else "discover\ntest\ncancel\n",
     )
     if responses_ok:
         assert result.exit_code == 0, result.output
@@ -974,10 +982,12 @@ def test_authentication_recovery_keeps_budget_and_secrets(tmp_path, monkeypatch,
             "--output",
             str(path),
         ],
-        input="discover\ntest\nkey\nCONNECT_GOOD\ny\n" if recover else "discover\ntest\ncancel\n",
+        input="discover\ntest\nkey\nCONNECT_GOOD\n262144\n262144\ntest\ny\n"
+        if recover
+        else "discover\ntest\ncancel\n",
     )
     assert result.exit_code == 0, result.output
-    assert result.output.count("Would you like to test these settings?") == 1
+    assert result.output.count("Would you like to test these settings?") == (2 if recover else 1)
     assert "Approve setup" not in result.output
     assert "Key rejected by this server" in result.output
     assert "Give Feedback" not in result.output
@@ -1096,7 +1106,7 @@ def test_interface_and_later_checks_share_the_cli_budget(tmp_path, monkeypatch):
             "--output",
             str(path),
         ],
-        input="discover\ntest\ny\n",
+        input="discover\ntest\n262144\n262144\ntest\ny\n",
     )
     assert result.exit_code == 0, result.output
     assert len(sent) == 3  # All of the budget was spent testing interfaces.
@@ -1176,7 +1186,7 @@ def test_no_exact_catalogue_match_offers_a_fuzzy_suggestion(
     result = CliRunner().invoke(
         command,
         options,
-        input=("gateway/wired-model\n" if select else "\n") + "save\ny\n",
+        input=("gateway/wired-model\n" if select else "\n262144\n262144\n") + "save\ny\n",
     )
     assert result.exit_code == 0, result.output
     assert "Model not found; did you mean one of these?" in result.output
@@ -1186,7 +1196,7 @@ def test_no_exact_catalogue_match_offers_a_fuzzy_suggestion(
         assert entry["context_window"] == 50000
         assert "No catalogue match" not in result.output
     else:
-        assert "context_window" not in entry
+        assert entry["context_window"] == 262144  # Explicit manual declaration, not a fallback.
         assert "No details listed" in (result.output)
 
 
@@ -1300,7 +1310,7 @@ def test_default_budget_covers_explicit_small_cap_and_every_level(tmp_path, monk
             "--output",
             str(path),
         ],
-        input="discover\ntest\ny\n",
+        input="discover\ntest\n262144\n262144\ntest\ny\n",
     )
     assert result.exit_code == 0, result.output
     assert [body["reasoning_effort"] for body in bodies if "reasoning_effort" in body] == [
@@ -1347,7 +1357,7 @@ def test_unset_budget_tokens_is_unlimited_and_never_warns(tmp_path, monkeypatch)
             "--output",
             str(path),
         ],
-        input="discover\ntest\ny\n",
+        input="discover\ntest\n262144\n262144\ntest\ny\n",
     )
     assert result.exit_code == 0, result.output
     assert "Check budget: unlimited" not in result.output
@@ -1374,7 +1384,9 @@ def test_declining_initial_approval_makes_no_calls_or_writes(tmp_path, monkeypat
     monkeypatch.setenv("CONNECT_TEST_KEY", "test-key")
     path = tmp_path / "models.yaml"
     flags = [value for value in args(path) if value != "--no-probe"]
-    result = CliRunner().invoke(command, [*flags, "--media-inputs", ""], input="save\nn\n")
+    result = CliRunner().invoke(
+        command, [*flags, "--media-inputs", ""], input="262144\n262144\nsave\nn\n"
+    )
     assert result.exit_code == 0, result.output
     assert "Would you like to test these settings?" in result.output
     assert "1 (test): Test now" in " ".join(result.output.split())
@@ -1411,7 +1423,7 @@ def test_initial_approval_defaults_to_yes(tmp_path, monkeypatch):
             "--output",
             str(path),
         ],
-        input="\nn\n",
+        input="262144\n262144\n\nn\n",
     )
     assert result.exit_code == 0, result.output
     assert "Choice [1]:" in result.output
@@ -1453,7 +1465,7 @@ def test_provider_menu_fills_connection_defaults(
     result = CliRunner().invoke(
         command,
         ["--no-catalogue", "--no-probe"],
-        input=f"{provider}\ntest-model\ndiscover\n-\nsave\n{style}\nmy-model\ny\n",
+        input=f"{provider}\ntest-model\ndiscover\n-\nsave\n{style}\n262144\n262144\nsave\nmy-model\ny\n",
     )
     assert result.exit_code == 0, result.output
     expected_listing = {"api_style": style, "api_key": "preset-test-key"}
@@ -1506,7 +1518,7 @@ def test_mixed_endpoint_selects_model_before_request_interface(tmp_path, monkeyp
             "--output",
             str(path),
         ],
-        input=f"vendor-b/model\ndiscover\nsave\n{style}\nselected\ny\n",
+        input=f"vendor-b/model\ndiscover\nsave\n{style}\n262144\n262144\nsave\nselected\ny\n",
     )
     assert result.exit_code == 0, result.output
     assert len(seen) == 1
@@ -1552,7 +1564,9 @@ def test_large_model_list_and_invalid_choice_do_not_flood_terminal(tmp_path, mon
 
     monkeypatch.setattr(connect, "discover", discover)
     result = CliRunner().invoke(
-        command, args(tmp_path / "models.yaml")[1:], input="wrong\nvendor/model-42\nsave\ny\n"
+        command,
+        args(tmp_path / "models.yaml")[1:],
+        input="wrong\nvendor/model-42\n262144\n262144\nsave\ny\n",
     )
     assert result.exit_code == 0, result.output
     assert "Found 1000 models" in result.output

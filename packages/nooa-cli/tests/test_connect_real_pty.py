@@ -108,7 +108,10 @@ finally:
                 os.write(master, b"\x1b[1;1R")
             screen = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", output.decode(errors="replace"))
             compact = "".join(re.sub(r"[│┌┐└┘─┬┴├┤┼]", "", screen).split())
-            if phase == 0 and "Wouldyouliketotestthesesettings?" in compact:
+            if phase == 0 and "Contextwindow(tokens)" in compact:
+                os.write(master, b"262144\r262144\r")
+                phase = -1
+            if phase == -1 and "Wouldyouliketotestthesesettings?" in compact:
                 os.write(master, b"\x03" if cancel else b"\x1bOP")
                 phase = 1
             elif not cancel and phase == 1 and "F1Closehelp" in compact:

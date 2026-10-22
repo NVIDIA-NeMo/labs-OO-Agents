@@ -6,7 +6,7 @@ import asyncio
 import os
 from contextlib import aclosing
 from copy import deepcopy
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +37,10 @@ class WizardState:
     catalogue_model: Any = None
     configured: Any = None
     context_window: Any = None
+    manual_limits: Any = None
+    manual_limits_required: bool = False
+    manual_limits_deferred: bool = False
+    settings_prefill: Any = field(default_factory=dict, init=False)
     data: Any = None
     default_style: Any = None
     discovery_endpoint: Any = None
@@ -108,6 +112,12 @@ class WizardState:
     unobserved: Any = None
     working_dir: Any = None
     yes: Any = None
+
+    def __post_init__(self):
+        self.settings_prefill = {
+            key: getattr(self, key)
+            for key in ("context_window", "levels_file", "levels", "reasoning_template")
+        }
 
 
 def scrub_setup(state: WizardState, value):
@@ -1213,6 +1223,8 @@ def prepare_metadata(state: WizardState) -> bool:
                 show_default=False,
                 choices=[""] + [item["id"] for item in matches],
             )
+            if not selected:
+                state.manual_limits_required = True
             if selected:
                 state.candidate = next((item for item in matches if item["id"] == selected), None)
                 if state.candidate is None:
@@ -1240,6 +1252,8 @@ def prepare_metadata(state: WizardState) -> bool:
                     show_default=False,
                     choices=[""] + [item["id"] for item in fuzzy],
                 )
+                if not selected:
+                    state.manual_limits_required = True
                 if selected:
                     state.candidate = next((item for item in fuzzy if item["id"] == selected), None)
                     if state.candidate is None:
@@ -1304,7 +1318,7 @@ def show_model_metadata(state: WizardState):
     records = state.server_details.records if state.server_details else ()
     server_facts = usable_server_metadata(state)
     if state.edited_settings:
-        rows.append(("Source", "Your edits"))
+        rows.append(("Source", "Your settings"))
     elif server_facts:
         rows.append(("Source", "This server"))
         if state.candidate and (
@@ -1417,6 +1431,61 @@ def show_model_metadata(state: WizardState):
             view.warning(scrub_setup(state, notice))
 
 
+def require_manual_limits(state: WizardState, *, edit=False):
+    """Bound only explicit human manual continuations; never synthesize catalogue facts.
+
+    Raw declarations live in wizard/proposal provenance. The registry supports only
+    a conservative effective context_window, not separate literal input metadata.
+    """
+    if state.yes or state.manual_limits_deferred or state.api_style in connect.DECISION_API_STYLES:
+        return
+    if not (edit or state.manual_limits_required or state.no_catalogue and state.editing is None):
+        return
+    if state.manual_limits is not None and not edit:
+        return
+    server = state.selected_endpoint_model or {}
+    known = (
+        connect.model_metadata(state.model, None, server) if server.get("id") == state.model else {}
+    )
+    if known.get("context_length") and not edit:
+        # A reported context or input bound is already conservative and exact.
+        # Preserve it, including its separate raw endpoint_limits provenance.
+        return
+    previous = state.manual_limits or {}
+    raw_context = previous.get("context_window", state.context_window)
+    raw_input = previous.get("max_input_tokens")
+    context, input_limit = prompts.manual_model_limits(raw_context, raw_input, edit=edit)
+    state.manual_limits = {"context_window": context, "max_input_tokens": input_limit}
+    state.context_window = min(context, input_limit)
+    if known.get("context_length"):
+        state.context_window = min(state.context_window, known["context_length"])
+    if not state.guided:
+        view.fields(
+            [
+                ("Source", "Your settings"),
+                ("Context window (declared)", f"{context:,} tokens"),
+                ("Input token limit (declared)", f"{input_limit:,} tokens"),
+                ("Effective context bound", f"{state.context_window:,} tokens"),
+            ]
+        )
+
+
+def discard_catalogue_settings(state: WizardState):
+    """Explicit continuation discards public guesses, not exact selected-server facts."""
+    server = state.selected_endpoint_model
+    state.candidate = (
+        connect.model_metadata(state.model, None, server)
+        if server and server.get("id") == state.model
+        else None
+    )
+    if state.edited_settings:
+        for key, value in state.settings_prefill.items():
+            setattr(state, key, value)
+    state.edited_level_patches = None
+    state.manual_limits_required = True
+    state.edited_settings = False
+
+
 def configure_metadata(state: WizardState) -> bool:
     """Review settings after media choice, retaining the existing prompt order."""
     if not state.metadata_prepared:
@@ -1457,8 +1526,7 @@ def configure_metadata(state: WizardState) -> bool:
                 if state.editing is not None:
                     view.note(scrub_setup(state, "Edits discarded. Nothing saved."))
                     return False
-                state.candidate = None
-                state.edited_settings = False
+                discard_catalogue_settings(state)
                 view.note(
                     scrub_setup(
                         state,
@@ -1474,6 +1542,7 @@ def configure_metadata(state: WizardState) -> bool:
             # Apply edits only after confirmation, not if the user skips them.
             state.context_window = None
             state.levels_file = state.levels = state.reasoning_template = None
+    require_manual_limits(state)
     return True
 
 
@@ -1657,6 +1726,7 @@ def configure_media_inputs(state: WizardState) -> bool:
 def configure_checks(state: WizardState) -> bool:
     """Configure checks; return False when the user cancels."""
     reject_decision_media(state)
+    require_manual_limits(state)
     profile = connect.plan(
         state.alias or "candidate",
         state.model,
@@ -1717,13 +1787,22 @@ def configure_checks(state: WizardState) -> bool:
             )
             for label in state.levels.split(",")
         }
+    planning_candidate = state.candidate
+    if state.manual_limits and planning_candidate is not None:
+        # User edits must use the current manual bound, not a stale provisional
+        # candidate context. Exact endpoint limits are still merged by plan().
+        planning_candidate = deepcopy(planning_candidate)
+        planning_candidate["context_length"] = state.context_window
+        planning_candidate.setdefault("limit_sources", {})["context_length"] = "user"
+        if planning_candidate.get("top_provider"):
+            planning_candidate["top_provider"].pop("context_length", None)
     state.proposal = connect.plan(
         state.alias or "candidate",
         state.model,
         state.api_style,
         state.endpoint,
         state.api_key_env,
-        catalogue=state.candidate,
+        catalogue=planning_candidate,
         catalogue_settings=bool(state.edited_settings),
         endpoint_model=state.selected_endpoint_model,
         endpoint_models_url=state.endpoint_models_url,
@@ -1818,11 +1897,32 @@ def configure_checks(state: WizardState) -> bool:
             for style, state.result in state.interfaces.results.items()
         }
     if state.context_window:
-        state.proposal.entry["context_window"] = state.context_window
+        effective = state.context_window
+        if state.manual_limits:
+            server = state.selected_endpoint_model or {}
+            known = (
+                connect.model_metadata(state.model, None, server)
+                if server.get("id") == state.model
+                else {}
+            )
+            if known.get("context_length"):
+                effective = min(effective, known["context_length"])
+        state.proposal.entry["context_window"] = effective
         state.proposal.entry["provenance"]["context_window"] = {
             "source": "user",
             "value": state.context_window,
         }
+    if state.manual_limits and state.api_style not in connect.DECISION_API_STYLES:
+        provenance = state.proposal.entry["provenance"]
+        provenance["manual_limits"] = {"source": "user", **state.manual_limits}
+        provenance["context_window"] = {
+            "source": "user",
+            "value": state.proposal.entry["context_window"],
+        }
+        # User declarations are not a public catalogue mapping or tested evidence.
+        provenance["limit_sources"] = {"context_length": "user"}
+        provenance.pop("catalogue", None)
+        provenance["probes"] = {}
     if state.patches:
         state.proposal.entry["provenance"]["reasoning_levels"] = {
             "source": "user",
@@ -2309,7 +2409,7 @@ def show_guided_proposal(state: WizardState, *, deferred_style=False, updated=Fa
         rows.extend(
             (
                 (
-                    "Context window",
+                    "Effective context bound" if state.manual_limits else "Context window",
                     f"{entry['context_window']:,} tokens"
                     if entry.get("context_window")
                     else "Not set",
@@ -2317,6 +2417,19 @@ def show_guided_proposal(state: WizardState, *, deferred_style=False, updated=Fa
                 ("Reply limit", f"{entry['max_tokens']:,} tokens"),
             )
         )
+        if state.manual_limits:
+            rows.extend(
+                [
+                    (
+                        "Context window (declared)",
+                        f"{state.manual_limits['context_window']:,} tokens",
+                    ),
+                    (
+                        "Input token limit (declared)",
+                        f"{state.manual_limits['max_input_tokens']:,} tokens",
+                    ),
+                ]
+            )
         if maximum:
             rows.append(("Reply maximum", f"{maximum:,} tokens"))
         if "cache_breakpoint" in entry and entry["cache_breakpoint"] is None:
@@ -2335,8 +2448,13 @@ def show_guided_proposal(state: WizardState, *, deferred_style=False, updated=Fa
         if state.typesafe_danger_zone_images:
             rows.append(("Image option", "experimental images on"))
     view.fields(scrub_setup(state, rows))
-    if state.edited_settings:
-        view.fields(scrub_setup(state, [("Model details", "Your edits")]))
+    if state.manual_limits and state.api_style not in connect.DECISION_API_STYLES:
+        view.fields(scrub_setup(state, [("Model details", "Your settings")]))
+        view.note(
+            "Saved context bound is no greater than the smaller declared limit; raw limits remain in this review, not the saved registry."
+        )
+    elif state.edited_settings:
+        view.fields(scrub_setup(state, [("Model details", "Your settings")]))
     elif (
         state.candidate is not None
         and state.editing is None
@@ -2421,12 +2539,22 @@ def review_guided_proposal(state: WizardState, *, deferred_style=False):
             )
             else ()
         )
+        skip_options = (
+            (("skip", "Continue without catalogue settings"),)
+            if state.api_style not in connect.DECISION_API_STYLES
+            and state.candidate is not None
+            and state.editing is None
+            and not state.manual_limits_required
+            and not state.manual_limits
+            else ()
+        )
         action = prompts.labelled_choice(
             "Would you like to test these settings?",
             (
                 *options,
                 ("save", "Save without testing"),
                 ("change", "Change settings"),
+                *skip_options,
                 *profile_options,
             ),
             default="test" if options else "save",
@@ -2436,6 +2564,12 @@ def review_guided_proposal(state: WizardState, *, deferred_style=False):
                 state.proposal.entry.get("structured_output_mode")
             )
             state.structured_output_mode_set = True
+            if not configure_checks(state):
+                return None
+            show_guided_proposal(state, deferred_style=deferred_style, updated=True)
+            continue
+        if action == "skip":
+            discard_catalogue_settings(state)
             if not configure_checks(state):
                 return None
             show_guided_proposal(state, deferred_style=deferred_style, updated=True)
@@ -2456,50 +2590,74 @@ def review_guided_proposal(state: WizardState, *, deferred_style=False):
             if not configure_media_inputs(state):
                 return None
         else:
-            current = deepcopy(state.candidate or {})
-            current.setdefault("id", state.model)
-            entry = state.proposal.entry
-            current["context_length"] = entry.get("context_window")
-            current["top_provider"] = {
-                "max_completion_tokens": entry.get("max_output_tokens")
-                or entry.get("provenance", {})
-                .get("catalogue_limits", {})
-                .get("max_completion_tokens")
-            }
-            maximum = current["top_provider"]["max_completion_tokens"]
-            if not isinstance(maximum, int) or isinstance(maximum, bool) or maximum <= 0:
-                current["top_provider"]["max_completion_tokens"] = None
-            current["reasoning"] = {
-                "supported_efforts": list(entry.get("reasoning_levels", {})),
-                "default_effort": entry.get("reasoning_default"),
-            }
-            state.candidate = prompts.edit_model_details(current)
-            state.context_window = state.candidate.get("context_length")
-            state.levels_file = state.levels = state.reasoning_template = None
-            state.edited_settings = True
-            labels = state.candidate.get("reasoning", {}).get("supported_efforts", [])
-            original = entry.get("reasoning_levels", {})
-            state.edited_level_patches = {
-                label: deepcopy(original[label])
-                if label in original
-                else connect.reasoning_settings("effort", state.api_style, label)
-                for label in labels
-            } or None
-            limits = [
-                v
-                for v in (
-                    state.context_window - 1 if state.context_window else None,
-                    state.candidate.get("top_provider", {}).get("max_completion_tokens"),
+            if not state.manual_limits_deferred and (
+                state.manual_limits or state.candidate is None
+            ):
+                require_manual_limits(state, edit=True)
+                maximum = (
+                    state.proposal.entry.get("provenance", {})
+                    .get("catalogue_limits", {})
+                    .get("max_completion_tokens")
                 )
-                if isinstance(v, int) and not isinstance(v, bool) and v > 0
-            ]
-            ceiling = min(limits) if limits else None
-            state.reply_tokens = prompts.choose_reply_limit(
-                min(entry["max_tokens"], ceiling) if ceiling else entry["max_tokens"],
-                ceiling,
-                output_ceiling=state.candidate.get("top_provider", {}).get("max_completion_tokens"),
-                source=entry.get("provenance", {}).get("reply_limit", {}).get("source", "user"),
-            )
+                limits = [state.context_window - 1]
+                if isinstance(maximum, int) and not isinstance(maximum, bool) and maximum > 0:
+                    limits.append(maximum)
+                else:
+                    maximum = None
+                ceiling = min(limits)
+                state.reply_tokens = prompts.choose_reply_limit(
+                    min(state.proposal.entry["max_tokens"], ceiling),
+                    ceiling,
+                    output_ceiling=maximum,
+                    source="user",
+                )
+            else:
+                current = deepcopy(state.candidate or {})
+                current.setdefault("id", state.model)
+                entry = state.proposal.entry
+                current["context_length"] = entry.get("context_window")
+                current["top_provider"] = {
+                    "max_completion_tokens": entry.get("max_output_tokens")
+                    or entry.get("provenance", {})
+                    .get("catalogue_limits", {})
+                    .get("max_completion_tokens")
+                }
+                maximum = current["top_provider"]["max_completion_tokens"]
+                if not isinstance(maximum, int) or isinstance(maximum, bool) or maximum <= 0:
+                    current["top_provider"]["max_completion_tokens"] = None
+                current["reasoning"] = {
+                    "supported_efforts": list(entry.get("reasoning_levels", {})),
+                    "default_effort": entry.get("reasoning_default"),
+                }
+                state.candidate = prompts.edit_model_details(current)
+                state.context_window = state.candidate.get("context_length")
+                state.levels_file = state.levels = state.reasoning_template = None
+                state.edited_settings = True
+                labels = state.candidate.get("reasoning", {}).get("supported_efforts", [])
+                original = entry.get("reasoning_levels", {})
+                state.edited_level_patches = {
+                    label: deepcopy(original[label])
+                    if label in original
+                    else connect.reasoning_settings("effort", state.api_style, label)
+                    for label in labels
+                } or None
+                limits = [
+                    v
+                    for v in (
+                        state.context_window - 1 if state.context_window else None,
+                        state.candidate.get("top_provider", {}).get("max_completion_tokens"),
+                    )
+                    if isinstance(v, int) and not isinstance(v, bool) and v > 0
+                ]
+                ceiling = min(limits) if limits else None
+                state.reply_tokens = prompts.choose_reply_limit(
+                    min(entry["max_tokens"], ceiling) if ceiling else entry["max_tokens"],
+                    ceiling,
+                    output_ceiling=state.candidate.get("top_provider", {}).get(
+                        "max_completion_tokens"
+                    ),
+                    source=entry.get("provenance", {}).get("reply_limit", {}).get("source", "user"),
+                )
             # Profile/media declarations and explicit test selections remain unchanged.
         if not configure_checks(state):
             return None
@@ -2524,6 +2682,7 @@ def guided_setup(state: WizardState) -> bool:
     explicit_reply_tokens = state.reply_tokens
     # A provider preset is a proposal, never evidence of supported interfaces.
     state.api_style = state.api_style or state.default_style
+    state.manual_limits_deferred = deferred_style
     if not configure_media_inputs(state) or not configure_checks(state):
         return False
     show_guided_proposal(state, deferred_style=deferred_style)
@@ -2533,9 +2692,9 @@ def guided_setup(state: WizardState) -> bool:
     state.approval = state.probe if action == "test" else "none"
     if action == "save":
         state.test_media_inputs = None
+    deferred_limits_revised = False
     if deferred_style:
-        if state.api_style not in connect.DECISION_API_STYLES:
-            state.reply_tokens = state.proposal.entry["max_tokens"]
+        state.manual_limits_deferred = False
         state.api_style = None
         if not check_interfaces(state):
             return False
@@ -2549,13 +2708,15 @@ def guided_setup(state: WizardState) -> bool:
             )
             if not configure_media_inputs(state):
                 return False
-        # Rebuild only the request plan after interface selection, not prompt rounds.
+        # New literal completion declarations need their own current review.
+        previous_limits = state.manual_limits
         if not configure_checks(state):
             return False
+        deferred_limits_revised = previous_limits is None and state.manual_limits is not None
     elif action == "save":
         if not configure_checks(state):
             return False
-    if state.guided_media_revised:
+    if state.guided_media_revised or deferred_limits_revised:
         show_guided_proposal(state, updated=True)
         action = review_guided_proposal(state)
         if action is None:

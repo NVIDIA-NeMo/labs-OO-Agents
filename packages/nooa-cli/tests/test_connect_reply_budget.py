@@ -44,14 +44,14 @@ def test_wizard_reply_budget_is_a_runtime_cap(tmp_path, monkeypatch, choice, exp
             "--output",
             str(path),
         ],
-        input="-\nchange\n\n\n\n" + choice + "\nsave\ny\n",
+        input="-\n262144\n262144\nchange\n\n\n" + choice + "\nsave\ny\n",
     )
     assert result.exit_code == 0, result.output
     entry = yaml.safe_load(path.read_text())["models"]["local"]
     assert entry["max_tokens"] == expected
     assert entry["include"] == ["reasoning.encrypted_content"]
     assert entry["store"] is False
-    assert "Recommended — 32,768 tokens (NOOA default)" in result.output
+    assert "Recommended — 32,768 tokens (current setting)" in result.output
     assert "Short replies and simple questions" not in result.output
     assert "Coding agents and tool use" not in result.output
     assert "Long documents and deeper reasoning" not in result.output
@@ -160,7 +160,7 @@ def test_boolean_catalogue_output_limit_is_not_treated_as_one_token(tmp_path, mo
             "--output",
             str(path),
         ],
-        input="-\nchange\n\n\n\nsave\ny\n",
+        input="-\n262144\n262144\nchange\n\n\nsave\ny\n",
     )
     assert result.exit_code == 0, result.output
     assert chosen["output_ceiling"] is None

@@ -498,9 +498,9 @@ def test_listed_media_menu_requested_order_and_default(terminal_menu, monkeypatc
     accepted, screens = terminal_menu(keys, lambda: offer_suggestions(state, []))
     assert accepted is True
     labels = [
-        "Enable listed inputs with test",
+        "Test and enable Images",
         "Test all media inputs",
-        "Enable listed inputs without testing",
+        "Enable Images without testing",
         "Select media inputs manually",
         "Turn media inputs off",
     ]
@@ -508,7 +508,7 @@ def test_listed_media_menu_requested_order_and_default(terminal_menu, monkeypatc
     assert [initial.index(label) for label in labels] == sorted(
         initial.index(label) for label in labels
     )
-    assert ">  1. Enable listed inputs with test" in initial
+    assert ">  1. Test and enable Images" in initial
     assert "Keep current media" not in initial
     assert state.test_media_inputs == (
         ["image"]
@@ -556,7 +556,7 @@ def test_listed_media_pipe_order_and_default(monkeypatch, answer, action):
 
     result = CliRunner().invoke(choose, input=answer)
     assert result.exit_code == 0, result.output
-    assert "1 (test): Enable listed inputs with test" in " ".join(result.output.split())
+    assert "1 (test): Test and enable Images" in " ".join(result.output.split())
     assert state.test_media_inputs == (
         ["image"]
         if action == "test"

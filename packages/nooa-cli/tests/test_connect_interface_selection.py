@@ -93,10 +93,18 @@ def test_known_interface_after_model_skips_comparison(monkeypatch, tmp_path, sty
     monkeypatch.setattr(connect, "check_interfaces", lambda *a, **kw: pytest.fail("No comparison"))
     mock_http(monkeypatch, handle)
     result = CliRunner().invoke(
-        command, [*options(path), "--probe", "minimal"], input=f"{style}\ntest\ny\n"
+        command,
+        [*options(path), "--probe", "minimal"],
+        input=f"{style}\n"
+        + ("" if style in connect.DECISION_API_STYLES else "262144\n262144\n")
+        + "test\ny\n",
     )
     assert result.exit_code == 0, result.output
-    assert menu_seen == ["Request interface"]
+    assert menu_seen == ["Request interface"] + (
+        []
+        if style in connect.DECISION_API_STYLES
+        else ["Context window (tokens)", "Input token limit (tokens)"]
+    )
     assert len(requests) == 1
     entry = yaml.safe_load(path.read_text())["models"]["local"]
     assert entry["api_style"] == style
@@ -128,7 +136,7 @@ def test_explicit_edit_and_yes_bypass_interface_menu(monkeypatch, tmp_path, mode
         monkeypatch.setattr(prompts, "edit_model_details", lambda current: current)
         flags = ["--edit-model", "local", "--no-probe", "--api-key-env", "", "--output", str(path)]
     result = CliRunner().invoke(
-        command, flags, input="save\ny\ny\n" if mode == "edit" else "save\ny\n"
+        command, flags, input="save\ny\ny\n" if mode == "edit" else "262144\n262144\nsave\ny\n"
     )
     assert result.exit_code == 0, result.output
     assert "Request interface" not in result.output
@@ -151,7 +159,7 @@ def test_menu_order_provider_url_key_model_interface(monkeypatch, tmp_path):
     result = CliRunner().invoke(
         command,
         ["--as", "local", "--no-probe", "--no-catalogue", "--output", str(path)],
-        input=f"custom\n{BASE}\n-\nexact/model\nchat\nsave\ny\n",
+        input=f"custom\n{BASE}\n-\nexact/model\nchat\n262144\n262144\nsave\ny\n",
     )
     assert result.exit_code == 0, result.output
     assert sequence[:5] == [
@@ -257,7 +265,11 @@ def test_custom_discovery_never_guesses_decision_url_and_reuses_selected_request
         flags += ["--reply-tokens", "200"]
     if candidate:
         flags += ["--systemone-endpoint", candidate]
-    result = CliRunner().invoke(command, flags, input="discover\ntest\ny\n")
+    result = CliRunner().invoke(
+        command,
+        flags,
+        input="discover\ntest\n" + ("" if candidate else "262144\n262144\ntest\n") + "y\n",
+    )
     assert result.exit_code == 0, result.output
     assert path.exists(), result.output
     entry = yaml.safe_load(path.read_text())["models"]["local"]

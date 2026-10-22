@@ -142,7 +142,7 @@ def test_reply_ceiling_and_boolean_reasoning_metadata_are_explained():
     assert "Choose a smaller reply limit" in result.output
     assert "Thinking on/off" in result.output
     assert "Thinking on" in result.output
-    assert "Source: Your edits" in " ".join(result.output.split())
+    assert "Source: Your settings" in " ".join(result.output.split())
 
 
 def test_progress_reports_evidence_and_skips_without_payloads(monkeypatch):
@@ -1026,7 +1026,7 @@ def test_model_details_attribute_actual_limit_source(source, label, edited):
     assert (" · " + label in result.output) is (not edited)
     if edited:
         assert (
-            "Source: Your edits" in " ".join(result.output.split())
+            "Source: Your settings" in " ".join(result.output.split())
             and "OpenRouter" not in result.output
         )
     else:

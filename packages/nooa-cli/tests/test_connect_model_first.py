@@ -168,7 +168,7 @@ def test_no_metadata_exact_model_precedes_interface_without_key_or_http(monkeypa
             "--output",
             str(local),
         ],
-        input="custom\nhttps://generic.test/v1\nexact/model\nchat\nsave\ny\n",
+        input="custom\nhttps://generic.test/v1\nexact/model\nchat\n262144\n262144\nsave\ny\n",
     )
     assert result.exit_code == 0, result.output
     model_question = "Exact model ID (metadata is disabled; Ctrl-C to cancel)"

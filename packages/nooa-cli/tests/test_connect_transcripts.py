@@ -161,7 +161,7 @@ def test_full_check_transcript_and_failure_no_save(monkeypatch, tmp_path, column
             "--output",
             str(target),
         ],
-        input="test\ny\n",
+        input="262144\n262144\ntest\ny\n",
         color=bool(color),
     )
     assert result.exit_code == 0, result.output

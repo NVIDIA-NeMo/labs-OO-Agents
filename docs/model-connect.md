@@ -59,6 +59,26 @@ allows metadata GETs. For an entirely offline exact-ID setup, also supply
 fetch metadata. Omitting the model ID requests the model-list picker (a GET),
 even with `--no-catalogue`, which skips public and automatic limit lookups.
 
+### Continuing without catalogue settings
+
+Choosing **Continue without catalogue settings** asks for **Context window
+(tokens)** and **Input token limit (tokens)** when exact server limits are
+unavailable. Human `--no-catalogue` / `--no-metadata` setup follows the same path.
+Enter positive whole numbers of at least two tokens; Ctrl-C cancels without saving.
+`--context-window` prefills only the context value. **Change settings** lets you
+revise both values. Native decisions bypass these chat limits; `--yes` and stages
+remain noninteractive.
+
+The review shows both declarations as **Your settings**. The saved `context_window`
+is the smaller value, bounded by any known server limit. The reply cap is separate
+and is reserved against that saved bound. The saved configuration retains this
+effective bound, not the two raw declarations.
+
+Media setup shows **Suggested inputs: Images** and **Test and enable Images**
+(or the actual suggested set). **Current inputs: Off** remains until a test passes.
+**Enable Images without testing** is the explicit untested alternative.
+**Save without testing** clears planned tests without enabling their inputs.
+
 To prefill the connection details, pass the answers as flags. The wizard still
 asks about media choices, testing, changes, and saving unless you use `--yes`:
 

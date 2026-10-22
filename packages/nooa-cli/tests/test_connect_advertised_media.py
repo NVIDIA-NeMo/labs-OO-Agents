@@ -64,7 +64,7 @@ def test_explicit_suggestion_review_preserves_or_changes_only_on_choice(
         seen.append(options)
         assert default == "test"
         assert list(dict(options)) == ["test", "test-all", "suggested", "manual", "none"]
-        assert dict(options)["suggested"] == "Enable listed inputs without testing"
+        assert dict(options)["suggested"] == "Enable Images, Audio clips, Videos without testing"
         return action
 
     monkeypatch.setattr(prompts, "labelled_choice", choose)
@@ -123,7 +123,7 @@ def test_suggested_checks_are_selected_explicitly_and_unavailable_not_claimed(mo
     current.api_style = "responses"
 
     def choose(label, options, **kw):
-        assert dict(options)["test"] == "Enable listed inputs with test"
+        assert dict(options)["test"] == "Test and enable Images"
         return "test"
 
     monkeypatch.setattr(prompts, "labelled_choice", choose)
@@ -138,7 +138,7 @@ def test_systemone_suggestions_do_not_guess_transport(monkeypatch, capsys):
 
     def choose(label, options, **kw):
         assert "test" not in dict(options)
-        assert dict(options)["suggested"] == "Enable listed inputs without testing"
+        assert dict(options)["suggested"] == "Enable Images without testing"
         return "suggested"
 
     monkeypatch.setattr(prompts, "labelled_choice", choose)
@@ -155,7 +155,7 @@ def test_systemone_suggestions_do_not_guess_transport(monkeypatch, capsys):
     )
 
 
-def test_cached_metadata_only_model_does_not_add_settings_prompt(monkeypatch):
+def test_cached_media_only_model_requires_manual_limits(monkeypatch):
     current = state(no_catalogue=True)
     current.media_hints = None
     current.endpoint_models = [
@@ -169,10 +169,11 @@ def test_cached_metadata_only_model_does_not_add_settings_prompt(monkeypatch):
     assert current.media_hints["architecture"] == META["architecture"]
     monkeypatch.setattr(prompts, "labelled_choice", lambda *a, **kw: "none")
     assert wizard.configure_media_inputs(current)
-    monkeypatch.setattr(
-        prompts, "prompt", lambda *a, **kw: pytest.fail("No new model settings prompt")
-    )
+    answers = iter(["128000", "64000"])
+    monkeypatch.setattr(prompts, "prompt", lambda *a, **kw: next(answers))
     assert wizard.configure_metadata(current)
+    assert current.manual_limits == {"context_window": 128000, "max_input_tokens": 64000}
+    assert current.context_window == 64000
 
 
 def test_changed_interface_does_not_use_other_endpoint_hints(monkeypatch):
@@ -553,3 +554,45 @@ def test_media_suggestions_render_actual_source_without_changing_permissions(
     ) in " ".join(output.split())
     assert current.media_inputs is None and current.test_media_inputs is None
     assert current.media_hints == before
+
+
+@pytest.mark.parametrize("action", ["test", "suggested", "none"])
+def test_images_suggestion_caption_is_explicit_and_never_auto_enabled(monkeypatch, capsys, action):
+    current = state(metadata_displayed=True)
+    current.media_hints = {"id": "model", "input_modalities": ["image"]}
+
+    def choose(label, options, *, default):
+        assert list(dict(options)) == ["test", "test-all", "suggested", "manual", "none"]
+        assert dict(options)["test"] == "Test and enable Images"
+        assert dict(options)["suggested"] == "Enable Images without testing"
+        assert default == "test"
+        assert current.media_inputs is None and current.test_media_inputs is None
+        return action
+
+    monkeypatch.setattr(prompts, "labelled_choice", choose)
+    assert wizard.configure_media_inputs(current)
+    output = " ".join(capsys.readouterr().out.split())
+    assert "Suggested inputs: Images" in output
+    assert "Current inputs: Off" in output
+    assert current.test_media_inputs == (["image"] if action == "test" else None)
+    assert current.media_inputs == (["image"] if action == "suggested" else [])
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"id": "model"},
+        {"id": "model", "input_modalities": []},
+        {"id": "model", "capabilities": {"vision": False}},
+    ],
+)
+def test_unknown_or_no_media_has_no_invented_image_suggestion(monkeypatch, capsys, metadata):
+    current = state(metadata_displayed=True)
+    current.media_hints = metadata
+    monkeypatch.setattr(prompts, "choose_media_mode", lambda **kwargs: "manual")
+    monkeypatch.setattr(prompts, "choose_media_inputs", lambda previous: [])
+    assert wizard.configure_media_inputs(current)
+    output = " ".join(capsys.readouterr().out.split())
+    assert "Suggested inputs: Images" not in output
+    assert "Test and enable Images" not in output
+    assert current.media_inputs == [] and current.test_media_inputs is None

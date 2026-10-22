@@ -365,7 +365,7 @@ def test_exact_wizard_bypass_all_metadata_then_direct_test(monkeypatch, local, s
             "--output",
             str(local),
         ],
-        input="test\ny\n",
+        input=("262144\n262144\n" if style == "chat" else "") + "test\ny\n",
     )
     assert result.exit_code == 0, result.output
     assert len(calls) == 1

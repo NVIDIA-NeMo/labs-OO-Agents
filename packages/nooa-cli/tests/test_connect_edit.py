@@ -172,7 +172,7 @@ def test_pasted_key_is_saved_only_with_separate_consent(registry, monkeypatch, c
             "--no-probe",
             "--no-catalogue",
         ],
-        input=f"private-value\nsave\ny\n{choice}\n",
+        input=f"private-value\n262144\n262144\nsave\ny\n{choice}\n",
     )
     assert result.exit_code == 0, result.output
     secret = path.with_name("secrets.yaml")
@@ -247,7 +247,7 @@ def test_final_save_cancel_does_not_persist_pasted_key(registry):
             "--no-probe",
             "--no-catalogue",
         ],
-        input="private-value\nsave\nn\n",
+        input="private-value\n262144\n262144\nsave\nn\n",
     )
     assert result.exit_code == 0, result.output
     assert path.read_bytes() == before

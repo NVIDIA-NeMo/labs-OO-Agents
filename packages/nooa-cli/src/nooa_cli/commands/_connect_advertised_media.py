@@ -43,8 +43,19 @@ def offer_suggestions(state, previous):
                 ],
             )
         )
+
+    def input_label(kind):
+        return {"audio": "Audio clips", "video": "Videos"}.get(kind, view.media_label(kind))
+
+    suggested_label = ", ".join(input_label(kind) for kind in report["suggested"])
+    checkable_label = ", ".join(input_label(kind) for kind in report["checkable"])
     view.fields(
-        [("Current inputs", ", ".join(view.media_label(kind) for kind in previous) or "Off")]
+        [
+            ("Suggested inputs", suggested_label),
+            ("Current inputs", ", ".join(view.media_label(kind) for kind in previous) or "Off"),
+        ]
+        if suggested_label
+        else [("Current inputs", ", ".join(view.media_label(kind) for kind in previous) or "Off")]
     )
     if (
         state.media_inputs is not None
@@ -68,12 +79,12 @@ def offer_suggestions(state, previous):
     )
     can_test_all = not state.no_probe and state.approval == "all" and bool(all_report["checkable"])
     if can_test:
-        options.append(("test", "Enable listed inputs with test"))
+        options.append(("test", f"Test and enable {checkable_label}"))
     if can_test_all:
         options.append(("test-all", "Test all media inputs"))
     options.extend(
         (
-            ("suggested", "Enable listed inputs without testing"),
+            ("suggested", f"Enable {suggested_label} without testing"),
             ("manual", "Select media inputs manually"),
             ("none", "Turn media inputs off"),
         )

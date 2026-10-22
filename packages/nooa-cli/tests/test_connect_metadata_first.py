@@ -87,7 +87,12 @@ def test_metadata_precedes_consent_and_save_without_testing_has_zero_post(guided
     result = CliRunner().invoke(command, [*flags, "--api-style", "chat"], input=action + "\ny\n")
     assert result.exit_code == 0, result.output
     assert decisions == [
-        (("test", "Test now"), ("save", "Save without testing"), ("change", "Change settings"))
+        (
+            ("test", "Test now"),
+            ("save", "Save without testing"),
+            ("change", "Change settings"),
+            ("skip", "Continue without catalogue settings"),
+        )
     ]
     assert [r.method for r in calls] == ["GET", "GET"] + (["POST"] if action == "test" else [])
     assert result.output.count("Proposed configuration") == 1
@@ -162,7 +167,13 @@ def test_no_probe_allows_metadata_but_never_offers_model_calls(guided):
     )
     assert result.exit_code == 0, result.output
     assert all(r.method == "GET" for r in calls)
-    assert decisions == [(("save", "Save without testing"), ("change", "Change settings"))]
+    assert decisions == [
+        (
+            ("save", "Save without testing"),
+            ("change", "Change settings"),
+            ("skip", "Continue without catalogue settings"),
+        )
+    ]
     assert path.exists()
 
 
