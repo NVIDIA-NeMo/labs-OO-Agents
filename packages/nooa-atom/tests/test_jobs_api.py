@@ -3,11 +3,14 @@
 """Tests for ``JobsApi`` (``self.jobs``): background jobs delivered on the ``jobs`` channel."""
 
 import asyncio
+import contextlib
 import datetime
+import gc
 import os
 import re
 import time
 import tracemalloc
+import warnings
 from pathlib import Path
 
 import pytest
@@ -941,3 +944,105 @@ def test_status_line_shows_age_while_running_and_pending_above_zero():
     assert job.status_line() == "build · job · running 1h05m · 2 pending · make build"
     job.pending = 0
     assert "pending" not in job.status_line()
+
+
+@pytest.mark.parametrize(
+    "start",
+    [
+        lambda jobs: jobs.run("true", label="old", description=3, replace=True),
+        lambda jobs: jobs.run("true", label="old", items=0, replace=True),
+        lambda jobs: jobs.run("true", label="old", seconds=-1, replace=True),
+        lambda jobs: jobs.run("true", label="old", timeout="1", replace=True),
+        lambda jobs: jobs.run(["true"], label="old", replace=True),
+        lambda jobs: jobs.tail("missing.log", label="old", replace=True),
+        lambda jobs: jobs.tail("f.log", label="old", description=None, replace=True),
+        lambda jobs: jobs.tail("f.log", label="old", items="2", replace=True),
+        lambda jobs: jobs.spawn(asyncio.sleep(0), label="old", items=2, replace=True),
+        lambda jobs: jobs.spawn(asyncio.sleep(0), label="old", description=1, replace=True),
+        lambda jobs: jobs.spawn(object(), label="old", replace=True),
+        lambda jobs: jobs.after(-1, label="old", replace=True),
+        lambda jobs: jobs.after(1, label="old", description=b"x", replace=True),
+        lambda jobs: jobs.every(0, label="old", replace=True),
+        lambda jobs: jobs.every(1, label="old", description=1, replace=True),
+    ],
+)
+async def test_a_bad_argument_with_replace_leaves_the_old_job_running(agent, tmp_path, start):
+    (tmp_path / "f.log").write_text("")
+    await agent.jobs.run("sleep 30", label="old")
+    old = agent.jobs.get("old")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)  # closed below, not the point here
+        with pytest.raises((TypeError, ValueError, FileNotFoundError)):
+            result = start(agent.jobs)
+            if asyncio.iscoroutine(result):
+                await result
+    current = agent.jobs.get("old")
+    assert current.state == "running" and current.started_at == old.started_at
+    assert current.target == "sleep 30"
+
+
+async def test_a_bad_label_with_replace_leaves_the_old_job_running(agent):
+    await agent.jobs.run("sleep 30", label="old")
+    with pytest.raises(ValueError, match="is not valid"):
+        await agent.jobs.run("true", label="old-job", replace=True)
+    assert agent.jobs.get("old").state == "running"
+
+
+async def test_spawn_rejections_close_the_coroutine(agent):
+    agent.jobs.after(30, label="busy")
+
+    async def work():
+        return 1
+
+    rejections = [
+        lambda: agent.jobs.spawn(work(), label="busy"),  # label taken
+        lambda: agent.jobs.spawn(work(), label="not-valid"),  # bad label
+        lambda: agent.jobs.spawn(work(), label="w", items=2),  # coroutine + items
+        lambda: agent.jobs.spawn(work(), label="w", seconds=1),
+        lambda: agent.jobs.spawn(work(), label="w", description=5),
+    ]
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        for reject in rejections:
+            with pytest.raises((TypeError, ValueError)):
+                reject()
+        gc.collect()
+    never_awaited = [w for w in caught if "was never awaited" in str(w.message)]
+    assert never_awaited == []
+    assert agent.jobs.get("w") is None
+
+
+def _open_fds_on(path: Path) -> int:
+    count = 0
+    for fd in os.listdir("/proc/self/fd"):
+        with contextlib.suppress(OSError):
+            if os.readlink(f"/proc/self/fd/{fd}") == str(path):
+                count += 1
+    return count
+
+
+@pytest.mark.skipif(not Path("/proc/self/fd").exists(), reason="needs /proc")
+async def test_tail_cancelled_or_replaced_before_it_starts_holds_no_file(agent, tmp_path):
+    log = tmp_path / "t.log"
+    log.write_text("")
+    agent.jobs.tail(log, label="tl")
+    agent.jobs.tail(log, label="tl", replace=True)  # replaces the first before it ran
+    assert await agent.jobs.cancel("tl") is True  # and cancels the second before it ran
+    gc.collect()
+    assert _open_fds_on(log) == 0
+    # A tail that did run closes its file when cancelled.
+    agent.jobs.tail(log, label="tl2")
+    await _until(lambda: _open_fds_on(log) == 1)
+    assert await agent.jobs.cancel("tl2") is True
+    assert _open_fds_on(log) == 0
+
+
+async def test_tail_delivers_lines_appended_after_the_call_before_it_ran(agent, tmp_path):
+    log = tmp_path / "early.log"
+    log.write_text("old\n")
+    agent.jobs.tail(log, label="early")
+    with log.open("a") as f:  # appended before the job's task first ran
+        f.write("new\n")
+    item = await _next(agent)
+    assert item.items == ["new"]
+    await agent.jobs.cancel("early")

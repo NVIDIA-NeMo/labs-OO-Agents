@@ -297,6 +297,11 @@ def _check_seconds(value: Any, *, zero_ok: bool = False) -> float:
     return value
 
 
+def _check_description(description: Any) -> None:
+    if not isinstance(description, str):
+        raise TypeError("description must be a string")
+
+
 def _throttle(items: int | None, seconds: float | None) -> Throttle | None:
     if items is not None:
         if isinstance(items, bool) or not isinstance(items, int):
@@ -327,9 +332,15 @@ def _text_chars(value: Any) -> int:
     return len(value) if isinstance(value, str) else 0
 
 
-async def _tail_lines(handle: Any) -> AsyncIterator[str]:
-    """Yield complete lines appended to an open binary file, polling for more."""
+async def _tail_lines(path: Path, offset: int) -> AsyncIterator[str]:
+    """Yield complete lines appended to ``path`` after byte ``offset``, polling for more.
+
+    The file is opened here, on first iteration, and closed when the
+    generator ends: a job cancelled before it ever ran holds no file.
+    """
     splitter = LineSplitter(_LINE_CHARS)
+    handle = open(path, "rb")  # noqa: SIM115 - closed in the finally below
+    handle.seek(offset)
     try:
         while True:
             chunk = handle.read(_CHUNK_BYTES)
@@ -434,8 +445,7 @@ class JobsApi(Skill):
         Only a ``run`` gets a log; ``after`` and a coroutine ``spawn`` pass
         ``streaming=False`` (they cannot be throttled).
         """
-        if not isinstance(description, str):
-            raise TypeError("description must be a string")
+        _check_description(description)
         self._claim(label, replace)
         log_path = None
         if kind == "run":
@@ -892,6 +902,16 @@ class JobsApi(Skill):
             await self.jobs.run("uv run pytest -q", label="tests")
             return_result(Waiting(explanation="tests running", on=["tests"]))
         """
+        # Every argument is checked before _claim, which stops the old job on replace=True.
+        if not isinstance(cmd, str):
+            raise TypeError(f"cmd must be a string, got {cmd!r}")
+        if stdin is not None and not isinstance(stdin, str):
+            raise TypeError(f"stdin must be a string or None, got {type(stdin).__name__}")
+        if cwd is not None and not isinstance(cwd, str | Path):
+            raise TypeError(f"cwd must be a str or Path, got {cwd!r}")
+        if timeout is not None:
+            _check_seconds(timeout)
+        _check_description(description)
         throttle = _throttle(items, seconds)
         self._claim(label, replace)  # fail before the await
         context = await self._shell_context()
@@ -923,16 +943,22 @@ class JobsApi(Skill):
         if inspect.iscoroutinefunction(work) or inspect.isasyncgenfunction(work):
             name = getattr(work, "__name__", "work")
             raise TypeError(f"pass {name}(), not {name}: spawn() takes the call's result")
-        name = getattr(work, "__qualname__", None) or type(work).__name__
-        about = {"target": f"{name}()", "description": description, "replace": replace}
-        if hasattr(work, "__aiter__"):
-            job = self._new_job(label, "spawn", _throttle(items, seconds), **about)
-            return self._start(job, self._stream_job(job, work.__aiter__()))
-        if not isinstance(work, Awaitable):
-            raise TypeError("spawn() takes a coroutine or an async iterator")
-        if items is not None or seconds is not None:
-            raise ValueError("items/seconds apply to async iterators only")
-        job = self._new_job(label, "spawn", None, streaming=False, **about)
+        try:
+            name = getattr(work, "__qualname__", None) or type(work).__name__
+            about = {"target": f"{name}()", "description": description, "replace": replace}
+            if hasattr(work, "__aiter__"):
+                job = self._new_job(label, "spawn", _throttle(items, seconds), **about)
+                return self._start(job, self._stream_job(job, work.__aiter__()))
+            if not isinstance(work, Awaitable):
+                raise TypeError("spawn() takes a coroutine or an async iterator")
+            if items is not None or seconds is not None:
+                raise ValueError("items/seconds apply to async iterators only")
+            job = self._new_job(label, "spawn", None, streaming=False, **about)
+        except BaseException:
+            # Rejected: close the model's coroutine so it is not reported as never awaited.
+            if inspect.iscoroutine(work):
+                work.close()
+            raise
         return self._start(job, self._call_job(job, work))
 
     def tail(
@@ -953,16 +979,23 @@ class JobsApi(Skill):
 
             self.jobs.tail("logs/server.log", label="server_log", seconds=60)
         """
+        # Every argument (and the file) is checked before _claim, which stops the
+        # old job on replace=True.
+        if not isinstance(path, str | Path):
+            raise TypeError(f"path must be a str or Path, got {path!r}")
+        _check_description(description)
         throttle = _throttle(items, seconds)
-        self._claim(label, replace)  # fail before opening the file
         resolved = (Path(self._shell_dir()) / Path(path)).resolve()
-        handle = open(resolved, "rb")  # noqa: SIM115 - closed by the generator
-        handle.seek(0, os.SEEK_END)
+        if not resolved.is_file():
+            raise FileNotFoundError(f"no such file: {resolved}")
+        if not os.access(resolved, os.R_OK):
+            raise PermissionError(f"cannot read {resolved}")
+        offset = resolved.stat().st_size  # deliver what is appended from now on
         target = str(resolved) if str(resolved) == str(path) else f"{path} ({resolved})"
         job = self._new_job(
             label, "tail", throttle, target=target, description=description, replace=replace
         )
-        return self._start(job, self._stream_job(job, _tail_lines(handle)))
+        return self._start(job, self._stream_job(job, _tail_lines(resolved, offset)))
 
     def after(
         self,
