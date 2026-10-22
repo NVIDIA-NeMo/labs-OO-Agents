@@ -116,6 +116,38 @@ async def test_a_spawned_child_must_return_a_task_result_and_the_parent_gets_it(
     assert (child.turn_method, child.retained) == ("handle_work", True)
 
 
+async def test_one_shot_spawned_workers_deliver_and_close_themselves(
+    atom_registry, atom_options, atom_models
+):
+    collect = cell(
+        "self.vars['seen'] = list(self.vars.get('seen') or []) + [\n"
+        "    i.result.report for i in notification['delegates'] if type(i).__name__ == 'ChildResult'\n"
+        "]\n"
+        "if len(self.vars['seen']) < 2:\n"
+        "    return_result(Waiting(explanation='more to come', on=['delegates']))\n"
+        "else:\n"
+        "    return_result(Done(explanation=','.join(sorted(self.vars['seen']))))"
+    )
+    atom_models.scripts[None] = [
+        _wait_then(
+            "await self.spawn('A', 'task a', name='a', kept=False)\n"
+            "await self.spawn('B', 'task b', name='b', kept=False)"
+        ),
+        collect,
+        collect,
+    ]
+    atom_models.scripts["a"] = [_result("A done")]
+    atom_models.scripts["b"] = [_result("B done")]
+    root = await atom_registry.create(atom_options)
+    outcome = await asyncio.wait_for(root.prompt("go"), TIMEOUT)
+    assert outcome == Done(explanation="A done,B done")
+    kids = atom_registry.children(root.id)
+    assert sorted(kid.name for kid in kids) == ["a", "b"]
+    assert not any(kid.retained for kid in kids)  # one-shot workers, not kept
+    # Nobody called close(): each closed itself after its result.
+    await until(lambda: all(atom_registry.is_closed(root.id, kid.id) for kid in kids), TIMEOUT)
+
+
 async def test_a_delegated_result_that_is_not_a_task_result_is_rejected(
     atom_registry, atom_options, atom_models
 ):
@@ -270,12 +302,13 @@ async def test_removed_keywords_raise_a_one_line_type_error(
     assert atom_registry.children(root.id) == []
 
 
-def test_the_verbs_take_only_description_prompt_name_brief_and_model():
+def test_the_verbs_take_only_description_prompt_name_brief_model_and_spawns_kept():
     from nooa_atom.agent.agent import AtomAgent
 
-    for method in (AtomAgent.spawn, AtomAgent.delegate):
+    base = ["self", "description", "prompt", "name", "brief", "model"]
+    for method, extra in ((AtomAgent.spawn, ["kept"]), (AtomAgent.delegate, [])):
         params = inspect.signature(method).parameters
-        assert list(params) == ["self", "description", "prompt", "name", "brief", "model"]
+        assert list(params) == base + extra
         assert params["name"].kind is inspect.Parameter.KEYWORD_ONLY
         assert params["name"].default is inspect.Parameter.empty  # required: no slug fallback
     assert {name for name in dir(ChildRef) if not name.startswith("_")} >= {"wait", "send", "close"}

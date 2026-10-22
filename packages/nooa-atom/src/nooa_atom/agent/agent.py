@@ -325,7 +325,8 @@ class AtomAgent(InteractiveAgent):
         questions (it decides and states its assumptions), and is closed after
         its result. ``done.result`` is its ``TaskResult`` (read
         ``result.report``). Use it only when you need the report before
-        continuing; otherwise use ``spawn()``. A Todo prompt is a one-way
+        continuing; otherwise use ``spawn()`` (``kept=False`` for a one-shot
+        that does not wait). A Todo prompt is a one-way
         brief, as in ``spawn()``: nothing is written to your Todo. Record
         what you verified on it yourself.
 
@@ -357,11 +358,17 @@ class AtomAgent(InteractiveAgent):
         name: str,
         brief: str | None = None,
         model: str | None = None,
+        kept: bool = True,
         **removed: Any,
     ) -> ChildRef:
-        """Start a kept child on ``prompt`` and return its ``ChildRef`` at once.
+        """Start a child on ``prompt`` and return its ``ChildRef`` at once.
 
-        Its outcomes arrive under ``notification["delegates"]``: a
+        With ``kept=False`` it is a one-shot worker, like ``delegate()`` but
+        without waiting: it cannot ask questions, its ``ChildResult`` (or
+        ``ChildFailed``) arrives under ``notification["delegates"]``, and it
+        closes itself after that, so parallel workers need no ``close()``.
+
+        A kept child's outcomes arrive under ``notification["delegates"]``: a
         ``ChildResult`` (``item.result`` is a ``TaskResult``; ``.report`` the full report), a
         ``ChildQuestion`` (reply with ``await item.child.send(...)``) or a
         ``ChildFailed``, after any ``ChildMessage`` progress notes;
@@ -385,9 +392,10 @@ class AtomAgent(InteractiveAgent):
                 name is free again); its path is yours plus ``/name``.
             brief: Extra instructions sent with the prompt.
             model: Model alias for the child; yours when omitted.
+            kept: ``False`` for a one-shot worker that closes itself after its result.
         """
         _reject_removed("spawn", removed)
-        return await _start_child(self, description, prompt, brief, model, name=name, kept=True)
+        return await _start_child(self, description, prompt, brief, model, name=name, kept=kept)
 
     @hidden
     def receive_delegated_todo(self, todo: Todo) -> None:
