@@ -60,7 +60,7 @@ async def test_waiting_on_a_finished_job_with_its_result_buffered_is_accepted(ag
     with pytest.raises(WaitingTargetNotRunning):
         _check(agent, "other")
     item = channel.drain()[0]
-    assert (isinstance(item, JobUpdate) and item.done) and item.items[0].stdout == "done\n"
+    assert (isinstance(item, JobUpdate) and item.done) and item.stdout == "done\n"
     with pytest.raises(WaitingTargetNotRunning):
         _check(agent, "quick")
 
@@ -70,7 +70,7 @@ async def test_jobs_use_the_agent_shell_directory_and_exports(agent, tmp_path):
     await agent.shell.run("cd pkg; export ATOM_JOBS_VAR=1")
     await agent.jobs.run('pwd; echo "$ATOM_JOBS_VAR"', label="where")
     item = await asyncio.wait_for(agent.queue_manager.get_channel("jobs").get(), TIMEOUT)
-    assert item.items[0].stdout.splitlines() == [str(tmp_path / "pkg"), "1"]
+    assert item.stdout.splitlines() == [str(tmp_path / "pkg"), "1"]
 
 
 async def test_a_resumed_session_reports_jobs_that_did_not_survive(tmp_path, sessions_dir):
