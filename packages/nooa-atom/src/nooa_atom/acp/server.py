@@ -357,7 +357,7 @@ class AtomACPAgent:
         self._pool_dialects = pool_dialects(client_info)
         self._pool_client = bool(self._pool_dialects)
         self._pool_forms = self._pool_client
-        return initialize_response(protocol_version, client_info)
+        return initialize_response(protocol_version, client_info, client_capabilities)
 
     def _use_pool_dialect(self, dialect: PoolDialect) -> None:
         """Speak only ``dialect`` from now on: the client just used its steer method.
