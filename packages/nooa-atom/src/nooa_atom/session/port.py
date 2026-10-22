@@ -22,6 +22,7 @@ from nooa_atom.session.items import (
 from nooa_atom.session.names import check_name, child_path
 from nooa_atom.session.options import reject_removed_options
 from nooa_atom.session.session import Session, as_data
+from nooa_atom.session.store import InvalidSessionIdError, SessionNotFoundError
 
 if TYPE_CHECKING:
     from nooa_atom.session.registry import SessionRegistry
@@ -333,7 +334,14 @@ class SessionPort:
         """A child's live status (``ChildRef.status``); a deeper session's too."""
         registry = self._registry
         live = registry.get(child_id)
-        parent_id = live.parent_id if live is not None else registry.info(child_id).parent_id
+        if live is not None:
+            parent_id = live.parent_id
+        else:
+            try:
+                parent_id = registry.info(child_id).parent_id
+            except (SessionNotFoundError, InvalidSessionIdError) as exc:
+                # ChildRef.status falls back to its stored value on this error.
+                raise ChildFailedError(f"Child {child_id!r} does not exist") from exc
         if parent_id != self._session.id and self.is_ancestor_of(child_id):
             parent = registry.get(parent_id) if parent_id else None
             if parent is not None:

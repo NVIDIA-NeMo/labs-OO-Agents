@@ -982,6 +982,16 @@ async def test_closed_children_are_read_once_per_parent(atom_registry, atom_opti
     assert len(reads) <= 1
 
 
+async def test_status_of_an_unknown_child_is_child_failed(atom_registry, atom_options):
+    """A stale ref's live status lookup fails as ChildFailedError, so it falls back."""
+    root = await atom_registry.create(atom_options)
+    port = root._agent.session
+    with pytest.raises(ChildFailedError, match="does not exist"):
+        port.child_status("0" * 32)
+    ref = ChildRef(id="0" * 32, name="gone", depth=1, status="idle")
+    assert "gone" in repr(ref)
+
+
 # ---- finding 10: a Done's message is marked on the event -------------------
 
 

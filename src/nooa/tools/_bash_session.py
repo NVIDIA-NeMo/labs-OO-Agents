@@ -426,7 +426,7 @@ class BashSession:
             if sep and key:
                 env[key.decode(errors="replace")] = value.decode(errors="replace")
         cwd = first.strip()
-        if not cwd.startswith("/") or not env:
+        if not cwd.startswith("/") or not os.path.isdir(cwd) or not env:
             return None
         return cwd, env
 

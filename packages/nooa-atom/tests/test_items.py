@@ -237,9 +237,14 @@ def test_a_child_ref_reads_status_live_in_its_parents_turn():
         current_port.reset(token)
 
 
-def test_delegate_items_preview_as_one_short_line():
+def test_delegate_items_name_their_child_as_status_source():
     ref = items.ChildRef(id="c1", name="probe", depth=1, status="idle")
     done = items.Done(explanation="ok")
-    assert items.ChildResult(child=ref, done=done).status_preview() == "probe finished: ok"
-    assert items.ChildFailed(child=ref, error="boom").status_preview() == "probe failed: boom"
-    assert items.ChildMessage(child=ref, text="half way").status_preview() == "probe says: half way"
+    for item in (
+        items.ChildResult(child=ref, done=done),
+        items.ChildFailed(child=ref, error="boom"),
+        items.ChildMessage(child=ref, text="half way"),
+        items.ChildQuestion(child=ref, question="which?"),
+    ):
+        assert item.status_source() == "probe"  # the sender only, never the content
+        assert not hasattr(item, "status_preview")
