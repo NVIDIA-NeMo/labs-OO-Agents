@@ -8,6 +8,7 @@ job's label or a child's name, and rejects a name that is both.
 """
 
 import asyncio
+import re
 
 from atom_test_agents import ATOM_SPEC, AtomModels, cell
 from nooa_atom import SessionOptions, SessionStore
@@ -66,6 +67,8 @@ async def test_the_status_lists_jobs_and_live_children_together(tmp_path, sessio
                 "await self.v.fix.wait()\n"
                 "self.v.review = await self.spawn('Review PR 462', 'review it')\n"
                 "await asyncio.sleep(0.3)\n"
+                "assert self.child('Review PR 462').id == self.v.review.id\n"
+                "try:\n    self.child('nope')\nexcept KeyError as e:\n    print('MISSING<<' + str(e) + '>>')\n"
                 "print('STATUS<<' + self._queue_status() + '>>')"
             ),
             cell("await self.jobs.cancel('tests')\n" + DONE),
@@ -73,13 +76,14 @@ async def test_the_status_lists_jobs_and_live_children_together(tmp_path, sessio
         {"Fix flaky test": [cell(CHILD_DONE)], "Review PR 462": _slow_child(5)},
     )
     status = calls[1].split("STATUS<<", 1)[1].split(">>", 1)[0]
+    assert "no child named 'nope'; open children: ['Fix flaky test', 'Review PR 462']" in calls[1]
     assert "Background work:\n" in status
-    assert "  • tests · job · running · full run before pushing" in status
+    assert re.search(r"  • tests · job · running \d+s · full run before pushing", status)
     assert "  • Review PR 462 · child · running" in status
     assert "  • Fix flaky test · child · retained" in status
     assert status.endswith(
         "\nCancel a job: await self.jobs.cancel('<label>')"
-        "\nClose a child: await next(c for c in self.children() if c.name == '<name>').close()"
+        "\nClose a child: await self.child('<name>').close()"
     )
 
 

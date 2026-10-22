@@ -379,6 +379,22 @@ class AtomAgent(InteractiveAgent):
         """Handles on the child sessions you started, with live status and any unanswered question."""
         return self._port().children()
 
+    def child(self, name: str) -> ChildRef:
+        """The child you started with this name (or id), e.g. ``await self.child("review").close()``.
+
+        An open child wins over closed ones with the same name. Raises
+        ``KeyError`` if no child, or more than one open child, has it.
+        """
+        matches = [c for c in self.children() if name in (c.name, c.id)]
+        open_ = [c for c in matches if c.status != "closed"]
+        found = open_ or matches
+        if len(found) == 1:
+            return found[0]
+        names = sorted({c.name for c in self.children() if c.status != "closed"})
+        if not found:
+            raise KeyError(f"no child named {name!r}; open children: {names}")
+        raise KeyError(f"{len(found)} open children are named {name!r}: use its id")
+
     @hidden
     @no_trace
     def _queue_status(self) -> str:

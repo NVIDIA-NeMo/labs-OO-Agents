@@ -248,11 +248,29 @@ class _Job:
         }
 
     def status_line(self) -> str:
-        """One short line for the per-turn status: label · job · state · description or target."""
+        """One short line for the per-turn status.
+
+        ``label · job · running 3m · 2 pending · description or target``: the
+        age only while running, the pending count only when above 0.
+        """
+        state = self.state
+        if state == "running":
+            state = f"running {_age(self.started_at)}"
+        pending = f"{self.pending} pending" if self.pending > 0 else ""
         about = self.description or self.target
-        return _short(
-            " · ".join(part for part in (self.label, "job", self.state, about) if part), 100
-        )
+        parts = (self.label, "job", state, pending, about)
+        return _short(" · ".join(part for part in parts if part), 100)
+
+
+def _age(started_at: str) -> str:
+    """Time since ``started_at`` (ISO) as ``40s``, ``3m`` or ``1h05m``."""
+    started = datetime.datetime.fromisoformat(started_at)
+    seconds = max(0, int((datetime.datetime.now() - started).total_seconds()))
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m"
+    return f"{seconds // 3600}h{seconds % 3600 // 60:02d}m"
 
 
 def _short(text: str, limit: int = _TARGET_CHARS) -> str:

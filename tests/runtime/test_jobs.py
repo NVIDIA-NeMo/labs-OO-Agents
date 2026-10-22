@@ -3,6 +3,7 @@
 """Tests for ``JobsApi`` (``self.jobs``): background jobs delivered on the ``jobs`` channel."""
 
 import asyncio
+import datetime
 import os
 import re
 import time
@@ -608,8 +609,8 @@ async def test_the_status_line_shows_label_state_and_description_or_target(agent
     agent.jobs.after(300, label="timer")
     await agent.jobs.run("sleep 30 # " + "y" * 300, label="noisy")
     status = agent.queue_manager.status()
-    assert "  • tests · job · running · full run before pushing" in status
-    assert "  • timer · job · running · after 300s" in status
+    assert re.search(r"  • tests · job · running \d+s · full run before pushing", status)
+    assert re.search(r"  • timer · job · running \d+s · after 300s", status)
     noisy = next(line for line in status.splitlines() if "noisy" in line)
     assert noisy.endswith("…") and len(noisy) <= 4 + 100
     assert "→ jobs" not in status
@@ -898,3 +899,17 @@ async def test_tail_caps_a_5mb_line(agent, tmp_path):
     assert first.items == ["y" * 8_000 + "[... 4,992,000 chars of this line omitted]"]
     assert second.items == ["short"]
     await agent.jobs.cancel("log")
+
+
+def test_status_line_shows_age_while_running_and_pending_above_zero():
+    from nooa.runtime import jobs as jobs_mod
+
+    assert jobs_mod._age(jobs_mod._now()) in ("0s", "1s")
+    old = (datetime.datetime.now() - datetime.timedelta(minutes=65)).isoformat(timespec="seconds")
+    assert jobs_mod._age(old) == "1h05m"
+    job = jobs_mod._Job("build", "run", None, None, True, target="make build")
+    job.started_at = old
+    job.pending = 2
+    assert job.status_line() == "build · job · running 1h05m · 2 pending · make build"
+    job.pending = 0
+    assert "pending" not in job.status_line()
