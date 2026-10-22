@@ -70,8 +70,12 @@ async def test_concise_python_is_full_tool_card_not_message(make_adapter, worksp
     assert (status.kind, status.status) == ("other", "completed")
     assert status.content is not None
     assert status.content[0].content.text == "Checked repository\nExtra detail"
-    [start] = starts
-    [end] = client.updates(session_id, ToolCallProgress)
+    # The cell sent a message while running: its card moved below the message.
+    old_start, start = starts
+    moved, end = client.updates(session_id, ToolCallProgress)
+    assert moved.tool_call_id == old_start.tool_call_id and moved.status == "completed"
+    assert moved.content is not None and "Continued below." in moved.content[1].content.text
+    assert start.tool_call_id == end.tool_call_id != old_start.tool_call_id
     assert start.title == end.title == "python: # Check repository status"
     assert start.kind == "other" and end.status == "completed"
     for card in (start, end):
