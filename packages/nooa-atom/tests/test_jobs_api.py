@@ -214,13 +214,18 @@ async def test_throttle_by_items_batches_and_flushes_before_the_result(agent):
 
 
 async def test_run_progress_by_seconds(agent):
+    # Bursts of lines separated by pauses longer than the window: each burst is
+    # batched, and the window (not the end of the run) delivers it.
     await agent.jobs.run(
-        "for i in 1 2 3 4 5 6; do echo $i; sleep 0.1; done", label="t", seconds=0.35
+        "echo 1; echo 2; sleep 0.6; echo 3; echo 4; sleep 0.6; echo 5; echo 6",
+        label="t",
+        seconds=0.3,
     )
     updates, result = await _collect_run(agent)
     sent = [e.text for u in updates for e in u.items]
+    # In order and without gaps; lines still batched at the end are in the ShellResult only.
     assert sent == [f"{i}" for i in range(1, len(sent) + 1)] and len(sent) >= 2
-    assert 1 <= len(updates) <= 3 and len(updates[0].items) >= 2
+    assert any(len(u.items) > 1 for u in updates)  # batched, not one update per line
     assert result.items[0].returncode == 0
     assert result.items[0].stdout == "".join(f"{i}\n" for i in range(1, 7))
 
@@ -232,8 +237,12 @@ async def test_throttle_turns_run_progress_on_and_off(agent, tmp_path):
         f"while [ ! -e {go}1 ]; do sleep 0.02; done; echo loud1; echo loud2; "
         f"while [ ! -e {go}2 ]; do sleep 0.02; done; echo quiet2"
     )
-    await agent.jobs.run(script, label="r")
-    await asyncio.sleep(0.2)
+    info = await agent.jobs.run(script, label="r")
+    # Wait until quiet1 was read (the log gets it as it is read), then let it pass
+    # through the job's in-process queues before progress is turned on.
+    log = Path(info.log_path)
+    await _until(lambda: log.exists() and "quiet1" in log.read_text())
+    await asyncio.sleep(0.1)
     assert agent.queue_manager.get_channel("jobs").qsize() == 0  # quiet by default
     assert agent.jobs.throttle("r", items=2).throttle.items == 2  # progress on
     (tmp_path / "go1").touch()
@@ -251,17 +260,19 @@ async def test_throttle_turns_run_progress_on_and_off(agent, tmp_path):
 
 async def test_throttle_by_seconds_batches_slow_output(agent):
     async def ticks():
-        for i in range(6):
-            yield i
-            await asyncio.sleep(0.1)
+        # Bursts separated by pauses longer than the window.
+        for burst in ((0, 1, 2), (3, 4), (5,)):
+            for i in burst:
+                yield i
+            await asyncio.sleep(0.6)
 
-    agent.jobs.spawn(ticks(), label="tick", seconds=0.35)
+    agent.jobs.spawn(ticks(), label="tick", seconds=0.3)
     updates = await _stream_updates(agent, "tick")
-    assert updates[-1].done
+    assert updates[-1].done and [u.done for u in updates].count(True) == 1
     flat = [v for u in updates for v in u.items]
-    assert flat == list(range(6))
-    assert len(updates[0].items) >= 3  # several items per delivery
-    assert len(updates) <= 3
+    assert flat == list(range(6))  # complete and in order
+    assert any(len(u.items) > 1 for u in updates)  # several items per delivery
+    assert not updates[0].done  # the window delivered before the end
 
 
 async def test_throttle_off_flushes_pending_items(agent):
