@@ -885,30 +885,59 @@ async def test_a_question_is_rendered_once_when_the_turn_ends(bridged):
     assert _messages(client) == ["Which branch: main or dev?\n\nBoth have it.\n\n"]
 
 
+def _status_cards(client: _RecordingClient) -> list[ToolCallStart]:
+    """The finished status cards the bridge sends for a turn's return or a summary."""
+    return [
+        update
+        for _, update in client.updates
+        if isinstance(update, ToolCallStart) and update.tool_call_id.startswith("status-")
+    ]
+
+
+def _assert_status_card(card: ToolCallStart, title: str, body: str | None) -> None:
+    assert card.title == title
+    assert (card.kind, card.status) == ("other", "completed")
+    if body is None:
+        assert not card.content
+    else:
+        [content] = card.content or []
+        assert _content_text(cast(ContentToolCallContent, content)) == body
+
+
 @pytest.mark.parametrize(
-    ("kind", "outcome", "line"),
+    ("kind", "outcome", "title", "body"),
     [
-        ("done", {"explanation": "fixed parse()"}, "> **Done:** fixed parse()"),
-        ("done", {"explanation": ""}, "> **Done.**"),
+        ("done", {"explanation": "fixed parse()"}, "Done: fixed parse()", None),
+        ("done", {"explanation": ""}, "Done", None),
+        ("done", {}, "Done", None),
+        (
+            "done",
+            {"explanation": "fixed parse()\nand its tests"},
+            "Done: fixed parse()",
+            "fixed parse()\nand its tests",
+        ),
         (
             "waiting",
             {"explanation": "tests running", "on": ["jobs", "delegates"]},
-            "> **Waiting:** tests running",
+            "Waiting: tests running",
+            None,
         ),
-        ("waiting", {"explanation": "tests running", "on": []}, "> **Waiting:** tests running"),
+        ("waiting", {"explanation": "tests running", "on": []}, "Waiting: tests running", None),
+        ("waiting", {"explanation": "", "on": ["jobs"]}, "Waiting", None),
     ],
 )
-async def test_a_done_or_waiting_turn_ends_with_a_status_line(bridged, kind, outcome, line):
+async def test_a_done_or_waiting_turn_ends_with_a_status_card(bridged, kind, outcome, title, body):
     _agent, session, client, bridge = bridged
     session.emit(TurnEndedUpdate(session_id="session-1", outcome_kind=kind, outcome=outcome))
     await bridge.flush()
-    assert _messages(client) == [f"{line}\n\n"]
+    assert _messages(client) == []  # the return is a card, not chat text
+    assert _types(client) == [ToolCallStart]
+    [card] = _status_cards(client)
+    _assert_status_card(card, title, body)
 
 
-@pytest.mark.parametrize(
-    ("kind", "line"), [("done", "> **Done:** answered"), ("waiting", "> **Waiting:** answered")]
-)
-async def test_a_status_line_follows_the_turns_messages(bridged, kind, line):
+@pytest.mark.parametrize("kind", ["done", "waiting"])
+async def test_a_status_card_follows_the_turns_messages(bridged, kind):
     agent, session, client, bridge = bridged
     session.emit(SimpleNamespace(kind="turn_started", session_id="session-1"))
     agent.event_manager.add(AgentMessage(content="Here is the answer."))
@@ -918,10 +947,13 @@ async def test_a_status_line_follows_the_turns_messages(bridged, kind, line):
         )
     )
     await bridge.flush()
-    assert _messages(client) == ["Here is the answer.\n\n", f"{line}\n\n"]
+    assert _messages(client) == ["Here is the answer.\n\n"]  # the reply stays the last message
+    assert _types(client)[-2:] == [AgentMessageChunk, ToolCallStart]
+    [card] = _status_cards(client)
+    _assert_status_card(card, f"{kind.capitalize()}: answered", None)
 
 
-async def test_each_turn_ends_with_its_own_status_line(bridged):
+async def test_each_turn_ends_with_its_own_status_card(bridged):
     agent, session, client, bridge = bridged
     agent.event_manager.add(AgentMessage(content="Started the job."))
     session.emit(
@@ -935,11 +967,50 @@ async def test_each_turn_ends_with_its_own_status_line(bridged):
         TurnEndedUpdate(session_id="session-1", outcome_kind="done", outcome={"explanation": "ok"})
     )
     await bridge.flush()
-    assert _messages(client) == [
-        "Started the job.\n\n",
-        "> **Waiting:** job running\n\n",
-        "> **Done:** ok\n\n",
-    ]
+    assert _messages(client) == ["Started the job.\n\n"]
+    cards = _status_cards(client)
+    assert [card.title for card in cards] == ["Waiting: job running", "Done: ok"]
+    assert len({card.tool_call_id for card in cards}) == 2
+    assert _types(client) == [AgentMessageChunk, ToolCallStart, ToolCallStart]
+
+
+@pytest.mark.parametrize("kind", ["done", "waiting"])
+async def test_no_status_card_when_silent(bridged, kind):
+    agent, session, client, bridge = bridged
+    bridge.set_verbosity("silent")
+    agent.event_manager.add(AgentMessage(content="Here is the answer."))
+    session.emit(
+        TurnEndedUpdate(
+            session_id="session-1", outcome_kind=kind, outcome={"explanation": "answered"}
+        )
+    )
+    await bridge.flush()
+    assert _messages(client) == ["Here is the answer.\n\n"]
+    assert _status_cards(client) == []
+    assert _types(client) == [AgentMessageChunk]
+
+
+@pytest.mark.parametrize("level", ["silent", "concise", "verbose"])
+async def test_a_summary_is_a_status_card(bridged, level):
+    agent, _session, client, bridge = bridged
+    agent.event_manager.add(AgentMessage(content="First."))
+    agent.event_manager.add(AgentMessage(content="Second."))
+    await bridge.flush()
+    client.updates.clear()
+    bridge.set_verbosity(level)
+    # Real collapse emission, not merely a manually added Summary event.
+    agent.event_manager.collapse("1", "2", summary_text="Full recap\nMore recap")
+    await bridge.flush()
+    assert _messages(client) == []
+    assert [u for _, u in client.updates if isinstance(u, AgentThoughtChunk)] == []
+    cards = _status_cards(client)
+    if level == "silent":
+        assert client.updates == []
+    else:
+        [card] = cards
+        body = "Full recap\nMore recap" if level == "verbose" else None
+        _assert_status_card(card, "Summarized context (1..2)", body)
+        assert _types(client) == [ToolCallStart]
 
 
 async def test_a_failed_turn_closes_its_open_cards_as_unfinished(bridged):
@@ -1663,16 +1734,30 @@ async def test_activity_verbosity(tmp_path, level, tool_name):
     await bridge.flush()
     updates = [u for _, u in client.updates]
     thoughts = [u.content.text for u in updates if isinstance(u, AgentThoughtChunk)]
-    cards = [u for u in updates if isinstance(u, (ToolCallStart, ToolCallProgress))]
+    status = _status_cards(client)
+    cards = [
+        u for u in updates if isinstance(u, (ToolCallStart, ToolCallProgress)) and u not in status
+    ]
     assert [u.content.text for u in updates if isinstance(u, AgentMessageChunk)] == [
-        "User-facing answer\nStill visible\n\n",
-        "> **Done:** Task completed\n> More details\n\n",
+        "User-facing answer\nStill visible\n\n"
     ]
     if level == "silent":
         assert thoughts == []
         assert cards == []
-    elif level == "concise":
-        assert thoughts == ["Summarized context (1..2).\n\n"]
+        assert status == []
+    else:
+        # The summary and the turn's return are status cards, around the reply.
+        assert [card.title for card in status] == [
+            "Summarized context (1..2)",
+            "Done: Task completed",
+        ]
+        summary_body = "Full recap\nMore recap" if level == "verbose" else None
+        _assert_status_card(status[0], "Summarized context (1..2)", summary_body)
+        _assert_status_card(status[1], "Done: Task completed", "Task completed\nMore details")
+        assert updates.index(status[0]) < len(updates) - 2
+        assert isinstance(updates[-2], AgentMessageChunk) and updates[-1] is status[1]
+    if level == "concise":
+        assert thoughts == []
         assert [type(card) for card in cards] == [ToolCallStart, ToolCallProgress]
         assert [card.status for card in cards] == ["in_progress", "completed"]
         for card in cards:
@@ -1682,11 +1767,9 @@ async def test_activity_verbosity(tmp_path, level, tool_name):
         assert len(cards[0].content) == 1
         assert len(cards[1].content) == 2
         assert "private output" in _content_text(cards[1].content[1])
-    else:
+    elif level == "verbose":
         assert len(cards) == 6  # Python start/end, Bash start/output/end, diff
-        assert thoughts[0] == "Long reasoning"
-        assert "Full recap\nMore recap" in thoughts[1]
-        assert len(thoughts) == 2  # the turn's return is not a thought
+        assert thoughts == ["Long reasoning"]  # neither summary nor return is a thought
     await bridge.close()
     await agent.aclose()
 
@@ -1763,13 +1846,23 @@ async def test_return_activity_does_not_hide_questions(tmp_path, level, kind):
     session.emit(TurnEndedUpdate(session_id=session.id, outcome_kind=kind, outcome=outcome))
     await bridge.flush()
     thoughts = [u.content.text for _, u in client.updates if isinstance(u, AgentThoughtChunk)]
-    assert thoughts == []  # the return is shown as agent text, never as a thought
+    assert thoughts == []  # the return is never a thought
     answers = [u.content.text for _, u in client.updates if isinstance(u, AgentMessageChunk)]
-    assert answers == (
-        ["Which target?\nFull question\n\nBoth build.\n\n"]
-        if kind == "need_input"
-        else ["> **Waiting:** Waiting for review\n> More detail\n\n"]
-    )
+    status = _status_cards(client)
+    if kind == "need_input":
+        # A question is always the agent's text, at every level, and gets no card.
+        assert answers == ["Which target?\nFull question\n\nBoth build.\n\n"]
+        assert status == []
+        assert _types(client) == [AgentMessageChunk]
+    else:
+        assert answers == []
+        if level == "silent":
+            assert client.updates == []
+        else:
+            [card] = status
+            _assert_status_card(
+                card, "Waiting: Waiting for review", "Waiting for review\nMore detail"
+            )
     await bridge.close()
     await agent.aclose()
 
@@ -2101,7 +2194,15 @@ async def test_rolling_slot_resets_with_fresh_ids_and_ignores_late_results(tmp_p
         ToolCallEvent(tool_call_id="new-id", name="python_cell", arguments={"code": "# second"})
     )
     await bridge.flush()
-    cards = [u for _, u in client.updates if isinstance(u, (ToolCallStart, ToolCallProgress))]
+    # The turn's own status card is not part of the rolling slot.
+    status = _status_cards(client)
+    expected = {"done": ["Done: Finished"], "waiting": ["Waiting: Finished"]}
+    assert [card.title for card in status] == expected.get(boundary, [])
+    cards = [
+        u
+        for _, u in client.updates
+        if isinstance(u, (ToolCallStart, ToolCallProgress)) and u not in status
+    ]
     assert [type(u) for u in cards] == [ToolCallStart, ToolCallProgress, ToolCallStart]
     assert cards[0].tool_call_id == cards[1].tool_call_id != cards[2].tool_call_id
     assert cards[1].status == "failed"
@@ -2145,7 +2246,14 @@ async def test_child_turn_end_closes_only_its_rolling_card(tmp_path):
         )
     )
     await bridge.flush()
-    cards = [u for _, u in client.updates if isinstance(u, (ToolCallStart, ToolCallProgress))]
+    # Only the parent's return gets a status card; it is not the child's rolling card.
+    status = _status_cards(client)
+    assert [card.title for card in status] == ["Waiting: Waiting for child"]
+    cards = [
+        u
+        for _, u in client.updates
+        if isinstance(u, (ToolCallStart, ToolCallProgress)) and u not in status
+    ]
     assert len(cards) == 2
     assert cards[0].tool_call_id == cards[1].tool_call_id
     assert cards[1].status == "failed"

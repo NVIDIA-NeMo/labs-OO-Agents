@@ -47,11 +47,8 @@ async def test_a_done_turn_ends_the_prompt_after_its_messages(make_adapter, work
         for entry in client.log
         if entry[0] != "update" or isinstance(entry[2], AgentMessageChunk)
     ]
-    assert kinds[-3:] == ["update", "update", "response"]
-    assert client.texts(AgentMessageChunk, session_id)[-2:] == [
-        "Hello there.\n\n",
-        "> **Done:** answered\n\n",
-    ]
+    assert kinds[-2:] == ["update", "response"]
+    assert client.texts(AgentMessageChunk, session_id)[-1] == "Hello there.\n\n"
 
 
 async def test_prompt_text_includes_resource_links(make_adapter, workspace):
@@ -213,10 +210,7 @@ async def test_the_session_is_usable_after_a_cancel(make_adapter, workspace, cli
     await adapter.cancel(session_id)
     assert (await asyncio.wait_for(prompt, TIMEOUT)).stop_reason == "cancelled"
     assert (await _prompt(adapter, session_id, "again")).stop_reason == "end_turn"
-    assert client.texts(AgentMessageChunk, session_id)[-2:] == [
-        "Back again.\n\n",
-        "> **Done:** answered\n\n",
-    ]
+    assert client.texts(AgentMessageChunk, session_id)[-1] == "Back again.\n\n"
 
 
 # ---- errors from the turn ----------------------------------------------------
@@ -290,10 +284,7 @@ async def test_a_command_meant_for_the_agent_runs_a_turn(atom_adapter, workspace
     assert response.stop_reason == "end_turn"
     [llm] = adapter.test_models.made
     assert "Review two words" in str(llm.calls[0].messages)
-    assert client.texts(AgentMessageChunk, session_id)[-2:] == [
-        "Reviewed.\n\n",
-        "> **Done:** answered\n\n",
-    ]
+    assert client.texts(AgentMessageChunk, session_id)[-1] == "Reviewed.\n\n"
 
 
 async def test_host_controls_answer_as_text(atom_adapter, workspace, client):
@@ -321,10 +312,7 @@ async def test_each_session_is_its_own_trace_session(atom_adapter, workspace, cl
     second = await _new(adapter, workspace)
     for session_id in (first, second):
         await _prompt(adapter, session_id, "which trace?")
-        assert client.texts(AgentMessageChunk, session_id)[-2:] == [
-            session_id + "\n\n",
-            "> **Done:** traced\n\n",
-        ]
+        assert client.texts(AgentMessageChunk, session_id)[-1] == session_id + "\n\n"
         await _prompt(adapter, session_id, "/trace-url")
         assert client.texts(AgentMessageChunk, session_id)[-1] == (
             f"Trace viewer:\n```text\nhttp://viewer:5001/traces/view?session_id={session_id}\n```\n\n"
@@ -353,10 +341,7 @@ async def test_turns_run_with_the_tracing_hooks_registered(
     adapter = await atom_adapter([cell(_HOOKS_CELL)])
     session_id = await _new(adapter, workspace)
     await _prompt(adapter, session_id, "hooked?")
-    assert client.texts(AgentMessageChunk, session_id)[-2:] == [
-        "Hooks\n\n",
-        "> **Done:** hooked\n\n",
-    ]
+    assert client.texts(AgentMessageChunk, session_id)[-1] == "Hooks\n\n"
 
 
 async def test_usage_answers_with_the_token_totals(atom_adapter, workspace, client):
@@ -707,13 +692,7 @@ async def test_a_pool_steer_keeps_the_prompt_open_until_its_turn_ends(
     client.log.append(("response", "prompt", response))
 
     assert response.stop_reason == "end_turn"
-    assert _order(client, session_id)[-5:] == [
-        "First.\n\n",
-        "> **Done:** answered\n\n",
-        "Second.\n\n",
-        "> **Done:** answered\n\n",
-        "response",
-    ]
+    assert _order(client, session_id)[-3:] == ["First.\n\n", "Second.\n\n", "response"]
     assert len(models.llms[None].calls) == 4
 
 
@@ -745,15 +724,7 @@ async def test_pool_steers_are_handled_in_order_within_the_prompt(make_adapter, 
     client.log.append(("response", "prompt", response))
 
     assert response.stop_reason == "end_turn"
-    assert _order(client, session_id)[-7:] == [
-        "First.\n\n",
-        "> **Done:** answered\n\n",
-        "A.\n\n",
-        "> **Done:** answered\n\n",
-        "B.\n\n",
-        "> **Done:** answered\n\n",
-        "response",
-    ]
+    assert _order(client, session_id)[-4:] == ["First.\n\n", "A.\n\n", "B.\n\n", "response"]
     calls = models.llms[None].calls
     assert len(calls) == 5
     assert "message a" in str(calls[2].messages) and "message b" not in str(calls[2].messages)
@@ -777,13 +748,7 @@ async def test_pool_steers_taken_by_one_turn_end_the_prompt_with_it(
     client.log.append(("response", "prompt", response))
 
     assert response.stop_reason == "end_turn"
-    assert _order(client, session_id)[-5:] == [
-        "First.\n\n",
-        "> **Done:** answered\n\n",
-        "Both.\n\n",
-        "> **Done:** answered\n\n",
-        "response",
-    ]
+    assert _order(client, session_id)[-3:] == ["First.\n\n", "Both.\n\n", "response"]
     assert len(models.llms[None].calls) == 3
     acks = [
         meta for _, meta in _input_events(client, session_id) if "poolside/clientInputId" in meta
@@ -930,11 +895,7 @@ async def test_a_pool_steer_from_another_client_is_still_followed(make_adapter, 
     block.set()
     response = await asyncio.wait_for(prompt, TIMEOUT)
     client.log.append(("response", "prompt", response))
-    assert _order(client, session_id)[-3:] == [
-        "Second.\n\n",
-        "> **Done:** answered\n\n",
-        "response",
-    ]
+    assert _order(client, session_id)[-2:] == ["Second.\n\n", "response"]
 
 
 async def test_a_question_waits_while_a_pool_steer_is_queued(make_adapter, workspace, client):
@@ -960,12 +921,7 @@ async def test_a_question_waits_while_a_pool_steer_is_queued(make_adapter, works
 
     assert response.stop_reason == "end_turn"
     assert [entry for entry in client.log if entry[0] in ("ext", "permission")] == []
-    assert _order(client, session_id)[-4:] == [
-        "Which branch?\n\n",
-        "Using main.\n\n",
-        "> **Done:** answered\n\n",
-        "response",
-    ]
+    assert _order(client, session_id)[-3:] == ["Which branch?\n\n", "Using main.\n\n", "response"]
     calls = models.llms[None].calls
     assert len(calls) == 3
     assert "wait, use main" in str(calls[2].messages)

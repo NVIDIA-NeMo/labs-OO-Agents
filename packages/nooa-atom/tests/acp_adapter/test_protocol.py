@@ -235,7 +235,7 @@ async def test_a_question_is_text_answered_by_the_next_prompt_over_the_wire(tmp_
         )
     assert response.stop_reason == "end_turn"
     assert client.elicitations == []
-    assert client.texts()[-2:] == ["Using the answer.\n\n", "> **Done:** answered\n\n"]
+    assert client.texts()[-1] == "Using the answer.\n\n"
 
 
 async def test_the_delete_extension_works_over_the_wire(tmp_path):
