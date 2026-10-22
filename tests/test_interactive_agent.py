@@ -84,7 +84,7 @@ def test_message_records_event_and_renders(agent):
 
 def test_turn_results_require_their_text():
     assert Done(explanation=" finished ").explanation == "finished"
-    assert Waiting(explanation="job ci-42", on=["jobs:ci-42"]).on == ["jobs:ci-42"]
+    assert Waiting(explanation="job ci-42", on=["ci"]).on == ["ci"]
     assert NeedInput(question="Which branch?", options=["main", "dev"]).options == ["main", "dev"]
     with pytest.raises(ValidationError):
         Done(explanation="  ")
@@ -110,10 +110,10 @@ def test_done_carries_an_optional_reply_and_evidence():
 
 
 def test_waiting_carries_an_optional_user_line():
-    waiting = Waiting(message="  Tests are running.  ", explanation="ci", on=["jobs:ci-42"])
+    waiting = Waiting(message="  Tests are running.  ", explanation="ci", on=["ci"])
     assert waiting.message == "Tests are running."
-    assert Waiting(message=" ", explanation="ci", on=["jobs:ci-42"]).message is None
-    assert Waiting(explanation="ci", on=["jobs:ci-42"]).message is None
+    assert Waiting(message=" ", explanation="ci", on=["ci"]).message is None
+    assert Waiting(explanation="ci", on=["ci"]).message is None
 
 
 def test_need_input_reason_is_optional():
@@ -217,7 +217,7 @@ _NOTIFICATION = {"user_messages": ["hi"]}
     [
         ('return_result(Done(explanation="finished"))', Done),
         ('return_result(NeedInput(question="Which branch?"))', NeedInput),
-        ('return_result(Waiting(explanation="waiting for job ci-42", on=["jobs:ci-42"]))', Waiting),
+        ('return_result(Waiting(explanation="waiting for job ci-42", on=["ci"]))', Waiting),
     ],
 )
 async def test_handle_accepts_each_turn_result(code, expected):
@@ -235,10 +235,10 @@ async def test_handle_returns_the_reply_in_done():
 
 
 async def test_handle_returns_the_user_line_in_waiting():
-    code = 'return_result(Waiting(message="Tests are running.", explanation="ci", on=["jobs:ci"]))'
+    code = 'return_result(Waiting(message="Tests are running.", explanation="ci", on=["ci"]))'
     agent = _Host(llm=FakeLLMClient([_cell(code, "c1")]))
     result = await agent.handle(_NOTIFICATION)
-    assert result == Waiting(message="Tests are running.", explanation="ci", on=["jobs:ci"])
+    assert result == Waiting(message="Tests are running.", explanation="ci", on=["ci"])
     assert result.message == "Tests are running."
 
 
