@@ -74,6 +74,10 @@ from nooa_atom.acp.listing import list_sessions, validate_workspace
 from nooa_atom.acp.protocol import INJECT_CAPABILITY, initialize_response, open_stdio
 from nooa_atom.acp.recover import COMMAND as RECOVER
 from nooa_atom.acp.recover import recover
+from nooa_atom.acp.terminal_auth import clear_result as clear_connect_result
+from nooa_atom.acp.terminal_auth import consume_result as consume_connect_result
+from nooa_atom.acp.terminal_auth import describe_result as describe_connect_result
+from nooa_atom.acp.terminal_auth import supports_terminal_auth
 from nooa_atom.agent.connect_command import CONNECT_FALLBACK
 from nooa_atom.agent.slash_commands import CONNECT, RESERVED_COMMAND_NAMES
 from nooa_atom.session.items import (
@@ -356,6 +360,15 @@ class AtomACPAgent:
         del kwargs
         root = validate_workspace(cwd, additional_directories)
         self._log_llm_config(root)
+        if self._terminal_auth():
+            if not (self._model or _default_model(root)):
+                # The client runs `nooa atom --connect` and retries.
+                raise RequestError.auth_required(
+                    {"reason": "No model is configured; connect one with `nooa connect`."}
+                )
+            # A connect result left by an earlier wizard run (first start, or a
+            # /connect never typed again) must not answer a later /connect.
+            clear_connect_result()
         options = SessionOptions(
             workspace=root,
             agent_spec=self._agent_spec_for(root),
@@ -681,6 +694,10 @@ class AtomACPAgent:
                 handled = await self._run_command(session, bridge, *slash)
                 if handled is not None:
                     return handled
+            if self._terminal_auth() and not self._has_model(session):
+                raise RequestError.auth_required(
+                    {"reason": "No model is configured; connect one with `nooa connect`."}
+                )
             await self._request_title(session, text)
             receipt = await session.submit(text, source=SOURCE)
             if self._pool_client:
@@ -889,6 +906,39 @@ class AtomACPAgent:
         level = content.get("verbosity") if content else None
         return level if level in VERBOSITY_LEVELS else None
 
+    def _terminal_auth(self) -> bool:
+        """Whether the client runs ``terminal`` auth methods (it was offered ``nooa connect``)."""
+        return supports_terminal_auth(self.client_capabilities)
+
+    def _has_model(self, session: Session) -> bool:
+        """Whether ``session`` has a model to talk to: its own, the server's, or a configured one."""
+        return bool(session.info.model or self._model or _default_model(session.options.workspace))
+
+    async def _connect_in_terminal(
+        self, session: Session, bridge: ACPEventBridge
+    ) -> PromptResponse:
+        """``/connect`` for a client that runs terminal auth.
+
+        The first ``/connect`` fails with "Authentication required", so the
+        client runs ``nooa atom --connect`` (the CLI wizard) in a terminal
+        and reconnects. The wizard leaves a one-shot result on a save; the
+        next ``/connect`` takes it and says what was saved. Without a fresh
+        result (none, cancelled, already taken, or older than
+        ``RESULT_MAX_AGE``) it asks for authentication again.
+        """
+        result = consume_connect_result()
+        if result is None:
+            raise RequestError.auth_required(
+                {"reason": "/connect runs `nooa connect` in a terminal."}
+            )
+        bridge.publish(
+            ConfigOptionUpdate(
+                session_update="config_option_update",
+                config_options=self._config_options(session) or [],
+            )
+        )
+        return await self._say(bridge, describe_connect_result(result))
+
     def _client_shows_forms(self) -> bool:
         """Whether the client advertised standard ACP form elicitation."""
         capabilities = self.client_capabilities
@@ -991,6 +1041,8 @@ class AtomACPAgent:
             return await self._say(bridge, message)
         if name == RECOVER.name:
             return await self._say(bridge, await self._recover(session, raw_args))
+        if name == "connect" and self._terminal_auth():
+            return await self._connect_in_terminal(session, bridge)
         if name not in {command.name for command in session.commands()}:
             if name == "connect":
                 message = _CONNECT_TEXT

@@ -6,15 +6,18 @@ The wizard itself is mocked; nothing here touches the network.
 """
 
 import json
+import time
 
 import click
 import click.testing
 import pytest
 import yaml
-from acp import PROTOCOL_VERSION
+from acp import PROTOCOL_VERSION, RequestError, text_block
 from acp.schema import (
+    AgentMessageChunk,
     AuthCapabilities,
     ClientCapabilities,
+    ConfigOptionUpdate,
     ElicitationCapabilities,
     ElicitationFormCapabilities,
 )
@@ -165,3 +168,145 @@ def test_connect_runs_the_wizard_with_the_defaults_of_nooa_connect(wizard, no_se
     assert click.testing.CliRunner().invoke(nooa_connect, []).exit_code == 0
     via_acp, via_cli = wizard.calls
     assert via_acp == via_cli
+
+
+# ---- first run: no model ----------------------------------------------------------
+
+
+async def test_session_new_without_a_model_asks_terminal_clients_to_connect(
+    make_adapter, workspace, user_dir
+):
+    adapter = await make_adapter(ScriptedModels({None: []}), capabilities=TERMINAL)
+    with pytest.raises(RequestError) as failed:
+        await adapter.new_session(str(workspace))
+    assert failed.value.code == -32000
+    # The wizard saved a model; the retried session/new (any process) succeeds.
+    _save_user_model(user_dir)
+    retry = await make_adapter(ScriptedModels({None: []}), capabilities=TERMINAL)
+    assert (await retry.new_session(str(workspace))).session_id
+
+
+async def test_session_new_without_a_model_is_unchanged_for_other_clients(make_adapter, workspace):
+    adapter = await make_adapter(ScriptedModels({None: []}), capabilities=FORMS)
+    assert (await adapter.new_session(str(workspace))).session_id
+
+
+async def test_session_new_with_a_server_model_is_not_auth(make_adapter, workspace):
+    adapter = await make_adapter(ScriptedModels({None: []}), capabilities=TERMINAL, model="m")
+    assert (await adapter.new_session(str(workspace))).session_id
+
+
+async def test_a_prompt_without_a_model_asks_terminal_clients_to_connect(
+    make_adapter, workspace, user_dir
+):
+    _save_user_model(user_dir)
+    adapter = await make_adapter(ScriptedModels({None: []}), capabilities=TERMINAL)
+    session_id = (await adapter.new_session(str(workspace))).session_id
+    (user_dir / "llm_config.yaml").unlink()
+    with pytest.raises(RequestError) as failed:
+        await adapter.prompt(session_id, [text_block("hello")])
+    assert failed.value.code == -32000
+    assert adapter.session(session_id).info.reply_count == 0
+
+
+# ---- /connect -----------------------------------------------------------------------
+
+
+async def _connect_prompt(adapter, session_id):
+    return await adapter.prompt(session_id, [text_block("/connect")])
+
+
+async def test_connect_fails_with_auth_required_then_reports_the_save(
+    atom_adapter, workspace, client
+):
+    adapter = await atom_adapter([], capabilities=TERMINAL)
+    session_id = (await adapter.new_session(str(workspace))).session_id
+    with pytest.raises(RequestError) as failed:
+        await _connect_prompt(adapter, session_id)
+    assert failed.value.code == -32000
+    # The client ran `nooa atom --connect` (it saved) and reconnected: a new
+    # agent process, with no memory of the first /connect.
+    await adapter.close()
+    restarted = await atom_adapter([], capabilities=TERMINAL)
+    session_id = (await restarted.new_session(str(workspace))).session_id
+    terminal_auth.write_result("local", "openai/m", "https://key:secret@api.test/v1?x=1")
+    before = len(client.updates(session_id, ConfigOptionUpdate))
+    response = await _connect_prompt(restarted, session_id)
+    assert response.stop_reason == "end_turn"
+    text = "".join(client.texts(AgentMessageChunk, session_id))
+    assert "Saved model alias local: openai/m at https://api.test/v1" in text
+    assert "secret" not in text
+    assert len(client.updates(session_id, ConfigOptionUpdate)) == before + 1
+    assert restarted.session(session_id).info.reply_count == 0
+    # One save answers one /connect: the next one asks again.
+    with pytest.raises(RequestError) as again:
+        await _connect_prompt(restarted, session_id)
+    assert again.value.code == -32000
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        None,  # no result: the wizard was cancelled or never ran
+        "stale",
+        "future",
+        "not json",
+        json.dumps({"alias": "", "saved_at": 0}),
+        json.dumps(["local"]),
+    ],
+)
+async def test_connect_without_a_fresh_result_asks_again(
+    atom_adapter, workspace, user_dir, content
+):
+    adapter = await atom_adapter([], capabilities=TERMINAL)
+    session_id = (await adapter.new_session(str(workspace))).session_id
+    path = user_dir / terminal_auth.RESULT_FILE
+    if content == "stale":
+        terminal_auth.write_result(
+            "local", "m", "", now=time.time() - terminal_auth.RESULT_MAX_AGE - 1
+        )
+    elif content == "future":
+        terminal_auth.write_result("local", "m", "", now=time.time() + 3600)
+    elif content is not None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+    with pytest.raises(RequestError) as failed:
+        await _connect_prompt(adapter, session_id)
+    assert failed.value.code == -32000
+    assert not path.exists()
+
+
+async def test_session_new_drops_a_left_over_result(atom_adapter, workspace, user_dir):
+    # First start: the wizard saved, session/new succeeded. A later /connect
+    # must run the wizard, not report that old save.
+    terminal_auth.write_result("local", "m", "")
+    adapter = await atom_adapter([], capabilities=TERMINAL)
+    session_id = (await adapter.new_session(str(workspace))).session_id
+    assert not (user_dir / terminal_auth.RESULT_FILE).exists()
+    with pytest.raises(RequestError):
+        await _connect_prompt(adapter, session_id)
+
+
+async def test_terminal_auth_wins_over_forms_for_connect(atom_adapter, workspace, client):
+    adapter = await atom_adapter([], capabilities=FORMS_AND_TERMINAL)
+    session_id = (await adapter.new_session(str(workspace))).session_id
+    with pytest.raises(RequestError):
+        await _connect_prompt(adapter, session_id)
+    assert not [entry for entry in client.log if entry[0] == "elicitation"]
+
+
+async def test_clients_without_terminal_auth_keep_the_form_connect(
+    atom_adapter, workspace, client, user_dir
+):
+    from acp.schema import DeclineElicitationResponse
+    from nooa_atom.agent.connect_command import CANCELLED
+
+    # Even a fresh result does not change their /connect.
+    terminal_auth.write_result("local", "m", "")
+    adapter = await atom_adapter([], capabilities=FORMS)
+    session_id = (await adapter.new_session(str(workspace))).session_id
+    client.elicitation_answers = [DeclineElicitationResponse(action="decline")]
+    response = await _connect_prompt(adapter, session_id)
+    assert response.stop_reason == "end_turn"
+    assert CANCELLED in "".join(client.texts(AgentMessageChunk, session_id))
+    assert (user_dir / terminal_auth.RESULT_FILE).exists()
