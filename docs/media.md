@@ -5,6 +5,11 @@ as agent method arguments. For media created while CodeAct runs, use `show()`.
 
 ## Configure the model
 
+Agents: follow [nooa-connect](../skills/nooa-connect/SKILL.md), the canonical
+permission-first headless guide, before model configuration, network/media
+checks or registry writes. Bound samples and private user media separately.
+For guided human setup, [nooa connect](model-connect.md) chooses media formats,
+configures the reply limit and known context size, and tests the route.
 NOOA assumes models are text-only until configured. Set `media_inputs` in the
 model's registry entry or client constructor. Supported values are `image`,
 `audio`, `video`, and `pdf`. Omitted, null, or empty lists mean text-only.
@@ -37,7 +42,7 @@ and enable `image`. From a source checkout, run:
 uv run python examples/quickstart/13_multimodal.py --model vision
 ```
 
-This sends the bundled sample images to your provider and can cost money.
+This sends the bundled sample images to your provider.
 For a custom configuration file, add `--config /path/to/llm_config.yaml`.
 
 ## CodeAct and `show()`
@@ -125,28 +130,30 @@ case, use the shared assistant-response format described in the
 
 ## Connect checks and migration
 
-Make an offline, unsaved configuration plan:
+In the wizard, choose generated-sample checks or select formats manually.
+`--test-media-inputs image,pdf` sends sample attachments and enables formats
+that pass. Test the model on your own examples before relying on its answers. Wizard `--yes` confirms checks
+and saving. Audio/video checks currently run only for Chat. See
+[Connect media setup](model-connect.md#choose-media-inputs-during-setup).
+
+For focused diagnostics, use a media stage:
 
 ```sh
-uv run nooa connect your-model --stage plan --as vision \
+uv run nooa connect your-model --stage media --as vision \
   --endpoint https://gateway.example/v1 --api-style chat \
-  --api-key-env MODEL_KEY --media-inputs image,pdf --max-tokens 4096 > media-plan.json
+  --api-key-env MODEL_KEY --test-media-inputs image,pdf \
+  --max-tokens 4096 --budget-tokens 32768 > media-result.json
 ```
 
-Save separately with `--stage save --input media-plan.json --output llm_config.yaml`.
-Load it with `reload_registry(Path("llm_config.yaml"))` or set
-`NEMO_OO_LLM_CONFIG` to its absolute path. In the wizard, use explicit model/endpoint/API
-style with `--media-inputs image,pdf --no-probe --no-catalogue` to stay offline;
-`--no-probe` alone can still fetch catalogue metadata.
+This runs a text baseline and media checks without confirmation or automatic
+saving. Review passed, failed, and skipped checks, then save separately with
+`--stage save --input media-result.json --output llm_config.yaml`. Load the file
+with `reload_registry(Path("llm_config.yaml"))` or set `NEMO_OO_LLM_CONFIG` to
+its absolute path.
 
-With approval to spend and send generated samples, use `--stage media` with
-`--test-media-inputs image,pdf --max-tokens 4096 --budget-tokens 32768`
-instead of `--media-inputs`.
-This runs a text baseline and media checks, can incur charges, and has no consent
-prompt or automatic save. The token budget is an estimate; failed calls count.
-Wizard `--yes` approves checks and saving. Audio/video checks currently run only
-for Chat. Review passed, failed, and skipped checks before saving; see
-[Connect media setup](model-connect.md#choose-media-inputs-during-setup).
+For an unsaved proposal, use `--stage plan --media-inputs image,pdf` instead.
+In the wizard, `--no-probe` skips model checks but may fetch metadata; an exact
+model, endpoint, and API style plus `--no-catalogue` skips discovery too.
 
 For existing model entries, add the formats you use. Set `media_inputs: []`
 for text-only models to silence the missing-list warning.
