@@ -74,7 +74,8 @@ from nooa_atom.acp.listing import list_sessions, validate_workspace
 from nooa_atom.acp.protocol import INJECT_CAPABILITY, initialize_response, open_stdio
 from nooa_atom.acp.recover import COMMAND as RECOVER
 from nooa_atom.acp.recover import recover
-from nooa_atom.agent.slash_commands import RESERVED_COMMAND_NAMES
+from nooa_atom.agent.connect_command import CONNECT_FALLBACK
+from nooa_atom.agent.slash_commands import CONNECT, RESERVED_COMMAND_NAMES
 from nooa_atom.session.items import (
     CommandInfo,
     CommandsChangedUpdate,
@@ -126,10 +127,8 @@ INJECT_SOURCE = "acp:inject"
 _CANCELLED = object()  # a client request stopped by session/cancel
 _DISMISSED = object()  # the person declined or dismissed a local form
 
-_CONNECT_TEXT = (
-    "Connecting a model provider needs the terminal for now: run `nooa connect` in a "
-    "shell, then pick the new model alias here."
-)
+# Agents without the built-in /connect (it needs client forms) reply with its fallback.
+_CONNECT_TEXT = CONNECT_FALLBACK
 
 
 def _template_pattern(template: str) -> re.Pattern[str]:
@@ -1004,6 +1003,8 @@ class AtomACPAgent:
             else:
                 return None
             return await self._say(bridge, message)
+        if name == CONNECT.name:
+            return await self._run_host_command(session, bridge, name, raw_args)
         try:
             with _trace_scope(session):
                 result = await session.invoke_command(name, raw_args)
@@ -1033,6 +1034,25 @@ class AtomACPAgent:
             channel = "slash_commands" if "slash_commands" in channels else "user_messages"
             receipt = await session.submit(result.text, channel=channel, source=SOURCE)
             return await self._finish(session, bridge, receipt.item_id)
+        return await self._say(bridge, result.text)
+
+    async def _run_host_command(
+        self, session: Session, bridge: ACPEventBridge, name: str, raw_args: str
+    ) -> PromptResponse:
+        """Run a built-in host-side command (``/connect``) that Stop can end.
+
+        It asks the client with forms (the session's asker) and its reply is
+        shown, never sent to the agent. Stop cancels the whole command, its
+        pending form and any request it is waiting on.
+        """
+        epoch = self._ask_epochs.get(session.id, 0)
+        with _trace_scope(session):
+            result = await self._client_call(session.id, session.invoke_command(name, raw_args))
+        if result is _CANCELLED or not self._client_answer_is_current(session, bridge, epoch):
+            await bridge.flush()
+            return PromptResponse(stop_reason="cancelled")
+        if result is None:  # the command failed; _client_call logged it
+            return await self._say(bridge, f"/{name} failed; nothing written.")
         return await self._say(bridge, result.text)
 
     async def _pick_verbosity(self, session: Session, bridge: ACPEventBridge) -> PromptResponse:

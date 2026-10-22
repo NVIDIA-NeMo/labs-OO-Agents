@@ -139,3 +139,50 @@ async def test_the_asker_answers_cancel_when_stopped(make_adapter, workspace, cl
     adapter._cancel_client_calls(session_id)
     answer = await asyncio.wait_for(pending, 10)
     assert answer.action == "cancel" and answer.values == {}
+
+
+# ---- /connect: a host-side built-in that uses these forms -------------------
+
+
+async def test_connect_without_forms_replies_with_the_fallback(atom_adapter, workspace, client):
+    from nooa_atom.agent.connect_command import CONNECT_FALLBACK
+
+    adapter = await atom_adapter([])
+    session_id = (await adapter.new_session(str(workspace))).session_id
+    assert "connect" in {c.name for c in adapter.session(session_id).commands()}
+    response = await adapter.prompt(session_id, [text_block("/connect")])
+    assert response.stop_reason == "end_turn"
+    assert CONNECT_FALLBACK in "".join(client.texts(AgentMessageChunk, session_id))
+    assert adapter.session(session_id).info.reply_count == 0
+
+
+async def test_connect_asks_the_client_and_never_the_agent(
+    atom_adapter, workspace, client, monkeypatch
+):
+    from nooa_atom.agent.connect_command import CANCELLED
+
+    adapter = await atom_adapter([], capabilities=FORMS)
+    session_id = (await adapter.new_session(str(workspace))).session_id
+    client.elicitation_answers = [DeclineElicitationResponse(action="decline")]
+    response = await adapter.prompt(session_id, [text_block("/connect")])
+    assert response.stop_reason == "end_turn"
+    [request] = [entry for entry in client.log if entry[0] == "elicitation"]
+    assert list(request[2].requested_schema.properties) == ["provider"]
+    assert CANCELLED in "".join(client.texts(AgentMessageChunk, session_id))
+    assert adapter.session(session_id).info.reply_count == 0
+
+
+async def test_stop_ends_connect(atom_adapter, workspace, client):
+    adapter = await atom_adapter([], capabilities=FORMS)
+    session_id = (await adapter.new_session(str(workspace))).session_id
+    client.elicitation_gate = asyncio.Event()
+    client.elicitation_answers = [
+        AcceptElicitationResponse(action="accept", content={"provider": "nvidia"})
+    ]
+    prompt = asyncio.create_task(adapter.prompt(session_id, [text_block("/connect")]))
+    await asyncio.wait_for(client.elicitation_started.wait(), 10)
+    await adapter.cancel(session_id)
+    response = await asyncio.wait_for(prompt, 10)
+    assert response.stop_reason == "cancelled"
+    client.elicitation_gate.set()
+    assert len([entry for entry in client.log if entry[0] == "elicitation"]) == 1

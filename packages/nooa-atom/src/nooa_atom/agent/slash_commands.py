@@ -84,7 +84,25 @@ COMPACT = SlashCommand(
         "- Then show self.context_stats and say which tag range you collapsed."
     ),
 )
-BUILTIN_COMMANDS = {COMPACT.name: COMPACT}
+
+
+async def _connect(args: str = "") -> str:
+    """Connect a model provider (runs host-side with client forms)."""
+    from .connect_command import run_connect
+
+    return await run_connect(args)
+
+
+# Built-in commands that run host-side: the body is Python, run by the host
+# inside ``invoke_command`` (with the client's forms), and nothing is sent to
+# the agent.
+CONNECT = SlashCommand(
+    name="connect",
+    description="Connect a model provider and save it as a model alias.",
+    output_to_agent=False,
+    _method=_connect,
+)
+BUILTIN_COMMANDS = {COMPACT.name: COMPACT, CONNECT.name: CONNECT}
 
 
 def discover_markdown_commands(skills_dirs, reserved=RESERVED_COMMAND_NAMES):
