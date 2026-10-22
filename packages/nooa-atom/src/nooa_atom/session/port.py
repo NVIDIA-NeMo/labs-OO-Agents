@@ -162,8 +162,12 @@ class SessionPort:
 
     @hidden
     def check_child_name(self, name: str) -> None:
-        """Raise ``ValueError`` unless ``name`` is a valid name no open child of this session has."""
-        check_name(name, "child")
+        """Raise ``ValueError`` unless ``name`` is a valid name no open child of this session has.
+
+        Reserved names and this agent's channel names are refused too (``check_name``).
+        """
+        queues = getattr(getattr(self._session, "_agent", None), "queue_manager", None)
+        check_name(name, "child", queues.channels() if queues is not None else ())
         for info in self._registry.children(self._session.id):
             if info.name == name and info.status != "closed":
                 raise ValueError(

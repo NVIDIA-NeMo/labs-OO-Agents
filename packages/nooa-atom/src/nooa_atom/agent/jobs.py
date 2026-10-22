@@ -480,7 +480,7 @@ class JobsApi(Skill):
     @hidden
     def _claim(self, label: str, replace: bool) -> None:
         """Check ``label`` is free, first stopping its running job if ``replace``."""
-        check_name(label, "job")
+        check_name(label, "job", self._queues.channels())
         child = self._child_using(label)
         if child:
             raise ValueError(

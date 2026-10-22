@@ -20,6 +20,17 @@ def test_a_name_is_an_identifier_that_is_not_a_keyword():
             check_name(bad, "child")
 
 
+def test_channel_and_person_names_are_reserved():
+    for reserved in ("jobs", "delegates", "user", "user_messages", "system_messages"):
+        assert is_valid_name(reserved)  # an identifier, but refused by check_name
+        with pytest.raises(ValueError, match=f"name '{reserved}' is reserved: Waiting"):
+            check_name(reserved, "job")
+    # A queue-manager channel in use (a skill's 'mesh') is refused too.
+    with pytest.raises(ValueError, match="child name 'mesh' is reserved"):
+        check_name("mesh", "child", ["jobs", "mesh"])
+    assert check_name("mesh", "child") == "mesh"  # free when no such channel exists
+
+
 async def _tree(registry, root_options):
     root = await registry.create(root_options)
     mid = await registry.create(root.options.inherit(name="mid", kept=True), parent_id=root.id)
@@ -75,6 +86,12 @@ async def test_an_open_childs_name_is_taken_until_it_is_closed(registry, root_op
         port.check_child_name("mid")
     with pytest.raises(ValueError, match="is not valid"):
         port.check_child_name("ci-check")
+    for reserved in ("jobs", "delegates", "user_messages"):
+        with pytest.raises(ValueError, match=f"child name '{reserved}' is reserved"):
+            port.check_child_name(reserved)
+    root._agent.queue_manager.queue("mesh")  # a channel in use is refused as a name
+    with pytest.raises(ValueError, match="child name 'mesh' is reserved"):
+        port.check_child_name("mesh")
     mid._agent.session.check_child_name("mid")  # names are per session
     await registry.close_child(root, mid.id)
     port.check_child_name("mid")  # free again

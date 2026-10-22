@@ -194,6 +194,14 @@ async def test_labels_are_unique_among_running_jobs(agent):
     for bad in (" ", "ci-check", "class", "1st"):
         with pytest.raises(ValueError, match="is not valid: use a Python identifier"):
             await agent.jobs.run("true", label=bad)
+    for reserved in ("jobs", "delegates", "user", "user_messages", "system_messages"):
+        with pytest.raises(ValueError, match=f"job name '{reserved}' is reserved: Waiting"):
+            await agent.jobs.run("true", label=reserved)
+    agent.queue_manager.queue("mesh")  # a queue-manager channel in use
+    work = asyncio.sleep(0)
+    with pytest.raises(ValueError, match="job name 'mesh' is reserved"):
+        agent.jobs.spawn(work, label="mesh")
+    work.close()  # refused before it was started
     await agent.jobs.cancel("x")
     await agent.jobs.run("echo again", label="x")  # free once it stopped
     item = await _next(agent)
