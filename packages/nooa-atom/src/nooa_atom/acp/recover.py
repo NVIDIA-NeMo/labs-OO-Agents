@@ -20,8 +20,8 @@ from nooa_atom.session.store import SessionStore
 COMMAND = CommandInfo(
     name="recover",
     description=(
-        "Continue a session that is marked in use (for example after a crash) in a new "
-        "copy; the original is not changed. Without an argument, list those sessions."
+        "Continue a session marked in use in a new copy, leaving the original unchanged. "
+        "Without arguments, list those sessions."
     ),
     input_hint="[session id, id prefix or title]",
 )

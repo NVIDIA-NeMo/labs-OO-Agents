@@ -85,7 +85,7 @@ string, then pass that value using the callable's documented API:
 content
 EOF"""
 
-Use `doc(...)` to inspect the available command runner and how it accepts
+Use `print(doc(...))` to inspect the available command runner and how it accepts
 commands or standard input.'''
 
 

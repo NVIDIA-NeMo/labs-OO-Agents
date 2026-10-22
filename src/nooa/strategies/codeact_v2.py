@@ -98,7 +98,7 @@ class CodeActV2(CodeActStrategy):
             "# Python cell context",
             "# Already in scope inside python_cell(); state persists across cells.",
             "# Use these names directly; do not re-import or re-define them.",
-            "# Use doc(name) for details about any type or function.",
+            "# Use print(doc(name)) for details about any type or function.",
             "",
             *code,
         ]
@@ -233,7 +233,7 @@ Use Python for arithmetic, iteration, transforms, and batches rather than manual
 constructing large outputs. Define reusable helpers at the top of a cell. Existing
 methods on `self` may be called with `await` when async.
 
-If `self` exposes delegation, inspect its documentation with `doc(self.delegate)`.
+If `self` exposes delegation, inspect its documentation with `print(doc(self.delegate))`.
 Use bounded objectives when an independent context helps; run independent work
 with `asyncio.gather` and inspect each result. For single-shot extraction or
 classification, use a documented `@strategy(PredictStrategy())` helper.
