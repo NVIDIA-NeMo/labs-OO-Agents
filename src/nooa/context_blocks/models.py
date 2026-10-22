@@ -462,8 +462,8 @@ class ContextWindowStats(BaseModel):
         guidance = (
             "Compact history: "
             "self.events.collapse(start_tag, end_tag, summary_text=...); "
-            "see doc(self.events).\n"
-            "Add, remove, or edit context blocks: doc(self.context)."
+            "see print(doc(self.events)).\n"
+            "Add, remove, or edit context blocks: print(doc(self.context))."
         )
         if self.prompt_tokens is None:
             return "Context: awaiting first model response\n" + guidance

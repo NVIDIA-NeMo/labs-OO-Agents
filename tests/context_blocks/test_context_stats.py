@@ -384,8 +384,8 @@ class TestContextWindowStatsFormat:
             "  Context blocks: ~6,000 tokens — 5 blocks\n"
             "  Events:         ~18,000 tokens — 12 events\n"
             "Compact history: self.events.collapse(start_tag, end_tag, summary_text=...); "
-            "see doc(self.events).\n"
-            "Add, remove, or edit context blocks: doc(self.context)."
+            "see print(doc(self.events)).\n"
+            "Add, remove, or edit context blocks: print(doc(self.context))."
         )
         assert stats.format() == expected
         assert "self.events.collapse" in stats.format()

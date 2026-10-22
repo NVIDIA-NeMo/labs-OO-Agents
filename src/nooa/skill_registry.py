@@ -1305,7 +1305,7 @@ class SkillRegistry(Skill):
 
         if active_tools:
             lines.append(
-                "Active Skills (use via self.<attr>, docs via doc(self.<attr>),"
+                "Active Skills (use via self.<attr>, docs via print(doc(self.<attr>)),"
                 " deactivate via self.skills.deactivate(['name'])):"
             )
             for _name, attr, desc in active_tools:
