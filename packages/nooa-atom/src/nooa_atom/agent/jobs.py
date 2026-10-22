@@ -162,9 +162,13 @@ class JobUpdate(BaseModel):
     lines: Annotated[list[str], spec(max_length=20, max_string=500)] = Field(
         default_factory=list,
         description=(
-            "Output lines since the last update, without the newline: a throttled run"
-            " (stdout and stderr interleaved, unmarked) or tail"
+            "Output lines since the last update, without the newline: a throttled run's"
+            " stdout, or tail"
         ),
+    )
+    stderr_lines: Annotated[list[str], spec(max_length=20, max_string=500)] = Field(
+        default_factory=list,
+        description="A throttled run's stderr lines since the last update, without the newline",
     )
     values: Annotated[list[Any], spec(max_length=10, max_string=500)] = Field(
         default_factory=list,
@@ -197,6 +201,10 @@ class JobsLost(EventBase):
 _WAKE = object()  # throttle changed: re-evaluate batching
 _END = object()  # source exhausted
 _SKIP = object()  # collect(): nothing to deliver for this value
+
+
+class _StderrLine(str):
+    """A run's stderr line in a batch; delivered in ``JobUpdate.stderr_lines``."""
 
 
 def _strip_newline(line: str) -> str:
@@ -772,7 +780,8 @@ class JobsApi(Skill):
                 done[0] = event
                 return _SKIP
             tails[event.kind].write(event.text)
-            return _strip_newline(event.text)
+            line = _strip_newline(event.text)
+            return _StderrLine(line) if event.kind == "stderr" else line
 
         def finish() -> dict[str, Any]:
             return {
@@ -846,12 +855,18 @@ class JobsApi(Skill):
 
         def update(done: bool = False) -> JobUpdate:
             nonlocal batch, batch_chars, batch_started
+            batched: dict[str, list[Any]] = {into: batch}
+            if into == "lines":  # a run's stderr lines go to their own field
+                batched = {
+                    "lines": [v for v in batch if not isinstance(v, _StderrLine)],
+                    "stderr_lines": [str(v) for v in batch if isinstance(v, _StderrLine)],
+                }
             item = JobUpdate(
                 label=job.label,
                 path=job.path,
                 done=done,
                 error=failure[0] if done and failure else None,
-                **{into: batch},
+                **batched,
                 **(final if done else {}),
             )
             batch, batch_chars, batch_started = [], 0, None
@@ -955,8 +970,8 @@ class JobsApi(Skill):
         ``log_path=``: stdout and stderr are written there as lines arrive
         (interleaved; relative to the command's directory; overwritten), and
         the done update and ``JobInfo`` carry the path. With ``items``/``seconds`` it also sends progress while running:
-        ``JobUpdate.lines`` batches of output lines, stdout and stderr
-        interleaved as they arrive (see ``throttle``; a line is cut at 8,000
+        batches of output lines, ``JobUpdate.lines`` (stdout) and
+        ``JobUpdate.stderr_lines`` (see ``throttle``; a line is cut at 8,000
         chars); lines still batched when it ends arrive only in
         ``stdout``/``stderr``.
 

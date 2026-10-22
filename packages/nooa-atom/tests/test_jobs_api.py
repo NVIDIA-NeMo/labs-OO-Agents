@@ -88,6 +88,7 @@ async def test_run_delivers_a_labelled_shell_result(agent):
         "stdout",
         "stderr",
         "lines",
+        "stderr_lines",
         "values",
         "result",
         "log_path",
@@ -272,9 +273,9 @@ async def test_a_quiet_run_ends_with_one_done_update_holding_the_shell_result(ag
 async def test_run_with_progress_delivers_lines_then_its_result(agent):
     await agent.jobs.run("echo a; echo b >&2; echo c", label="s", items=1)
     updates, result = await _collect_run(agent)
-    assert all(len(u.lines) == 1 for u in updates)
-    lines = sorted(u.lines[0] for u in updates)
-    assert lines == ["a", "b", "c"]  # both streams, no trailing newline
+    assert all(len(u.lines) + len(u.stderr_lines) == 1 for u in updates)
+    assert [line for u in updates for line in u.lines] == ["a", "c"]  # stdout, no newline
+    assert [line for u in updates for line in u.stderr_lines] == ["b"]  # stderr apart
     assert result.label == "s" and result.returncode == 0
     assert result.stdout == "a\nc\n" and result.stderr == "b\n"
 
