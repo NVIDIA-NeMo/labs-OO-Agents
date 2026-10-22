@@ -95,7 +95,7 @@ await self.jobs.cancel("build")                               # kills the proces
 await self.jobs.run("make serve", label="srv", replace=True)  # restart a running job with that label
 ```
 
-- A `run`'s done update keeps only the last 20,000 chars of stdout and, separately, of stderr (after a `[... N chars omitted]` line); there is no log file. For more, have the command redirect to a file itself (`cmd > out.log 2>&1`) and read it.
+- A `run`'s done update keeps only the last 20,000 chars of stdout and, separately, of stderr (after a `[... N chars omitted]` line); for the full output pass `log_path=` (stdout and stderr written there as lines arrive, interleaved; relative to the command's directory; overwritten); the done update and `JobInfo` carry `log_path`.
 - Streams end with a done update carrying their last pending `lines`/`values` (or none); on an error only `error` is set; a cancelled job delivers nothing more. Jobs do not survive a restart: a resumed session gets one `JobsLost` event listing those that were running.
 - **Who uses what.** `self.jobs` is for the model's own background work. Skills that own a named channel or long-lived infrastructure (e.g. agent_mesh's `mesh` inbox pump, CI monitors) keep using `agent.queue_manager.queue(name, replace=True)` + `spawn(...)`, and call `agent.queue_manager.set_cancel_hint(name, "Stop a monitor: await self.<skill>.stop('<label>')")` if the model may stop them. Without a hint, `status()` shows the job but no cancel command.
 

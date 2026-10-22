@@ -77,7 +77,7 @@ async def test_run_delivers_a_labelled_shell_result(agent):
     assert item.path == "/root/t"
     assert item.returncode == 3 and item.stdout == "out\n"
     assert item.stderr == "err\n"
-    # No job-owned log file: the done update is the whole delivered output.
+    # No log file unless log_path= asks for one: the done update is the whole output.
     assert set(JobUpdate.model_fields) == {
         "label",
         "path",
@@ -90,8 +90,9 @@ async def test_run_delivers_a_labelled_shell_result(agent):
         "lines",
         "values",
         "result",
+        "log_path",
     }
-    assert not [name for name in type(agent.jobs.get("t")).model_fields if "log" in name]
+    assert item.log_path is None and agent.jobs.get("t").log_path is None
     assert agent.jobs.get("t").state == "done"
     assert agent.jobs.get("t").finished_at is not None
 
@@ -114,6 +115,36 @@ async def test_run_takes_stdin_and_cwd(agent, tmp_path):
     await agent.jobs.run("cat; pwd", label="stdin_job", stdin="hello\n", cwd="d")
     item = await _next(agent)
     assert item.stdout == f"hello\n{tmp_path / 'd'}\n"
+
+
+async def test_run_log_path_gets_the_full_output_and_keeps_the_exit_code(agent, tmp_path):
+    info = await agent.jobs.run(
+        "for i in $(seq 1 3000); do echo out line $i; echo err line $i >&2; done; exit 3",
+        label="noisy",
+        log_path="logs/noisy.log",
+    )
+    log = tmp_path / "logs" / "noisy.log"
+    assert info.log_path == str(log)
+    update = await _next(agent)
+    assert update.done and update.returncode == 3
+    assert update.log_path == str(log)
+    assert len(update.stdout) <= 20_000 + 200  # the in-memory tail is unchanged
+    text = log.read_text()
+    assert text.count("out line") == 3000 and text.count("err line") == 3000
+    assert agent.jobs.get("noisy").log_path == str(log)
+
+
+async def test_run_log_path_is_relative_to_the_commands_directory(agent, tmp_path):
+    (tmp_path / "sub").mkdir()
+    await agent.jobs.run("echo hi", label="here", cwd="sub", log_path="run.log")
+    update = await _next(agent)
+    assert update.log_path == str(tmp_path / "sub" / "run.log")
+    assert (tmp_path / "sub" / "run.log").read_text() == "hi\n"
+    await agent.jobs.run("echo again", label="here", cwd="sub", log_path="run.log")
+    await _next(agent)
+    assert (tmp_path / "sub" / "run.log").read_text() == "again\n"  # overwritten
+    await agent.jobs.run("echo none", label="plain")
+    assert (await _next(agent)).log_path is None
 
 
 async def test_run_does_not_block_the_shell(agent):

@@ -101,6 +101,9 @@ class JobInfo(BaseModel):
     payload: Any = Field(
         default=None, description="Value given to after()/every(); delivered as result/values"
     )
+    log_path: str | None = Field(
+        default=None, description="run with log_path=: the file getting its full output"
+    )
     started_at: str = Field(description="Start time (ISO, seconds)")
     finished_at: str | None = Field(default=None, description="End time, None while running")
     throttle: Throttle | None = Field(default=None, description="Current batching, None if off")
@@ -149,6 +152,10 @@ class JobUpdate(BaseModel):
     )
     stderr: Annotated[str, spec(max_string=2000)] = Field(
         default="", description="run, done update: the last 20,000 chars of stderr"
+    )
+    log_path: str | None = Field(
+        default=None,
+        description="run with log_path=, done update: the file with its full output",
     )
     lines: Annotated[list[str], spec(max_length=20, max_string=500)] = Field(
         default_factory=list,
@@ -215,6 +222,7 @@ class _Job:
         self.target = target
         self.description = description
         self.payload: Any = None
+        self.log_path: str | None = None  # run with log_path=: the full-output file
         self.id = uuid.uuid4().hex
         self.proc: asyncio.subprocess.Process | None = None  # set while a run command runs
         self.streaming = streaming
@@ -244,6 +252,7 @@ class _Job:
             target=self.target,
             description=self.description,
             payload=self.payload,
+            log_path=self.log_path,
             started_at=self.started_at,
             finished_at=self.finished_at,
             throttle=self.throttle,
@@ -424,8 +433,7 @@ class JobsApi(Skill):
 
     A ``run``'s output is capped at 20,000 chars per stream: the done
     update keeps the last 20,000 chars of stdout and, separately, of
-    stderr. If you need more, have the command redirect to a file itself
-    (``cmd > out.log 2>&1``), then read that file.
+    stderr. For the full output pass ``log_path=`` to ``run``.
 
     Any job's update starts the next turn; check ``u.label`` / ``u.done`` and
     return ``Waiting`` again if yours has not finished.
@@ -732,9 +740,14 @@ class JobsApi(Skill):
         timeout: float | None,
         cwd: str | Path | None,
         context: tuple[str, dict],
+        log: Any = None,
     ) -> AsyncIterator[JobUpdate]:
-        """Run one command; yield progress updates (if throttled), then the done update."""
-        # Per stream, the kept end of the output (in memory only; no log file).
+        """Run one command; yield progress updates (if throttled), then the done update.
+
+        With ``log`` (an open text file, from ``log_path=``) every line is also
+        written there as it arrives; the file is closed when the job ends.
+        """
+        # Per stream, the kept end of the output (in memory; the full output only with log_path=).
         tails = {
             kind: TruncatingStringIO(limit=_TAIL_CHARS, tail_chars=_TAIL_CHARS)
             for kind in ("stdout", "stderr")
@@ -742,8 +755,14 @@ class JobsApi(Skill):
         done = [StreamDone(kind="done", returncode=0, timed_out=False)]
 
         async def source() -> AsyncIterator[Any]:
-            async for event in self._lines(command, stdin, timeout, cwd, context, job):
-                yield event
+            try:
+                async for event in self._lines(command, stdin, timeout, cwd, context, job):
+                    if log is not None and isinstance(event, StreamEvent):
+                        log.write(event.text)
+                    yield event
+            finally:
+                if log is not None:
+                    log.close()
 
         def collect(event: Any) -> Any:
             """Keep the output tail; return the progress item to deliver, or ``_SKIP``."""
@@ -759,6 +778,7 @@ class JobsApi(Skill):
                 "timed_out": done[0].timed_out,
                 "stdout": tails["stdout"].getvalue(),
                 "stderr": tails["stderr"].getvalue(),
+                "log_path": job.log_path,
             }
 
         stream = self._stream_job(job, source(), into="lines", collect=collect, finish=finish)
@@ -918,6 +938,7 @@ class JobsApi(Skill):
         seconds: float | None = None,
         description: str = "",
         replace: bool = False,
+        log_path: str | Path | None = None,
     ) -> JobInfo:
         """Run a shell command in the background, in its own bash process.
 
@@ -928,15 +949,16 @@ class JobsApi(Skill):
         ``notification["jobs"]`` with ``returncode`` (124 on timeout),
         ``timed_out``, ``stdout`` and ``stderr``. ``stdout`` and ``stderr`` are
         each capped at 20,000 chars: only the last 20,000 of each stream are
-        kept, after a ``[... N chars omitted]`` line. For more, have the
-        command write to a file itself (``cmd > out.log 2>&1``) and read that
-        file. With ``items``/``seconds`` it also sends progress while running:
+        kept, after a ``[... N chars omitted]`` line. For the full output pass
+        ``log_path=``: stdout and stderr are written there as lines arrive
+        (interleaved; relative to the command's directory; overwritten), and
+        the done update and ``JobInfo`` carry the path. With ``items``/``seconds`` it also sends progress while running:
         ``JobUpdate.lines`` batches of output lines, stdout and stderr
         interleaved as they arrive (see ``throttle``; a line is cut at 8,000
         chars); lines still batched when it ends arrive only in
         ``stdout``/``stderr``.
 
-            await self.jobs.run("uv run pytest -q", label="tests")
+            await self.jobs.run("uv run pytest -q", label="tests", log_path="logs/tests.log")
             return_result(Waiting(explanation="tests running", on=["tests"]))
         """
         # Every argument is checked before _claim, which stops the old job on replace=True.
@@ -946,16 +968,27 @@ class JobsApi(Skill):
             raise TypeError(f"stdin must be a string or None, got {type(stdin).__name__}")
         if cwd is not None and not isinstance(cwd, str | Path):
             raise TypeError(f"cwd must be a str or Path, got {cwd!r}")
+        if log_path is not None and not isinstance(log_path, str | Path):
+            raise TypeError(f"log_path must be a str or Path, got {log_path!r}")
         if timeout is not None:
             _check_seconds(timeout)
         _check_description(description)
         throttle = _throttle(items, seconds)
         self._claim(label, replace)  # fail before the await
         context = await self._shell_context()
+        log = None
+        if log_path is not None:
+            base = Path(context[0]) if cwd is None else (Path(context[0]) / Path(cwd)).resolve()
+            resolved = (base / Path(log_path)).resolve()
+            resolved.parent.mkdir(parents=True, exist_ok=True)
+            # Line-buffered, so the file can be read while the job runs.
+            log = open(resolved, "w", encoding="utf-8", errors="replace", buffering=1)  # noqa: SIM115
         job = self._new_job(
             label, "run", throttle, target=cmd, description=description, replace=replace
         )
-        return self._start(job, self._run_job(job, cmd, stdin, timeout, cwd, context))
+        if log is not None:
+            job.log_path = log.name
+        return self._start(job, self._run_job(job, cmd, stdin, timeout, cwd, context, log))
 
     def spawn(
         self,
