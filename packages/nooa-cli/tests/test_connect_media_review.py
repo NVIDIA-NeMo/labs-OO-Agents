@@ -43,7 +43,12 @@ def terminal_menu(monkeypatch):
                     )
                     if not sent:
                         sent = True
-                        pipe.send_text(keys)
+                        pipe.send_text(
+                            "\x1b[B\r"
+                            if "How would you like to use the selected inputs?"
+                            in str(choice.message)
+                            else keys
+                        )
 
                 app.after_render += rendered
                 return app
@@ -324,10 +329,10 @@ def test_yes_skips_initial_menu_and_format_questions(monkeypatch, editing, expli
         (False, "\n", False),
         (False, "test\n", False),
         (False, "1\n", False),
-        (False, "manual\npdf\n", True),
-        (False, "2\npdf\n", True),
-        (True, "\n\n", True),
-        (True, "manual\n\n", True),
+        (False, "manual\npdf\nenable\n", True),
+        (False, "2\npdf\nenable\n", True),
+        (True, "\n\nenable\n", True),
+        (True, "manual\n\nenable\n", True),
         (True, "test\n", False),
         (True, "1\n", False),
     ],
@@ -473,9 +478,10 @@ def test_decision_image_wizard_token_mapping(monkeypatch, tmp_path, previous, ac
     "keys,action",
     [
         ("\r", "test"),
-        ("\x1b[B\r", "suggested"),
-        ("\x1b[B\x1b[B\r", "manual"),
-        ("\x1b[B\x1b[B\x1b[B\r", "none"),
+        ("\x1b[B\r", "test-all"),
+        ("\x1b[B\x1b[B\r", "suggested"),
+        ("\x1b[B\x1b[B\x1b[B\r", "manual"),
+        ("\x1b[B\x1b[B\x1b[B\x1b[B\r", "none"),
     ],
 )
 def test_listed_media_menu_requested_order_and_default(terminal_menu, monkeypatch, keys, action):
@@ -493,6 +499,7 @@ def test_listed_media_menu_requested_order_and_default(terminal_menu, monkeypatc
     assert accepted is True
     labels = [
         "Enable listed inputs with test",
+        "Test all media inputs",
         "Enable listed inputs without testing",
         "Select media inputs manually",
         "Turn media inputs off",
@@ -503,10 +510,18 @@ def test_listed_media_menu_requested_order_and_default(terminal_menu, monkeypatc
     )
     assert ">  1. Enable listed inputs with test" in initial
     assert "Keep current media" not in initial
-    assert state.test_media_inputs == (["image"] if action == "test" else None)
+    assert state.test_media_inputs == (
+        ["image"]
+        if action == "test"
+        else ["image", "audio", "video", "pdf"]
+        if action == "test-all"
+        else None
+    )
     assert (
         state.media_inputs
-        == {"test": [], "suggested": ["image"], "manual": ["video"], "none": []}[action]
+        == {"test": [], "test-all": [], "suggested": ["image"], "manual": ["video"], "none": []}[
+            action
+        ]
     )
 
 
@@ -516,9 +531,11 @@ def test_listed_media_menu_requested_order_and_default(terminal_menu, monkeypatc
         ("\n", "test"),
         ("1\n", "test"),
         ("test\n", "test"),
-        ("2\n", "suggested"),
-        ("3\n", "manual"),
-        ("4\n", "none"),
+        ("2\n", "test-all"),
+        ("test-all\n", "test-all"),
+        ("3\n", "suggested"),
+        ("4\nenable\n", "manual"),
+        ("5\n", "none"),
     ],
 )
 def test_listed_media_pipe_order_and_default(monkeypatch, answer, action):
@@ -540,8 +557,16 @@ def test_listed_media_pipe_order_and_default(monkeypatch, answer, action):
     result = CliRunner().invoke(choose, input=answer)
     assert result.exit_code == 0, result.output
     assert "1 (test): Enable listed inputs with test" in " ".join(result.output.split())
-    assert state.test_media_inputs == (["image"] if action == "test" else None)
+    assert state.test_media_inputs == (
+        ["image"]
+        if action == "test"
+        else ["image", "audio", "video", "pdf"]
+        if action == "test-all"
+        else None
+    )
     assert (
         state.media_inputs
-        == {"test": [], "suggested": ["image"], "manual": ["video"], "none": []}[action]
+        == {"test": [], "test-all": [], "suggested": ["image"], "manual": ["video"], "none": []}[
+            action
+        ]
     )

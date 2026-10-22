@@ -185,7 +185,10 @@ def test_normal_wizard_transcript(monkeypatch, tmp_path, columns, save):
 def test_choices_reach_actual_renderer(monkeypatch, columns, case):
     monkeypatch.setenv("TERM", "xterm-256color")
     monkeypatch.setattr(prompts.sys.stdin, "isatty", lambda: True)
+    from prompt_toolkit.application import Application
+
     original = ChoiceInput._create_application
+    original_run = Application.run
     screens = []
     options = {
         "provider": (
@@ -246,12 +249,38 @@ def test_choices_reach_actual_renderer(monkeypatch, columns, case):
                     )
                 if not sent:
                     sent = True
-                    pipe.send_text("\x1b[B\r")
+                    pipe.send_text(" \r" if case == "manual" else "\x1b[B\r")
+
+            app.after_render += rendered
+            return app
+
+        def checkbox_run(app, *args, **kwargs):
+            app = create_checkbox(app)
+            return original_run(app, *args, **kwargs)
+
+        def create_checkbox(app):
+            sent = False
+
+            def rendered(_):
+                nonlocal sent
+                screen = app.renderer.last_rendered_screen
+                if screen is not None:
+                    screens.append(
+                        "\n".join(
+                            "".join(row[x].char for x in sorted(row))
+                            for _, row in sorted(screen.data_buffer.items())
+                        )
+                    )
+                if not sent:
+                    sent = True
+                    pipe.send_text(" \r")
 
             app.after_render += rendered
             return app
 
         monkeypatch.setattr(ChoiceInput, "_create_application", create)
+        if case == "manual":
+            monkeypatch.setattr(Application, "run", checkbox_run)
         if case in options:
             text, values, default, labels = options[case]
             selected = prompts.prompt(text, choices=values, default=default, labels=labels)
@@ -264,7 +293,7 @@ def test_choices_reach_actual_renderer(monkeypatch, columns, case):
             assert prompts.review_media_inputs(["image"]) == "manual"
         else:
             assert prompts.choose_media_inputs() == ["image"]
-    assert screens and "Enter Continue" in screens[0]
+    assert screens and ("Enter Confirm" if case == "manual" else "Enter Continue") in screens[0]
     assert "→ to edit" not in screens[0] and "Enter to use" not in screens[0]
     assert all(len(line) <= columns for screen in screens for line in screen.splitlines())
     for token in ("recommended:", "highflag", "keep:", "test:"):
@@ -283,7 +312,10 @@ def test_choices_reach_actual_renderer(monkeypatch, columns, case):
         ):
             assert label in " ".join(screens[0].split())
     elif case == "manual":
-        assert "Text only" in screens[0] and "Image, Audio, Video, PDF" in screens[0]
+        assert "text only" in screens[0]
+        assert all(
+            label in screens[0] for label in ("Images", "Audio", "Video", "PDFs", "Space Toggle")
+        )
 
 
 def test_normal_mode_keeps_technical_reasoning_details_optional():

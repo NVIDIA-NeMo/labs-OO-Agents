@@ -347,36 +347,98 @@ def parse_media_inputs(value):
     )
 
 
-def choose_media_inputs(current=()):
-    """User-declared formats; no network or model metadata involved."""
-    if sys.stdin.isatty():
-        from itertools import combinations
+def choose_media_inputs(current=(), *, available=("image", "audio", "video", "pdf")):
+    """User-declared formats; checkboxes on TTY, comma-separated values in pipes."""
+    if not sys.stdin.isatty():
+        while True:
+            value = prompt(
+                "Enable media inputs manually (not tested; "
+                + ",".join(available)
+                + "; - to turn all off)",
+                default=",".join(current) or "-",
+            )
+            try:
+                parsed = parse_media_inputs(value)
+                if any(kind not in available for kind in parsed):
+                    raise ValueError("Choose only: " + ", ".join(available))
+                return parsed
+            except ValueError as exc:
+                view.note(str(exc), err=True)
 
-        formats = ("image", "audio", "video", "pdf")
-        values = [subset for size in range(5) for subset in combinations(formats, size)]
-        selected = labelled_choice(
-            "Choose media inputs without testing",
-            tuple(
-                (
-                    ",".join(subset) or "-",
-                    ", ".join("PDF" if kind == "pdf" else kind.capitalize() for kind in subset)
-                    or "Text only",
-                )
-                for subset in values
+    from prompt_toolkit.application import Application
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.layout import HSplit, Layout
+    from prompt_toolkit.output import ColorDepth
+    from prompt_toolkit.styles import Style
+    from prompt_toolkit.widgets import CheckboxList, Frame, Label
+
+    checks = CheckboxList(
+        values=[(kind, view.media_label(kind)) for kind in available],
+        default_values=[kind for kind in current if kind in available],
+    )
+    help_open = False
+
+    def toolbar():
+        text = (
+            "F1 Close help\nNone checked = text only\nSkip tests: restart with --no-probe\n"
+            "Manual setup: docs/model-configuration.md\nAgent workflow: nooa-connect\n"
+            if help_open
+            else "None checked = text only\n"
+        ) + "↑↓ Move · Space Toggle · Enter Confirm\nCtrl-C Cancel · F1 Help"
+        width = max(8, view.shutil.get_terminal_size((80, 24)).columns - 2)
+        return "\n".join(
+            part
+            for line in text.splitlines()
+            for part in view.textwrap.wrap(line, width=width, break_on_hyphens=False)
+        )
+
+    bindings = KeyBindings()
+
+    @bindings.add("enter", eager=True)
+    def accept(event):
+        selected = checks.current_values
+        # Retain the order of existing permissions, then append newly checked rows.
+        event.app.exit(
+            result=[kind for kind in current if kind in selected]
+            + [kind for kind in available if kind in selected and kind not in current]
+        )
+
+    @bindings.add("c-c")
+    def cancel(event):
+        event.app.exit(exception=KeyboardInterrupt())
+
+    @bindings.add("f1")
+    def toggle_help(event):
+        nonlocal help_open
+        help_open = not help_open
+        event.app.invalidate()
+
+    app = Application(
+        layout=Layout(
+            HSplit(
+                [
+                    Frame(checks, title="Choose media inputs"),
+                    Label(toolbar),
+                ]
             ),
-            default=",".join(kind for kind in formats if kind in current) or "-",
-        )
-        parsed = parse_media_inputs(selected)
-        return list(current) if set(parsed) == set(current) else parsed
-    while True:
-        value = prompt(
-            "Enable media inputs manually (not tested; image,audio,video,pdf; - to turn all off)",
-            default=",".join(current) or "-",
-        )
-        try:
-            return parse_media_inputs(value)
-        except ValueError as exc:
-            view.note(str(exc), err=True)
+            focused_element=checks,
+        ),
+        key_bindings=bindings,
+        style=Style.from_dict({})
+        if "NO_COLOR" in os.environ
+        else Style.from_dict(
+            {
+                "checkbox-selected": "ansicyan bold",
+                "frame.border": "ansibrightblack",
+            }
+        ),
+        color_depth=ColorDepth.DEPTH_1_BIT if "NO_COLOR" in os.environ else None,
+        full_screen=False,
+    )
+    try:
+        return app.run()
+    except (EOFError, KeyboardInterrupt):
+        raise click.Abort() from None
 
 
 def choice_label(value):

@@ -54,9 +54,16 @@ def test_explicit_suggestion_review_preserves_or_changes_only_on_choice(
     seen = []
 
     def choose(label, options, *, default):
+        if label == "How would you like to use the selected inputs?":
+            assert default == "test"
+            assert dict(options) == {
+                "test": "Test selected inputs",
+                "enable": "Enable without testing",
+            }
+            return "enable"
         seen.append(options)
         assert default == "test"
-        assert list(dict(options)) == ["test", "suggested", "manual", "none"]
+        assert list(dict(options)) == ["test", "test-all", "suggested", "manual", "none"]
         assert dict(options)["suggested"] == "Enable listed inputs without testing"
         return action
 

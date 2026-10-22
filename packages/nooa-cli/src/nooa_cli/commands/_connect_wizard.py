@@ -1001,6 +1001,58 @@ def public_models_for_setup(state: WizardState):
     return asyncio.run(connect.catalogue())
 
 
+def usable_server_metadata(state: WizardState) -> bool:
+    """Exact allowlisted route facts, not an ID, empty containers or neighbours."""
+    from nooa.unifiedllm.connect._server_details import listing_facts, positive_integer
+
+    selected = state.selected_endpoint_model or {}
+    if state.model and selected.get("id") == state.model:
+        facts = listing_facts(selected)
+        for key, value in facts.items():
+            if key == "architecture":
+                if any(value.get(field) for field in ("input_modalities", "output_modalities")):
+                    return True
+            elif key != "id" and value:
+                return True
+    for record in state.server_details.records if state.server_details else ():
+        if record.get("schema") == "openrouter.fallback" or record.get("id") != state.model:
+            continue
+        facts = record.get("facts") or {}
+        if any(
+            positive_integer(facts.get(key))
+            for key in (
+                "max_input_tokens",
+                "max_output_tokens",
+                "context_length",
+                "context_window",
+            )
+        ):
+            return True
+        if any(
+            isinstance(facts.get(key), bool)
+            for key in (
+                "supports_vision",
+                "supports_function_calling",
+                "supports_reasoning",
+                "supports_parallel_function_calling",
+                "supports_system_messages",
+                "supports_response_schema",
+                "supports_prompt_caching",
+                "supports_audio_input",
+                "supports_audio_output",
+                "supports_web_search",
+            )
+        ):
+            return True
+        if (
+            facts.get("mode")
+            or facts.get("supported_reasoning_efforts")
+            or facts.get("supported_openai_params")
+        ):
+            return True
+    return False
+
+
 def prepare_metadata(state: WizardState) -> bool:
     """Fetch allowed metadata before media choice, without settings prompts."""
     state.metadata_prepared = True
@@ -1080,7 +1132,12 @@ def prepare_metadata(state: WizardState) -> bool:
             if len(matches) == 1:
                 state.candidate = matches[0]
             else:
-                if not state.yes and models and not state.catalogue_model:
+                if (
+                    not state.yes
+                    and models
+                    and not state.catalogue_model
+                    and not usable_server_metadata(state)
+                ):
                     selected = prompts.prompt(
                         "Explicit OpenRouter match (blank continues without details)",
                         default="",
@@ -1166,7 +1223,7 @@ def prepare_metadata(state: WizardState) -> bool:
             # Never auto-select a fuzzy guess; only offer it for confirmation.
             fuzzy = (
                 []
-                if state.yes or state.catalogue_model
+                if state.yes or state.catalogue_model or usable_server_metadata(state)
                 else connect.fuzzy_match_models(state.model, models)
             )
             if fuzzy:
@@ -1245,10 +1302,7 @@ def show_model_metadata(state: WizardState):
     view.section("Model details")
     rows = [("Model", state.model)]
     records = state.server_details.records if state.server_details else ()
-    server_facts = any(
-        record.get("schema") != "openrouter.fallback" and len(record.get("facts") or {}) > 1
-        for record in records
-    ) or any(key != "id" for key in endpoint)
+    server_facts = usable_server_metadata(state)
     if state.edited_settings:
         rows.append(("Source", "Your edits"))
     elif server_facts:
@@ -1287,7 +1341,11 @@ def show_model_metadata(state: WizardState):
             )
             break
     for key, label in (("display_name", "Name"), ("description", "Description")):
-        value = endpoint.get(key) or model.get(key)
+        value = (
+            endpoint.get(key)
+            or (endpoint.get("name") if key == "display_name" else None)
+            or model.get(key)
+        )
         if value:
             rows.append((label, value))
     outputs = (endpoint.get("architecture") or {}).get("output_modalities") or endpoint.get(
@@ -1297,6 +1355,23 @@ def show_model_metadata(state: WizardState):
         endpoint.get(field) == "decision" for field in ("model_type", "client_type")
     ):
         rows.append(("Model type", "Decision"))
+    elif endpoint.get("model_type") or endpoint.get("client_type"):
+        rows.append(("Model type", endpoint.get("model_type") or endpoint.get("client_type")))
+    for record in records:
+        if record.get("schema") != "litellm.model_group.info" or record.get("id") != state.model:
+            continue
+        facts = record.get("facts") or {}
+        for key, label in (
+            ("supports_vision", "Vision listed"),
+            ("supports_function_calling", "Tools listed"),
+            ("supports_reasoning", "Reasoning listed"),
+        ):
+            if isinstance(facts.get(key), bool):
+                rows.append((label, "Yes" if facts[key] else "No"))
+        if facts.get("supported_reasoning_efforts"):
+            rows.append(
+                ("Reasoning efforts listed", ", ".join(facts["supported_reasoning_efforts"]))
+            )
     interfaces = endpoint.get("supported_interfaces") or []
     if interfaces:
         rows.append(
@@ -1420,6 +1495,40 @@ def reject_decision_media(state: WizardState) -> None:
             raise click.UsageError(str(exc)) from None
 
 
+def select_manual_media(state: WizardState, previous, *, available=None):
+    """Plan explicitly selected tests; selection alone never grants new permissions."""
+    selected = (
+        prompts.choose_media_inputs(previous, available=available)
+        if available is not None
+        else prompts.choose_media_inputs(previous)
+    )
+    state.test_media_inputs = None
+    state.inherit_media_inputs = False
+    state.media_inputs = selected
+    if not selected:
+        return
+    report = connect.advertised_media_suggestions(
+        {"id": state.model, "input_modalities": selected},
+        api_style=state.api_style,
+        decision_image_transport=state.decision_image_transport or "json",
+        typesafe_danger_zone_images=state.typesafe_danger_zone_images,
+    )
+    for kind, reason in report["unavailable_checks"].items():
+        view.fields([(view.media_label(kind) + " test", reason)])
+    can_test = not state.no_probe and state.approval == "all" and bool(report["checkable"])
+    if not can_test:
+        return
+    action = prompts.labelled_choice(
+        "How would you like to use the selected inputs?",
+        (("test", "Test selected inputs"), ("enable", "Enable without testing")),
+        default="test",
+    )
+    if action == "test":
+        state.test_media_inputs = list(selected)
+        state.media_inputs = list(previous)
+        state.inherit_media_inputs = True
+
+
 def configure_media_inputs(state: WizardState) -> bool:
     """Declaration belongs to this connection, not optional published metadata."""
     from nooa.unifiedllm.media_inputs import validate_media_inputs
@@ -1521,12 +1630,12 @@ def configure_media_inputs(state: WizardState) -> bool:
         return True
     if state.test_media_inputs is not None:
         state.test_media_inputs = prompts.parse_media_inputs(state.test_media_inputs)
-    elif not state.yes and state.approval == "all":
+    elif not state.yes and not state.no_probe and state.approval == "all":
         mode = prompts.choose_media_mode(editing=bool(state.editing))
         if mode == "test":
             state.test_media_inputs = ["image", "audio", "video", "pdf"]
         else:
-            state.media_inputs = prompts.choose_media_inputs(previous)
+            select_manual_media(state, previous)
             return True
     if state.test_media_inputs:
         # Retesting is evidence collection, not permission revocation.
@@ -1538,7 +1647,10 @@ def configure_media_inputs(state: WizardState) -> bool:
             view.line(scrub_setup(state, "Media tests: " + ", ".join(state.test_media_inputs)))
     else:
         state.inherit_media_inputs = bool(state.yes)
-        state.media_inputs = list(previous) if state.yes else prompts.choose_media_inputs(previous)
+        if state.yes:
+            state.media_inputs = list(previous)
+        else:
+            select_manual_media(state, previous)
     return True
 
 
@@ -1968,7 +2080,7 @@ def save_model(state: WizardState) -> bool:
             view.line(
                 scrub_setup(
                     state,
-                    "Keep these settings, or choose another model or API format to try the unavailable inputs.",
+                    "Unavailable inputs were not tested on this connection. Keep these settings, or enable inputs manually as unverified.",
                 ),
                 dim=True,
             )
@@ -1981,7 +2093,12 @@ def save_model(state: WizardState) -> bool:
                 fg="yellow",
             )
             state.result.entry["media_inputs"] = prompts.choose_media_inputs(
-                state.result.entry["media_inputs"]
+                state.result.entry["media_inputs"],
+                **(
+                    {"available": ("image",)}
+                    if state.api_style in connect.DECISION_API_STYLES
+                    else {}
+                ),
             )
     if tested_media_inputs != state.result.entry.get("media_inputs", []):
         view.media_settings(state.result.entry)
@@ -2254,6 +2371,13 @@ def show_guided_proposal(state: WizardState, *, deferred_style=False, updated=Fa
         if state.api_style in connect.DECISION_API_STYLES
         else ("image", "audio", "video", "pdf")
     )
+    selected_report = connect.advertised_media_suggestions(
+        {"id": state.model, "input_modalities": list(selected)},
+        api_style=state.api_style,
+        decision_image_transport=state.decision_image_transport or "json",
+        typesafe_danger_zone_images=state.typesafe_danger_zone_images,
+    )
+    unavailable = selected_report["unavailable_checks"]
     media_rows = []
     for kind in kinds:
         value = (
@@ -2265,8 +2389,12 @@ def show_guided_proposal(state: WizardState, *, deferred_style=False, updated=Fa
             if kind in enabled
             else "Off"
         )
+        if kind in unavailable:
+            value = "Enabled; test unavailable" if kind in enabled else "Off; test unavailable"
         media_rows.append((view.media_label(kind), value))
     view.fields(scrub_setup(state, media_rows))
+    for kind, reason in unavailable.items():
+        view.fields(scrub_setup(state, [(view.media_label(kind) + " test", reason)]))
     view.section("Tests")
     if state.no_probe or state.probe == "none":
         view.fields(scrub_setup(state, [("Status", "Off")]))

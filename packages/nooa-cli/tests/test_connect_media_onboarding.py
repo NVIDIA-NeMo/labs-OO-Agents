@@ -865,7 +865,9 @@ def test_test_all_boolean_access_summary_and_retained_permissions(monkeypatch, t
         )
         assert f"✓ {kind}" not in output and f"{kind} input: Failed" not in output
     assert "Not available in this test: audio, video" in output
-    assert "Keep these settings" in output and "choose another model or API" in output
+    assert "Keep these settings" in output and "enable inputs manually as unverified" in output
+    assert "Unavailable inputs were not tested on this connection" in output
+    assert "choose another model or API" not in output
     assert "Review media inputs" not in output
     assert "Wrong answer" not in output and "understanding not confirmed" not in output
     expected = previous + ["image", "pdf"]

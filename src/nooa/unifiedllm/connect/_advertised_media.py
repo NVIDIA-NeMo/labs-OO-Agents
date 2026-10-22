@@ -107,7 +107,7 @@ def advertised_media_suggestions(
             )
         elif api_style in {"anthropic", "responses"} and kind in {"audio", "video"}:
             unavailable[kind] = (
-                "Audio/video testing isn't available for this API format. Use Chat to test these inputs, or choose them without testing."
+                "Audio/video testing is not implemented for this connection. Inputs enabled without testing remain unverified."
             )
         elif (
             api_style == "systemone"
