@@ -462,6 +462,7 @@ class ContextWindowStats(BaseModel):
         guidance = (
             "Compact history: "
             "self.events.collapse(start_tag, end_tag, summary_text=...); "
+            'a tag is the N shown as <sys tag="N"> in your history; '
             "see print(doc(self.events)).\n"
             "Add, remove, or edit context blocks: print(doc(self.context))."
         )
