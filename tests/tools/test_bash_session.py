@@ -153,6 +153,27 @@ class TestPublicStateHelpers:
         out, _, _ = await session.run('pwd; echo "$SNAP_VAR"')
         assert out.splitlines() == [str(tmp_path / "sub"), "a b=c"]
 
+    async def test_snapshot_reads_a_large_environment_whole(self, session, tmp_path):
+        # Over 40 KB of env: its base64 is far past MAX_OUTPUT_CHARS, which a
+        # capped read would cut (and then decode to garbage or fail).
+        (tmp_path / "sub").mkdir()
+        await session.run('cd sub; export BIG_VAR="$(head -c 45000 /dev/zero | tr "\\0" x)"')
+        snap = await session.snapshot_cwd_env()
+        assert snap is not None
+        cwd, env = snap
+        assert cwd == str(tmp_path / "sub")
+        assert env["BIG_VAR"] == "x" * 45000
+        assert "PATH" in env
+
+    async def test_snapshot_is_none_when_the_capture_is_corrupt(self, session, monkeypatch):
+        async def cut(command, timeout, *, bounded=True):
+            # A cut blob that a lenient decode still accepts (non-base64 chars
+            # are dropped) and turns into garbage after "PATH=/bin".
+            return "/somewhere\nUEFUSD0vYmlu<truncated-output-x>", "", 0, False
+
+        monkeypatch.setattr(session, "_run_unlocked", cut)
+        assert await session.snapshot_cwd_env() is None  # never a wrong environment
+
     async def test_busy_while_a_command_runs_and_no_snapshot_then(self, session):
         import asyncio
 

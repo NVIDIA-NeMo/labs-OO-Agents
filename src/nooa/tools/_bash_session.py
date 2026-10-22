@@ -402,8 +402,12 @@ class BashSession:
             return None
         try:
             async with self._lock:
+                # Uncapped: a large environment (HPC modules) is far over
+                # MAX_OUTPUT_CHARS, and a cut base64 blob decodes to garbage.
                 out, _err, code, timed_out = await self._run_unlocked(
-                    'printf "%s\\n" "$PWD"; env -0 | base64 | tr -d "\\n"', timeout
+                    'printf "%s\\n" "$PWD"; env -0 | base64 | tr -d "\\n"',
+                    timeout,
+                    bounded=False,
                 )
         except Exception:
             return None
@@ -411,8 +415,10 @@ class BashSession:
             return None
         first, _, encoded = out.partition("\n")
         try:
-            raw = base64.b64decode(encoded.strip())
-        except ValueError:
+            # validate=True: anything but a clean base64 blob means the capture
+            # is incomplete or corrupt; the caller falls back rather than use it.
+            raw = base64.b64decode(encoded.strip(), validate=True)
+        except ValueError:  # binascii.Error
             return None
         env: dict[str, str] = {}
         for entry in raw.split(b"\0"):
@@ -420,14 +426,18 @@ class BashSession:
             if sep and key:
                 env[key.decode(errors="replace")] = value.decode(errors="replace")
         cwd = first.strip()
-        if not cwd or not env:
+        if not cwd.startswith("/") or not env:
             return None
         return cwd, env
 
-    async def _run_unlocked(self, command: str, timeout: float) -> tuple[str, str, int, bool]:
+    async def _run_unlocked(
+        self, command: str, timeout: float, *, bounded: bool = True
+    ) -> tuple[str, str, int, bool]:
         """Actual run implementation (caller must hold self._lock).
 
-        Returns (stdout, stderr, exit_code, timed_out).
+        Returns (stdout, stderr, exit_code, timed_out). With ``bounded=False``
+        the output is returned whole instead of cut to ``MAX_OUTPUT_CHARS``
+        (for internal reads such as ``snapshot_cwd_env`` that must be complete).
         """
         if not self._ready:
             await self.start()
@@ -459,7 +469,8 @@ class BashSession:
                     int(line) for line in ctrl_lines[2:] if line.strip().isdigit()
                 )
 
-        stdout, stderr = _bounded(stdout), _bounded(stderr)
+        if bounded:
+            stdout, stderr = _bounded(stdout), _bounded(stderr)
 
         if timed_out:
             exit_code = 124
