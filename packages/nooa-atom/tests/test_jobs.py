@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""``self.jobs`` on the Atom agent: Waiting on ``jobs:<label>`` and the model-facing docs."""
+"""``self.jobs`` on the Atom agent: Waiting on a job's label or path, and the model-facing docs."""
 
 import asyncio
 
@@ -39,13 +39,14 @@ async def test_the_agent_has_jobs_and_no_producers(agent):
 
 async def test_waiting_on_a_running_job_by_label_is_accepted(agent):
     await agent.jobs.run("sleep 30", label="tests")
-    _check(agent, "jobs:tests")
+    _check(agent, "tests")
+    _check(agent, "/root/tests")
     _check(agent, "jobs")
-    with pytest.raises(WaitingTargetNotRunning, match="jobs:other"):
-        _check(agent, "jobs:other")
+    with pytest.raises(WaitingTargetNotRunning, match="'other'"):
+        _check(agent, "other")
     await agent.jobs.cancel("tests")
     with pytest.raises(WaitingTargetNotRunning):
-        _check(agent, "jobs:tests")
+        _check(agent, "tests")
 
 
 async def test_waiting_on_a_finished_job_with_its_result_buffered_is_accepted(agent):
@@ -56,13 +57,13 @@ async def test_waiting_on_a_finished_job_with_its_result_buffered_is_accepted(ag
             break
         await asyncio.sleep(0.02)
     assert agent.queue_manager.running_handles() == []
-    _check(agent, "jobs:quick")
+    _check(agent, "quick")
     with pytest.raises(WaitingTargetNotRunning):
-        _check(agent, "jobs:other")
+        _check(agent, "other")
     item = channel.drain()[0]
     assert (isinstance(item, JobUpdate) and item.done) and item.items[0].stdout == "done\n"
     with pytest.raises(WaitingTargetNotRunning):
-        _check(agent, "jobs:quick")
+        _check(agent, "quick")
 
 
 async def test_jobs_use_the_agent_shell_directory_and_exports(agent, tmp_path):

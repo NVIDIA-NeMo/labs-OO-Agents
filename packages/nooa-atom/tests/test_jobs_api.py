@@ -69,8 +69,10 @@ async def _until(predicate, timeout: float = TIMEOUT) -> None:
 async def test_run_delivers_a_labelled_shell_result_and_a_log(agent):
     info = await agent.jobs.run("echo out; echo err >&2; exit 3", label="t")
     assert info.state == "running" and info.kind == "run"
+    assert info.path == "/root/t"  # outside a session tree the agent is /root
     item = await _next(agent)
     assert (isinstance(item, JobUpdate) and item.done) and item.label == "t"
+    assert item.path == "/root/t"
     assert isinstance(item.items[0], ShellResult)
     assert item.items[0].returncode == 3 and item.items[0].stdout == "out\n"
     assert item.items[0].stderr == "err\n"
@@ -95,7 +97,7 @@ async def test_run_starts_in_the_shell_directory_with_its_exports(agent, tmp_pat
 
 async def test_run_takes_stdin_and_cwd(agent, tmp_path):
     (tmp_path / "d").mkdir()
-    await agent.jobs.run("cat; pwd", label="in", stdin="hello\n", cwd="d")
+    await agent.jobs.run("cat; pwd", label="stdin_job", stdin="hello\n", cwd="d")
     item = await _next(agent)
     assert item.items[0].stdout == f"hello\n{tmp_path / 'd'}\n"
 
@@ -162,8 +164,9 @@ async def test_labels_are_unique_among_running_jobs(agent):
         await agent.jobs.run("true", label="x")
     with pytest.raises(ValueError, match="already running"):
         agent.jobs.spawn(asyncio.sleep(0), label="x")
-    with pytest.raises(ValueError, match="label"):
-        await agent.jobs.run("true", label=" ")
+    for bad in (" ", "ci-check", "class", "1st"):
+        with pytest.raises(ValueError, match="is not valid: use a Python identifier"):
+            await agent.jobs.run("true", label=bad)
     await agent.jobs.cancel("x")
     await agent.jobs.run("echo again", label="x")  # free once it stopped
     item = await _next(agent)
@@ -326,7 +329,7 @@ async def test_status_names_self_jobs_not_the_queue_manager(agent):
     await agent.jobs.run("sleep 5", label="build")
     status = agent.queue_manager.status()
     assert "build" in status
-    assert status.endswith("\nCancel a job: await self.jobs.cancel('<label>')")
+    assert status.endswith("\nCancel a job: await self.jobs.cancel('<name>')")
     assert "queue_manager" not in status
 
 
@@ -448,9 +451,9 @@ async def test_after_delivers_its_payload_once_none_by_default(agent):
     assert time.monotonic() - started >= 0.2
     assert agent.jobs.get("timer").state == "done"
     task = "check CI on PR #462 and report"
-    assert agent.jobs.after(0.05, label="check-ci", payload=task).payload == task
+    assert agent.jobs.after(0.05, label="check_ci", payload=task).payload == task
     assert (await _next(agent)).items == [task]
-    assert agent.jobs.get("check-ci").payload == task
+    assert agent.jobs.get("check_ci").payload == task
     # Other kinds keep payload None.
     assert agent.jobs.every(30, label="e").payload is None
     assert (await agent.jobs.run("true", label="r")).payload is None
@@ -609,8 +612,8 @@ async def test_the_status_line_shows_label_state_and_description_or_target(agent
     agent.jobs.after(300, label="timer")
     await agent.jobs.run("sleep 30 # " + "y" * 300, label="noisy")
     status = agent.queue_manager.status()
-    assert re.search(r"  • tests · job · running \d+s · full run before pushing", status)
-    assert re.search(r"  • timer · job · running \d+s · after 300s", status)
+    assert re.search(r"  • /root/tests · job · running \d+s · full run before pushing", status)
+    assert re.search(r"  • /root/timer · job · running \d+s · after 300s", status)
     noisy = next(line for line in status.splitlines() if "noisy" in line)
     assert noisy.endswith("…") and len(noisy) <= 4 + 100
     assert "→ jobs" not in status

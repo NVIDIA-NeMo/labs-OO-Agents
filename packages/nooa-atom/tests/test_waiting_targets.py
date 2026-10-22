@@ -111,13 +111,13 @@ async def test_waiting_on_delegates_is_accepted_with_a_running_child(tmp_path, s
         sessions_dir,
         [
             cell(
-                "self.v.child = await self.spawn('Worker', 'fix it')\n"
+                "self.v.child = await self.spawn('Worker', 'fix it', name='worker')\n"
                 "return_result(Waiting(explanation='w', on=['delegates']))"
             ),
             cell("[item] = notification['delegates']\n" + DONE),
         ],
         {
-            "Worker": [
+            "worker": [
                 cell(
                     "await asyncio.sleep(0.2)\n"
                     "return_result(Done(explanation='fixed', result=TaskResult("
@@ -153,7 +153,7 @@ async def test_a_finished_or_cancelled_job_is_rejected(tmp_path, sessions_dir):
                 "await asyncio.sleep(0.05)\n"
                 "assert done_job.state != 'running', done_job.state\n"
                 "self.queue_manager.get_channel('ci').flush()\n"
-                "return_result(Waiting(explanation='w', on=['jobs:ci-1']))"
+                "return_result(Waiting(explanation='w', on=['ci']))"
             ),
             cell(
                 "self.queue_manager.queue('build')\n"
@@ -168,7 +168,7 @@ async def test_a_finished_or_cancelled_job_is_rejected(tmp_path, sessions_dir):
     )
     # The strategy allows three rejected results per turn; this uses two.
     assert len(calls) == 3
-    assert "Waiting on 'jobs:ci-1', but no job labelled 'ci-1' is running: it may" in calls[1]
+    assert "Waiting on 'ci', but no job labelled 'ci' is running: it may" in calls[1]
     assert "Waiting on 'build', but no job labelled 'build' is running" in calls[2]
     for text in calls[1:]:
         assert HINT in text

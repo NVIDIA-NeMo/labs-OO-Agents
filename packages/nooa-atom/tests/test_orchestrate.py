@@ -21,7 +21,7 @@ TIMEOUT = 30
 ORCHESTRATOR_TEXT = (
     "You are the orchestrator. You decide how the work is split and who does",
     "Write the requirements: how success will be measured.",
-    "await self.spawn(description, todo)",
+    "await self.spawn(description, todo, name=...)",
     "task's requirements and its rules or constraints in it.",
     "run one editing child at a time",
     "a ``ChildMessage`` (``item.text``) is a progress",
@@ -183,7 +183,7 @@ async def test_an_orchestrating_root_leaves_children_open_for_the_host_to_close(
         cell(
             "todo = self.todo.add('Fix parse()', description='Goal: fix it. Check: pytest')\n"
             "self.v.todo_id = todo.id\n"
-            "self.v.child = await self.spawn('Fix parser', todo)\n"
+            "self.v.child = await self.spawn('fix_parser', todo, name='fix_parser')\n"
             "return_result(Waiting(explanation='worker running', on=['delegates']))"
         ),
         cell(
@@ -200,7 +200,7 @@ async def test_an_orchestrating_root_leaves_children_open_for_the_host_to_close(
             "assert ref.status != 'closed', ref.status\n" + RESULT
         ),
     ]
-    models.scripts["Fix parser"] = [
+    models.scripts["fix_parser"] = [
         cell(
             "return_result(Done(explanation='first try', result=TaskResult("
             "solution_description='s', evidence='e', how_to_verify='h', report='first try')))"
@@ -234,9 +234,9 @@ async def test_an_orchestrating_root_leaves_children_open_for_the_host_to_close(
     store = SessionStore(sessions_root(options.workspace, sessions_dir))
     assert store.get(run.session_id).turn_method == "handle_orchestrate"
     [child] = [info for info in store.list(roots_only=False) if info.parent_id == run.session_id]
-    assert (child.name, child.turn_method, child.retained) == ("Fix parser", "handle_work", True)
+    assert (child.name, child.turn_method, child.retained) == ("fix_parser", "handle_work", True)
     root_prompt = str(models.llms[None].calls[0].messages)
-    child_prompts = str([call.messages for call in models.llms["Fix parser"].calls])
+    child_prompts = str([call.messages for call in models.llms["fix_parser"].calls])
     assert ORCHESTRATOR_TEXT[0] in root_prompt
     assert ORCHESTRATOR_TEXT[0] not in child_prompts
     # The worker got the Todo as its prompt, then the feedback.
@@ -252,9 +252,9 @@ async def test_an_orchestrating_roots_one_shot_children_run_handle_work(tmp_path
     )
     models = AtomModels()
     models.scripts[None] = [
-        cell("done = await self.delegate('Worker', 'fix it')\n" + RESULT),
+        cell("done = await self.delegate('worker', 'fix it', name='worker')\n" + RESULT),
     ]
-    models.scripts["Worker"] = [cell(child_result)]
+    models.scripts["worker"] = [cell(child_result)]
     registry = SessionRegistry(SessionStore(sessions_dir), agent_factory=models)
     try:
         root = await registry.create(
@@ -263,6 +263,6 @@ async def test_an_orchestrating_roots_one_shot_children_run_handle_work(tmp_path
         await asyncio.wait_for(root.prompt("fix it"), TIMEOUT)
         [child] = registry.children(root.id)
         assert child.turn_method == "handle_work"
-        assert ORCHESTRATOR_TEXT[0] not in str(models.llms["Worker"].calls[0].messages)
+        assert ORCHESTRATOR_TEXT[0] not in str(models.llms["worker"].calls[0].messages)
     finally:
         await registry.close_all()

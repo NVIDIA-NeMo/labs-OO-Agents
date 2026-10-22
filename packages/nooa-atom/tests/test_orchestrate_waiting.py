@@ -108,17 +108,17 @@ async def test_waiting_when_every_child_is_idle_with_nothing_pending_is_rejected
         sessions_dir,
         [
             cell(
-                "self.v.child = await self.spawn('Worker', 'fix it')\n"
+                "self.v.child = await self.spawn('Worker', 'fix it', name='worker')\n"
                 "await self.v.child.wait()\n"
                 "self.delegates.flush()\n"
                 "assert self.children()[0].status == 'retained'\n"
                 "return_result(Waiting(explanation='w', on=['delegates']))"
             ),
-            cell("return_result(Waiting(explanation='w', on=['Worker']))"),
+            cell("return_result(Waiting(explanation='w', on=['worker']))"),
             cell(RESULT),
         ],
         {
-            "Worker": [
+            "worker": [
                 cell(
                     "return_result(Done(explanation='did it', result=TaskResult("
                     "solution_description='s', evidence='e', how_to_verify='h', report='did it')))"
@@ -128,7 +128,7 @@ async def test_waiting_when_every_child_is_idle_with_nothing_pending_is_rejected
     )
     assert len(calls) == 3
     assert "Waiting on 'delegates', but no child is running" in calls[1]
-    assert "Waiting on child 'Worker', but it is not running" in calls[2]
+    assert "Waiting on child 'worker', but it is not running" in calls[2]
 
 
 async def test_waiting_while_a_child_is_running_is_accepted(tmp_path, sessions_dir):
@@ -137,18 +137,18 @@ async def test_waiting_while_a_child_is_running_is_accepted(tmp_path, sessions_d
         sessions_dir,
         [
             cell(
-                "self.v.child = await self.spawn('Worker', 'fix it')\n"
+                "self.v.child = await self.spawn('Worker', 'fix it', name='worker')\n"
                 "for _ in range(200):\n"
                 "    if self.children()[0].status == 'running':\n"
                 "        break\n"
                 "    await asyncio.sleep(0.01)\n"
                 "assert self.children()[0].status == 'running'\n"
-                "return_result(Waiting(explanation='w', on=['delegates', 'Worker']))"
+                "return_result(Waiting(explanation='w', on=['delegates', 'worker']))"
             ),
             cell("assert notification['delegates']\n" + RESULT),
         ],
         {
-            "Worker": [
+            "worker": [
                 cell(
                     "await asyncio.sleep(0.3)\nreturn_result(Done(explanation='did it', result=TaskResult("
                     "solution_description='s', evidence='e', how_to_verify='h', report='did it')))"
@@ -166,7 +166,7 @@ async def test_waiting_on_a_buffered_result_is_accepted(tmp_path, sessions_dir):
         sessions_dir,
         [
             cell(
-                "child = await self.spawn('Worker', 'fix it')\n"
+                "child = await self.spawn('Worker', 'fix it', name='worker')\n"
                 "for _ in range(500):\n"
                 "    if self.delegates.qsize():\n"
                 "        break\n"
@@ -178,7 +178,7 @@ async def test_waiting_on_a_buffered_result_is_accepted(tmp_path, sessions_dir):
             cell("[item] = notification['delegates']\n" + RESULT),
         ],
         {
-            "Worker": [
+            "worker": [
                 cell(
                     "return_result(Done(explanation='did it', result=TaskResult("
                     "solution_description='s', evidence='e', how_to_verify='h', report='did it')))"
@@ -197,18 +197,18 @@ async def test_waiting_on_a_working_child_is_accepted(tmp_path, sessions_dir):
         sessions_dir,
         [
             cell(
-                "self.v.child = await self.spawn('Worker', 'fix it')\n"
+                "self.v.child = await self.spawn('Worker', 'fix it', name='worker')\n"
                 "for _ in range(500):\n"
                 "    if self.children()[0].status == 'working':\n"
                 "        break\n"
                 "    await asyncio.sleep(0.01)\n"
                 "assert self.children()[0].status == 'working', self.children()[0].status\n"
-                "return_result(Waiting(explanation='w', on=['delegates', 'Worker']))"
+                "return_result(Waiting(explanation='w', on=['delegates', 'worker']))"
             ),
             cell("[item] = notification['delegates']\n" + RESULT),
         ],
         {
-            "Worker": [
+            "worker": [
                 cell(
                     "self.queue_manager.queue('ci')\n"
                     "self.queue_manager.spawn(asyncio.sleep(0.5, result='green'), "
@@ -227,7 +227,7 @@ async def test_waiting_on_a_working_child_is_accepted(tmp_path, sessions_dir):
     assert not _rejected(calls[1])
 
 
-@pytest.mark.parametrize("target", ["delegates", "Worker"])
+@pytest.mark.parametrize("target", ["delegates", "worker"])
 async def test_waiting_right_after_sending_to_an_idle_retained_child_is_accepted(
     tmp_path, sessions_dir, target
 ):
@@ -236,7 +236,7 @@ async def test_waiting_right_after_sending_to_an_idle_retained_child_is_accepted
         sessions_dir,
         [
             cell(
-                "self.v.child = await self.spawn('Worker', 'fix it')\n"
+                "self.v.child = await self.spawn('Worker', 'fix it', name='worker')\n"
                 "await self.v.child.wait()\n"
                 "self.delegates.flush()\n"
                 "await self.v.child.send('FEEDBACK: one more case')\n"
@@ -245,7 +245,7 @@ async def test_waiting_right_after_sending_to_an_idle_retained_child_is_accepted
             cell("[item] = notification['delegates']\n" + RESULT),
         ],
         {
-            "Worker": [
+            "worker": [
                 cell(
                     "return_result(Done(explanation='did it', result=TaskResult("
                     "solution_description='s', evidence='e', how_to_verify='h', report='did it')))"
@@ -267,7 +267,7 @@ async def test_waiting_on_a_child_by_id_is_checked(tmp_path, sessions_dir):
         sessions_dir,
         [
             cell(
-                "self.v.child = await self.spawn('Worker', 'fix it')\n"
+                "self.v.child = await self.spawn('Worker', 'fix it', name='worker')\n"
                 "await self.v.child.wait()\n"
                 "self.delegates.flush()\n"
                 "return_result(Waiting(explanation='w', on=[self.v.child.id]))"
@@ -279,7 +279,7 @@ async def test_waiting_on_a_child_by_id_is_checked(tmp_path, sessions_dir):
             cell("[item] = notification['delegates']\n" + RESULT),
         ],
         {
-            "Worker": [
+            "worker": [
                 cell(
                     "return_result(Done(explanation='did it', result=TaskResult("
                     "solution_description='s', evidence='e', how_to_verify='h', report='did it')))"
@@ -302,20 +302,20 @@ async def test_waiting_on_jobs_needs_a_running_job(tmp_path, sessions_dir):
         sessions_dir,
         [
             cell("return_result(Waiting(explanation='w', on=['jobs']))"),
-            cell("return_result(Waiting(explanation='w', on=['jobs:ci-42']))"),
+            cell("return_result(Waiting(explanation='w', on=['ci_42']))"),
             cell(
                 "self.queue_manager.queue('ci')\n"
                 "self.queue_manager.spawn(asyncio.sleep(0.2, result='green'), "
                 "channel='ci', label='ci-42')\n"
-                "return_result(Waiting(explanation='w', on=['jobs', 'jobs:ci-42', 'ci']))"
+                "return_result(Waiting(explanation='w', on=['jobs', 'ci-42', 'ci']))"
             ),
             cell("assert notification['ci'] == ['green']\n" + RESULT),
         ],
     )
     assert len(calls) == 4
     assert "Waiting on 'jobs', but no job is running and nothing is queued" in calls[1]
-    assert "Waiting on 'jobs:ci-42', but no job labelled 'ci-42' is running" in calls[2]
-    assert "self.jobs.get('ci-42')" in calls[2] and "label='ci-42'" in calls[2]
+    assert "Waiting on 'ci_42', but no running job or child has that name" in calls[2]
+    assert "self.jobs.get('ci_42')" in calls[2] and "label='ci_42'" in calls[2]
     assert not _rejected(calls[3])
 
 
@@ -327,14 +327,14 @@ async def test_waiting_on_an_unknown_name_is_rejected_and_lists_what_is_running(
         sessions_dir,
         [
             cell(
-                "self.v.child = await self.spawn('Worker', 'fix it')\n"
+                "self.v.child = await self.spawn('Worker', 'fix it', name='worker')\n"
                 "return_result(Waiting(explanation='w', on=['user_messages', 'ci', 'delegates']))"
             ),
             cell("return_result(Waiting(explanation='w', on=['delegates']))"),
             cell("[item] = notification['delegates']\n" + RESULT),
         ],
         {
-            "Worker": [
+            "worker": [
                 cell(
                     "await asyncio.sleep(0.3)\nreturn_result(Done(explanation='did it', result=TaskResult("
                     "solution_description='s', evidence='e', how_to_verify='h', report='did it')))"
@@ -350,6 +350,6 @@ async def test_waiting_on_an_unknown_name_is_rejected_and_lists_what_is_running(
     assert "NeedInput" not in calls[1]
     assert FIX in calls[1]
     assert "Waiting on 'delegates'" not in calls[1]
-    assert "Running right now: " in calls[1] and "'Worker'" in calls[1]
+    assert "Running right now: " in calls[1] and "'worker'" in calls[1]
     assert "'delegates'" in calls[1]
     assert not _rejected(calls[2])

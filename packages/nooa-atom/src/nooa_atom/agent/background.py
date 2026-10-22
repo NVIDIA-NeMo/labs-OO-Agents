@@ -20,6 +20,7 @@ class LiveChild(BaseModel):
 
     id: str
     name: str
+    path: str
     state: str  # what the status list shows: running, retained, has a question for you, ...
     active: bool  # running, working, or has input queued: something will arrive from it
 
@@ -52,14 +53,20 @@ def live_children(agent: Any) -> list[LiveChild]:
         else:
             state = "input queued"
         found.append(
-            LiveChild(id=session.id, name=session.info.name or "", state=state, active=active)
+            LiveChild(
+                id=session.id,
+                name=session.name or "",
+                path=registry.path(session.id),
+                state=state,
+                active=active,
+            )
         )
     return found
 
 
 def child_status_lines(agent: Any) -> list[str]:
-    """``<name> · child · <state>`` for each live child, for the "Background work" list."""
-    return [f"{child.name or child.id} · child · {child.state}" for child in live_children(agent)]
+    """``<path> · child · <state>`` for each live child, for the "Background work" list."""
+    return [f"{child.path} · child · {child.state}" for child in live_children(agent)]
 
 
 def _asked(agent: Any) -> set[str]:

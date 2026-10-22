@@ -9,9 +9,11 @@ their output on the agent's ``jobs`` queue channel. The channel registry
 (``self.queue_manager``) stays hidden; this is the model-facing view of it,
 as ``self.events`` is for ``self.event_manager``.
 
-Every delivered item carries the job's ``label``, so a turn can wait with
-``Waiting(on=["jobs:<label>"])`` (or ``on=["jobs"]`` for any job) and find
-the outcome in ``notification["jobs"]``.
+Every delivered item carries the job's ``label`` and ``path``, so a turn
+can wait with ``Waiting(on=["<label>"])`` (or ``on=["jobs"]`` for any job)
+and find the outcome in ``notification["jobs"]``. A label is a name in the
+session's one namespace of live names, shared with its open children (see
+``nooa_atom.session.names``).
 """
 
 import asyncio
@@ -41,6 +43,7 @@ from nooa.agentdoc import (
 from nooa.context_blocks import EventBase
 from nooa.skill import Skill
 from nooa.tools import ShellResult, StreamDone, StreamEvent
+from nooa_atom.session.names import ROOT_PATH, check_name, child_path
 
 if TYPE_CHECKING:
     from nooa.runtime.channels import Channel, JobHandle, QueueManager
@@ -94,6 +97,7 @@ class JobInfo(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     label: str = Field(description="Name it was started with; items it delivers carry it")
+    path: str = Field(default="", description="Its path: your session's path plus /label")
     kind: JobKind = Field(description="The method that started it")
     state: JobStateName = Field(description="running, done, failed or cancelled")
     target: str = Field(default="", description="What runs: command, file, interval or callable")
@@ -133,6 +137,7 @@ class JobUpdate(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     label: str = Field(description="The job's label")
+    path: str = Field(default="", description="The job's path: your session's path plus /label")
     items: list[Any] = Field(
         default_factory=list,
         description=(
@@ -192,8 +197,10 @@ class _Job:
         streaming: bool,
         target: str = "",
         description: str = "",
+        path: str = "",
     ):
         self.label = label
+        self.path = path or label
         self.kind = kind
         self.target = target
         self.description = description
@@ -222,6 +229,7 @@ class _Job:
     def info(self) -> JobInfo:
         return JobInfo(
             label=self.label,
+            path=self.path,
             kind=self.kind,
             state=self.state,
             target=self.target,
@@ -249,15 +257,15 @@ class _Job:
     def status_line(self) -> str:
         """One short line for the per-turn status.
 
-        ``label · job · running 3m · 2 pending · description or target``: the
-        age only while running, the pending count only when above 0.
+        ``/root/label · job · running 3m · 2 pending · description or target``:
+        the age only while running, the pending count only when above 0.
         """
         state = self.state
         if state == "running":
             state = f"running {_age(self.started_at)}"
         pending = f"{self.pending} pending" if self.pending > 0 else ""
         about = self.description or self.target
-        parts = (self.label, "job", state, pending, about)
+        parts = (self.path, "job", state, pending, about)
         return _short(" · ".join(part for part in parts if part), 100)
 
 
@@ -359,7 +367,7 @@ class JobsApi(Skill):
     arrives as items in ``notification["jobs"]``, each with ``.label``.
 
         await self.jobs.run("uv run pytest -q", label="tests", description="full run before pushing")
-        return_result(Waiting(explanation="tests running", on=["tests"]))  # or "jobs:tests"
+        return_result(Waiting(explanation="tests running", on=["tests"]))
         # next turn: u = notification["jobs"][0]  -> JobUpdate with done=True
         # u.items[0] is the ShellResult (.returncode, .stdout tail); u.log_path the full log
 
@@ -369,12 +377,15 @@ class JobsApi(Skill):
     Any job's update starts the next turn; check ``u.label`` / ``u.done`` and
     return ``Waiting`` again if yours has not finished.
 
+    A label is a Python identifier (``tests``, ``ci_check``), unique among
+    your running jobs and open children; the job's path is your session's
+    path plus ``/label`` (``/root/tests``).
+
     ``tail(path)`` follows a file, ``after(seconds)`` is a timer and
     ``every(seconds)`` ticks. ``run`` and ``cancel`` are awaited; the other
     methods return at once. Every start method takes an optional
-    ``description=``; ``JobInfo.target`` says what runs. Labels are unique
-    among running jobs; ``replace=True`` restarts a running job with the same
-    label. ``list()``/``get(label)`` show state; ``await cancel(label)`` stops
+    ``description=``; ``JobInfo.target`` says what runs. ``replace=True``
+    restarts a running job with the same label. ``list()``/``get(label)`` show state; ``await cancel(label)`` stops
     a job (and kills its process).
     """
 
@@ -388,9 +399,7 @@ class JobsApi(Skill):
         self._jobs: dict[str, _Job] = {}
         self._finished: deque[_Job] = deque(maxlen=_KEEP_FINISHED)
         self._log_dir: Path | None = None
-        self._queues.set_cancel_hint(
-            JOBS_CHANNEL, "Cancel a job: await self.jobs.cancel('<label>')"
-        )
+        self._queues.set_cancel_hint(JOBS_CHANNEL, "Cancel a job: await self.jobs.cancel('<name>')")
 
     # ---- internals -------------------------------------------------------
 
@@ -433,7 +442,16 @@ class JobsApi(Skill):
         if kind == "run":
             safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in label)[:60]
             log_path = str(self._logs() / f"{safe}-{uuid.uuid4().hex[:6]}.log")
-        job = _Job(label, kind, throttle, log_path, streaming, _short(target), description.strip())
+        job = _Job(
+            label,
+            kind,
+            throttle,
+            log_path,
+            streaming,
+            _short(target),
+            description.strip(),
+            path=child_path(self._base_path(), label),
+        )
         if label in self._jobs:
             self._finished.append(self._jobs[label])
         self._jobs[label] = job
@@ -442,16 +460,33 @@ class JobsApi(Skill):
     @hidden
     def _claim(self, label: str, replace: bool) -> None:
         """Check ``label`` is free, first stopping its running job if ``replace``."""
+        check_name(label, "job")
+        child = self._child_using(label)
+        if child:
+            raise ValueError(
+                f"name {label!r} is already used by child {child}; pick another label, or "
+                f"close the child first (await self.child({label!r}).close())"
+            )
         if replace:
             self._stop_now(label)
-        if not isinstance(label, str) or not label.strip():
-            raise ValueError("label must be a non-empty string")
         current = self._jobs.get(label)
         if current is not None and current.state == "running":
             raise ValueError(
                 f"a job labelled {label!r} is already running; pass replace=True to "
                 f"restart it, or await self.jobs.cancel({label!r})"
             )
+
+    @hidden
+    def _child_using(self, name: str) -> str | None:
+        """The path of the agent's open child named ``name``, if it has one (the shared namespace)."""
+        using = getattr(self._agent, "_child_using_name", None)
+        return using(name) if callable(using) else None
+
+    @hidden
+    def _base_path(self) -> str:
+        """The agent's session path (``/root`` outside a session tree)."""
+        path = getattr(self._agent, "_session_path", None)
+        return (path() if callable(path) else None) or ROOT_PATH
 
     @hidden
     def _start(self, job: _Job, work: Any) -> JobInfo:
@@ -726,9 +761,11 @@ class JobsApi(Skill):
     @hidden
     async def _call_job(self, job: _Job, work: Awaitable[Any]) -> JobUpdate:
         try:
-            item = JobUpdate(label=job.label, items=[await work], done=True)
+            item = JobUpdate(label=job.label, path=job.path, items=[await work], done=True)
         except Exception as exc:
-            item = JobUpdate(label=job.label, done=True, error=f"{type(exc).__name__}: {exc}")
+            item = JobUpdate(
+                label=job.label, path=job.path, done=True, error=f"{type(exc).__name__}: {exc}"
+            )
             job.final_state = "failed"
         finally:
             job.finished_at = _now()
@@ -776,6 +813,7 @@ class JobsApi(Skill):
             nonlocal batch, batch_chars, batch_started
             item = JobUpdate(
                 label=job.label,
+                path=job.path,
                 items=batch,
                 done=done,
                 log_path=job.log_path,
@@ -881,7 +919,7 @@ class JobsApi(Skill):
         the ``ShellResult``.
 
             await self.jobs.run("uv run pytest -q", label="tests")
-            return_result(Waiting(explanation="tests running", on=["jobs:tests"]))
+            return_result(Waiting(explanation="tests running", on=["tests"]))
         """
         throttle = _throttle(items, seconds)
         self._claim(label, replace)  # fail before the await
@@ -942,7 +980,7 @@ class JobsApi(Skill):
         ``items``/``seconds``. A relative ``path`` is relative to the shell's
         directory.
 
-            self.jobs.tail("logs/server.log", label="server-log", seconds=60)
+            self.jobs.tail("logs/server.log", label="server_log", seconds=60)
         """
         throttle = _throttle(items, seconds)
         self._claim(label, replace)  # fail before opening the file
@@ -968,7 +1006,7 @@ class JobsApi(Skill):
 
         ``seconds=0`` fires right away; ``cancel(label)`` stops it before it fires.
 
-            self.jobs.after(600, label="check-ci", payload="check CI on PR #462 and report")
+            self.jobs.after(600, label="check_ci", payload="check CI on PR #462 and report")
         """
         _check_seconds(seconds, zero_ok=True)
         job = self._new_job(
@@ -997,7 +1035,7 @@ class JobsApi(Skill):
         Each tick is one ``JobUpdate`` item: ``payload`` if given, else the tick
         count (1, 2, 3, ...); ``throttle(label, ...)`` batches them.
 
-            self.jobs.every(300, label="poll-ci", payload="check CI and report changes")
+            self.jobs.every(300, label="poll_ci", payload="check CI and report changes")
         """
         _check_seconds(seconds)
         job = self._new_job(
