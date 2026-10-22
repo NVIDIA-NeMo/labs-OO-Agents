@@ -1102,3 +1102,14 @@ def test_decision_image_failure_explains_one_sample_failure_and_action(facts, ex
     assert "Images: enabled (not confirmed by this test)" in detail
     assert "wire" not in detail and "Native" not in detail
     assert record == before
+
+
+def test_no_reasoning_returned_does_not_claim_replay_loss():
+    reason = (
+        "No replayable reasoning returned; check reasoning/replay settings or try another interface. "
+        "This does not mean reasoning is off"
+    )
+    record = {"outcome": "not_confirmed", "reason": reason, "state_retained": None}
+    assert view.check_outcome("reasoning_retention", record, "failed") == "Not available"
+    assert view.check_reason(reason) == "No replayable reasoning was returned in this check."
+    assert "another API" not in view.check_reason(reason)

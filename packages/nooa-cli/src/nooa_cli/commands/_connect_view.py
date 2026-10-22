@@ -198,7 +198,7 @@ def check_reason(reason):
         "probes require one non-streaming generation": "Checks require one complete reply without streaming",
         "Reasoning state was replayed, but the selected reasoning settings did not reach every request; check parameter filtering in the client": "Reasoning was carried forward, but some selected settings were not sent. Review the client settings.",
         "Reasoning was returned but not preserved in the follow-up request; check replay settings or try another interface": "Reasoning was not carried forward. Review the settings or try another API format.",
-        "No replayable reasoning returned; check reasoning/replay settings or try another interface. This does not mean reasoning is off": "Could not confirm reasoning carried forward. Try another API format; reasoning may still be active.",
+        "No replayable reasoning returned; check reasoning/replay settings or try another interface. This does not mean reasoning is off": "No replayable reasoning was returned in this check.",
         "No cache reuse reported on these continuations; provider caching can vary. The model connection still works": "No cache reuse reported. Caching can vary; the connection still works.",
         "Cache markers were sent, but the server reported no reuse; retry later or check server support": "Caching was requested, but no reuse was reported. Check the server's caching settings.",
         "No cache markers or cache reads observed; check the runtime's cache defaults and server support": "Caching was not requested and no reuse was reported. Review the client and server caching settings.",
