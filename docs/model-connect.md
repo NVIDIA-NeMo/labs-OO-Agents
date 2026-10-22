@@ -63,16 +63,27 @@ even with `--no-catalogue`, which skips public and automatic limit lookups.
 
 Choosing **Continue without catalogue settings** asks for **Context window
 (tokens)** and **Input token limit (tokens)** when exact server limits are
-unavailable. Human `--no-catalogue` / `--no-metadata` setup follows the same path.
+unavailable, immediately after continuation and before the initial **Model details**,
+interface and media choices. Human `--no-catalogue` / `--no-metadata` setup follows the same path.
 Enter positive whole numbers of at least two tokens; Ctrl-C cancels without saving.
 `--context-window` prefills only the context value. **Change settings** lets you
 revise both values. Native decisions bypass these chat limits; `--yes` and stages
 remain noninteractive.
 
-The review shows both declarations as **Your settings**. The saved `context_window`
+The initial **Model details** and current proposal review show both declarations as
+**Your settings**. A later native Decision choice discards these chat declarations
+and context bounds. The saved `context_window`
 is the smaller value, bounded by any known server limit. The reply cap is separate
 and is reserved against that saved bound. The saved configuration retains this
 effective bound, not the two raw declarations.
+
+Native Anthropic provider/endpoint setup defaults to **Anthropic Messages**, without
+an interface-discovery offer; an explicit interface override is retained. Model and
+media tests still require the ordinary **Test now** consent. Audio/video rows on
+Messages or Responses identify the native interface limitation, not missing tests.
+For native OpenAI only, a missing direct catalogue ID can match the exact
+`openai/<raw model ID>` namespace. This supplements identity-only server listings;
+it does not claim OpenAI-listed limits or change the wire model ID.
 
 Media setup shows **Suggested inputs: Images** and **Test and enable Images**
 (or the actual suggested set). **Current inputs: Off** remains until a test passes.

@@ -189,13 +189,13 @@ def test_wizard_retries_only_selected_interface_at_120_seconds(tmp_path, monkeyp
             "--output",
             str(target),
         ],
-        input="model\ndiscover\n-\ntest\nlonger\nchat\n262144\n262144\ntest\ny\n",
+        input="model\n262144\n262144\ndiscover\n-\nchange\n262144\n262144\nrecommended\ntest\nlonger\nchat\ny\n",
     )
     assert result.exit_code == 0, result.output
     # Configured-cap routing is distinct from interface discovery;
     # check_interfaces now also probes reasoning by default for chat.
     assert len(posts) == 6
-    # Discovery consent, then review of the newly declared completion limits.
+    # An intentional re-edit is reviewed before routing consent, not a late collector.
     assert result.output.count("Would you like to test these settings?") == 2
     assert "Approve setup" not in result.output
     assert result.output.count("Results ·") == 1

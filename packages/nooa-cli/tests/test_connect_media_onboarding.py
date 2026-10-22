@@ -157,7 +157,7 @@ def test_interactive_test_choice_after_single_approval_review_can_manually_enabl
     path = tmp_path / "models.yaml"
     # Approval, test/manual choice, final review/manual choice, declaration, save.
     result = CliRunner().invoke(
-        command, options(path), input="test\n262144\n262144\ntest\nmanual\nimage,pdf\ny\n"
+        command, options(path), input="262144\n262144\ntest\ntest\nmanual\nimage,pdf\ny\n"
     )
     assert result.exit_code == 0, result.output
     assert len(calls) == 3
@@ -184,7 +184,7 @@ def test_interactive_test_choice_after_single_approval_review_can_manually_enabl
 def test_cancel_at_review_does_not_save_or_send_extra_requests(monkeypatch, tmp_path):
     calls = fake_http(monkeypatch)
     path = tmp_path / "models.yaml"
-    result = CliRunner().invoke(command, options(path), input="test\n262144\n262144\ntest\n")
+    result = CliRunner().invoke(command, options(path), input="262144\n262144\ntest\ntest\n")
     assert result.exit_code == 1
     assert len(calls) == 3 and not path.exists()
 
@@ -517,7 +517,7 @@ def test_test_all_media_includes_real_video_and_saves_passed_temporal_sample(
     result = CliRunner().invoke(
         command,
         args + (["--test-media-inputs", "image,audio,video,pdf", "--yes"] if yes else []),
-        input="test\n262144\n262144\ntest\nkeep\ny\n",
+        input="262144\n262144\ntest\ntest\nkeep\ny\n",
     )
     assert result.exit_code == 0, result.output
     text = " ".join(re.sub(r" · \d+\.\ds", "", result.output).split())

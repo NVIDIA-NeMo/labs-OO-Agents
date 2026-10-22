@@ -164,6 +164,8 @@ def test_cached_media_only_model_requires_manual_limits(monkeypatch):
     ]
     current.discovery_endpoint = BASE
     mock_http(monkeypatch, lambda request: pytest.fail("Cached setup is offline"))
+    answers = iter(["128000", "64000"])
+    monkeypatch.setattr(prompts, "prompt", lambda *a, **kw: next(answers))
     assert wizard.prepare_metadata(current)
     assert current.candidate is None
     assert current.media_hints["architecture"] == META["architecture"]
@@ -181,6 +183,8 @@ def test_changed_interface_does_not_use_other_endpoint_hints(monkeypatch):
     current.endpoint_models = [META]
     current.discovery_endpoint = "https://other.test/v1"
     mock_http(monkeypatch, lambda request: pytest.fail("Unknown offline setup"))
+    answers = iter(["128000", "64000"])
+    monkeypatch.setattr(prompts, "prompt", lambda *a, **kw: next(answers))
     assert wizard.prepare_metadata(current)
     assert current.media_hints is None and current.selected_endpoint_model is None
 

@@ -54,7 +54,11 @@ def test_provider_model_interface_order_and_listing_headers_before_choice(
     def review(text, options, **kwargs):
         if text == "Would you like to test these settings?":
             assert all(request.method == "GET" for request in calls)
-            assert questions[-1] == "Request interface"
+            assert questions[-1] == (
+                "Search available models (type to search; Tab to select)"
+                if provider == "anthropic"
+                else "Request interface"
+            )
             reviews.append(options)
         return choice(text, options, **kwargs)
 
@@ -109,8 +113,8 @@ def test_provider_model_interface_order_and_listing_headers_before_choice(
         + "\n"
         + ("https://generic.test/v1\n" if provider == "custom" else "")
         + "exact-model\n"
-        + style
-        + "\nsave\ny\n"
+        + ("" if provider == "anthropic" else style + "\n")
+        + "save\ny\n"
     )
     result = CliRunner().invoke(
         command,
@@ -130,9 +134,16 @@ def test_provider_model_interface_order_and_listing_headers_before_choice(
         input=answers,
     )
     assert result.exit_code == 0, result.output
-    assert reviews and " ".join(result.output.split()).index("Model: exact-model") < " ".join(
-        result.output.split()
-    ).index("Request interface") < result.output.index("Proposed configuration")
+    assert reviews
+    if provider == "anthropic":
+        assert "Request interface" not in result.output
+        assert result.output.index("Model details") < result.output.index("Media setup")
+    else:
+        assert (
+            " ".join(result.output.split()).index("Model: exact-model")
+            < " ".join(result.output.split()).index("Request interface")
+            < result.output.index("Proposed configuration")
+        )
     assert yaml.safe_load(local.read_text())["models"]["local"]["api_style"] == style
     assert "approved-work-key" not in result.output + local.read_text()
     assert sum(
@@ -168,7 +179,7 @@ def test_no_metadata_exact_model_precedes_interface_without_key_or_http(monkeypa
             "--output",
             str(local),
         ],
-        input="custom\nhttps://generic.test/v1\nexact/model\nchat\n262144\n262144\nsave\ny\n",
+        input="custom\nhttps://generic.test/v1\nexact/model\n262144\n262144\nchat\nsave\ny\n",
     )
     assert result.exit_code == 0, result.output
     model_question = "Exact model ID (metadata is disabled; Ctrl-C to cancel)"
@@ -327,7 +338,7 @@ def test_openrouter_discovery_offers_chat_responses_and_decision_without_name_cl
     monkeypatch.setattr(prompts, "labelled_choice", choose)
     monkeypatch.setattr(connect, "write", write)
     mock_http(monkeypatch, handle)
-    answers = "discover\ntest\n" + ("systemone\n" if budget > 512 else "") + "y\n"
+    answers = "262144\n262144\ndiscover\ntest\n" + ("systemone\n" if budget > 512 else "") + "y\n"
     result = CliRunner().invoke(
         command,
         [
@@ -429,7 +440,7 @@ def test_late_known_interface_never_forwards_key_to_another_origin_without_optin
             str(local),
             *(["--share-interface-key"] if share else []),
         ],
-        input="systemone\ntest\ny\n",
+        input="262144\n262144\nsystemone\ntest\ny\n",
     )
     assert result.exit_code == (0 if share else 2), result.output
     assert len(calls) == (1 if share else 0)

@@ -401,6 +401,8 @@ def select_connection(state: WizardState) -> bool:
             )
             if state.api_key_env == "-":
                 state.api_key_env = ""
+    if state.endpoint == connect.PROVIDERS["anthropic"].api_base:
+        state.default_style = "anthropic"
     # Listing/authentication conventions do not choose the selected model's
     # generation interface. A mixed server can list all models via /models.
     state.discovery_style = state.listing_style or (
@@ -594,22 +596,46 @@ def select_model(state: WizardState) -> bool:
     return True
 
 
+def known_decision_model(state: WizardState) -> bool:
+    """Only explicit selected-model type facts can bypass provisional chat limits."""
+    metadata = state.selected_endpoint_model or state.candidate or {}
+    outputs = (metadata.get("architecture") or {}).get("output_modalities") or metadata.get(
+        "output_modalities", []
+    )
+    return (
+        (isinstance(outputs, list) and "decisions" in outputs and "text" not in outputs)
+        or any(metadata.get(field) == "decision" for field in ("model_type", "client_type"))
+        or (metadata.get("mode") == "evaluation")
+    )
+
+
+def discard_chat_limits(state: WizardState):
+    """A later native Decision selection drops provisional completion declarations."""
+    # Even an explicit context prefill is a chat bound, not Decision state.
+    state.context_window = None
+    state.manual_limits = None
+    state.manual_limits_required = False
+    state.manual_limits_deferred = False
+    state.candidate = (
+        connect.decision_metadata(state.model, state.candidate, state.selected_endpoint_model)
+        or None
+    )
+    state.media_hints = state.candidate
+
+
 def select_request_interface(state: WizardState) -> bool:
     """Choose after the selected model/metadata, before any inference consent."""
     if not state.metadata_displayed:
         show_model_metadata(state)
     if state.api_style or state.yes or state.editing is not None:
         return True
+    # The native provider/endpoint contract is known, unlike a Claude model on a gateway.
+    if state.provider == "anthropic" or state.endpoint == connect.PROVIDERS["anthropic"].api_base:
+        state.api_style = "anthropic"
+        return True
     choices = ("discover", "chat", "responses", "anthropic", "systemone", "openai")
-    # Use declared output type, not the model name, to suggest an interface.
-    metadata = state.selected_endpoint_model or state.candidate or {}
-    outputs = (metadata.get("architecture") or {}).get("output_modalities") or metadata.get(
-        "output_modalities", []
-    )
-    decision_output = isinstance(outputs, list) and "decisions" in outputs and "text" not in outputs
-    decision_hint = decision_output or any(
-        metadata.get(field) == "decision" for field in ("model_type", "client_type")
-    )
+    # Use declared output/type facts, not the model name, to suggest an interface.
+    decision_hint = known_decision_model(state)
     suggested = (
         "systemone" if decision_hint and "systemone" in state.interface_endpoints else "discover"
     )
@@ -664,11 +690,10 @@ def select_request_interface(state: WizardState) -> bool:
         state.endpoint = selected_endpoint
         # The explicit shared catalogue retains descriptive selected-model facts.
         # Decision plans do not apply chat budgets/profiles from the listing.
-        state.candidate = (
-            connect.decision_metadata(state.model, state.candidate, state.selected_endpoint_model)
-            or None
-        )
-        state.media_hints = state.candidate
+        discard_chat_limits(state)
+    # An explicit Completion override of a native type still needs chat bounds.
+    if choice not in connect.DECISION_API_STYLES:
+        require_manual_limits(state)
     reject_decision_media(state)
     return True
 
@@ -1017,6 +1042,8 @@ def usable_server_metadata(state: WizardState) -> bool:
 
     selected = state.selected_endpoint_model or {}
     if state.model and selected.get("id") == state.model:
+        if known_decision_model(state):
+            return True
         facts = listing_facts(selected)
         for key, value in facts.items():
             if key == "architecture":
@@ -1064,7 +1091,7 @@ def usable_server_metadata(state: WizardState) -> bool:
 
 
 def prepare_metadata(state: WizardState) -> bool:
-    """Fetch allowed metadata before media choice, without settings prompts."""
+    """Fetch allowed metadata and collect missing manual limits before the first summary."""
     state.metadata_prepared = True
     state.selected_endpoint_model = (
         next(
@@ -1205,6 +1232,16 @@ def prepare_metadata(state: WizardState) -> bool:
             if state.catalogue_model
             else [item for item in models if item.get("id") == state.model]
         )
+        # A native OpenAI raw ID has one exact provider-qualified catalogue ID.
+        # This is supplementary public metadata, never a fuzzy model-name guess.
+        if (
+            not matches
+            and not state.catalogue_model
+            and (
+                state.provider == "openai" or state.endpoint == connect.PROVIDERS["openai"].api_base
+            )
+        ):
+            matches = [item for item in models if item.get("id") == "openai/" + state.model]
         if len(matches) == 1:
             state.candidate = matches[0]
         elif matches:
@@ -1303,6 +1340,7 @@ def prepare_metadata(state: WizardState) -> bool:
         )
         if combined.get("endpoint_limits"):
             state.candidate = combined
+    require_manual_limits(state)
     show_model_metadata(state)
     return True
 
@@ -1317,7 +1355,7 @@ def show_model_metadata(state: WizardState):
     rows = [("Model", state.model)]
     records = state.server_details.records if state.server_details else ()
     server_facts = usable_server_metadata(state)
-    if state.edited_settings:
+    if state.edited_settings or state.manual_limits:
         rows.append(("Source", "Your settings"))
     elif server_facts:
         rows.append(("Source", "This server"))
@@ -1362,12 +1400,7 @@ def show_model_metadata(state: WizardState):
         )
         if value:
             rows.append((label, value))
-    outputs = (endpoint.get("architecture") or {}).get("output_modalities") or endpoint.get(
-        "output_modalities", []
-    )
-    if (isinstance(outputs, list) and "decisions" in outputs and "text" not in outputs) or any(
-        endpoint.get(field) == "decision" for field in ("model_type", "client_type")
-    ):
+    if known_decision_model(state):
         rows.append(("Model type", "Decision"))
     elif endpoint.get("model_type") or endpoint.get("client_type"):
         rows.append(("Model type", endpoint.get("model_type") or endpoint.get("client_type")))
@@ -1423,6 +1456,17 @@ def show_model_metadata(state: WizardState):
                 render=False,
             )
         )
+    if state.manual_limits:
+        rows.extend(
+            [
+                ("Context window (declared)", f"{state.manual_limits['context_window']:,} tokens"),
+                (
+                    "Input token limit (declared)",
+                    f"{state.manual_limits['max_input_tokens']:,} tokens",
+                ),
+                ("Effective context bound", f"{state.context_window:,} tokens"),
+            ]
+        )
     view.fields(scrub_setup(state, rows))
     if not report["advertised"]:
         view.note("No media is listed.")
@@ -1437,7 +1481,14 @@ def require_manual_limits(state: WizardState, *, edit=False):
     Raw declarations live in wizard/proposal provenance. The registry supports only
     a conservative effective context_window, not separate literal input metadata.
     """
-    if state.yes or state.manual_limits_deferred or state.api_style in connect.DECISION_API_STYLES:
+    if (
+        state.yes
+        or state.manual_limits_deferred
+        or state.api_style in connect.DECISION_API_STYLES
+        or state.api_style is None
+        and known_decision_model(state)
+        and not edit
+    ):
         return
     if not (edit or state.manual_limits_required or state.no_catalogue and state.editing is None):
         return
@@ -2507,7 +2558,13 @@ def show_guided_proposal(state: WizardState, *, deferred_style=False, updated=Fa
             if kind in enabled
             else "Off"
         )
-        if kind in unavailable:
+        if kind in {"audio", "video"} and state.api_style in {"anthropic", "responses"}:
+            value = (
+                "Enabled; interface doesn’t support this format"
+                if kind in enabled
+                else "Off; interface doesn’t support this format"
+            )
+        elif kind in unavailable:
             value = "Enabled; test unavailable" if kind in enabled else "Off; test unavailable"
         media_rows.append((view.media_label(kind), value))
     view.fields(scrub_setup(state, media_rows))
@@ -2682,7 +2739,8 @@ def guided_setup(state: WizardState) -> bool:
     explicit_reply_tokens = state.reply_tokens
     # A provider preset is a proposal, never evidence of supported interfaces.
     state.api_style = state.api_style or state.default_style
-    state.manual_limits_deferred = deferred_style
+    # Unknown interfaces already have their provisional literal limits upfront.
+    state.manual_limits_deferred = deferred_style and known_decision_model(state)
     if not configure_media_inputs(state) or not configure_checks(state):
         return False
     show_guided_proposal(state, deferred_style=deferred_style)
@@ -2692,7 +2750,6 @@ def guided_setup(state: WizardState) -> bool:
     state.approval = state.probe if action == "test" else "none"
     if action == "save":
         state.test_media_inputs = None
-    deferred_limits_revised = False
     if deferred_style:
         state.manual_limits_deferred = False
         state.api_style = None
@@ -2700,23 +2757,16 @@ def guided_setup(state: WizardState) -> bool:
             return False
         if state.api_style in connect.DECISION_API_STYLES:
             state.reply_tokens = explicit_reply_tokens
-            state.candidate = (
-                connect.decision_metadata(
-                    state.model, state.candidate, state.selected_endpoint_model
-                )
-                or None
-            )
+            discard_chat_limits(state)
             if not configure_media_inputs(state):
                 return False
-        # New literal completion declarations need their own current review.
-        previous_limits = state.manual_limits
+        # Re-plan for the selected route using the already reviewed limits.
         if not configure_checks(state):
             return False
-        deferred_limits_revised = previous_limits is None and state.manual_limits is not None
     elif action == "save":
         if not configure_checks(state):
             return False
-    if state.guided_media_revised or deferred_limits_revised:
+    if state.guided_media_revised:
         show_guided_proposal(state, updated=True)
         action = review_guided_proposal(state)
         if action is None:

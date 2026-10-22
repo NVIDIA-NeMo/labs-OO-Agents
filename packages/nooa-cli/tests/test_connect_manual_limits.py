@@ -495,12 +495,17 @@ def test_deferred_completion_reviews_raw_limits_and_preserves_edited_reply(
         "--output",
         str(path),
     ]
-    # The optional provisional editor is followed by literal final completion
-    # declarations and a review that allows a further change before saving.
-    answers = "discover\nchange\n-\n-\n-\ncustom\n1234\n" + action + "\n"
+    # Literal limits precede even an undecided interface; intentional edits still
+    # have their own current review, without a second automatic limit collection.
+    answers = (
+        "128000\n64000\ndiscover\n"
+        "change\n128000\n64000\ncustom\n1234\n"
+        "change\n128000\n64000\nrecommended\n"
+        "change\n48000\n24000\nrecommended\n" + action + "\n"
+    )
     if action == "save":
         answers += "chat\n"
-    answers += "128000\n64000\nchange\n48000\n24000\nrecommended\n" + action + "\ny\n"
+    answers += "y\n"
     result = CliRunner().invoke(command, flags, input=answers)
     assert result.exit_code == 0, result.output
     assert len(decisions) == 4
@@ -578,8 +583,7 @@ def test_final_manual_reedit_can_increase_a_provisional_context_and_reply(monkey
     result = CliRunner().invoke(
         command,
         flags,
-        input="discover\nchange\n8000\n-\n-\nrecommended\nsave\nchat\n64000\n"
-        "change\n128000\n64000\ncustom\n10000\nsave\ny\n",
+        input="8000\n64000\ndiscover\nchange\n128000\n64000\ncustom\n10000\nsave\nchat\ny\n",
     )
     assert result.exit_code == 0, result.output
     saved = yaml.safe_load(path.read_text())["models"]["local"]

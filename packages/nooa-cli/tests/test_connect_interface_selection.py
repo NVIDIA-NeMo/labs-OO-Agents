@@ -95,16 +95,14 @@ def test_known_interface_after_model_skips_comparison(monkeypatch, tmp_path, sty
     result = CliRunner().invoke(
         command,
         [*options(path), "--probe", "minimal"],
-        input=f"{style}\n"
-        + ("" if style in connect.DECISION_API_STYLES else "262144\n262144\n")
-        + "test\ny\n",
+        input=f"262144\n262144\n{style}\ntest\ny\n",
     )
     assert result.exit_code == 0, result.output
-    assert menu_seen == ["Request interface"] + (
-        []
-        if style in connect.DECISION_API_STYLES
-        else ["Context window (tokens)", "Input token limit (tokens)"]
-    )
+    assert menu_seen == [
+        "Context window (tokens)",
+        "Input token limit (tokens)",
+        "Request interface",
+    ]
     assert len(requests) == 1
     entry = yaml.safe_load(path.read_text())["models"]["local"]
     assert entry["api_style"] == style
@@ -159,14 +157,16 @@ def test_menu_order_provider_url_key_model_interface(monkeypatch, tmp_path):
     result = CliRunner().invoke(
         command,
         ["--as", "local", "--no-probe", "--no-catalogue", "--output", str(path)],
-        input=f"custom\n{BASE}\n-\nexact/model\nchat\n262144\n262144\nsave\ny\n",
+        input=f"custom\n{BASE}\n-\nexact/model\n262144\n262144\nchat\nsave\ny\n",
     )
     assert result.exit_code == 0, result.output
-    assert sequence[:5] == [
+    assert sequence[:7] == [
         "Choose a provider",
         "Model server URL",
         "Key environment variable (new to enter a key; - for no authentication)",
         "Search available models (type to search; Tab to select)",
+        "Context window (tokens)",
+        "Input token limit (tokens)",
         "Request interface",
     ]
     assert "API format" not in sequence
@@ -209,7 +209,7 @@ def test_hub_shared_listing_and_default_full_systemone_url(monkeypatch, tmp_path
             "--output",
             str(path),
         ],
-        input=f"exact/model\n{choice}\ntest\ny\n",
+        input=f"exact/model\n262144\n262144\n{choice}\ntest\ny\n",
     )
     assert result.exit_code == 0, result.output
     entry = yaml.safe_load(path.read_text())["models"]["local"]
@@ -268,7 +268,7 @@ def test_custom_discovery_never_guesses_decision_url_and_reuses_selected_request
     result = CliRunner().invoke(
         command,
         flags,
-        input="discover\ntest\n" + ("" if candidate else "262144\n262144\ntest\n") + "y\n",
+        input="262144\n262144\ndiscover\ntest\ny\n",
     )
     assert result.exit_code == 0, result.output
     assert path.exists(), result.output
@@ -433,7 +433,7 @@ def test_user_selects_decision_among_multiple_successes_and_reuses_full_route(
             "--budget-tokens",
             "20000",
         ],
-        input="discover\ntest\nsystemone\ny\n",
+        input="262144\n262144\ndiscover\ntest\nsystemone\ny\n",
     )
     assert result.exit_code == 0, result.output
     assert "Working API formats: OpenAI-compatible Chat, System One Decisions" in result.output
@@ -476,7 +476,7 @@ def test_custom_cross_origin_interface_key_requires_explicit_flag(monkeypatch, t
     ]
     if opt_in:
         flags += ["--share-interface-key"]
-    result = CliRunner().invoke(command, flags, input="discover\ntest\ny\n")
+    result = CliRunner().invoke(command, flags, input="262144\n262144\ndiscover\ntest\ny\n")
     assert "interface-secret-canary" not in result.output
     if opt_in:
         assert result.exit_code == 0, result.output
@@ -509,7 +509,7 @@ def test_hub_overridden_chat_base_refuses_auto_mapped_key(monkeypatch, tmp_path)
             "--output",
             str(path),
         ],
-        input="discover\ntest\n",
+        input="262144\n262144\ndiscover\ntest\n",
     )
     assert result.exit_code != 0
     assert "--share-interface-key" in result.output
@@ -585,7 +585,7 @@ def test_discover_selected_decision_media_rejected_after_routing_only(monkeypatc
             "--output",
             str(path),
         ],
-        input="exact/model\ndiscover\ntest\ncancel\n",
+        input="exact/model\n262144\n262144\ndiscover\ntest\ncancel\n",
     )
     assert result.exit_code == 2, result.output
     assert "currently supports image attachments only. Use media_inputs: [image]" in " ".join(

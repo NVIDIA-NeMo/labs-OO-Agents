@@ -482,9 +482,15 @@ def test_guided_test_all_proposal_marks_unimplemented_checks_before_consent(
     wizard.show_guided_proposal(current)
     text = " ".join(capsys.readouterr().out.split())
     assert (
-        "Audio: " + ("Enabled; test unavailable" if previous else "Off; test unavailable") in text
+        "Audio: "
+        + (
+            "Enabled; interface doesn’t support this format"
+            if previous
+            else "Off; interface doesn’t support this format"
+        )
+        in text
     )
-    assert "Video: Off; test unavailable" in text
+    assert "Video: Off; interface doesn’t support this format" in text
     assert "Native audio/video input is not supported by this API format" in text
     assert "Use Chat" not in text
     assert current.proposal.entry["media_inputs"] == previous

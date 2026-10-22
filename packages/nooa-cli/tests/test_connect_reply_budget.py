@@ -44,7 +44,7 @@ def test_wizard_reply_budget_is_a_runtime_cap(tmp_path, monkeypatch, choice, exp
             "--output",
             str(path),
         ],
-        input="-\n262144\n262144\nchange\n\n\n" + choice + "\nsave\ny\n",
+        input="262144\n262144\n-\nchange\n\n\n" + choice + "\nsave\ny\n",
     )
     assert result.exit_code == 0, result.output
     entry = yaml.safe_load(path.read_text())["models"]["local"]
@@ -160,7 +160,7 @@ def test_boolean_catalogue_output_limit_is_not_treated_as_one_token(tmp_path, mo
             "--output",
             str(path),
         ],
-        input="-\n262144\n262144\nchange\n\n\nsave\ny\n",
+        input="262144\n262144\n-\nchange\n\n\nsave\ny\n",
     )
     assert result.exit_code == 0, result.output
     assert chosen["output_ceiling"] is None

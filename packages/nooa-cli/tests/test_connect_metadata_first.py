@@ -470,7 +470,12 @@ def test_deferred_decision_revises_default_all_media_with_explicit_review(
             str(path),
             *(["--test-media-inputs", "image,audio,video,pdf"] if explicit else []),
         ],
-        input="discover\n" + ("" if explicit else "test\n") + "test\n" + revision + "\n" + tail,
+        input="262144\n262144\ndiscover\n"
+        + ("" if explicit else "test\n")
+        + "test\n"
+        + revision
+        + "\n"
+        + tail,
     )
     assert result.exit_code == (2 if explicit and revision == "cancel" else 0), result.output
     assert reviews and len(calls) == count

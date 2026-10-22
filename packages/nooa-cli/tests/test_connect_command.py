@@ -422,7 +422,7 @@ def test_recovery_edit_server_preserves_budget_and_saves_only_new_route(tmp_path
             "--output",
             str(path),
         ],
-        input="discover\ntest\nserver\nhttps://new.example/v1\nnew-model\n262144\n262144\ntest\ny\n",
+        input="262144\n262144\ndiscover\ntest\nserver\nhttps://new.example/v1\nnew-model\ny\n",
     )
     assert result.exit_code == 0, result.output
     assert [r.url.host for r in sent] == ["old.example"] * 3 + ["new.example"] * 4
@@ -597,7 +597,7 @@ def test_a_rejected_listing_key_continues_manually_without_retry(tmp_path, monke
             "--output",
             str(path),
         ],
-        input="wire/model\ndiscover\nsave\nchat\n262144\n262144\nsave\nlocal\ny\n",
+        input="wire/model\n262144\n262144\ndiscover\nsave\nchat\nlocal\ny\n",
     )
     assert result.exit_code == 0, result.output
     assert "Continue with an exact model ID" in result.output
@@ -927,9 +927,9 @@ def test_interface_menu_only_offers_successes_or_explicit_manual_escape(
             "--output",
             str(path),
         ],
-        input="discover\ntest\nresponses\n262144\n262144\ntest\ny\n"
+        input="262144\n262144\ndiscover\ntest\nresponses\ny\n"
         if responses_ok
-        else "discover\ntest\ncancel\n",
+        else "262144\n262144\ndiscover\ntest\ncancel\n",
     )
     if responses_ok:
         assert result.exit_code == 0, result.output
@@ -982,9 +982,9 @@ def test_authentication_recovery_keeps_budget_and_secrets(tmp_path, monkeypatch,
             "--output",
             str(path),
         ],
-        input="discover\ntest\nkey\nCONNECT_GOOD\n262144\n262144\ntest\ny\n"
+        input="262144\n262144\ndiscover\nchange\n262144\n262144\nrecommended\ntest\nkey\nCONNECT_GOOD\ny\n"
         if recover
-        else "discover\ntest\ncancel\n",
+        else "262144\n262144\ndiscover\ntest\ncancel\n",
     )
     assert result.exit_code == 0, result.output
     assert result.output.count("Would you like to test these settings?") == (2 if recover else 1)
@@ -1044,7 +1044,7 @@ def test_retry_stops_when_original_budget_is_exhausted(tmp_path, monkeypatch):
             "--output",
             str(path),
         ],
-        input="discover\ntest\nretry\n",
+        input="262144\n262144\ndiscover\ntest\nretry\n",
     )
     assert result.exit_code == 0, result.output
     assert len(sent) == 4
@@ -1106,7 +1106,7 @@ def test_interface_and_later_checks_share_the_cli_budget(tmp_path, monkeypatch):
             "--output",
             str(path),
         ],
-        input="discover\ntest\n262144\n262144\ntest\ny\n",
+        input="262144\n262144\ndiscover\ntest\ny\n",
     )
     assert result.exit_code == 0, result.output
     assert len(sent) == 3  # All of the budget was spent testing interfaces.
@@ -1197,7 +1197,7 @@ def test_no_exact_catalogue_match_offers_a_fuzzy_suggestion(
         assert "No catalogue match" not in result.output
     else:
         assert entry["context_window"] == 262144  # Explicit manual declaration, not a fallback.
-        assert "No details listed" in (result.output)
+        assert "Source: Your settings" in " ".join(result.output.split())
 
 
 def test_no_exact_catalogue_match_is_not_guessed_under_yes(
@@ -1310,7 +1310,7 @@ def test_default_budget_covers_explicit_small_cap_and_every_level(tmp_path, monk
             "--output",
             str(path),
         ],
-        input="discover\ntest\n262144\n262144\ntest\ny\n",
+        input="262144\n262144\ndiscover\ntest\ny\n",
     )
     assert result.exit_code == 0, result.output
     assert [body["reasoning_effort"] for body in bodies if "reasoning_effort" in body] == [
@@ -1357,7 +1357,7 @@ def test_unset_budget_tokens_is_unlimited_and_never_warns(tmp_path, monkeypatch)
             "--output",
             str(path),
         ],
-        input="discover\ntest\n262144\n262144\ntest\ny\n",
+        input="262144\n262144\ndiscover\ntest\ny\n",
     )
     assert result.exit_code == 0, result.output
     assert "Check budget: unlimited" not in result.output
@@ -1465,7 +1465,11 @@ def test_provider_menu_fills_connection_defaults(
     result = CliRunner().invoke(
         command,
         ["--no-catalogue", "--no-probe"],
-        input=f"{provider}\ntest-model\ndiscover\n-\nsave\n{style}\n262144\n262144\nsave\nmy-model\ny\n",
+        input=(
+            f"{provider}\ntest-model\n262144\n262144\n-\nsave\nmy-model\ny\n"
+            if provider == "anthropic"
+            else f"{provider}\ntest-model\n262144\n262144\ndiscover\n-\nsave\n{style}\nmy-model\ny\n"
+        ),
     )
     assert result.exit_code == 0, result.output
     expected_listing = {"api_style": style, "api_key": "preset-test-key"}
@@ -1482,12 +1486,16 @@ def test_provider_menu_fills_connection_defaults(
     assert "preset-test-key" not in result.output
     assert "Model server URL:" not in result.output
     assert "Key environment variable" not in result.output
-    assert (
-        result.output.index("Search available models")
-        < result.output.index("Request interface")
-        < result.output.index("Would you like to test these settings?")
-        < result.output.index("API format [")
-    )
+    if provider == "anthropic":
+        assert "Request interface" not in result.output and "API format [" not in result.output
+        assert result.output.index("Search available models") < result.output.index("Model details")
+    else:
+        assert (
+            result.output.index("Search available models")
+            < result.output.index("Request interface")
+            < result.output.index("Would you like to test these settings?")
+            < result.output.index("API format [")
+        )
 
 
 @pytest.mark.parametrize("style", ["chat", "responses", "anthropic"])
@@ -1518,7 +1526,7 @@ def test_mixed_endpoint_selects_model_before_request_interface(tmp_path, monkeyp
             "--output",
             str(path),
         ],
-        input=f"vendor-b/model\ndiscover\nsave\n{style}\n262144\n262144\nsave\nselected\ny\n",
+        input=f"vendor-b/model\n262144\n262144\ndiscover\nsave\n{style}\nselected\ny\n",
     )
     assert result.exit_code == 0, result.output
     assert len(seen) == 1
