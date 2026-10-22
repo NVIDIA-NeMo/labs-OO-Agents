@@ -282,6 +282,17 @@ class Choice(_Field):
             schema["enum"] = list(self.values)
         return schema
 
+    def to_string_schema(self) -> dict[str, Any]:
+        # String-only clients (Pool) show a picker for ``oneOf`` but a bare text
+        # box for ``enum``, so always send titled options to them.
+        schema = super().to_string_schema()
+        schema.pop("enum", None)
+        schema["oneOf"] = [
+            {"const": value, "title": label if label is not None else value}
+            for value, label in self.options  # type: ignore[misc]
+        ]
+        return schema
+
     def coerce(self, value: Any) -> str:
         text = value if isinstance(value, str) else None
         if text not in self.values:

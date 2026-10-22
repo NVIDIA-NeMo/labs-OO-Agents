@@ -85,7 +85,7 @@ def scripted(*answers):
 HAPPY = (
     {"provider": "nvidia"},
     {"api_key_env": "NVIDIA_API_KEY"},
-    {"filter": "llama"},
+    {"search": "llama"},
     {"model": "acme/llama-big"},
     {"context_window": 100000, "max_tokens": 4096},
     {"alias": "big"},
@@ -114,7 +114,7 @@ async def test_the_happy_path_writes_the_config(fake, tmp_path):
     assert fields == [
         ["provider"],
         ["api_key_env"],
-        ["filter"],
+        ["search"],
         ["model"],
         ["context_window", "max_tokens"],
         ["alias"],
@@ -122,7 +122,7 @@ async def test_the_happy_path_writes_the_config(fake, tmp_path):
     requests = [request for *_rest, request in asker.forms]
     assert "custom" in requests[0].fields["provider"].values
     assert requests[1].fields["api_key_env"].default == "NVIDIA_API_KEY"
-    assert requests[3].fields["model"].values == ("acme/llama-big",)
+    assert requests[3].fields["model"].values == ("acme/llama-big", "\x00search-again")
     assert requests[4].fields["context_window"].default == 131072
     assert requests[5].fields["alias"].default == "llama-big"
     # No form ever asks for a key, and the key came from the environment.

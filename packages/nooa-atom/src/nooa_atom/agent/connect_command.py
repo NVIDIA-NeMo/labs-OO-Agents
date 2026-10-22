@@ -33,6 +33,8 @@ CONNECT_FALLBACK = (
 
 CANCELLED = "Cancelled; nothing written."
 
+_SEARCH_AGAIN = "\x00search-again"
+"""Picker value that returns to the model search."""
 MAX_CHOICES = 25
 """More discovered models than this are narrowed with a filter first."""
 
@@ -184,23 +186,40 @@ class _Wizard:
             return values["model"].strip(), endpoint, None
         self.note(f"Found {len(names)} models at {endpoint}.")
         shown = names
-        message = f"Found {len(names)} models. Type part of a name to narrow the list."
-        while len(shown) > MAX_CHOICES:
-            values = await _form(
-                message, filter=Text(title="Filter", description="Part of a model ID.")
-            )
-            query = values["filter"].strip().lower()
-            matching = [name for name in names if query in name.lower()]
-            if not matching:
-                message = f"No model ID contains {values['filter']!r}. Try another filter."
-            elif len(matching) > MAX_CHOICES:
-                message = f"{len(matching)} models match {values['filter']!r}. Narrow it further."
-            else:
+        message = f"Found {len(names)} models. Type part of a name to search them."
+        while True:
+            if len(shown) > MAX_CHOICES:
+                values = await _form(
+                    self.with_progress(message),
+                    search=Text(title="Search models", description="Part of a model ID."),
+                )
+                query = values["search"].strip().lower()
+                matching = [name for name in names if query in name.lower()]
+                if not matching:
+                    message = f"No model ID contains {values['search']!r}. Search again."
+                    continue
+                if len(matching) > MAX_CHOICES:
+                    message = (
+                        f"{len(matching)} models match {values['search']!r}. "
+                        "Type more of the name."
+                    )
+                    shown = matching
+                    continue
                 shown = matching
-        values = await _form(
-            f"Choose a model ({len(shown)} shown).",
-            model=Choice(title="Model", options=shown),
-        )
+            options = dict.fromkeys(shown, None)
+            if len(names) > len(shown):
+                options[_SEARCH_AGAIN] = "Search again…"
+            values = await _form(
+                f"Choose a model ({len(shown)} of {len(names)}).",
+                model=Choice(
+                    title="Model",
+                    options={name: label or name for name, label in options.items()},
+                ),
+            )
+            if values["model"] != _SEARCH_AGAIN:
+                break
+            shown = names
+            message = f"Found {len(names)} models. Type part of a name to search them."
         model = values["model"]
         endpoint_model = next((item for item in found.models if item.get("id") == model), None)
         return model, endpoint, endpoint_model
