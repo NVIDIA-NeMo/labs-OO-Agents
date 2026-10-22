@@ -227,7 +227,7 @@ def test_terminal_progress_clears_active_row_on_completion_and_cancel(monkeypatc
     result = CliRunner().invoke(command)
     assert result.exit_code == 0, result.output
     assert result.stdout.count("\r\x1b[2K") == 2
-    assert "OpenAI-compatible Chat: Passed" in result.output
+    assert "OpenAI-compatible Chat: Works" in result.output
 
 
 def test_wrong_answer_shows_a_passed_icon_not_attention():

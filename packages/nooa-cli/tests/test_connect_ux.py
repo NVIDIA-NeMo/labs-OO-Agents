@@ -117,7 +117,7 @@ def test_normal_wizard_transcript(monkeypatch, tmp_path, columns, save):
         "API key",
         "Search available models",
         "Request interface",
-        "OpenAI-compatible Chat: Passed",
+        "OpenAI-compatible Chat: Works",
         "configure media inputs",
         "Proposed configuration",
         "Would you like to test these settings?",
@@ -152,7 +152,10 @@ def test_normal_wizard_transcript(monkeypatch, tmp_path, columns, save):
     assert "Test now approves" not in plain
     rows = [row for row in output.splitlines() if re.match(r"  [✓!–] ", row)]
     assert rows and all(
-        re.search(r": (Passed|Not available|Failed|Skipped)( · 0.0s)?$", row) for row in rows
+        re.search(
+            r": (Passed|Not available|Failed|Skipped|Works|Returned|Not returned)( · 0.0s)?$", row
+        )
+        for row in rows
     )
     assert all(len(row) <= columns for row in rows)
     assert path.exists() is save

@@ -887,9 +887,9 @@ def test_bare_command_walks_through_setup_and_checks_inline(tmp_path, monkeypatc
     assert "acceptance alone" not in result.output
     assert "private test reasoning" not in result.output
     assert result.output.index("OpenAI-compatible Chat — checking") < result.output.index(
-        "OpenAI-compatible Chat: Passed"
+        "OpenAI-compatible Chat: Works"
     )
-    assert result.output.index("OpenAI-compatible Chat: Passed") < result.output.index(
+    assert result.output.index("OpenAI-compatible Chat: Works") < result.output.index(
         "Tool use — checking"
     )
     assert result.output.index("Tool use — checking") < result.output.index("Save this model as")

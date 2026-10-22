@@ -383,6 +383,9 @@ def progress_result(icon, label, detail, *, elapsed="", headline=None, fg=None):
         click.echo("  " + part)
 
 
+INTERFACE_NAMES = {"chat", "responses", "anthropic", "systemone", "openai"}
+
+
 def check_label(name):
     """One human vocabulary for checks and review rows."""
     if name.startswith("level:"):
@@ -394,6 +397,8 @@ def check_label(name):
         "chat": "OpenAI-compatible Chat",
         "responses": "OpenAI Responses",
         "anthropic": "Anthropic Messages",
+        "systemone": "System One Decisions",
+        "openai": "OpenAI Decisions",
         "routing": "Connection",
         "decision:typed": "Typed decisions (boolean, choice, score)",
         "decision:positive": "Decision positive case",
@@ -455,11 +460,39 @@ class CheckProgress:
         self.started = {}
         self.results = {}
         self.reasoning_levels = {}
+        self.interface_seen = set()
 
     def _clear(self):
         if self.active:
             click.echo("\r\033[2K", nl=False, color=True)
             self.active = False
+
+    def _interface_update(self, name, label, record):
+        """Discovery rows: an interface that doesn't answer is not available, not a failure."""
+        elapsed = (
+            f" · {time.monotonic() - self.started.pop(name):.1f}s" if name in self.started else ""
+        )
+        accepted = record.get("outcome") == "accepted"
+        reasoning_row = name in self.interface_seen
+        self.interface_seen.add(name)
+        if reasoning_row:
+            label += " reasoning"
+            if accepted and record.get("reasoning_observed"):
+                icon, headline, detail, color = "✓", "Returned", "", "green"
+            elif accepted:
+                icon, headline, detail, color = "–", "Not returned", "", None
+            else:
+                icon, headline, color = "–", "Not available", None
+                detail = check_failure(record) or check_reason(record.get("reason")) or ""
+        elif accepted:
+            icon, headline, detail, color = "✓", "Works", "", "green"
+        else:
+            icon, headline, color = "–", "Not available", None
+            detail = check_failure(record) or check_reason(record.get("reason")) or ""
+        progress_result(
+            icon, label, detail or headline, elapsed=elapsed, headline=headline, fg=color
+        )
+        self.results[name] = headline
 
     def update(self, name, record, *, missing_reasoning=False, media_inputs=None):
         label = check_label(name)
@@ -477,6 +510,9 @@ class CheckProgress:
             return
         if name == "session" and outcome == "completed":
             return  # Cache and reasoning rows already describe the result.
+        if name in INTERFACE_NAMES:
+            self._interface_update(name, label, record)
+            return
         if outcome == "retrying":
             line(
                 f"↻ {label}: Reached the test limit; retrying with {record['tested_reply_tokens']:,} tokens (saved setting unchanged).",
