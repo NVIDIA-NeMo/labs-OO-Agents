@@ -35,6 +35,7 @@ from nooa import hidden, strategy
 from nooa.agentdoc import doc  # noqa: F401  # visible in the REPL, as on base
 from nooa.context_blocks import Metadata
 from nooa.context_blocks.roles import Role
+from nooa.runtime.turn_loop import ResultKind
 from nooa.storage.markers import nosnapshot
 from nooa.storage.snapshot_vars import SnapshotVars
 
@@ -116,6 +117,7 @@ class Done(BaseModel):
     turn, ``handle_work``, requires one; other turns may leave it unset).
     """
 
+    _turn_kind: ClassVar[ResultKind] = "done"
     explanation: str = Field(description="Status line saying what was finished; not the reply")
     message: str | None = Field(default=None, description="The reply to show the user")
     evidence: list[str] = Field(
@@ -143,6 +145,7 @@ class NeedInput(BaseModel):
     """
 
     model_config = {"extra": "forbid"}
+    _turn_kind: ClassVar[ResultKind] = "need_input"
     kind: Literal["question"] = "question"
     question: str
     reason: str | None = None
@@ -160,6 +163,7 @@ class Waiting(BaseModel):
     next turn when one of them delivers.
     """
 
+    _turn_kind: ClassVar[ResultKind] = "waiting"
     explanation: str = Field(description="Why the turn is waiting")
     message: str | None = Field(default=None, description="Line to show the user while waiting")
     on: list[str] = Field(

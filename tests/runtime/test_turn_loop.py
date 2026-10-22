@@ -38,11 +38,11 @@ class ScriptedAgent(InteractiveAgent):
 class HostedQuestion:
     """A host's own result type: its class says how the loop settles it."""
 
-    __turn_kind__ = "need_input"
+    _turn_kind = "need_input"
 
 
 class BogusKind:
-    __turn_kind__ = "cancelled"  # only done / need_input / waiting are accepted
+    _turn_kind = "cancelled"  # only done / need_input / waiting are accepted
 
 
 def record(agent, *types):

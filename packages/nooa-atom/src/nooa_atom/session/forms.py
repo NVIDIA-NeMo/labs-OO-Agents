@@ -7,18 +7,19 @@ adds ``NeedInputForm`` as an extra return type of its turn methods; the
 form's question types, its answer and the readable-text helpers used by the
 session store and the ACP adapters live here.
 
-``NeedInputForm`` sets ``__turn_kind__ = "need_input"``, so the core turn
+``NeedInputForm`` sets ``_turn_kind = "need_input"``, so the core turn
 loop settles it as an input request; the Atom session tells it apart by
 type and records it as ``need_input_form``.
 """
 
 import re
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, ClassVar, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from nooa import hidden
 from nooa.interactive import NeedInput
+from nooa.runtime.turn_loop import ResultKind
 
 
 def _non_blank(value: str) -> str:
@@ -222,7 +223,7 @@ class NeedInputForm(BaseModel):
 
     model_config = {"extra": "forbid", "strict": True}
     # The core turn loop settles this as an input request (see module doc).
-    __turn_kind__ = "need_input"
+    _turn_kind: ClassVar[ResultKind] = "need_input"
     kind: Literal["form"] = "form"
     heading: str = Field(description="What the form is for")
     reason: str | None = Field(default=None, description="Optional: why you are asking")

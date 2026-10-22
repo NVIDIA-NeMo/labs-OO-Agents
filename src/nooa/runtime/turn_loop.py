@@ -13,7 +13,7 @@ import contextvars
 import logging
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
-from typing import Annotated, Any, ClassVar, Literal
+from typing import Annotated, Any, ClassVar, Literal, get_args
 
 from pydantic import Field
 
@@ -25,7 +25,10 @@ logger = logging.getLogger(__name__)
 PrepareTurn = Callable[[], Awaitable[None]]
 CommitTurn = Callable[[dict[str, list[Any]]], None]
 
-TurnKind = Literal["done", "need_input", "waiting", "cancelled", "error"]
+# How a turn result settles the turn. A result class names its kind in a
+# ``_turn_kind`` class variable, as events name their role in ``_role``.
+ResultKind = Literal["done", "need_input", "waiting"]
+TurnKind = Literal[ResultKind, "cancelled", "error"]
 
 
 class TurnCancelled(EventBase):
@@ -62,8 +65,8 @@ class TurnSettled(EventBase):
     """Published once a turn has finished, however it finished.
 
     - ``done`` / ``need_input`` / ``waiting``: ``result`` is the turn's
-      ``Done`` / ``NeedInput`` / ``Waiting``, or a host result type whose
-      class sets ``__turn_kind__`` to that kind.
+      ``Done`` / ``NeedInput`` / ``Waiting``, or any result whose class sets
+      ``_turn_kind`` to that kind (a host's own result type).
     - ``cancelled``: ``cancel(by=...)`` stopped it. ``cancelled_by`` names
       who; ``interrupted`` is the tag of the interrupted cell's output (or
       ``None``). ``TurnCancelled`` is already in the agent's events, unless
@@ -105,25 +108,10 @@ class TurnLoopEnded(EventBase):
     message: str = ""
 
 
-_RESULT_KINDS = ("done", "need_input", "waiting")
-
-
 def _settled_from(result: Any) -> TurnSettled:
-    """Map a turn method's return value to a ``TurnSettled``.
-
-    A host's own result type settles as the kind its class names in
-    ``__turn_kind__`` (``"done"``, ``"need_input"`` or ``"waiting"``).
-    """
-    from nooa.interactive import Done, NeedInput, Waiting
-
-    if isinstance(result, Done):
-        return TurnSettled(kind="done", result=result)
-    if isinstance(result, NeedInput):
-        return TurnSettled(kind="need_input", result=result)
-    if isinstance(result, Waiting):
-        return TurnSettled(kind="waiting", result=result)
-    kind = getattr(type(result), "__turn_kind__", None)
-    if kind in _RESULT_KINDS:
+    """Map a turn method's return value to a ``TurnSettled`` by its ``_turn_kind``."""
+    kind = getattr(type(result), "_turn_kind", None)
+    if kind in get_args(ResultKind):
         return TurnSettled(kind=kind, result=result)
     return TurnSettled(
         kind="error", message=f"turn returned {type(result).__name__}, not a turn result"

@@ -87,7 +87,8 @@ def test_the_core_turn_loop_settles_a_form_as_an_input_request():
     form = NeedInputForm(heading="Details", questions=[TextQuestion(id="name", label="Name?")])
     settled = _settled_from(form)
     assert settled.kind == "need_input" and settled.result is form
-    assert "__turn_kind__" not in NeedInputForm.model_fields
+    assert "_turn_kind" not in NeedInputForm.model_fields
+    assert NeedInputForm._turn_kind == "need_input"
 
 
 def test_a_one_shot_worker_may_not_return_a_form():
