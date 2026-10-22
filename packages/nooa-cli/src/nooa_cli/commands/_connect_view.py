@@ -405,6 +405,7 @@ def check_label(name):
         "cache": "Cache reuse",
         "reasoning_retention": "Reasoning retention",
         "encrypted_reasoning": "Encrypted reasoning",
+        "explicit_cache": "Prompt caching",
         "session": "Conversation",
     }.get(name, name)
 
@@ -517,9 +518,15 @@ class CheckProgress:
             )
         elif name == "reasoning_retention" and outcome == "confirmed":
             detail = "Preserved in the next request"
+        elif name == "explicit_cache":
+            detail = "Not supported by this server; turned off for this model."
         from nooa.unifiedllm.connect._records import check_status
 
-        status = check_status(name, record, missing_reasoning=missing_reasoning)
+        status = (
+            "skipped"
+            if name == "explicit_cache"
+            else check_status(name, record, missing_reasoning=missing_reasoning)
+        )
         if (
             name == "routing"
             and record.get("client") != "decision"

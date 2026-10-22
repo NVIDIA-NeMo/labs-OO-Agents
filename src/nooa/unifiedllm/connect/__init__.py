@@ -2949,10 +2949,10 @@ async def run_steps(
                 and _cache_options_rejected(exc)
             ):
                 rejection = _disable_explicit_cache(entry, status)
-                yield ProbeUpdate("explicit_cache", deepcopy(rejection))
                 # Retry once without cache fields; the saved entry keeps caching off.
+                # The rejected attempt is not shown as a failed connection.
+                yield ProbeUpdate("explicit_cache", deepcopy(rejection))
                 pending.appendleft(probe)
-                yield ProbeUpdate(probe.name, deepcopy(record))
                 continue
             spent += max(0, record.get("reported_tokens", 0) - probe.token_estimate)
             stopped = probe.name == "routing" or status in {401, 403}

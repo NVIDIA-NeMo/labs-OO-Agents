@@ -2718,6 +2718,19 @@ def run_checks(state: WizardState) -> bool:
     )
     state.tokens_spent += state.result.entry["provenance"].get("tokens_charged_to_budget", 0)
     state.result.entry["provenance"]["tokens_charged_to_budget"] = state.tokens_spent
+    # Settings the server refused during the checks (and were turned off) are
+    # part of what was tested, so the save candidate must carry them too.
+    for name, record_key in (
+        ("cache_breakpoint", "explicit_cache"),
+        ("include", "encrypted_reasoning"),
+    ):
+        record = state.result.entry["provenance"].get(record_key) or {}
+        if (
+            record.get("outcome") == "rejected"
+            and state.configured is not None
+            and name in state.result.entry
+        ):
+            state.configured[name] = deepcopy(state.result.entry[name])
     skipped = [
         name
         for name, record in state.result.entry["provenance"]["probes"].items()
