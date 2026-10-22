@@ -138,7 +138,7 @@ async def test_a_second_prompt_during_a_turn_is_queued_for_its_own_turn(make_ada
     assert len(calls) == 3
     # The running turn's next model call lists it as pending, once, in the queues block.
     during = str(calls[1].messages)
-    assert "user_messages: 1 pending" in during
+    assert "Unread:\\n  • user_messages: also do the second" in during
     assert during.count("also do the second") == 1
     assert "also do the second" in str(calls[2].messages)
 

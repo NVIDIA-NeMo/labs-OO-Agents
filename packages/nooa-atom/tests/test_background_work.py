@@ -3,7 +3,7 @@
 """One view of background work: jobs and child sessions in one status list, one way to wait.
 
 The per-turn ``queues`` block lists running ``self.jobs`` jobs and live
-children together under "Background work", by path (``/root/tests``);
+children together, by path (``/root/tests``), under "Unread:", "Running:" and "Idle:";
 ``Waiting(on=[name])`` takes a job's label or a child's name (or path). Jobs
 and children share one namespace of live names, so no name is both.
 """
@@ -78,10 +78,12 @@ async def test_the_status_lists_jobs_and_live_children_together(tmp_path, sessio
     )
     status = calls[1].split("STATUS<<", 1)[1].split(">>", 1)[0]
     assert "no child named 'nope'; open children: ['fix_flaky_test', 'review_pr_462']" in calls[1]
-    assert "Background work:\n" in status
-    assert re.search(r"  • /root/tests · job · running \d+s · full run before pushing", status)
-    assert "  • /root/review_pr_462 · child · running" in status
-    assert "  • /root/fix_flaky_test · child · retained" in status
+    assert re.search(
+        r"^Running:\n  • /root/tests · job · \d+s · full run before pushing\n"
+        r"  • /root/review_pr_462 · child · \d+s\n"
+        r"Idle:\n  • /root/fix_flaky_test · child · retained\n",
+        status,
+    ), status
     assert status.endswith(
         "\nCancel a job: await self.jobs.cancel('<name>')"
         "\nClose a child: await self.child('<name>').close()"
@@ -199,11 +201,16 @@ async def test_a_child_with_an_unread_question_says_so_until_it_is_read(tmp_path
     )
     asked = calls[1].split("ASKED<<", 1)[1].split(">>", 1)[0]
     read = calls[1].split("READ<<", 1)[1].split(">>", 1)[0]
-    assert "delegates: 1 pending\n  1. /root/asker asks: Which branch?\n" in asked
-    assert "Background work:\n  • /root/asker · child · has a question for you" in asked
-    # Once read, the question is no longer buffered: the kept child shows as retained.
-    assert "has a question for you" not in read
-    assert "  • /root/asker · child · retained" in read
+    # Unread: only its question line, not under Running/Idle too.
+    assert asked == (
+        "Unread:\n  • /root/asker asks: Which branch?\n"
+        "Close a child: await self.child('<name>').close()"
+    )
+    # Once read but not answered, it stays under Unread, still not Idle.
+    assert read == (
+        "Unread:\n  • /root/asker · child · question not answered yet\n"
+        "Close a child: await self.child('<name>').close()"
+    )
 
 
 async def test_paths_of_jobs_and_a_grandchild(tmp_path, sessions_dir):
@@ -260,12 +267,12 @@ async def test_paths_of_jobs_and_a_grandchild(tmp_path, sessions_dir):
     assert "DEEP<</root/review_pr_462/verifier running>>" in text
     status = text.split("STATUS<<", 1)[1].split(">>", 1)[0]
     lines = status.splitlines()
-    assert lines[0] == "Background work:"
-    assert re.fullmatch(r"  • /root/tests · job · running \d+s · full run before pushing", lines[1])
-    assert re.fullmatch(r"  • /root/ci_check · job · running \d+s · watch CI on PR 462", lines[2])
-    # Running until its turn ends Waiting on its own child, then "waiting on its own job".
+    assert lines[0] == "Running:"
+    assert re.fullmatch(r"  • /root/tests · job · \d+s · full run before pushing", lines[1])
+    assert re.fullmatch(r"  • /root/ci_check · job · \d+s · watch CI on PR 462", lines[2])
+    # Its turn's age until the turn ends Waiting on its own child, then "waiting on its own job".
     assert re.fullmatch(
-        r"  • /root/review_pr_462 · child · (running|waiting on its own job)", lines[3]
+        r"  • /root/review_pr_462 · child · (\d+s|waiting on its own job)", lines[3]
     )
     assert "verifier" not in status  # only your own jobs and children
     rejected = text  # the error from the same cell's return_result
@@ -277,3 +284,85 @@ async def test_paths_of_jobs_and_a_grandchild(tmp_path, sessions_dir):
     assert "You are /root/review_pr_462, a child of /root. You can ask" in first
     deeper = str(models.llms["verifier"].calls[0].messages)
     assert "You are /root/review_pr_462/verifier, a child of /root/review_pr_462." in deeper
+
+
+async def test_the_queues_block_reads_unread_running_idle(tmp_path, sessions_dir):
+    """The whole block: an unread question and job batches, running jobs and children, idle."""
+    models = AtomModels()
+    models.scripts[None] = [
+        cell(
+            "await self.jobs.run('sleep 30', label='tests', description='full test run before pushing')\n"
+            "await self.jobs.run('for i in $(seq 1 2000); do echo line $i; sleep 0.02; done',"
+            " label='build', items=50)\n"
+            "self.jobs.every(600, label='ci_check', description='check PR 480 CI every 10 min')\n"
+            "self.v.fix = await self.spawn('Fix flaky test', 'fix it', name='fix_flaky_test')\n"
+            "await self.v.fix.wait()\n"
+            "self.v.review = await self.spawn('Review PR 480', 'review it', name='review_pr_480')\n"
+            "await self.spawn('Pick branch', 'ask', name='pick_branch')\n"
+            "delegates = self.queue_manager.get_channel('delegates')\n"
+            "jobs = self.queue_manager.get_channel('jobs')\n"
+            "async with asyncio.timeout(20):\n"
+            "    while not (delegates.qsize() and jobs.qsize() >= 2):\n"
+            "        await asyncio.sleep(0.02)\n"
+            "    while True:\n"
+            "        try:\n"
+            "            self.child('/root/review_pr_480/verifier')\n"
+            "            break\n"
+            "        except KeyError:\n"
+            "            await asyncio.sleep(0.02)\n"
+            "print('STATUS<<' + self._queue_status() + '>>')"
+        ),
+        cell(
+            "for label in ('tests', 'build', 'ci_check'):\n"
+            "    await self.jobs.cancel(label)\n" + DONE
+        ),
+    ]
+    models.scripts["fix_flaky_test"] = [cell(CHILD_DONE)]
+    models.scripts["review_pr_480"] = [
+        cell(
+            "self.v.verifier = await self.spawn('Verify', 'verify it', name='verifier')\n"
+            "await asyncio.sleep(30)\n" + CHILD_DONE
+        )
+    ]
+    models.scripts["verifier"] = _slow_child(30)
+    models.scripts["pick_branch"] = [
+        cell("return_result(NeedInput(question='Which branch should I push to: main or dev?'))")
+    ]
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    options = SessionOptions(workspace=workspace, agent_spec=ATOM_SPEC, sessions_dir=sessions_dir)
+    registry = SessionRegistry(SessionStore(sessions_dir), agent_factory=models)
+    try:
+        root = await registry.create(options)
+        outcome = await asyncio.wait_for(root.prompt("hi"), TIMEOUT)
+        assert outcome.explanation == "done"
+    finally:
+        await registry.close_all()
+    calls = models.llms[None].calls
+    added = calls[1].messages[len(calls[0].messages) :]
+    text = "\n".join(str(message.get("content") or "") for message in added)
+    status = text.split("STATUS<<", 1)[1].split(">>", 1)[0]
+    print(status)
+    lines = status.splitlines()
+    assert lines[0] == "Unread:"
+    assert lines[1] == "  • /root/pick_branch asks: Which branch should I push to: main or dev?"
+    assert re.fullmatch(r"  • /root/build: 50 lines, last: line \d+", lines[2])
+    running = lines.index("Running:")
+    idle = lines.index("Idle:")
+    assert 2 < running < idle
+    assert re.fullmatch(
+        r"  • /root/tests · job · \d+s · full test run before pushing", lines[running + 1]
+    )
+    assert lines[running + 2].startswith("  • /root/build · job · ")
+    assert re.fullmatch(
+        r"  • /root/ci_check · job · \d+s · check PR 480 CI every 10 min", lines[running + 3]
+    )
+    assert re.fullmatch(r"  • /root/review_pr_480 · child · \d+s", lines[running + 4])
+    assert lines[idle:] == [
+        "Idle:",
+        "  • /root/fix_flaky_test · child · retained",
+        "Cancel a job: await self.jobs.cancel('<name>')",
+        "Close a child: await self.child('<name>').close()",
+    ]
+    assert "pick_branch" not in "\n".join(lines[running:])  # its question is under Unread only
+    assert "verifier" not in status

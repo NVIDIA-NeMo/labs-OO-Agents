@@ -240,6 +240,13 @@ def _preview_item(item: Any, max_chars: int) -> str:
     return text
 
 
+def _unread_line(channel: str, item: Any, max_chars: int) -> str:
+    """One ``Unread:`` line: an item's own ``status_preview()``, else ``<channel>: <preview>``."""
+    if callable(getattr(item, "status_preview", None)):
+        return _preview_item(item, max_chars)
+    return _preview_item(f"{channel}: {_preview_item(item, max_chars)}", max_chars)
+
+
 def _default_event_preview(value: Any) -> str:
     """Default ``value_preview`` for event-mode puts.
 
@@ -763,7 +770,7 @@ class QueueManager:
         self._cancel_hints: dict[str, str] = {}
 
     def set_cancel_hint(self, channel: str, hint: str) -> None:
-        """Show ``hint`` once under "Background work" while jobs on ``channel`` run.
+        """Show ``hint`` once, after the status sections, while jobs on ``channel`` run.
 
         One plain line naming the call with a placeholder, e.g.
         ``"Stop a monitor: await self.ci.stop('<label>')"``; the labels
@@ -953,48 +960,70 @@ class QueueManager:
     # ---- composite status block -----------------------------------------
 
     def status(
-        self, *, max_items: int = 3, max_chars: int = 80, more_work: Sequence[str] = ()
+        self,
+        *,
+        max_items: int = 3,
+        max_chars: int = 80,
+        more_work: Sequence[str] = (),
+        more_unread: Sequence[str] = (),
+        idle: Sequence[str] = (),
     ) -> str:
-        """Composite ``status`` across queue-mode channels and active spawns.
+        """Composite ``status`` block: "Unread:", "Running:", "Idle:", then cancel hints.
 
-        Wired into a dynamic context block (``queues``) so the LLM
-        sees pending counts every turn. Event-mode channels skip —
-        they don't accumulate.
+        Wired into a dynamic context block (``queues``) so the LLM sees,
+        every turn, what arrived and was not read yet and what is still
+        working. Each heading starts at the left edge with one ``  • `` line
+        per entry; an empty section is left out.
 
-        Also lists the running spawned jobs under "Background work:", so the
-        LLM knows background producers are still running even when queues
-        are empty. ``more_work`` adds a host's own lines to that list (Atom's
-        child sessions). Returns ``"(nothing queued)"`` when there is no
-        status to show.
+        - ``Unread:`` one line per item buffered on a queue-mode channel, in
+          channel order (event-mode channels do not accumulate). An item
+          with a ``status_preview()`` shows what it returns (it names its
+          own source); any other item shows as ``<channel>: <preview>``.
+          At most ``max_items`` item lines, then ``… N more``. A host's own
+          ``more_unread`` lines follow, uncapped.
+        - ``Running:`` running spawned jobs (their ``describe()``, else
+          ``<label> → <channel>``), then the host's ``more_work`` lines.
+        - ``Idle:`` the host's ``idle`` lines (work with nothing to do).
+
+        Each preview is one line, cut at ``max_chars``. Returns
+        ``"(nothing queued)"`` when there is nothing to show.
         """
-        parts = [
-            ch.status(max_items=max_items, max_chars=max_chars)
+        items = [
+            _unread_line(ch.name, item, max_chars)
             for ch in self._channels.values()
             if ch.mode == "queue"
+            for item in list(ch._items)
         ]
-        body = "\n".join(p for p in parts if p)
+        unread = items[:max_items]
+        if len(items) > max_items:
+            unread.append(f"… {len(items) - max_items} more")
+        unread += [line for line in more_unread if line]
 
-        # Show active spawns — tells the LLM "monitors are running"
-        # even when no items are pending (items were already delivered).
+        # Active spawns tell the LLM monitors are running even when no
+        # items are pending (items were already delivered).
         active_spawns = [h for h in self._handles if h.state == "running"]
         work = [
-            (h.describe() if h.describe is not None else None) or f"{h.label} → {h.name} (running)"
+            (h.describe() if h.describe is not None else None) or f"{h.label} → {h.name}"
             for h in active_spawns
         ]
         work += [line for line in more_work if line]
-        if work:
-            work_status = "\n".join(["Background work:", *(f"  • {line}" for line in work)])
-            body = f"{body}\n{work_status}" if body else work_status
+
+        lines: list[str] = []
+        for heading, entries in (
+            ("Unread:", unread),
+            ("Running:", work),
+            ("Idle:", [line for line in idle if line]),
+        ):
+            if entries:
+                lines += [heading, *(f"  • {entry}" for entry in entries)]
 
         # Cancel hints come only from the API that owns a channel
         # (``set_cancel_hint``); the status never names the hidden queue_manager.
         # Each hint shows once, however many of its jobs are running.
         owned = self._cancel_hints
-        hints = "\n".join(dict.fromkeys(owned[h.name] for h in active_spawns if h.name in owned))
-        if hints:
-            body = f"{body}\n{hints}" if body else hints
+        lines += dict.fromkeys(owned[h.name] for h in active_spawns if h.name in owned)
 
-        return body or "(nothing queued)"
+        return "\n".join(lines) or "(nothing queued)"
 
     def _event_notify(self) -> None:
         with self._batch_lock:

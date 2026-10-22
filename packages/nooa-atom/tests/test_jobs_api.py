@@ -660,8 +660,8 @@ async def test_the_status_line_shows_label_state_and_description_or_target(agent
     agent.jobs.after(300, label="timer")
     await agent.jobs.run("sleep 30 # " + "y" * 300, label="noisy")
     status = agent.queue_manager.status()
-    assert re.search(r"  • /root/tests · job · running \d+s · full run before pushing", status)
-    assert re.search(r"  • /root/timer · job · running \d+s · after 300s", status)
+    assert re.search(r"  • /root/tests · job · \d+s · full run before pushing", status)
+    assert re.search(r"  • /root/timer · job · \d+s · after 300s", status)
     noisy = next(line for line in status.splitlines() if "noisy" in line)
     assert noisy.endswith("…") and len(noisy) <= 4 + 100
     assert "→ jobs" not in status
@@ -979,7 +979,7 @@ def test_status_line_shows_age_while_running_and_pending_above_zero():
     job = jobs_mod._Job("build", "run", None, True, target="make build")
     job.started_at = old
     job.pending = 2
-    assert job.status_line() == "build · job · running 1h05m · 2 pending · make build"
+    assert job.status_line() == "build · job · 1h05m · 2 pending · make build"
     job.pending = 0
     assert "pending" not in job.status_line()
 
@@ -1084,3 +1084,76 @@ async def test_tail_delivers_lines_appended_after_the_call_before_it_ran(agent, 
     item = await _next(agent)
     assert item.items == ["new"]
     await agent.jobs.cancel("early")
+
+
+def _update(kind, **fields):
+    from nooa_atom.agent.jobs import JobUpdate
+
+    update = JobUpdate(label="build", path="/root/build", **fields)
+    update._kind = kind
+    return update
+
+
+def test_job_update_status_previews():
+    from nooa.tools import ShellResult, StreamEvent
+
+    def lines(*texts):
+        return [StreamEvent(kind="stdout", text=text) for text in texts]
+
+    def shell(code, timed_out=False):
+        return [ShellResult(stdout="", stderr="", returncode=code, timed_out=timed_out)]
+
+    progress = lines(*(f"line {i}" for i in range(601, 651)))
+    assert _update("run", items=progress).status_preview() == (
+        "/root/build: 50 lines, last: line 650"
+    )
+    assert _update("run", items=shell(0), done=True).status_preview() == "/root/build done: exit 0"
+    assert _update("run", items=shell(3), done=True).status_preview() == "/root/build done: exit 3"
+    assert _update("run", items=shell(124), done=True).status_preview() == (
+        "/root/build done: timed out"
+    )
+    assert _update("run", items=shell(124, True), done=True).status_preview() == (
+        "/root/build done: timed out"
+    )
+    failed = _update("spawn", done=True, error="ValueError: boom")
+    assert failed.status_preview() == "/root/build failed: ValueError: boom"
+    assert _update("tail", items=["a", "b", "c"]).status_preview() == (
+        "/root/build: 3 lines, last: c"
+    )
+    assert _update("tail", items=["only"]).status_preview() == "/root/build: 1 line, last: only"
+    assert _update("every", items=[3]).status_preview() == "/root/build: tick 3"
+    assert _update("every", items=[4, 5]).status_preview() == "/root/build: 2 ticks, last: tick 5"
+    assert _update("every", items=["check CI"]).status_preview() == "/root/build: check CI"
+    assert _update("after", items=["check CI"], done=True).status_preview() == (
+        "/root/build done: check CI"
+    )
+    assert _update("after", items=[None], done=True).status_preview() == "/root/build done: None"
+    assert _update("spawn", items=[{"ok": 1}], done=True).status_preview() == (
+        "/root/build done: {'ok': 1}"
+    )
+    assert _update("spawn", items=[1, 2, 3]).status_preview() == ("/root/build: 3 values, last: 3")
+    assert _update("spawn", items=[1, 2], done=True).status_preview() == (
+        "/root/build done: 2 values, last: 2"
+    )
+    assert _update("spawn", items=[], done=True).status_preview() == "/root/build done"
+    long = _update("tail", items=["x" * 500]).status_preview()
+    assert len(long) == 80 and long.endswith("…") and "\n" not in long
+
+
+async def test_job_updates_carry_their_kind_into_the_unread_list(agent):
+    agent.jobs.every(0.01, label="tick")
+    await _until(lambda: agent.queue_manager.get_channel("jobs").qsize() >= 4)
+    lines = agent.queue_manager.status().splitlines()
+    await agent.jobs.cancel("tick")  # also withdraws its queued ticks
+    assert lines[:4] == [
+        "Unread:",
+        "  • /root/tick: tick 1",
+        "  • /root/tick: tick 2",
+        "  • /root/tick: tick 3",
+    ]
+    assert re.fullmatch(r"  • … \d+ more", lines[4])
+    assert re.fullmatch(r"  • /root/tick · job · \d+s · every 0.01s", lines[6])
+    assert lines[5] == "Running:"
+    agent.jobs.after(0, label="timer", payload="check CI")
+    await _until(lambda: agent.jobs.get("timer").state == "done")
+    assert agent.queue_manager.status() == "Unread:\n  • /root/timer done: check CI"

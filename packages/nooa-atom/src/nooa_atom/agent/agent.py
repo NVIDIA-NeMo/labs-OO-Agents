@@ -460,12 +460,15 @@ class AtomAgent(InteractiveAgent):
     @hidden
     @no_trace
     def _queue_status(self) -> str:
-        """The ``queues`` block: pending items, then jobs and live children as "Background work"."""
-        from nooa_atom.agent.background import CLOSE_HINT, child_status_lines
+        """The ``queues`` block: "Unread:", "Running:" (jobs, children), "Idle:", then hints."""
+        from nooa_atom.agent.background import CLOSE_HINT, child_sections
 
-        children = child_status_lines(self)
-        status = self.queue_manager.status(more_work=children)
-        return f"{status}\n{CLOSE_HINT}" if children else status
+        children = child_sections(self)
+        status = self.queue_manager.status(
+            more_unread=children["unread"], more_work=children["running"], idle=children["idle"]
+        )
+        listed = any(children.values())  # a child is listed (its question counts)
+        return f"{status}\n{CLOSE_HINT}" if listed else status
 
     @hidden
     def after_restore(self) -> None:

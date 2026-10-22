@@ -435,4 +435,47 @@ async def test_status_uses_an_items_status_preview():
     qm = QueueManager()
     ch = qm.queue("delegates")
     ch.put(Asked())
-    assert qm.status() == "delegates: 1 pending\n  1. Worker asks: Which branch?"
+    assert qm.status() == "Unread:\n  • Worker asks: Which branch?"
+
+
+def test_status_unread_names_the_channel_of_an_item_without_a_preview_and_caps_it():
+    qm = QueueManager()
+    messages = qm.queue("user_messages")
+    jobs = qm.queue("jobs")
+    for text in ("one", "two"):
+        messages.put(text)
+    jobs.put({"n": 1})
+    jobs.put("x" * 200)
+    status = qm.status()
+    assert status.splitlines() == [
+        "Unread:",
+        "  • user_messages: one",
+        "  • user_messages: two",
+        "  • jobs: {'n': 1}",
+        "  • … 1 more",
+    ]
+    # A long preview is cut at max_chars, the channel name included.
+    lines = qm.status(max_items=10).splitlines()
+    assert lines[-1] == "  • jobs: " + "x" * 73 + "…"
+    assert len(lines[-1]) == 4 + 80
+
+
+def test_status_sections_order_and_omission():
+    qm = QueueManager()
+    qm.queue("delegates").put("hi")
+    status = qm.status(
+        more_unread=["/root/a · child · question not answered yet"],
+        more_work=["/root/b · child · 4s"],
+        idle=["/root/c · child · retained"],
+    )
+    assert status == (
+        "Unread:\n  • delegates: hi\n  • /root/a · child · question not answered yet\n"
+        "Running:\n  • /root/b · child · 4s\n"
+        "Idle:\n  • /root/c · child · retained"
+    )
+    assert QueueManager().status(idle=["/root/c · child · retained"]) == (
+        "Idle:\n  • /root/c · child · retained"
+    )
+    empty = QueueManager()
+    empty.queue("delegates")
+    assert empty.status(more_work=[""], idle=[]) == "(nothing queued)"

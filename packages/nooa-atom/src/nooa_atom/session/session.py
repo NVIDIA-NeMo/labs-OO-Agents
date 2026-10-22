@@ -14,6 +14,7 @@ import hashlib
 import inspect
 import json
 import logging
+import time
 from collections import OrderedDict, deque
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import suppress
@@ -196,6 +197,9 @@ class Session:
             update={"status": "idle", "mode": options.permission_mode}, deep=True
         )
         self._owned_llm = owned_llm
+        # When the current (or last) turn was claimed (time.monotonic()); None
+        # before the first. The parent's status block shows a running child's age.
+        self.turn_started_at: float | None = None
         # Clients this session built and swapped out while another live
         # session (a child) still used them; closed when this one closes.
         self._retired_llms: list[Any] = []
@@ -724,6 +728,7 @@ class Session:
             del entries[index]
         self._batch_consumed = [(channel, item_id) for channel, _, item_id in selected]
         self._consumed.extend(item_ids)
+        self.turn_started_at = time.monotonic()
         self.info.status = "running"
 
     def _on_turn_began(self, _event: Any) -> None:

@@ -541,8 +541,7 @@ async def test_queue_manager_status_composite(producer: ProducerHelper, mode: st
     await asyncio.sleep(0.05)
 
     status = qm.status()
-    assert "alpha: 1 pending" in status
-    assert "beta: 2 pending" in status
+    assert status == "Unread:\n  • alpha: a\n  • beta: b\n  • beta: c"
 
 
 # ---------------------------------------------------------------------------

@@ -69,8 +69,9 @@ def test_status_populated_formatting_unchanged_then_drained():
     messages.put("second")
     monitor.put("ok")
 
-    assert qm.status(max_items=1) == (
-        "user_messages: 2 pending\n  1. first\n  … 1 more\nci_monitor: 1 pending\n  1. ok"
+    assert qm.status(max_items=1) == "Unread:\n  • user_messages: first\n  • … 2 more"
+    assert qm.status() == (
+        "Unread:\n  • user_messages: first\n  • user_messages: second\n  • ci_monitor: ok"
     )
     assert messages.drain() == ["first", "second"]
     assert monitor.drain() == ["ok"]
@@ -96,9 +97,9 @@ async def test_active_spawns_shown_when_queues_empty():
     await asyncio.sleep(0.05)
 
     status = qm.status()
-    assert "Background work:" in status
+    assert "\nRunning:\n  • " in status  # after "Unread:" (the item it yielded)
     assert "ci_monitor" in status
-    assert "running" in status
+    assert "running" not in status  # the heading says it
 
     # Cleanup
     await qm.shutdown()
@@ -109,4 +110,4 @@ def test_no_active_spawns_shown_when_none_running():
     qm = QueueManager()
     qm.queue("user_messages")
     status = qm.status()
-    assert "Background work:" not in status
+    assert "Running:" not in status

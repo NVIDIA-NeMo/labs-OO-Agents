@@ -29,7 +29,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
 from nooa.agentdoc import (
     LineSplitter,
@@ -68,6 +68,8 @@ _KEEP_FINISHED = 100
 _KEEP_ITEMS = 5
 # Longest JobInfo.target, in characters.
 _TARGET_CHARS = 200
+# Longest JobUpdate.status_preview() line, in characters.
+_PREVIEW_CHARS = 80
 # How often tail() checks its file for new lines.
 _TAIL_POLL_SECONDS = 0.5
 
@@ -149,6 +151,53 @@ class JobUpdate(BaseModel):
             " is then [] (e.g. a spawn whose coroutine raised). None otherwise"
         ),
     )
+    # The kind of job that sent it (in memory only), for status_preview().
+    _kind: JobKind | None = PrivateAttr(default=None)
+
+    def status_preview(self) -> str:
+        """One line (at most 80 chars) for the per-turn ``Unread:`` list.
+
+        ``<path>: 50 lines, last: <line>`` (run progress, tail), ``<path>: tick 3``
+        or the payload (every), ``<path>: 3 values, last: <value>`` (spawn);
+        the done update: ``<path> done: exit 0`` / ``done: timed out`` (run),
+        ``<path> done: <payload or return value>``, ``<path> failed: <error>``.
+        """
+        path = self.path or self.label
+        if self.error is not None:
+            return _short(f"{path} failed: {self.error}", _PREVIEW_CHARS)
+        items = self.items
+        if self.done:
+            if (
+                self._kind in ("run", None)
+                and len(items) == 1
+                and isinstance(items[0], ShellResult)
+            ):
+                result = items[0]
+                timed_out = result.timed_out or result.returncode == 124
+                end = "timed out" if timed_out else f"exit {result.returncode}"
+                return f"{path} done: {end}"
+            if self._kind == "after" or (self._kind == "spawn" and len(items) == 1):
+                return _short(f"{path} done: {_value_preview(items[0])}", _PREVIEW_CHARS)
+            if not items:
+                return f"{path} done"
+            return _short(f"{path} done: {self._batch_preview()}", _PREVIEW_CHARS)
+        return _short(f"{path}: {self._batch_preview()}", _PREVIEW_CHARS)
+
+    def _batch_preview(self) -> str:
+        """``N lines, last: ...`` / ``tick N`` / ``N values, last: ...`` for ``items``."""
+        items = self.items
+        if not items:
+            return "no new values"
+        last = items[-1]
+        if self._kind in ("run", "tail") or isinstance(last, StreamEvent):
+            text = last.text if isinstance(last, StreamEvent) else str(last)
+            noun = "line" if len(items) == 1 else "lines"
+            return f"{len(items)} {noun}, last: {text}"
+        if self._kind == "every":
+            tick = f"tick {last}" if isinstance(last, int) else _value_preview(last)
+            return tick if len(items) == 1 else f"{len(items)} ticks, last: {tick}"
+        noun = "value" if len(items) == 1 else "values"
+        return f"{len(items)} {noun}, last: {_value_preview(last)}"
 
 
 _LOST_KEYS = ("label", "kind", "target", "description", "started_at")
@@ -245,12 +294,12 @@ class _Job:
     def status_line(self) -> str:
         """One short line for the per-turn status.
 
-        ``/root/label · job · running 3m · 2 pending · description or target``:
-        the age only while running, the pending count only when above 0.
+        ``/root/label · job · 3m · 2 pending · description or target``: the age
+        while running (else the end state), the pending count only when above 0.
         """
         state = self.state
         if state == "running":
-            state = f"running {_age(self.started_at)}"
+            state = _age(self.started_at)
         pending = f"{self.pending} pending" if self.pending > 0 else ""
         about = self.description or self.target
         parts = (self.path, "job", state, pending, about)
@@ -266,6 +315,15 @@ def _age(started_at: str) -> str:
     if seconds < 3600:
         return f"{seconds // 60}m"
     return f"{seconds // 3600}h{seconds % 3600 // 60:02d}m"
+
+
+def _value_preview(value: Any) -> str:
+    """A delivered value as short text: strings as-is, anything else bounded by ``pformat``."""
+    if isinstance(value, str):
+        return value
+    from nooa.agentdoc import pformat
+
+    return pformat(value, max_length=_PREVIEW_CHARS, max_string=_PREVIEW_CHARS, max_depth=2)
 
 
 def _short(text: str, limit: int = _TARGET_CHARS) -> str:
@@ -759,6 +817,7 @@ class JobsApi(Skill):
             job.final_state = "failed"
         finally:
             job.finished_at = _now()
+        item._kind = job.kind
         job.last.append(item)
         return item
 
@@ -810,6 +869,7 @@ class JobsApi(Skill):
                 done=done,
                 error=failure[0] if done and failure else None,
             )
+            item._kind = job.kind
             batch, batch_chars, batch_started = [], 0, None
             job.pending = 0
             job.last.append(item)
