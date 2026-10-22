@@ -25,6 +25,7 @@ from nooa.storage.sqlite import SessionAlreadyActiveError
 from nooa_atom.session.events import (
     ChildClosed,
     ChildDeleted,
+    ChildNamed,
     SnapshotRestoreFailed,
 )
 from nooa_atom.session.items import (
@@ -140,6 +141,9 @@ class SessionRegistry:
         # records, named by their description), and every path computed so
         # far: a session's name and parent never change.
         self._derived_names: dict[str, str] = {}
+        # Derived names each parent has recorded (``ChildNamed``), by parent id
+        # and child id: read once per parent, kept current as names are recorded.
+        self._recorded_names: dict[str, dict[str, str]] = {}
         self._paths: dict[str, str] = {}
 
     # ---- create ------------------------------------------------------
@@ -416,31 +420,73 @@ class SessionRegistry:
     def child_name(self, info: SessionInfo) -> str:
         """A child's name: the stored one, or for an older record without a valid one, ``child_<n>``.
 
-        ``n`` is the child's place among its parent's children by creation
-        (bumped past a name a sibling already has). A root's name is its own.
+        ``n`` is the child's place among its parent's children by creation,
+        bumped past every name a sibling already has (a stored one, or one
+        derived before). The names of all such siblings are derived together,
+        so they never collide, and each is recorded in the parent
+        (``ChildNamed``) when first derived, so it stays the same in a later
+        process even if siblings are deleted. A root's name is its own.
         """
         if info.parent_id is None or is_valid_name(info.name):
             return info.name or ""
         derived = self._derived_names.get(info.id)
         if derived is None:
-            siblings = sorted(
-                (
-                    other
-                    for other in self.store.list(roots_only=False)
-                    if other.parent_id == info.parent_id
-                ),
-                key=lambda other: other.created_at,
-            )
-            taken = {other.name for other in siblings if is_valid_name(other.name)}
-            place = next(
-                (n for n, other in enumerate(siblings, 1) if other.id == info.id), len(siblings) + 1
-            )
-            derived = f"child_{place}"
-            while derived in taken:
-                place += 1
-                derived = f"child_{place}"
-            self._derived_names[info.id] = derived
+            self._derive_names(info.parent_id, extra=info)
+            derived = self._derived_names[info.id]
         return derived
+
+    def _derive_names(self, parent_id: str, *, extra: SessionInfo | None = None) -> None:
+        """Derive (and record) a ``child_<n>`` name for every child of ``parent_id`` lacking one.
+
+        ``extra`` is a child not (yet) listed by the store; it comes last.
+        A name is recorded only while the parent is live (its record is
+        written through its own handle); one derived while it is not is
+        recorded on a later call once it is.
+        """
+        siblings = sorted(
+            (other for other in self.store.list(roots_only=False) if other.parent_id == parent_id),
+            key=lambda other: other.created_at,
+        )
+        if extra is not None and all(other.id != extra.id for other in siblings):
+            siblings.append(extra)
+        legacy = [other for other in siblings if not is_valid_name(other.name)]
+        recorded = self._recorded_of(parent_id)
+        for other in legacy:
+            name = recorded.get(other.id)
+            if name is not None and other.id not in self._derived_names:
+                self._derived_names[other.id] = name
+        taken = {other.name for other in siblings if is_valid_name(other.name)}
+        taken.update(self._derived_names[o.id] for o in legacy if o.id in self._derived_names)
+        legacy_ids = {other.id for other in legacy}
+        for place, other in enumerate(siblings, 1):
+            if other.id in legacy_ids and other.id not in self._derived_names:
+                n = place
+                while f"child_{n}" in taken:
+                    n += 1
+                self._derived_names[other.id] = f"child_{n}"
+                taken.add(f"child_{n}")
+        parent = self.sessions.get(parent_id)
+        if parent is None or parent.closing:
+            return
+        for other in legacy:
+            name = self._derived_names[other.id]
+            if recorded.get(other.id) != name:
+                with suppress(Exception):
+                    parent.handle.events.add(ChildNamed(child_id=other.id, name=name))
+                    recorded[other.id] = name
+
+    def _recorded_of(self, parent_id: str) -> dict[str, str]:
+        """The ``child_<n>`` names ``parent_id`` recorded (``ChildNamed``), by child id; read once."""
+        recorded = self._recorded_names.get(parent_id)
+        if recorded is None:
+            recorded = {}
+            with suppress(Exception):
+                for _kind, raw in self.store.load_rows(parent_id, frozenset({"ChildNamed"})):
+                    child_id, name = str(raw.get("child_id") or ""), raw.get("name")
+                    if child_id and isinstance(name, str) and is_valid_name(name):
+                        recorded.setdefault(child_id, name)  # the first record wins
+            self._recorded_names[parent_id] = recorded
+        return recorded
 
     def path(self, session_id: str) -> str:
         """A session's path: ``/root`` for a root, else its parent's path, ``/`` and its name."""
@@ -693,6 +739,7 @@ class SessionRegistry:
         read again on demand (``_closed_of``, ``load``, ``pending_question``).
         """
         self._closed_children.pop(parent_id, None)
+        self._recorded_names.pop(parent_id, None)
         for key in [key for key in self._questions if key[0] == parent_id]:
             del self._questions[key]
 

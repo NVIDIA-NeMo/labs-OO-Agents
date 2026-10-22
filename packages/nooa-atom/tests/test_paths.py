@@ -105,3 +105,31 @@ async def test_names_survive_a_reload_and_older_records_get_one(sessions_dir, ro
         assert fresh.path(old.id) == "/root/child_2"
     finally:
         await fresh.close_all()
+
+
+async def test_older_siblings_get_distinct_names_that_stay_stable(sessions_dir, root_options):
+    registry = SessionRegistry(SessionStore(sessions_dir), agent_factory=ScriptedModels())
+    root = await registry.create(root_options)
+    # Two records from before names were identifiers, then a child really named child_1.
+    first = await registry.create(root.options.inherit(name="Fix A", kept=True), parent_id=root.id)
+    second = await registry.create(root.options.inherit(name="Fix B", kept=True), parent_id=root.id)
+    named = await registry.create(
+        root.options.inherit(name="child_1", kept=True), parent_id=root.id
+    )
+    # Places 1 and 2, bumped past child_1 and past each other: never the same name.
+    assert registry.path(second.id) == "/root/child_3"  # derived first, for the later sibling
+    assert [c.name for c in registry.children(root.id)] == ["child_2", "child_3", "child_1"]
+    assert registry.path(first.id) == "/root/child_2"
+    assert registry.path(named.id) == "/root/child_1"
+    await registry.close_all()
+
+    # Recorded when first derived: a later process keeps them, even once a sibling is gone.
+    store = SessionStore(sessions_dir)
+    assert store.delete(first.id)
+    fresh = SessionRegistry(store, agent_factory=ScriptedModels())
+    try:
+        assert [c.name for c in fresh.children(root.id)] == ["child_3", "child_1"]
+        assert fresh.path(second.id) == "/root/child_3"
+        assert (await fresh.load(second.id)).name == "child_3"
+    finally:
+        await fresh.close_all()
