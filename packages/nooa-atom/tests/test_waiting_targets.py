@@ -102,7 +102,8 @@ async def test_waiting_on_the_person_is_rejected_with_the_done_or_need_input_hin
     assert "Waiting on 'user_messages', but the person is not a job." in calls[1]
     assert HINT in calls[1]
     # What is running is listed, and the person is never among it.
-    assert "Running right now: 'jobs', 'mesh', 'mesh inbox pump'." in calls[1]
+    # The mesh pump is a queue-manager task, not a ``self.jobs`` job: no 'jobs'.
+    assert "Running right now: 'mesh', 'mesh inbox pump'." in calls[1]
 
 
 async def test_waiting_on_delegates_is_accepted_with_a_running_child(tmp_path, sessions_dir):
@@ -183,3 +184,56 @@ async def test_waiting_on_jobs_without_a_running_job_is_rejected(tmp_path, sessi
     assert len(calls) == 2
     assert "Waiting on 'jobs', but no job is running and nothing is queued" in calls[1]
     assert HINT in calls[1]
+
+
+async def test_waiting_on_jobs_with_only_a_queue_manager_task_is_rejected(tmp_path, sessions_dir):
+    # A queue-manager task on its own channel never delivers on ``jobs``.
+    calls = await _run(
+        tmp_path,
+        sessions_dir,
+        [
+            cell(
+                "self.queue_manager.queue('ci')\n"
+                "self.queue_manager.spawn(asyncio.sleep(0.3), channel='ci', label='ci-1')\n"
+                "return_result(Waiting(explanation='w', on=['jobs']))"
+            ),
+            cell(DONE),
+        ],
+    )
+    assert len(calls) == 2
+    assert "Waiting on 'jobs', but no job is running and nothing is queued" in calls[1]
+    assert HINT in calls[1]
+
+
+async def test_waiting_on_jobs_is_accepted_while_a_self_jobs_job_runs(tmp_path, sessions_dir):
+    calls = await _run(
+        tmp_path,
+        sessions_dir,
+        [
+            cell(
+                "await self.jobs.run('sleep 0.3; echo hi', label='slow')\n"
+                "return_result(Waiting(explanation='w', on=['jobs']))"
+            ),
+            cell("assert notification['jobs'][0].label == 'slow'\n" + DONE),
+        ],
+    )
+    assert len(calls) == 2
+    assert not _rejected(calls[1])
+
+
+async def test_waiting_on_jobs_is_accepted_when_its_result_is_buffered(tmp_path, sessions_dir):
+    calls = await _run(
+        tmp_path,
+        sessions_dir,
+        [
+            cell(
+                "await self.jobs.run('echo hi', label='quick')\n"
+                "while self.jobs.get('quick').state == 'running':\n"
+                "    await asyncio.sleep(0.02)\n"
+                "return_result(Waiting(explanation='w', on=['jobs']))"
+            ),
+            cell("assert notification['jobs'][0].label == 'quick'\n" + DONE),
+        ],
+    )
+    assert len(calls) == 2
+    assert not _rejected(calls[1])

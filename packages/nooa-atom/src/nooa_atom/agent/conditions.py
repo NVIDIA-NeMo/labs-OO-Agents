@@ -207,7 +207,10 @@ def _running_names(agent: Any) -> dict[str, Any]:
                     also.add(item_path)
     if any(children.values()):
         now.add("delegates")
-    if handles:
+    # ``jobs`` is the ``self.jobs`` channel: only a running ``self.jobs`` job
+    # (or its item already buffered there, added above) delivers on it, not
+    # any queue-manager task.
+    if jobs is not None and any(info.state == "running" for info in jobs.list()):
         now.add("jobs")
     now -= PERSON_NAMES
     return {
