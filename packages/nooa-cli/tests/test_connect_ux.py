@@ -323,17 +323,26 @@ def test_normal_mode_keeps_technical_reasoning_details_optional():
     @click.command()
     def display():
         progress = view.CheckProgress()
-        progress.update(
-            "level:high",
+        from nooa.unifiedllm import connect
+
+        record = {
+            "outcome": "accepted",
+            "reasoning_observed": True,
+            "answer_correct": True,
+            "reasoning_encrypted": True,
+            "reasoning_encrypted_bytes": 400,
+            "output_tokens": 500,
+        }
+        entry = connect.configure_entry(
             {
-                "outcome": "accepted",
-                "reasoning_observed": True,
-                "answer_correct": True,
-                "reasoning_encrypted": True,
-                "reasoning_encrypted_bytes": 400,
-                "output_tokens": 500,
-            },
+                "model_name": "openai/model",
+                "reasoning_levels": {
+                    "high": {"reasoning_effort": "high"},
+                },
+            }
         )
+        connect.stamp_verification(record, entry, "level:high")
+        progress.update("level:high", record)
         progress.finish()
 
     result = CliRunner().invoke(display)
@@ -421,6 +430,12 @@ def test_no_default_requires_selection_and_custom_budget_is_editable(monkeypatch
 def test_display_outcomes_do_not_upgrade_unconfirmed_evidence(name, record, expected):
     from nooa.unifiedllm.connect._records import check_status
 
+    if expected == "Passed":
+        from nooa.unifiedllm import connect
+
+        connect.stamp_verification(
+            record, connect.configure_entry({"model_name": "openai/model"}), name
+        )
     original = record.copy()
     assert view.check_outcome(name, record, check_status(name, record)) == expected
     assert record == original

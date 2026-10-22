@@ -143,7 +143,7 @@ async def test_cache_change_invalidates_routing_evidence(monkeypatch):
     await connect.check_stage(changed, "routing", api_key="fake")
     assert len(sent) == 2
     patched = connect.configure_entry(original.entry, cache_enabled=True)
-    assert patched["provenance"]["probes"] == {}
+    assert not connect.verification_is_current(patched["provenance"]["probes"]["routing"], patched)
     assert "routing" in original.entry["provenance"]["probes"]  # Detached edit.
     off = plan(existing_entry=original.entry)
     assert off.entry["cache_breakpoint"] is None
@@ -198,12 +198,13 @@ def test_cache_change_discards_old_session_verdict_and_retains_known_settings():
         requests_accepted=["routing"],
         reasoning_observed=["high"],
     )
+    connect.stamp_verification(entry["provenance"]["session_checks"]["cache"], entry, "cache")
     assert "cache" in connect.verdict(entry).passed
     changed = connect.configure_entry(entry, cache_enabled=False)
     assert "cache" not in connect.verdict(changed).passed
-    assert "session_checks" not in changed["provenance"]
-    assert "requests_accepted" not in changed["provenance"]
-    assert "reasoning_observed" not in changed["provenance"]
+    assert changed["provenance"]["session_checks"]["cache"]["verification_current"] is False
+    assert changed["provenance"]["requests_accepted"] == []
+    assert changed["provenance"]["reasoning_observed"] == []
     assert changed["store"] is True and changed["include"] == [] and changed["max_tokens"] == 1500
 
 

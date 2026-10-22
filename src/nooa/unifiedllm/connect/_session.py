@@ -179,7 +179,7 @@ def _reasoning_values(response):
         yield from payloads(native)
 
 
-async def session_steps(alias, entry, *, api_key, budget_tokens):
+async def _session_steps(alias, entry, *, api_key, budget_tokens):
     """Three configured-cap turns, without retries; never execute model tools."""
     from nooa.context_blocks.formatter import OpenAIProviderFormatter
     from nooa.context_blocks.models import BlockMetadata, ResolvedBlock, Role
@@ -550,3 +550,20 @@ async def session_steps(alias, entry, *, api_key, budget_tokens):
     finally:
         hooks.remove(capture)
         await client.aclose()
+
+
+async def session_steps(alias, entry, *, api_key, budget_tokens):
+    """Stamp executed session evidence with its configured dependencies."""
+    from contextlib import aclosing
+    from copy import deepcopy
+
+    from ._verification import stamp_verification
+
+    executed_entry = deepcopy(entry)
+    async with aclosing(
+        _session_steps(alias, entry, api_key=api_key, budget_tokens=budget_tokens)
+    ) as steps:
+        async for update in steps:
+            if update.outcome.get("outcome") not in {"not_probed", "running"}:
+                stamp_verification(update.outcome, executed_entry, update.name, timeout_seconds=120)
+            yield update

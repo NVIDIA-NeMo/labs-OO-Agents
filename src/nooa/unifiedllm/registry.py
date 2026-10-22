@@ -517,6 +517,10 @@ def client_from_config(
     for key in (
         "temperature",
         "top_p",
+        "timeout",
+        "chat_template_kwargs",
+        "base_url",
+        "custom_llm_provider",
         "max_tokens",
         "reasoning",
         "thinking",
@@ -581,6 +585,31 @@ def client_from_config(
                 name,
             )
 
+    # Context is endpoint-local too. Switching from an env-var declaration
+    # to an explicit key changes credential scope, even if key values happen
+    # to coincide. Explicit context redeclarations remain authoritative.
+    from nooa.unifiedllm.route_identity import same_context_route
+
+    original_route = {
+        **config,
+        "api_key": params.get("api_key"),
+    }
+    effective_route = {
+        **params,
+        **overrides,
+        "api_key_env": config.get("api_key_env") if "api_key" not in overrides else None,
+    }
+    same_route = same_context_route(
+        model,
+        original_route,
+        config.get("client_type", "completion"),
+        effective_route.get("model", model),
+        effective_route,
+        selected_client_type,
+    )
+    if not same_route:
+        config.pop("context_window", None)
+
     params.update(overrides)
     if config and "media_inputs" not in params and name not in _warned_text_only:
         _warned_text_only.add(name)
@@ -597,5 +626,6 @@ def client_from_config(
         if selected_client_type == "responses"
         else CompletionClient(**params)
     )
-    client._registry_config = config  # For context_window lookup
+    client._registry_config = config  # Sanitized endpoint-local context metadata
+    client._registry_context_route = (client.model, dict(client.config), selected_client_type)
     return client

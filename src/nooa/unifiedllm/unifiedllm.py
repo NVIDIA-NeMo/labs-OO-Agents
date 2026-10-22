@@ -1325,8 +1325,8 @@ class UnifiedLLM(ABC):
 
         Includes selected reasoning levels, per-call caps and extra_body. Does
         not infer a reply cap from model metadata. ``fallback_reserve`` is only
-        a planning allowance when no cap is configured. For a per-call model
-        switch, never reuse the original model's window; pass an explicit
+        a planning allowance when no cap is configured. For a per-call route
+        switch, never reuse the original endpoint's window; pass an explicit
         context_window or use a separately configured client for that model.
         """
         params = self._prepare_call_config(overrides or {})
@@ -1337,9 +1337,19 @@ class UnifiedLLM(ABC):
         cap = caps[0] if caps else None
         if cap is not None and (type(cap) is not int or cap <= 0):
             raise ValueError("Reply token limit must be a positive integer")
-        same_model = self._effective_model(params) == self.model
+        from nooa.unifiedllm.route_identity import same_context_route
+
+        client_type = "responses" if isinstance(self, ResponsesClient) else "completion"
+        same_route = same_context_route(
+            self.model,
+            self.config,
+            client_type,
+            self._effective_model(params),
+            params,
+            client_type,
+        )
         window = (overrides or {}).get("context_window")
-        if window is None and same_model:
+        if window is None and same_route:
             window = self.context_window
         if not isinstance(window, int) or window <= 0:
             window = None
@@ -1485,7 +1495,7 @@ class UnifiedLLM(ABC):
         Resolution order:
         1. Explicit ``context_window`` config passed to the client constructor
         2. Registry config (if created via get_llm_client())
-        3. Registry lookup by model name or model_name field
+        3. Unambiguous registry lookup by compatible route (direct clients only)
         4. litellm model info (for known models)
         5. None (unknown model)
 
@@ -1497,12 +1507,21 @@ class UnifiedLLM(ABC):
         if cw is not None:
             return cw
 
-        # Then check registry config (set by get_llm_client()).
+        from nooa.unifiedllm.route_identity import same_context_route
+
+        client_type = "responses" if isinstance(self, ResponsesClient) else "completion"
+        # Factories attach sanitized metadata and a snapshot of its actual route.
+        # Do not reverse-lookup another alias when this route has no declaration.
         if self._registry_config is not None:
-            cw = self._registry_config.get("context_window")
-            if cw is not None:
-                return cw
-            # Registry entry exists but lacks context_window — fall through
+            route = getattr(self, "_registry_context_route", None)
+            if route is None or same_context_route(
+                self.model, self.config, client_type, route[0], route[1], route[2]
+            ):
+                cw = self._registry_config.get("context_window")
+                if cw is not None:
+                    return cw
+            info = self.get_model_info()
+            return info.get("max_input_tokens") if info else None
 
         # Try registry lookup by model string. The property is reachable
         # from any UnifiedLLM instance — including ones constructed
@@ -1524,18 +1543,24 @@ class UnifiedLLM(ABC):
         with _registry_lock:
             models_snapshot = dict(MODELS)
 
-        # Direct key match
-        if model_str in models_snapshot:
-            cw = models_snapshot[model_str].get("context_window")
-            if cw is not None:
-                return cw
-
-        # Reverse lookup: check if any registry entry's model_name matches
-        for _key, cfg in models_snapshot.items():
-            if cfg.get("model_name") == model_str:
+        # Neither a key collision nor a shared model string proves endpoint
+        # identity. All compatible aliases must agree; never depend on YAML
+        # order when two declarations for the same route have different caps.
+        windows = set()
+        for key, cfg in models_snapshot.items():
+            if same_context_route(
+                model_str,
+                self.config,
+                client_type,
+                cfg.get("model_name", key),
+                cfg,
+                cfg.get("client_type", "completion"),
+            ):
                 cw = cfg.get("context_window")
-                if cw is not None:
-                    return cw
+                if type(cw) is int and cw > 0:
+                    windows.add(cw)
+        if len(windows) == 1:
+            return windows.pop()
 
         # Fallback to litellm
         info = self.get_model_info()

@@ -342,11 +342,42 @@ def run_stage(
             ):
                 raise click.UsageError("Save input requires an alias string and an entry mapping")
             try:
+                imported_entry = data["entry"]
+                if context_window is not None or (
+                    discovery_file and imported_entry.get("context_window") is not None
+                ):
+                    imported_model = imported_entry.get("model_name", "").split("/", 1)[-1]
+                    imported_endpoint = imported_entry.get("api_base")
+                    imported_listing = (
+                        read_discovery_listing(
+                            discovery_file,
+                            imported_endpoint,
+                            models_url=models_url,
+                            api_style=imported_entry.get("api_style", "chat"),
+                        )
+                        if discovery_file
+                        else None
+                    )
+                    server = (
+                        next(
+                            (m for m in imported_listing.models if m["id"] == imported_model), None
+                        )
+                        if imported_listing
+                        else connect.scoped_endpoint_limits(imported_entry)
+                    )
+                    imported_entry = connect.apply_context_window(
+                        imported_entry,
+                        context_window
+                        if context_window is not None
+                        else imported_entry["context_window"],
+                        model=imported_model,
+                        endpoint_model=server,
+                    )
                 alias, entry = (
                     data["alias"],
                     connect.configure_entry(
                         {
-                            **data["entry"],
+                            **imported_entry,
                             **(
                                 {"decision_image_transport": decision_image_transport}
                                 if decision_image_transport is not None
@@ -370,8 +401,13 @@ def run_stage(
                 )
             except ValueError as exc:
                 raise click.UsageError(str(exc)) from None
-            if document.get("ok") is False:
-                view.warning("Warning: saving a configuration whose checks did not pass.", err=True)
+            # Stage save deliberately permits manual/untested entries, but never
+            # treats a report boolean as proof for an edited current candidate.
+            if not connect.routing_allows_save(data["entry"], entry):
+                view.warning(
+                    "Warning: saving a configuration whose current settings have not passed checks.",
+                    err=True,
+                )
             path = Path(output)
             existing = {}
             if path.exists():
@@ -486,6 +522,7 @@ def run_stage(
                         output_tokens=output_tokens,
                         reasoning_output_tokens=reasoning_output_tokens,
                         reply_tokens=reply_tokens,
+                        context_window=context_window,
                         cache_enabled=cache_enabled,
                         **mode_kwargs,
                         media_inputs=declared_media,
@@ -504,10 +541,6 @@ def run_stage(
                 entry = proposal.entry if proposal is not None else {}
                 if "advertised_model" in entry.get("provenance", {}) and models_url:
                     entry["provenance"]["models_url"] = connect.validate_models_url(models_url)
-                if context_window and proposal is not None:
-                    entry["context_window"] = context_window
-                    proposal = connect.refresh_plan(proposal)
-                    entry = proposal.entry
             except ValueError as exc:
                 # Local plan/configuration validation, not request execution.
                 raise click.UsageError(str(exc)) from None

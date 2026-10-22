@@ -185,7 +185,7 @@ def test_same_route_inheritance_and_profile_change_invalidates_all_evidence():
     entry = proposal.entry
     entry["provenance"].update(
         probes={"routing": {"outcome": "accepted", "structured_output_mode": "anthropic"}},
-        session_checks={"outcome": "accepted"},
+        session_checks={"session": {"outcome": "accepted"}},
         requests_accepted=["routing"],
         reasoning_observed=["high"],
     )
@@ -193,17 +193,16 @@ def test_same_route_inheritance_and_profile_change_invalidates_all_evidence():
     assert plan(existing_entry=entry).entry["structured_output_mode"] == "anthropic"
     changed = connect.configure_entry(entry, structured_output_mode=None)
     assert changed["structured_output_mode"] is None
-    assert changed["provenance"]["probes"] == {}
-    assert (
-        not {"session_checks", "requests_accepted", "reasoning_observed"}
-        & changed["provenance"].keys()
-    )
+    assert changed["provenance"]["probes"]["routing"]["verification_current"] is False
+    assert changed["provenance"]["session_checks"]["session"]["verification_current"] is False
+    assert changed["provenance"]["requests_accepted"] == []
+    assert changed["provenance"]["reasoning_observed"] == []
     assert entry == original
     # Direct edits/removal and refresh cannot recycle an old request body.
     edited = deepcopy(entry)
     edited.pop("structured_output_mode")
     refreshed = connect.refresh_plan(replace(proposal, entry=edited))
-    assert refreshed.entry["provenance"]["probes"] == {}
+    assert refreshed.entry["provenance"]["probes"]["routing"]["verification_current"] is False
 
 
 @pytest.mark.parametrize(

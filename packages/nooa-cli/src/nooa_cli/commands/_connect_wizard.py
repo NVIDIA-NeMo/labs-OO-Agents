@@ -16,7 +16,6 @@ import yaml
 
 from nooa import paths
 from nooa.unifiedllm import connect
-from nooa.unifiedllm.connect._records import text_baseline_passed
 
 from . import _connect_prompts as prompts
 from . import _connect_view as view
@@ -2106,28 +2105,23 @@ def configure_checks(state: WizardState) -> bool:
             for style, state.result in state.interfaces.results.items()
         }
     if state.context_window:
-        effective = state.context_window
-        if state.manual_limits:
-            server = state.selected_endpoint_model or {}
-            known = (
-                connect.model_metadata(state.model, None, server)
-                if server.get("id") == state.model
-                else {}
-            )
-            if known.get("context_length"):
-                effective = min(effective, known["context_length"])
-        state.proposal.entry["context_window"] = effective
-        state.proposal.entry["provenance"]["context_window"] = {
-            "source": "user",
-            "value": state.context_window,
-        }
+        state.proposal = replace(
+            state.proposal,
+            entry=connect.apply_context_window(
+                state.proposal.entry,
+                state.context_window,
+                model=state.model,
+                endpoint_model=state.selected_endpoint_model,
+            ),
+        )
     if state.manual_limits and state.api_style not in connect.DECISION_API_STYLES:
         provenance = state.proposal.entry["provenance"]
         provenance["manual_limits"] = {"source": "user", **state.manual_limits}
-        provenance["context_window"] = {
-            "source": "user",
-            "value": state.proposal.entry["context_window"],
-        }
+        provenance["context_window"].update(
+            value=state.proposal.entry["context_window"],
+            declared=state.manual_limits["context_window"],
+            effective=state.proposal.entry["context_window"],
+        )
         # User declarations are not a public catalogue mapping or tested evidence.
         provenance["limit_sources"] = {"context_length": "user"}
         provenance.pop("catalogue", None)
@@ -2213,11 +2207,12 @@ def baseline_allows_save(state: WizardState) -> bool:
         return True
     entry = state.result.entry if state.result is not None else {}
     record = entry.get("provenance", {}).get("probes", {}).get("routing", {})
-    if state.api_style in connect.DECISION_API_STYLES:
-        # Decision models have no text baseline: the accepted decision check is the gate.
-        if connect.check_status("routing", record) == "passed":
-            return True
-    elif text_baseline_passed(record):
+    candidate = connect.configure_entry(entry)
+    # A separately edited configured candidate must not borrow the result's proof.
+    configured = state.configured if state.configured is not None else candidate
+    if connect.routing_allows_save(entry, candidate) and connect.routing_allows_save(
+        entry, configured
+    ):
         return True
     reason = view.connection_detail(record)
     # Only sanitized display facts: never echo raw provider errors or replies.
@@ -2427,6 +2422,8 @@ def save_model(state: WizardState) -> bool:
                     ),
                     headline=headline,
                 )
+    if not baseline_allows_save(state):
+        return False
     # The effective declarations above are reviewed before the final save decision.
     # Checks may take a while: refresh names before offering completion or
     # asking to replace an entry added since setup started.

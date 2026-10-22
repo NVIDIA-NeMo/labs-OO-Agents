@@ -716,7 +716,7 @@ def test_picker_discover_anthropic_retains_endpoint_limits(
     assert reviewed[0]["provenance"]["endpoint_limits"]["max_output_tokens"] == 128
     baseline = reviewed[0]["provenance"]["probes"]["routing"]
     assert baseline["configured_reply_tokens"] == 128
-    assert baseline["baseline_config"]["max_tokens"] == 128
+    assert baseline["verification_config"]["params"]["max_tokens"] == 128
     assert any(
         json.loads(r.content).get("max_tokens") == 128
         for r in requests

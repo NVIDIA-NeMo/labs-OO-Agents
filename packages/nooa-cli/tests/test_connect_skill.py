@@ -151,7 +151,11 @@ def test_documented_headless_workflow_with_mocked_native_requests(monkeypatch, t
             assert info["model_id"] == "EXACT_MODEL"
         if "--stage" in args and args[args.index("--stage") + 1] in {"plan", "save"}:
             assert len(seen) == before  # Includes the metadata-only save with no redirect.
-        assert result.stderr == "" or "Warning" in result.stderr
+        assert (
+            result.stderr == ""
+            or "Warning" in result.stderr
+            or "current settings have not passed checks" in result.stderr
+        )
 
     entry = yaml.safe_load(Path(".nooa/llm_config.yaml").read_text())["models"]["work"]
     assert entry["max_tokens"] == 1024

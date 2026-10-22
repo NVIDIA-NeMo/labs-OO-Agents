@@ -10,6 +10,34 @@ from click.testing import CliRunner
 from nooa_cli.commands import _connect_view as view
 
 
+@pytest.fixture(autouse=True)
+def fresh_progress_evidence(monkeypatch):
+    """These presentation fixtures simulate newly completed checks, not imports.
+
+    Stamp only the synthetic streamed records. Historical trust regressions live
+    in test_connect_current_verification.py and do not use this fixture.
+    """
+    from nooa.unifiedllm import connect
+
+    original = view.CheckProgress.update
+
+    def update(self, name, record, **kwargs):
+        record = record.copy()
+        entry = connect.configure_entry(
+            {
+                "model_name": "openai/model",
+                "reasoning_levels": {name[6:]: {"reasoning_effort": "low"}}
+                if name.startswith("level:")
+                else {},
+            }
+        )
+        if record.get("outcome") not in {"running", "not_probed"}:
+            connect.stamp_verification(record, entry, name)
+        return original(self, name, record, **kwargs)
+
+    monkeypatch.setattr(view.CheckProgress, "update", update)
+
+
 def test_intro_is_wrapped_without_budget_boilerplate_and_keeps_manual_routes(monkeypatch):
     monkeypatch.setattr(
         view.shutil, "get_terminal_size", lambda *args, **kwargs: os.terminal_size((58, 24))
@@ -631,6 +659,13 @@ def test_media_labels_keep_classification_and_safe_reasons(outcome, label, statu
     )
     assert f"Image input: {expected}" in " ".join(result.output.split())
     assert record == before
+    # The synthetic raw fixture is historical until explicitly stamped.
+    if outcome == "passed":
+        from nooa.unifiedllm import connect
+
+        connect.stamp_verification(
+            record, connect.configure_entry({"model_name": "openai/model"}), "media:image"
+        )
     assert check_status("media:image", record) == status
 
 

@@ -198,11 +198,11 @@ def test_active_level_cap_and_selector_changes_invalidate_evidence():
     entry = connect.configure_entry(proposal.entry)
     assert reply_budget(entry, 200000) == (8192, 8192, 8192 + 3 * 8192)
     entry["provenance"]["probes"] = {"routing": {"outcome": "accepted"}}
-    entry["provenance"]["session_checks"] = {"outcome": "completed"}
+    entry["provenance"]["session_checks"] = {"session": {"outcome": "completed"}}
     entry["reasoning_level"] = "low"
     updated = connect.configure_entry(entry)
-    assert updated["provenance"]["probes"] == {}
-    assert "session_checks" not in updated["provenance"]
+    assert updated["provenance"]["probes"]["routing"]["verification_current"] is False
+    assert updated["provenance"]["session_checks"]["session"]["verification_current"] is False
     same = connect.plan(
         "local", MODEL_ID, "anthropic", BASE, "", existing_entry=updated, reply_tokens=4096
     )

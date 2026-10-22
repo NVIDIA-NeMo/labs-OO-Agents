@@ -36,6 +36,7 @@ import yaml
 from nooa.unifiedllm.limits import REPLY_CAP_KEYS
 
 from ._advertised_media import advertised_media_suggestions, media_metadata
+from ._context_limits import apply_context_window, bound_context_window, scoped_endpoint_limits
 from ._records import (
     TYPED_TEXT_BASELINE,
     ProbeRecord,
@@ -47,6 +48,19 @@ from ._records import (
 from ._server_details import ModelDetails as ModelDetails
 from ._server_details import bounded_json, openrouter_facts, token_limit
 from ._server_details import server_details as server_details
+from ._verification import (
+    effective_config_fingerprint as effective_config_fingerprint,
+)
+from ._verification import (
+    effective_config_snapshot as effective_config_snapshot,
+)
+from ._verification import (
+    effective_route_scope,
+    invalidate_verification,
+    routing_allows_save,
+    stamp_verification,
+    verification_is_current,
+)
 
 CATALOGUE_URL = "https://openrouter.ai/api/v1/models"
 # OpenRouter defaults to text output, excluding native decision models.
@@ -343,7 +357,7 @@ def verdict(entry: dict) -> Verdict:
         **provenance.get("session_checks", {}),
     }.items():
         status = check_status(
-            name, record, missing_reasoning=name.removeprefix("level:") in missing
+            name, record, entry=entry, missing_reasoning=name.removeprefix("level:") in missing
         )
         groups[status].append(name)
     return Verdict(
@@ -845,26 +859,6 @@ def configure_entry(
     if not isinstance(provenance, dict):
         raise ValueError("provenance must be a mapping")
     snapshot = provenance.get("structured_output_profile")
-    records = provenance.get("probes") or {}
-    stale = isinstance(snapshot, dict) and snapshot.get("mode") != effective_mode
-    if snapshot is None and effective_mode is not None and provenance.get("session_checks"):
-        stale = True  # Unstamped legacy session evidence cannot prove this profile.
-    # Older records have no profile snapshot. Their bounded mode or baseline
-    # config identifies prior evidence; missing mode means the legacy carrier.
-    stale |= any(
-        record.get(
-            "structured_output_mode",
-            (record.get("baseline_config") or {}).get("structured_output_mode"),
-        )
-        != effective_mode
-        for record in records.values()
-        if isinstance(record, dict)
-    )
-    if stale:
-        provenance["probes"] = {}
-        for field in ("session_checks", "requests_accepted", "reasoning_observed"):
-            provenance.pop(field, None)
-        result["provenance"] = provenance
     if (
         "structured_output_mode" in entry
         or structured_output_mode is not STRUCTURED_OUTPUT_UNSET
@@ -872,13 +866,6 @@ def configure_entry(
     ):
         result.setdefault("provenance", {})["structured_output_profile"] = {"mode": effective_mode}
     if structured_output_mode is not STRUCTURED_OUTPUT_UNSET:
-        if result.get("structured_output_mode") != structured_output_mode:
-            provenance = result.setdefault("provenance", {})
-            if not isinstance(provenance, dict):
-                raise ValueError("provenance must be a mapping")
-            provenance["probes"] = {}
-            for field in ("session_checks", "requests_accepted", "reasoning_observed"):
-                provenance.pop(field, None)
         result["structured_output_mode"] = structured_output_mode
     result["media_inputs"] = list(validate_media_inputs(result.get("media_inputs")))
     for patch in (result.get("reasoning_levels") or {}).values():
@@ -932,7 +919,7 @@ def configure_entry(
             "not_probed",
             ["context_window", "reasoning", "tools", "sessions", "reply_limit"],
         )
-        return result
+        return invalidate_verification(result)
     provenance = result.setdefault("provenance", {})
     if not isinstance(provenance, dict):
         raise ValueError("provenance must be a mapping")
@@ -960,11 +947,6 @@ def configure_entry(
         reject_cache_options({k: v for k, v in result.items() if k != "provenance"})
     if cache_enabled is not None:
         cache_breakpoint = "auto" if cache_enabled else None
-        if result.get("cache_breakpoint", "auto") != cache_breakpoint:
-            provenance["probes"] = {}
-            provenance.pop("session_checks", None)
-            for field in ("requests_accepted", "reasoning_observed"):
-                provenance.pop(field, None)
         result["cache_breakpoint"] = cache_breakpoint
     from nooa.unifiedllm.reasoning import ReasoningConfig
 
@@ -989,13 +971,56 @@ def configure_entry(
     provenance = result.setdefault("provenance", {})
     if not isinstance(provenance, dict):
         raise ValueError("provenance must be a mapping")
+    window = result.get("context_window")
+    if window is not None:
+        model = result.get("model_name", "").split("/", 1)[-1]
+        endpoint_limits = scoped_endpoint_limits(result)
+        context_evidence = bound_context_window(window, model=model, endpoint_model=endpoint_limits)
+        result["context_window"] = context_evidence["effective"]
+        previous = provenance.get("context_window") or {}
+        if previous and provenance.get("endpoint_limits") and not endpoint_limits:
+            # Keep the CURRENT literal declaration, not an old endpoint ceiling
+            # or its larger historical declaration after a route/scope edit.
+            provenance["context_window"] = context_evidence
+            previous = context_evidence
+        if previous.get("effective", window) != window:
+            previous = {
+                **previous,
+                "declared": window,
+                "value": window,
+                "effective_source": context_evidence["effective_source"],
+            }
+        if previous or endpoint_limits.get("id") == model:
+            # Reconfiguration/import may lower the bound, never resurrect a
+            # larger declaration after an intentional edit to the effective value.
+            provenance["context_window"] = {
+                **context_evidence,
+                "source": provenance.get("limit_sources", {}).get("context_length", "entry"),
+                **previous,
+                "effective": context_evidence["effective"],
+            }
+            if context_evidence["effective"] < window:
+                provenance["context_window"]["effective_source"] = context_evidence[
+                    "effective_source"
+                ]
     ceiling = result.pop("max_output_tokens", None)
     limits = provenance.setdefault("catalogue_limits", {})
     if not isinstance(limits, dict):
         raise ValueError("catalogue_limits must be a mapping")
     if isinstance(ceiling, int) and not isinstance(ceiling, bool) and ceiling > 0:
         limits["max_completion_tokens"] = ceiling
+    supplied_ceiling = ceiling
     ceiling = limits.get("max_completion_tokens")
+    if (
+        supplied_ceiling is None
+        and str(provenance.get("limit_sources", {}).get("max_completion_tokens", "")).startswith(
+            "endpoint"
+        )
+        and not scoped_endpoint_limits(result)
+    ):
+        # An endpoint-derived output ceiling is historical on another route too.
+        # A newly supplied literal ceiling still applies during initial planning.
+        ceiling = None
     known_limits = [
         v
         for v in (ceiling, result.get("context_window"))
@@ -1095,14 +1120,9 @@ def configure_entry(
     if active is not None:
         effective.update((result.get("reasoning_levels") or {})[active])
     snapshot = {"level": active, "settings": effective, "reply_cap": configured_reply_cap(result)}
-    previous = provenance.get("active_reasoning")
-    if previous != snapshot and (previous is not None or active is not None):
-        provenance["probes"] = {}
-        for field in ("session_checks", "requests_accepted", "reasoning_observed"):
-            provenance.pop(field, None)
     provenance["active_reasoning"] = snapshot
     provenance["warnings"] = entry_warnings(result)
-    return result
+    return invalidate_verification(result)
 
 
 def model_metadata(
@@ -1250,6 +1270,7 @@ def entry_warnings(entry: dict) -> list[str]:
         and r.get("tested_reply_tokens") == cap
         and r.get("settings_sent") is True
         for r in records
+        if isinstance(r, dict)
     ):
         warnings.append(
             "Reply limit not tested with the saved settings. Run a connection check to test it."
@@ -1376,6 +1397,7 @@ def plan(
     catalogue_settings: bool = False,
     endpoint_model: dict | None = None,
     endpoint_models_url: str | None = None,
+    context_window: int | None = None,
     reasoning_levels: dict | None = None,
     reasoning_level=REASONING_SELECTION_UNSET,
     budget_tokens: int = DEFAULT_CHECK_BUDGET,
@@ -1411,6 +1433,9 @@ def plan(
     its output cap plus 512 estimated input tokens (4,096 for selected generated
     media samples). ``endpoint_models_url`` is the verified listing source,
     independent of record media hints; omitted sources use the legacy /models URL.
+    ``context_window`` is an explicit declaration clamped to positive literal
+    context/input limits on the exact ID-bearing ``endpoint_model`` only. It
+    never allocates a reply cap; declared/effective/source remain in provenance.
     Reported usage can increase that charge. Servers can ignore
     caps, so this is not a billing limit. Media facts never change declarations.
     Non-Chat video and audio remain transparently not tested. For decisions, a
@@ -1677,10 +1702,14 @@ def plan(
         catalogue = model_metadata(model, catalogue, endpoint_model)
         provenance["limit_sources"] = deepcopy(catalogue.get("limit_sources", {}))
         if catalogue.get("endpoint_limits"):
+            if (endpoint_model or {}).get("id") == model:
+                provenance["endpoint_model_id"] = model
             provenance["endpoint_limits"] = {
                 **catalogue["endpoint_limits"],
                 "url": endpoint_models_url or api_base + "/models",
             }
+            if (endpoint_model or {}).get("id") == model:
+                provenance["endpoint_limit_scope"] = effective_route_scope(entry)
         if any(
             v == "catalogue" for v in catalogue.get("limit_sources", {}).values()
         ) or catalogue.get("reasoning"):
@@ -1762,18 +1791,18 @@ def plan(
         entry["store"] = False
         entry["include"] = ["reasoning.encrypted_content"]
         provenance["encrypted_reasoning"] = {"source": "connect", "outcome": "not_probed"}
-        route_keys = ("model_name", "api_base", "api_key_env", "api_style")
         if (
             existing_entry
-            and all(existing_entry.get(key) == entry.get(key) for key in route_keys)
-            and existing_entry.get("include") == []
-            and existing_entry.get("provenance", {}).get("encrypted_reasoning", {}).get("outcome")
-            == "rejected"
+            and same_media_route(existing_entry, entry)
+            and existing_entry.get("api_key_env") == entry.get("api_key_env")
         ):
-            entry["include"] = []
-            provenance["encrypted_reasoning"] = deepcopy(
-                existing_entry["provenance"]["encrypted_reasoning"]
-            )
+            # Declarations survive supported saves, which strip provenance.
+            for field in ("store", "include"):
+                if field in existing_entry:
+                    entry[field] = deepcopy(existing_entry[field])
+            previous = existing_entry.get("provenance", {}).get("encrypted_reasoning")
+            if entry["include"] == [] and previous and previous.get("outcome") == "rejected":
+                provenance["encrypted_reasoning"] = deepcopy(previous)
     token_key = "max_output_tokens" if api_style == "responses" else "max_tokens"
     body = {
         "model": model,
@@ -1783,7 +1812,7 @@ def plan(
         ],
     }
     if api_style == "responses":
-        body["store"] = False
+        body["store"] = entry["store"]
         body["include"] = list(entry["include"])
     probes = [Probe("routing", body, output_tokens + 512)]
     tool_body = deepcopy(body)
@@ -1832,6 +1861,11 @@ def plan(
             )
         )
     entry["provenance"] = provenance
+    if context_window is not None:
+        entry = apply_context_window(
+            entry, context_window, model=model, endpoint_model=endpoint_model
+        )
+        provenance = entry["provenance"]
     if reply_tokens is None:
         recommendation = ((catalogue or {}).get("default_parameters") or {}).get("max_tokens")
         if (
@@ -2071,40 +2105,38 @@ async def _run_probe(alias: str, entry: dict, probe: Probe, api_key: str | None)
             raise RuntimeError("Configured typed check permits only one outbound send")
         send_started = True
 
-        expected = {k: v for k, v in probe.body.items() if k in REPLY_CAP_KEYS}
-        if probe.name.startswith("level:"):
-            expected = {
-                **{k: v for k, v in settings.items() if k not in REPLY_CAP_KEYS},
-                **expected,
-            }
-        if typed:
-            # Resolve the same defaults/selected effort as the impending native
-            # call. Observe request settings, not catalogue/declaration metadata.
-            resolved = client._prepare_call_config({})
-            selected_level = entry.get("reasoning_level", client.reasoning_level)
-            selected_settings = (entry.get("reasoning_levels") or {}).get(selected_level, {})
-            expected = {
-                **{
-                    k: resolved[k]
-                    for k in (
-                        "temperature",
-                        "top_p",
-                        "reasoning",
-                        "reasoning_effort",
-                        "output_config",
-                        "store",
-                        "include",
-                        *REPLY_CAP_KEYS,
-                    )
-                    if k in resolved
-                },
-                **{
-                    k: v
-                    for k, v in selected_settings.items()
-                    if k not in REPLY_CAP_KEYS and k != "extra_body"
-                },
-                **(resolved.get("extra_body") or {}),
-            }
+        # Typed calls use the constructor defaults; ordinary probes also carry
+        # their planned overrides. Resolve controls exactly as runtime dispatch
+        # does, including selected levels and flattened SDK extra_body values.
+        resolved = client._prepare_call_config({} if typed else params)
+        selected_level = params.get(
+            "reasoning_level", entry.get("reasoning_level", client.reasoning_level)
+        )
+        selected_settings = (entry.get("reasoning_levels") or {}).get(selected_level, {})
+        control_keys = {
+            "temperature",
+            "top_p",
+            "reasoning",
+            "reasoning_effort",
+            "thinking",
+            "chat_template_kwargs",
+            "output_config",
+            "store",
+            "include",
+            *REPLY_CAP_KEYS,
+        } | (selected_settings.keys() - {"extra_body"})
+        expected = {
+            **{key: entry[key] for key in control_keys - REPLY_CAP_KEYS if key in entry},
+            **{key: resolved[key] for key in control_keys if key in resolved},
+            # A faulty adapter dropping a selected control from resolution must
+            # not erase the obligation to observe that declaration on the wire.
+            **{
+                key: resolved.get(key, value)
+                for key, value in selected_settings.items()
+                if key not in REPLY_CAP_KEYS and key != "extra_body"
+            },
+            **(resolved.get("extra_body") or {}),
+        }
         wire = json.loads(request.content)
         if typed_media_check and entry["api_style"] == "anthropic" and not native:
             tools = wire.get("tools", [])
@@ -2120,7 +2152,14 @@ async def _run_probe(alias: str, entry: dict, probe: Probe, api_key: str | None)
                     and schema["properties"]["value"].get("type") == "boolean"
                 ):
                     schema_carrier = tool["name"]
-        observed = settings_on_wire(expected, wire)
+        # Responses SDKs omit an explicit empty include list. Absence is the
+        # same opt-out, but a nonempty include must still fail observation.
+        controls_wire = (
+            {**wire, "include": []}
+            if expected.get("include") == [] and "include" not in wire
+            else wire
+        )
+        observed = settings_on_wire(expected, controls_wire)
         if native:
             output = wire.get("output_config")
             exact = (
@@ -2561,7 +2600,8 @@ async def run_steps(
             probe = replace(probe, body={**probe.body, "include": []})
         previous = records.get(probe.name, {})
         if (
-            previous.get("outcome") == "accepted"
+            verification_is_current(previous, entry, probe.name)
+            and previous.get("outcome") == "accepted"
             and previous.get("request") == probe.body
             and previous.get("client") == "unifiedllm"
             and previous.get("settings_sent") is True
@@ -2572,8 +2612,6 @@ async def run_steps(
                 and previous.get("baseline_kind") == "interface_acceptance"
                 or probe.uses_configured_cap
                 and text_baseline_passed(previous)
-                and previous.get("baseline_config")
-                == {k: v for k, v in entry.items() if k != "provenance"}
             )
         ):
             if probe.name == "routing" and entry.get("include"):
@@ -2592,7 +2630,7 @@ async def run_steps(
             continue
         if probe.name.startswith("media:"):
             baseline = records.get("routing", {})
-            if probe.skip_reason or not text_baseline_passed(baseline):
+            if probe.skip_reason or not routing_allows_save(entry, entry):
                 record["reason"] = (
                     probe.skip_reason or text_baseline_reason(baseline) + "; media not tested"
                 )
@@ -2641,6 +2679,7 @@ async def run_steps(
             continue
         spent += probe.token_estimate
         yield ProbeUpdate(probe.name, {"outcome": "running"})
+        stamp_verification(record, entry, probe.name, timeout_seconds=probe.timeout_seconds)
         started = time.monotonic()
         deadline = asyncio.timeout(probe.timeout_seconds)
         record["request_shape"] = {
@@ -2862,7 +2901,6 @@ async def run_steps(
             if probe.uses_configured_cap:
                 record.update(
                     baseline_kind=TYPED_TEXT_BASELINE,
-                    baseline_config=deepcopy({k: v for k, v in entry.items() if k != "provenance"}),
                     typed_result_validated=type(response.parsed) is int,
                     answer_correct=type(response.parsed) is int and response.parsed == 323,
                     final_answer_observed=bool((response.content or "").strip()),
@@ -2959,7 +2997,7 @@ async def run_steps(
                 "tokens_charged_to_budget", 0
             )
     provenance["warnings"] = entry_warnings(entry)
-    yield ConnectResult(proposal.alias, entry)
+    yield ConnectResult(proposal.alias, invalidate_verification(entry))
 
 
 async def _run_decision_steps(
@@ -2978,6 +3016,7 @@ async def _run_decision_steps(
         # Only routing acceptance may be reused; all accuracy/media cases are fresh.
         if (
             probe.name == "routing"
+            and verification_is_current(previous, entry, probe.name)
             and previous.get("outcome") == "accepted"
             and previous.get("request") == probe.body
             and previous.get("client") == "decision"
@@ -3015,6 +3054,7 @@ async def _run_decision_steps(
                 raise ValueError(f"Set {entry['api_key_env']} before probing, or approve none")
         yield ProbeUpdate(probe.name, {"outcome": "running"})
         charged += probe.token_estimate
+        stamp_verification(record, entry, probe.name, timeout_seconds=probe.timeout_seconds)
         started = time.monotonic()
         deadline = asyncio.timeout(probe.timeout_seconds)
         record["request_shape"] = {
@@ -3098,7 +3138,7 @@ async def _run_decision_steps(
     entry["provenance"].update(
         requests_accepted=accepted, tokens_charged_to_budget=charged, warnings=entry_warnings(entry)
     )
-    yield ConnectResult(proposal.alias, entry)
+    yield ConnectResult(proposal.alias, invalidate_verification(entry))
 
 
 async def check_interfaces(

@@ -119,7 +119,13 @@ def test_actual_guided_manual_limits_are_literal_and_conservative(
         "context_window": context,
         "max_input_tokens": input_limit,
     }
-    assert provenance["context_window"] == {"source": "user", "value": min(context, input_limit)}
+    assert provenance["context_window"] == {
+        "source": "user",
+        "value": min(context, input_limit),
+        "declared": context,
+        "effective": min(context, input_limit),
+        "effective_source": "user",
+    }
     assert "catalogue" not in provenance
     assert not provenance["probes"] and not entry.get("reasoning_levels")
     assert "max_input_tokens" not in entry and "max_output_tokens" not in entry

@@ -179,6 +179,10 @@ def test_defensive_save_guard_precedes_prompts_and_writes(monkeypatch, tmp_path,
         "provenance": {"probes": {} if record is None else {"routing": record}},
         "media_inputs": [],
     }
+    entry = connect.configure_entry(entry)
+    if record == GOOD:
+        # This case simulates a fresh baseline execution, not imported legacy proof.
+        connect.stamp_verification(entry["provenance"]["probes"]["routing"], entry, "routing")
     state = wizard.WizardState(
         approval="all",
         yes=True,

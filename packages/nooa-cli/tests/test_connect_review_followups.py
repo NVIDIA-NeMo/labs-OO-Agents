@@ -210,15 +210,22 @@ def test_progress_reports_puzzle_result_and_parse_failure(correct):
     @click.command()
     def display():
         progress = view.CheckProgress(diagnostics=True)
-        progress.update(
-            "level:high",
+        record = {
+            "outcome": "accepted",
+            "reasoning_observed": True,
+            "answer_correct": correct,
+            "reasoning_tokens": 4096,
+        }
+        entry = connect.configure_entry(
             {
-                "outcome": "accepted",
-                "reasoning_observed": True,
-                "answer_correct": correct,
-                "reasoning_tokens": 4096,
-            },
+                "model_name": "openai/model",
+                "reasoning_levels": {
+                    "high": {"reasoning_effort": "high"},
+                },
+            }
         )
+        connect.stamp_verification(record, entry, "level:high")
+        progress.update("level:high", record)
         progress.update("anthropic", {"outcome": "not_confirmed", "error": "ReasoningReplayError"})
 
     result = CliRunner().invoke(display)
