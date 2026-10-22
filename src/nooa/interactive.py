@@ -29,13 +29,13 @@ from pydantic import (
     ValidationError,
     field_serializer,
     field_validator,
-    model_validator,
 )
 
 from nooa import hidden, strategy
 from nooa.agentdoc import doc  # noqa: F401  # visible in the REPL, as on base
 from nooa.context_blocks import Metadata
 from nooa.context_blocks.roles import Role
+from nooa.runtime.turn_loop import ResultKind
 from nooa.storage.markers import nosnapshot
 from nooa.storage.snapshot_vars import SnapshotVars
 
@@ -117,6 +117,7 @@ class Done(BaseModel):
     turn, ``handle_work``, requires one; other turns may leave it unset).
     """
 
+    _turn_kind: ClassVar[ResultKind] = "done"
     explanation: str = Field(description="Status line saying what was finished; not the reply")
     message: str | None = Field(default=None, description="The reply to show the user")
     evidence: list[str] = Field(
@@ -137,57 +138,23 @@ class Done(BaseModel):
 
 
 class NeedInput(BaseModel):
-    """Turn result: a question the agent cannot continue without.
+    """Turn result: a conversational question, answered by the person's next message.
 
-    ``question`` is the question itself; the host shows it to the person,
-    so do not also send it with ``self.message()``. Omit ``options`` for a
-    free-text answer. Set ``options`` only for a single choice among fixed values, or ``answer_type`` (a pydantic model class whose fields
-    are simple values: str, int, float, bool, or a list of str) for a typed
-    answer, or neither for free text. The host turns ``answer_type`` into a
-    form and the answer arrives in the next notification as an instance of
-    it. ``reason`` optionally says in one sentence why progress is not
-    possible or not desirable without the answer.
+    The host shows ``question``, so do not also send it with
+    ``self.message()``. The answer arrives as a plain ``str``; put any
+    suggested answers in the question text. ``reason`` optionally says in
+    one sentence why progress is not possible or not desirable without it.
     """
+
+    model_config = {"extra": "forbid"}
+    _turn_kind: ClassVar[ResultKind] = "need_input"
 
     question: str = Field(description="The question to show the person")
     reason: str | None = Field(
         default=None, description="Why progress is not possible or not desirable without it"
     )
-    options: list[str] | None = Field(
-        default=None, min_length=1, description="Choices for a single choice"
-    )
-    answer_type: type[BaseModel] | None = Field(
-        default=None,
-        description="Pydantic model class with simple fields; the answer comes back as an instance",
-    )
 
     _check_question = field_validator("question")(_non_blank)
-
-    @field_validator("options", mode="before")
-    @classmethod
-    def _options_not_empty(cls, value: Any) -> Any:
-        if isinstance(value, list | tuple) and not value:
-            raise ValueError(
-                "options=[] is empty: omit options for a free-text answer, e.g. "
-                'NeedInput(question="..."), or list at least one choice'
-            )
-        return value
-
-    @field_validator("options")
-    @classmethod
-    def _options_not_blank(cls, value: list[str] | None) -> list[str] | None:
-        return None if value is None else [_non_blank(option) for option in value]
-
-    @field_serializer("answer_type", when_used="json")
-    def _serialize_answer_type(self, value: type[BaseModel] | None) -> str | None:
-        """A class cannot be JSON-encoded; record it as ``module:qualname``."""
-        return None if value is None else f"{value.__module__}:{value.__qualname__}"
-
-    @model_validator(mode="after")
-    def _one_answer_shape(self) -> "NeedInput":
-        if self.options is not None and self.answer_type is not None:
-            raise ValueError("set options or answer_type, not both")
-        return self
 
 
 class Waiting(BaseModel):
@@ -200,6 +167,7 @@ class Waiting(BaseModel):
     next turn when one of them delivers.
     """
 
+    _turn_kind: ClassVar[ResultKind] = "waiting"
     explanation: str = Field(description="Why the turn is waiting")
     message: str | None = Field(default=None, description="Line to show the user while waiting")
     on: list[str] = Field(
@@ -649,14 +617,11 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
           Use ``self.message()`` only for text to show before the turn ends.
 
         - ``NeedInput(question=...)`` — you cannot continue without an
-          answer. ``question`` is the question; the host shows it, so do
-          not also send it with ``message()``. Add ``options=[...]`` for a
-          single choice, or ``answer_type=SomeModel`` (a pydantic class you
-          define with simple fields) for a typed answer. The answer arrives
-          in the next notification. ``reason`` optionally says why you
-          need it::
+          answer. The host shows ``question``, so do not also send it with
+          ``message()``. The next message answers it as plain text; put any
+          suggested answers in the question. ``reason`` optionally says why::
 
-              return_result(NeedInput(question="Which branch should I push to?", options=["main", "dev"]))
+              return_result(NeedInput(question="Which branch should I push to: main or dev?"))
 
         - ``Waiting(message=..., explanation=..., on=[...])`` — waiting on a
           background job or queue, not on a person. ``message`` is shown to

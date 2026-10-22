@@ -34,7 +34,7 @@ CHILD_RESULT = (
     "solution_description='patched parse()', evidence='tests pass', "
     "how_to_verify='pytest', report='REPORT: off-by-one fixed')))"
 )
-ASK = "return_result(NeedInput(question='Which branch?', options=['main', 'dev']))"
+ASK = "return_result(NeedInput(question='Which branch?', reason='Both have the fix.'))"
 # Atom cells run with the agent module's globals, so they reach the test's
 # events through the test-agents module.
 BLOCKING = (
@@ -589,7 +589,7 @@ async def test_wait_returns_a_question_then_the_result(atom_registry, atom_optio
         cell(
             "ref = await self.spawn('Pusher', 'push the branch')\n"
             "q = await ref.wait()\n"
-            "assert isinstance(q, ChildQuestion) and q.options == ['main', 'dev']\n"
+            "assert isinstance(q, ChildQuestion) and q.reason == 'Both have the fix.'\n"
             "assert f'pending_question=\\'[{q.id}] Which branch?' in repr(self.children()[0])\n"
             "try:\n"
             "    await ref.wait()\n"

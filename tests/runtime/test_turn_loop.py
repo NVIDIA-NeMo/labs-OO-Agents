@@ -30,7 +30,19 @@ class ScriptedAgent(InteractiveAgent):
             return NeedInput(question="which?")
         if text == "junk":
             return 42
+        if text == "hosted":
+            return HostedQuestion()
         return Done(explanation=text)
+
+
+class HostedQuestion:
+    """A host's own result type: its class says how the loop settles it."""
+
+    _turn_kind = "need_input"
+
+
+class BogusKind:
+    _turn_kind = "cancelled"  # only done / need_input / waiting are accepted
 
 
 def record(agent, *types):
@@ -77,6 +89,18 @@ async def test_every_way_a_turn_ends_is_a_kind(agent):
     assert (boom.kind, boom.message, type(boom.error)) == ("error", "ValueError: boom", ValueError)
     assert (junk.kind, junk.error) == ("error", None)
     assert "not a turn result" in junk.message
+
+
+async def test_a_host_result_type_settles_as_its_declared_kind(agent):
+    seen = record(agent, "TurnSettled")
+    agent.turns.start()
+    agent.queue_manager.get_channel("user_messages").put("hosted")
+    await settled(seen, 1)
+    [end] = seen
+    assert end.kind == "need_input" and isinstance(end.result, HostedQuestion)
+    from nooa.runtime.turn_loop import _settled_from
+
+    assert _settled_from(BogusKind()).kind == "error"
 
 
 async def test_cancel_settles_before_it_returns_and_tells_the_model(agent):

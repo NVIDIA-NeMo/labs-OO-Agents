@@ -138,8 +138,8 @@ async def test_a_retained_childs_question_is_answered_with_send(registry, root_o
         ),
         cell(
             "[q] = notification['delegates']\n"
-            "self.v.schema_title = q.answer_schema['title']\n"
-            "await q.child.send({'branch': 'main'})\n"
+            "self.v.asked = q.question\n"
+            "await q.child.send('main')\n"
             "return_result(Waiting(explanation='answered', on=['delegates']))"
         ),
         cell(
@@ -152,10 +152,10 @@ async def test_a_retained_childs_question_is_answered_with_send(registry, root_o
         ),
     ]
     models.scripts["Helper"] = [
-        cell("return_result(NeedInput(question='Which branch?', answer_type=Answer))"),
+        cell("return_result(NeedInput(question='Which branch?'))"),
         cell(
             "[a] = notification['user_messages']\n"
-            "return_result(Done(explanation=f\"branch {a['branch']}\", result=TaskResult(solution_description='s', evidence='e', how_to_verify='v')))"
+            "return_result(Done(explanation=f\"branch {a}\", result=TaskResult(solution_description='s', evidence='e', how_to_verify='v')))"
         ),
         cell(
             "[m] = notification['user_messages']\nreturn_result(Done(explanation=f'second: {m}', result=TaskResult(solution_description='s', evidence='e', how_to_verify='v')))"
@@ -164,7 +164,7 @@ async def test_a_retained_childs_question_is_answered_with_send(registry, root_o
     root = await registry.create(root_options)
     outcome = await asyncio.wait_for(root.prompt("go"), TIMEOUT)
     assert outcome == Done(explanation="second: SECOND-MESSAGE")
-    assert root._agent.v.schema_title == "Answer"
+    assert root._agent.v.asked == "Which branch?"
     [child_options] = [o for o in models.built if o.name == "Helper"]
     assert (child_options.turn_method, child_options.kept) == ("handle_work", True)
     [helper] = registry.children(root.id)

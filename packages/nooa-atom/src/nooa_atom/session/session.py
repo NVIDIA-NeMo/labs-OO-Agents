@@ -1268,15 +1268,7 @@ def _outcome_data(outcome: Any, kind: OutcomeKind) -> tuple[dict[str, Any], str 
         except Exception:  # a result that is not data
             return {"explanation": outcome.explanation, "result": repr(result)}, None
     if kind == "need_input":
-        schema = (
-            outcome.answer_type.model_json_schema() if outcome.answer_type is not None else None
-        )
-        return {
-            "question": outcome.question,
-            "options": outcome.options,
-            "reason": getattr(outcome, "reason", None),
-            "answer_schema": schema,
-        }, None
+        return {"question": outcome.question, "reason": outcome.reason}, None
     if kind == "waiting":
         return outcome.model_dump(mode="json"), None
     if kind == "cancelled":

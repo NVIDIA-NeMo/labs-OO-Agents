@@ -22,7 +22,6 @@ from pathlib import Path
 from string import Formatter
 from types import SimpleNamespace
 from typing import Any, cast
-from uuid import uuid4
 
 from acp import (
     InitializeResponse,
@@ -30,10 +29,8 @@ from acp import (
     NewSessionResponse,
     PromptResponse,
     RequestError,
-    start_tool_call,
     text_block,
     update_agent_message,
-    update_tool_call,
     update_user_message,
 )
 from acp.agent.connection import AgentSideConnection
@@ -46,11 +43,12 @@ from acp.schema import (
     CloseSessionResponse,
     ConfigOptionUpdate,
     ElicitationFormSessionMode,
+    ElicitationSchema,
+    ElicitationStringPropertySchema,
     HttpMcpServer,
     Implementation,
     ListSessionsResponse,
     McpServerStdio,
-    PermissionOption,
     SessionConfigOptionSelect,
     SessionConfigSelectOption,
     SessionMode,
@@ -58,13 +56,10 @@ from acp.schema import (
     SetSessionConfigOptionResponse,
     SetSessionModeResponse,
     SseMcpServer,
-    ToolCallUpdate,
     UnstructuredCommandInput,
 )
-from pydantic import BaseModel, Field, ValidationError
 
 from nooa.errors import GenerationError
-from nooa.interactive import NeedInput
 from nooa.mcp import MCPManager, MCPTool
 from nooa.slash_dispatch import CoercionError
 from nooa.storage.sqlite import SessionAlreadyActiveError
@@ -72,17 +67,10 @@ from nooa.strategies.codeact import MAX_ITERATIONS_MESSAGE, OUTPUT_TOKENS_EXHAUS
 from nooa_atom.acp.event_bridge import (
     VERBOSITY_LEVELS,
     ACPEventBridge,
-    Verbosity,
     cancel_text,
     pool_input_event,
 )
 from nooa_atom.acp.listing import list_sessions, validate_workspace
-from nooa_atom.acp.need_input import (
-    answer_from_content,
-    need_input_schema,
-    pool_answer,
-    pool_form_schema,
-)
 from nooa_atom.acp.protocol import INJECT_CAPABILITY, initialize_response, open_stdio
 from nooa_atom.acp.recover import COMMAND as RECOVER
 from nooa_atom.acp.recover import recover
@@ -110,12 +98,9 @@ from nooa_atom.session.store import (
 )
 from nooa_atom.workspace.settings import load_acp_verbosity, write_settings_updates
 
-
-class _VerbosityAnswer(BaseModel):
-    verbosity: Verbosity = Field(
-        title="Verbosity",
-        description="silent: no activity; concise: one-line notices; verbose: full activity (default).",
-    )
+_VERBOSITY_HELP = (
+    "silent: no activity; concise: one-line notices; verbose: full activity (default)."
+)
 
 
 logger = logging.getLogger(__name__)
@@ -138,14 +123,8 @@ SOURCE = "acp"
 INJECT_SOURCE = "acp:inject"
 """Injected inputs are not ordinary prompts: echo their admission once."""
 
-FORM_ANSWER_SOURCE = "acp:form-answer"
-"""Accepted NeedInput form answers, echoed once by the admission bridge."""
-
-DECLINED = "(declined to answer)"
-"""What the agent receives when the person declines or dismisses a question."""
-DECLINED_SOURCE = "user:declined"
-
 _CANCELLED = object()  # a client request stopped by session/cancel
+_DISMISSED = object()  # the person declined or dismissed a local form
 
 _CONNECT_TEXT = (
     "Connecting a model provider needs the terminal for now: run `nooa connect` in a "
@@ -307,7 +286,6 @@ class AtomACPAgent:
         self._ask_epochs: dict[str, int] = {}
         # The question each session's prompt is asking, so two prompts that
         # returned with the same turn ask it once.
-        self._asking: dict[str, NeedInput] = {}
         # Workspaces whose model configuration files were logged.
         self._logged_config: set[Path] = set()
 
@@ -751,25 +729,18 @@ class AtomACPAgent:
         they were admitted, including ones admitted while this loop runs.
         Each is waited for as ``item_id`` is (``_finish_item``); the prompt
         returns ``end_turn`` when all are done, and stops at the first
-        other answer. A question is not asked while a follower after it is
-        still waiting: the person's queued message comes first, and its turn
-        has the question in context.
+        other answer.
         """
         self._open[session.id] = self._open.get(session.id, 0) + 1
         # Taken now: Stop pops the list but leaves in it the followers a
         # turn took, whose outcome is then the cancelled turn's.
         followers = self._followers.setdefault(session.id, [])
-        asked: list[NeedInput] = []
         try:
-            response = await self._finish_item(
-                session, bridge, item_id, asked, later=lambda: bool(followers)
-            )
+            response = await self._finish_item(session, bridge, item_id)
             while response.stop_reason == "end_turn" and followers:
                 receipt, _text = followers[0]
                 try:
-                    response = await self._finish_item(
-                        session, bridge, receipt.item_id, asked, later=lambda: len(followers) > 1
-                    )
+                    response = await self._finish_item(session, bridge, receipt.item_id)
                 finally:
                     if followers and followers[0][0] is receipt:
                         followers.pop(0)
@@ -782,191 +753,91 @@ class AtomACPAgent:
                 self._followers.pop(session.id, None)
 
     async def _finish_item(
-        self,
-        session: Session,
-        bridge: ACPEventBridge,
-        item_id: str,
-        asked: list[NeedInput],
-        *,
-        later: Callable[[], bool],
+        self, session: Session, bridge: ACPEventBridge, item_id: str
     ) -> PromptResponse:
-        """Wait for the turn that consumes ``item_id``; answer questions until it is done.
+        """Wait for the turn that consumes ``item_id``.
 
-        A ``NeedInput`` the client can answer (a form, or a yes/no
-        permission) is submitted and the same prompt waits for the next
-        turn; otherwise the question, already sent by the bridge as the
-        turn's final message, ends the item with ``end_turn``. ``asked``
-        holds the questions this prompt already handled: an item consumed by
-        the same turn as an earlier one resolves with the same question,
-        which is not asked again. While ``later()`` (followers wait after
-        this item), a question is left as text and the item is done.
+        A ``NeedInput`` is never a dialog: the bridge already sent its
+        question as the turn's final message, so it ends the item with
+        ``end_turn`` and the person's next prompt answers it as text.
         """
-        epoch = self._ask_epochs.get(session.id, 0)
-        while True:
-            outcome = await session.outcome(item_id)
-            if isinstance(outcome, TurnCancelledOutcome):
-                # The bridge closed the open cards when the Session reported
-                # the cancel, which happens before this outcome resolves.
-                await bridge.flush()
-                return PromptResponse(stop_reason="cancelled")
-            if (
-                not isinstance(outcome, NeedInput)
-                or self._asking.get(session.id) is outcome
-                or any(known is outcome for known in asked)
-                or later()
-            ):
-                # Done; or a question another prompt of this turn is asking,
-                # this prompt already asked, or a queued message answers first.
-                await bridge.flush()
-                return PromptResponse(stop_reason="end_turn")
-            asked.append(outcome)
-            self._asking[session.id] = outcome
-            try:
-                await bridge.flush()
-                if not self._client_answer_is_current(session, bridge, epoch):
-                    return PromptResponse(stop_reason="cancelled")
-                answer = await self._ask(session, bridge, outcome)
-            finally:
-                if self._asking.get(session.id) is outcome:
-                    del self._asking[session.id]
-            if not self._client_answer_is_current(session, bridge, epoch):
-                return PromptResponse(stop_reason="cancelled")
-            if answer is _CANCELLED:
-                await bridge.flush()
-                return PromptResponse(stop_reason="cancelled")
-            if answer is None:
-                return PromptResponse(stop_reason="end_turn")
-            value, source = answer
-            receipt = await session.submit(value, source=source)
-            item_id = receipt.item_id
+        outcome = await session.outcome(item_id)
+        # The bridge closed the open cards when the Session reported a
+        # cancel, which happens before this outcome resolves.
+        await bridge.flush()
+        if isinstance(outcome, TurnCancelledOutcome):
+            return PromptResponse(stop_reason="cancelled")
+        return PromptResponse(stop_reason="end_turn")
 
-    async def _ask(self, session: Session, bridge: ACPEventBridge, need: NeedInput) -> Any:
-        """Ask the client to answer ``need``: ``(item, source)``, ``None`` or ``_CANCELLED``.
+    async def _ask_verbosity(self, session: Session, question: str) -> Any:
+        """Ask the client to pick a verbosity level in a form of its own.
 
-        Pool's own form for a free-text, choice or typed question when the
-        client is Pool (not yes/no); else a form when the client advertised ``elicitation.form``
-        and the question flattens; else a permission request for a yes/no
-        question; else ``None`` (the question stays as text). A client error
-        falls back to ``None``.
+        Pool's ``_poolside/elicitation`` when the client is Pool, else a
+        standard ``elicitation/create`` form when the client advertised
+        ``elicitation.form``. Returns the chosen level, ``_DISMISSED`` when
+        the person declined or dismissed it, ``_CANCELLED`` when Stop ended
+        it, or ``None`` when no form could be shown or the answer is not a
+        level. A failed Pool request turns Pool forms off for this connection.
         """
         conn = self._require_conn()
-        pool_schema = pool_form_schema(need) if self._pool_forms else None
-        if pool_schema is not None:
-            return await self._ask_pool(session, need, pool_schema)
+        via_pool = self._pool_forms
+        if via_pool:
+            # Pool declines non-string inputs: one required string picker.
+            picker = {
+                "type": "string",
+                "title": "Verbosity",
+                "description": _VERBOSITY_HELP,
+                "oneOf": [{"const": level, "title": level} for level in VERBOSITY_LEVELS],
+            }
+            params = {
+                "sessionId": session.id,
+                "mode": "form",
+                "message": question,
+                "requestedSchema": {
+                    "type": "object",
+                    "properties": {"verbosity": picker},
+                    "required": ["verbosity"],
+                },
+            }
+            request = conn.ext_method(_POOL_FORM_METHOD, params)
+        elif self._client_shows_forms():
+            field = ElicitationStringPropertySchema(
+                type="string",
+                title="Verbosity",
+                description=_VERBOSITY_HELP,
+                enum=list(VERBOSITY_LEVELS),
+            )
+            schema = ElicitationSchema(properties={"verbosity": field}, required=["verbosity"])
+            request = conn.create_elicitation(
+                message=question,
+                mode=ElicitationFormSessionMode(session_id=session.id, requested_schema=schema),
+            )
+        else:
+            return None
+        response = await self._client_call(session.id, request)
+        if response is _CANCELLED:
+            return response
+        if response is None:
+            if via_pool:
+                self._pool_forms = False
+            return None
+        if isinstance(response, dict):
+            action, content = response.get("action"), response.get("content")
+        else:
+            action, content = getattr(response, "action", None), getattr(response, "content", None)
+        if action != "accept":
+            return _DISMISSED
+        level = content.get("verbosity") if isinstance(content, dict) else None
+        return level if level in VERBOSITY_LEVELS else None
+
+    def _client_shows_forms(self) -> bool:
+        """Whether the client advertised standard ACP form elicitation."""
         capabilities = self.client_capabilities
-        forms = (
+        return (
             capabilities is not None
             and capabilities.elicitation is not None
             and capabilities.elicitation.form is not None
         )
-        schema = need_input_schema(need)
-        if forms and schema is not None:
-            mode = ElicitationFormSessionMode(session_id=session.id, requested_schema=schema)
-            response = await self._client_call(
-                session.id, conn.create_elicitation(message=need.question, mode=mode)
-            )
-            if response is None or response is _CANCELLED:
-                return response
-            if response.action == "accept":
-                try:
-                    return answer_from_content(need, response.content), FORM_ANSWER_SOURCE
-                except (ValidationError, ValueError):
-                    # Invalid client data is not an answer; leave the question as text.
-                    return None
-            return DECLINED, DECLINED_SOURCE
-        options = need.options or []
-        if sorted(option.lower() for option in options) == ["no", "yes"]:
-            return await self._ask_yes_no(session, bridge, need.question, options)
-        return None
-
-    async def _ask_pool(self, session: Session, need: NeedInput, schema: dict[str, Any]) -> Any:
-        """Ask with Pool's ``_poolside/elicitation`` form; the result is as ``_ask``'s.
-
-        A malformed or blank options answer, or a typed answer that does not
-        validate, is asked once more with the error, then left as text. Options
-        are suggestions; typed Literal fields still restrict their values.
-        A failed request turns Pool forms off for this connection.
-        """
-        conn = self._require_conn()
-        question = f"{need.question}\n\n{need.reason}" if need.reason else need.question
-        message = question
-        for _attempt in range(2):
-            params: dict[str, Any] = {
-                "sessionId": session.id,
-                "mode": "form",
-                "message": message,
-                "requestedSchema": schema,
-            }
-            if len(schema["properties"]) > 1:
-                # Pool's own agent sends the field order with every multi-field form.
-                params["_meta"] = {"poolside/field_order": list(schema["properties"])}
-            response = await self._client_call(
-                session.id, conn.ext_method(_POOL_FORM_METHOD, params)
-            )
-            if response is _CANCELLED:
-                return response
-            if response is None:
-                self._pool_forms = False
-                return None
-            if not isinstance(response, dict) or response.get("action") != "accept":
-                return DECLINED, DECLINED_SOURCE
-            try:
-                return pool_answer(need, response.get("content")), FORM_ANSWER_SOURCE
-            except ValidationError as exc:
-                problems = "; ".join(
-                    f"{'.'.join(str(part) for part in error['loc'])}: {error['msg']}"
-                    for error in exc.errors()
-                )
-                message = f"{question}\n\nThat answer was not accepted: {problems}"
-            except ValueError as exc:
-                message = f"{question}\n\n{exc}"
-        return None
-
-    async def _ask_yes_no(
-        self, session: Session, bridge: ACPEventBridge, question: str, options: list[str]
-    ) -> Any:
-        """A yes/no question as a pending card and a permission request."""
-        conn = self._require_conn()
-        yes = next(option for option in options if option.lower() == "yes")
-        no = next(option for option in options if option.lower() == "no")
-        tool_call_id = f"question-{uuid4()}"
-        epoch = self._ask_epochs.get(session.id, 0)
-        bridge.publish(start_tool_call(tool_call_id, question, kind="other", status="pending"))
-        await bridge.flush()
-        if not self._client_answer_is_current(session, bridge, epoch):
-            bridge.publish(update_tool_call(tool_call_id, status="failed", title="Cancelled"))
-            return _CANCELLED
-        response = await self._client_call(
-            session.id,
-            conn.request_permission(
-                session_id=session.id,
-                tool_call=ToolCallUpdate(
-                    tool_call_id=tool_call_id, title=question, status="pending"
-                ),
-                options=[
-                    PermissionOption(option_id=yes, name=yes, kind="allow_once"),
-                    PermissionOption(option_id=no, name=no, kind="reject_once"),
-                ],
-            ),
-        )
-        chosen = getattr(getattr(response, "outcome", None), "option_id", None)
-        if response is _CANCELLED or response is None or chosen not in (yes, no):
-            bridge.publish(
-                update_tool_call(
-                    tool_call_id,
-                    status="failed",
-                    title="Cancelled" if response is _CANCELLED else question,
-                )
-            )
-            await bridge.flush()
-            if response is None or response is _CANCELLED:
-                return response
-            return DECLINED, DECLINED_SOURCE
-        bridge.publish(
-            update_tool_call(tool_call_id, status="completed", content=None, raw_output=chosen)
-        )
-        await bridge.flush()
-        return chosen, SOURCE
 
     def _client_answer_is_current(
         self, session: Session, bridge: ACPEventBridge, epoch: int
@@ -1106,27 +977,23 @@ class AtomACPAgent:
 
     async def _pick_verbosity(self, session: Session, bridge: ACPEventBridge) -> PromptResponse:
         """Ask the client locally; neither the command nor its answer enters the agent."""
-        need = NeedInput(
-            question=f"ACP verbosity: {bridge.verbosity}. Choose activity detail.",
-            answer_type=_VerbosityAnswer,
-        )
+        question = f"ACP verbosity: {bridge.verbosity}. Choose activity detail."
         epoch = self._ask_epochs.get(session.id, 0)
-        answer = await self._ask(session, bridge, need)
+        level = await self._ask_verbosity(session, question)
         if not self._client_answer_is_current(session, bridge, epoch):
             return PromptResponse(stop_reason="cancelled")
-        if answer is _CANCELLED:
+        if level is _CANCELLED:
             await bridge.flush()
             return PromptResponse(stop_reason="cancelled")
-        if answer is None:
+        if level is None:
             return await self._say(
                 bridge,
                 f"ACP verbosity: {bridge.verbosity}. Usage: /verbosity silent|concise|verbose",
             )
-        value, _source = answer
-        if not isinstance(value, _VerbosityAnswer):
+        if level is _DISMISSED:
             return await self._say(bridge, f"ACP verbosity unchanged: {bridge.verbosity}.")
         # Reuse local dispatch for validation, confirmation and config-picker sync.
-        response = await self._run_command(session, bridge, "verbosity", value.verbosity)
+        response = await self._run_command(session, bridge, "verbosity", level)
         assert response is not None
         return response
 

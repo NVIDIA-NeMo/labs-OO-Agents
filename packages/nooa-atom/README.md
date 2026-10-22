@@ -126,46 +126,20 @@ cells and truncation without a summary do not produce activity lines. Changing
 levels finalizes any already-visible open cards (including mirrored child
 cards); subsequent activity uses the new level.
 
-A question the agent asks (`NeedInput`) goes to the client as a form when
-the client advertises `elicitation.form`, as a permission request when it
-is a yes/no choice, and otherwise as text answered by the next message.
-When the client is Pool (`clientInfo.name` is `pool`), free-text, choice and
-typed questions use Pool's `_poolside/elicitation` form instead. Pool shows
-string fields only, so every field is sent as a string with the expected type
-in its description ("a whole number", "yes or no", "a comma-separated list")
-and the answer is converted back. `NeedInput(options=[...])` offers suggestions
-in a picker plus free text (`anyOf` of a `oneOf` of `{const, title}` entries
-and a string). The person can type an alternative in the form without Escape.
-A listed choice matches ignoring case and surrounding spaces; any other
-nonblank string is passed through exactly as entered. Missing, blank or
-non-string option answers are asked once more, then left as text.
+A question the agent asks (`NeedInput`) is never a dialog: the bridge sends
+its question (and reason) as the agent's message, the prompt ends with
+`end_turn`, and the person's next prompt answers it as plain text.
 
-Typed `answer_type` fields still validate against the Pydantic model. A string
-`Literal` is a strict picker; `Literal[...] | str` deliberately adds free text.
-A typed answer that does not validate is asked once more, then left as text.
-A form with more than one field sends `_meta["poolside/field_order"]` with the
-fields in model order. Yes/no questions keep the permission request. Other ACP
-clients still receive an enum for `options` when they support standard forms.
-If Pool fails the request, questions fall back to text for the rest of the
-connection.
-
-Accepted Pool and standard ACP form answers are echoed once as user messages before
-any subsequent agent reply. Typed answers display their validated JSON; text answers
-keep their text. Ordinary prompts, Pool inputs and yes/no permission answers are not
-re-echoed. `_nooa/session/inject` inputs echo once on admission, including a buffered
-steer's same-ID queued fallback. Invalid standard form answers are not admitted and
-leave the question as
-text (Pool retries once). Declined/dismissed forms still submit the silent
-`(declined to answer)` marker; stopping an open form submits nothing. Loading a
-session replays every admitted user item once, including the stored decline marker,
-as before.
-
-These picker/text shapes were measured in Pool 1.0.16. Its built-in agent's
-wire capture accepts unlisted text for both single-field and multi-field
-`anyOf[oneOf, string]` forms. This is a Pool extension, not general JSON Schema
-support: native number, boolean and array widgets are not supported. The
-capture establishes accepted values, not the exact on-screen label or key
-sequence; rendering in other versions must be checked separately.
+`/verbosity` with no argument is the adapter's own picker and never reaches the
+agent. When the client is Pool (`clientInfo.name` is `pool`) it is Pool's
+`_poolside/elicitation` form with one required string `verbosity` field whose
+`oneOf` lists the three levels (`{const, title}` entries; Pool declines
+non-string inputs). Other clients that advertise `elicitation.form` get a
+standard `elicitation/create` form with an `enum` of the levels. Declining or
+dismissing keeps the level; without a form, or with an answer that is not a
+level, the adapter shows `Usage: /verbosity silent|concise|verbose`. If Pool
+fails the request, the picker falls back to that text for the rest of the
+connection. Stop cancels an open picker.
 
 ## Skills and MCP servers
 
