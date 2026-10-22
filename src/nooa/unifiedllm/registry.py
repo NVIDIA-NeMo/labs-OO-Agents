@@ -519,6 +519,7 @@ def client_from_config(
         "top_p",
         "max_tokens",
         "reasoning",
+        "thinking",
         "reasoning_effort",
         "reasoning_levels",
         "reasoning_default",
