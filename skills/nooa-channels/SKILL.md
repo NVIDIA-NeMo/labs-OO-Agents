@@ -1,6 +1,6 @@
 ---
 name: nooa-channels
-description: Reactive input for NOOA agents — Channel/QueueManager for queued and event-mode input, race() turn dispatch, spawn() background jobs with JobHandle, and Atom's model-facing self.jobs API built on it (background commands, file tails, timers, ticks). Use when an agent must react to external input mid-run — user messages, CI output, timers, job completions — or when building an interactive/long-running agent loop.
+description: Reactive input for NOOA agents — Channel/QueueManager for queued and event-mode input, race() turn dispatch, spawn() background jobs with JobHandle, the bundled producers (monitor a shell command, cron ticks, one-shot timers, file tails), and Atom's model-facing self.jobs API built on it (background commands, file tails, timers, ticks). Use when an agent must react to external input mid-run — user messages, CI output, timers, job completions — or when building an interactive/long-running agent loop.
 compatibility: nooa package
 ---
 
@@ -59,6 +59,20 @@ class Watcher(Agent, llm=llm):
 handle = qm.spawn(watch_ci(), channel="ci", buffer=100)  # async generator: one put per yield
 qm.spawn(fetch_report(url), channel="reports")             # coroutine: one put of its result
 ```
+
+Bundled producers (`nooa.runtime.producers`; also `self.producers` on every `InteractiveAgent`):
+
+```python
+from nooa.runtime.producers import monitor, after, cron, tail, run_job
+
+qm.spawn(monitor("pytest -q"), channel="ci", buffer=100)          # stream stdout lines
+qm.spawn(after(300), channel="wakeup")                              # one-shot timer → None
+qm.spawn(cron(60), channel="ticks")                                 # yields 1, 2, 3, ... per minute
+qm.spawn(tail("app.log"), channel="logs")                           # new lines as they appear
+qm.spawn(run_job(some_coro(), job_id="batch-7"), channel="jobs")    # {"job_id": ..., "result": ...}
+```
+
+`monitor()` runs the command in its own process group and kills the whole group on cancel (no orphaned children); stderr is merged into stdout.
 
 - A **coroutine** job puts its single result on completion; an **async generator** puts each yielded value.
 - Lifecycle events: `StreamEnd(channel_name=...)` when a job finishes is a runtime event (subscribe with `event_manager.on("StreamEnd", ...)`; never recorded or shown to the model); `JobError(channel_name, error_type, error_message)` on failure goes to the event log and is also put on the data channel so `race()` wakes the agent to react.

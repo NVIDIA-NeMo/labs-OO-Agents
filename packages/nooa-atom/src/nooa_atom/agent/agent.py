@@ -232,8 +232,8 @@ class AtomAgent(InteractiveAgent):
         # surface. Load them so hosts can expose ``@slash_command`` methods,
         # but leave them inactive until the user opts in with ``/skills``.
         # Memory integration is deferred; do not auto-load its entry point.
-        # Also ignore the retired web publisher and producers entry points in
-        # older installed package metadata (``self.jobs`` replaced producers).
+        # Also ignore the retired web publisher entry point in older installed
+        # package metadata, and producers (core already sets ``self.producers``).
         loaded = set(self.skills.loaded())
         installed = []
         for name in self.skills.discovered():

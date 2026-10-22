@@ -30,9 +30,8 @@ def _check(agent, *on: str) -> None:
     check_waiting_targets(agent, Waiting(explanation="w", on=list(on)), fix=UNATTENDED_FIX)
 
 
-async def test_the_agent_has_jobs_and_no_producers(agent):
+async def test_the_agent_has_jobs(agent):
     assert isinstance(agent.jobs, JobsApi)
-    assert not hasattr(agent, "producers")
     assert "jobs" in agent.queue_manager.channels()
     assert "self.jobs.run(" in (AtomAgent.__doc__ or "")
 

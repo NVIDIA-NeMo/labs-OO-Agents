@@ -49,6 +49,7 @@ with hidden:
     from nooa.config import CodeActConfig, PredictConfig  # noqa: F401
     from nooa.events import _json_safe
     from nooa.runtime.channels import Channel, ChannelReader, QueueManager
+    from nooa.runtime.producers_skill import ProducersSkill
     from nooa.runtime.turn_loop import TurnLoop
     from nooa.strategies import CodeActStrategy
     from nooa.strategy_validation import InvariantError
@@ -58,6 +59,9 @@ import asyncio  # noqa: F401
 import datetime  # noqa: F401
 import json  # noqa: F401
 import re  # noqa: F401
+
+from nooa.runtime import producers  # noqa: F401
+from nooa.runtime.producers import after, cron, monitor, run_job, tail  # noqa: F401
 
 # Optional third-party libraries — visible in REPL (use np, pd, px, go directly)
 try:
@@ -483,6 +487,7 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
         self.user_messages = self._user_messages_in.reader
         self.event_manager.on_close(self.queue_manager.shutdown)
         self.turns = TurnLoop(self)
+        self.producers = ProducersSkill()
         # Surface pending-queue counts (and a short preview of each item)
         # to the LLM every turn — the agent reads queue depth straight
         # from the ``queues`` context block. Composed via
