@@ -15,8 +15,9 @@ def offer_suggestions(state, previous):
 
         show_model_metadata(state)
     from ._connect_input_policy import media_route
+    from ._connect_wizard import model_media_hints
 
-    hints = state.media_hints
+    hints = model_media_hints(state)
     report = connect.advertised_media_suggestions(
         hints,
         source=(hints or {}).get(

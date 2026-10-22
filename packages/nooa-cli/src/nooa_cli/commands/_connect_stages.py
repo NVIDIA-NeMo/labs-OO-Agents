@@ -243,6 +243,7 @@ def run_stage(
     input_file,
     output,
     yes,
+    allow_unverified=False,
     prompt_key=False,
     discovery_file=None,
     catalogue_file=None,
@@ -276,6 +277,10 @@ def run_stage(
     failure_code = 1
     key = None
     discovery_key = None
+    saved = False
+    verification = None
+    input_diagnostic = None
+    known_failed = False
     from ._connect_prompts import parse_media_inputs
 
     try:
@@ -329,6 +334,8 @@ def run_stage(
             raise click.UsageError(
                 "--input and --output are for stage save; redirect JSON stdout for other stages"
             )
+        if allow_unverified and stage != "save":
+            raise click.UsageError("--allow-unverified requires --stage save")
         if stage == "save":
             if not input_file or not output:
                 raise click.UsageError("Save requires --input and --output")
@@ -401,12 +408,42 @@ def run_stage(
                 )
             except ValueError as exc:
                 raise click.UsageError(str(exc)) from None
-            # Stage save deliberately permits manual/untested entries, but never
-            # treats a report boolean as proof for an edited current candidate.
+            from nooa.unifiedllm.connect._verification import save_verification
+
+            verification, current_checks = save_verification(entry)
+            checks = {
+                **(document.get("checks") or {}),
+                **current_checks,
+            }
+            checks = {name: record for name, record in checks.items() if isinstance(record, dict)}
+            for name, record in checks.items():
+                if name not in current_checks:
+                    record["verification_current"] = False
+                    if name not in verification["unverified_scopes"]:
+                        verification["unverified_scopes"].append(name)
+            if verification["state"] == "verified" and verification["unverified_scopes"]:
+                verification["state"] = "partial"
+                verification["verified"] = False
+            verification["checks"] = checks
+            input_diagnostic = document.get("diagnostic_prompt")
+            known_failed = document.get("ok") is False or verification["state"] == "failed"
+            if known_failed:
+                if not verification["baseline_verified"]:
+                    verification["state"] = "failed"
+                elif verification["state"] == "verified":
+                    verification["state"] = "partial"
+                    verification["unverified_scopes"].append("input_report")
+                verification["verified"] = False
+            # Command success is WRITE success only. No imported report boolean
+            # stamps old evidence or authorizes saving a known failure.
             if not connect.routing_allows_save(data["entry"], entry):
                 view.warning(
                     "Warning: saving a configuration whose current settings have not passed checks.",
                     err=True,
+                )
+            if known_failed and not allow_unverified:
+                raise click.UsageError(
+                    "Failed input was not saved; --allow-unverified explicitly acknowledges failed checks"
                 )
             path = Path(output)
             existing = {}
@@ -417,7 +454,9 @@ def run_stage(
                 if not yes:
                     raise click.UsageError("Alias exists; --yes explicitly permits replacement")
                 view.warning(f"Warning: replacing alias {alias!r} in {path}.", err=True)
-            connect.write(entry, path, alias=alias)
+            expected_alias = connect.alias_target(existing.get("models") or {}, alias)
+            connect.write(entry, path, alias=alias, expected_alias=expected_alias)
+            saved = True
             data = {"alias": alias, "path": str(path), "entry": entry}
             from ._connect_registry import shadowing_source
 
@@ -660,7 +699,7 @@ def run_stage(
             "detail": error["message"],
             **({"status_code": status} if isinstance(status, int) else {}),
         }
-        data = None
+        data = {"alias": alias, "entry": entry} if stage == "save" and verification else None
     from ._connect_registry import diagnostic_context
 
     total_budget = connect.DEFAULT_CHECK_BUDGET if budget_tokens is None else budget_tokens
@@ -714,9 +753,26 @@ def run_stage(
         "run_context": run_context,
         "warnings": connect.entry_warnings(entry) if entry else [],
         "checks": {name: public_record(record) for name, record in checks.items()},
-        "diagnostic_prompt": None
-        if ok
-        else connect.diagnostic_prompt(stage, entry, checks, run_context=run_context, api_key=key),
+        "diagnostic_prompt": (
+            input_diagnostic
+            or connect.diagnostic_prompt(stage, entry, checks, run_context=run_context, api_key=key)
+        )
+        if not ok or known_failed or (verification and verification["state"] == "partial")
+        else None,
+        **(
+            {
+                "saved": saved,
+                "save_status": "saved" if saved else "not_saved",
+                "verification": {
+                    **verification,
+                    "checks": {name: public_record(record) for name, record in checks.items()},
+                }
+                if verification
+                else None,
+            }
+            if stage == "save"
+            else {}
+        ),
     }
     # Both credentials can be reflected by catalogue metadata or local error paths.
     report = scrub_report(report, api_key=key, api_key_env=api_key_env)

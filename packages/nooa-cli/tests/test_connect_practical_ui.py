@@ -126,7 +126,9 @@ def test_native_group_capabilities_are_descriptive_not_settings(monkeypatch, cap
     wizard.show_model_metadata(current)
     text = " ".join(capsys.readouterr().out.split())
     assert "Source: This server" in text
-    assert "Vision listed: " + ("Yes" if flag else "No") in text
+    assert ("Media types: Images" in text) is flag
+    assert "Vision listed" not in text and "Images advertised" not in text
+    assert text.count("Media types:") == int(flag)
     assert "Reasoning efforts listed: low, max" in text
     assert current.candidate is None and current.media_inputs is None
     record["id"] = "neighbour"

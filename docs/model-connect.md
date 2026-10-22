@@ -411,8 +411,9 @@ Native decision routes instead require accepted decision routing to save in the
 wizard. With `--probe all`, three fresh typed decision smoke cases follow routing.
 Their failures remain visible and prevent image testing, but do not erase routing
 acceptance or block saving that route. `--probe minimal` checks decision routing
-only. Explicit `--stage save` can write even a failed report with a warning;
-inspect its checks before choosing to save.
+only. Explicit `--stage save` blocks a known failed report unless you acknowledge
+it with `--allow-unverified`. Even then, its machine verification stays failed
+and the checks/troubleshooting handoff remain available; writing is not testing.
 
 ### Configured typed text baseline
 
@@ -924,3 +925,54 @@ session checks use the active selection and its saved reply cap; additional
 declared levels may be checked separately. Advertised support, request acceptance,
 reasoning observed, and replay are distinct results. **Save without testing**
 keeps the choice but clearly marks the setup untested.
+
+
+### Save confidence and replacement ownership
+
+Stage save adds `saved` (write completed), `save_status` (`saved`/`not_saved`)
+and a separate `verification` object without changing version 1 command `ok`.
+`ok: true` on save is **not** a passed test. Inspect `verification.state`:
+`verified` is a current genuine baseline plus all recorded/declared checks;
+`partial` is a good baseline with optional failed, stale or untested scopes;
+`untested` has no current baseline; `failed` retains an acknowledged failed
+input. Scope lists, `baseline_verified`, `current_fingerprint` and public
+`checks` explain the boundary. No whole-model certification is implied.
+Plan/manual saves are allowed as untested. Known failed input requires
+`--allow-unverified` (not `--yes`); absence blocks writing with exit 2 and a
+machine diagnostic. Acknowledged writes retain failure diagnostics and checks.
+Changed active parameters, caps, route or profile invalidate old proof; saved
+legacy `ok` booleans are never stamped into passes. Registry files contain only
+settings; loading an alias does not recover session verification evidence.
+
+Both frontends use compare-and-set consent under the stable registry sidecar:
+`--yes` allows replacing the alias **as reviewed**, not an unseen concurrent
+replacement. A missing alias differs from a null entry. If it changes, reload
+and review/confirm again. Unrelated updates and comments are preserved. The
+library `connect.write(..., expected_alias=...)` accepts a detached local target
+from `connect.alias_target(models, alias)`; omitting it deliberately preserves
+unconditional library writes for compatibility. Frontends must always pass it.
+Never store or report that raw target or a credential-derived revision hash.
+The writer validates normalization and the exact selected-file alias through
+`load_model_entries`, without globally reloading user state. Higher-priority
+layer shadowing is reported separately; use the selected path explicitly.
+
+Human new-key saves use a guarded create-only secret transaction: no unknown
+existing variable (including null) is overwritten. Choose a different approved
+variable name if needed. The secret lock is held through the model commit;
+if that fails, rollback restores only the bytes this transaction owns. Recovery
+holds the existing model sidecar through strict selected-file inspection and
+rollback; any remaining profile referencing the new variable, or an unreadable/
+unknown committed state, keeps the key and reports partial state. A
+concurrent/non-cooperating secret change or rollback failure is left untouched
+and reported as a **partial state**, with no success claim or key value echoed.
+Two filesystem writes are not atomic. Write/Replace declines and cancellation
+before commit do not write either file. Declining key storage still permits the
+model entry but warns that its environment variable must be set before use.
+
+Server metadata **Media types: Images** can include an exact selected server
+`supports_vision: true` advertisement, not a media type named “vision,” a tested
+result or permission. It says nothing about Audio, Video or PDF and does not
+enable inputs. Exact listing media (including empty/false declarations) takes
+priority; false group flags do not imply tested unsupported.
+Transport/API-style/replay-vendor labels remain metadata where the current
+registry does not select a backend from them; saving does not migrate dispatch.

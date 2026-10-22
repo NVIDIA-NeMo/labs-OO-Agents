@@ -268,3 +268,61 @@ def routing_allows_save(tested_entry: dict, candidate: dict) -> bool:
     if candidate.get("client_type") == "decision":
         return record.get("client") == "decision" and record.get("outcome") == "accepted"
     return text_baseline_passed({**record, "verification_current": True})
+
+
+def save_verification(entry: dict) -> tuple[dict, dict]:
+    """Current save confidence, not command/write success or whole-model approval.
+
+    verified means a genuine current typed baseline and all recorded optional
+    checks passed; partial retains a good baseline with optional gaps/failures.
+    Unstamped/stale evidence never becomes current merely by being imported.
+    """
+    from ._records import check_status
+
+    candidate = invalidate_verification(entry)
+    provenance = candidate.get("provenance") or {}
+    checks = {
+        **(provenance.get("probes") or {}),
+        **(provenance.get("session_checks") or {}),
+    }
+    checks = {name: record for name, record in checks.items() if isinstance(record, dict)}
+    current = {
+        name: record
+        for name, record in checks.items()
+        if verification_is_current(record, candidate, name)
+        and record.get("outcome") not in {"not_probed", "running"}
+    }
+    passed = [
+        name
+        for name, record in current.items()
+        if check_status(
+            name,
+            record,
+            entry=candidate,
+            missing_reasoning=name.startswith("level:")
+            and record.get("reasoning_observed") is not True,
+        )
+        == "passed"
+    ]
+    baseline = routing_allows_save(candidate, candidate)
+    declared = [f"media:{kind}" for kind in candidate.get("media_inputs", [])]
+    if candidate.get("reasoning_level"):
+        declared.append("level:" + candidate["reasoning_level"])
+    gaps = list(dict.fromkeys(name for name in [*checks, *declared] if name not in passed))
+    state = (
+        ("partial" if gaps else "verified")
+        if baseline
+        else "failed"
+        if "routing" in current
+        else "untested"
+    )
+    return {
+        "state": state,
+        "verified": state == "verified",
+        "baseline_verified": baseline,
+        "current_fingerprint": effective_config_fingerprint(candidate),
+        "verified_scopes": passed,
+        "unverified_scopes": gaps,
+        "scope": "recorded checks only; not whole-model certification",
+        "checks": checks,
+    }, checks

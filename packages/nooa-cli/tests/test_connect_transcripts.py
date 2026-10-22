@@ -87,14 +87,14 @@ def test_full_manual_transcript_sources_media_pending_save(
     assert "Source: This server" in output
     if media is None:
         assert "Additional details: OpenRouter" in output
-        assert "Media listed: Images, PDFs" in output
+        assert "Media types: Images, PDFs" in output
     else:
         assert "Additional details: OpenRouter" not in output
         if media == ["image"]:
-            assert "Media listed: Images" in output and "Media listed: Images, PDFs" not in output
+            assert "Media types: Images" in output and "Media types: Images, PDFs" not in output
         else:
             assert output.count("No media is listed.") == 1
-            assert "Media listed:" not in output
+            assert "Media types:" not in output
     if media == ["file"]:
         assert "PDF support isn't listed" in output
     assert (

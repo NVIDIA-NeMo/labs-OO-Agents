@@ -1550,10 +1550,49 @@ def prepare_metadata(state: WizardState) -> bool:
     return True
 
 
+def model_media_hints(state):
+    """Detached advertisement for display and suggestions, never permissions.
+
+    Exact selected listing media (including empty/false declarations) wins.
+    Only when that listing has no media facts may a selected LiteLLM group
+    supports_vision flag describes image advertisement. It never implies PDF,
+    audio/video, native profiles or a tested result.
+    """
+    hints = deepcopy(state.media_hints or state.candidate or state.selected_endpoint_model or {})
+    endpoint = state.selected_endpoint_model or {}
+    if endpoint.get("id") == state.model and connect.media_metadata(endpoint):
+        return connect.model_metadata(state.model, hints, endpoint)
+    records = state.server_details.records if state.server_details else ()
+    for record in records:
+        if record.get("schema") != "litellm.model_group.info" or record.get("id") != state.model:
+            continue
+        flag = (record.get("facts") or {}).get("supports_vision")
+        if isinstance(flag, bool):
+            # An explicit false overrides lower-priority public image hints but
+            # says nothing about the other independently advertised formats.
+            original_source = hints.get("media_source", "published model information")
+            other_types = [
+                kind
+                for kind in connect.advertised_media_suggestions(hints)["advertised"]
+                if kind != "image"
+            ]
+            hints.setdefault("capabilities", {})["image_input"] = {"supported": flag}
+            if flag:
+                image_source = record.get("source") or "This server"
+                hints["media_source"] = (
+                    image_source + " (Images); " + original_source + " (other listed inputs)"
+                    if other_types
+                    else image_source
+                )
+            hints["media_model_id"] = state.model
+            break
+    return hints
+
+
 def show_model_metadata(state: WizardState):
     """One selected-model summary, before interface/media choices and model calls."""
     state.metadata_displayed = True
-    model = state.media_hints or state.candidate or state.selected_endpoint_model or {}
+    model = model_media_hints(state)
     report = connect.advertised_media_suggestions(model)
     endpoint = state.selected_endpoint_model or {}
     view.section("Model details")
@@ -1614,7 +1653,6 @@ def show_model_metadata(state: WizardState):
             continue
         facts = record.get("facts") or {}
         for key, label in (
-            ("supports_vision", "Vision listed"),
             ("supports_function_calling", "Tools listed"),
             ("supports_reasoning", "Reasoning listed"),
         ):
@@ -1632,7 +1670,7 @@ def show_model_metadata(state: WizardState):
     report = connect.advertised_media_suggestions(model)
     if report["advertised"]:
         rows.append(
-            ("Media listed", ", ".join(view.media_label(kind) for kind in report["advertised"]))
+            ("Media types", ", ".join(view.media_label(kind) for kind in report["advertised"]))
         )
         source = model.get("media_source")
         if source:
@@ -2837,6 +2875,7 @@ def save_model(state: WizardState) -> bool:
         )
         if not state.yes and not prompts.confirm("Replace this model?", default=False):
             return False
+    expected_alias = connect.alias_target(state.data.get("models", {}), state.alias)
     state.result = replace(state.result, alias=state.alias)
     view.line(
         scrub_setup(
@@ -2887,6 +2926,11 @@ def save_model(state: WizardState) -> bool:
     ):
         view.fields([("Caching", "Off")])
     view.fields(scrub_setup(state, structured_output_rows(state.result.entry)))
+    from nooa.unifiedllm.connect._verification import save_verification
+
+    confidence, _ = save_verification(state.result.entry)
+    view.fields([("Verification", confidence["state"] + " (recorded checks only)")])
+    reviewed_entry = deepcopy(state.result.entry)
     if state.yes or prompts.confirm(f"Write model entry to {state.path}?", default=True):
         save_key = False
         if (
@@ -2904,25 +2948,59 @@ def save_model(state: WizardState) -> bool:
             save_key = not state.yes and prompts.confirm(
                 "Save this key for future NOOA runs?", default=True
             )
-            if save_key:
-                from nooa.secrets import write_secret_env
+        if state.result.entry != reviewed_entry:
+            raise ValueError("Model settings changed after review; review and retest before saving")
+        if not baseline_allows_save(state):
+            return False
+        if save_key:
+            from nooa.secrets import new_secret_env
 
-                write_secret_env(secrets_path, state.api_key_env, state.api_key)
+            def model_may_be_saved():
+                # The normal registry loader deliberately swallows read/parse
+                # errors. Rollback needs a STRICT read: unknown is not absent.
+                try:
+                    saved_document = yaml.safe_load(state.path.read_text())
+                except FileNotFoundError:
+                    return False
+                if not isinstance(saved_document, dict) or not isinstance(
+                    saved_document.get("models", {}), dict
+                ):
+                    raise ValueError("Cannot determine whether the model was committed")
+                # A concurrent edit may change parameters/alias yet still
+                # depend on the new variable. Do not remove its credential.
+                return any(
+                    isinstance(profile, dict) and profile.get("api_key_env") == state.api_key_env
+                    for profile in saved_document.get("models", {}).values()
+                )
+
+            with new_secret_env(
+                secrets_path,
+                state.api_key_env,
+                state.api_key,
+                model_may_be_saved=model_may_be_saved,
+                rollback_guard=lambda: connect.registry_write_lock(state.path),
+            ):
+                connect.write(
+                    state.result.entry, state.path, alias=state.alias, expected_alias=expected_alias
+                )
+            view.line(
+                scrub_setup(
+                    state,
+                    f"Saved key as {state.api_key_env}. Existing secret values are preserved.",
+                )
+            )
+            if os.environ.get(state.api_key_env):
                 view.line(
                     scrub_setup(
                         state,
-                        f"Saved key as {state.api_key_env}. Existing secret values are preserved.",
-                    )
+                        f"Your current environment still overrides this file. Unset or update {state.api_key_env} before starting NOOA again.",
+                    ),
+                    fg="yellow",
                 )
-                if os.environ.get(state.api_key_env):
-                    view.line(
-                        scrub_setup(
-                            state,
-                            f"Your current environment still overrides this file. Unset or update {state.api_key_env} before starting NOOA again.",
-                        ),
-                        fg="yellow",
-                    )
-        connect.write(state.result.entry, state.path, alias=state.alias)
+        else:
+            connect.write(
+                state.result.entry, state.path, alias=state.alias, expected_alias=expected_alias
+            )
         view.section("Saved model")
         view.fields(scrub_setup(state, [("Alias", state.alias), ("File", state.path)]))
         view.media_settings(state.result.entry)

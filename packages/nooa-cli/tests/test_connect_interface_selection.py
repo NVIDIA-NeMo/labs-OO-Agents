@@ -231,9 +231,9 @@ def test_custom_discovery_never_guesses_decision_url_and_reuses_selected_request
     reviewed = []
     original_write = connect.write
 
-    def write(entry, target, *, alias):
+    def write(entry, target, *, alias, **kwargs):
         reviewed.append(entry)
-        original_write(entry, target, alias=alias)
+        original_write(entry, target, alias=alias, **kwargs)
 
     def handle(request):
         requests.append(request)
@@ -409,9 +409,9 @@ def test_user_selects_decision_among_multiple_successes_and_reuses_full_route(
     reviewed = []
     original_write = connect.write
 
-    def write(entry, target, *, alias):
+    def write(entry, target, *, alias, **kwargs):
         reviewed.append(entry)
-        original_write(entry, target, alias=alias)
+        original_write(entry, target, alias=alias, **kwargs)
 
     def handle(request):
         requests.append(request)
@@ -647,9 +647,9 @@ def test_picker_discover_anthropic_retains_endpoint_limits(
     reviewed = []
     original_write = connect.write
 
-    def write(entry, target, *, alias):
+    def write(entry, target, *, alias, **kwargs):
         reviewed.append(entry)
-        original_write(entry, target, alias=alias)
+        original_write(entry, target, alias=alias, **kwargs)
 
     def handle(request):
         requests.append(request)

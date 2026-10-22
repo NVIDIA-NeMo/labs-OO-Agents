@@ -22,7 +22,7 @@ import tempfile
 import time
 from collections import deque
 from collections.abc import AsyncIterator, Mapping
-from contextlib import aclosing
+from contextlib import aclosing, contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -3343,30 +3343,71 @@ async def check_interfaces(
     yield InterfaceResult(results, spent)
 
 
-def write(entry: dict, path: Path, *, alias: str) -> None:
-    """Replace one model; frontends warn before calling this for an existing alias.
+ALIAS_MISSING = object()
+ALIAS_UNCONDITIONAL = object()
 
+
+def alias_target(models: dict, alias: str):
+    """Detached local consent target; missing differs from a null/tombstoned alias.
+
+    Do not serialize this value or hash it: legacy entries may contain secrets.
+    """
+    from copy import deepcopy
+
+    return deepcopy(models[alias]) if alias in models else ALIAS_MISSING
+
+
+@contextmanager
+def registry_write_lock(path: Path):
+    """Hold the existing stable model sidecar for write or rollback inspection.
+
+    Lock order for two-file save/recovery is secret then model. Do not call
+    write() while holding this lock: it acquires its own descriptor. Recovery
+    holds it through credential-dependency inspection and secret rollback.
+    """
+    import fcntl
+
+    path = Path(path).resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Keep the stable sidecar inode: unlinking it lets writers bypass waiters.
+    with path.with_name(f".{path.name}.lock").open("a") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        yield path
+
+
+def write(entry: dict, path: Path, *, alias: str, expected_alias=ALIAS_UNCONDITIONAL) -> None:
+    """Replace one model with optional compare-and-set consent under the sidecar lock.
+
+    Library callers may deliberately omit expected_alias for an unconditional
+    update (backward compatibility). ALL frontends must pass alias_target from
+    their consent snapshot; ALIAS_MISSING means create only. Conflicts require
+    reloading and fresh consent, never automatic retry. No target is reported.
     Splice the selected YAML entry instead of reformatting the whole file, so
     unrelated entries and comments remain intact. The final replace is atomic.
     """
-    entry = configure_entry(entry)
+    candidate = configure_entry(entry)
+    from ._verification import effective_config_snapshot
+    from ._verification import routing_allows_save as current_baseline
+
+    if current_baseline(entry, entry) and effective_config_snapshot(
+        entry
+    ) != effective_config_snapshot(candidate):
+        raise ValueError(
+            "Save normalization changed active settings; review and retest the candidate"
+        )
+    entry = candidate
     # Persist discovered settings only. Probe evidence, request bodies, catalogue
     # data and warnings belong to the connect session (surfaces via
     # ``nooa connect check --json``); embedding them here would write the whole
     # history of the connect call into the registry.
     entry.pop("provenance", None)
-    path = Path(path).resolve()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # Lock a stable sidecar inode, not the registry inode replaced atomically.
-    # Keep the lock file: unlinking it would let a third writer bypass waiters.
-    import fcntl
-
-    with path.with_name(f".{path.name}.lock").open("a") as lock:
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-        _write_entry(entry, path, alias=alias)
+    with registry_write_lock(path) as path:
+        _write_entry(entry, path, alias=alias, expected_alias=expected_alias)
 
 
-def _write_entry(entry: dict, path: Path, *, alias: str) -> None:
+def _write_entry(
+    entry: dict, path: Path, *, alias: str, expected_alias=ALIAS_UNCONDITIONAL
+) -> None:
     """Perform one locked read/modify/replace, retaining a concurrent-edit check."""
     original = path.read_bytes() if path.exists() else None
     mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o600
@@ -3379,6 +3420,15 @@ def _write_entry(entry: dict, path: Path, *, alias: str) -> None:
         data["models"] = {}
     if not isinstance(data, dict) or not isinstance(data.get("models", {}), dict):
         raise ValueError("Registry must be a mapping with a models mapping")
+    current = data.get("models", {})
+    if expected_alias is not ALIAS_UNCONDITIONAL:
+        matches = (
+            alias not in current
+            if expected_alias is ALIAS_MISSING
+            else alias in current and current[alias] == expected_alias
+        )
+        if not matches:
+            raise ValueError("Alias changed since review; reload and confirm replacement again")
     document = yaml.compose(source)
     if any(isinstance(token, (yaml.AnchorToken, yaml.AliasToken)) for token in yaml.scan(source)):
         raise ValueError(
@@ -3449,6 +3499,13 @@ def _write_entry(entry: dict, path: Path, *, alias: str) -> None:
             os.chmod(temporary.name, mode)
             temporary.flush()
             os.fsync(temporary.fileno())
+        from nooa.unifiedllm.registry import load_model_entries
+
+        loaded = load_model_entries(temporary_path).get(alias)
+        if loaded != entry:
+            raise ValueError(
+                "Saved alias did not resolve to the reviewed candidate; no changes made"
+            )
         if (path.read_bytes() if path.exists() else None) != original:
             raise ValueError("Registry changed during write; reload before retrying")
         os.replace(temporary_path, path)

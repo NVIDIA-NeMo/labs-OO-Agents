@@ -202,8 +202,11 @@ configured settings observed. Native decision routing only checks a valid
 accepted decision response; use `decision` for typed correctness smoke cases.
 
 Do not automatically chain save after a failed or uninspected check. **Stage
-save can write an untested plan or failed report with a warning.** If the user
-wants manual unverified configuration, make that choice explicit and save the
+save can write an untested plan without claiming checks passed. A known failed
+report requires explicit `--allow-unverified`; without it, save is blocked with
+exit 2 and the machine diagnostic retained.** `--yes` is replacement consent,
+not acknowledgement of failed checks. If the user wants manual unverified
+configuration, make that choice explicit and save the
 plan instead of describing it as tested.
 
 ### 3. Save the reviewed entry only when authorized
@@ -227,7 +230,24 @@ keep result JSON as the evidence artifact.
 
 ### 4. Confirm what the application will actually load
 
-Inspect `model-save.json` for `data.path` and `data.shadowed_by`. A successful
+Inspect `model-save.json` for `saved`, `save_status`, `verification.state`,
+`verification.baseline_verified`, `verification.verified_scopes`,
+`verification.unverified_scopes`, `checks`, `diagnostic_prompt`, `data.path` and
+`data.shadowed_by`. Save `ok: true` means command/write success **only**:
+`verified` means a current genuine baseline and all recorded/declared scopes
+passed; `partial` means a passed baseline with optional gaps; `untested` means
+no current baseline; `failed` retains acknowledged failures. Check scope and
+current fingerprints before claiming a particular feature was checked. Imported
+legacy booleans and changed active settings are not proof. Checks/diagnostics
+remain in the report even for an acknowledged successful write. The registry
+stores settings, not evidence: reloading alone never recreates verification.
+
+Replacement consent is compare-and-set on the reviewed local alias (including
+null entries). If it appears or changes after review, reload and ask for fresh
+consent; never retry automatically. Unrelated alias updates are preserved. No
+alias revision, credential hash or raw target value belongs in a report.
+
+A successful
 write may be shadowed by a higher-priority registry. Load an explicit file when
 appropriate:
 

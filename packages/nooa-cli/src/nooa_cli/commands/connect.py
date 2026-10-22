@@ -199,6 +199,11 @@ class ConnectCommand(click.Command):
     default=None,
     help="Approve experimental TypeSafe multipart image requests.",
 )
+@click.option(
+    "--allow-unverified",
+    is_flag=True,
+    help="Stage save only: acknowledge a failed input report; writing does not verify it.",
+)
 @click.option("--show-config", is_flag=True, help="Show full YAML details before saving.")
 @click.option(
     "--show-diagnostics",
@@ -268,6 +273,7 @@ def command(
     test_media_inputs,
     decision_image_transport,
     typesafe_danger_zone_images,
+    allow_unverified,
     show_config,
     show_diagnostics,
     output,
@@ -377,6 +383,7 @@ def command(
                 input_file=input_file,
                 output=output,
                 yes=yes,
+                allow_unverified=allow_unverified,
                 prompt_key=prompt_key,
                 catalogue_file=catalogue_file,
                 catalogue_model=catalogue_model,
@@ -402,6 +409,8 @@ def command(
                 working_dir=bool(working_dir),
             )
             raise click.exceptions.Exit(code)
+        if allow_unverified:
+            raise click.UsageError("--allow-unverified requires --stage save")
         if input_file:
             raise click.UsageError("--input requires --stage save")
         if catalogue_file:

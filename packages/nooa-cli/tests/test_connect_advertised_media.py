@@ -552,7 +552,7 @@ def test_media_suggestions_render_actual_source_without_changing_permissions(
     before = deepcopy(current.media_hints)
     assert offer_suggestions(current, []) is False
     output = capsys.readouterr().out
-    assert "Media listed: Images" in " ".join(output.split())
+    assert "Media types: Images" in " ".join(output.split())
     assert "Media source: " + (
         "OpenRouter" if source == connect.CATALOGUE_URL else source
     ) in " ".join(output.split())

@@ -795,9 +795,24 @@ def test_typed_media_stage_json_acceptance_and_native_validation(
     source.write_text(result.stdout)
     path = tmp_path / "saved.yaml"
     save = CliRunner().invoke(
-        command, ["--stage", "save", "--input", str(source), "--output", str(path)]
+        command,
+        [
+            "--stage",
+            "save",
+            "--input",
+            str(source),
+            "--output",
+            str(path),
+            *(["--allow-unverified"] if not passed else []),
+        ],
     )
     assert save.exit_code == 0, save.output
+    saved_report = json.loads(save.stdout)
+    assert saved_report["saved"] is True
+    assert saved_report["verification"]["state"] == ("verified" if passed else "partial")
+    assert saved_report["checks"][f"media:{kind}"]["verification_current"] is True
+    if not passed:
+        assert saved_report["diagnostic_prompt"]
     assert yaml.safe_load(path.read_text())["models"]["candidate"]["media_inputs"] == (
         [kind] if passed else []
     )

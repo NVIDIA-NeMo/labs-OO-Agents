@@ -163,9 +163,9 @@ def test_wizard_lists_decisions_and_saves_unverified_hints(monkeypatch, tmp_path
     reviewed_entries = []
     original_write = connect.write
 
-    def capture_write(entry, target, *, alias):
+    def capture_write(entry, target, *, alias, **kwargs):
         reviewed_entries.append(entry)
-        original_write(entry, target, alias=alias)
+        original_write(entry, target, alias=alias, **kwargs)
 
     monkeypatch.setattr(connect, "write", capture_write)
     monkeypatch.setattr(wizard, "entries", lambda *args, **kwargs: {})
