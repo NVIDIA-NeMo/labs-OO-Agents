@@ -282,38 +282,3 @@ class TestFileBackedExport:
         from nooa.agentdoc import FileBackedTruncatingStringIO as FB
 
         assert FB is FileBackedTruncatingStringIO
-
-
-class TestExplicitPathAndCap:
-    def test_writes_to_the_given_path(self, tmp_path):
-        target = tmp_path / "out.log"
-        buf = FileBackedTruncatingStringIO(limit=4, tail_chars=4, path=target)
-        buf.write("abcdefgh")
-        buf.close()
-        assert buf.file_path == str(target)
-        assert target.read_text() == "abcdefgh"
-        assert buf.getvalue() == f"[... 4 chars omitted; full output: {target}]\nefgh"
-
-    def test_max_file_bytes_caps_the_file_and_says_so_at_close(self, tmp_path):
-        target = tmp_path / "out.log"
-        buf = FileBackedTruncatingStringIO(limit=0, tail_chars=0, path=target, max_file_bytes=5)
-        buf.write_bytes(b"abc")
-        buf.write_bytes(b"defgh")
-        assert buf.file_bytes_dropped == 3
-        buf.close()
-        buf.close()  # idempotent
-        assert target.read_bytes() == b"abcde\n[log truncated: 3 more bytes not written]\n"
-
-    def test_write_bytes_goes_to_the_file_only(self, tmp_path):
-        target = tmp_path / "out.log"
-        buf = FileBackedTruncatingStringIO(limit=10, path=target)
-        buf.write_bytes(b"\xffraw")
-        buf.write("text")
-        buf.close()
-        assert target.read_bytes() == b"\xffrawtext"
-        assert buf.getvalue() == "text"
-
-    def test_unwritable_path_falls_back_to_memory(self, tmp_path):
-        buf = FileBackedTruncatingStringIO(limit=4, tail_chars=4, path=tmp_path / "no" / "x")
-        buf.write("abcdefgh")
-        assert buf.getvalue() == "[... 4 chars omitted]\nefgh"

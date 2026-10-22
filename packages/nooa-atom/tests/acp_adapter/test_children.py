@@ -16,7 +16,7 @@ def _models() -> ScriptedModels:
         {
             None: [
                 cell(
-                    "child = await self.session.delegate('helper', 'CHILD-PROMPT', kept=True, name='helper')\n"
+                    "child = await self.session.delegate('helper', 'CHILD-PROMPT', kept=True)\n"
                     "return_result(Done(explanation='spawned'))"
                 ),
                 done("noted the child's result"),

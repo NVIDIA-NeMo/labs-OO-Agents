@@ -260,7 +260,7 @@ async def test_a_child_with_another_model_gets_its_own_client(workspace, session
     parent_llm = CellLLM(
         [
             cell(
-                "done = await self.delegate('other', 'use the other model', model='other', name='other')\n"
+                "done = await self.delegate('Other', 'use the other model', model='other')\n"
                 "return_result(Done(explanation=done.result.report))"
             )
         ]

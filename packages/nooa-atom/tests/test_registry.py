@@ -330,7 +330,7 @@ async def test_the_llm_factory_builds_owned_clients(root_options, sessions_dir):
             "alias-a": [
                 [
                     cell(
-                        "c = await self.session.delegate('Other', 'x', model='alias-b', name='other')\n"
+                        "c = await self.session.delegate('Other', 'x', model='alias-b')\n"
                         "await c.wait()\n"
                         "return_result(Done(explanation='ok'))"
                     )
@@ -646,12 +646,12 @@ async def test_load_takes_options_from_the_record(registry, root_options, sessio
 async def test_a_throwaway_childs_turn_method_is_recorded(registry, root_options, models):
     models.scripts[None] = [
         cell(
-            "c = await self.session.delegate('T', 't', name='t')\n"
+            "c = await self.session.delegate('T', 't')\n"
             "await c.wait()\n"
             "return_result(Done(explanation='ok'))"
         )
     ]
-    models.scripts["t"] = [work_done("t")]
+    models.scripts["T"] = [work_done("t")]
     root = await registry.create(root_options)
     await asyncio.wait_for(root.prompt("go"), TIMEOUT)
     [child] = registry.children(root.id)

@@ -168,21 +168,19 @@ async def test_a_delegated_child_is_its_own_agent_under_the_delegate_call(
     spans, atom_registry, atom_options, atom_models
 ):
     atom_models.scripts[None] = [
-        cell(
-            "done = await self.delegate('fix', 'fix it', name='fix')\nreturn_result(Done(explanation='ok'))"
-        )
+        cell("done = await self.delegate('Fix', 'fix it')\nreturn_result(Done(explanation='ok'))")
     ]
-    atom_models.scripts["fix"] = [cell(CHILD_RESULT)]
+    atom_models.scripts["Fix"] = [cell(CHILD_RESULT)]
     root, outcome = await _run_root(atom_registry, atom_options)
     assert outcome == Done(explanation="ok")
     finished = spans.get_finished_spans()
-    under = _cell_span(finished, "self.delegate('fix'")
-    child_spans = _of_session(finished, "fix")
+    under = _cell_span(finished, "self.delegate('Fix'")
+    child_spans = _of_session(finished, "Fix")
     _assert_nested(child_spans, under, root.id, finished)
     [delegate] = _methods(finished, "delegate")
     assert _parent(delegate, finished) is under
-    _assert_turns_under(finished, "fix", delegate)
-    _assert_named(child_spans, "fix")
+    _assert_turns_under(finished, "Fix", delegate)
+    _assert_named(child_spans, "Fix")
     # The root keeps its class name.
     root_spans = [s for s in finished if s.attributes.get(SESSION_NAME_ATTR) is None]
     assert {s.attributes.get("agent.name") for s in root_spans} - {None} == {"AtomAgent"}
@@ -201,7 +199,7 @@ async def test_a_kept_childs_follow_up_turn_stays_in_the_roots_trace(
 ):
     atom_models.scripts[None] = [
         cell(
-            "self.v.ref = await self.spawn('kept', 'first task', name='kept')\n"
+            "self.v.ref = await self.spawn('Kept', 'first task')\n"
             "return_result(Waiting(explanation='child working', on=['delegates']))"
         ),
         cell(
@@ -211,12 +209,12 @@ async def test_a_kept_childs_follow_up_turn_stays_in_the_roots_trace(
         ),
         cell("[item] = notification['delegates']\nreturn_result(Done(explanation='both'))"),
     ]
-    atom_models.scripts["kept"] = [cell(CHILD_RESULT), cell(CHILD_RESULT)]
+    atom_models.scripts["Kept"] = [cell(CHILD_RESULT), cell(CHILD_RESULT)]
     root, outcome = await _run_root(atom_registry, atom_options)
     assert outcome == Done(explanation="both")
     finished = spans.get_finished_spans()
-    spawn_cell = _cell_span(finished, "self.spawn('kept'")
-    child_spans = _of_session(finished, "kept")
+    spawn_cell = _cell_span(finished, "self.spawn('Kept'")
+    child_spans = _of_session(finished, "Kept")
     # Two turns of the kept child, both in the root's trace, both under the
     # spawn cell: its loop context was set up once, when it was created.
     assert len([s for s in child_spans if s.name == "method.handle_work"]) == 2
@@ -225,43 +223,41 @@ async def test_a_kept_childs_follow_up_turn_stays_in_the_roots_trace(
     # that call returned, in the loop context set up at creation).
     [spawn] = _methods(finished, "spawn")
     assert _parent(spawn, finished) is spawn_cell
-    _assert_turns_under(finished, "kept", spawn, count=2)
-    _assert_named(child_spans, "kept")
+    _assert_turns_under(finished, "Kept", spawn, count=2)
+    _assert_named(child_spans, "Kept")
 
 
 async def test_a_grandchild_nests_under_the_childs_delegate_call(
     spans, atom_registry, atom_options, atom_models
 ):
     atom_models.scripts[None] = [
-        cell(
-            "done = await self.delegate('mid', 'go on', name='mid')\nreturn_result(Done(explanation='ok'))"
-        )
+        cell("done = await self.delegate('Mid', 'go on')\nreturn_result(Done(explanation='ok'))")
     ]
-    atom_models.scripts["mid"] = [
+    atom_models.scripts["Mid"] = [
         cell(
-            "done = await self.delegate('leaf', 'leaf work', name='leaf')\n"
+            "done = await self.delegate('Leaf', 'leaf work')\n"
             "return_result(Done(explanation='mid', result=TaskResult("
             "solution_description='s', evidence='e', how_to_verify='h', report='MID')))"
         )
     ]
-    atom_models.scripts["leaf"] = [cell(CHILD_RESULT)]
+    atom_models.scripts["Leaf"] = [cell(CHILD_RESULT)]
     root, outcome = await _run_root(atom_registry, atom_options)
     assert outcome == Done(explanation="ok")
     finished = spans.get_finished_spans()
-    root_cell = _cell_span(finished, "self.delegate('mid'")
-    mid_cell = _cell_span(finished, "self.delegate('leaf'")
-    leaf_spans = _of_session(finished, "leaf")
-    _assert_nested(_of_session(finished, "mid"), root_cell, root.id, finished)
+    root_cell = _cell_span(finished, "self.delegate('Mid'")
+    mid_cell = _cell_span(finished, "self.delegate('Leaf'")
+    leaf_spans = _of_session(finished, "Leaf")
+    _assert_nested(_of_session(finished, "Mid"), root_cell, root.id, finished)
     _assert_nested(leaf_spans, mid_cell, root.id, finished)
     _assert_nested(leaf_spans, root_cell, root.id, finished)
     [root_delegate] = _methods(finished, "delegate")
-    [mid_delegate] = _methods(finished, "delegate", "mid")
+    [mid_delegate] = _methods(finished, "delegate", "Mid")
     assert _parent(mid_delegate, finished) is mid_cell
-    assert mid_delegate.attributes["agent.name"] == "mid"
-    _assert_turns_under(finished, "mid", root_delegate)
-    _assert_turns_under(finished, "leaf", mid_delegate)
-    _assert_named(_of_session(finished, "mid"), "mid")
-    _assert_named(leaf_spans, "leaf")
+    assert mid_delegate.attributes["agent.name"] == "Mid"
+    _assert_turns_under(finished, "Mid", root_delegate)
+    _assert_turns_under(finished, "Leaf", mid_delegate)
+    _assert_named(_of_session(finished, "Mid"), "Mid")
+    _assert_named(leaf_spans, "Leaf")
     [mid] = atom_registry.children(root.id)
     for span in leaf_spans:
         assert span.attributes[DEPTH_ATTR] == 2
@@ -272,11 +268,9 @@ async def test_an_ordinary_agent_called_in_a_childs_cell_keeps_its_class_name(
     spans, atom_registry, atom_options, atom_models
 ):
     atom_models.scripts[None] = [
-        cell(
-            "done = await self.delegate('fix', 'fix it', name='fix')\nreturn_result(Done(explanation='ok'))"
-        )
+        cell("done = await self.delegate('Fix', 'fix it')\nreturn_result(Done(explanation='ok'))")
     ]
-    atom_models.scripts["fix"] = [
+    atom_models.scripts["Fix"] = [
         cell(
             "from nooa import Agent\n"
             "class Helper(Agent):\n"
@@ -288,10 +282,10 @@ async def test_an_ordinary_agent_called_in_a_childs_cell_keeps_its_class_name(
     root, outcome = await _run_root(atom_registry, atom_options)
     assert outcome == Done(explanation="ok")
     finished = spans.get_finished_spans()
-    [ping] = _methods(finished, "ping", "fix")
+    [ping] = _methods(finished, "ping", "Fix")
     assert ping.attributes["agent.name"] == "Helper"
     assert _parent(ping, finished).name == "code_execution"
-    assert _parent(ping, finished).attributes["agent.name"] == "fix"
+    assert _parent(ping, finished).attributes["agent.name"] == "Fix"
 
 
 async def test_with_tracing_off_children_run_and_emit_no_spans(
@@ -310,11 +304,9 @@ async def test_with_tracing_off_children_run_and_emit_no_spans(
     if hasattr(provider, "add_span_processor"):
         provider.add_span_processor(SimpleSpanProcessor(exporter))
     atom_models.scripts[None] = [
-        cell(
-            "done = await self.delegate('fix', 'fix it', name='fix')\nreturn_result(Done(explanation='ok'))"
-        )
+        cell("done = await self.delegate('Fix', 'fix it')\nreturn_result(Done(explanation='ok'))")
     ]
-    atom_models.scripts["fix"] = [cell(CHILD_RESULT)]
+    atom_models.scripts["Fix"] = [cell(CHILD_RESULT)]
     root, outcome = await _run_root(atom_registry, atom_options)
     assert outcome == Done(explanation="ok")
     assert exporter.get_finished_spans() == ()
@@ -328,11 +320,9 @@ async def test_without_nooa_tracing_children_still_run(
     # An import of nooa.tracing fails as it does when OpenTelemetry is not installed.
     monkeypatch.setitem(sys.modules, "nooa.tracing", None)
     atom_models.scripts[None] = [
-        cell(
-            "done = await self.delegate('fix', 'fix it', name='fix')\nreturn_result(Done(explanation='ok'))"
-        )
+        cell("done = await self.delegate('Fix', 'fix it')\nreturn_result(Done(explanation='ok'))")
     ]
-    atom_models.scripts["fix"] = [cell(CHILD_RESULT)]
+    atom_models.scripts["Fix"] = [cell(CHILD_RESULT)]
     root, outcome = await _run_root(atom_registry, atom_options)
     assert outcome == Done(explanation="ok")
 

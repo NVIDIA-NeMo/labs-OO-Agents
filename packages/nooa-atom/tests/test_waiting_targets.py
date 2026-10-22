@@ -82,7 +82,7 @@ async def test_waiting_on_mesh_without_a_pump_is_rejected(tmp_path, sessions_dir
         ],
     )
     assert len(calls) == 2
-    assert "Waiting on 'mesh', but no running job or child has that name" in calls[1]
+    assert "Waiting on 'mesh', but it is not a running job" in calls[1]
     assert HINT in calls[1]
     assert "Running right now: nothing." in calls[1]
 
@@ -111,13 +111,13 @@ async def test_waiting_on_delegates_is_accepted_with_a_running_child(tmp_path, s
         sessions_dir,
         [
             cell(
-                "self.v.child = await self.spawn('Worker', 'fix it', name='worker')\n"
+                "self.v.child = await self.spawn('Worker', 'fix it')\n"
                 "return_result(Waiting(explanation='w', on=['delegates']))"
             ),
             cell("[item] = notification['delegates']\n" + DONE),
         ],
         {
-            "worker": [
+            "Worker": [
                 cell(
                     "await asyncio.sleep(0.2)\n"
                     "return_result(Done(explanation='fixed', result=TaskResult("
@@ -153,7 +153,7 @@ async def test_a_finished_or_cancelled_job_is_rejected(tmp_path, sessions_dir):
                 "await asyncio.sleep(0.05)\n"
                 "assert done_job.state != 'running', done_job.state\n"
                 "self.queue_manager.get_channel('ci').flush()\n"
-                "return_result(Waiting(explanation='w', on=['ci']))"
+                "return_result(Waiting(explanation='w', on=['jobs:ci-1']))"
             ),
             cell(
                 "self.queue_manager.queue('build')\n"
@@ -168,8 +168,8 @@ async def test_a_finished_or_cancelled_job_is_rejected(tmp_path, sessions_dir):
     )
     # The strategy allows three rejected results per turn; this uses two.
     assert len(calls) == 3
-    assert "Waiting on 'ci', but no job labelled 'ci' is running: it may" in calls[1]
-    assert "Waiting on 'build', but no job labelled 'build' is running" in calls[2]
+    assert "Waiting on 'jobs:ci-1', but no such job is running." in calls[1]
+    assert "Waiting on 'build', but no such job is running." in calls[2]
     for text in calls[1:]:
         assert HINT in text
 
@@ -181,5 +181,5 @@ async def test_waiting_on_jobs_without_a_running_job_is_rejected(tmp_path, sessi
         [cell("return_result(Waiting(explanation='w', on=['jobs']))"), cell(DONE)],
     )
     assert len(calls) == 2
-    assert "Waiting on 'jobs', but no job is running and nothing is queued" in calls[1]
+    assert "Waiting on 'jobs', but no such job is running." in calls[1]
     assert HINT in calls[1]

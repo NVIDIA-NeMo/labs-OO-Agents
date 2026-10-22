@@ -75,12 +75,12 @@ async def test_a_childs_cached_tokens_roll_up_and_survive_a_reload(
 ):
     models.scripts[None] = [
         cell(
-            "a = await self.session.delegate('A', 'a', kept=True, name='a')\n"
+            "a = await self.session.delegate('A', 'a', kept=True)\n"
             "await a.wait()\n"
             "return_result(Done(explanation='ok'))"
         )
     ]
-    models.scripts["a"] = [work_done("a done", usage=CALL)]
+    models.scripts["A"] = [work_done("a done", usage=CALL)]
     root = await registry.create(root_options)
     await asyncio.wait_for(root.prompt("go"), TIMEOUT)
     totals = root._agent.session.usage()
@@ -98,13 +98,13 @@ async def test_a_childs_cached_tokens_roll_up_and_survive_a_reload(
 async def test_usage_reports_this_session_then_with_its_subagents(registry, root_options, models):
     models.scripts[None] = [
         cell(
-            "a = await self.session.delegate('A', 'a', kept=True, name='a')\n"
+            "a = await self.session.delegate('A', 'a', kept=True)\n"
             "await a.wait()\n"
             "return_result(Done(explanation='ok'))",
             usage=CALL,
         )
     ]
-    models.scripts["a"] = [work_done("a done", usage=CALL)]
+    models.scripts["A"] = [work_done("a done", usage=CALL)]
     root = await registry.create(root_options)
     await asyncio.wait_for(root.prompt("go"), TIMEOUT)
 

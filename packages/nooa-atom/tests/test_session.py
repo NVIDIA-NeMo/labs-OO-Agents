@@ -94,7 +94,7 @@ async def test_need_input_is_returned_and_shown_as_a_question(make_session):
 
 async def test_waiting_keeps_prompt_open_until_a_later_turn_ends(make_session):
     session, _ = make_session(wait_on("jobs"), done("job finished"), start=False)
-    jobs = session._agent.queue_manager.queue("jobs")  # a host-declared channel
+    jobs = session._agent.queue_manager.queue("jobs")
     session.start()
     ended = []
     session.subscribe(lambda e: ended.append(e) if isinstance(e, TurnEndedUpdate) else None)
