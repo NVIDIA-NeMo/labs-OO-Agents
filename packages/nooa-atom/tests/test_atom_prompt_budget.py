@@ -115,11 +115,18 @@ RESULT = (
 # ChildRef has path, and the class doc says jobs and children share one set of
 # names: about 110 characters more in the system prompt and in total for every
 # row. Measured values plus about 2% headroom.
+# Re-measured when the stable turn instructions moved from handle() into the
+# class doc (feat/atom-jobs-reland): before, 15,922 system for every row and
+# 19,285 / 18,465 / 18,980 / 20,460 total. The handle() doc fell from 2,005 to
+# 290 characters, so its total (repeated every turn) fell by 1,557; the class
+# doc grew by 158, which put the system prompt over 16,000: the system limit
+# was raised to the measured 16,080 rounded up to the next 100, and handle's
+# total limit lowered to its measured value plus about 2%.
 LIMITS = {
-    (ATOM, "handle"): (16_000, 19_300),  # measured 15,516 / 18,809
-    (ATOM, "handle_batch"): (16_000, 18_600),  # measured 15,516 / 18,066
-    (ATOM, "handle_work"): (16_000, 19_000),  # measured 15,516 / 18,536
-    (ATOM, "handle_orchestrate"): (16_000, 20_600),  # measured 15,516 / 20,018
+    (ATOM, "handle"): (16_100, 18_100),  # measured 16,080 / 17,728
+    (ATOM, "handle_batch"): (16_100, 18_600),  # measured 16,080 / 18,409
+    (ATOM, "handle_work"): (16_100, 19_000),  # measured 16,080 / 18,924
+    (ATOM, "handle_orchestrate"): (16_100, 20_600),  # measured 16,080 / 20,404
 }
 # The bench guard's system-prompt ceiling; every agent stays under it.
 BENCH_SYSTEM_LIMIT = 20_000

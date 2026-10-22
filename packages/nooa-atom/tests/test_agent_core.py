@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Atom agent construction and repository instructions."""
 
+import inspect
 from types import SimpleNamespace
 
 import pytest
@@ -371,10 +372,12 @@ def test_cells_see_the_turn_types_but_not_the_helpers():
     assert names & hidden == set()
 
 
-def test_the_handle_prompt_names_every_input_channel():
-    text = AtomAgent.handle.__doc__ or ""
-    for channel in ("user_messages", "system_messages", "slash_commands", "delegates"):
-        assert f'"{channel}"' in text, channel
+def test_the_class_prompt_names_every_input_channel():
+    # The class doc is the system prompt; handle()'s doc is repeated every turn.
+    text = AtomAgent.__doc__ or ""
+    for channel in ("user_messages", "system_messages", "slash_commands", "delegates", "jobs"):
+        assert f"``{channel}``" in text, channel
+    assert len(inspect.getdoc(AtomAgent.handle)) < 400
     assert "SessionInfo" not in (AtomAgent.get_summarization_status.__doc__ or "")
 
 
@@ -414,22 +417,14 @@ async def test_the_state_block_shows_the_shell_directory_and_the_repo_root(tmp_p
         await agent.aclose()
 
 
-@pytest.mark.parametrize("method", ["handle", "handle_batch"])
-async def test_the_turn_prompt_says_locals_last_one_call(tmp_path, method):
-    from nooa import build_prompt_data
-    from nooa.prompts import render_prompt_data
-
-    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
-    try:
-        data = await build_prompt_data(getattr(agent, method), {"user_messages": ["hi"]})
-        rendered = " ".join(render_prompt_data(data).split())
-        assert (
-            "Python locals live for one method call; when the call returns they are gone. "
-            "Anything you need later goes in ``self.v`` (durable, snapshot-backed) or the todo "
-            "list. Do not rely on a variable from an earlier call."
-        ) in rendered
-    finally:
-        await agent.aclose()
+def test_the_class_prompt_says_locals_last_one_call():
+    # Said once in the class doc (the system prompt), not in each turn method's doc.
+    sentence = (
+        "Locals last one method call: keep what later turns need in ``self.v`` or the todo list."
+    )
+    assert sentence in " ".join((AtomAgent.__doc__ or "").split())
+    for method in ("handle", "handle_batch", "handle_work", "handle_orchestrate"):
+        assert "locals" not in inspect.getdoc(getattr(AtomAgent, method)).lower(), method
 
 
 async def test_repo_tools_take_a_cwd_for_one_call(tmp_path):

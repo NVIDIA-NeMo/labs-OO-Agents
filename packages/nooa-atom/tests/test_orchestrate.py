@@ -37,9 +37,11 @@ UNCHANGED_PROMPTS = {
     # handle() as on dev/atom after #447 and #451 (#451's "or from your parent
     # agent if you are a child" line and #447's NeedInput free-text wording),
     # plus the regular progress-update guidance, and NeedInput as a plain-text
-    # question (no options).
-    "handle": "4e6aa53b2bb8ad8d061843e9917dff06d27b5e6bb05dec64426fd4162eecdf95",
-    "handle_batch": "9124c2874abd30f61a26f313abacbdc925f02a20efac8b4d7e3319a22ab545f0",
+    # question (no options). Then the stable turn instructions moved into the
+    # class doc: handle() keeps three sentences, and the locals paragraph left
+    # every turn method's doc.
+    "handle": "d7986ff1ffb5b875f9852a20323695dad9dd72ec00b1d84b4c039835b563d8c9",
+    "handle_batch": "9eef8eb5f2d8067d02c0eb742c4f6b8006ae8fff001130277e119a8510f6027d",
 }
 
 RESULT = (
@@ -59,7 +61,7 @@ def test_handle_orchestrate_has_the_orchestrator_prompt():
     # The return contract is kept from the earlier prompt.
     assert "result=TaskResult(" in prompt
     assert "If something blocks you, still return ``Done`` with a ``TaskResult``" in prompt
-    assert "Python locals live for one method call" in prompt
+    assert "Locals last one method call" in AtomAgent.__doc__  # said once, in the class doc
     # The orchestrator no longer closes its children; the host does.
     assert "child.close()" not in prompt
     # Nobody can answer a question, so the prompt never offers NeedInput.

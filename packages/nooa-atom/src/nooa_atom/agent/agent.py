@@ -103,9 +103,8 @@ class AtomAgent(InteractiveAgent):
     worker and returns its ``Done``, whose ``result`` is a ``TaskResult`` (read ``result.report``).
     ``child = await self.spawn(description, todo, name="review")`` starts a kept child and returns
     at once; it may ask you questions and takes ``await child.send(...)`` follow-ups
-    until ``await child.close()``. When nothing else is left, end the turn with
-    ``Waiting(explanation=..., on=["delegates"])``. Outcomes arrive under
-    ``notification["delegates"]``: ``ChildResult`` (``item.result.report``), ``ChildQuestion``
+    until ``await child.close()``. Wait on them with ``on=["delegates"]``. Outcomes
+    arrive under ``notification["delegates"]``: ``ChildResult`` (``item.result.report``), ``ChildQuestion``
     (reply with ``await item.child.send(...)``), ``ChildFailed`` (``item.error``) or
     ``ChildMessage`` (``item.text``, a progress note). The Todo is a one-way
     brief: the child works on its own copy and its report comes back as the
@@ -119,22 +118,29 @@ class AtomAgent(InteractiveAgent):
     aligned with the current understanding, and append comments for material findings,
     decisions, completed steps, and verification—not routine narration. Keep durable
     facts on ``self.v``, task-specific plans and findings on the Todo's ``v``, and
-    scratch in cell locals; neither store is a dump.
+    scratch in cell locals; neither store is a dump. Locals last one method call:
+    keep what later turns need in ``self.v`` or the todo list.
 
     Work until the newest request is complete or genuinely needs user input. Use
     as many execution cells as necessary, inspect each result, and never claim a
     check passed without running it. Run anything that may take more than a
-    minute or two (test suites, builds, long scripts) with ``self.jobs.run(...)``
-    instead of blocking a cell, and if nothing else is left end the turn with
-    ``Waiting(explanation=..., on=["<name>"])``; ``on`` takes the name of a job or
-    child you started. Jobs and children share one set of names (identifiers). Send each user-facing answer
-    through ``self.message()`` as a complete Markdown document.
+    minute or two (tests, builds) with ``self.jobs.run(...)`` instead of blocking
+    a cell. Jobs and children share one set of names.
+
+    ``notification`` maps a channel (``user_messages``, ``system_messages``,
+    ``slash_commands``, ``delegates``, ``jobs``) to its new items. In
+    interactive turns, send brief progress notes and each answer (complete
+    Markdown) with ``self.message()``.
 
     End every turn with exactly one ``return_result(...)``: ``Done`` after
-    completing the request (reply with ``self.message()`` first),
-    ``NeedInput(question=...)`` only when a person must answer,
-    and ``Waiting(explanation=..., on=[...])`` only while something you started
-    is still running, naming the channel or job it waits on.
+    sending the reply with ``self.message()``::
+
+        self.message("Fixed the off-by-one in `parse()`; its tests pass.")
+        return_result(Done(explanation="fixed parse() and ran its tests"))
+
+    ``NeedInput(question=...)`` only when a person must answer (the host shows
+    ``question``; don't also send it); ``Waiting(explanation=..., on=[...])``
+    only while a job or child you started runs, ``on`` naming it.
     """
 
     # Attributes carrying this agent's own tools. The skill registry refuses
@@ -605,46 +611,9 @@ class AtomAgent(InteractiveAgent):
     ) -> Done | NeedInput | Waiting:
         """Handle one interactive turn: the newest request and anything else that arrived.
 
-        ``notification`` maps a channel name to the items that arrived on it:
-        ``"user_messages"`` (text from the person, or from your parent agent if
-        you are a child), ``"system_messages"``
-        (host housekeeping), ``"slash_commands"`` (command output sent to you)
-        and ``"delegates"`` (results of children you spawned). Do all the work
-        the request needs before ending the turn; use as many cells as it
-        takes, and run checks rather than assume them.
-
-        You are event-driven: queues shows running producers and pending
-        inputs, while notification contains events delivered for this turn; a
-        producer may finish before its result is consumed.
-
-        Use ``self.message()`` regularly to keep the user informed with brief
-        progress updates while you work, especially during tool use or longer
-        tasks. Updates should explain what you are doing, what you have
-        learned, and what comes next.
-
-        End with exactly one ``return_result(...)``:
-
-        - ``Done(explanation=...)`` when the request is complete. Send the
-          reply with ``self.message()`` first; ``explanation`` is a short
-          status line for the host, not the reply::
-
-              self.message("Fixed the off-by-one in `parse()`; the parser tests pass.")
-              return_result(Done(explanation="fixed parse() and ran its tests"))
-
-        - ``NeedInput(question=...)`` when you cannot go on without an
-          answer from the person. The host shows ``question``, so do not also
-          send it with ``self.message()``. The next message answers it as
-          plain text; put any suggested answers in the question.
-
-        - ``Waiting(explanation=..., on=[...])`` when a job you started is
-          still running and nothing else is left to do. ``on`` names what
-          you wait for, for example ``["jobs"]``; the next turn starts when
-          it delivers.
-
-        Python locals live for one method call; when the call returns they
-        are gone. Anything you need later goes in ``self.v`` (durable,
-        snapshot-backed) or the todo list. Do not rely on a variable from an
-        earlier call.
+        Do all the work the request needs before ending the turn; run checks
+        rather than assume them. End with exactly one ``return_result(...)``
+        (``Done``, ``NeedInput`` or ``Waiting``) as your instructions describe.
         """
         ...
 
@@ -687,11 +656,6 @@ class AtomAgent(InteractiveAgent):
         that says what blocked you and what you tried. Return
         ``Waiting(explanation=..., on=[...])`` only while a job you started
         is still running.
-
-        Python locals live for one method call; when the call returns they
-        are gone. Anything you need later goes in ``self.v`` (durable,
-        snapshot-backed) or the todo list. Do not rely on a variable from an
-        earlier call.
         """
         ...
 
@@ -769,11 +733,6 @@ class AtomAgent(InteractiveAgent):
 
         If something blocks you, still return ``Done`` with a ``TaskResult``
         that says what blocked you and what was tried.
-
-        Python locals live for one method call; when the call returns they
-        are gone. Anything you need later goes in ``self.v`` (durable,
-        snapshot-backed) or the todo list. Do not rely on a variable from an
-        earlier call.
         """
         ...
 
@@ -822,11 +781,6 @@ class AtomAgent(InteractiveAgent):
 
         No routine progress notes: ``self.message()`` is for a short note
         (cut at 1,000 chars), never the report; that goes in the result.
-
-        Python locals live for one method call; when the call returns they
-        are gone. Anything you need later goes in ``self.v`` (durable,
-        snapshot-backed) or the todo list. Do not rely on a variable from an
-        earlier call.
         """
         ...
 
