@@ -465,7 +465,7 @@ class Router:
             self._fail(frame.id, RequestError.invalid_params({"errors": exc.errors()}))
             return
         self._init_params = frame.message.get("params")
-        response = initialize_response(request.protocol_version)
+        response = initialize_response(request.protocol_version, request.client_capabilities)
         self._answer(
             frame,
             response.model_dump(mode="json", by_alias=True, exclude_none=True, exclude_unset=True),

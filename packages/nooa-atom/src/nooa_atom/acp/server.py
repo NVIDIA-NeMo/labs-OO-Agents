@@ -342,7 +342,7 @@ class AtomACPAgent:
         self.client_capabilities = client_capabilities
         self._pool_client = client_info is not None and client_info.name == "pool"
         self._pool_forms = self._pool_client
-        return initialize_response(protocol_version)
+        return initialize_response(protocol_version, client_capabilities)
 
     # ---- new -----------------------------------------------------------
 
