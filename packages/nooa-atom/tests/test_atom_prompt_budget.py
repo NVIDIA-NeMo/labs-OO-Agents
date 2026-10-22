@@ -123,7 +123,7 @@ RESULT = (
 # was raised to the measured 16,080 rounded up to the next 100, and handle's
 # total limit lowered to its measured value plus about 2%.
 LIMITS = {
-    (ATOM, "handle"): (16_100, 18_100),  # measured 16,080 / 17,728
+    (ATOM, "handle"): (16_100, 18_600),  # measured 16,080 / 18,150
     (ATOM, "handle_batch"): (16_100, 18_600),  # measured 16,080 / 18,409
     (ATOM, "handle_work"): (16_100, 19_000),  # measured 16,080 / 18,924
     (ATOM, "handle_orchestrate"): (16_100, 20_600),  # measured 16,080 / 20,404

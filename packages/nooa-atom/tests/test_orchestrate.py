@@ -40,7 +40,7 @@ UNCHANGED_PROMPTS = {
     # question (no options). Then the stable turn instructions moved into the
     # class doc: handle() keeps three sentences, and the locals paragraph left
     # every turn method's doc.
-    "handle": "d7986ff1ffb5b875f9852a20323695dad9dd72ec00b1d84b4c039835b563d8c9",
+    "handle": "f4558376a3b74ecd3f6685a44b534581336a1e1ea701e3e71f55afac858d72ad",
     "handle_batch": "9eef8eb5f2d8067d02c0eb742c4f6b8006ae8fff001130277e119a8510f6027d",
 }
 

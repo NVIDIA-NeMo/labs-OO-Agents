@@ -377,7 +377,7 @@ def test_the_class_prompt_names_every_input_channel():
     text = AtomAgent.__doc__ or ""
     for channel in ("user_messages", "system_messages", "slash_commands", "delegates", "jobs"):
         assert f"``{channel}``" in text, channel
-    assert len(inspect.getdoc(AtomAgent.handle)) < 400
+    assert len(inspect.getdoc(AtomAgent.handle)) < 800
     assert "SessionInfo" not in (AtomAgent.get_summarization_status.__doc__ or "")
 
 

@@ -614,6 +614,15 @@ class AtomAgent(InteractiveAgent):
         Do all the work the request needs before ending the turn; run checks
         rather than assume them. End with exactly one ``return_result(...)``
         (``Done``, ``NeedInput`` or ``Waiting``) as your instructions describe.
+
+        You are event-driven: queues shows running producers and pending
+        inputs, while notification contains events delivered for this turn; a
+        producer may finish before its result is consumed.
+
+        Use ``self.message()`` regularly to keep the user informed with brief
+        progress updates while you work, especially during tool use or longer
+        tasks. Updates should explain what you are doing, what you have
+        learned, and what comes next.
         """
         ...
 
