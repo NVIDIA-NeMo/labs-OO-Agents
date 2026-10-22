@@ -307,7 +307,7 @@ async def test_waiting_on_jobs_needs_a_running_job(tmp_path, sessions_dir):
                 "self.queue_manager.queue('ci')\n"
                 "self.queue_manager.spawn(asyncio.sleep(0.2, result='green'), "
                 "channel='ci', label='ci-42')\n"
-                "return_result(Waiting(explanation='w', on=['jobs', 'ci-42', 'ci']))"
+                "return_result(Waiting(explanation='w', on=['ci-42', 'ci']))"
             ),
             cell("assert notification['ci'] == ['green']\n" + RESULT),
         ],
