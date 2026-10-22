@@ -81,7 +81,7 @@ async def test_a_spawned_childs_result_arrives_on_delegates_and_wakes_the_parent
             "[item] = notification['delegates']\n"
             "assert isinstance(item, ChildResult)\n"
             "assert item.child.id == self.v.child.id\n"
-            "return_result(Done(explanation='review: ' + item.report))"
+            "return_result(Done(explanation='review: ' + item.result.report))"
         ),
     ]
     atom_models.scripts["review"] = [cell(CHILD_RESULT)]
@@ -108,7 +108,7 @@ async def test_a_spawned_childs_dict_result_arrives_as_a_task_result(
         ),
         cell(
             "[item] = notification['delegates']\n"
-            "return_result(Done(explanation='review: ' + item.report))"
+            "return_result(Done(explanation='review: ' + item.result.report))"
         ),
     ]
     atom_models.scripts["review"] = [cell(CHILD_DICT_RESULT)]

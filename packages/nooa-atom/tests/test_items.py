@@ -265,7 +265,8 @@ def test_child_items_are_flat_with_the_child_last():
     )
     result = ChildResult(child=ref, done=done)
     assert (result.name, result.path, result.summary) == ("Review auth", "/root/review", "reviewed")
-    assert result.report == "R" * 4_800 and result.result == done.result
+    assert result.result.report == "R" * 4_800 and result.result == done.result
+    assert not hasattr(result, "report")  # one copy: result.report
     assert result.evidence == done.evidence and result.done == done
     for item in (
         result,
@@ -283,7 +284,7 @@ def test_child_items_are_flat_with_the_child_last():
 
 def test_a_child_result_report_falls_back_to_the_done_message():
     result = ChildResult(child=_CHILD, done=Done(explanation="x", message="hello"))
-    assert result.report == "hello" and result.result is None and result.path == "Review auth"
+    assert result.message == "hello" and result.result is None and result.path == "Review auth"
 
 
 def test_a_child_result_dumps_child_and_done_only_and_loads_old_records():
@@ -292,8 +293,8 @@ def test_a_child_result_dumps_child_and_done_only_and_loads_old_records():
         result={"solution_description": "s", "evidence": "e", "how_to_verify": "v", "report": "r"},
     )
     result = ChildResult(child=_CHILD, done=done)
-    assert isinstance(result.result, TaskResult) and result.report == "r"
+    assert isinstance(result.result, TaskResult) and result.result.report == "r"
     dumped = result.model_dump(mode="json")
     assert set(dumped) == {"child", "done"}  # the flat fields are derived on load
     again = ChildResult.model_validate(dumped)
-    assert again == result and again.report == "r"
+    assert again == result and again.result.report == "r"

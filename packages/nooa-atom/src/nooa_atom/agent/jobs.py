@@ -87,6 +87,7 @@ class Throttle(BaseModel):
     seconds: float | None = None
 
 
+@spec(hide_empty=True)
 class JobInfo(BaseModel):
     """A job's status, as returned by ``self.jobs`` methods."""
 
@@ -123,6 +124,7 @@ class JobInfo(BaseModel):
     )
 
 
+@spec(hide_empty=True)
 class JobUpdate(BaseModel):
     """What a job delivers to ``notification["jobs"]``: new ``lines``/``values`` while it runs, then one ``done=True`` update.
 

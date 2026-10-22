@@ -585,7 +585,7 @@ async def test_a_plain_interactive_agents_kept_child_returns_a_task_result(
         cell(
             "child = await self.session.delegate('Worker', 'do it', kept=True, name='worker')\n"
             "r = await child.wait()\n"
-            "return_result(Done(explanation=type(r.result).__name__ + ': ' + r.report))"
+            "return_result(Done(explanation=type(r.result).__name__ + ': ' + r.result.report))"
         )
     ]
     models.scripts["worker"] = [

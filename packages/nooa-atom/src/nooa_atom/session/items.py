@@ -53,6 +53,7 @@ class Receipt(BaseModel):
     delivered: Literal["queued", "steered"]
 
 
+@spec(hide_empty=True)
 class ChildRef(BaseModel):
     """A handle on a child session: data plus ``wait()``, ``send()`` and ``close()``.
 
@@ -191,17 +192,19 @@ class ChildFailedError(RuntimeError):
     """A child's turn failed, it is closed, or waiting for it could never end."""
 
 
+@spec(hide_empty=True)
 class ChildResult(BaseModel):
-    """A child finished a turn with ``Done``; read ``item.report`` for its full report, ``item.result`` for its ``TaskResult``."""
+    """A child finished a turn with ``Done``; its full report is ``item.result.report``."""
 
     name: str = Field("", description="the child's name")
     path: str = Field("", description="the child's path in the session tree, else its name")
     summary: str = Field("", description="the child's Done.explanation: one status line")
-    report: Annotated[str, spec(max_string=1000)] = Field(
-        "", description="the full report: result.report, else Done.message"
+    result: Annotated[TaskResult | None, spec(max_string=1000)] = Field(
+        None,
+        description="the child's TaskResult (always one for a worker): .report is the full report",
     )
-    result: Annotated[TaskResult | None, spec(max_string=300)] = Field(
-        None, description="the child's TaskResult (always one for a worker), else None"
+    message: Annotated[str, spec(max_string=1000)] = Field(
+        "", description="the child's Done.message, if it sent one"
     )
     evidence: Annotated[list[str], spec(max_length=5, max_string=300)] = Field(
         default_factory=list, description="the child's Done.evidence"
@@ -238,10 +241,8 @@ class ChildResult(BaseModel):
             name=self.child.name,
             path=self.child.path or self.child.name,
             summary=done.explanation,
-            report=(result.report if result is not None and result.report else None)
-            or done.message
-            or "",
             result=result,
+            message=done.message or "",
             evidence=list(done.evidence),
         )
         return self
@@ -251,6 +252,7 @@ class ChildResult(BaseModel):
         return self.path
 
 
+@spec(hide_empty=True)
 class ChildQuestion(BaseModel):
     """A kept child asked you a question (its ``NeedInput``); reply with ``await item.child.send(...)``."""
 
@@ -279,6 +281,7 @@ class ChildQuestion(BaseModel):
         return self.path
 
 
+@spec(hide_empty=True)
 class ChildFailed(BaseModel):
     """A child's turn failed or the child ended without a result; read ``item.error``."""
 
@@ -303,6 +306,7 @@ CHILD_MESSAGE_CHARS = 1_000
 CHILD_MESSAGE_CUT = "\n[cut: the full report belongs in the result]"
 
 
+@spec(hide_empty=True)
 class ChildMessage(BaseModel):
     """A progress note a child sent with ``self.message()``, not its result; read ``item.text``."""
 

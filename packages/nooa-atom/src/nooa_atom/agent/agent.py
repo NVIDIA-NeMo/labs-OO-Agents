@@ -105,7 +105,7 @@ class AtomAgent(InteractiveAgent):
     at once; it may ask you questions and takes ``await child.send(...)`` follow-ups
     until ``await child.close()``. When nothing else is left, end the turn with
     ``Waiting(explanation=..., on=["delegates"])``. Outcomes arrive under
-    ``notification["delegates"]``: ``ChildResult`` (``item.report``), ``ChildQuestion``
+    ``notification["delegates"]``: ``ChildResult`` (``item.result.report``), ``ChildQuestion``
     (reply with ``await item.child.send(...)``), ``ChildFailed`` (``item.error``) or
     ``ChildMessage`` (``item.text``, a progress note). The Todo is a one-way
     brief: the child works on its own copy and its report comes back as the
@@ -356,7 +356,7 @@ class AtomAgent(InteractiveAgent):
         """Start a kept child on ``prompt`` and return its ``ChildRef`` at once.
 
         Its outcomes arrive under ``notification["delegates"]``: a
-        ``ChildResult`` (``item.report``; ``item.result`` is a ``TaskResult``), a
+        ``ChildResult`` (``item.result`` is a ``TaskResult``; ``.report`` the full report), a
         ``ChildQuestion`` (reply with ``await item.child.send(...)``) or a
         ``ChildFailed``, after any ``ChildMessage`` progress notes;
         ``item.child.name`` matches the returned ref (also ``self.child(name)``).
@@ -741,7 +741,7 @@ class AtomAgent(InteractiveAgent):
            can run in parallel. While children run, end the turn with
            ``Waiting(explanation=..., on=["delegates"])``.
         4. Measure: results arrive in ``notification["delegates"]`` (a
-           ``ChildResult`` whose ``item.report`` is the child's report
+           ``ChildResult`` whose ``item.result.report`` is the child's report
            and ``item.result`` its ``TaskResult``, a ``ChildQuestion``: ``await item.child.send(...)``, or
            a ``ChildFailed``; a ``ChildMessage`` (``item.text``) is a progress
            note). Its report is the TaskResult; record what you verified on

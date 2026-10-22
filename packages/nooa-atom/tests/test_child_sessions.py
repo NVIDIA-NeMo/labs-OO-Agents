@@ -100,7 +100,7 @@ async def test_a_spawned_child_must_return_a_task_result_and_the_parent_gets_it(
             "[item] = notification['delegates']\n"
             "assert isinstance(item, ChildResult)\n"
             "assert isinstance(item.result, TaskResult)\n"
-            "return_result(Done(explanation=item.report))"
+            "return_result(Done(explanation=item.result.report))"
         ),
     ]
     atom_models.scripts["fix_parser"] = [
@@ -178,14 +178,14 @@ async def test_a_spawned_child_persists_and_takes_follow_ups(
         _wait_then("self.v.ref = await self.spawn('kept', 'first task', name='kept')"),
         cell(
             "[item] = notification['delegates']\n"
-            "self.v.first = item.report\n"
+            "self.v.first = item.result.report\n"
             "assert self.v.ref.status == 'retained'\n"
             "await self.v.ref.send('follow-up')\n"
             "return_result(Waiting(explanation='follow-up', on=['delegates']))"
         ),
         cell(
             "[item] = notification['delegates']\n"
-            "return_result(Done(explanation=self.v.first + ' / ' + item.report))"
+            "return_result(Done(explanation=self.v.first + ' / ' + item.result.report))"
         ),
     ]
     atom_models.scripts["kept"] = [
@@ -215,7 +215,7 @@ async def test_send_steers_a_running_child(atom_registry, atom_options, atom_mod
             "receipt = await ref.send('STEERED-TEXT')\n"
             "_t.BLOCK.set()\n"
             "r = await ref.wait()\n"
-            "return_result(Done(explanation=f'{receipt.delivered}: {r.report}'))"
+            "return_result(Done(explanation=f'{receipt.delivered}: {r.result.report}'))"
         )
     ]
     atom_models.scripts["busy"] = [cell(BLOCKING), _result("steered")]
@@ -415,7 +415,7 @@ async def test_the_child_works_on_a_local_copy_and_nothing_flows_back(
             "assert isinstance(item, ChildResult)\n"
             "assert item.child.todo_id == self.v.todo_id == self.v.ref.todo_id\n"
             "assert self.todo.get(self.v.todo_id).model_dump(mode='json') == self.v.before\n"
-            "return_result(Done(explanation=item.report))"
+            "return_result(Done(explanation=item.result.report))"
         ),
     ]
     atom_models.scripts["parser"] = [
@@ -464,7 +464,7 @@ async def test_a_kept_childs_results_never_touch_the_parents_todo(
         ),
         cell(
             "[item] = notification['delegates']\n"
-            "self.todo.comment(self.v.todo_id, 'verified: ' + item.report)\n"
+            "self.todo.comment(self.v.todo_id, 'verified: ' + item.result.report)\n"
             "self.todo.complete(self.v.todo_id)\n"
             "return_result(Done(explanation='finished'))"
         ),
@@ -602,7 +602,7 @@ async def test_wait_returns_a_question_then_the_result(atom_registry, atom_optio
             "await q.child.send('main')\n"
             "assert 'pending_question' not in repr(self.children()[0])\n"
             "r = await ref.wait()\n"
-            "return_result(Done(explanation=f'{type(r).__name__}: {r.report}'))"
+            "return_result(Done(explanation=f'{type(r).__name__}: {r.result.report}'))"
         )
     ]
     atom_models.scripts["pusher"] = [
@@ -719,7 +719,7 @@ async def test_send_answers_and_clears_the_pending_question(
             "assert self.session.pending_question(ref.id) is None\n"
             "assert 'pending_question' not in repr(ref)\n"
             "r = await ref.wait()\n"
-            "return_result(Done(explanation=r.report))"
+            "return_result(Done(explanation=r.result.report))"
         )
     ]
     atom_models.scripts["asker"] = [
@@ -811,7 +811,7 @@ async def test_a_question_answered_by_the_host_is_cleared_and_wait_waits(
     assert not waiting.done()
     block.set()
     outcome = await asyncio.wait_for(waiting, TIMEOUT)
-    assert outcome.report == "r"
+    assert outcome.result.report == "r"
 
 
 # ---- finding 5: after a reload, state comes from the record ----------------
@@ -848,7 +848,7 @@ async def test_a_pending_question_survives_a_reload_with_its_id(
                     "await self.v.ref.send('dev')\n"
                     "assert 'pending_question' not in repr(self.v.ref)\n"
                     "r = await self.v.ref.wait()\n"
-                    "return_result(Done(explanation=r.report))"
+                    "return_result(Done(explanation=r.result.report))"
                 )
             ],
             "asker": [
@@ -893,7 +893,7 @@ async def test_a_queued_outcome_is_withdrawn_by_wait_after_a_reload(
         loaded = await fresh.load(root.id)
         # Right away, before the loaded parent's loop takes the re-queued item.
         outcome = await asyncio.wait_for(loaded._agent.session.wait_child(ref.id), TIMEOUT)
-        assert outcome.report == "QUEUED"
+        assert outcome.result.report == "QUEUED"
         assert loaded._agent.queue_manager.get_channel("delegates").qsize() == 0
     finally:
         await fresh.close_all()
@@ -1099,7 +1099,9 @@ async def test_send_hands_a_todo_to_a_kept_child(atom_registry, atom_options, at
             "await self.v.ref.send(b)\n"
             "return_result(Waiting(explanation='sent', on=['delegates']))"
         ),
-        cell("[item] = notification['delegates']\nreturn_result(Done(explanation=item.report))"),
+        cell(
+            "[item] = notification['delegates']\nreturn_result(Done(explanation=item.result.report))"
+        ),
     ]
     atom_models.scripts["kept"] = [
         cell(CHILD_RESULT),
@@ -1138,7 +1140,9 @@ async def test_sending_the_briefed_todo_is_an_ordinary_item(
             "await self.v.ref.send('just text')\n"
             "return_result(Waiting(explanation='sent', on=['delegates']))"
         ),
-        cell("[item] = notification['delegates']\nreturn_result(Done(explanation=item.report))"),
+        cell(
+            "[item] = notification['delegates']\nreturn_result(Done(explanation=item.result.report))"
+        ),
     ]
     atom_models.scripts["kept"] = [
         cell("self.todo.complete(self.todo.active())\n" + CHILD_RESULT),
@@ -1207,7 +1211,7 @@ async def test_an_old_record_with_a_child_todo_base_row_reloads(
                 _wait_then("await self.v.ref.send('one more')"),
                 cell(
                     "[item] = notification['delegates']\n"
-                    "return_result(Done(explanation=item.report))"
+                    "return_result(Done(explanation=item.result.report))"
                 ),
             ],
             "kept": [cell(CHILD_RESULT)],

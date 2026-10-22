@@ -968,6 +968,23 @@ def _get_type_hints_cached(obj_type: type) -> dict[str, Any]:
         return {}
 
 
+def _is_empty(value: Any) -> bool:
+    """``None`` or an empty str/bytes/list/tuple/dict/set: what ``hide_empty`` leaves out."""
+    if value is None:
+        return True
+    return isinstance(value, str | bytes | list | tuple | dict | set | frozenset) and not value
+
+
+def _hides_empty(obj_type: type, field_name: str) -> bool:
+    """Whether ``spec(hide_empty=True)`` applies to this field: its own spec, else its class's."""
+    own = _field_spec_override(obj_type, field_name, "hide_empty")
+    if own is not _MISSING:
+        return bool(own)
+    from nooa.agentdoc._metadata import get_docs_metadata
+
+    return bool(get_docs_metadata(obj_type).get("hide_empty"))
+
+
 def _field_spec_override(obj_type: type, field_name: str, key: str) -> Any:
     """Read a per-field ``spec()`` override from ``Annotated`` type hints.
 
@@ -1131,6 +1148,8 @@ def _format_instance_repr(
         # only keep types (classes), since those are intentional class-level tools.
         if callable(value) and not isinstance(value, type):
             continue
+        if _is_empty(value) and _hides_empty(obj_type, field.name):
+            continue
         # Per-field spec(max_string=..., max_length=...) overrides the caller's default.
         field_max_string = _field_spec_override(obj_type, field.name, "max_string")
         if field_max_string is _MISSING:
@@ -1164,6 +1183,8 @@ def _format_instance_repr(
             if max_length and field_count >= max_length:
                 break
 
+            if _is_empty(value) and _hides_empty(obj_type, name):
+                continue
             field_max_string = _field_spec_override(obj_type, name, "max_string")
             if field_max_string is _MISSING:
                 field_max_string = max_string
@@ -1394,6 +1415,8 @@ def _format_nested_instance(
     for name in field_names:
         if name in values:
             value = values[name]
+            if _is_empty(value) and _hides_empty(obj_type, name):
+                continue
             # Per-field spec(max_string=..., max_length=...) overrides the caller's default.
             field_max_string = _field_spec_override(obj_type, name, "max_string")
             if field_max_string is _MISSING:
