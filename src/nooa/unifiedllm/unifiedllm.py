@@ -258,7 +258,8 @@ class _ClientHttp:
             _, provider, dynamic_api_key, dynamic_api_base = litellm.get_llm_provider(
                 model,
                 api_key=config.get("api_key"),
-                api_base=config.get("api_base"),
+                api_base=config.get("api_base") or config.get("base_url"),
+                custom_llm_provider=config.get("custom_llm_provider"),
             )
         except Exception as e:  # noqa: BLE001
             # Unknown/ambiguous model — don't risk handing an incompatible client
@@ -281,7 +282,7 @@ class _ClientHttp:
 
         # OpenAI SDK path: client= must be an AsyncOpenAI / OpenAI wrapping httpx.
         api_key = config.get("api_key") or dynamic_api_key
-        api_base = config.get("api_base") or dynamic_api_base
+        api_base = config.get("api_base") or config.get("base_url") or dynamic_api_base
         # CompletionClient's RetryConfig owns retries; calls set their own value.
         common: dict[str, Any] = {"timeout": self._timeout, "max_retries": 0}
         if api_key:
@@ -1946,6 +1947,60 @@ class CompletionClient(UnifiedLLM):
         return mode == "anthropic"
 
     @staticmethod
+    def _normalize_chat_extensions(api_params, effective_model):
+        """Use the resolved OpenAI Chat adapter's SDK extension envelope.
+
+        This is independent of the output contract and model family. Native
+        Messages adapters consume top-level fields and must not be rewritten.
+        Route overrides may omit our owned SDK client, so resolve the actual
+        LiteLLM dispatch rather than testing for an injected client alone.
+        """
+        fields = ("thinking", "output_config")
+        if not any(key in api_params for key in fields):
+            return
+        _, provider, _, _ = litellm.get_llm_provider(
+            model=effective_model,
+            custom_llm_provider=api_params.get("custom_llm_provider"),
+            api_base=api_params.get("api_base") or api_params.get("base_url"),
+        )
+        if provider != "openai" and provider not in getattr(
+            litellm, "openai_compatible_providers", []
+        ):
+            return
+        # Compatibility alone is not the transport: these resolved providers
+        # have dedicated HTTP adapters ahead of LiteLLM's Chat SDK dispatch.
+        if (
+            provider
+            in {
+                "deepseek",
+                "azure_ai",
+                "fireworks_ai",
+                "ragflow",
+                "xai",
+                "groq",
+                "cometapi",
+                "hosted_vllm",
+            }
+            or api_params.get("text_completion") is True
+        ):
+            return
+        from litellm.secret_managers.main import get_secret_bool
+
+        # Use the same adapter switch as LiteLLM, not an SDK-client/name guess.
+        if get_secret_bool("EXPERIMENTAL_OPENAI_BASE_LLM_HTTP_HANDLER"):
+            return
+        extra = copy.deepcopy(dict(api_params.get("extra_body") or {}))
+        # Validate all duplicates before changing anything. Whole extension
+        # blocks are caller-owned; do not merge or silently override conflicts.
+        for key in fields:
+            if key in api_params and key in extra and api_params[key] != extra[key]:
+                raise ValueError(f"Conflicting {key} settings in extra_body")
+        for key in fields:
+            if key in api_params:
+                extra[key] = copy.deepcopy(api_params.pop(key))
+        api_params["extra_body"] = extra
+
+    @staticmethod
     def _set_output_format(api_params, output_model, effective_model, native_output):
         if output_model is None:
             return
@@ -2251,6 +2306,7 @@ class CompletionClient(UnifiedLLM):
             api_params["tools"] = [self._convert_tool_to_schema(tool) for tool in tools]
             api_params["parallel_tool_calls"] = False
 
+        self._normalize_chat_extensions(api_params, effective_model)
         self._set_output_format(api_params, output_model, effective_model, native_output)
 
         # Bedrock/Anthropic reject messages with tool_call blocks when tools= is absent.
@@ -2369,6 +2425,7 @@ class CompletionClient(UnifiedLLM):
             api_params["tools"] = [self._convert_tool_to_schema(tool) for tool in tools]
             api_params["parallel_tool_calls"] = False
 
+        self._normalize_chat_extensions(api_params, effective_model)
         self._set_output_format(api_params, output_model, effective_model, native_output)
 
         # Bedrock/Anthropic reject messages with tool_call blocks when tools= is absent.
