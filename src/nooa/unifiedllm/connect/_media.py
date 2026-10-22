@@ -217,6 +217,19 @@ def explicitly_rejected(exc, kind):
         "pdf": r"pdfs?|documents?|files?",
     }[kind]
     noun = rf"(?:{names})(?: (?:input|content|format|type|data|url|attachment|processing)s?)?"
+    # Text-only models: the whole request is refused because it has media.
+    if re.search(r"\bnot a multimodal model\b|\bdoes(?: not|n't) support multimodal", text):
+        return True
+    # "Unsupported content part type: 'file'" names the wire part for this format.
+    part = re.search(r"unsupported (?:chat )?content(?: part)? type:? '?([a-z_]+)", text)
+    parts = {
+        "image": {"image_url", "input_image"},
+        "audio": {"input_audio", "audio_url"},
+        "video": {"video_url"},
+        "pdf": {"file", "input_file", "document"},
+    }[kind]
+    if part and part.group(1) in parts:
+        return True
     return bool(
         re.search(
             rf"\b{noun}\b (?:is |are |was |were )?(?:not supported|unsupported|not allowed|rejected|invalid)\b",

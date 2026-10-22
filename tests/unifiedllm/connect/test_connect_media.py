@@ -778,3 +778,33 @@ def test_wire_evidence_rejects_duplicate_original_attachments(kind):
     duplicate["messages"][0]["content"].append(deepcopy(body["messages"][0]["content"][-1]))
     assert media_on_wire(kind, body, body)
     assert not media_on_wire(kind, body, duplicate)
+
+
+@pytest.mark.parametrize(
+    "message,kind",
+    [
+        ("nvcf/llama-70b-instruct is not a multimodal model", "image"),
+        ("nvcf/llama-70b-instruct is not a multimodal model", "audio"),
+        ("Unsupported chat content part type: 'file'. Supported types: image_url, text", "pdf"),
+        ("Unsupported chat content part type: 'video_url'.", "video"),
+    ],
+)
+def test_text_only_server_refusals_count_as_rejected(message, kind):
+    """Hub/vLLM refusals for media on text-only models are explicit, not inconclusive."""
+    from nooa.unifiedllm.connect._media import explicitly_rejected
+
+    class Error(Exception):
+        status_code = 400
+        body = {"error": {"message": message}}
+
+    assert explicitly_rejected(Error(message), kind)
+
+
+def test_unrelated_content_part_rejection_does_not_reject_other_formats():
+    from nooa.unifiedllm.connect._media import explicitly_rejected
+
+    class Error(Exception):
+        status_code = 400
+        body = {"error": {"message": "Unsupported chat content part type: 'file'."}}
+
+    assert not explicitly_rejected(Error("x"), "image")
