@@ -1053,6 +1053,14 @@ class AtomACPAgent:
             return PromptResponse(stop_reason="cancelled")
         if result is None:  # the command failed; _client_call logged it
             return await self._say(bridge, f"/{name} failed; nothing written.")
+        # /connect may have saved a new alias: resend the options so the
+        # client's model picker lists it without reloading the session.
+        bridge.publish(
+            ConfigOptionUpdate(
+                session_update="config_option_update",
+                config_options=self._config_options(session) or [],
+            )
+        )
         return await self._say(bridge, result.text)
 
     async def _pick_verbosity(self, session: Session, bridge: ACPEventBridge) -> PromptResponse:

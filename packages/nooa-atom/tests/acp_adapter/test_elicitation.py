@@ -9,6 +9,7 @@ from acp.schema import (
     AcceptElicitationResponse,
     AgentMessageChunk,
     ClientCapabilities,
+    ConfigOptionUpdate,
     DeclineElicitationResponse,
     ElicitationCapabilities,
     ElicitationFormCapabilities,
@@ -186,3 +187,15 @@ async def test_stop_ends_connect(atom_adapter, workspace, client):
     assert response.stop_reason == "cancelled"
     client.elicitation_gate.set()
     assert len([entry for entry in client.log if entry[0] == "elicitation"]) == 1
+
+
+async def test_connect_resends_the_config_options(atom_adapter, workspace, client):
+    # A saved alias must reach the client's model picker without a reload.
+    adapter = await atom_adapter([], capabilities=FORMS)
+    session_id = (await adapter.new_session(str(workspace))).session_id
+    before = len(client.updates(session_id, ConfigOptionUpdate))
+    client.elicitation_answers = [DeclineElicitationResponse(action="decline")]
+    await adapter.prompt(session_id, [text_block("/connect")])
+    updates = client.updates(session_id, ConfigOptionUpdate)
+    assert len(updates) == before + 1
+    assert updates[-1].config_options
