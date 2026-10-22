@@ -425,3 +425,14 @@ class TestIntegrationSpawnFlushReplaceRespawn:
         assert h.state == "cancelled"
 
         await qm.shutdown()
+
+
+async def test_status_uses_an_items_status_preview():
+    class Asked:
+        def status_preview(self):
+            return "Worker asks: Which branch?"
+
+    qm = QueueManager()
+    ch = qm.queue("delegates")
+    ch.put(Asked())
+    assert qm.status() == "delegates: 1 pending\n  1. Worker asks: Which branch?"

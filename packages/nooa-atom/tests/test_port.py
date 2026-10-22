@@ -51,19 +51,19 @@ async def test_the_port_is_installed_visible_and_not_snapshotted(registry, root_
 async def test_delegate_and_wait_returns_the_childs_done(registry, root_options, models):
     models.scripts[None] = [
         cell(
-            "child = await self.session.delegate('Review auth', 'CHILD-PROMPT')\n"
+            "child = await self.session.delegate('Review auth', 'CHILD-PROMPT', name='review_auth')\n"
             "done = (await child.wait()).done\n"
             "return_result(Done(explanation=f'{child.name}: {done.explanation}'))"
         )
     ]
-    models.scripts["Review auth"] = [work_done("login is fine")]
+    models.scripts["review_auth"] = [work_done("login is fine")]
     root = await registry.create(root_options)
     outcome = await asyncio.wait_for(root.prompt("review"), TIMEOUT)
-    assert outcome == Done(explanation="Review auth: login is fine")
+    assert outcome == Done(explanation="review_auth: login is fine")
 
-    [child_options] = [o for o in models.built if o.name == "Review auth"]
+    [child_options] = [o for o in models.built if o.name == "review_auth"]
     assert (child_options.turn_method, child_options.kept) == ("handle_work", False)
-    assert "CHILD-PROMPT" in str(models.llms["Review auth"].calls[0].messages)
+    assert "CHILD-PROMPT" in str(models.llms["review_auth"].calls[0].messages)
     # The throwaway child is closed after its result, which went to the
     # waiter only: the parent ran no extra turn for it.
     [child_info] = registry.children(root.id)
@@ -76,13 +76,13 @@ async def test_delegate_and_wait_returns_the_childs_done(registry, root_options,
 async def test_a_pydantic_result_arrives_as_its_own_class(registry, root_options, models):
     models.scripts[None] = [
         cell(
-            "child = await self.session.delegate('Fix', 'fix it')\n"
+            "child = await self.session.delegate('Fix', 'fix it', name='fix')\n"
             "done = (await child.wait()).done\n"
             "self.v.result = done.result\n"
             "return_result(Done(explanation=type(done.result).__name__))"
         )
     ]
-    models.scripts["Fix"] = [
+    models.scripts["fix"] = [
         cell(
             "return_result(Done(explanation='fixed', result=TaskResult("
             "solution_description='patched', evidence='tests pass', how_to_verify='run tests')))"
@@ -98,25 +98,25 @@ async def test_a_pydantic_result_arrives_as_its_own_class(registry, root_options
 async def test_a_throwaway_child_cannot_ask_and_ends_done(registry, root_options, models):
     models.scripts[None] = [
         cell(
-            "child = await self.session.delegate('Push', 'push the branch')\n"
+            "child = await self.session.delegate('Push', 'push the branch', name='push')\n"
             "done = (await child.wait()).done\n"
             "return_result(Done(explanation=done.explanation))"
         )
     ]
-    models.scripts["Push"] = [
+    models.scripts["push"] = [
         cell("return_result(NeedInput(question='Which branch?'))"),
         work_done("blocked: branch not given"),
     ]
     root = await registry.create(root_options)
     outcome = await asyncio.wait_for(root.prompt("go"), TIMEOUT)
     assert outcome == Done(explanation="blocked: branch not given")
-    assert "return_result validation error" in str(models.llms["Push"].calls[1].messages)
+    assert "return_result validation error" in str(models.llms["push"].calls[1].messages)
 
 
 async def test_a_background_result_wakes_the_parent(registry, root_options, models):
     models.scripts[None] = [
         cell(
-            "await self.session.delegate('Bg', 'work in the background')\n"
+            "await self.session.delegate('Bg', 'work in the background', name='bg')\n"
             "return_result(Waiting(explanation='child working', on=['delegates']))"
         ),
         cell(
@@ -124,7 +124,7 @@ async def test_a_background_result_wakes_the_parent(registry, root_options, mode
             "return_result(Done(explanation=f'{type(r).__name__}: {r.done.explanation}'))"
         ),
     ]
-    models.scripts["Bg"] = [work_done("background done")]
+    models.scripts["bg"] = [work_done("background done")]
     root = await registry.create(root_options)
     outcome = await asyncio.wait_for(root.prompt("go"), TIMEOUT)
     assert outcome == Done(explanation="ChildResult: background done")
@@ -133,7 +133,7 @@ async def test_a_background_result_wakes_the_parent(registry, root_options, mode
 async def test_a_retained_childs_question_is_answered_with_send(registry, root_options, models):
     models.scripts[None] = [
         cell(
-            "await self.session.delegate('Helper', 'ask me', kept=True)\n"
+            "await self.session.delegate('Helper', 'ask me', kept=True, name='helper')\n"
             "return_result(Waiting(explanation='child working', on=['delegates']))"
         ),
         cell(
@@ -151,7 +151,7 @@ async def test_a_retained_childs_question_is_answered_with_send(registry, root_o
             "[r] = notification['delegates']\nreturn_result(Done(explanation=r.done.explanation))"
         ),
     ]
-    models.scripts["Helper"] = [
+    models.scripts["helper"] = [
         cell("return_result(NeedInput(question='Which branch?'))"),
         cell(
             "[a] = notification['user_messages']\n"
@@ -165,7 +165,7 @@ async def test_a_retained_childs_question_is_answered_with_send(registry, root_o
     outcome = await asyncio.wait_for(root.prompt("go"), TIMEOUT)
     assert outcome == Done(explanation="second: SECOND-MESSAGE")
     assert root._agent.v.asked == "Which branch?"
-    [child_options] = [o for o in models.built if o.name == "Helper"]
+    [child_options] = [o for o in models.built if o.name == "helper"]
     assert (child_options.turn_method, child_options.kept) == ("handle_work", True)
     [helper] = registry.children(root.id)
     assert registry.get(helper.id) is not None  # retained: still live
@@ -177,12 +177,12 @@ async def test_a_child_ref_kept_in_vars_works_after_a_reload(
 ):
     models.scripts[None] = [
         cell(
-            "self.v.helper = await self.session.delegate('Keeper', 'get ready', kept=True)\n"
+            "self.v.helper = await self.session.delegate('Keeper', 'get ready', kept=True, name='keeper')\n"
             "return_result(Waiting(explanation='child working', on=['delegates']))"
         ),
         done("child is ready"),
     ]
-    models.scripts["Keeper"] = [work_done("ready")]
+    models.scripts["keeper"] = [work_done("ready")]
     root = await registry.create(root_options)
     assert await asyncio.wait_for(root.prompt("start"), TIMEOUT) == Done(
         explanation="child is ready"
@@ -202,7 +202,7 @@ async def test_a_child_ref_kept_in_vars_works_after_a_reload(
                     "return_result(Done(explanation=r.done.explanation))"
                 ),
             ],
-            "Keeper": [
+            "keeper": [
                 cell(
                     "return_result(Done(explanation=f'got {notification}', result=TaskResult(solution_description='s', evidence='e', how_to_verify='v')))"
                 )
@@ -223,7 +223,7 @@ async def test_closing_a_child_fails_the_parents_wait(registry, root_options, mo
     started, _block = fresh_events()
     models.scripts[None] = [
         cell(
-            "child = await self.session.delegate('Slow', 'take forever')\n"
+            "child = await self.session.delegate('Slow', 'take forever', name='slow')\n"
             "self.v.child_id = child.id\n"
             "try:\n"
             "    await child.wait()\n"
@@ -231,7 +231,7 @@ async def test_closing_a_child_fails_the_parents_wait(registry, root_options, mo
             "    return_result(Done(explanation=f'failed: {exc}'))"
         )
     ]
-    models.scripts["Slow"] = [cell(BLOCKING_CELL)]
+    models.scripts["slow"] = [cell(BLOCKING_CELL)]
     root = await registry.create(root_options)
     pending = asyncio.ensure_future(root.prompt("go"))
     await asyncio.wait_for(started.wait(), TIMEOUT)
@@ -244,7 +244,7 @@ async def test_children_rename_and_usage(registry, root_options, models):
     usage = LLMUsage(input_tokens=7, output_tokens=3, cost_usd=0.25)
     models.scripts[None] = [
         cell(
-            "a = await self.session.delegate('A', 'a', kept=True)\n"
+            "a = await self.session.delegate('A', 'a', kept=True, name='a')\n"
             "await a.wait()\n"
             "await self.session.rename('Renamed by the agent')\n"
             "names = sorted(c.name for c in self.session.children())\n"
@@ -252,9 +252,9 @@ async def test_children_rename_and_usage(registry, root_options, models):
             usage=LLMUsage(input_tokens=1, output_tokens=1),
         )
     ]
-    models.scripts["A"] = [work_done("a done", usage=usage)]
+    models.scripts["a"] = [work_done("a done", usage=usage)]
     root = await registry.create(root_options)
-    assert await asyncio.wait_for(root.prompt("go"), TIMEOUT) == Done(explanation="A")
+    assert await asyncio.wait_for(root.prompt("go"), TIMEOUT) == Done(explanation="a")
     assert root.info.title == "Renamed by the agent"
     totals = root._agent.session.usage()
     assert (totals.input_tokens, totals.attributed_input_tokens) == (1, 7)
@@ -265,20 +265,20 @@ async def test_usage_rolls_up_to_every_ancestor(registry, root_options, models):
     usage = LLMUsage(input_tokens=5, output_tokens=2)
     models.scripts[None] = [
         cell(
-            "c = await self.session.delegate('Mid', 'm')\n"
+            "c = await self.session.delegate('Mid', 'm', name='mid')\n"
             "await c.wait()\n"
             "return_result(Done(explanation='ok'))"
         )
     ]
-    models.scripts["Mid"] = [
+    models.scripts["mid"] = [
         cell(
-            "g = await self.session.delegate('Leaf', 'l')\n"
+            "g = await self.session.delegate('Leaf', 'l', name='leaf')\n"
             "await g.wait()\n"
             "return_result(Done(explanation='mid ok', result=TaskResult(solution_description='s', evidence='e', how_to_verify='v')))",
             usage=usage,
         )
     ]
-    models.scripts["Leaf"] = [work_done("leaf ok", usage=usage)]
+    models.scripts["leaf"] = [work_done("leaf ok", usage=usage)]
     root = await registry.create(root_options)
     changes = []
     root.subscribe(lambda e: changes.append(e.usage) if e.kind == "usage_changed" else None)
@@ -310,7 +310,7 @@ async def test_waiting_turn_does_not_resolve_the_prompt(registry, root_options, 
 async def test_wait_takes_a_result_that_is_already_queued(registry, root_options, models):
     models.scripts[None] = [
         cell(
-            "child = await self.session.delegate('Quick', 'q')\n"
+            "child = await self.session.delegate('Quick', 'q', name='quick')\n"
             "delegates = self.queue_manager.get_channel('delegates')\n"
             "async with asyncio.timeout(5):\n"
             "    while delegates.qsize() == 0:\n"
@@ -319,7 +319,7 @@ async def test_wait_takes_a_result_that_is_already_queued(registry, root_options
             "return_result(Done(explanation=done.explanation))"
         )
     ]
-    models.scripts["Quick"] = [work_done("quick result")]
+    models.scripts["quick"] = [work_done("quick result")]
     root = await registry.create(root_options)
     assert await asyncio.wait_for(root.prompt("go"), TIMEOUT) == Done(explanation="quick result")
     await asyncio.sleep(0.05)
@@ -332,7 +332,7 @@ async def test_a_result_for_a_cancelled_wait_arrives_on_delegates(registry, root
     started, block = fresh_events()
     models.scripts[None] = [
         cell(
-            "c = await self.session.delegate('Kid', 'k', kept=True)\n"
+            "c = await self.session.delegate('Kid', 'k', kept=True, name='kid')\n"
             "await c.wait()\n"
             "return_result(Done(explanation='not reached'))"
         ),
@@ -341,7 +341,7 @@ async def test_a_result_for_a_cancelled_wait_arrives_on_delegates(registry, root
             "return_result(Done(explanation=f'{type(r).__name__}: {r.done.explanation}'))"
         ),
     ]
-    models.scripts["Kid"] = [
+    models.scripts["kid"] = [
         cell(
             BLOCKING_CELL
             + "return_result(Done(explanation='kid done', result=TaskResult(solution_description='s', evidence='e', how_to_verify='v')))"
@@ -369,7 +369,7 @@ async def test_a_child_cancelled_during_wait_fails_the_wait(registry, root_optio
     started, _block = fresh_events()
     models.scripts[None] = [
         cell(
-            "c = await self.session.delegate('Kid', 'k')\n"
+            "c = await self.session.delegate('Kid', 'k', name='kid')\n"
             "self.v.cid = c.id\n"
             "try:\n"
             "    await c.wait()\n"
@@ -377,7 +377,7 @@ async def test_a_child_cancelled_during_wait_fails_the_wait(registry, root_optio
             "    return_result(Done(explanation=f'failed: {exc}'))"
         )
     ]
-    models.scripts["Kid"] = [cell(BLOCKING_CELL)]
+    models.scripts["kid"] = [cell(BLOCKING_CELL)]
     root = await registry.create(root_options)
     pending = asyncio.ensure_future(root.prompt("go"))
     await asyncio.wait_for(started.wait(), TIMEOUT)
@@ -389,7 +389,7 @@ async def test_a_background_child_closed_mid_turn_wakes_the_parent(registry, roo
     started, _block = fresh_events()
     models.scripts[None] = [
         cell(
-            "c = await self.session.delegate('Bg', 'b')\n"
+            "c = await self.session.delegate('Bg', 'b', name='bg')\n"
             "self.v.cid = c.id\n"
             "return_result(Waiting(explanation='child working', on=['delegates']))"
         ),
@@ -398,7 +398,7 @@ async def test_a_background_child_closed_mid_turn_wakes_the_parent(registry, roo
             "return_result(Done(explanation=f'{type(f).__name__}: {f.error}'))"
         ),
     ]
-    models.scripts["Bg"] = [cell(BLOCKING_CELL)]
+    models.scripts["bg"] = [cell(BLOCKING_CELL)]
     root = await registry.create(root_options)
     pending = asyncio.ensure_future(root.prompt("go"))
     await asyncio.wait_for(started.wait(), TIMEOUT)
@@ -425,12 +425,12 @@ async def test_closed_children_read_closed_everywhere(registry, root_options, mo
     """A child its parent closed (here: keep=False, after its result) reads ``closed``."""
     models.scripts[None] = [
         cell(
-            "c = await self.session.delegate('Gone', 'g')\n"
+            "c = await self.session.delegate('Gone', 'g', name='gone')\n"
             "await c.wait()\n"
             "return_result(Done(explanation='ok'))"
         )
     ]
-    models.scripts["Gone"] = [work_done("gone")]
+    models.scripts["gone"] = [work_done("gone")]
     root = await registry.create(root_options)
     await asyncio.wait_for(root.prompt("go"), TIMEOUT)
     [info] = registry.children(root.id)
@@ -514,13 +514,13 @@ async def test_a_result_arrives_after_the_agent_removed_delegates(registry, root
     models.scripts[None] = [
         cell("[r] = notification['delegates']\nreturn_result(Done(explanation=r.done.explanation))")
     ]
-    models.scripts["Kid"] = [work_done("kid done")]
+    models.scripts["kid"] = [work_done("kid done")]
     root = await registry.create(root_options)
     ended = []
     root.subscribe(lambda e: ended.append(e) if e.kind == "turn_ended" else None)
     root._agent.queue_manager.remove_channel("delegates")
     child = await registry.create(
-        root.options.inherit(name="Kid"), parent_id=root.id, initial_items=[("user_messages", "go")]
+        root.options.inherit(name="kid"), parent_id=root.id, initial_items=[("user_messages", "go")]
     )
     await until(lambda: ended, TIMEOUT)
     assert ended[0].outcome["explanation"] == "kid done"
@@ -530,7 +530,7 @@ async def test_a_result_arrives_after_the_agent_removed_delegates(registry, root
 async def test_a_failed_delivery_keeps_a_finished_throwaway_child_available(
     registry, root_options, models, monkeypatch
 ):
-    models.scripts["Kid"] = [work_done("kid done")]
+    models.scripts["kid"] = [work_done("kid done")]
     root = await registry.create(root_options)
 
     def broken(*args, **kwargs):
@@ -538,9 +538,9 @@ async def test_a_failed_delivery_keeps_a_finished_throwaway_child_available(
 
     monkeypatch.setattr(registry, "_put", broken)
     child = await registry.create(
-        root.options.inherit(name="Kid"), parent_id=root.id, initial_items=[("user_messages", "go")]
+        root.options.inherit(name="kid"), parent_id=root.id, initial_items=[("user_messages", "go")]
     )
-    await until(lambda: child.info.status == "idle" and models.llms["Kid"].calls, TIMEOUT)
+    await until(lambda: child.info.status == "idle" and models.llms["kid"].calls, TIMEOUT)
     assert registry.get(child.id) is child and not child.closing
     [ended] = registry.store.load_rows(child.id, frozenset({"TurnEnded"}))
     assert ended[1]["explanation"] == "kid done"
@@ -553,7 +553,7 @@ async def test_a_wait_cut_short_leaves_the_result_for_the_delegates_channel(
     started, block = fresh_events()
     models.scripts[None] = [
         cell(
-            "child = await self.session.delegate('Slow', 'take your time')\n"
+            "child = await self.session.delegate('Slow', 'take your time', name='slow')\n"
             "try:\n"
             "    await asyncio.wait_for(child.wait(), 0.05)\n"
             "except TimeoutError:\n"
@@ -565,7 +565,7 @@ async def test_a_wait_cut_short_leaves_the_result_for_the_delegates_channel(
             "return_result(Done(explanation='late: ' + item.done.explanation))"
         ),
     ]
-    models.scripts["Slow"] = [cell(BLOCKING_CELL), work_done("slow result")]
+    models.scripts["slow"] = [cell(BLOCKING_CELL), work_done("slow result")]
     root = await registry.create(root_options)
     outcome = root.outcome((await root.submit("go")).item_id)
     await asyncio.wait_for(started.wait(), TIMEOUT)
@@ -583,12 +583,12 @@ async def test_a_plain_interactive_agents_kept_child_returns_a_task_result(
     """A kept child of a non-Atom agent runs the base ``handle_work``: its Done carries a TaskResult."""
     models.scripts[None] = [
         cell(
-            "child = await self.session.delegate('Worker', 'do it', kept=True)\n"
+            "child = await self.session.delegate('Worker', 'do it', kept=True, name='worker')\n"
             "r = await child.wait()\n"
             "return_result(Done(explanation=type(r.done.result).__name__ + ': ' + r.done.result.report))"
         )
     ]
-    models.scripts["Worker"] = [
+    models.scripts["worker"] = [
         # A Done without a TaskResult is rejected and the model is asked again.
         cell("return_result(Done(explanation='no result'))"),
         cell(work_result("worked", report="the report")),
@@ -596,7 +596,7 @@ async def test_a_plain_interactive_agents_kept_child_returns_a_task_result(
     root = await registry.create(root_options)
     outcome = await asyncio.wait_for(root.prompt("go"), TIMEOUT)
     assert outcome == Done(explanation="TaskResult: the report")
-    [child_options] = [o for o in models.built if o.name == "Worker"]
+    [child_options] = [o for o in models.built if o.name == "worker"]
     assert (child_options.turn_method, child_options.kept) == ("handle_work", True)
 
 

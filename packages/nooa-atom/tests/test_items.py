@@ -235,3 +235,11 @@ def test_a_child_ref_reads_status_live_in_its_parents_turn():
         assert ref.model_dump()["status"] == "idle"
     finally:
         current_port.reset(token)
+
+
+def test_delegate_items_preview_as_one_short_line():
+    ref = items.ChildRef(id="c1", name="probe", depth=1, status="idle")
+    done = items.Done(explanation="ok")
+    assert items.ChildResult(child=ref, done=done).status_preview() == "probe finished: ok"
+    assert items.ChildFailed(child=ref, error="boom").status_preview() == "probe failed: boom"
+    assert items.ChildMessage(child=ref, text="half way").status_preview() == "probe says: half way"

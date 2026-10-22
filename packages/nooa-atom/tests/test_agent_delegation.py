@@ -50,20 +50,20 @@ async def test_delegate_returns_the_childs_done_with_its_task_result(
 ):
     atom_models.scripts[None] = [
         cell(
-            "done = await self.delegate('Fix parser', 'CHILD-PROMPT: fix the parser')\n"
+            "done = await self.delegate('fix_parser', 'CHILD-PROMPT: fix the parser', name='fix_parser')\n"
             "self.v.result = done.result\n"
             "return_result(Done(explanation=done.result.report))"
         )
     ]
-    atom_models.scripts["Fix parser"] = [cell(CHILD_RESULT)]
+    atom_models.scripts["fix_parser"] = [cell(CHILD_RESULT)]
     root = await atom_registry.create(atom_options)
     outcome = await asyncio.wait_for(root.prompt("fix it"), TIMEOUT)
     assert outcome == Done(explanation="REPORT: off-by-one fixed")
     assert isinstance(root._agent.v.result, TaskResult)
-    assert "CHILD-PROMPT: fix the parser" in _messages(atom_models, "Fix parser")
+    assert "CHILD-PROMPT: fix the parser" in _messages(atom_models, "fix_parser")
     # The child is a session of its own, with its own record.
     [child] = atom_registry.children(root.id)
-    assert (child.name, child.turn_method, child.retained) == ("Fix parser", "handle_work", False)
+    assert (child.name, child.turn_method, child.retained) == ("fix_parser", "handle_work", False)
     assert child.agent == ATOM_SPEC
     assert atom_registry.store.load_rows(child.id, frozenset({"TurnStarted"}))
 
@@ -73,7 +73,7 @@ async def test_a_spawned_childs_result_arrives_on_delegates_and_wakes_the_parent
 ):
     atom_models.scripts[None] = [
         cell(
-            "ref = await self.spawn('Review', 'review the diff')\n"
+            "ref = await self.spawn('review', 'review the diff', name='review')\n"
             "self.v.child = ref\n"
             "return_result(Waiting(explanation='review running', on=['delegates']))"
         ),
@@ -84,11 +84,11 @@ async def test_a_spawned_childs_result_arrives_on_delegates_and_wakes_the_parent
             "return_result(Done(explanation='review: ' + item.done.result.report))"
         ),
     ]
-    atom_models.scripts["Review"] = [cell(CHILD_RESULT)]
+    atom_models.scripts["review"] = [cell(CHILD_RESULT)]
     root = await atom_registry.create(atom_options)
     outcome = await asyncio.wait_for(root.prompt("review"), TIMEOUT)
     assert outcome == Done(explanation="review: REPORT: off-by-one fixed")
-    assert [ref.name for ref in root._agent.children()] == ["Review"]
+    assert [ref.name for ref in root._agent.children()] == ["review"]
 
 
 CHILD_DICT_RESULT = (
@@ -103,7 +103,7 @@ async def test_a_spawned_childs_dict_result_arrives_as_a_task_result(
 ):
     atom_models.scripts[None] = [
         cell(
-            "await self.spawn('Review', 'review the diff')\n"
+            "await self.spawn('review', 'review the diff', name='review')\n"
             "return_result(Waiting(explanation='review running', on=['delegates']))"
         ),
         cell(
@@ -111,7 +111,7 @@ async def test_a_spawned_childs_dict_result_arrives_as_a_task_result(
             "return_result(Done(explanation='review: ' + item.done.result.report))"
         ),
     ]
-    atom_models.scripts["Review"] = [cell(CHILD_DICT_RESULT)]
+    atom_models.scripts["review"] = [cell(CHILD_DICT_RESULT)]
     root = await atom_registry.create(atom_options)
     outcome = await asyncio.wait_for(root.prompt("review"), TIMEOUT)
     assert outcome == Done(explanation="review: REPORT: dict result")
@@ -120,11 +120,11 @@ async def test_a_spawned_childs_dict_result_arrives_as_a_task_result(
 async def test_delegate_coerces_a_dict_result_too(atom_registry, atom_options, atom_models):
     atom_models.scripts[None] = [
         cell(
-            "done = await self.delegate('Fix parser', 'fix the parser')\n"
+            "done = await self.delegate('fix_parser', 'fix the parser', name='fix_parser')\n"
             "return_result(Done(explanation=done.result.report))"
         )
     ]
-    atom_models.scripts["Fix parser"] = [cell(CHILD_DICT_RESULT)]
+    atom_models.scripts["fix_parser"] = [cell(CHILD_DICT_RESULT)]
     root = await atom_registry.create(atom_options)
     outcome = await asyncio.wait_for(root.prompt("fix it"), TIMEOUT)
     assert outcome == Done(explanation="REPORT: dict result")
@@ -155,14 +155,14 @@ async def test_a_todo_objective_goes_as_text_and_gets_the_report(
         cell(
             "todo = self.todo.add('Fix the parser', description='parse() drops the last line')\n"
             "self.todo.comment(todo, 'suspect the loop bound')\n"
-            "done = await self.delegate('Parser', todo)\n"
+            "done = await self.delegate('parser', todo, name='parser')\n"
             "return_result(Done(explanation=done.result.report))"
         )
     ]
-    atom_models.scripts["Parser"] = [cell(CHILD_RESULT)]
+    atom_models.scripts["parser"] = [cell(CHILD_RESULT)]
     root = await atom_registry.create(atom_options)
     outcome = await asyncio.wait_for(root.prompt("go"), TIMEOUT)
-    prompt = _messages(atom_models, "Parser")
+    prompt = _messages(atom_models, "parser")
     for text in ("Fix the parser", "parse() drops the last line", "suspect the loop bound"):
         assert text in prompt
     # The report comes back in the TaskResult; delegate() writes nothing to the Todo.
@@ -175,7 +175,7 @@ async def test_delegating_past_the_depth_limit_fails_in_the_cell(
     atom_registry, atom_options, atom_models
 ):
     atom_models.scripts[None] = [
-        cell("await self.delegate('Too deep', 'anything')"),
+        cell("await self.delegate('too_deep', 'anything', name='too_deep')"),
         done("could not delegate"),
     ]
     root = await atom_registry.create(atom_options.model_copy(update={"max_depth": 0}))
@@ -190,7 +190,7 @@ async def test_a_failed_child_raises_in_the_parents_cell(atom_registry, atom_opt
     atom_models.scripts[None] = [
         cell(
             "try:\n"
-            "    await self.delegate('Broken', 'anything')\n"
+            "    await self.delegate('broken', 'anything', name='broken')\n"
             "except ChildFailedError as exc:\n"
             "    return_result(Done(explanation='child failed'))"
         )

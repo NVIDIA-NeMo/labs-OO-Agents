@@ -77,7 +77,13 @@ async def test_the_root_loads_as_an_atom_agent_with_its_saved_state(workspace, c
         assert isinstance(agent.v.child, ChildRef)
         assert isinstance(agent.v.review, ChildResult)
         assert agent.v.review.done.result.report == "REPORT: off-by-one fixed"
-        assert sorted(ref.name for ref in agent.children()) == sorted(CHILDREN.values())
+        # Older children were named by their description: one that is not an
+        # identifier gets child_<n> (its place among the children), by load.
+        names = {ref.name for ref in agent.children()}
+        expected = {name if name.isidentifier() else "" for name in CHILDREN.values()}
+        assert {n for n in names if not n.startswith("child_")} == expected - {""}
+        assert len(names) == len(CHILDREN)
+        assert all(ref.path == f"/root/{ref.name}" for ref in agent.children())
         # The context block was renamed; the restored agent has only the new one.
         assert "workspace_state" in agent.context
         assert "coding_state" not in agent.context
