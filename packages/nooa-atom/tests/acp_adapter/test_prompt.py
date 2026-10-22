@@ -136,10 +136,10 @@ async def test_a_second_prompt_during_a_turn_is_queued_for_its_own_turn(make_ada
     assert finished == ["first", "second"]
     calls = models.llms[None].calls
     assert len(calls) == 3
-    # The running turn's next model call lists it as pending, once, in the queues block.
+    # The running turn's next model call counts it in the queues block, without its text.
     during = str(calls[1].messages)
-    assert "Unread:\\n  • user_messages: also do the second" in during
-    assert during.count("also do the second") == 1
+    assert "Unread:\\n  • user_messages: 1\\nRead now: await self.user_messages.get()" in during
+    assert "also do the second" not in during
     assert "also do the second" in str(calls[2].messages)
 
 

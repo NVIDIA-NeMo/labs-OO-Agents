@@ -427,37 +427,65 @@ class TestIntegrationSpawnFlushReplaceRespawn:
         await qm.shutdown()
 
 
-async def test_status_uses_an_items_status_preview():
+async def test_status_counts_items_and_names_their_senders_never_their_content():
     class Asked:
-        def status_preview(self):
+        def __init__(self, sender):
+            self.sender = sender
+
+        def status_source(self):
+            return self.sender
+
+        def status_preview(self):  # an old hook: ignored, no content is shown
             return "Worker asks: Which branch?"
 
     qm = QueueManager()
     ch = qm.queue("delegates")
-    ch.put(Asked())
-    assert qm.status() == "Unread:\n  • Worker asks: Which branch?"
+    for sender in ("/root/a", "/root/b", "/root/a"):
+        ch.put(Asked(sender))
+    ch.put("a plain string has no sender")
+    assert qm.status() == "Unread:\n  • delegates: 4 (from /root/a, /root/b)"
+    assert ch.status() == "delegates: 4 unread (from /root/a, /root/b)"
+    assert "Which branch" not in qm.status()
 
 
-def test_status_unread_names_the_channel_of_an_item_without_a_preview_and_caps_it():
+def test_status_unread_caps_senders_and_has_one_line_per_channel():
+    class From:
+        def __init__(self, sender):
+            self.sender = sender
+
+        def status_source(self):
+            return self.sender
+
     qm = QueueManager()
     messages = qm.queue("user_messages")
     jobs = qm.queue("jobs")
     for text in ("one", "two"):
         messages.put(text)
-    jobs.put({"n": 1})
-    jobs.put("x" * 200)
-    status = qm.status()
-    assert status.splitlines() == [
+    for sender in ("/root/a", "/root/b", "/root/c", "/root/" + "x" * 200):
+        jobs.put(From(sender))
+    assert qm.status(max_items=2).splitlines() == [
         "Unread:",
-        "  • user_messages: one",
-        "  • user_messages: two",
-        "  • jobs: {'n': 1}",
-        "  • … 1 more",
+        "  • user_messages: 2",
+        "  • jobs: 4 (from /root/a, /root/b, +2 more)",
     ]
-    # A long preview is cut at max_chars, the channel name included.
-    lines = qm.status(max_items=10).splitlines()
-    assert lines[-1] == "  • jobs: " + "x" * 73 + "…"
-    assert len(lines[-1]) == 4 + 80
+    # A long sender name is cut at max_chars.
+    last = qm.status(max_items=10).splitlines()[-1]
+    assert last.endswith(", /root/" + "x" * 73 + "…)")
+
+
+def test_status_read_now_lists_hints_of_unread_channels_only():
+    qm = QueueManager()
+    qm.queue("user_messages").put("hi")
+    delegates = qm.queue("delegates")
+    hints = {"user_messages": "await self.user_messages.get()", "delegates": "d.get()"}
+    assert qm.status(read_hints=hints) == (
+        "Unread:\n  • user_messages: 1\nRead now: await self.user_messages.get()"
+    )
+    delegates.put("x")
+    assert qm.status(read_hints=hints).splitlines()[-1] == (
+        "Read now: await self.user_messages.get() · d.get()"
+    )
+    assert QueueManager().status(read_hints=hints) == "(nothing queued)"
 
 
 def test_status_sections_order_and_omission():
@@ -469,7 +497,7 @@ def test_status_sections_order_and_omission():
         idle=["/root/c · child · retained"],
     )
     assert status == (
-        "Unread:\n  • delegates: hi\n  • /root/a · child · question not answered yet\n"
+        "Unread:\n  • delegates: 1\n  • /root/a · child · question not answered yet\n"
         "Running:\n  • /root/b · child · 4s\n"
         "Idle:\n  • /root/c · child · retained"
     )

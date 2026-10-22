@@ -211,9 +211,9 @@ class ChildResult(BaseModel):
             done = done.model_copy(update={"result": result})
         return done
 
-    def status_preview(self) -> str:
-        """One line for the pending ``delegates`` list."""
-        return f"{self.child.path or self.child.name} finished: {self.done.explanation}"
+    def status_source(self) -> str:
+        """Who sent it, for the per-turn ``Unread:`` count (never its content)."""
+        return self.child.path or self.child.name
 
 
 class ChildQuestion(BaseModel):
@@ -235,9 +235,9 @@ class ChildQuestion(BaseModel):
         """Convert a child's ``NeedInput``."""
         return cls(child=child, question=need.question, reason=need.reason)
 
-    def status_preview(self) -> str:
-        """One line for the pending ``delegates`` list: who asks what."""
-        return f"{self.child.path or self.child.name} asks: {self.question}"
+    def status_source(self) -> str:
+        """Who sent it, for the per-turn ``Unread:`` count (never its content)."""
+        return self.child.path or self.child.name
 
 
 class ChildFailed(BaseModel):
@@ -246,9 +246,9 @@ class ChildFailed(BaseModel):
     child: ChildRef
     error: str
 
-    def status_preview(self) -> str:
-        """One line for the pending ``delegates`` list."""
-        return f"{self.child.path or self.child.name} failed: {self.error}"
+    def status_source(self) -> str:
+        """Who sent it, for the per-turn ``Unread:`` count (never its content)."""
+        return self.child.path or self.child.name
 
 
 class ChildMessage(BaseModel):
@@ -262,9 +262,9 @@ class ChildMessage(BaseModel):
     child: ChildRef
     text: str
 
-    def status_preview(self) -> str:
-        """One line for the pending ``delegates`` list."""
-        return f"{self.child.path or self.child.name} says: {self.text}"
+    def status_source(self) -> str:
+        """Who sent it, for the per-turn ``Unread:`` count (never its content)."""
+        return self.child.path or self.child.name
 
 
 class TurnCancelledOutcome(BaseModel):

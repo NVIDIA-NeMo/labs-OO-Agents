@@ -14,6 +14,12 @@ CLOSE_HINT = "Close a child: await self.child('<name>').close()"
 
 # Shown for a child per status; ``working``: its last turn ended Waiting on its own job.
 _SHOWN = {"working": "waiting on its own job", "retained": "retained"}
+# How to read each channel listed under "Unread:" (the queues block's "Read now:" line).
+READ_HINTS = {
+    "user_messages": "await self.user_messages.get()",
+    "delegates": "await self.delegates.get()",
+    "jobs": "job updates come in next turn's notification",
+}
 # Its line for a question that was read (taken off ``delegates``) but not answered yet.
 UNANSWERED = "question not answered yet"
 
@@ -83,11 +89,11 @@ def live_children(agent: Any) -> list[LiveChild]:
 def child_sections(agent: Any) -> dict[str, list[str]]:
     """The live children's ``queues`` lines by section: ``unread``, ``running``, ``idle``.
 
-    ``asking`` holds the paths of children whose unread question is listed
-    by the question item itself (no line of their own). Each line is ``<path> · child · <state>`` (a running child's age is left
-    out when its turn start is unknown). A child with an unread question
-    has no line here: the question itself is listed under "Unread:". One
-    whose question was read but not answered is under ``unread``.
+    Each line is ``<path> · child · <state>`` (a running child's age is left
+    out when its turn start is unknown). A child with an unread question has
+    no line: it is counted, by path, in the ``delegates`` line under
+    "Unread:"; ``asking`` holds those paths. One whose question was read but
+    not answered is under ``unread``.
     """
     sections: dict[str, list[str]] = {"unread": [], "running": [], "idle": [], "asking": []}
     for child in live_children(agent):

@@ -201,9 +201,10 @@ async def test_a_child_with_an_unread_question_says_so_until_it_is_read(tmp_path
     )
     asked = calls[1].split("ASKED<<", 1)[1].split(">>", 1)[0]
     read = calls[1].split("READ<<", 1)[1].split(">>", 1)[0]
-    # Unread: only its question line, not under Running/Idle too.
+    # Unread: only counted, by path, under delegates (no content), not under Running/Idle.
     assert asked == (
-        "Unread:\n  • /root/asker asks: Which branch?\n"
+        "Unread:\n  • delegates: 1 (from /root/asker)\n"
+        "Read now: await self.delegates.get()\n"
         "Close a child: await self.child('<name>').close()"
     )
     # Once read but not answered, it stays under Unread, still not Idle.
@@ -345,11 +346,16 @@ async def test_the_queues_block_reads_unread_running_idle(tmp_path, sessions_dir
     print(status)
     lines = status.splitlines()
     assert lines[0] == "Unread:"
-    assert lines[1] == "  • /root/pick_branch asks: Which branch should I push to: main or dev?"
-    assert re.fullmatch(r"  • /root/build: 50 lines, last: line \d+", lines[2])
+    assert lines[1] == "  • delegates: 1 (from /root/pick_branch)"
+    assert re.fullmatch(r"  • jobs: \d+ \(from /root/build\)", lines[2])
+    assert lines[3] == (
+        "Read now: await self.delegates.get() · job updates come in next turn's notification"
+    )
+    assert "main or dev" not in status  # no content
+    assert "last:" not in status
     running = lines.index("Running:")
     idle = lines.index("Idle:")
-    assert 2 < running < idle
+    assert running == 4 < idle
     assert re.fullmatch(
         r"  • /root/tests · job · \d+s · full test run before pushing", lines[running + 1]
     )
@@ -364,5 +370,5 @@ async def test_the_queues_block_reads_unread_running_idle(tmp_path, sessions_dir
         "Cancel a job: await self.jobs.cancel('<name>')",
         "Close a child: await self.child('<name>').close()",
     ]
-    assert "pick_branch" not in "\n".join(lines[running:])  # its question is under Unread only
+    assert "pick_branch" not in "\n".join(lines[running:])  # counted under Unread only
     assert "verifier" not in status

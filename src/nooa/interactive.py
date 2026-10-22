@@ -529,8 +529,10 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
     @hidden
     @no_trace
     def _queue_status(self) -> str:
-        """The ``queues`` context block: pending items per channel and running jobs."""
-        return self.queue_manager.status()
+        """The ``queues`` context block: unread counts per channel, how to read them, running jobs."""
+        return self.queue_manager.status(
+            read_hints={"user_messages": "await self.user_messages.get()"}
+        )
 
     @property
     def v(self) -> AgentVars:

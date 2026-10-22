@@ -460,12 +460,15 @@ class AtomAgent(InteractiveAgent):
     @hidden
     @no_trace
     def _queue_status(self) -> str:
-        """The ``queues`` block: "Unread:", "Running:" (jobs, children), "Idle:", then hints."""
-        from nooa_atom.agent.background import CLOSE_HINT, child_sections
+        """The ``queues`` block: "Unread:" counts, "Read now:", "Running:", "Idle:", then hints."""
+        from nooa_atom.agent.background import CLOSE_HINT, READ_HINTS, child_sections
 
         children = child_sections(self)
         status = self.queue_manager.status(
-            more_unread=children["unread"], more_work=children["running"], idle=children["idle"]
+            more_unread=children["unread"],
+            more_work=children["running"],
+            idle=children["idle"],
+            read_hints=READ_HINTS,
         )
         listed = any(children.values())  # a child is listed (its question counts)
         return f"{status}\n{CLOSE_HINT}" if listed else status

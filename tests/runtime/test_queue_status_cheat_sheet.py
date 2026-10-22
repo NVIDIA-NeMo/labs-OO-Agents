@@ -69,10 +69,7 @@ def test_status_populated_formatting_unchanged_then_drained():
     messages.put("second")
     monitor.put("ok")
 
-    assert qm.status(max_items=1) == "Unread:\n  • user_messages: first\n  • … 2 more"
-    assert qm.status() == (
-        "Unread:\n  • user_messages: first\n  • user_messages: second\n  • ci_monitor: ok"
-    )
+    assert qm.status() == "Unread:\n  • user_messages: 2\n  • ci_monitor: 1"
     assert messages.drain() == ["first", "second"]
     assert monitor.drain() == ["ok"]
     assert qm.status() == "(nothing queued)"

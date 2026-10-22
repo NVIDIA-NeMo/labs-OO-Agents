@@ -21,7 +21,7 @@ import inspect
 import logging
 import threading
 from collections import deque
-from collections.abc import AsyncGenerator, Callable, Coroutine, Sequence
+from collections.abc import AsyncGenerator, Callable, Coroutine, Mapping, Sequence
 from functools import wraps
 from typing import Annotated, Any, ClassVar, Literal
 
@@ -216,35 +216,35 @@ class JobHandle:
 ChannelMode = Literal["queue", "event"]
 
 
-def _preview_item(item: Any, max_chars: int) -> str:
-    """Single-line bounded preview for the queue ``status()`` block.
+def _item_source(item: Any) -> str | None:
+    """Who sent ``item``: its ``status_source()`` (a name or path) on one line, else ``None``.
 
-    Strings render as-is; an item with a ``status_preview()`` method shows
-    what it returns; anything else goes through ``pformat`` so deeply
-    nested dicts/lists come out bounded by default. Newlines and tabs
-    flatten to single chars so previews stay one line, then the whole
-    thing is clipped to ``max_chars`` with an ellipsis when needed.
+    Only the sender, never the content: the status block says that
+    something is waiting and from where, not what it says.
     """
-    from nooa.agentdoc import pformat
-
-    preview = getattr(item, "status_preview", None)
-    if isinstance(item, str):
-        text = item
-    elif callable(preview):
-        text = str(preview())
-    else:
-        text = pformat(item, max_length=max_chars, max_string=max_chars, max_depth=2)
-    text = text.replace("\r\n", "\n").replace("\n", "↵").replace("\t", " ")
-    if len(text) > max_chars:
-        text = text[: max_chars - 1] + "…"
-    return text
+    source = getattr(item, "status_source", None)
+    if isinstance(item, str) or not callable(source):
+        return None
+    return " ".join(str(source() or "").split()) or None
 
 
-def _unread_line(channel: str, item: Any, max_chars: int) -> str:
-    """One ``Unread:`` line: an item's own ``status_preview()``, else ``<channel>: <preview>``."""
-    if callable(getattr(item, "status_preview", None)):
-        return _preview_item(item, max_chars)
-    return _preview_item(f"{channel}: {_preview_item(item, max_chars)}", max_chars)
+def _count_line(
+    name: str, items: Sequence[Any], *, max_items: int, max_chars: int, unit: str = ""
+) -> str:
+    """``<name>: 3 (from /root/a, /root/b)``: the count and distinct senders, no content.
+
+    At most ``max_items`` senders are named, then ``+N more``; each is cut at
+    ``max_chars``. Items without a ``status_source()`` add to the count only.
+    """
+    sources = list(dict.fromkeys(s for s in map(_item_source, items) if s))
+    line = f"{name}: {len(items)}{unit}"
+    if sources:
+        shown = ", ".join(
+            s if len(s) <= max_chars else s[: max_chars - 1] + "…" for s in sources[:max_items]
+        )
+        extra = len(sources) - max_items
+        line += f" (from {shown}{f', +{extra} more' if extra > 0 else ''})"
+    return line
 
 
 def _default_event_preview(value: Any) -> str:
@@ -611,25 +611,19 @@ class Channel[T]:
         return len(dropped)
 
     def status(self, *, max_items: int = 3, max_chars: int = 80) -> str:
-        """Pending-count summary + short preview of waiting items.
+        """How many items wait unread, and from whom: ``delegates: 2 unread (from /root/a)``.
 
-        Returns an empty string when:
-        - the channel is event-mode (no buffer),
-        - or the queue is drained.
-
-        Both make it cheap for ``QueueManager.status()`` to compose
-        the per-channel parts and skip empty ones.
+        Never shows item content (read it with ``get()``). Senders come from
+        each item's ``status_source()``; at most ``max_items`` are named, each
+        cut at ``max_chars``. Returns an empty string when the channel is
+        event-mode (no buffer) or drained, so ``QueueManager.status()`` can
+        skip it.
         """
         if self.mode != "queue" or not self._items:
             return ""
-        lines = [f"{self.name}: {len(self._items)} pending"]
-        snapshot = list(self._items)
-        for i, item in enumerate(snapshot[:max_items], start=1):
-            lines.append(f"  {i}. {_preview_item(item, max_chars)}")
-        overflow = len(snapshot) - max_items
-        if overflow > 0:
-            lines.append(f"  … {overflow} more")
-        return "\n".join(lines)
+        return _count_line(
+            self.name, list(self._items), max_items=max_items, max_chars=max_chars, unit=" unread"
+        )
 
     # ---- lifecycle -------------------------------------------------------
 
@@ -700,9 +694,9 @@ class ChannelReader[T]:
     def status(self, *, max_items: int = 3, max_chars: int = 80) -> str:
         """Delegate to the underlying ``Channel.status()``.
 
-        Exposed so the LLM can peek at pending items mid-turn —
-        ``self.user_messages.status()`` — without reaching into the
-        producer-side handle.
+        Exposed so the LLM can see mid-turn how many items wait and from
+        whom (``self.user_messages.status()``), without their content and
+        without reaching into the producer-side handle.
         """
         return self._source.status(max_items=max_items, max_chars=max_chars)
 
@@ -967,37 +961,36 @@ class QueueManager:
         more_work: Sequence[str] = (),
         more_unread: Sequence[str] = (),
         idle: Sequence[str] = (),
+        read_hints: Mapping[str, str] | None = None,
     ) -> str:
-        """Composite ``status`` block: "Unread:", "Running:", "Idle:", then cancel hints.
+        """Composite ``status`` block: "Unread:", "Read now:", "Running:", "Idle:", then cancel hints.
 
         Wired into a dynamic context block (``queues``) so the LLM sees,
         every turn, what arrived and was not read yet and what is still
         working. Each heading starts at the left edge with one ``  • `` line
         per entry; an empty section is left out.
 
-        - ``Unread:`` one line per item buffered on a queue-mode channel, in
-          channel order (event-mode channels do not accumulate). An item
-          with a ``status_preview()`` shows what it returns (it names its
-          own source); any other item shows as ``<channel>: <preview>``.
-          At most ``max_items`` item lines, then ``… N more``. A host's own
-          ``more_unread`` lines follow, uncapped.
+        - ``Unread:`` one line per queue-mode channel with buffered items, in
+          channel order: ``<channel>: <count>``, plus ``(from a, b)`` naming
+          the distinct senders (each item's ``status_source()``; at most
+          ``max_items``, each cut at ``max_chars``). Never any item content:
+          a preview reads as if the item had been read. The host's own
+          ``more_unread`` lines follow.
+        - ``Read now:`` the ``read_hints`` entries (channel name -> how to
+          read it) of the channels listed under "Unread:", joined by `` · ``.
         - ``Running:`` running spawned jobs (their ``describe()``, else
           ``<label> → <channel>``), then the host's ``more_work`` lines.
         - ``Idle:`` the host's ``idle`` lines (work with nothing to do).
 
-        Each preview is one line, cut at ``max_chars``. Returns
-        ``"(nothing queued)"`` when there is nothing to show.
+        Returns ``"(nothing queued)"`` when there is nothing to show.
         """
-        items = [
-            _unread_line(ch.name, item, max_chars)
-            for ch in self._channels.values()
-            if ch.mode == "queue"
-            for item in list(ch._items)
+        waiting = [ch for ch in self._channels.values() if ch.mode == "queue" and ch.qsize()]
+        unread = [
+            _count_line(ch.name, list(ch._items), max_items=max_items, max_chars=max_chars)
+            for ch in waiting
         ]
-        unread = items[:max_items]
-        if len(items) > max_items:
-            unread.append(f"… {len(items) - max_items} more")
         unread += [line for line in more_unread if line]
+        hints = [read_hints[ch.name] for ch in waiting if read_hints and ch.name in read_hints]
 
         # Active spawns tell the LLM monitors are running even when no
         # items are pending (items were already delivered).
@@ -1016,6 +1009,8 @@ class QueueManager:
         ):
             if entries:
                 lines += [heading, *(f"  • {entry}" for entry in entries)]
+            if heading == "Unread:" and hints:
+                lines.append("Read now: " + " · ".join(dict.fromkeys(hints)))
 
         # Cancel hints come only from the API that owns a channel
         # (``set_cancel_hint``); the status never names the hidden queue_manager.
