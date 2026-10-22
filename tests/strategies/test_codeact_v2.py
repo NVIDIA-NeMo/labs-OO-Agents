@@ -327,6 +327,7 @@ async def test_explicit_return_completes_with_only_python_cell_tool():
     assert "self.v" not in normalized_description
     assert "self.shell" not in normalized_description
     assert CodeActV2()._always_available_text() in tool.description
+    assert "`print(doc(x))`" in tool.description
     assert CodeActV2()._restrictions_text() in tool.description
     for name in (
         "self",

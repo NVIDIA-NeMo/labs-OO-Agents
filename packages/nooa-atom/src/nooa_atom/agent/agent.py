@@ -490,6 +490,10 @@ class AtomAgent(InteractiveAgent):
         the request needs before ending the turn; use as many cells as it
         takes, and run checks rather than assume them.
 
+        You are event-driven: queues shows running producers and pending
+        inputs, while notification contains events delivered for this turn; a
+        producer may finish before its result is consumed.
+
         Use ``self.message()`` regularly to keep the user informed with brief
         progress updates while you work, especially during tool use or longer
         tasks. Updates should explain what you are doing, what you have
