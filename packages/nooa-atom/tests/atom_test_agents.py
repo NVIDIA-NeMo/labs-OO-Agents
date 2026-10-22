@@ -23,6 +23,7 @@ from nooa_atom.session.items import (  # noqa: F401
 )
 from nooa_atom.session.loader import load_agent_class
 
+from nooa import elicit  # noqa: F401  (scripted cells ask forms)
 from nooa.context_blocks import Metadata
 from nooa.context_blocks.roles import Role
 from nooa.interactive import Done, InteractiveAgent, NeedInput, Waiting  # noqa: F401
@@ -86,6 +87,16 @@ class CellLLM(FakeLLMClient):
                     usage=head.usage,
                 )
         return super()._scripted_call(messages, tools, output_model, kwargs)
+
+
+async def ask_name_in_task() -> str:
+    """A helper a cell awaits: it asks a form from a task of its own."""
+
+    async def inner() -> str:
+        answer = await elicit.ask("Your name?", name=elicit.Text())
+        return answer.values["name"]
+
+    return await asyncio.create_task(inner())
 
 
 def cell(code: str, *, usage: LLMUsage | None = None) -> LLMResponse:

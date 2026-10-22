@@ -22,6 +22,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel
 
+from nooa import elicit
 from nooa.context_blocks.roles import Role
 from nooa.events import Notification
 from nooa.interactive import (
@@ -225,6 +226,8 @@ class Session:
         self._closed = False
         self._before_close = before_close
         self._loop_context_hooks: list[Callable[[], object]] = []
+        # The host's form asker (``set_asker``); bound for root sessions only.
+        self._asker: elicit.Asker | None = None
         self._pending_steers: list[tuple[str, str, str]] = []  # (item_id, text, source)
         self._snapshot_digest: str | None = None
         self._checkpoint_task: asyncio.Task[None] | None = None
@@ -692,6 +695,10 @@ class Session:
 
     async def _prepare_turn(self) -> None:
         self._usage_before = self.info.usage.model_copy()
+        # Runs in the turn's own task, before the turn method: what is bound
+        # here reaches the turn's cells and skills (tasks copy the context)
+        # and ends with the turn.
+        elicit._asker.set(self._bound_asker())
         await self._apply_pending_model()
 
     def _commit_turn(self, notification: dict[str, list[Any]]) -> None:
@@ -992,11 +999,16 @@ class Session:
         ]
 
     async def invoke_command(self, name: str, raw_args: str) -> CommandResult:
-        """Run a slash command through the agent's registry; ``KeyError`` if unknown."""
+        """Run a slash command through the agent's registry; ``KeyError`` if unknown.
+
+        The command runs with the host's asker bound (root sessions), so a
+        host-side command can show forms with ``nooa.elicit.ask``.
+        """
         registry = getattr(self._agent, "slash_commands", None)
         if registry is None:
             raise KeyError(name)
-        result = await registry.invoke(name, raw_args)
+        with elicit.bind_asker(self._bound_asker()):
+            result = await registry.invoke(name, raw_args)
         value = getattr(result, "value", None)
         if isinstance(value, BaseModel):
             data: dict[str, Any] | None = value.model_dump(mode="json")
@@ -1010,6 +1022,31 @@ class Session:
             output_to_agent=bool(getattr(result, "output_to_agent", False)),
             data=data,
         )
+
+    # ---- forms ---------------------------------------------------------
+
+    def set_asker(self, asker: elicit.Asker | None) -> None:
+        """Install the host's form asker (``None`` removes it).
+
+        Only a root session binds it, around its turns and slash commands, so
+        ``nooa.elicit.ask`` reaches the person there; in a child session it
+        raises ``ElicitationUnavailable``. The asker in place when a form is
+        asked is the one used, so a host can replace it between turns.
+        """
+        self._asker = asker
+
+    def _bound_asker(self) -> elicit.Asker | None:
+        """What to bind in a turn or command: a stand-in for the current asker."""
+        if self.parent_id is not None:
+            return None
+
+        async def ask(request: elicit.ElicitationRequest) -> elicit.Elicited:
+            asker = self._asker
+            if asker is None:
+                raise elicit.ElicitationUnavailable("This session's client cannot show forms.")
+            return await asker(request)
+
+        return ask
 
     # ---- title, mode, usage -----------------------------------------
 
