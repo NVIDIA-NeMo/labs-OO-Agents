@@ -158,6 +158,29 @@ def _alive(pid: int) -> bool:
         return True
 
 
+@pytest.mark.timeout(60)  # without the fix teardown hangs too: fail, do not stall the run
+@pytest.mark.parametrize("throttle", [{}, {"items": 1}])
+async def test_cancel_returns_while_a_chatty_jobs_output_is_buffered(agent, throttle):
+    # ``yes`` prints far more than the 256-slot queues hold, so at the cancel
+    # the line pumps are blocked on full queues. Their cleanup must not wait
+    # for queue space nobody frees, or cancel() never returns.
+    await agent.jobs.run("yes", label="chatty", **throttle)
+    await asyncio.sleep(0.5)
+    cancel = asyncio.ensure_future(agent.jobs.cancel("chatty"))
+    # asyncio.wait, not wait_for: wait_for would wait for the hung cancel itself.
+    done, _ = await asyncio.wait({cancel}, timeout=5.0)
+    assert done, "cancel() did not return: the job's cleanup is blocked on a full queue"
+    assert cancel.result() is True
+    assert agent.jobs.get("chatty").state == "cancelled"
+
+
+async def test_timeout_ends_a_chatty_job(agent):
+    await agent.jobs.run("yes", label="chatty", timeout=0.5)
+    item = await asyncio.wait_for(_next(agent), 5.0)
+    assert isinstance(item, JobUpdate) and item.done
+    assert item.items[0].returncode == 124 and item.items[0].timed_out
+
+
 async def test_labels_are_unique_among_running_jobs(agent):
     await agent.jobs.run("sleep 5", label="x")
     hint = (

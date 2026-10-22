@@ -304,6 +304,37 @@ def _throttle(items: int | None, seconds: float | None) -> Throttle | None:
     return Throttle(items=items, seconds=seconds)
 
 
+async def _stop_pumps(tasks: list[asyncio.Task]) -> None:
+    """Cancel a command's pipe readers and wait for them; never blocks on a queue."""
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def _reap(proc: asyncio.subprocess.Process) -> None:
+    """Wait for a (killed) command to end, reading and dropping what is left in its pipes.
+
+    Once the readers are stopped nobody reads the pipes, and asyncio's
+    ``proc.wait()`` also waits for them to close: a pipe left paused (its
+    buffer full) would make it wait forever.
+    """
+
+    async def discard(stream: asyncio.StreamReader | None) -> None:
+        if stream is None:
+            return
+        with contextlib.suppress(Exception):
+            while await stream.read(_CHUNK_BYTES):
+                pass
+
+    drains = [asyncio.create_task(discard(stream)) for stream in (proc.stdout, proc.stderr)]
+    try:
+        await proc.wait()
+    finally:
+        for drain in drains:
+            drain.cancel()
+        await asyncio.gather(*drains, return_exceptions=True)
+
+
 def _kill_group(proc: asyncio.subprocess.Process) -> None:
     if proc.returncode is not None:
         return
@@ -601,6 +632,9 @@ class JobsApi(Skill):
         queue: asyncio.Queue[tuple[str, str] | None] = asyncio.Queue(_QUEUE_ITEMS)
 
         async def pump(stream: asyncio.StreamReader, kind: str) -> None:
+            # The end marker is put only when the stream ends or fails, never
+            # on cancellation: then nobody reads the queue any more, and a put
+            # on a full queue would block the cleanup below forever.
             try:
                 async for line in bounded_lines(
                     stream,
@@ -608,8 +642,10 @@ class JobsApi(Skill):
                     chunk_bytes=_CHUNK_BYTES,
                 ):
                     await queue.put((kind, line))
-            finally:
+            except Exception:
                 await queue.put(None)
+                raise
+            await queue.put(None)
 
         async def feed() -> None:
             assert proc.stdin is not None and stdin is not None
@@ -654,16 +690,20 @@ class JobsApi(Skill):
                     timed_out = True
             if timed_out:
                 _kill_group(proc)
-                await proc.wait()
+                await _stop_pumps(tasks)
+                # Lines the pumps had already queued still go out.
+                while not queue.empty():
+                    entry = queue.get_nowait()
+                    if entry is not None:
+                        yield StreamEvent(kind=entry[0], text=entry[1])
+                await _reap(proc)
             code = 124 if timed_out else (proc.returncode or 0)
             yield StreamDone(kind="done", returncode=code, timed_out=timed_out)
         finally:
             _kill_group(proc)
-            for task in tasks:
-                task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
+            await _stop_pumps(tasks)
             with contextlib.suppress(Exception):
-                await proc.wait()
+                await _reap(proc)
 
     @hidden
     async def _run_job(
@@ -746,13 +786,15 @@ class JobsApi(Skill):
         failure: list[str] = []
 
         async def pump() -> None:
+            # _END is put when the source ends or fails, not on cancellation
+            # (from the finally below): nobody reads the inbox then, and a put
+            # on a full inbox would block that cleanup forever.
             try:
                 async for value in source:
                     await inbox.put(value)
             except Exception as exc:
                 failure.append(f"{type(exc).__name__}: {exc}")
-            finally:
-                await inbox.put(_END)
+            await inbox.put(_END)
 
         reader = asyncio.create_task(pump())
         batch: list[Any] = []
