@@ -195,7 +195,7 @@ async def test_a_child_with_an_unread_question_says_so_until_it_is_read(tmp_path
             ),
             cell(DONE),
         ],
-        {"asker": [cell("return_result(NeedInput(question='Which branch?', options=['main']))")]},
+        {"asker": [cell("return_result(NeedInput(question='Which branch?'))")]},
     )
     asked = calls[1].split("ASKED<<", 1)[1].split(">>", 1)[0]
     read = calls[1].split("READ<<", 1)[1].split(">>", 1)[0]
