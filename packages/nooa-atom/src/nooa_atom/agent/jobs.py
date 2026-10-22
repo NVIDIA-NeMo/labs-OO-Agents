@@ -969,8 +969,11 @@ class JobsApi(Skill):
         kept, after a ``[... N chars omitted]`` line. For the full output pass
         ``log_path=``: stdout and stderr are written there as lines arrive
         (interleaved; relative to the command's directory; overwritten), and
-        the done update and ``JobInfo`` carry the path. With ``items``/``seconds`` it also sends progress while running:
-        batches of output lines, ``JobUpdate.lines`` (stdout) and
+        the done update and ``JobInfo`` carry the path. In a pipe
+        (``cmd | tail``) the exit code is the last command's, so a failing
+        command can look green; use ``log_path=`` instead of piping into
+        ``tail``. With ``items``/``seconds`` it also sends progress while
+        running: batches of output lines, ``JobUpdate.lines`` (stdout) and
         ``JobUpdate.stderr_lines`` (see ``throttle``; a line is cut at 8,000
         chars); lines still batched when it ends arrive only in
         ``stdout``/``stderr``.
