@@ -1131,13 +1131,16 @@ def _format_instance_repr(
         # only keep types (classes), since those are intentional class-level tools.
         if callable(value) and not isinstance(value, type):
             continue
-        # Per-field spec(max_string=...) overrides the caller's default.
+        # Per-field spec(max_string=..., max_length=...) overrides the caller's default.
         field_max_string = _field_spec_override(obj_type, field.name, "max_string")
         if field_max_string is _MISSING:
             field_max_string = max_string
+        field_max_length = _field_spec_override(obj_type, field.name, "max_length")
+        if field_max_length is _MISSING:
+            field_max_length = max_length
         value_str = _format_value_to_str(
             value,
-            max_length=max_length,
+            max_length=field_max_length,
             max_string=field_max_string,
             max_depth=(max_depth - 1) if max_depth else None,
             expand_all=False,
@@ -1164,9 +1167,12 @@ def _format_instance_repr(
             field_max_string = _field_spec_override(obj_type, name, "max_string")
             if field_max_string is _MISSING:
                 field_max_string = max_string
+            field_max_length = _field_spec_override(obj_type, name, "max_length")
+            if field_max_length is _MISSING:
+                field_max_length = max_length
             value_str = _format_value_to_str(
                 value,
-                max_length=max_length,
+                max_length=field_max_length,
                 max_string=field_max_string,
                 max_depth=(max_depth - 1) if max_depth else None,
                 expand_all=False,
@@ -1388,13 +1394,16 @@ def _format_nested_instance(
     for name in field_names:
         if name in values:
             value = values[name]
-            # Per-field spec(max_string=...) overrides the caller's default.
+            # Per-field spec(max_string=..., max_length=...) overrides the caller's default.
             field_max_string = _field_spec_override(obj_type, name, "max_string")
             if field_max_string is _MISSING:
                 field_max_string = nested_max_string
+            field_max_length = _field_spec_override(obj_type, name, "max_length")
+            if field_max_length is _MISSING:
+                field_max_length = nested_max_length
             value_str = _format_value_to_str(
                 value,
-                max_length=nested_max_length,
+                max_length=field_max_length,
                 max_string=field_max_string,
                 max_depth=(max_depth - 1) if max_depth else None,
                 expand_all=False,

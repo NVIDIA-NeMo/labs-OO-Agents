@@ -124,7 +124,7 @@ class Spec:
         ] = None,
         max_length: Annotated[
             int | None,
-            "Override max items per container in pformat — parameter annotations only, e.g. Annotated[list, spec(max_length=20)] (not honored on class fields)",
+            "Override max items per container in pformat for this annotation (parameter annotation or class field), e.g. Annotated[list, spec(max_length=20)]",
         ] = _SENTINEL,
         max_string: Annotated[
             int | None,
