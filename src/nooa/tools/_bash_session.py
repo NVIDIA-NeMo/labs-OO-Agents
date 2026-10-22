@@ -382,6 +382,48 @@ class BashSession:
         async with self._lock:
             return await self._run_unlocked(command, timeout)
 
+    def is_busy(self) -> bool:
+        """True while a command runs in the session or bash is starting.
+
+        A ``run()`` started now would wait for that to finish.
+        """
+        return self._lock.locked() or self._start_lock.locked()
+
+    async def snapshot_cwd_env(self, timeout: float = 5.0) -> tuple[str, dict[str, str]] | None:
+        """The session's current directory and exported environment, if it is idle.
+
+        Returns ``None`` without waiting or starting bash when the session is
+        not started yet, is busy (``is_busy()``), or the capture fails or
+        takes longer than ``timeout``. The capture runs as one command in the
+        session and changes nothing in it.
+        """
+        self._ensure_lock_on_current_loop()
+        if not self._ready or self.is_busy():
+            return None
+        try:
+            async with self._lock:
+                out, _err, code, timed_out = await self._run_unlocked(
+                    'printf "%s\\n" "$PWD"; env -0 | base64 | tr -d "\\n"', timeout
+                )
+        except Exception:
+            return None
+        if code != 0 or timed_out:
+            return None
+        first, _, encoded = out.partition("\n")
+        try:
+            raw = base64.b64decode(encoded.strip())
+        except ValueError:
+            return None
+        env: dict[str, str] = {}
+        for entry in raw.split(b"\0"):
+            key, sep, value = entry.partition(b"=")
+            if sep and key:
+                env[key.decode(errors="replace")] = value.decode(errors="replace")
+        cwd = first.strip()
+        if not cwd or not env:
+            return None
+        return cwd, env
+
     async def _run_unlocked(self, command: str, timeout: float) -> tuple[str, str, int, bool]:
         """Actual run implementation (caller must hold self._lock).
 

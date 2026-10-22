@@ -26,15 +26,17 @@ def test_no_cheat_sheet_with_empty_channels(names):
     assert "shutdown" not in status
 
 
-def test_cheat_sheet_appears_with_extra_channels():
-    """Cheat sheet appears when channels beyond user_messages exist."""
+def test_status_never_names_the_hidden_queue_manager():
+    """Pending items on extra channels are shown, but no queue_manager commands."""
     qm = QueueManager()
     qm.queue("user_messages")
     ch = qm.queue("ci_monitor")
     ch.put("some status line")
     status = qm.status()
-    assert "remove_channel" in status
     assert "ci_monitor" in status
+    assert "queue_manager" not in status
+    assert "remove_channel" not in status
+    assert "shutdown" not in status
 
 
 def test_cheat_sheet_lists_extra_channel_names():
@@ -48,16 +50,6 @@ def test_cheat_sheet_lists_extra_channel_names():
     status = qm.status()
     assert "pipeline_a" in status
     assert "pipeline_b" in status
-
-
-def test_cheat_sheet_mentions_shutdown():
-    """Cheat sheet includes shutdown as the nuclear option."""
-    qm = QueueManager()
-    qm.queue("user_messages")
-    ch = qm.queue("ci")
-    ch.put("line")
-    status = qm.status()
-    assert "shutdown" in status
 
 
 def test_no_cheat_sheet_when_no_channels():
@@ -78,12 +70,7 @@ def test_status_populated_formatting_unchanged_then_drained():
     monitor.put("ok")
 
     assert qm.status(max_items=1) == (
-        "user_messages: 2 pending\n"
-        "  1. first\n"
-        "  … 1 more\n"
-        "ci_monitor: 1 pending\n"
-        "  1. ok\n"
-        "💡 self.queue_manager.remove_channel('ci_monitor') | .shutdown()"
+        "user_messages: 2 pending\n  1. first\n  … 1 more\nci_monitor: 1 pending\n  1. ok"
     )
     assert messages.drain() == ["first", "second"]
     assert monitor.drain() == ["ok"]
@@ -109,7 +96,7 @@ async def test_active_spawns_shown_when_queues_empty():
     await asyncio.sleep(0.05)
 
     status = qm.status()
-    assert "active background job" in status
+    assert "Background work:" in status
     assert "ci_monitor" in status
     assert "running" in status
 
@@ -122,4 +109,4 @@ def test_no_active_spawns_shown_when_none_running():
     qm = QueueManager()
     qm.queue("user_messages")
     status = qm.status()
-    assert "active background job" not in status
+    assert "Background work:" not in status
