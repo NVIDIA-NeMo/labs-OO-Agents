@@ -1,6 +1,6 @@
 ---
 name: nooa-channels
-description: Reactive input for NOOA agents — Channel/QueueManager for queued and event-mode input, race() turn dispatch, spawn() background jobs with JobHandle, and the model-facing self.jobs API on interactive agents (background commands, file tails, timers, ticks). Use when an agent must react to external input mid-run — user messages, CI output, timers, job completions — or when building an interactive/long-running agent loop.
+description: Reactive input for NOOA agents — Channel/QueueManager for queued and event-mode input, race() turn dispatch, spawn() background jobs with JobHandle, and Atom's model-facing self.jobs API built on it (background commands, file tails, timers, ticks). Use when an agent must react to external input mid-run — user messages, CI output, timers, job completions — or when building an interactive/long-running agent loop.
 compatibility: nooa package
 ---
 
@@ -64,9 +64,10 @@ qm.spawn(fetch_report(url), channel="reports")             # coroutine: one put 
 - Lifecycle events: `StreamEnd(channel_name=...)` when a job finishes is a runtime event (subscribe with `event_manager.on("StreamEnd", ...)`; never recorded or shown to the model); `JobError(channel_name, error_type, error_message)` on failure goes to the event log and is also put on the data channel so `race()` wakes the agent to react.
 - `JobHandle`: `.state` (`running/done/cancelled/failed`), `await handle.cancel()` (awaits generator `finally` cleanup), `.values` (buffered outputs — `buffer=True` unbounded, `buffer=N` ring of last N, default off).
 
-## `self.jobs` — the model-facing view (interactive agents)
+## `self.jobs` — a model-facing view built on `spawn()` (Atom)
 
-`InteractiveAgent` registers a `jobs` queue channel and exposes `self.jobs` (`nooa.runtime.jobs.JobsApi`), built on `spawn()`. Every item it delivers is a `JobUpdate` with `.label`, so a turn can end with `Waiting(on=["jobs:<label>"])` and read `notification["jobs"]`. In Atom one name works for both kinds of background work: `Waiting(on=["<name>"])` takes a running job's label or a child session's name (a name that is both is rejected; use `jobs:<label>` or the child's id), and the per-turn status lists jobs and live children together under "Background work". Exactly one update with `done=True` ends each job; its result is `items[0]` (a `ShellResult` for `run`, a coroutine's return value, `after`'s payload).
+The Atom agent (`nooa_atom.agent.agent.AtomAgent`) registers a `jobs` queue channel and exposes `self.jobs` (`nooa_atom.agent.jobs.JobsApi`), built on `spawn()`; core `InteractiveAgent` has no `self.jobs`. Every item it delivers is a `JobUpdate` with `.label`, so a turn can end with `Waiting(on=["jobs:<label>"])` and read `notification["jobs"]`. One name works for both kinds of background work: `Waiting(on=["<name>"])` takes a running job's label or a child session's name (a name that is both is rejected; use `jobs:<label>` or the child's id), and the per-turn status lists jobs and live children together under "Background work". Exactly one update with `done=True` ends each job; its result is `items[0]` (a `ShellResult` for `run`, a coroutine's return value, `after`'s payload).
+
 
 ```python
 await self.jobs.run("uv run pytest -q", label="tests")       # own bash process; one done update (items[0] is the ShellResult)

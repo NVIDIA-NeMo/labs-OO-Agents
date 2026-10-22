@@ -11,9 +11,9 @@ import tracemalloc
 from pathlib import Path
 
 import pytest
+from nooa_atom.agent.jobs import JobsApi, JobUpdate
 
 from nooa.runtime.channels import QueueManager
-from nooa.runtime.jobs import JobsApi, JobUpdate
 from nooa.tools._results import StreamEvent
 from nooa.tools.shell_tools import ShellResult, ShellTools
 
@@ -28,7 +28,7 @@ class _Agent:
         self.queue_manager.queue("jobs")
         self.shell = ShellTools(cwd=str(cwd)) if shell else None
         self.cwd = cwd
-        self._jobs_running: dict = {}  # set by InteractiveAgent.__init__
+        self._jobs_running: dict = {}  # set by AtomAgent.__init__
 
 
 @pytest.fixture
@@ -705,13 +705,27 @@ async def test_status_has_no_queue_manager_cancel_hint_for_skill_channels():
 
 
 async def test_jobs_running_at_a_snapshot_are_reported_once_after_restore(tmp_path):
+    from nooa_atom.agent.jobs import JobsLost
+
     from nooa.interactive import InteractiveAgent
-    from nooa.runtime.jobs import JobsLost
     from nooa.storage.snapshot import AgentSnapshot
     from nooa.unifiedllm import FakeLLMClient
 
     class Host(InteractiveAgent, llm=FakeLLMClient()):
-        pass
+        """A minimal interactive agent that installs JobsApi, as AtomAgent does."""
+
+        jobs: JobsApi
+        _jobs_running: dict
+
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self._jobs_in = self.queue_manager.queue("jobs")
+            self._jobs_running = {}
+            self.jobs = JobsApi(self)
+
+        def after_restore(self) -> None:
+            super().after_restore()
+            self.jobs.after_restore()
 
     old = Host(llm=FakeLLMClient())
     await old.jobs.run("sleep 30", label="tests", description="full run")
@@ -902,7 +916,7 @@ async def test_tail_caps_a_5mb_line(agent, tmp_path):
 
 
 def test_status_line_shows_age_while_running_and_pending_above_zero():
-    from nooa.runtime import jobs as jobs_mod
+    from nooa_atom.agent import jobs as jobs_mod
 
     assert jobs_mod._age(jobs_mod._now()) in ("0s", "1s")
     old = (datetime.datetime.now() - datetime.timedelta(minutes=65)).isoformat(timespec="seconds")

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Agent-facing JobsApi: run long work in the background, by label.
 
-``JobsApi`` is attached to interactive agents as ``self.jobs``. It runs
+``JobsApi`` is attached to the Atom agent as ``self.jobs``. It runs
 shell commands in their own bash processes (not the agent's persistent
 shell session) and arbitrary coroutines or async iterators, and delivers
 their output on the agent's ``jobs`` queue channel. The channel registry
@@ -40,8 +40,7 @@ from nooa.agentdoc import (
 )
 from nooa.context_blocks import EventBase
 from nooa.skill import Skill
-from nooa.tools._results import StreamDone, StreamEvent
-from nooa.tools.shell_tools import ShellResult
+from nooa.tools import ShellResult, StreamDone, StreamEvent
 
 if TYPE_CHECKING:
     from nooa.runtime.channels import Channel, JobHandle, QueueManager

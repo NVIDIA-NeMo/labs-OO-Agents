@@ -11,9 +11,9 @@ from nooa_atom.agent.conditions import (
     WaitingTargetNotRunning,
     check_waiting_targets,
 )
+from nooa_atom.agent.jobs import JobsApi, JobUpdate
 
 from nooa.interactive import Waiting
-from nooa.runtime.jobs import JobsApi, JobUpdate
 from nooa.unifiedllm import FakeLLMClient
 
 TIMEOUT = 15.0
@@ -76,11 +76,10 @@ async def test_jobs_use_the_agent_shell_directory_and_exports(agent, tmp_path):
 async def test_a_resumed_session_reports_jobs_that_did_not_survive(tmp_path, sessions_dir):
     """Jobs running at the last checkpoint come back as one JobsLost event."""
     from atom_test_agents import ATOM_SPEC, AtomModels
+    from nooa_atom.agent.jobs import JobsLost
     from nooa_atom.session.options import SessionOptions
     from nooa_atom.session.registry import SessionRegistry
     from nooa_atom.session.store import SessionStore
-
-    from nooa.runtime.jobs import JobsLost
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()

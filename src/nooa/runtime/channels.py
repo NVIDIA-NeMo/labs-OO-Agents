@@ -141,7 +141,7 @@ class JobHandle:
         self.label = label or name
         self.state: JobState = "running"
         # Optional one-line summary for ``QueueManager.status()``, set by the
-        # API that owns the job (``self.jobs``); called at render time.
+        # model-facing API that owns the job; called at render time.
         self.describe: Callable[[], str] | None = None
         self._task = task
         if buffer is True:
@@ -732,10 +732,10 @@ class QueueManager:
         """Show ``hint`` once under "Background work" while jobs on ``channel`` run.
 
         One plain line naming the call with a placeholder, e.g.
-        ``"Cancel a job: await self.jobs.cancel('<label>')"``; the labels
+        ``"Stop a monitor: await self.ci.stop('<label>')"``; the labels
         are already in the list above it.
 
-        For channels owned by a model-facing API (``self.jobs``): ``status()``
+        For channels owned by a model-facing API: ``status()``
         then names that API instead of the hidden ``queue_manager`` and does
         not offer the channel for removal.
         """

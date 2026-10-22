@@ -14,7 +14,7 @@ These are instructions *for coding agents about the framework* — not `nooa.Ski
 | [`nooa-agentdoc`](nooa-agentdoc/SKILL.md) | Making types render beautiful docs for the LLM: `doc()`, `spec()`, `hidden`, `Annotated` descriptions, `pformat`/`pprint` tuning |
 | [`nooa-context-and-state`](nooa-context-and-state/SKILL.md) | Context blocks, event history and `EventQuery`, history summarization, persistence and memory |
 | [`nooa-tools-and-skills`](nooa-tools-and-skills/SKILL.md) | Methods as tools, built-in tools (`ShellTools`/`TodoManager`), MCP integration, agent skills (`Skill`/`TextSkill`), multimodal media |
-| [`nooa-channels`](nooa-channels/SKILL.md) | Reactive input: Channel/QueueManager, race() dispatch loops, spawn() background jobs, the `self.jobs` API |
+| [`nooa-channels`](nooa-channels/SKILL.md) | Reactive input: Channel/QueueManager, race() dispatch loops, spawn() background jobs, Atom's `self.jobs` API |
 | [`nooa-self-extending`](nooa-self-extending/SKILL.md) | Agent-authored code: persistent skill libraries (self.libs), in-cell helpers and standalone @strategy sub-calls, @slash_command |
 | [`nooa-middleware-hooks`](nooa-middleware-hooks/SKILL.md) | Intercepting execution: middleware (`intercept()` guardrails/transforms/blocking), event observers (`on()`), InstrumentationHooks protocol |
 | [`nooa-capturing-traces`](nooa-capturing-traces/SKILL.md) | Capturing traces: auto-tracing, `enable_tracing` + exporters (jsonl/otlp/langfuse/journal), `@no_trace`, span model, env vars |

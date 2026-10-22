@@ -35,7 +35,6 @@ from pydantic import (
 from nooa import hidden, strategy
 from nooa.agentdoc import (
     doc,  # noqa: F401  # visible in the REPL, as on base
-    spec,
 )
 from nooa.context_blocks import Metadata
 from nooa.context_blocks.roles import Role
@@ -59,8 +58,6 @@ import asyncio  # noqa: F401
 import datetime  # noqa: F401
 import json  # noqa: F401
 import re  # noqa: F401
-
-from nooa.runtime.jobs import JobInfo, JobsApi, JobUpdate  # noqa: F401
 
 # Optional third-party libraries — visible in REPL (use np, pd, px, go directly)
 try:
@@ -194,9 +191,8 @@ class NeedInput(BaseModel):
 class Waiting(BaseModel):
     """Turn result: waiting on a background job or queue, not on a person.
 
-    ``on`` lists what is being waited on by name: a queue channel
-    (``"delegates"``, ``"jobs"``), a spawned job's label, a subagent's name.
-    ``explanation`` says why, for the host. ``message`` is an optional line
+    ``on`` lists what is being waited on by name: queue channels or names
+    the host defines. ``explanation`` says why, for the host. ``message`` is an optional line
     the host shows the user. The host keeps the request open and runs the
     next turn when one of them delivers.
     """
@@ -204,7 +200,8 @@ class Waiting(BaseModel):
     explanation: str = Field(description="Why the turn is waiting")
     message: str | None = Field(default=None, description="Line to show the user while waiting")
     on: list[str] = Field(
-        min_length=1, description="Names of the channels, jobs or subagents being waited on"
+        min_length=1,
+        description="Names of what is being waited on: queue channels or names the host defines",
     )
 
     _check_explanation = field_validator("explanation")(_non_blank)
@@ -476,8 +473,7 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
 
     **Input queues.** Every ``InteractiveAgent`` has a ``self.user_messages``
     queue that the host feeds when the human types. Subclasses may declare
-    additional queues as instance attributes for other producers
-    (``self.jobs`` output arrives on ``jobs``).
+    additional queues as instance attributes for other producers.
 
     Each queue is two objects: a ``Channel`` (full producer + dispatcher
     API, hidden from the LLM under ``_<name>_in``) and a ``ChannelReader``
@@ -505,17 +501,6 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
     # Read-only facade (just .get() / .status() / .name) is what the
     # LLM sees as ``self.user_messages``.
     user_messages: Annotated[ChannelReader, nosnapshot]
-    # Background jobs (``self.jobs``): the model-facing view of
-    # ``queue_manager.spawn``. Their results arrive on the ``jobs`` channel.
-    _jobs_in: Annotated[Channel, hidden, nosnapshot]
-    jobs: Annotated[
-        JobsApi,
-        nosnapshot,
-        spec(description='Background commands and timers; results arrive in notification["jobs"]'),
-    ]
-    # label -> small record of each running job, saved with the snapshot so a
-    # resumed session can report the jobs that did not survive (JobsApi).
-    _jobs_running: Annotated[dict, hidden]
     # Persistent variables for the LLM — survives across turns AND
     # across sessions (snapshot-backed). Accessed via the ``self.v``
     # proxy for dot-attribute reads/writes (``self.v.spec = "..."``).
@@ -530,9 +515,6 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
         self.user_messages = self._user_messages_in.reader
         self.event_manager.on_close(self.queue_manager.shutdown)
         self.turns = TurnLoop(self)
-        self._jobs_in = self.queue_manager.queue("jobs")
-        self._jobs_running = {}
-        self.jobs = JobsApi(self)
         # Surface pending-queue counts (and a short preview of each item)
         # to the LLM every turn — the agent reads queue depth straight
         # from the ``queues`` context block. Composed via
@@ -568,10 +550,8 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
     def after_restore(self) -> None:
         """Called by a host after it restores a snapshot into this agent.
 
-        Reports, once, the ``self.jobs`` jobs that were running when the saved
-        session stopped (a ``JobsLost`` event); they did not survive.
+        Subclasses extend it to repair state that did not survive the restart.
         """
-        self.jobs.after_restore()
         # A snapshot from before the queues block stopped naming the hidden
         # queue_manager restores the old expression; put the current one back.
         from nooa import Context
@@ -610,10 +590,6 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
 
     def message(self, text: str, *, echo: bool = False) -> None:
         """Send a Markdown message to the user.
-
-        In a child session the text goes to the parent instead, as a
-        ``ChildMessage`` on its ``delegates`` channel: a progress note, not
-        the child's result.
 
         Each call renders as an independent block — so every call must be a
         complete, self-contained Markdown document.  In particular, never split
@@ -699,10 +675,10 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
 
         - ``Waiting(message=..., explanation=..., on=[...])`` — waiting on a
           background job or queue, not on a person. ``message`` is shown to
-          the user; ``on`` names what you wait for: a channel, a job label,
-          a subagent::
+          the user; ``on`` names what you wait for, such as a queue
+          channel::
 
-              return_result(Waiting(message="Tests are running; I will report when they finish.", explanation="tests running", on=["jobs:ci-42"]))
+              return_result(Waiting(message="CI is running; I will report when it finishes.", explanation="CI running", on=["ci"]))
 
         ## Available queues
 
@@ -715,8 +691,6 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
         Recognized ``queue_name`` values:
 
         - ``"user_messages"`` — text from the human; ``item`` is a str.
-        - ``"jobs"`` — output of ``self.jobs`` background jobs: ``JobUpdate``
-          items with a ``.label``; the one with ``done=True`` ends the job.
 
         Hosts declare the rest. ``CodingAgent`` adds ``"slash_commands"``
         (``SlashCommandResult``) and ``"system_messages"`` (host-owned

@@ -19,13 +19,13 @@ from nooa.interactive import (
     install_summarizer,
 )
 from nooa.paths import get_project_dir
-from nooa.runtime.jobs import JobInfo, JobUpdate  # noqa: F401  (visible to cells)
 from nooa.storage.markers import nosnapshot
 from nooa.strategies import CodeActV2, PredictStrategy
 from nooa.tools import MethodWriting, SkillWriting, Todo, TodoManager
 from nooa.tools.shell_tools import ShellTools
 from nooa_atom.agent.activity import ActivityShellTools
 from nooa_atom.agent.instructions import render_agent_instructions
+from nooa_atom.agent.jobs import JobInfo, JobsApi, JobUpdate  # noqa: F401  (visible to cells)
 from nooa_atom.agent.slash_commands import SlashCommandRegistry
 
 # Visible to generated cells (cells see this module's globals): the model
@@ -170,6 +170,15 @@ class AtomAgent(InteractiveAgent):
     _summarizers: Annotated[list[Any], hidden, nosnapshot]
     _delegates_in: Annotated[Any, hidden, nosnapshot]
     delegates: Annotated[ChannelReader, nosnapshot]
+    # Background jobs (``self.jobs``): the model-facing view of
+    # ``queue_manager.spawn``. Their results arrive on the ``jobs`` channel.
+    # JobsApi is a Skill, so it is never snapshotted; its doc line is set
+    # with spec() below the class (this module postpones annotations).
+    _jobs_in: Annotated[Channel, hidden, nosnapshot]
+    jobs: JobsApi
+    # label -> small record of each running job, saved with the snapshot so a
+    # resumed session can report the jobs that did not survive (JobsApi).
+    _jobs_running: Annotated[dict, hidden]
     # The Session port, installed by the session that runs this agent. The
     # model uses the flat delegation methods below, not the port.
     session: Annotated[SessionPort | None, hidden, nosnapshot]
@@ -198,6 +207,9 @@ class AtomAgent(InteractiveAgent):
         # The Session port finds this channel and does not declare its own.
         self._delegates_in = self.queue_manager.queue("delegates")
         self.delegates = self._delegates_in.reader
+        self._jobs_in = self.queue_manager.queue("jobs")
+        self._jobs_running = {}
+        self.jobs = JobsApi(self)
         self.todo = TodoManager()
         # Libraries live at <project>/.nooa/libs. get_project_dir() resolves
         # that per process, which is what a one-workspace host like the TUI
@@ -395,6 +407,28 @@ class AtomAgent(InteractiveAgent):
             raise KeyError(f"no child named {name!r}; open children: {names}")
         raise KeyError(f"{len(found)} open children are named {name!r}: use its id")
 
+    def message(self, text: str, *, echo: bool = False) -> None:
+        """Send a Markdown message to the user.
+
+        In a child session the text goes to the parent instead, as a
+        ``ChildMessage`` on its ``delegates`` channel: a progress note, not
+        the child's result.
+
+        Each call renders as an independent block — so every call must be a
+        complete, self-contained Markdown document.  In particular, never split
+        a table across calls: the header row and all data rows must be in the
+        same ``message()`` call, otherwise the table will not render correctly.
+
+        Args:
+            text: Markdown content to send.
+            echo: If True, also ``print()`` the text so the LLM can see it
+                in the execution output. By default the LLM does NOT see the
+                content of ``message()`` calls — only the user does. Use
+                ``echo=True`` when you need to reference the sent content in
+                subsequent cells.
+        """
+        super().message(text, echo=echo)
+
     @hidden
     @no_trace
     def _queue_status(self) -> str:
@@ -407,10 +441,15 @@ class AtomAgent(InteractiveAgent):
 
     @hidden
     def after_restore(self) -> None:
-        """Called by the session registry after it restores a snapshot into this agent."""
+        """Called by the session registry after it restores a snapshot into this agent.
+
+        Reports, once, the ``self.jobs`` jobs that were running when the saved
+        session stopped (a ``JobsLost`` event); they did not survive.
+        """
         from nooa_atom.workspace.options import drop_stale_memory_context
 
-        super().after_restore()  # reports self.jobs jobs that did not survive
+        super().after_restore()
+        self.jobs.after_restore()
         drop_stale_memory_context(self)
         self.skills.after_restore()
 
@@ -764,6 +803,11 @@ class AtomAgent(InteractiveAgent):
 
 # A ClassVar's Annotated metadata is not read by agentdoc; hide it explicitly.
 spec(AtomAgent, "session_port_visible", hidden=True)
+spec(
+    AtomAgent,
+    "jobs",
+    description='Background commands and timers; results arrive in notification["jobs"]',
+)
 
 
 @hidden

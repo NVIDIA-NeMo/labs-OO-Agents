@@ -180,7 +180,6 @@ async def test_standalone_aclose_stops_turn_and_jobs(agent):
 async def test_event_only_wakes_once_and_channel_removal_has_no_lost_wake(agent):
     qm = agent.queue_manager
     qm.remove_channel("user_messages")
-    qm.remove_channel("jobs")  # every interactive agent has one
     events = qm.event("events")
     events.put("before start")
     agent.turns.start()
@@ -386,7 +385,6 @@ async def test_pending_event_wake_after_final_removal_ends_instead_of_empty_turn
     entered, release = asyncio.Event(), asyncio.Event()
     qm = agent.queue_manager
     qm.remove_channel("user_messages")
-    qm.remove_channel("jobs")  # every interactive agent has one
     channel = qm.event("events")
 
     async def prepare():
