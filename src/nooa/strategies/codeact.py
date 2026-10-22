@@ -716,6 +716,7 @@ Standard Python builtins and agent instance (`self`) are available."""
         names = ", ".join(f"`{name}`" for name in self._always_available_builtins())
         return (
             f"Always available without import: {names}, plus stdlib `asyncio` and `typing`. "
+            "`doc(x)` returns its text instead of printing it: use `print(doc(x))`. "
             + " ".join(self.SHOW_NOTE_LINES)
         )
 
