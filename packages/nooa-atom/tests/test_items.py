@@ -248,3 +248,52 @@ def test_delegate_items_name_their_child_as_status_source():
     ):
         assert item.status_source() == "probe"  # the sender only, never the content
         assert not hasattr(item, "status_preview")
+
+
+def test_child_items_are_flat_with_the_child_last():
+    from nooa_atom.session.items import ChildMessage
+
+    from nooa.agentdoc import pformat
+
+    ref = _CHILD.model_copy(update={"path": "/root/review"})
+    done = Done(
+        explanation="reviewed",
+        evidence=[f"e{i}" for i in range(8)],
+        result=TaskResult(
+            solution_description="s", evidence="ev", how_to_verify="h", report="R" * 4_800
+        ),
+    )
+    result = ChildResult(child=ref, done=done)
+    assert (result.name, result.path, result.summary) == ("Review auth", "/root/review", "reviewed")
+    assert result.report == "R" * 4_800 and result.result == done.result
+    assert result.evidence == done.evidence and result.done == done
+    for item in (
+        result,
+        ChildQuestion(child=ref, question="q?"),
+        ChildFailed(child=ref, error="boom"),
+        ChildMessage(child=ref, text="note"),
+    ):
+        assert list(type(item).model_fields)[-1 if item is not result else -2] == "child"
+        assert item.path == "/root/review" and item.status_source() == "/root/review"
+    rendered = pformat({"delegates": [result]}, max_string=100_000, max_length=100, max_depth=10)
+    assert "report=str(len=4800" in rendered and "evidence=list(len=8" in rendered
+    assert "done=" not in rendered  # kept for delegate(), hidden from the display
+    assert len(rendered) < 3_000
+
+
+def test_a_child_result_report_falls_back_to_the_done_message():
+    result = ChildResult(child=_CHILD, done=Done(explanation="x", message="hello"))
+    assert result.report == "hello" and result.result is None and result.path == "Review auth"
+
+
+def test_a_child_result_dumps_child_and_done_only_and_loads_old_records():
+    done = Done(
+        explanation="ok",
+        result={"solution_description": "s", "evidence": "e", "how_to_verify": "v", "report": "r"},
+    )
+    result = ChildResult(child=_CHILD, done=done)
+    assert isinstance(result.result, TaskResult) and result.report == "r"
+    dumped = result.model_dump(mode="json")
+    assert set(dumped) == {"child", "done"}  # the flat fields are derived on load
+    again = ChildResult.model_validate(dumped)
+    assert again == result and again.report == "r"

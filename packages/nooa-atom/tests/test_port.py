@@ -562,7 +562,7 @@ async def test_a_wait_cut_short_leaves_the_result_for_the_delegates_channel(
         ),
         cell(
             "[item] = notification['delegates']\n"
-            "return_result(Done(explanation='late: ' + item.done.explanation))"
+            "return_result(Done(explanation='late: ' + item.summary))"
         ),
     ]
     models.scripts["slow"] = [cell(BLOCKING_CELL), work_done("slow result")]
@@ -585,7 +585,7 @@ async def test_a_plain_interactive_agents_kept_child_returns_a_task_result(
         cell(
             "child = await self.session.delegate('Worker', 'do it', kept=True, name='worker')\n"
             "r = await child.wait()\n"
-            "return_result(Done(explanation=type(r.done.result).__name__ + ': ' + r.done.result.report))"
+            "return_result(Done(explanation=type(r.result).__name__ + ': ' + r.report))"
         )
     ]
     models.scripts["worker"] = [

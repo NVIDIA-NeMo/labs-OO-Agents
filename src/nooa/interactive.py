@@ -234,7 +234,7 @@ def require_task_result(agent: Any, result: Any, call: Any) -> None:
     """Reject a worker ``Done`` whose ``result`` is not a ``TaskResult``, and a one-shot question.
 
     The postcondition of every worker turn (``handle_work``). A worker's
-    parent reads ``done.result``; ``self.message()`` text reaches it only as
+    parent reads it as ``ChildResult.result``; ``self.message()`` text reaches it only as
     progress notes. A dict that validates as a ``TaskResult`` is accepted
     (the parent receives it as one). A one-shot worker may not ask: its
     session port says so (``agent.session.may_ask``).

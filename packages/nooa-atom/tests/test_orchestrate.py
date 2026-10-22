@@ -190,13 +190,13 @@ async def test_an_orchestrating_root_leaves_children_open_for_the_host_to_close(
         cell(
             "[item] = notification['delegates']\n"
             "assert isinstance(item, ChildResult) and item.child.id == self.v.child.id\n"
-            "self.todo.comment(self.v.todo_id, 'first try: ' + item.done.explanation)\n"
+            "self.todo.comment(self.v.todo_id, 'first try: ' + item.summary)\n"
             "await self.v.child.send('FEEDBACK: the empty-input case still fails')\n"
             "return_result(Waiting(explanation='follow-up running', on=['delegates']))"
         ),
         cell(
             "[item] = notification['delegates']\n"
-            "assert item.done.explanation == 'fixed the empty case'\n"
+            "assert item.summary == 'fixed the empty case'\n"
             "[ref] = self.children()\n"
             "assert ref.status != 'closed', ref.status\n" + RESULT
         ),

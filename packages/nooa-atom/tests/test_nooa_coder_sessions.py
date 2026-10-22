@@ -76,7 +76,7 @@ async def test_the_root_loads_as_an_atom_agent_with_its_saved_state(workspace, c
         )
         assert isinstance(agent.v.child, ChildRef)
         assert isinstance(agent.v.review, ChildResult)
-        assert agent.v.review.done.result.report == "REPORT: off-by-one fixed"
+        assert agent.v.review.report == "REPORT: off-by-one fixed"
         # Older children were named by their description: one that is not an
         # identifier gets child_<n> (its place among the children), by load.
         names = {ref.name for ref in agent.children()}
