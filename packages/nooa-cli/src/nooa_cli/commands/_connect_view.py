@@ -235,6 +235,10 @@ def media_test_detail(kind, record, *, media_inputs=None):
         return f"{media_label(kind).removesuffix('s')} check skipped" + (
             ": " + check_reason(record["reason"]) if record.get("reason") else ""
         )
+    if outcome == "rejected" and record.get("client") != "decision":
+        return (
+            f"Not available · This model doesn't accept {media_label(kind).lower()}; it stays off."
+        )
     reason = record.get("reason", "").removesuffix(f"; {kind} support was not confirmed")
     if record.get("client") == "decision" and not record.get("error"):
         if record.get("attachment_observed") is False:
@@ -422,6 +426,8 @@ def check_outcome(name, record, status):
         return "Skipped"
     if outcome == "unavailable" or outcome == "warning" and not record.get("error"):
         return "Not available"
+    if name.startswith("media:") and outcome == "rejected":
+        return "Not available"  # The model refused this format; it simply stays off.
     if (
         name == "reasoning_retention"
         and outcome == "not_confirmed"

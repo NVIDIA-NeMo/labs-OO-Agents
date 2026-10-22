@@ -2913,12 +2913,18 @@ def save_model(state: WizardState) -> bool:
     connect.configure_entry(state.result.entry)  # local policy gate before any save side effect
     tested_media_inputs = list(state.result.entry.get("media_inputs", []))
     media_facts = state.result.entry.get("provenance", {}).get("probes", {})
+    enabled_now = state.result.entry.get("media_inputs", [])
     all_passed = bool(state.test_media_inputs) and all(
-        media_facts.get(f"media:{kind}", {}).get("outcome") == "passed"
-        and kind in state.result.entry.get("media_inputs", [])
+        (media_facts.get(f"media:{kind}", {}).get("outcome") == "passed" and kind in enabled_now)
+        or (
+            media_facts.get(f"media:{kind}", {}).get("outcome") == "rejected"
+            and kind not in enabled_now
+        )
         for kind in state.test_media_inputs
     )
-    # Nothing to decide when every tested format passed and is enabled.
+    # Nothing to decide when every tested format either passed (and is on) or
+    # was refused by the server (and is off). If the model only said it couldn't
+    # see a sample, the user may still choose to enable that format.
     if not state.yes and state.test_media_inputs and not all_passed:
         action = prompts.review_media_inputs(state.result.entry["media_inputs"])
         if action == "manual":

@@ -619,7 +619,12 @@ def test_format_budget_shows_small_values_as_is():
             "attention",
             "Service returned HTTP 400; image support was not confirmed",
         ),
-        ("rejected", "Failed", "attention", "Provider explicitly rejected this media request"),
+        (
+            "rejected",
+            "Not available",
+            "attention",
+            "Provider explicitly rejected this media request",
+        ),
         ("not_probed", "Skipped", "skipped", "budget exhausted"),
         (
             "inconclusive",
@@ -645,7 +650,7 @@ def test_media_labels_keep_classification_and_safe_reasons(outcome, label, statu
     assert result.exit_code == 0, result.output
     expected = {
         "passed": "Passed",
-        "rejected": "Failed · Server rejected the media request; Images: not confirmed.",
+        "rejected": "Not available · This model doesn't accept images; it stays off.",
         "not_probed": "Skipped · Image check skipped: check budget used up",
     }.get(
         outcome,
