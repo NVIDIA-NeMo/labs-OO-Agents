@@ -69,6 +69,19 @@ def test_none_content_normalizes_to_empty_public_text() -> None:
     assert LLMResponse(content=None).content == ""
 
 
+def test_content_separates_text_parts_with_newlines() -> None:
+    """Separate assistant messages stay readable; empty placeholder parts add nothing."""
+    response = LLMResponse(
+        parts=(
+            AssistantText(text="Checking Paris."),
+            AssistantText(text=""),
+            AssistantText(text="Checking Oslo."),
+        )
+    )
+
+    assert response.content == "Checking Paris.\nChecking Oslo."
+
+
 def test_opaque_state_is_not_searchable() -> None:
     manager = EventManager()
     response = LLMResponse(

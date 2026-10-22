@@ -112,7 +112,7 @@ def render(response, state="live 1", formatter=None):
 def test_exact_order_and_derived_views():
     response = turn()
     assert project_turn(response, SCOPE) == output_items()
-    assert response.content == "Before.Between."
+    assert response.content == "Before.\nBetween."
     assert response.reasoning == "think first\nthen think"
     assert [call.id for call in response.tool_calls] == ["call_1", "call_2"]
     data = response.model_dump()
@@ -252,7 +252,7 @@ def test_renderer_keeps_reference_and_truncation_replaces_without_native_state()
     assert replacement["content"] == "Bef"
     resolved = [replacement]
     assert isinstance(resolved[0], dict)
-    assert original.content == "Before.Between."
+    assert original.content == "Before.\nBetween."
 
 
 def test_renderer_drops_incomplete_calls_as_a_state_stripping_edit():
@@ -601,7 +601,7 @@ def test_search_retains_response_metadata_without_native_parts():
     assert "searchable-model" in text
     assert "tool_calls" in text
     assert "think first" in text
-    assert "Before.Between." in text
+    assert "Before.\nBetween." in text
     assert "opaque-one" not in text
 
 

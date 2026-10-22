@@ -340,7 +340,9 @@ class LLMResponse(EventBase):
 
     @property
     def content(self) -> Annotated[str, spec(max_string=None)]:
-        return "".join(part.text for part in self.parts if isinstance(part, AssistantText))
+        return "\n".join(
+            part.text for part in self.parts if isinstance(part, AssistantText) and part.text
+        )
 
     def __instance_values__(self) -> dict[str, Any]:
         """Display readable response values, not the archived provider parts."""

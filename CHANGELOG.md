@@ -6,6 +6,13 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- `LLMResponse.content` puts a newline between separate assistant messages
+  instead of running them together (`"Checking Paris.Checking Oslo."` is now
+  `"Checking Paris.\nChecking Oslo."`). Text blocks inside one message still
+  join exactly as written, and empty text parts add nothing. This intentionally
+  differs from the OpenAI SDK's separator-free `output_text`. Replay is
+  unchanged: compatible turns still send their stored native items, so prompt
+  caching is unaffected.
 - `RetryConfig` is the only endpoint retry budget for `CompletionClient` on
   OpenAI-compatible routes. LiteLLM let the OpenAI SDK retry each attempt twice
   more, so `RetryConfig(max_retries=2)` sent 9 requests for a persistent server

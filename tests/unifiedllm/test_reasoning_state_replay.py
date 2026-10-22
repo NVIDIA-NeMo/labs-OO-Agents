@@ -226,7 +226,13 @@ async def test_real_responses_message_structure_survives_json_resume(
     try:
         prompt = [{"role": "user", "content": "think"}]
         first = await client.acall(prompt) if is_async else client.call(prompt)
-        assert first.content == raw.output_text
+        # Blocks inside a message join as written; separate messages get a newline.
+        assert first.content == "\n".join(
+            text
+            for item in raw.output
+            if item.type == "message"
+            and (text := "".join(b.text for b in item.content if b.type == "output_text"))
+        )
         # The fallback for providers without output_text must use identical text.
         assert client._extract_text_from_output(_responses(*output)) == raw.output_text
         if persistence == "json":
