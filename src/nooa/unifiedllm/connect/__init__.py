@@ -1457,8 +1457,12 @@ def plan(
     decision_image_transport: str | None = None,
     typesafe_danger_zone_images: bool | None = None,
     decision_checks: bool = True,
+    checked_levels: list[str] | tuple[str, ...] | None = None,
 ) -> ConnectPlan:
     """Prepare requests without reading credentials, files or network resources.
+
+    ``checked_levels`` limits reasoning-level checks to those labels (for
+    example only the level the user chose); None checks every level.
 
     ``structured_output_mode='anthropic'`` explicitly selects the native carrier
     for Completion chat/anthropic routes. Omission preserves a same-route saved
@@ -1879,6 +1883,8 @@ def plan(
     )
     probes.append(Probe("tools", tool_body, output_tokens + 512))
     for label, params in levels.items():
+        if checked_levels is not None and label not in checked_levels:
+            continue
         level_body = deepcopy(body)
         level_body[token_key] = reasoning_output_tokens
         level_body["input" if api_style == "responses" else "messages"][0]["content"] = (

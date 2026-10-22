@@ -132,7 +132,7 @@ finally:
                 os.write(master, b"\x1b[1;1R")
             screen = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", output.decode(errors="replace"))
             compact = "".join(re.sub(r"[│┌┐└┘─┬┴├┤┼]", "", screen).split())
-            if native and phase == 0 and "Cancelsetup" in compact:
+            if native and phase == 0 and "7.Off" in compact:
                 os.write(master, b"\x03" if cancel else b"\x1b[B\x1b[B\x1b[B\r")
                 phase = 1 if cancel else -1
             if not native and phase == 0 and "Contextwindow(tokens)" in compact:

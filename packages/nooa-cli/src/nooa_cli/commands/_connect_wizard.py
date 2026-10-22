@@ -347,8 +347,18 @@ def select_connection(state: WizardState) -> bool:
             f"Unknown provider. Choose {', '.join(connect.PROVIDERS)}, or custom."
         )
     if not state.provider and not state.endpoint and not state.yes:
+        # Preselect the first provider whose key is already set, so Enter works.
+        keyed = next(
+            (
+                name
+                for name, preset in connect.PROVIDERS.items()
+                if os.environ.get(preset.api_key_env)
+            ),
+            None,
+        )
         state.provider = prompts.prompt(
             "Choose a provider",
+            default=keyed,
             choices=(*connect.PROVIDERS, "custom"),
             labels={
                 **{name: preset.label for name, preset in connect.PROVIDERS.items()},
@@ -2049,6 +2059,32 @@ def configure_media_inputs(state: WizardState) -> bool:
     return True
 
 
+def server_effort_levels(state: WizardState):
+    """Effort levels the selected model's own server lists, as request settings.
+
+    Listing is a hint; the chosen level is still tested before it is trusted.
+    """
+    efforts, supported = None, None
+    for record in state.server_details.records if state.server_details else ():
+        if record.get("schema") == "openrouter.fallback" or record.get("id") != state.model:
+            continue
+        facts = record.get("facts") or {}
+        if isinstance(facts.get("supports_reasoning"), bool):
+            supported = facts["supports_reasoning"]
+        if facts.get("supported_reasoning_efforts"):
+            efforts = list(facts["supported_reasoning_efforts"])
+    if supported is False:
+        return {}
+    if not efforts:
+        return None
+    template = "adaptive" if state.api_style == "anthropic" else "effort"
+    return {
+        label: connect.reasoning_settings(template, state.api_style, label)
+        for label in efforts
+        if isinstance(label, str) and label
+    } or None
+
+
 def choose_reasoning(state: WizardState, *, deferred=False, edit=False) -> bool:
     """Plain route-specific selection. Nothing is activated by merely listing levels."""
     if state.api_style in connect.DECISION_API_STYLES:
@@ -2111,6 +2147,8 @@ def choose_reasoning(state: WizardState, *, deferred=False, edit=False) -> bool:
         if native_manual and previous_on is not None:
             levels["on"] = previous_on  # retain the wizard's reviewed allowance across edits
     if levels is None:
+        levels = server_effort_levels(state)
+    if levels is None:
         # Only exact OpenRouter metadata retains known effort templates here.
         candidate = state.candidate or {}
         if (
@@ -2168,8 +2206,7 @@ def choose_reasoning(state: WizardState, *, deferred=False, edit=False) -> bool:
         occupied.add(token)
         selections[token] = label
         options.append((token, "Off" if label in {"off", "disabled", "none"} else label.title()))
-    options.append(("cancel", "Cancel setup"))
-    options = tuple(options)
+    options = tuple(options)  # Ctrl-C cancels setup
     default = "keep" if keep else "default"
     if state.guided_reasoning_route == route and state.guided_reasoning_choice in dict(options):
         default = state.guided_reasoning_choice
@@ -2245,7 +2282,7 @@ def bound_simple_reasoning(state: WizardState, levels) -> bool:
             prompts.labelled_choice(
                 "The reply limit cannot fit this reasoning allowance",
                 (("adjust", "Adjust reply limit"), ("cancel", "Cancel setup")),
-                default="cancel",
+                default="adjust",
             )
             == "cancel"
         ):
@@ -2266,7 +2303,7 @@ def bound_simple_reasoning(state: WizardState, levels) -> bool:
             action = prompts.labelled_choice(
                 "Reasoning allowance exceeds the server limit",
                 (("allowance", "Change reasoning allowance"), ("cancel", "Cancel setup")),
-                default="cancel",
+                default="allowance",
             )
             if action == "cancel":
                 return False
@@ -2401,6 +2438,12 @@ def configure_checks(state: WizardState) -> bool:
         and state.api_style not in connect.DECISION_API_STYLES,
         reply_tokens=state.reply_tokens,
         cache_enabled=state.cache_enabled,
+        # Guided setup tests only the reasoning level the user chose.
+        checked_levels=([state.guided_reasoning_active] if state.guided_reasoning_active else [])
+        if state.guided
+        and state.guided_reasoning_choice is not None
+        and not (state.levels or state.levels_file or state.reasoning_template)
+        else None,
         **mode_kwargs,
     )
     if state.server_details is not None:

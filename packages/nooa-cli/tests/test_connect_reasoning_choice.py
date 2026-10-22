@@ -88,7 +88,6 @@ def test_guided_selection_save_reload_default_wire(native, monkeypatch, selectio
         "xhigh",
         "max",
         "off",
-        "cancel",
     ]
     assert "not tested (manual setup)" in result.output
     entry = yaml.safe_load(path.read_text())["models"]["local"]
@@ -117,12 +116,13 @@ def test_guided_selection_save_reload_default_wire(native, monkeypatch, selectio
 
 
 def test_cancel_reasoning_writes_nothing(native):
+    """Ctrl-C (end of input here) at the reasoning menu cancels without writing."""
     flags, path, calls, choices = native
-    result = CliRunner().invoke(command, flags, input="cancel\n")
-    assert result.exit_code == 0, result.output
+    result = CliRunner().invoke(command, flags, input="")
+    assert result.exit_code != 0, result.output
+    assert "Aborted" in result.output
     assert not path.exists()
     assert all(r.method == "GET" for r in calls)
-    assert "Nothing saved" in result.output
 
 
 def test_guided_change_reasoning_and_test_same_selected_setting(native):
