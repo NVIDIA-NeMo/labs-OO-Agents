@@ -1030,7 +1030,10 @@ class JobsApi(Skill):
         """Batch a running job's deliveries: one per ``items`` values or ``seconds``.
 
         Whichever comes first triggers a delivery; the rest is flushed at the
-        end. A batch is also sent early once it holds 200 items or 20,000 chars. Each call replaces the previous setting (omitted arguments become
+        end. So that one update never gets too big, a batch is also delivered
+        early once it holds 200 items or 20,000 chars of item text (a size
+        limit per update, unrelated to a ``run``'s 20,000-char output cap).
+        Each call replaces the previous setting (omitted arguments become
         None), first delivering what was already batched. ``throttle(label)``
         turns batching off: a ``run`` goes quiet until its done update (whose
         ``ShellResult`` holds the output), other jobs deliver every item.
