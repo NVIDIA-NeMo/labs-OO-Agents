@@ -278,6 +278,22 @@ async def test_initialize_advertises_pool_2_steer_to_pool_2(harness):
     assert harness.spawned == []
 
 
+async def test_initialize_offers_terminal_auth_to_clients_that_run_it(harness):
+    frame = await harness.initialize(
+        {"protocolVersion": PROTOCOL_VERSION, "clientCapabilities": {"auth": {"terminal": True}}}
+    )
+    assert frame.message["result"]["authMethods"] == [
+        {
+            "id": "nooa-connect",
+            "name": "Connect a model",
+            "description": "Set up a model provider in a terminal",
+            "type": "terminal",
+            "args": ["--connect"],
+        }
+    ]
+    assert harness.spawned == []
+
+
 async def test_authenticate_and_unknown_methods_are_method_not_found(harness):
     for method in ("authenticate", "logout", "_nooa/other"):
         frame = await harness.call(method, {})
