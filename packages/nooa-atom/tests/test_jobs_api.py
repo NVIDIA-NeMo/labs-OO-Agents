@@ -69,7 +69,7 @@ async def _until(predicate, timeout: float = TIMEOUT) -> None:
         await asyncio.sleep(0.02)
 
 
-async def test_run_delivers_a_labelled_shell_result_and_a_log(agent):
+async def test_run_delivers_a_labelled_shell_result(agent):
     info = await agent.jobs.run("echo out; echo err >&2; exit 3", label="t")
     assert info.state == "running" and info.kind == "run"
     assert info.path == "/root/t"  # outside a session tree the agent is /root
@@ -79,8 +79,9 @@ async def test_run_delivers_a_labelled_shell_result_and_a_log(agent):
     assert isinstance(item.items[0], ShellResult)
     assert item.items[0].returncode == 3 and item.items[0].stdout == "out\n"
     assert item.items[0].stderr == "err\n"
-    log = Path(item.log_path).read_text()
-    assert "out\n" in log and "err\n" in log
+    # No job-owned log file: the ShellResult is the whole delivered output.
+    assert set(JobUpdate.model_fields) == {"label", "path", "items", "done", "error"}
+    assert not [name for name in type(agent.jobs.get("t")).model_fields if "log" in name]
     assert agent.jobs.get("t").state == "done"
     assert agent.jobs.get("t").finished_at is not None
 
@@ -193,7 +194,7 @@ async def test_a_quiet_run_ends_with_one_done_update_holding_the_shell_result(ag
     updates, result = await _collect_run(agent)
     assert updates == [] and len(result.items) == 1 and isinstance(result.items[0], ShellResult)
     assert result.items[0].stdout == "1\n2\n3\n"
-    assert result.error is None and result.log_path
+    assert result.error is None
 
 
 async def test_run_with_progress_delivers_lines_then_its_result(agent):
@@ -204,7 +205,6 @@ async def test_run_with_progress_delivers_lines_then_its_result(agent):
     assert lines == [("stderr", "b"), ("stdout", "a"), ("stdout", "c")]  # no trailing newline
     assert result.label == "s" and result.items[0].returncode == 0
     assert result.items[0].stdout == "a\nc\n" and result.items[0].stderr == "b\n"
-    assert "a\n" in Path(result.log_path).read_text()
 
 
 async def test_throttle_by_items_batches_and_flushes_before_the_result(agent):
@@ -234,19 +234,21 @@ async def test_run_progress_by_seconds(agent):
 
 
 async def test_throttle_turns_run_progress_on_and_off(agent, tmp_path):
-    go = tmp_path / "go"
+    # Every phase is gated by a file the test creates, so each throttle change
+    # happens before the output it governs is printed (no timing assumptions).
+    # The command touches `started` once running and waiting: a real signal from
+    # the process itself. It prints nothing before go1, so no output can still be
+    # in flight when progress is turned on.
+    go, started = tmp_path / "go", tmp_path / "started"
     script = (
-        "echo quiet1; "
+        f"touch {started}; "
         f"while [ ! -e {go}1 ]; do sleep 0.02; done; echo loud1; echo loud2; "
-        f"while [ ! -e {go}2 ]; do sleep 0.02; done; echo quiet2"
+        f"while [ ! -e {go}2 ]; do sleep 0.02; done; echo quiet1; echo quiet2"
     )
     info = await agent.jobs.run(script, label="r")
-    # Wait until quiet1 was read (the log gets it as it is read), then let it pass
-    # through the job's in-process queues before progress is turned on.
-    log = Path(info.log_path)
-    await _until(lambda: log.exists() and "quiet1" in log.read_text())
-    await asyncio.sleep(0.1)
-    assert agent.queue_manager.get_channel("jobs").qsize() == 0  # quiet by default
+    assert info.throttle is None  # quiet by default
+    await _until(started.exists)
+    assert agent.queue_manager.get_channel("jobs").qsize() == 0
     assert agent.jobs.throttle("r", items=2).throttle.items == 2  # progress on
     (tmp_path / "go1").touch()
     update = await _next(agent)
@@ -256,9 +258,10 @@ async def test_throttle_turns_run_progress_on_and_off(agent, tmp_path):
     ]
     assert agent.jobs.throttle("r").throttle is None  # progress off again
     (tmp_path / "go2").touch()
+    # quiet1/quiet2 are printed only after progress was turned off: not delivered.
     updates, result = await _collect_run(agent)
     assert updates == []
-    assert result.items[0].stdout == "quiet1\nloud1\nloud2\nquiet2\n"
+    assert result.items[0].stdout == "loud1\nloud2\nquiet1\nquiet2\n"
 
 
 async def test_throttle_by_seconds_batches_slow_output(agent):
@@ -810,26 +813,31 @@ async def test_a_stream_ends_with_its_last_pending_values(agent):
 # ---- model-facing behaviour: result size, errors ------------------------
 
 
-async def test_a_big_run_result_keeps_the_end_and_points_to_the_log(agent):
+async def test_a_big_run_result_keeps_the_last_20000_chars_of_each_stream(agent):
     await agent.jobs.run(
         "python3 -c \"import sys; [print(f'line {i:05d}') for i in range(5000)];"
-        " sys.stderr.write('e' * 9000)\"",
+        " [sys.stderr.write(f'err {i:05d}\\n') for i in range(3000)]\"",
         label="big",
     )
     item = await _next(agent)
     result = item.items[0]
-    marker, _, kept = result.stdout.partition("\n")
-    assert marker == f"[... {55_000 - 3_000:,} chars omitted; full output: {item.log_path}]"
-    assert len(kept) == 3_000 and kept.endswith("line 04999\n")
-    # The 9,000-char stderr line was cut at 8,000 chars; the result keeps its end.
-    line_marker = "[... 1,000 chars of this line omitted]"
-    omitted = 8_000 + len(line_marker) - 3_000
-    assert result.stderr == (
-        f"[... {omitted:,} chars omitted; full output: {item.log_path}]\n"
-        + "e" * (3_000 - len(line_marker))
-        + line_marker
-    )
-    assert len(Path(item.log_path).read_text()) == 55_000 + 9_000
+    out = "".join(f"line {i:05d}\n" for i in range(5000))  # 55,000 chars
+    err = "".join(f"err {i:05d}\n" for i in range(3000))  # 30,000 chars
+    # Each stream keeps exactly its own last 20,000 chars, after a one-line
+    # notice that names no file (there is none).
+    assert result.stdout == f"[... {55_000 - 20_000:,} chars omitted]\n" + out[-20_000:]
+    assert result.stderr == f"[... {30_000 - 20_000:,} chars omitted]\n" + err[-20_000:]
+    for stream in (result.stdout, result.stderr):
+        notice, _, kept = stream.partition("\n")
+        assert len(kept) == 20_000
+        assert "full output" not in notice and "/" not in notice and ".log" not in notice
+
+
+async def test_a_run_under_the_cap_is_not_truncated(agent):
+    # 2,000 lines of 10 chars: exactly 20,000 chars, kept whole with no notice.
+    await agent.jobs.run("for i in $(seq 2000); do echo 123456789; done", label="fits")
+    item = await _next(agent)
+    assert item.items[0].stdout == "123456789\n" * 2_000
 
 
 @pytest.mark.parametrize("bad", ["10m", "10", True, None])
@@ -902,9 +910,8 @@ async def test_a_5mb_line_stays_bounded_and_later_lines_still_arrive(agent):
     assert lines[0] == "x" * 8_000 + "[... 4,992,000 chars of this line omitted]"
     assert lines[1:] == ["after-1", "after-2"]
     done = updates[-1]
-    assert done.done and len(done.items[0].stdout) <= 3_100
+    assert done.done and len(done.items[0].stdout) <= 20_000
     assert done.items[0].stdout.endswith("after-1\nafter-2\n")
-    assert Path(done.log_path).stat().st_size == 5_000_000 + len("\nafter-1\nafter-2\n")
 
 
 async def test_a_throttled_chatty_run_sends_batches_early_at_the_cap(agent):
@@ -938,7 +945,7 @@ def test_status_line_shows_age_while_running_and_pending_above_zero():
     assert jobs_mod._age(jobs_mod._now()) in ("0s", "1s")
     old = (datetime.datetime.now() - datetime.timedelta(minutes=65)).isoformat(timespec="seconds")
     assert jobs_mod._age(old) == "1h05m"
-    job = jobs_mod._Job("build", "run", None, None, True, target="make build")
+    job = jobs_mod._Job("build", "run", None, True, target="make build")
     job.started_at = old
     job.pending = 2
     assert job.status_line() == "build · job · running 1h05m · 2 pending · make build"

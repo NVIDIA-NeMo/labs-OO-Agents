@@ -22,7 +22,6 @@ import datetime
 import inspect
 import os
 import signal
-import tempfile
 import time
 import uuid
 from collections import deque
@@ -33,7 +32,6 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from nooa.agentdoc import (
-    FileBackedTruncatingStringIO,
     LineSplitter,
     TruncatingStringIO,
     bounded_lines,
@@ -50,11 +48,9 @@ if TYPE_CHECKING:
 __all__ = ["JobInfo", "JobUpdate", "JobsApi", "JobsLost", "Throttle"]
 
 JOBS_CHANNEL = "jobs"
-# Characters of stdout and of stderr kept in a delivered ShellResult (the end
-# of the output); the full output is in the log.
-_TAIL_CHARS = 3_000
-# Per-job log cap; output beyond it is counted but not written.
-_LOG_CAP_BYTES = 50 * 1024 * 1024
+# Characters kept of stdout and, separately, of stderr in a delivered
+# ShellResult (the end of each stream); nothing more is kept anywhere.
+_TAIL_CHARS = 20_000
 # Longest delivered line (run progress, tail), in characters; the rest of the
 # line is replaced by a "[... N chars of this line omitted]" marker.
 _LINE_CHARS = 8_000
@@ -106,7 +102,6 @@ class JobInfo(BaseModel):
     )
     started_at: str = Field(description="Start time (ISO, seconds)")
     finished_at: str | None = Field(default=None, description="End time, None while running")
-    log_path: str | None = Field(default=None, description="Full stdout+stderr log (run only)")
     throttle: Throttle | None = Field(default=None, description="Current batching, None if off")
     pending: int = Field(
         default=0,
@@ -154,9 +149,6 @@ class JobUpdate(BaseModel):
             " is then [] (e.g. a spawn whose coroutine raised). None otherwise"
         ),
     )
-    log_path: str | None = Field(
-        default=None, description="Full stdout+stderr log file (run only, else None)"
-    )
 
 
 _LOST_KEYS = ("label", "kind", "target", "description", "started_at")
@@ -192,7 +184,6 @@ class _Job:
         label: str,
         kind: JobKind,
         throttle: Throttle | None,
-        log_path: str | None,
         streaming: bool,
         target: str = "",
         description: str = "",
@@ -208,7 +199,6 @@ class _Job:
         self.proc: asyncio.subprocess.Process | None = None  # set while a run command runs
         self.streaming = streaming
         self.throttle = throttle
-        self.log_path = log_path
         self.started_at = _now()
         self.finished_at: str | None = None
         self.handle: JobHandle | None = None
@@ -236,7 +226,6 @@ class _Job:
             payload=self.payload,
             started_at=self.started_at,
             finished_at=self.finished_at,
-            log_path=self.log_path,
             throttle=self.throttle,
             pending=self.pending,
             last=list(self.last),
@@ -379,10 +368,15 @@ class JobsApi(Skill):
         await self.jobs.run("uv run pytest -q", label="tests", description="full run before pushing")
         return_result(Waiting(explanation="tests running", on=["tests"]))
         # next turn: u = notification["jobs"][0]  -> JobUpdate with done=True
-        # u.items[0] is the ShellResult (.returncode, .stdout tail); u.log_path the full log
+        # u.items[0] is the ShellResult (.returncode; .stdout/.stderr: the last 20,000 chars of each)
 
         await self.jobs.run("make build", label="build", items=200, seconds=60)
         # -> JobUpdate batches of output lines while it runs, then the done update
+
+    A ``run``'s output is capped at 20,000 chars per stream: the
+    ``ShellResult`` keeps the last 20,000 chars of stdout and, separately,
+    of stderr. If you need more, have the command redirect to a file itself
+    (``cmd > out.log 2>&1``), then read that file.
 
     Any job's update starts the next turn; check ``u.label`` / ``u.done`` and
     return ``Waiting`` again if yours has not finished.
@@ -408,7 +402,6 @@ class JobsApi(Skill):
         self._queues: QueueManager = agent.queue_manager
         self._jobs: dict[str, _Job] = {}
         self._finished: deque[_Job] = deque(maxlen=_KEEP_FINISHED)
-        self._log_dir: Path | None = None
         self._queues.set_cancel_hint(JOBS_CHANNEL, "Cancel a job: await self.jobs.cancel('<name>')")
 
     # ---- internals -------------------------------------------------------
@@ -419,14 +412,6 @@ class JobsApi(Skill):
         if JOBS_CHANNEL not in channels:
             return self._queues.queue(JOBS_CHANNEL)
         return channels[JOBS_CHANNEL]
-
-    @hidden
-    def _logs(self) -> Path:
-        if self._log_dir is None:
-            root = Path(tempfile.gettempdir()) / "nooa-jobs"
-            root.mkdir(parents=True, exist_ok=True)
-            self._log_dir = Path(tempfile.mkdtemp(prefix=f"{os.getpid()}-", dir=root))
-        return self._log_dir
 
     @hidden
     def _new_job(
@@ -442,20 +427,15 @@ class JobsApi(Skill):
     ) -> _Job:
         """Claim ``label`` (stopping its running job if ``replace``) for a new job.
 
-        Only a ``run`` gets a log; ``after`` and a coroutine ``spawn`` pass
-        ``streaming=False`` (they cannot be throttled).
+        ``after`` and a coroutine ``spawn`` pass ``streaming=False`` (they
+        cannot be throttled).
         """
         _check_description(description)
         self._claim(label, replace)
-        log_path = None
-        if kind == "run":
-            safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in label)[:60]
-            log_path = str(self._logs() / f"{safe}-{uuid.uuid4().hex[:6]}.log")
         job = _Job(
             label,
             kind,
             throttle,
-            log_path,
             streaming,
             _short(target),
             description.strip(),
@@ -601,7 +581,6 @@ class JobsApi(Skill):
         stdin: str | None,
         timeout: float | None,
         cwd: str | Path | None,
-        log: FileBackedTruncatingStringIO,
         context: tuple[str, dict],
         job: _Job,
     ) -> AsyncIterator[StreamEvent | StreamDone]:
@@ -627,7 +606,6 @@ class JobsApi(Skill):
                     stream,
                     max_line_chars=_LINE_CHARS,
                     chunk_bytes=_CHUNK_BYTES,
-                    on_bytes=log.write_bytes,
                 ):
                     await queue.put((kind, line))
             finally:
@@ -698,25 +676,16 @@ class JobsApi(Skill):
         context: tuple[str, dict],
     ) -> AsyncIterator[JobUpdate]:
         """Run one command; yield progress updates (if throttled), then the done update."""
-        assert job.log_path is not None
-        # The combined log (file only) and, per stream, the kept end of the output.
-        log = FileBackedTruncatingStringIO(
-            limit=0, tail_chars=0, path=job.log_path, max_file_bytes=_LOG_CAP_BYTES
-        )
+        # Per stream, the kept end of the output (in memory only; no log file).
         tails = {
-            kind: TruncatingStringIO(
-                limit=_TAIL_CHARS, tail_chars=_TAIL_CHARS, full_output_path=job.log_path
-            )
+            kind: TruncatingStringIO(limit=_TAIL_CHARS, tail_chars=_TAIL_CHARS)
             for kind in ("stdout", "stderr")
         }
         done = [StreamDone(kind="done", returncode=0, timed_out=False)]
 
         async def source() -> AsyncIterator[Any]:
-            try:
-                async for event in self._lines(command, stdin, timeout, cwd, log, context, job):
-                    yield event
-            finally:
-                log.close()
+            async for event in self._lines(command, stdin, timeout, cwd, context, job):
+                yield event
 
         def collect(event: Any) -> Any:
             """Keep the output tail; return the progress item to deliver, or ``_SKIP``."""
@@ -797,7 +766,6 @@ class JobsApi(Skill):
                 path=job.path,
                 items=batch,
                 done=done,
-                log_path=job.log_path,
                 error=failure[0] if done and failure else None,
             )
             batch, batch_chars, batch_started = [], 0, None
@@ -892,9 +860,12 @@ class JobsApi(Skill):
         the shell's directory) but returns at once and has no timeout unless
         given. ``cd``/``export`` in ``cmd`` do not affect ``self.shell``. When
         it ends, a ``JobUpdate`` with ``done=True`` arrives in
-        ``notification["jobs"]``: ``items[0]`` is a ``ShellResult`` (output
-        tail; on timeout returncode 124), ``log_path`` the full stdout+stderr
-        log. With ``items``/``seconds`` it also sends progress while running:
+        ``notification["jobs"]``: ``items[0]`` is a ``ShellResult`` (on
+        timeout returncode 124). Its ``stdout`` and ``stderr`` are each capped
+        at 20,000 chars: only the last 20,000 of each stream are kept, after a
+        ``[... N chars omitted]`` line. For more, have the command write to a
+        file itself (``cmd > out.log 2>&1``) and read that file. With
+        ``items``/``seconds`` it also sends progress while running:
         ``JobUpdate`` batches of ``StreamEvent`` lines (see ``throttle``; a line
         is cut at 8,000 chars); lines still batched when it ends arrive only in
         the ``ShellResult``.
