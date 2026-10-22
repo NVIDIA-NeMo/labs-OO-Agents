@@ -803,17 +803,15 @@ def test_intro_omits_budget_and_approval_explanations():
 
 
 @pytest.mark.parametrize("kind", ["audio", "video"])
-def test_local_media_skip_explains_api_format_without_claiming_unsupported(kind):
+def test_native_media_skip_reports_unsupported_api_format(kind):
     from nooa.unifiedllm.connect._media import media_content
 
     _, _, reason = media_content(kind, "responses")
     detail = view.media_test_detail(kind, {"outcome": "not_probed", "reason": reason})
     assert "check skipped" in detail
-    assert f"{kind.capitalize()} testing is not implemented for this connection" in detail
-    assert "testing is not implemented for this connection" in detail
-    assert "Inputs enabled without testing remain unverified" in detail
+    assert f"Native {kind} input is not supported by this API format." in detail
+    assert "not implemented" not in detail
     assert "Use Chat" not in detail
-    assert "native" not in detail and "unsupported" not in detail
 
 
 @pytest.mark.parametrize("columns", [24, 40, 80, 120, 240])

@@ -106,9 +106,7 @@ def advertised_media_suggestions(
                 "The NOOA decision client currently supports image attachments only. Use a chat model for this input format."
             )
         elif api_style in {"anthropic", "responses"} and kind in {"audio", "video"}:
-            unavailable[kind] = (
-                "Audio/video testing is not implemented for this connection. Inputs enabled without testing remain unverified."
-            )
+            unavailable[kind] = "Native audio/video input is not supported by this API format."
         elif (
             api_style == "systemone"
             and kind == "image"

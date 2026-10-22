@@ -178,8 +178,8 @@ def check_reason(reason):
         "Typed decision baseline did not pass; image not tested": "Decision answer checks did not pass; image check skipped",
         "Native typed response accepted but fixture answer incorrect": "Answer format accepted, but the sample answer was incorrect. Try another model.",
         "Image access, known color accuracy and actual wire attachment must all be confirmed": "Could not confirm image delivery and the sample answer. Review image settings or try another connection.",
-        "This interface has no native video input mapping here; select video manually as unverified.": "Video testing is not implemented for this connection. Inputs enabled without testing remain unverified.",
-        "This interface has no portable inline WAV input shape here; select audio manually as unverified.": "Audio testing is not implemented for this connection. Inputs enabled without testing remain unverified.",
+        "This interface has no native video input mapping here; select video manually as unverified.": "Native video input is not supported by this API format.",
+        "This interface has no portable inline WAV input shape here; select audio manually as unverified.": "Native audio input is not supported by this API format.",
         "Configured reply cap changed after planning; make a new plan": "Reply limit changed after planning; restart setup",
         "probe timeout must be between 1 and 120 seconds": "Check timeout must be 1–120 seconds",
         "selected reasoning level changes the approved reply cap": "Selected reasoning level needs a different reply limit; restart setup",
@@ -205,9 +205,9 @@ def check_reason(reason):
         "A message from an earlier turn rendered differently once replayed as history; explicit cache breakpoints will not accumulate hits across turns until the renderer keeps that message's wire shape stable": "Earlier messages changed when sent again, preventing cache reuse. Review the client settings.",
     }
     if reason.startswith("Video testing not implemented"):
-        return "Video testing is not implemented for this connection. Inputs enabled without testing remain unverified."
+        return "Native video input is not supported by this API format."
     if reason.startswith("Audio testing not implemented"):
-        return "Audio testing is not implemented for this connection. Inputs enabled without testing remain unverified."
+        return "Native audio input is not supported by this API format."
     if reason.startswith("Text baseline") or "; media not tested" in reason:
         return "Connection check did not pass; media not tested"
     return replacements.get(reason, reason)

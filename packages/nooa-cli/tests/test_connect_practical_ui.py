@@ -258,7 +258,7 @@ def test_manual_unavailable_checks_never_imply_permissions(
     )  # Explicit untested declaration only.
     if style != "chat":
         assert (
-            "is not implemented" if style == "responses" else "isn't available"
+            "is not supported" if style == "responses" else "isn't available"
         ) in capsys.readouterr().out
 
 
@@ -448,9 +448,7 @@ def test_post_result_decision_manual_picker_is_image_only_and_never_retests(
 
 
 @pytest.mark.parametrize("style", ["responses", "anthropic"])
-def test_audio_video_not_implemented_advice_is_connection_scoped_and_zero_sample_send(
-    monkeypatch, style
-):
+def test_audio_video_unsupported_native_format_is_scoped_and_zero_sample_send(monkeypatch, style):
     from nooa_cli.commands import _connect_view as view
 
     report = connect.advertised_media_suggestions(
@@ -459,7 +457,7 @@ def test_audio_video_not_implemented_advice_is_connection_scoped_and_zero_sample
     )
     assert report["checkable"] == []
     for kind, reason in report["unavailable_checks"].items():
-        assert "Audio/video testing is not implemented for this connection." in reason
+        assert "Native audio/video input is not supported by this API format." in reason
         detail = view.media_test_detail(kind, {"outcome": "not_probed", "reason": reason})
         assert "Use Chat" not in detail and "unsupported" not in detail
     mock_http(monkeypatch, lambda r: pytest.fail("Unavailable media fixture must not be sent"))
@@ -487,6 +485,6 @@ def test_guided_test_all_proposal_marks_unimplemented_checks_before_consent(
         "Audio: " + ("Enabled; test unavailable" if previous else "Off; test unavailable") in text
     )
     assert "Video: Off; test unavailable" in text
-    assert "Audio/video testing is not implemented for this connection" in text
+    assert "Native audio/video input is not supported by this API format" in text
     assert "Use Chat" not in text
     assert current.proposal.entry["media_inputs"] == previous
