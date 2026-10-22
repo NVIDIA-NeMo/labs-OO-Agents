@@ -199,7 +199,7 @@ class ChildResult(BaseModel):
     name: str = Field("", description="the child's name")
     path: str = Field("", description="the child's path in the session tree, else its name")
     summary: str = Field("", description="the child's Done.explanation: one status line")
-    result: Annotated[TaskResult | None, spec(max_string=1000)] = Field(
+    result: Annotated[TaskResult | None, spec(max_string=8000)] = Field(
         None,
         description="the child's TaskResult (always one for a worker): .report is the full report",
     )

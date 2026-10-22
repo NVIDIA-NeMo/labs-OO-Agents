@@ -277,9 +277,14 @@ def test_child_items_are_flat_with_the_child_last():
         assert list(type(item).model_fields)[-1 if item is not result else -2] == "child"
         assert item.path == "/root/review" and item.status_source() == "/root/review"
     rendered = pformat({"delegates": [result]}, max_string=100_000, max_length=100, max_depth=10)
-    assert "report=str(len=4800" in rendered and "evidence=list(len=8" in rendered
+    assert "R" * 4_800 in rendered and "evidence=list(len=8" in rendered  # shown whole
     assert "done=" not in rendered  # kept for delegate(), hidden from the display
-    assert len(rendered) < 3_000
+    assert len(rendered) < 7_000
+    long_report = done.result.model_copy(update={"report": "R" * 20_000})
+    long = ChildResult(child=ref, done=done.model_copy(update={"result": long_report}))
+    rendered = pformat({"delegates": [long]}, max_string=100_000, max_length=100, max_depth=10)
+    assert "report=str(len=20000" in rendered and "R" * 20_000 not in rendered
+    assert len(rendered) < 12_000
 
 
 def test_a_child_result_report_falls_back_to_the_done_message():
