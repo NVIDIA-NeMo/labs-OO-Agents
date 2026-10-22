@@ -17,7 +17,6 @@ session's one namespace of live names, shared with its open children (see
 """
 
 import asyncio
-import base64
 import contextlib
 import datetime
 import inspect
@@ -494,18 +493,18 @@ class JobsApi(Skill):
         job.handle = self._queues.spawn(work, channel=JOBS_CHANNEL, label=job.label)
         job.handle.describe = job.status_line
         self._agent._jobs_running[job.label] = job.record()
-        job.handle._task.add_done_callback(lambda task: self._forget(job, task))
+        job.handle.add_done_callback(lambda handle: self._forget(job, handle))
         return job.info()
 
     @hidden
-    def _forget(self, job: _Job, task: asyncio.Task[Any]) -> None:
+    def _forget(self, job: _Job, handle: "JobHandle") -> None:
         """Drop a finished job from ``agent._jobs_running``.
 
         That dict (label -> ``_Job.record()`` of each running job) is saved
         with the agent's snapshot; ``after_restore`` reads what the previous
         process left there.
         """
-        if task.cancelled() and job.final_state is None:
+        if handle.state == "cancelled" and job.final_state is None:
             return  # stopped by a shutdown, not by the job or the model: it did not survive
         record = self._agent._jobs_running
         if record.get(job.label, {}).get("id") == job.id:
@@ -524,7 +523,7 @@ class JobsApi(Skill):
             return
         if job.proc is not None:
             _kill_group(job.proc)
-        job.handle._task.cancel()
+        job.handle.cancel_nowait()  # marks the handle cancelled
         # Withdraw its updates still waiting on the channel: none is delivered
         # after the stop. (Once the task is cancelled it puts nothing more.)
         channel = self._queues.channels().get(JOBS_CHANNEL)
@@ -532,7 +531,6 @@ class JobsApi(Skill):
             for queued in channel.snapshot():
                 if isinstance(queued, JobUpdate) and queued.label == label:
                     channel.remove(queued)
-        job.handle.state = "cancelled"
         job.final_state = "cancelled"
         job.finished_at = job.finished_at or _now()
 
@@ -574,44 +572,17 @@ class JobsApi(Skill):
     async def _shell_context(self) -> tuple[str, dict[str, str]]:
         """The agent shell's directory and exported environment, cheaply.
 
-        Reads them from the running ``self.shell`` session when it is idle;
-        otherwise falls back to the shell's tracked directory and this
-        process's ``os.environ``.
+        Reads them from the running ``self.shell`` session when it is idle
+        (``BashSession.snapshot_cwd_env``); otherwise falls back to the
+        shell's tracked directory and this process's ``os.environ``.
         """
-        shell = getattr(self._agent, "shell", None)
-        cwd = self._shell_dir()
-        env = dict(os.environ)
-        session = getattr(shell, "session", None)
-        lock = getattr(session, "_lock", None)
-        if (
-            session is None
-            or not getattr(session, "_ready", False)
-            or (lock is not None and lock.locked())
-        ):
-            return cwd, env
-        try:
-            out, _err, code, timed_out = await session.run_with_timeout_flag(
-                'printf "%s\\n" "$PWD"; env -0 | base64 | tr -d "\\n"', timeout=5.0
-            )
-        except Exception:
-            return cwd, env
-        if code != 0 or timed_out:
-            return cwd, env
-        first, _, encoded = out.partition("\n")
-        try:
-            raw = base64.b64decode(encoded.strip())
-        except ValueError:
-            return cwd, env
-        captured: dict[str, str] = {}
-        for entry in raw.split(b"\0"):
-            key, sep, value = entry.partition(b"=")
-            if sep and key:
-                captured[key.decode(errors="replace")] = value.decode(errors="replace")
-        if captured:
-            env = captured
-        if first.strip():
-            cwd = first.strip()
-        return cwd, env
+        session = getattr(getattr(self._agent, "shell", None), "session", None)
+        snapshot = getattr(session, "snapshot_cwd_env", None)
+        if snapshot is not None:
+            captured = await snapshot(timeout=5.0)
+            if captured is not None:
+                return captured
+        return self._shell_dir(), dict(os.environ)
 
     @hidden
     async def _lines(

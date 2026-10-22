@@ -158,6 +158,40 @@ class JobHandle:
             return []
         return list(self._values)
 
+    def done(self) -> bool:
+        """True once the job's task has finished (done, failed or cancelled)."""
+        return self._task.done()
+
+    def add_done_callback(self, fn: Callable[["JobHandle"], object]) -> None:
+        """Call ``fn(handle)`` once the job's task has finished, however it ended.
+
+        Runs from the event loop like ``asyncio.Task.add_done_callback``
+        (right away, soon, if the task has already finished). ``state`` is
+        final by then: a task cancelled before it started reads
+        ``"cancelled"`` too.
+        """
+
+        def _call(task: asyncio.Task[Any]) -> None:
+            if task.cancelled() and self.state == "running":
+                self.state = "cancelled"
+            fn(self)
+
+        self._task.add_done_callback(_call)
+
+    def cancel_nowait(self) -> bool:
+        """Request cancellation without waiting; True if the job was still running.
+
+        Sets ``state`` to ``"cancelled"`` at once. The task unwinds (its
+        ``finally`` blocks run) on a later loop iteration; ``await cancel()``
+        waits for that instead.
+        """
+        if self._task.done():
+            return False
+        self._task.cancel()
+        if self.state == "running":
+            self.state = "cancelled"
+        return True
+
     async def cancel(self) -> None:
         """Cancel the underlying task and await its unwinding."""
         if self._task.done():
