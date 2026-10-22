@@ -51,7 +51,7 @@ async def test_notification_prefill_keeps_nested_task_middle(tmp_path, method):
     # These are the actual generated code and captured PythonOutput presented
     # after prefill execution, not merely the annotation or a pformat unit test.
     rendered = "\n".join(str(m) for m in llm.calls[0].messages)
-    assert "pprint(notification, max_length=100, max_string=100000, max_depth=10)" in rendered
+    assert "pprint(notification, max_length=100, max_string=50000, max_depth=10)" in rendered
     output = next(
         str(m["content"])
         for m in llm.calls[0].messages
