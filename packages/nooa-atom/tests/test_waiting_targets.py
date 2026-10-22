@@ -237,3 +237,37 @@ async def test_waiting_on_jobs_is_accepted_when_its_result_is_buffered(tmp_path,
     )
     assert len(calls) == 2
     assert not _rejected(calls[1])
+
+
+async def test_waiting_on_a_finished_child_with_an_unread_result_is_accepted(
+    tmp_path, sessions_dir
+):
+    """Its result is still on ``delegates``: the next turn starts at once and gets it."""
+    calls = await _run(
+        tmp_path,
+        sessions_dir,
+        [
+            cell(
+                "self.v.child = await self.spawn('Reader', 'read docs', name='docs_reader')\n"
+                "delegates = self.queue_manager.get_channel('delegates')\n"
+                "async with asyncio.timeout(10):\n"
+                "    while not delegates.qsize() or self.v.child.status == 'running':\n"
+                "        await asyncio.sleep(0.02)\n"
+                "return_result(Waiting(explanation='w', on=['docs_reader']))"
+            ),
+            cell(
+                "[item] = notification['delegates']\n"
+                "assert item.child.name == 'docs_reader', item\n" + DONE
+            ),
+        ],
+        {
+            "docs_reader": [
+                cell(
+                    "return_result(Done(explanation='read', result=TaskResult("
+                    "solution_description='s', evidence='e', how_to_verify='h')))"
+                )
+            ]
+        },
+    )
+    assert len(calls) == 2
+    assert not _rejected(calls[1])

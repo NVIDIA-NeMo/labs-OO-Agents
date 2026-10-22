@@ -77,7 +77,8 @@ def check_waiting_targets(agent: Any, result: Any, *, fix: str) -> None:
       (``"/root/tests"``), or a job with its result already buffered;
     - one of your children by name, path or id, while it is running,
       ``working`` (its last turn ended Waiting on its own job) or has
-      queued input;
+      queued input, or when something from it is still unread on
+      ``delegates`` (the next turn then starts at once with it);
     - ``"jobs"`` (any job; needs one running or a result buffered) or
       ``"delegates"`` (a child is running or has queued input, or an item
       is already buffered on ``delegates``);
@@ -205,6 +206,17 @@ def _running_names(agent: Any) -> dict[str, Any]:
                 item_path = getattr(item, "path", None)
                 if item_path:
                     also.add(item_path)
+    # A child that already delivered: its result, question or message is
+    # still unread on ``delegates``, so the next turn starts at once with it.
+    if "delegates" in channels:
+        for item in channels["delegates"].snapshot():
+            ref = getattr(item, "child", None)
+            name = getattr(ref, "name", None)
+            if isinstance(name, str) and name:
+                now.add(name)
+                also.update(
+                    key for key in (getattr(ref, "id", None), getattr(ref, "path", None)) if key
+                )
     if any(children.values()):
         now.add("delegates")
     # ``jobs`` is the ``self.jobs`` channel: only a running ``self.jobs`` job
