@@ -59,6 +59,7 @@ from nooa.events import (
 from nooa.runtime.harness_metrics import get_harness_metrics
 from nooa.runtime.hooks import call_after_hook, call_before_hook
 from nooa.runtime.sandbox.errors import SandboxExecutionError
+from nooa.strategies._completion_guard import completion_binding_errors
 from nooa.strategies.base import RuntimeServices, build_sampling_kwargs
 from nooa.strategies.codeact_errors import format_validation_error
 from nooa.strategies.composite import CompositeStrategy
@@ -3128,7 +3129,8 @@ Standard Python builtins and agent instance (`self`) are available."""
 
         # Validate REPL policy (no classes, await async methods)
         validator = GeneratedCodeValidator()
-        validation_errors = validator.validate(code, runtime.agent)
+        validation_errors = completion_binding_errors(code)
+        validation_errors.extend(validator.validate(code, runtime.agent))
         if validation_errors:
             error_msg = "Code validation failed:\n" + "\n".join(
                 f"• {err}" for err in validation_errors
