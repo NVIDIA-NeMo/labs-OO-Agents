@@ -189,3 +189,84 @@ async def test_unified_agent_shows_the_short_list_and_a_brief_arrives_active(
     assert isinstance(todos, TodoList)
     [item] = todos.list_todos()
     assert item.status == "done" and [c.body for c in item.comments] == ["child reported: FIXED"]
+
+
+async def _saved(sessions_dir, options, models, build) -> str:
+    """Save a session after ``build(agent)`` has filled its to-do list; return its id."""
+    models.scripts[None] = [cell("return_result(Done(explanation='ok'))")]
+    registry = SessionRegistry(SessionStore(sessions_dir), agent_factory=models)
+    try:
+        root = await registry.create(options)
+        await asyncio.wait_for(root.prompt("go"), TIMEOUT)
+        build(root._agent)
+        root._checkpoint()
+        await root.wait_for_checkpoint()
+        return root.id
+    finally:
+        await registry.close_all()
+
+
+async def _loaded_todo(sessions_dir, session_id):
+    registry = SessionRegistry(SessionStore(sessions_dir), agent_factory=AtomModels())
+    try:
+        loaded = await registry.load(session_id)
+        return loaded._agent.todo, loaded._agent.plan()
+    finally:
+        await registry.close_all()
+
+
+async def test_a_saved_todo_list_reloads_with_ids_notes_and_the_active_item(sessions_dir, options, models):
+    def build(agent):
+        agent.todo.add("Read the code")
+        agent.todo.add("Fix it", description="the brief")
+        agent.todo.activate("2")
+        agent.todo.comment("found it")
+
+    todos, plan = await _loaded_todo(sessions_dir, await _saved(sessions_dir, options, models, build))
+    assert isinstance(todos, TodoList) and all(isinstance(t, Todo) for t in todos.list_todos())
+    assert [t.id for t in todos.list_todos()] == ["1", "2"] and todos.active().id == "2"
+    assert [c.body for c in todos.get("2").comments] == ["found it"]
+    assert [(p.content, p.status) for p in plan] == [("Read the code", "pending"), ("Fix it", "in_progress")]
+    todos.complete()
+    assert todos.add("Verify").id == "3"
+
+
+async def test_an_earlier_todo_manager_reloads_as_a_todo_list(sessions_dir, options):
+    from atom_test_agents import ATOM_SPEC
+
+    class EarlierAtom(AtomModels):
+        def __call__(self, options, storage):
+            return super().__call__(options.model_copy(update={"agent_spec": ATOM_SPEC}), storage)
+
+    def build(agent):
+        assert not isinstance(agent.todo, TodoList)  # the core TodoManager, as saved before
+        legacy = agent.todo.add("Keep the parser fix", description="carried over")
+        agent.todo.activate(legacy)
+        agent.todo.comment(legacy, "half done")
+
+    todos, plan = await _loaded_todo(sessions_dir, await _saved(sessions_dir, options, EarlierAtom(), build))
+    assert isinstance(todos, TodoList)
+    [item] = todos.list_todos()
+    assert len(item.id) == 8 and todos.active().id == item.id  # the saved hex id is kept
+    assert (item.title, item.description, [c.body for c in item.comments]) == (
+        "Keep the parser fix",
+        "carried over",
+        ["half done"],
+    )
+    todos.comment("resumed")  # the four calls work on the restored item
+    todos.complete()
+    assert [c.body for c in item.comments] == ["half done", "resumed"] and item.status == "done"
+    assert todos.add("Next").id == "1"
+    assert [p.status for p in plan] == ["in_progress"]
+
+
+def test_a_core_todo_brief_arrives_active_without_colliding_with_new_ids():
+    from nooa.tools import Todo as CoreTodo
+
+    child = TodoList()
+    child.insert_copy(CoreTodo(id="2", title="Brief from the parent", description="do X"))
+    child.comment("started")
+    assert child.active().id == "2" and isinstance(child.get("2"), Todo)
+    assert child.add("My own step").id == "3"
+    child.complete()
+    assert child.get("2").status == "done"
