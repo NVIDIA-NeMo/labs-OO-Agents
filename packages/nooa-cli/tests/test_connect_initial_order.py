@@ -394,3 +394,33 @@ def test_real_public_duplicate_catalogue_is_rejected_not_auto_selected(monkeypat
     assert all(r.method == "GET" for r in calls)
     entry = yaml.safe_load(setup.read_text())["models"]["local"]
     assert entry.get("context_window") not in {64000, 32000}
+
+
+def test_openai_provider_discovery_also_checks_openai_decisions(monkeypatch, setup):
+    """Find what works on OpenAI includes its /v1/decisions route for decision models."""
+    http_setup(
+        monkeypatch,
+        public=[{"id": "openai/gpt-6-luna", "context_length": 64000}],
+        endpoint=[{"id": "gpt-6-luna"}],
+    )
+    seen = {}
+
+    def capture(*args, styles=None, endpoints=None, **kwargs):
+        seen.update(styles=tuple(styles), endpoints=dict(endpoints))
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(connect, "check_interfaces", capture)
+    options = flags(setup)
+    options[0] = "gpt-6-luna"
+    options += ["--provider", "openai", "--media-inputs", ""]
+    CliRunner().invoke(command, options, input="discover\n")
+    assert "openai" in seen["styles"]
+    assert seen["endpoints"]["openai"] == "https://api.openai.com/v1/decisions"
+
+
+def test_media_the_interface_cannot_send_needs_no_diagnosis():
+    assert wizard.media_cannot_apply({"implementation_supported": False})
+    assert wizard.media_cannot_apply({"reason": "Unsupported media input for responses: audio"})
+    assert wizard.media_cannot_apply({"reason": "Video testing not implemented for this route"})
+    assert not wizard.media_cannot_apply({"reason": "not approved"})
+    assert not wizard.media_cannot_apply({"outcome": "failed", "reason": "HTTP 400"})

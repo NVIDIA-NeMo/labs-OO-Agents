@@ -414,6 +414,10 @@ def select_connection(state: WizardState) -> bool:
         state.interface_endpoints["systemone"] = connect.PROVIDERS["hub"].api_base + "/systemone"
     elif state.provider == "openrouter":
         state.interface_endpoints["systemone"] = "https://openrouter.ai/api/alpha/decisions"
+    if state.provider == "openai" and "openai" not in state.interface_endpoints:
+        # OpenAI serves its decision models at /v1/decisions on the same server,
+        # so "Find what works" can check them alongside Responses and Chat.
+        state.interface_endpoints["openai"] = connect.PROVIDERS["openai"].api_base + "/decisions"
     if state.provider and state.provider != "custom":
         preset = connect.PROVIDERS[state.provider]
         if state.api_style in connect.DECISION_API_STYLES and not explicit_endpoint:
@@ -2664,7 +2668,10 @@ def run_checks(state: WizardState) -> bool:
     baseline_ok = baseline_allows_save(state)
     if state.approval != "none" and (
         decision.needs_attention
-        or any(checks[name].get("reason") != "not approved" for name in decision.skipped)
+        or any(
+            checks[name].get("reason") != "not approved" and not media_cannot_apply(checks[name])
+            for name in decision.skipped
+        )
     ):
         # A failed baseline always gets the agent prompt; optional gaps keep the hint.
         if state.show_diagnostics or not baseline_ok:
@@ -2709,6 +2716,16 @@ def run_checks(state: WizardState) -> bool:
             err=True,
         )
     return baseline_ok
+
+
+def media_cannot_apply(record: dict) -> bool:
+    """True for a media check this request interface can never send (nothing to fix)."""
+    reason = str(record.get("reason", ""))
+    return (
+        record.get("implementation_supported") is False
+        or reason.startswith("Unsupported media input for ")
+        or reason.startswith(("Video testing not implemented", "Audio testing not implemented"))
+    )
 
 
 def save_model(state: WizardState) -> bool:
