@@ -96,8 +96,8 @@ _LEGACY_TOOL_HINT: Annotated[str, hidden] = (
     "If `self` exposes delegation, inspect its documentation with `print(doc(self.delegate))`."
 )
 _TOOL_HINT: Annotated[str, hidden] = (
-    "Run commands and child agents as `self.jobs` work (`Shell`, `Subagent`); "
-    "see `print(doc(self.jobs))`."
+    "Run commands and child agents as `self.jobs` work (`Shell`, `Subagent`), "
+    "documented in the python_cell_tools block."
 )
 
 
@@ -274,6 +274,18 @@ def _tools_doc(text: str) -> str:
     return text
 
 
+# The one place the work workflows are shown (the tools block, before the work types).
+_WORK_EXAMPLES: Annotated[str, hidden] = """\
+# Work: everything that runs is a job on self.jobs.
+r = await Shell().run("pytest -q tests/test_x.py")        # short command -> CommandResult
+self.jobs.launch(Shell().run("pytest -q"), name="tests")   # long: a JobEvent arrives later
+sh = self.jobs.launch(Shell(), name="sh")                  # persistent bash session
+r = await sh.send("cd src && make")                        # a request -> CommandResult
+done = await Subagent("fix parser").run(todo)              # one-shot child -> TaskResult
+rev = self.jobs.launch(Subagent("review"), name="review")  # kept child
+req = rev.send(todo)                                       # await req -> TaskResult or Question
+"""
+
 _CONTEXT: Annotated[dict[str, Any], hidden] = {
     "state": None,
     "execution_context": None,
@@ -301,15 +313,8 @@ class UnifiedAtomAgent(AtomAgent):
     references, ``self.todo`` tracks multi-step work (activate the current
     Todo; comment material findings and checks), and ``self.v`` keeps
     durable facts (cell locals last one method call). Everything else that
-    runs is a job on ``self.jobs``::
-
-        r = await Shell().run("pytest -q tests/test_x.py")   # a short command
-        self.jobs.launch(Shell().run("pytest -q"), name="tests")   # long: arrives later
-        sh = self.jobs.launch(Shell(), name="sh")   # a persistent bash session
-        r = await sh.send("cd src && make")
-        done = await Subagent("fix parser").run(todo)   # one-shot child -> TaskResult
-        rev = self.jobs.launch(Subagent("review"), name="review")   # kept child
-        req = rev.send(todo)   # await req -> TaskResult or Question
+    runs is a job on ``self.jobs``: commands (``Shell``) and child agents
+    (``Subagent``); the python_cell_tools block shows each way to run them.
 
     A subagent sees only its brief: a Todo whose description carries the
     requirements, constraints and acceptance checks. Verify what it reports;
@@ -361,6 +366,7 @@ class UnifiedAtomAgent(AtomAgent):
             _tools_doc(
                 doc(RepoTools, Files, TodoManager, concise=True)
                 + "\n"
+                + _WORK_EXAMPLES
                 + doc(WorkManager, Job, JobEvent, Shell, CommandResult, Subagent, Question)
             ),
             prefix=True,
@@ -580,12 +586,17 @@ for _cls, _members in (
 ):
     for _member in _members:
         spec(_cls, _member, hidden=True)
+# The adapters' own send() is the protocol the manager calls; the model sends
+# through the launched job (Job.send), so only that one is documented.
 for _method in (
     WorkManager.running,
     WorkManager.records,
     WorkManager.aclose,
     JobEvent.status_source,
+    Shell.send,
+    Subagent.send,
 ):
     spec(_method, hidden=True)
-spec(JobEvent, "value", description="The item, the result, or the error text")
+spec(Shell, "current_dir", hidden=True)  # the status block shows a session's directory
+spec(Question, "id", hidden=True)
 del _name, _cls, _members, _member, _method

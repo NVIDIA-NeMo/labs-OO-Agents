@@ -29,9 +29,10 @@ import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import IO, Any
+from typing import IO, Annotated, Any
 
 from nooa import hidden
+from nooa.agentdoc import spec
 from nooa.tools import BashSession
 from nooa_atom.agent.work_manager import describe, job_dir
 
@@ -68,8 +69,10 @@ class CommandResult:
 
     returncode: int
     timed_out: bool
-    stdout: str
-    stderr: str
+    # Shown cut to 2,000 characters in notifications and pprint (display only):
+    # the full summary stays on the object, the full output in the *_path files.
+    stdout: Annotated[str, spec(max_string=2000)]
+    stderr: Annotated[str, spec(max_string=2000)]
     cwd: str
     stdout_path: str | None = None
     stderr_path: str | None = None
@@ -224,10 +227,11 @@ class Shell:
     """Bash commands: ``await Shell().run("make")`` runs one command in a fresh bash.
 
     Launched, it is a persistent session: ``sh = self.jobs.launch(Shell(),
-    name="sh")``, then ``await sh.send("cd src && make")``; cd, exports and
-    variables carry over, and commands run one at a time, in order. ``cwd``
-    defaults to the workspace; ``timeout`` (seconds) bounds each command,
-    which then ends with ``returncode`` 124 and ``timed_out=True``.
+    name="sh")``; each ``sh.send("cd src && make")`` is a request whose
+    result is a ``CommandResult``. cd, exports and variables carry over, and
+    commands run one at a time, in order. ``cwd`` defaults to the workspace;
+    ``timeout`` (seconds) bounds each command, which then ends with
+    ``returncode`` 124 and ``timed_out=True``.
     Cancelling a request interrupts its command; cancelling the session ends
     its bash.
     """

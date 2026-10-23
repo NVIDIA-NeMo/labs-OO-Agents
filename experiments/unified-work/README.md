@@ -62,6 +62,9 @@ req = rev.send(todo); await req.cancel()                         # stops the chi
 await rev.cancel()                                               # closes the child
 ```
 
+The examples above are shown to the model once, at the top of the work types
+in the `python_cell_tools` block; the class doc points there.
+
 Delivery: each outcome goes to one receiver, a pending `await job` /
 `async for x in job`, else a `JobEvent(name, id, kind, value)` in the next
 turn's `notification["jobs"]`. A child's `self.message()` notes are items of
@@ -110,13 +113,13 @@ First call, workspace path counted as a placeholder (`test_atom_prompt_budget.py
 | AtomAgent | handle_batch | 19,737 | 22,066 | 948 |
 | AtomAgent | handle_work | 19,737 | 22,581 | 1,467 |
 | AtomAgent | handle_orchestrate | 19,737 | 24,061 | 2,919 |
-| UnifiedAtomAgent | handle | 18,247 | 19,843 | 161 |
-| UnifiedAtomAgent | handle_batch | 18,247 | 19,863 | 157 |
-| UnifiedAtomAgent | handle_work | 18,247 | 19,860 | 158 |
-| UnifiedAtomAgent | handle_orchestrate | 18,247 | 19,900 | 170 |
+| UnifiedAtomAgent | handle | 18,262 | 19,858 | 161 |
+| UnifiedAtomAgent | handle_batch | 18,262 | 19,878 | 157 |
+| UnifiedAtomAgent | handle_work | 18,262 | 19,875 | 158 |
+| UnifiedAtomAgent | handle_orchestrate | 18,262 | 19,915 | 170 |
 
 The turn docstring is re-sent with every turn; the stable mode guidance moved
-into the class doc (system prompt, 3,030 characters vs. AtomAgent's 3,353), once.
+into the class doc (system prompt, 2,637 characters vs. AtomAgent's 3,353), once.
 
 ## Open questions
 
@@ -134,5 +137,9 @@ into the class doc (system prompt, 3,030 characters vs. AtomAgent's 3,353), once
 - A request cancelled after its outcome was handed over (before the request
   read it) ends `cancelled` and the outcome is dropped, without an event;
   the child stays open (pinned in `test_unified_agent.py`).
+- `CommandResult.stdout`/`stderr` are shown cut to 2,000 characters in
+  notifications and `pprint` (display only, `spec(max_string=2000)`); the
+  object keeps its 10 kB summaries and `*_path` the full output. A 9,000 +
+  5,000 character result pprints in 4,274 characters instead of 14,202.
 - Lingering pumps of background processes in a persistent shell are released
   only at session exit (stage-1 review, not blocking).

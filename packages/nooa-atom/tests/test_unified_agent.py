@@ -11,7 +11,7 @@ import asyncio
 
 import pytest
 from atom_test_agents import AtomModels, ask, cell, done, work_done
-from nooa_atom.agent.work_shell import Shell
+from nooa_atom.agent.work_shell import CommandResult, Shell
 from nooa_atom.agent.work_subagent import Question
 from nooa_atom.session.options import SessionOptions
 from nooa_atom.session.registry import SessionRegistry
@@ -417,6 +417,8 @@ async def test_first_call_offers_one_work_vocabulary(
         'notification["jobs"]',
         "<status ",
         f"(mode: {MODES[method]})",
+        "# Work: everything that runs is a job on self.jobs.",
+        "documented in the python_cell_tools block",
     ):
         assert wanted in rendered, wanted
     for legacy in (
@@ -441,8 +443,21 @@ async def test_first_call_offers_one_work_vocabulary(
         "status_source",
         "doc(self.delegate)",
         "_AgentJobs",
+        "Special type indicating",  # the Any pseudo-doc
+        "current_dir",
+        "print(doc(self.jobs))",
+        "async def send(self, command",  # adapters' send(): the manager's protocol
+        "async def send(self, task",
     ):
         assert legacy not in rendered, legacy
+    # The workflow examples live in the tools block only, not in the class doc.
+    start = messages.index("<system_prompt")
+    system_prompt = messages[start : messages.index("</system_prompt>", start)]
+    assert "Shell().run(" not in system_prompt and "python_cell_tools block" in system_prompt
+    assert messages.count("# Work: everything that runs is a job on self.jobs.") == 1
+    question = rendered[rendered.index("class Question") :]
+    question = question[: question.index("\n@dataclass") if "\n@dataclass" in question else 400]
+    assert "id:" not in question
 
 
 def test_turn_docs_are_short_and_name_their_mode():
@@ -694,3 +709,21 @@ async def test_cancel_after_the_outcome_was_handed_over_drops_it(fake_work):
     port.route.outcome(SimpleNamespace(report="NEXT"))
     assert (await second).report == "NEXT"
     assert port.sent == ["T2"]  # the follow-up went to the same child
+
+
+def test_command_output_is_shown_cut_but_kept_whole():
+    """Notifications pprint a CommandResult's streams cut; the object keeps them whole."""
+    from nooa_atom.agent.work_manager import JobEvent
+
+    from nooa.agentdoc import pformat
+
+    result = CommandResult(0, False, "o" * 9000, "e" * 5000, "/w", "/w/out", None)
+    shown = pformat(
+        {"jobs": [JobEvent("tests", 1, "done", result)]},
+        max_string=50_000,  # the turn's notification limit
+        max_length=100,
+        max_depth=10,
+    )
+    assert len(shown) < 4_500  # was 14,202 with both streams in full
+    assert "stdout_path='/w/out'" in shown
+    assert (len(result.stdout), len(result.stderr)) == (9000, 5000)
