@@ -233,3 +233,21 @@ def test_the_private_base_keeps_its_turn_methods():
 
     assert turn_method_of(BaseAtom, "handle_work") == "handle_work"
     assert ATOM_SPEC == "atom_test_agents:BaseAtom"
+
+
+async def test_workspace_is_static_and_only_names_a_distinct_search_root(tmp_path):
+    agent = _agent(tmp_path)
+    try:
+        initial = agent.context["workspace_state"]
+        assert agent.context_manager.is_static("workspace_state")
+        assert initial == f"Workspace: {tmp_path} — base for file paths and new shells."
+        agent.v.changed = True
+        assert agent.context["workspace_state"] == initial
+        from nooa_atom.tools.repo_tools import RepoTools
+
+        agent.repo = RepoTools(root=tmp_path / "other", session=agent.shell.session)
+        agent._install_context()
+        assert "Repository root:" in agent.context["workspace_state"]
+        assert str(tmp_path / "other") in agent.context["workspace_state"]
+    finally:
+        await agent.aclose()

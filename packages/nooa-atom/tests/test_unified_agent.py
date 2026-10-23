@@ -433,6 +433,12 @@ async def test_first_call_offers_one_work_vocabulary(
     assert "Run commands and child agents as `self.jobs` work" in tools
     messages = "\n".join(str(m.get("content", "")) for m in call.messages)
     rendered = messages + "\n" + tools  # what the model reads: the messages and the tool
+    prefix = str(call.messages[0].get("content", ""))
+    assert "<workspace_state>" in prefix
+    assert "base for file paths and new shells." in prefix
+    assert "<workspace_state expr=" not in rendered
+    assert "persistent vars" not in rendered
+    assert prefix.count("class Todo(BaseModel):") == 1
     for wanted in (
         "self.jobs.launch",
         "class WorkManager",
@@ -459,6 +465,9 @@ async def test_first_call_offers_one_work_vocabulary(
     for legacy in (
         "<skills",
         "## Python cell state",
+        "handle_batch",
+        "handle_work",
+        "handle_orchestrate",
         "includes method inputs",
         "self.delegate",
         "self.spawn",
