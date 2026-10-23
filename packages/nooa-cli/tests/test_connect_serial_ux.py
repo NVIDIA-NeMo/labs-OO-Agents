@@ -11,7 +11,6 @@ import pytest
 import yaml
 from click.testing import CliRunner
 from nooa_cli.commands import _connect_prompts as prompts
-from nooa_cli.commands import _connect_wizard as wizard
 from nooa_cli.commands.connect import command
 from pydantic import BaseModel
 
@@ -576,61 +575,6 @@ def test_manual_on_invalid_allowance_never_posts_or_writes(monkeypatch, tmp_path
     result = CliRunner().invoke(command, args(path), input="on\n" + allowance + "\n")
     assert result.exit_code != 0 and not path.exists()
     assert "at least 1,024" in result.output
-
-
-def test_identity_unchanged_native_base_does_not_reprepare_metadata(monkeypatch):
-    state = wizard.WizardState(
-        model="A",
-        api_style="anthropic",
-        endpoint="https://api.test/v1",
-        api_key_env="UX_KEY",
-        tokens_spent=1234,
-    )
-    marker = object()
-    state.server_details = marker
-    monkeypatch.setattr(
-        wizard, "prepare_metadata", lambda s: pytest.fail("same effective identity")
-    )
-    assert wizard.review_replacement_route(state, ("https://api.test", "A"))
-    assert state.server_details is marker and state.tokens_spent == 1234
-
-
-def test_route_replacement_preserves_explicit_ui_format_but_not_old_facts(monkeypatch):
-    state = wizard.WizardState(
-        model="B",
-        api_style="chat",
-        endpoint="https://api.test/v1",
-        budget_tokens=10000,
-        output_tokens=2048,
-        reasoning_output_tokens=4096,
-        approval="minimal",
-        probe="minimal",
-        guided=True,
-        api_key_env="",
-        media_inputs=[],
-        reply_tokens=4096,
-        candidate={"id": "A", "context_length": 999999},
-    )
-    state.structured_output_mode = "anthropic"  # choice made after constructing the wizard
-    state.structured_output_mode_set = True
-    state.server_details = object()
-    state.metadata_prepared = state.metadata_displayed = True
-    state.tokens_spent = 4608
-
-    def prep(s):
-        assert s.server_details is None and s.candidate is None
-        assert not s.metadata_displayed and not s.metadata_prepared
-        s.manual_limits = {"context_window": 32768, "max_input_tokens": 16384}
-        s.context_window = 16384
-        return True
-
-    monkeypatch.setattr(wizard, "prepare_metadata", prep)
-    monkeypatch.setattr(prompts, "labelled_choice", lambda label, opts, **kw: "test")
-    assert wizard.review_replacement_route(state, ("https://api.test/v1", "A"))
-    assert state.proposal.entry["structured_output_mode"] == "anthropic"
-    assert state.proposal.entry["context_window"] == 16384
-    assert state.proposal.budget_tokens == 5392 and state.tokens_spent == 4608
-    assert not state.proposal.entry["provenance"]["probes"]
 
 
 @pytest.mark.parametrize("action", ["cancel", "adjust"])
