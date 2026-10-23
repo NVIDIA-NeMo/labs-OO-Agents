@@ -286,6 +286,32 @@ async def test_resource_requests_and_lifecycle(setup):
         res.send("c")
 
 
+async def test_message_reaches_an_optional_resource_message_without_a_job(setup):
+    manager, channel = setup
+
+    class Noted(Toy):
+        def __init__(self) -> None:
+            super().__init__(slow_enter=0.02)
+            self.notes: list[str] = []
+
+        async def message(self, item):
+            self.notes.append(item)
+
+    noted = Noted()
+    res = manager.launch(noted, name="noted")
+    await res.message("n1")  # waits for entry, then hands it over
+    assert noted.notes == ["n1"] and [j.name for j in manager.list()] == ["noted"]
+    assert channel.qsize() == 0  # no request job, no event
+    plain = manager.launch(Toy(), name="plain")
+    with pytest.raises(TypeError, match="has no message"):
+        await plain.message("x")
+    with pytest.raises(TypeError, match="only a launched resource"):
+        await manager.launch(asyncio.sleep(0), name="nap").message("x")
+    await res.cancel()
+    with pytest.raises(RuntimeError, match="noted is"):
+        await res.message("late")
+
+
 async def test_request_bound_and_cancel_keeps_resource(setup):
     manager, _ = setup
     toy = Toy()
