@@ -29,13 +29,13 @@ from nooa import Context, hidden, strategy
 from nooa.agentdoc import doc, spec
 from nooa.interactive import Done, NeedInput, Waiting
 from nooa.strategies import CodeActV2, PredictStrategy  # noqa: F401
-from nooa.tools import Todo, TodoManager  # noqa: F401
 from nooa_atom.agent.work_manager import Job, JobEvent, WorkManager
 from nooa_atom.agent.work_shell import CommandResult, Shell
 from nooa_atom.agent.work_subagent import Question, Subagent
 from nooa_atom.session.items import TaskResult  # noqa: F401
 from nooa_atom.skills.manager import SkillManager
 from nooa_atom.tools.repo_tools import RepoTools
+from nooa_atom.tools.todo_list import Todo, TodoList  # noqa: F401
 
 with hidden:
     import inspect
@@ -387,8 +387,8 @@ class AtomAgent(AtomAgentBase):
     before destructive or outside-the-workspace actions.
 
     ``self.files`` reads and edits files, ``self.repo`` finds definitions and
-    references, ``self.todo`` tracks multi-step work (activate the current
-    Todo; comment material findings and checks), and ``self.v`` keeps
+    references, ``self.todo`` is your plan for multi-step work (activate the
+    item you work on, comment findings and checks, complete it), and ``self.v`` keeps
     durable facts (cell locals last one method call). Everything else that
     runs is a job on ``self.jobs``: commands (``Shell``) and child agents
     (``Subagent``); the python_cell_tools block shows each way to run them.
@@ -408,6 +408,7 @@ class AtomAgent(AtomAgentBase):
 
     jobs: Annotated[WorkManager, nosnapshot]
     files: Annotated[Files, nosnapshot]
+    todo: TodoList
     # Small records of the running jobs, saved with the snapshot so a resumed
     # session reports the ones that did not survive (``after_restore``).
     _work_records: Annotated[list, hidden]
@@ -445,12 +446,24 @@ class AtomAgent(AtomAgentBase):
         self._work_records = []
         self.jobs = _AgentJobs(self, on_change=self._record_work)
         self.files = Files(self.shell)
+        # Atom's own to-do list: four calls on the surface, TodoManager underneath.
+        self._install_todo_list()
         # Commands run as Shell work; the legacy shell skill stays loaded for
         # self.files and self.repo but is not offered (``/skills`` can still).
         self.skills.registry.deactivate(["nemo.shell"])
         self._restore_pending = False
         self._restored_lost: set[str] = set()
         self._install_context()
+
+    @hidden
+    @no_trace
+    def _install_todo_list(self) -> None:
+        """Make ``self.todo`` a ``TodoList``, keeping the items of a restored earlier ``TodoManager``."""
+        current = getattr(self, "todo", None)
+        if isinstance(current, TodoList):
+            return
+        self.todo = TodoList(current.to_dict() if current is not None else None)
+        self.skills.register("nemo.todo", self.todo)
 
     @hidden
     @no_trace
@@ -467,7 +480,7 @@ class AtomAgent(AtomAgentBase):
         """
         self.context["python_cell_tools"] = Context(
             _tools_doc(
-                doc(RepoTools, Files, TodoManager, SkillManager, concise=True)
+                doc(RepoTools, Files, TodoList, SkillManager, concise=True)
                 + "\n"
                 + _WORK_EXAMPLES
                 + doc(WorkManager, Job, JobEvent, Shell, CommandResult, Subagent, Question)
@@ -603,6 +616,7 @@ class AtomAgent(AtomAgentBase):
         from nooa_atom.workspace.options import drop_stale_memory_context
 
         InteractiveAgent.after_restore(self)
+        self._install_todo_list()
         self._install_context()
         drop_stale_memory_context(self)
         self.skills.after_restore()
