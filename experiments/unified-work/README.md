@@ -110,13 +110,13 @@ First call, workspace path counted as a placeholder (`test_atom_prompt_budget.py
 | AtomAgent | handle_batch | 19,737 | 22,066 | 948 |
 | AtomAgent | handle_work | 19,737 | 22,581 | 1,467 |
 | AtomAgent | handle_orchestrate | 19,737 | 24,061 | 2,919 |
-| UnifiedAtomAgent | handle | 18,161 | 19,757 | 161 |
-| UnifiedAtomAgent | handle_batch | 18,161 | 19,777 | 157 |
-| UnifiedAtomAgent | handle_work | 18,161 | 19,774 | 158 |
-| UnifiedAtomAgent | handle_orchestrate | 18,161 | 19,814 | 170 |
+| UnifiedAtomAgent | handle | 18,269 | 19,865 | 161 |
+| UnifiedAtomAgent | handle_batch | 18,269 | 19,885 | 157 |
+| UnifiedAtomAgent | handle_work | 18,269 | 19,882 | 158 |
+| UnifiedAtomAgent | handle_orchestrate | 18,269 | 19,922 | 170 |
 
 The turn docstring is re-sent with every turn; the stable mode guidance moved
-into the class doc (system prompt, 2,944 characters vs. AtomAgent's 3,353), once.
+into the class doc (system prompt, 3,030 characters vs. AtomAgent's 3,353), once.
 
 ## Open questions
 
@@ -124,7 +124,8 @@ into the class doc (system prompt, 2,944 characters vs. AtomAgent's 3,353), once
   session's `cd` does not move them.
 - The legacy `nemo.shell` skill stays loaded (repo and files use it) but is
   deactivated; `/skills` can still turn it on.
-- `RepoResult.matches` still says `self.shell.replace_match()` (a shared doc
-  string; `self.files.replace_match()` is the same call).
+- The repo-tool docs are shared; this agent's tools block rewrites their
+  three legacy-shell phrases (`_DOC_FIXES`), so a doc change upstream needs
+  the list updated (the vocabulary test fails if `self.shell` reappears).
 - Lingering pumps of background processes in a persistent shell are released
   only at session exit (stage-1 review, not blocking).
