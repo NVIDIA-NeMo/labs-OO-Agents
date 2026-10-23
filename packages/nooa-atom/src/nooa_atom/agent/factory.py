@@ -44,6 +44,10 @@ def create_session_agent(options: SessionOptions, storage: StorageManager) -> In
     default model) and passes the result here. Without an ``llm_factory``
     and without ``options.llm``, the class's own default client applies.
 
+    ``AtomAgent`` (or a subclass) also gets its role from ``options.turn_method``
+    (``nooa_atom.agent.roles.role_for``): the ``policy`` its ``handle`` turns
+    enforce and the ``instructions`` of its static ``role`` block.
+
     An Atom agent (``nooa_atom.agent:AtomAgent``, a subclass of it, or any
     other subclass of its private base ``AtomAgentBase``) also gets the workspace's
     settings (``AtomOptions``): ``cwd``, ``skills_dirs``, ``summarization``
@@ -54,7 +58,9 @@ def create_session_agent(options: SessionOptions, storage: StorageManager) -> In
     snapshot. Connecting remembered MCP servers is async and is left to the
     host's ``prepare`` hook. Any other agent gets only ``storage`` and ``llm``.
     """
+    from nooa_atom.agent.agent import AtomAgent
     from nooa_atom.agent.base import AtomAgentBase
+    from nooa_atom.agent.roles import role_for
 
     agent_class = load_agent_class(options.agent_spec, base=options.workspace)
     # Only an Atom agent gets the workspace: an unrelated agent's own
@@ -70,12 +76,16 @@ def create_session_agent(options: SessionOptions, storage: StorageManager) -> In
         accepts_any = any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values())
         workspace = Path(atom_options.working_dir)
         missing = []
-        for name, value in {
+        settings: dict[str, Any] = {
             "cwd": workspace,
             "skills_dirs": atom_options.skills_dirs,
             "summarization": atom_options.summarization,
             "libs_dir": workspace / ".nooa" / "libs",
-        }.items():
+        }
+        if issubclass(agent_class, AtomAgent):
+            # One turn method (handle): the session's turn_method selects the role.
+            settings["policy"], settings["instructions"] = role_for(options.turn_method)
+        for name, value in settings.items():
             if name in parameters or accepts_any:
                 kwargs[name] = value
             else:

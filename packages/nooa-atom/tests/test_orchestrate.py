@@ -8,7 +8,7 @@ import hashlib
 import pytest
 from atom_test_agents import ATOM_SPEC, AtomModels, CellLLM, cell
 from nooa_atom import SessionOptions, SessionStore, run_task
-from nooa_atom.agent import AtomAgent
+from nooa_atom.agent.base import AtomAgentBase
 from nooa_atom.session.registry import SessionRegistry
 from nooa_atom.session.store import sessions_root
 from pydantic import ValidationError
@@ -54,19 +54,19 @@ RESULT = (
 def test_handle_orchestrate_has_the_orchestrator_prompt():
     from nooa.strategies import CodeActV2
 
-    prompt = AtomAgent.handle_orchestrate.__doc__
+    prompt = AtomAgentBase.handle_orchestrate.__doc__
     assert prompt.startswith("You are a recursive language model agent.")
     for phrase in ORCHESTRATOR_TEXT:
         assert phrase in prompt
     # The return contract is kept from the earlier prompt.
     assert "result=TaskResult(" in prompt
     assert "If something blocks you, still return ``Done`` with a ``TaskResult``" in prompt
-    assert "Locals last one method call" in AtomAgent.__doc__  # said once, in the class doc
+    assert "Locals last one method call" in AtomAgentBase.__doc__  # said once, in the class doc
     # The orchestrator no longer closes its children; the host does.
     assert "child.close()" not in prompt
     # Nobody can answer a question, so the prompt never offers NeedInput.
     assert "NeedInput" not in prompt
-    assert isinstance(AtomAgent.handle_orchestrate._plan_strategy, CodeActV2)
+    assert isinstance(AtomAgentBase.handle_orchestrate._plan_strategy, CodeActV2)
 
 
 def test_handle_orchestrate_returns_only_done_or_waiting():
@@ -75,7 +75,7 @@ def test_handle_orchestrate_returns_only_done_or_waiting():
     from nooa.interactive import Done, NeedInput, Waiting
 
     def returns(method):
-        return typing.get_type_hints(getattr(AtomAgent, method))["return"]
+        return typing.get_type_hints(getattr(AtomAgentBase, method))["return"]
 
     assert returns("handle_orchestrate") == Done | Waiting
     # handle() and handle_batch() keep their return types.
@@ -91,7 +91,7 @@ async def test_handle_orchestrate_rejects_need_input(tmp_path):
             cell(RESULT),
         ]
     )
-    agent = AtomAgent(llm=llm, cwd=tmp_path)
+    agent = AtomAgentBase(llm=llm, cwd=tmp_path)
     try:
         outcome = await agent.handle_orchestrate({"user_messages": ["fix it"]})
         assert outcome.result.report == "VERIFIED"
@@ -105,7 +105,7 @@ async def test_handle_orchestrate_rejects_need_input(tmp_path):
 
 @pytest.mark.parametrize("method", list(UNCHANGED_PROMPTS))
 def test_the_interactive_and_batch_prompts_are_unchanged(method):
-    prompt = getattr(AtomAgent, method).__doc__
+    prompt = getattr(AtomAgentBase, method).__doc__
     assert hashlib.sha256(prompt.encode()).hexdigest() == UNCHANGED_PROMPTS[method]
     for phrase in ORCHESTRATOR_TEXT:
         assert phrase not in prompt
@@ -113,9 +113,9 @@ def test_the_interactive_and_batch_prompts_are_unchanged(method):
 
 async def test_handle_orchestrate_is_hidden_from_the_model(tmp_path):
     """Hosts call it as a turn method; the model never sees it listed."""
-    assert "handle_orchestrate" not in doc(AtomAgent, concise=True)
-    assert "handle_orchestrate" not in doc(AtomAgent)
-    agent = AtomAgent(llm=CellLLM([cell("return_result(Done(explanation='x'))")]), cwd=tmp_path)
+    assert "handle_orchestrate" not in doc(AtomAgentBase, concise=True)
+    assert "handle_orchestrate" not in doc(AtomAgentBase)
+    agent = AtomAgentBase(llm=CellLLM([cell("return_result(Done(explanation='x'))")]), cwd=tmp_path)
     try:
         await agent.handle({"user_messages": ["hi"]})
         call = agent.llm.calls[0]

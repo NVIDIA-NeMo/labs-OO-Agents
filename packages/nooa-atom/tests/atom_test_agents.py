@@ -365,7 +365,11 @@ PUBLIC_ATOM_SPEC = "nooa_atom.agent:AtomAgent"
 
 
 class BaseAtom(AtomAgentBase):
-    """Test-only: the private ``AtomAgentBase`` as a session agent."""
+    pass
+
+
+# Test-only: the private base as a session agent, with the base's own prompt.
+BaseAtom.__doc__ = AtomAgentBase.__doc__
 
 
 class AtomModels(ScriptedModels):

@@ -3,6 +3,13 @@
 Status: a spike on `spike/atom-unified-work`. Nothing here has been evaluated
 on a benchmark; no evaluation results are claimed.
 
+Update: on this branch the spike agent is now the public
+`nooa_atom.agent:AtomAgent`. `agent/unified.py` became `agent/agent.py`, the
+earlier `AtomAgent` became the private `agent/base.py:AtomAgentBase`, and
+there is one turn method, `handle`, with the role selected by `turn_method`
+(see `packages/nooa-atom/README.md`). The architecture notes below describe
+the spike as it was at b612e2d46, which is what frozen benchmark pins measure.
+
 ## Research question
 
 Does an agent work better, and with a smaller prompt, when every piece of

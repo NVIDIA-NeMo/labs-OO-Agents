@@ -11,6 +11,7 @@ import asyncio
 
 import pytest
 from atom_test_agents import AtomModels, ask, cell, done, work_done
+from nooa_atom.agent.roles import ROLE_INSTRUCTIONS
 from nooa_atom.agent.work_shell import CommandResult, Shell
 from nooa_atom.agent.work_subagent import Question
 from nooa_atom.session.options import SessionOptions
@@ -416,7 +417,7 @@ async def test_first_call_offers_one_work_vocabulary(
         "stdout_path",
         'notification["jobs"]',
         "<status ",
-        f"(mode: {MODES[method]})",
+        ROLE_INSTRUCTIONS[MODES[method]],
         "# Work: everything that runs is a job on self.jobs.",
         "documented in the python_cell_tools block",
     ):
@@ -450,6 +451,11 @@ async def test_first_call_offers_one_work_vocabulary(
         "async def send(self, task",
     ):
         assert legacy not in rendered, legacy
+    for other, text in ROLE_INSTRUCTIONS.items():
+        if other != MODES[method]:
+            assert text not in rendered, other
+    assert rendered.count(ROLE_INSTRUCTIONS[MODES[method]]) == 1
+    assert root.info.turn_method == method  # the host's selection is recorded as is
     # The workflow examples live in the tools block only, not in the class doc.
     start = messages.index("<system_prompt")
     system_prompt = messages[start : messages.index("</system_prompt>", start)]
@@ -460,19 +466,25 @@ async def test_first_call_offers_one_work_vocabulary(
     assert "id:" not in question
 
 
-def test_turn_docs_are_short_and_name_their_mode():
+def test_one_turn_method_with_a_tiny_doc():
     from nooa_atom.agent.agent import AtomAgent
+    from nooa_atom.session.session import turn_method_of
 
-    for method, mode in (
-        ("handle", "interactive"),
-        ("handle_batch", "unattended"),
-        ("handle_work", "child"),
-        ("handle_orchestrate", "orchestrator"),
-    ):
-        text = getattr(AtomAgent, method).__doc__
-        assert len(text) <= 300, (method, len(text))
-        assert f"(mode: {mode})" in text
-        assert f"- {mode}" in AtomAgent.__doc__ or mode in AtomAgent.__doc__
+    assert len(AtomAgent.handle.__doc__) <= 120
+    assert "Modes" not in AtomAgent.__doc__ and "mode:" not in AtomAgent.__doc__
+    for method in MODES:
+        assert turn_method_of(AtomAgent, method) == "handle"
+    assert turn_method_of(object(), "handle_batch") == "handle_batch"
+
+
+async def test_the_other_turn_methods_are_not_entry_points(tmp_path):
+    agent = await _agent(tmp_path)
+    try:
+        for name in ("handle_batch", "handle_work", "handle_orchestrate"):
+            with pytest.raises(TypeError, match="one turn method"):
+                await getattr(agent, name)({})
+    finally:
+        await agent.aclose()
 
 
 def test_cells_see_only_the_unified_modules_names():
