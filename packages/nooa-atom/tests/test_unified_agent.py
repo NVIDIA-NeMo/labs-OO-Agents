@@ -633,6 +633,236 @@ async def test_reserved_names_and_snapshots(tmp_path):
         await agent.aclose()
 
 
+# ---- Notes to a kept child: rev.message(), beside its requests --------------------
+
+
+def _child_gate(n):
+    """Child code: say it started, then hold its turn until the parent writes ``go<n>``."""
+    return (
+        f"await self.files.write_file('started{n}', 'x')\n"
+        "for _ in range(400):\n"
+        f"    if (await Shell().run('test -f go{n}')).returncode == 0:\n"
+        "        break\n"
+        "    await asyncio.sleep(0.05)\n"
+        "else:\n"
+        "    raise AssertionError('never released')\n"
+    )
+
+
+def _parent_wait(n):
+    """Parent code: wait until the child's turn reached gate ``n``."""
+    return (
+        "for _ in range(400):\n"
+        f"    if (await Shell().run('test -f started{n}')).returncode == 0:\n"
+        "        break\n"
+        "    await asyncio.sleep(0.05)\n"
+        "else:\n"
+        "    raise AssertionError('the child never started')\n"
+    )
+
+
+_SEE_ITEM = (
+    "[event] = notification['jobs']\n"
+    "assert (event.name, event.kind) == ('review', 'item'), event\n"
+    "self.v.item = str(event.value) if isinstance(event.value, Exception) else event.value.report\n"
+    "self.v.item_type = type(event.value).__name__\n"
+    "return_result(Done(explanation='saw the item'))"
+)
+
+
+async def test_a_note_reaches_the_running_turn_before_its_request_completes(
+    registry, options, models
+):
+    models.scripts[None] = [
+        cell(
+            "rev = self.jobs.launch(Subagent(), name='review')\n"
+            "req = rev.send('TASK-1')\n" + _parent_wait(1) + "await rev.message('NOTE-MID')\n"
+            "assert req.status == 'running'\n"
+            "await Shell().run('touch go1')\n"
+            "self.v.report = (await req).report\n"
+            "return_result(Done(explanation='ok'))"
+        )
+    ]
+    models.scripts["review"] = [
+        cell(_child_gate(1) + "print('held')"),
+        cell(WORK_RESULT.format(e="done", r="R-1")),
+    ]
+    root = await registry.create(options)
+    assert await asyncio.wait_for(root.prompt("go"), TIMEOUT) == Done(explanation="ok")
+    await _settle(root)
+    assert root._agent.v.report == "R-1"
+    assert "NOTE-MID" not in _prompt(models, "review", 0)
+    assert "NOTE-MID" in _prompt(models, "review", 1)  # read inside the same turn
+    assert len(models.llms["review"].calls) == 2  # no extra turn, no extra outcome
+    assert root._agent._jobs_in.qsize() == 0 and len(models.llms[None].calls) == 1
+    assert _delegates_empty(root)
+
+
+async def test_a_note_that_misses_the_turn_starts_one_whose_result_is_an_item(
+    registry, options, models
+):
+    models.scripts[None] = [
+        cell(
+            "rev = self.jobs.launch(Subagent(), name='review')\n"
+            "req = rev.send('TASK-1')\n" + _parent_wait(1) + "await rev.message('NOTE-SPILL')\n"
+            "await Shell().run('touch go1')\n"
+            "self.v.report = (await req).report\n"
+            "return_result(Done(explanation='ok'))"
+        ),
+        cell(_SEE_ITEM),
+    ]
+    models.scripts["review"] = [
+        # One cell: the turn ends with no model call left to read the note.
+        cell(_child_gate(1) + WORK_RESULT.format(e="done", r="R-1")),
+        cell("assert 'NOTE-SPILL' in str(notification)\n" + WORK_RESULT.format(e="n", r="R-NOTE")),
+    ]
+    root = await registry.create(options)
+    assert await asyncio.wait_for(root.prompt("go"), TIMEOUT) == Done(explanation="ok")
+    await _settle(root)
+    agent = root._agent
+    assert agent.v.report == "R-1"  # the request kept its own turn's result
+    assert agent.v.item == "R-NOTE"  # the note's turn reported as an item of the resource
+    assert _delegates_empty(root)
+
+
+async def test_a_request_queued_behind_a_note_turn_gets_its_own_result(registry, options, models):
+    models.scripts[None] = [
+        cell(
+            "rev = self.jobs.launch(Subagent(), name='review')\n"
+            "assert (await rev.send('TASK-1')).report == 'R-1'\n"
+            "await rev.message('NOTE-IDLE')\n" + _parent_wait(2) + "req = rev.send('TASK-2')\n"
+            "await asyncio.sleep(0.3)\n"
+            "await Shell().run('touch go2')\n"
+            "self.v.report = (await req).report\n"
+            "return_result(Done(explanation='ok'))"
+        ),
+        cell(_SEE_ITEM),
+    ]
+    models.scripts["review"] = [
+        work_done("one", report="R-1"),
+        cell(
+            "assert 'NOTE-IDLE' in str(notification)\n"
+            + _child_gate(2)
+            + WORK_RESULT.format(e="n", r="R-NOTE")
+        ),
+        cell("assert 'TASK-2' in str(notification)\n" + WORK_RESULT.format(e="two", r="R-2")),
+    ]
+    root = await registry.create(options)
+    assert await asyncio.wait_for(root.prompt("go"), TIMEOUT) == Done(explanation="ok")
+    await _settle(root)
+    agent = root._agent
+    assert agent.v.report == "R-2"  # not the note turn's R-NOTE
+    assert agent.v.item == "R-NOTE"
+    assert "TASK-2" not in _prompt(models, "review", 1)  # queued, never steered into it
+    assert _delegates_empty(root)
+
+
+async def test_cancelling_a_queued_request_takes_its_input_back_and_spares_the_note_turn(
+    registry, options, models
+):
+    models.scripts[None] = [
+        cell(
+            "rev = self.jobs.launch(Subagent(), name='review')\n"
+            "await rev.send('TASK-1')\n"
+            "await rev.message('NOTE-C')\n" + _parent_wait(2) + "req = rev.send('TASK-X')\n"
+            "await asyncio.sleep(0.3)\n"
+            "await req.cancel()\n"
+            "assert req.status == 'cancelled'\n"
+            "await Shell().run('touch go2')\n"
+            "self.v.report = (await rev.send('TASK-3')).report\n"
+            "return_result(Done(explanation='ok'))"
+        ),
+        cell(_SEE_ITEM),
+    ]
+    models.scripts["review"] = [
+        work_done("one", report="R-1"),
+        cell(_child_gate(2) + WORK_RESULT.format(e="n", r="R-NOTE")),
+        cell(
+            "assert 'TASK-X' not in str(notification) and 'TASK-3' in str(notification)\n"
+            + WORK_RESULT.format(e="three", r="R-3")
+        ),
+    ]
+    root = await registry.create(options)
+    assert await asyncio.wait_for(root.prompt("go"), TIMEOUT) == Done(explanation="ok")
+    await _settle(root)
+    agent = root._agent
+    assert agent.v.report == "R-3"
+    assert agent.v.item == "R-NOTE"  # the note's turn ran to its end
+    assert all("TASK-X" not in str(c.messages) for c in models.llms["review"].calls)
+    assert _delegates_empty(root)
+
+
+async def test_note_lifecycle_errors_and_questions_are_answered_with_send(
+    registry, options, models
+):
+    models.scripts[None] = [
+        cell(
+            "errors = []\n"
+            "rev = self.jobs.launch(Subagent(), name='review')\n"
+            "try:\n"
+            "    await rev.message('too early')\n"
+            "except RuntimeError as exc:\n"
+            "    errors.append(str(exc))\n"
+            "q = await rev.send('TASK')\n"
+            "assert isinstance(q, Question)\n"
+            "try:\n"
+            "    await rev.message('not an answer')\n"
+            "except RuntimeError as exc:\n"
+            "    errors.append(str(exc))\n"
+            "self.v.report = (await rev.send('ANSWER-7')).report\n"
+            "try:\n"
+            "    await self.jobs.launch(asyncio.sleep(0), name='nap').message('x')\n"
+            "except TypeError as exc:\n"
+            "    errors.append(str(exc))\n"
+            "await rev.cancel()\n"
+            "try:\n"
+            "    await rev.message('too late')\n"
+            "except RuntimeError as exc:\n"
+            "    errors.append(str(exc))\n"
+            "self.v.errors = errors\n"
+            "return_result(Done(explanation='ok'))"
+        )
+    ]
+    models.scripts["review"] = [
+        ask("which file?"),
+        cell("assert 'ANSWER-7' in str(notification)\n" + WORK_RESULT.format(e="a", r="R-A")),
+    ]
+    root = await registry.create(options)
+    assert await asyncio.wait_for(root.prompt("go"), TIMEOUT) == Done(explanation="ok")
+    agent = root._agent
+    assert agent.v.report == "R-A"
+    early, asking, plain, late = agent.v.errors
+    assert "send() it a task first" in early
+    assert "which file?" in asking and "answer it with send()" in asking
+    assert "only a launched resource has message()" in plain
+    assert "review is" in late
+    assert all("not an answer" not in str(c.messages) for c in models.llms["review"].calls)
+    assert _delegates_empty(root)
+
+
+async def test_a_failed_note_turn_is_a_visible_item(registry, options, models):
+    models.scripts[None] = [
+        cell(
+            "rev = self.jobs.launch(Subagent(), name='review')\n"
+            "await rev.send('TASK')\n"
+            "await rev.message('NOTE-DOOM')\n"
+            "return_result(Done(explanation='ok'))"
+        ),
+        cell(_SEE_ITEM),
+    ]
+    models.scripts["review"] = [work_done(report="R-1")]  # the note's turn has no script: fails
+    root = await registry.create(options)
+    assert await asyncio.wait_for(root.prompt("go"), TIMEOUT) == Done(explanation="ok")
+    for _ in range(1200):  # the model client retries (with backoff) before the turn fails
+        if "item_type" in root._agent.vars:
+            break
+        await asyncio.sleep(0.05)
+    agent = root._agent
+    assert agent.v.item_type == "RuntimeError"
+    assert "subagent review failed" in str(agent.v.item)
+    assert _delegates_empty(root)
+
+
 # ---- Subagent routing, against a fake session port -------------------------------
 
 
@@ -675,8 +905,14 @@ class _FakePort:
         self.route = route
         return SimpleNamespace(id="c1", name=name)
 
-    async def send_child(self, child_id: str, item, *, channel: str):
+    async def send_child(self, child_id: str, item, *, channel: str, steer: bool = True):
+        from types import SimpleNamespace
+
         self.sent.append(item)
+        return SimpleNamespace(item_id=f"item{len(self.sent)}")
+
+    def withdraw_child(self, child_id: str, receipt) -> bool:
+        return False  # its turn already started
 
     async def close_child(self, child_id: str) -> None:
         self.closed.append(child_id)
@@ -690,8 +926,12 @@ def _failed(error: str):
 
 
 async def _armed(port: _FakePort, rounds: int = 200) -> None:
+    """Wait for the request, then start the turn that carries its input."""
     for _ in range(rounds):
-        if port.route is not None and port.route.future is not None:
+        route = port.route
+        if route is not None and route.future is not None and (route.armed or route.want):
+            route.turn_started([route.want] if route.want else [])
+            assert route.armed
             return
         await asyncio.sleep(0)
     raise AssertionError("the request never armed its route")

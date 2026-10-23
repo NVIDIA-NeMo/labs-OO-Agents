@@ -368,6 +368,7 @@ r = await job.send("make")                                 # a request -> Comman
 done = await Subagent("fix parser").run(todo)              # one-shot child -> TaskResult
 rev = self.jobs.launch(Subagent("review"), name="review")  # kept child
 req = rev.send(todo)                                       # await req -> TaskResult or Question
+await rev.message("also check the docs")                   # a note it reads now, even mid-turn
 """
 
 _CONTEXT: Annotated[dict[str, Any], hidden] = {

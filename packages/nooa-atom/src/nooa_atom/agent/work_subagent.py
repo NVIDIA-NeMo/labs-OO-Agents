@@ -12,7 +12,9 @@ until it is used, inside a session's turn (it binds to that session then).
   ``TaskResult``, or a ``Question`` it asks; answer with the next
   ``rev.send(answer)``. Requests run one at a time, in order. Cancelling a
   request stops the child's current turn; cancelling the resource closes
-  the child.
+  the child. ``await rev.message(text)`` hands it a note now, even mid-turn,
+  with no answer promised: the running turn reads it, or it starts a turn
+  whose outcome arrives as an item of ``rev``.
 
 The child's ``self.message()`` notes are the job's items (a request's while
 one runs, else the resource's): they go to the work manager like any
@@ -45,21 +47,30 @@ class Question:
 
 
 class _Route:
-    """Where the registry sends a routed child's notes and outcomes (a ``ChildRoute``)."""
+    """Where the registry sends a routed child's notes and outcomes (a ``ChildRoute``).
+
+    A request is *armed* once the turn carrying its input starts (the first
+    request's turn is the child's first). Only an armed request takes a turn's
+    outcome; any other turn's outcome (one a note started) is an item.
+    """
 
     def __init__(self, idle_post: Callable[[Any], None], name: str) -> None:
         self.name = name
         self.idle_post = idle_post  # the resource's (or one-shot job's) items
         self.post = idle_post
         self.future: asyncio.Future[Any] | None = None
+        self.armed = False
+        self.want: str | None = None  # the item id that arms the waiting request
+        self.early: list[str] = []  # ids of turns started before ``want`` was known
         self.asking: Question | None = None
         self.drop_failure = False  # the failure of a turn its own request cancelled
         self.closed_reason: str | None = None
 
-    def expect(self, post: Callable[[Any], None]) -> asyncio.Future[Any]:
-        """Arm the next outcome before the child can deliver it."""
+    def expect(self, post: Callable[[Any], None], *, armed: bool = True) -> asyncio.Future[Any]:
+        """Arm the next outcome before the child can deliver it (``armed=False``: its turn's)."""
         self.future = asyncio.get_running_loop().create_future()
         self.post = post
+        self.armed, self.want, self.early = armed, None, []
         self.asking = None
         # A cancelled request's turn failure arrives while its interrupt runs,
         # under the send lock, before the next expect(): a flag left set here
@@ -67,27 +78,54 @@ class _Route:
         self.drop_failure = False
         return self.future
 
+    def claim(self, item_id: str) -> None:
+        """The waiting request's input was admitted as ``item_id``."""
+        self.want = item_id
+        self.armed = self.armed or item_id in self.early
+        self.early = []
+
+    def turn_started(self, item_ids: list[str]) -> None:
+        self.asking = None  # a new turn ends the child's question
+        if self.future is None or self.armed:
+            return
+        if self.want is None:
+            self.early.extend(item_ids)  # admitted, its receipt not read yet
+        elif self.want in item_ids:
+            self.armed = True
+
     def message(self, text: str) -> None:
-        self.post(text)
+        (self.post if self.armed else self.idle_post)(text)
+
+    def disarm(self) -> None:
+        self.future, self.post, self.armed, self.want = None, self.idle_post, False, None
 
     def outcome(self, item: Any) -> None:
-        future, self.future = self.future, None
-        self.post = self.idle_post
         if isinstance(item, ChildQuestion):
             self.asking = Question(str(item.question), str(item.id))
+        future = self.future if self.armed else None
+        if future is not None:
+            self.disarm()
         if future is not None and not future.done():
             future.set_result(item)
-        elif isinstance(item, ChildFailed) and self.drop_failure:
+        elif isinstance(item, ChildFailed) and self.drop_failure and future is None:
             self.drop_failure = False  # its request was cancelled: nobody waits for it
         else:
-            with contextlib.suppress(Exception):  # unasked for (after a cancel): an item
-                self.idle_post(_value(item, self.name))
+            with contextlib.suppress(Exception):  # unasked for (a note's turn, after a cancel)
+                self.idle_post(_item(item, self.name))
 
     def closed(self) -> None:
         self.closed_reason = self.closed_reason or f"subagent {self.name} was closed"
-        future, self.future = self.future, None
+        future = self.future
+        self.disarm()
         if future is not None and not future.done():
             future.set_exception(RuntimeError(self.closed_reason))
+
+
+def _item(item: Any, name: str) -> Any:
+    """An unasked-for outcome as a job item: a failure is a value, never raised."""
+    if isinstance(item, ChildFailed):
+        return RuntimeError(f"subagent {name} failed: {item.error}")
+    return _value(item, name)
 
 
 def _value(item: Any, name: str) -> Any:
@@ -137,6 +175,7 @@ class Subagent:
         self._child_id: str | None = None
         self._child_name: str | None = None
         self._lock: asyncio.Lock | None = None
+        self._started: asyncio.Event | None = None  # clear while send() starts the child
         self._name: str | None = None
         self._entering = False
 
@@ -188,6 +227,8 @@ class Subagent:
         finally:
             self._entering = False
         self._port, self._lock, self._name = port, asyncio.Lock(), current_name()
+        self._started = asyncio.Event()
+        self._started.set()
         self._idle_post = emitter()
         self._route, self._child_id, self._child_name = None, None, None
         return self
@@ -214,34 +255,73 @@ class Subagent:
                 raise RuntimeError(f"{route.closed_reason}; launch a new Subagent()")
             post = emitter()
             describe(f"task for subagent {self._child_name or self._name or ''}".rstrip())
+            receipt = None
             if route is None or self._child_id is None:
                 name = _child_name(port, self._name)
                 route = self._route = _Route(self._idle_post, name)
                 future = route.expect(post)
+                self._started.clear()
                 try:
                     ref = await _start(port, self, task, None, route, name=name, kept=True)
                 except BaseException:
                     self._route = None
                     raise
+                finally:
+                    self._started.set()
                 self._child_id, self._child_name = ref.id, ref.name
             else:
-                future = route.expect(post)
+                # Queued, not steered: a note's turn may be running, and this
+                # request takes only the outcome of the turn that carries it.
+                future = route.expect(post, armed=False)
                 text = _todo_text(task) if isinstance(task, _AnyTodo) else task
                 try:
-                    await port.send_child(self._child_id, text, channel="user_messages")
+                    receipt = await port.send_child(
+                        self._child_id, text, channel="user_messages", steer=False
+                    )
                 except BaseException:
-                    route.future, route.post = None, route.idle_post
+                    route.disarm()
                     raise
+                route.claim(receipt.item_id)
             try:
                 item = await future
             except asyncio.CancelledError:
-                await self._interrupt(route)
+                if route.armed or receipt is None or not self._withdraw(route, receipt):
+                    await self._interrupt(route)
                 raise
             return _value(item, route.name)
 
+    async def message(self, text: str | Todo) -> None:
+        """A note the child reads now, even mid-turn; no answer promised."""
+        # A running turn reads it before its next model call; else it starts a
+        # turn whose outcome is an item of this job. Answer questions with send().
+        if self._port is None or self._started is None:
+            raise RuntimeError("the subagent is not running; launch it with self.jobs.launch()")
+        await self._started.wait()  # the first send() may still be starting the child
+        route, child_id = self._route, self._child_id
+        if route is None or child_id is None:
+            raise RuntimeError("the subagent has no child yet: send() it a task first")
+        if route.closed_reason:
+            raise RuntimeError(f"{route.closed_reason}; launch a new Subagent()")
+        if route.asking is not None:
+            raise RuntimeError(
+                f"subagent {route.name} asked {route.asking.text!r}: answer it with send()"
+            )
+        item = _todo_text(text) if isinstance(text, _AnyTodo) else text
+        await self._port.send_child(child_id, item, channel="user_messages")
+
+    def _withdraw(self, route: _Route, receipt: Any) -> bool:
+        """A cancelled request whose turn has not started: take its input back."""
+        try:
+            withdrawn = bool(self._port.withdraw_child(self._child_id, receipt))
+        except Exception:
+            withdrawn = False
+        if withdrawn:
+            route.disarm()
+        return withdrawn
+
     async def _interrupt(self, route: _Route) -> None:
         """A cancelled request: stop the child's current turn (the child stays open)."""
-        route.future, route.post = None, route.idle_post
+        route.disarm()
         child = self._port._registry.get(self._child_id) if self._child_id else None
         if child is None:
             return

@@ -74,6 +74,9 @@ class ChildRoute(Protocol):
     ``wait()``s for (a ``ChildResult``, ``ChildQuestion`` or ``ChildFailed``),
     and ``closed()`` is called once when the child session closes. Each is
     called from the registry's listeners and must not block or raise.
+
+    A route may also define ``turn_started(item_ids)``: called as each of the
+    child's turns starts, with the ids of the admitted items it carries.
     """
 
     def message(self, text: str) -> None: ...
@@ -586,6 +589,9 @@ class SessionRegistry:
             # submit), ends the child's pending question.
             if child.parent_id is not None:
                 self._questions.pop((child.parent_id, child.id), None)
+            started = getattr(self._routes.get(child.id), "turn_started", None)
+            if started is not None:
+                started(list(update.item_ids))
             return
         if not isinstance(update, TurnEndedUpdate):
             return

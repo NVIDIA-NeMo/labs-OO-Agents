@@ -306,7 +306,9 @@ class SessionPort:
         )
 
     @hidden
-    async def send_child(self, child_id: str, item: Any, *, channel: str) -> Receipt:
+    async def send_child(
+        self, child_id: str, item: Any, *, channel: str, steer: bool = True
+    ) -> Receipt:
         """Admit ``item`` on one of a child's channels (loading the child if needed).
 
         Text on ``user_messages`` steers a running turn (it reads it before
@@ -314,6 +316,7 @@ class SessionPort:
         a turn. A new turn of the child ends its pending question. A Todo
         is an ordinary data item: to change a child's task, send the new
         brief as text or a Todo; the child decides how to update its own Todo.
+        With ``steer=False`` text is only queued: it waits for a turn of its own.
         """
         child = await self._registry.open_child(self._session, child_id)
         source = _parent_source(self._session)
@@ -321,9 +324,16 @@ class SessionPort:
             return await child.submit(as_data(item), channel=channel, source=source)
         # A message answers a pending question, as the turn it starts would.
         self._registry.clear_question(self._session, child_id)
-        if isinstance(item, str):
+        if isinstance(item, str) and steer:
             return await child.steer(item, source=source)
         return await child.submit(as_data(item), channel=channel, source=source)
+
+    @hidden
+    def withdraw_child(self, child_id: str, receipt: Receipt) -> bool:
+        """Take back an item sent to a child that nothing has consumed yet; return whether it was."""
+        self._registry.check_owner(self._session, child_id)
+        child = self._registry.get(child_id)
+        return child is not None and child.withdraw(receipt)
 
     @hidden
     def pending_question(self, child_id: str) -> ChildQuestion | None:

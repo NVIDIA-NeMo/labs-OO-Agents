@@ -8,7 +8,9 @@
 - an async iterable (an async generator): each value it yields is an item;
 - a resource, an async context manager with ``send(input) -> awaitable``: it is
   entered at launch and exited when cancelled; ``job.send(x)`` returns a request
-  ``Job`` whose result is what ``send`` returned.
+  ``Job`` whose result is what ``send`` returned. A resource with an optional
+  ``message(item)`` also takes ``await job.message(x)``: input handed over now,
+  outside its requests, with no result of its own.
 
 Each outcome has one receiver. A pending ``await job`` (or a reader iterating
 the job) takes it; otherwise a ``JobEvent`` goes to the outbox (the agent's
@@ -361,6 +363,22 @@ class Job:
         request._owner = self
         self._requests.append(request)
         return request
+
+    async def message(self, item: Any) -> None:
+        """Hand a resource input now, beside its requests; no result."""
+        if self._kind != "resource":
+            raise TypeError(f"{self.name} takes no input: only a launched resource has message()")
+        if self._closing or self._status != "running":
+            raise RuntimeError(f"{self.name} is {self._closing and 'closing' or self._status}")
+        await self._ready.wait()
+        if self._entered is None or self._closing:
+            raise RuntimeError(f"{self.name} is {'closing' if self._closing else 'not running'}")
+        deliver = getattr(self._entered, "message", None)
+        if not callable(deliver):
+            raise TypeError(f"{type(self._entered).__name__} has no message(item)")
+        result = deliver(item)
+        if inspect.isawaitable(result):
+            await result
 
     async def cancel(self) -> None:
         """Stop the work (a resource: its requests first, then its exit)."""
