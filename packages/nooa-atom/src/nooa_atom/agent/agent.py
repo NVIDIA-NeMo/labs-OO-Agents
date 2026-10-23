@@ -119,7 +119,8 @@ class AtomCodeAct(CodeActV2):
     An ``AtomAgent`` subclass defined in another module (a ``file.py:Class``
     agent) sees this module's names too, and its own module's names win.
     It also makes the agent's workspace the default ``cwd`` of ``Shell()``
-    for the turn (and the jobs it launches).
+    for the turn (and the jobs it launches), and the agent the owner that
+    closes the Shells they start.
     """
 
     def _extract_module_context(
@@ -185,6 +186,9 @@ class AtomCodeAct(CodeActV2):
         cwd = getattr(runtime.agent, "cwd", None)
         if cwd is not None:
             work_shell.default_cwd.set(str(cwd))
+        owner = getattr(runtime.agent, "_shells", None)
+        if owner is not None:  # the session closes the Shells its cells start
+            work_shell.shell_owner.set(owner)
         return super()._build_builtins(runtime, call)
 
 
@@ -355,10 +359,12 @@ def _tools_doc(text: str) -> str:
 # The one place the work workflows are shown (the tools block, before the work types).
 _WORK_EXAMPLES: Annotated[str, hidden] = """\
 # Work: everything that runs is a job on self.jobs.
-r = await Shell().run("pytest -q tests/test_x.py")        # short command -> CommandResult
-self.jobs.launch(Shell().run("pytest -q"), name="tests")   # long: a JobEvent arrives later
-sh = self.jobs.launch(Shell(), name="sh")                  # persistent bash session
-r = await sh.send("cd src && make")                        # a request -> CommandResult
+sh = Shell()                                               # one bash per object, started on first use
+r = await sh.run("cd src && export X=1")                   # -> CommandResult; cd/variables persist
+r = await sh.run("make")                                   # same bash: in src, X set
+self.jobs.launch(sh.run("pytest -q"), name="tests")        # long: a JobEvent arrives later
+job = self.jobs.launch(Shell(), name="sh")                 # a shell as a job; cancel closes it
+r = await job.send("make")                                 # a request -> CommandResult
 done = await Subagent("fix parser").run(todo)              # one-shot child -> TaskResult
 rev = self.jobs.launch(Subagent("review"), name="review")  # kept child
 req = rev.send(todo)                                       # await req -> TaskResult or Question
@@ -417,6 +423,8 @@ class AtomAgent(AtomAgentBase):
     # Set by after_restore until the child sessions from before it are reported.
     _restore_pending: Annotated[bool, hidden, nosnapshot]
     _restored_lost: Annotated[set, hidden, nosnapshot]
+    # The Shells this session's cells and jobs started: closed with the session.
+    _shells: Annotated[work_shell.ShellOwner, hidden, nosnapshot]
 
     # The role the host gave this agent (``nooa_atom.agent.roles``): the policy its
     # handle() turns enforce and the instructions of the ``role`` block.
@@ -447,6 +455,7 @@ class AtomAgent(AtomAgentBase):
         self.queue_manager._cancel_hints.pop("jobs", None)
         self._work_records = []
         self.jobs = _AgentJobs(self, on_change=self._record_work)
+        self._shells = work_shell.ShellOwner()
         self.files = Files(self.shell)
         # Atom's own to-do list: four calls on the surface, TodoManager underneath.
         self._install_todo_list()
@@ -692,11 +701,14 @@ class AtomAgent(AtomAgentBase):
 
     @hidden
     async def aclose(self) -> None:
-        """Cancel this session's jobs (shells, subagents), then release the agent."""
+        """Cancel this session's jobs, close the Shells it started, then release the agent."""
         if self.turns.in_turn:
             raise RuntimeError("an executing turn cannot close its own agent")
         try:
-            await self.jobs.aclose()
+            try:
+                await self.jobs.aclose()
+            finally:
+                await self._shells.aclose()
         finally:
             await super().aclose()
 
