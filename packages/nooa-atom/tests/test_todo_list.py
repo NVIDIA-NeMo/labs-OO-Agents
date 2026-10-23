@@ -350,3 +350,45 @@ def test_a_core_todo_brief_arrives_active_without_colliding_with_new_ids():
     assert child.add("My own step").id != "2"
     child.complete()
     assert child.get("2").status == "done"
+
+
+@pytest.mark.parametrize(
+    ("note", "text"),
+    [
+        (123, "123"),
+        (None, "None"),
+        ({"x": 1}, "{'x': 1}"),
+        ({"body": "dict note"}, "dict note"),
+        ("plain", "plain"),
+    ],
+)
+async def test_any_appended_note_survives_a_real_save_and_reload(
+    sessions_dir, options, models, note, text
+):
+    from nooa.tools.todo import TodoComment
+
+    ids = {}
+
+    def build(agent):
+        first = agent.todo.add("Read the code")
+        second = agent.todo.add("Fix it", description="the brief")
+        first.comments.append("ok")
+        second.comments.append(note)  # comments is a plain list: nothing validates the append
+        second.comments.append(TodoComment(body="core note"))
+        agent.todo.complete(first)
+        agent.todo.activate(second)
+        ids.update(first=first.id, second=second.id)
+
+    todos, plan = await _loaded_todo(
+        sessions_dir, await _saved(sessions_dir, options, models, build)
+    )
+    # The whole list and the active item come back, not an older snapshot.
+    assert [t.id for t in todos.list_todos()] == [ids["first"], ids["second"]]
+    assert todos.active().id == ids["second"]
+    assert todos.get(ids["second"]).comments == [text, "core note"]
+    assert todos.get(ids["first"]).comments == ["ok"]
+    assert [(p.content, p.status) for p in plan] == [
+        ("Read the code", "completed"),
+        ("Fix it", "in_progress"),
+    ]
+    assert text in todos.status()
