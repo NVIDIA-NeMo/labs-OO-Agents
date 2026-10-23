@@ -7,6 +7,7 @@ from __future__ import annotations
 import logging
 import os
 import stat
+from datetime import UTC, datetime
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -132,7 +133,7 @@ def render_agent_instructions(working_directory: str | Path) -> str:
     used = len(preamble)
     for path in discover_agent_instruction_files(working_directory):
         separator = _SECTION_SEPARATOR if len(sections) > 1 else ""
-        header = f"Instructions from {path}:\n\n"
+        header = f"Instructions from {path} (updated {_updated_at(path)}):\n\n"
         overhead = len(separator) + len(header)
         available = _MAX_INSTRUCTION_TOTAL_CHARS - used - overhead
         if available <= 0:
@@ -162,6 +163,51 @@ def render_agent_instructions(working_directory: str | Path) -> str:
         sections.append(rendered_piece)
         used += len(rendered_piece)
     return "".join(sections) if len(sections) > 1 else ""
+
+
+def _updated_at(path: Path) -> str:
+    """Return the file's modification time as a short UTC timestamp."""
+    try:
+        stamp = datetime.fromtimestamp(path.stat().st_mtime, UTC)
+    except OSError:
+        return "unknown"
+    return stamp.strftime("%Y-%m-%d %H:%M UTC")
+
+
+def _signature(paths: tuple[Path, ...]) -> tuple[tuple[str, int, int, int] | tuple[str], ...]:
+    """Identify each file's current version without reading it."""
+    versions: list[tuple[str, int, int, int] | tuple[str]] = []
+    for path in paths:
+        try:
+            info = path.stat()
+        except OSError:
+            versions.append((str(path),))
+            continue
+        versions.append((str(path), info.st_ino, info.st_size, info.st_mtime_ns))
+    return tuple(versions)
+
+
+class RepositoryInstructions:
+    """``AGENTS.md`` guidance for one startup folder, re-read only when a file changes.
+
+    Each ``render()`` looks the files up again and compares their size and
+    modification time with the last read. Unchanged files return the cached
+    text, so a cached prompt prefix stays byte-identical. An empty string means
+    there are no files yet.
+    """
+
+    def __init__(self, working_directory: str | Path) -> None:
+        self._working_directory = Path(working_directory)
+        self._signature: tuple[object, ...] | None = None
+        self._text = ""
+
+    def render(self) -> str:
+        """Return the current guidance, re-reading only files that changed."""
+        signature = _signature(discover_agent_instruction_files(self._working_directory))
+        if signature != self._signature:
+            self._text = render_agent_instructions(self._working_directory)
+            self._signature = signature
+        return self._text
 
 
 def _git_root(cwd: Path) -> Path | None:
