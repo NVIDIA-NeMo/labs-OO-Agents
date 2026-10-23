@@ -424,7 +424,7 @@ def test_actual_guided_manual_and_listed_consent_save_and_partial_results(
     assert entry["media_inputs"] == expected
     assert entry["context_window"] == 1000000
     assert result.output.count("\n  Model details\n") == 1
-    assert "Catalogue model" not in result.output
+    assert "Which of these is your model?" not in result.output
     if final_action == "save":
         assert not any(
             key.startswith("media:") for key in written[0]["provenance"].get("probes", {})

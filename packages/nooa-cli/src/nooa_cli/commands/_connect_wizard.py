@@ -381,14 +381,15 @@ def select_connection(state: WizardState) -> bool:
             f"Unknown provider. Choose {', '.join(connect.PROVIDERS)}, or custom."
         )
     if not state.provider and not state.endpoint and not state.yes:
-        # Preselect the first provider whose key is already set, so Enter works.
+        # Preselect the first provider whose key is already set, so Enter works;
+        # without any key, preselect the first listed provider.
         keyed = next(
             (
                 name
                 for name, preset in connect.PROVIDERS.items()
                 if os.environ.get(preset.api_key_env)
             ),
-            None,
+            next(iter(connect.PROVIDERS)),
         )
         state.provider = prompts.prompt(
             "Choose a provider",
@@ -951,13 +952,6 @@ def check_interfaces(state: WizardState) -> bool:
                         + ", ".join(prompts.choice_label(style) for style in available),
                     )
                 )
-                view.note(
-                    scrub_setup(
-                        state,
-                        "Accepted client types: "
-                        + ", ".join(state.interfaces.accepted_client_types),
-                    )
-                )
                 observed = [s for s in available if state.interfaces.reasoning_observed.get(s)]
                 view.note(
                     scrub_setup(
@@ -970,8 +964,14 @@ def check_interfaces(state: WizardState) -> bool:
                         ),
                     )
                 )
-        if state.interfaces and len(available) == 1:
-            state.api_style = available[0]
+        same_kind = len({style in connect.DECISION_API_STYLES for style in available}) == 1
+        if state.interfaces and (len(available) == 1 or (state.guided and same_kind)):
+            # Discovery already found what works: use the recommended format
+            # instead of asking a second interface question. Only a real
+            # choice between answering and decision models is still asked.
+            state.api_style = (
+                state.default_style if state.default_style in available else available[0]
+            )
             view.note(
                 scrub_setup(
                     state, f"Using {prompts.choice_label(state.api_style)} for {state.model}."
@@ -1294,7 +1294,7 @@ def prepare_metadata(state: WizardState) -> bool:
                     "Ambiguous match: choose --catalogue-model or --no-catalogue."
                 )
             selected = prompts.prompt(
-                "Catalogue model (blank leaves it unknown)",
+                "Which of these is your model? (Enter for none)",
                 default="",
                 show_default=False,
                 choices=[""] + [item["id"] for item in matches],
@@ -1323,7 +1323,7 @@ def prepare_metadata(state: WizardState) -> bool:
                     )
                 )
                 selected = prompts.prompt(
-                    "Catalogue model (blank leaves it unknown)",
+                    "Which of these is your model? (Enter for none)",
                     default="",
                     show_default=False,
                     choices=[""] + [item["id"] for item in fuzzy],
@@ -2091,7 +2091,7 @@ def choose_reasoning(state: WizardState, *, deferred=False, edit=False) -> bool:
     default = "keep" if keep else "default"
     if state.guided_reasoning_route == route and state.guided_reasoning_choice in dict(options):
         default = state.guided_reasoning_choice
-    view.note("Choose how much reasoning to request. Listed choices are not yet tested.")
+    view.note("Choose how much reasoning to request. Test now checks your choice.")
     choice = prompts.labelled_choice("Reasoning", options, default=default)
     if choice == "cancel":
         view.note("Setup cancelled. Nothing saved.")
@@ -3092,7 +3092,15 @@ def show_guided_proposal(state: WizardState, *, deferred_style=False, updated=Fa
         if state.guided_reasoning_choice == "keep" and active is None:
             label = "Keep current settings"
         rows.append(("Reasoning", label))
-        rows.append(("Reasoning check", "Not tested yet"))
+        seen = bool(state.interfaces and state.interfaces.reasoning_observed.get(state.api_style))
+        rows.append(
+            (
+                "Reasoning check",
+                "Returned during discovery; Test now checks your choice"
+                if seen
+                else "Test now checks your choice",
+            )
+        )
         if entry.get("reasoning_levels"):
             rows.append(("Other available choices", ", ".join(entry["reasoning_levels"])))
         rows.extend(structured_output_rows(entry))

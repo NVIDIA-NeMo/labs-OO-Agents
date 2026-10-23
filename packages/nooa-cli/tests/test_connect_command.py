@@ -947,15 +947,16 @@ def test_interface_menu_only_offers_successes_or_explicit_manual_escape(
             "--output",
             str(path),
         ],
-        input="262144\n262144\ndiscover\ntest\nresponses\ntest\ny\n"
+        input="262144\n262144\ndiscover\ntest\ntest\ny\n"
         if responses_ok
         # No working interface: decline "Start over?".
         else "262144\n262144\ndiscover\nn\n",
     )
     if responses_ok:
         assert result.exit_code == 0, result.output
-        assert choices == [("chat", "responses")]
-        assert yaml.safe_load(path.read_text())["models"]["local"]["api_style"] == "responses"
+        # Guided discovery uses the recommended working format; no second question.
+        assert choices == []
+        assert yaml.safe_load(path.read_text())["models"]["local"]["api_style"] == "chat"
     else:
         assert result.exit_code != 0
         assert not choices

@@ -226,7 +226,7 @@ def test_choices_reach_actual_renderer(monkeypatch, columns, case):
                 "cancel": "Cancel setup",
             },
         ),
-        "catalogue": ("Catalogue model", ("", "vendor/model"), "", None),
+        "catalogue": ("Which of these is your model?", ("", "vendor/model"), "", None),
         "reasoning": ("Default reasoning level", ("low", "high", "-"), "low", None),
     }
 

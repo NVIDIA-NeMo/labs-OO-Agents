@@ -99,7 +99,7 @@ def test_real_guided_blank_catalogue_order_and_early_cancel(tmp_path, cancel):
     )
     os.close(slave)
     steps = [
-        ("Cataloguemodel(blankleavesitunknown)", b"\r"),
+        ("Whichoftheseisyourmodel?(Enterfornone)", b"\r"),
         ("Contextwindow(tokens)", b"\x03" if cancel == "context" else b"128000\r"),
         ("Inputtokenlimit(tokens)", b"\x03" if cancel == "input" else b"64000\r"),
         ("Requestinterface", b"\x1b[B\r"),

@@ -371,7 +371,7 @@ def test_openrouter_discovery_offers_chat_responses_and_decision_without_name_cl
     assert entries[0]["provenance"]["tokens_charged_to_budget"] <= budget
     plain = " ".join(result.output.split())
     if budget > 512:
-        assert "Accepted client types: completion, responses, decision" in plain
+        assert "Accepted client types" not in plain
         assert (
             "Working API formats: OpenAI-compatible Chat, OpenAI Responses, System One Decisions"
             in plain
