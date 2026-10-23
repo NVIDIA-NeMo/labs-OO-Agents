@@ -3,6 +3,7 @@
 """``Shell`` work under the ``WorkManager``: real bash, one-shot and persistent."""
 
 import asyncio
+import contextlib
 import os
 from pathlib import Path
 
@@ -250,3 +251,23 @@ async def test_background_job_output_does_not_block_the_session(manager, tmp_pat
     await asyncio.sleep(2)  # the background writer is drained (and capped), not blocked
     r = await asyncio.wait_for(sh.send("jobs -r | wc -l"), 10)
     assert r.stdout.strip() == "0"
+
+
+async def test_one_shot_background_process_does_not_hold_the_command(tmp_path):
+    """A background process that inherits stdout/stderr does not keep run() waiting."""
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    r = await asyncio.wait_for(
+        Shell(tmp_path, timeout=2).run("sleep 3 & echo $! >bg.pid; echo hi"), 10
+    )
+    assert (r.returncode, r.timed_out, r.stdout) == (0, False, "hi\n")
+    assert loop.time() - started < 1.5
+    pid = int((tmp_path / "bg.pid").read_text())
+    try:
+        os.kill(pid, 0)  # still ours to stop: run() did not kill it
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(pid, 9)
+    # No transport or pump is left behind: nothing still reads its pipe.
+    pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+    assert not pending
