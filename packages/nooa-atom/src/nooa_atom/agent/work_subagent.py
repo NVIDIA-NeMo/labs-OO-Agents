@@ -60,6 +60,10 @@ class _Route:
         self.future = asyncio.get_running_loop().create_future()
         self.post = post
         self.asking = None
+        # A cancelled request's turn failure arrives while its interrupt runs,
+        # under the send lock, before the next expect(): a flag left set here
+        # would only drop this new request's real failure.
+        self.drop_failure = False
         return self.future
 
     def message(self, text: str) -> None:
