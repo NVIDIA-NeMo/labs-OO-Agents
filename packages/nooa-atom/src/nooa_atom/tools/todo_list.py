@@ -58,15 +58,28 @@ class Todo(_Todo):
     @field_validator("comments", mode="before")
     @classmethod
     def _note_text(cls, value: Any) -> Any:
-        """Notes saved as core ``TodoComment``s (or their dicts) keep their text."""
+        """Every note loads as text, so a saved list always restores.
+
+        ``comments`` is a plain list the model appends to, so anything can land
+        in it: a core ``TodoComment`` or its dict keeps its ``body``; any other
+        value (a number, ``None``, a dict without a text body) becomes ``str(v)``.
+        """
         if isinstance(value, list):
-            return [getattr(v, "body", v.get("body") if isinstance(v, dict) else v) for v in value]
+            return [_note(v) for v in value]
         return value
 
     @hidden
     def comment(self, text: str) -> str:
         self.comments.append(str(text))
         return str(text)
+
+
+def _note(value: Any) -> str:
+    """One note as text: a string as is, a TodoComment or its dict by its body, anything else by str()."""
+    if isinstance(value, str):
+        return value
+    body = value.get("body") if isinstance(value, dict) else getattr(value, "body", None)
+    return body if isinstance(body, str) else str(value)
 
 
 def _as_todo(todo: _Todo) -> Todo:
