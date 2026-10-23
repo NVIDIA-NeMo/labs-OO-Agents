@@ -127,11 +127,16 @@ RESULT = (
 # 199 characters more in the system prompt and in total for every row (before,
 # 16,080 system and 18,150 / 18,409 / 18,924 / 20,404 total). Limits: measured
 # values plus about 2%, rounded up to the next 100 (system: next 100).
+# Raised when self.jobs (JobsApi with JobInfo/JobUpdate) joined the
+# python_cell_tools block and the class doc went back to the short self.jobs
+# sentence (feat/atom-jobs-reland): system 16,279 -> 19,737 (+3,458), still
+# under BENCH_SYSTEM_LIMIT. Limits: measured totals plus about 2%, rounded up
+# to the next 100 (system: next 100).
 LIMITS = {
-    (ATOM, "handle"): (16_300, 18_800),  # measured 16,279 / 18,349
-    (ATOM, "handle_batch"): (16_300, 19_000),  # measured 16,279 / 18,608
-    (ATOM, "handle_work"): (16_300, 19_600),  # measured 16,279 / 19,123
-    (ATOM, "handle_orchestrate"): (16_300, 21_100),  # measured 16,279 / 20,603
+    (ATOM, "handle"): (19_800, 22_300),  # measured 19,737 / 21,807
+    (ATOM, "handle_batch"): (19_800, 22_600),  # measured 19,737 / 22,066
+    (ATOM, "handle_work"): (19_800, 23_100),  # measured 19,737 / 22,581
+    (ATOM, "handle_orchestrate"): (19_800, 24_600),  # measured 19,737 / 24,061
 }
 # The bench guard's system-prompt ceiling; every agent stays under it.
 BENCH_SYSTEM_LIMIT = 20_000

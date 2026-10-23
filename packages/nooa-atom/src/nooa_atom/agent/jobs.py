@@ -93,40 +93,31 @@ class JobInfo(BaseModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    name: str = Field(description="Name it was started with; items it delivers carry it")
-    path: str = Field(default="", description="Its path: your session's path plus /name")
+    name: str
+    path: str = Field(default="", description="Your session's path plus /name")
     kind: JobKind = Field(description="The method that started it")
-    state: JobStateName = Field(description="running, done, failed or cancelled")
-    target: str = Field(default="", description="What runs: command, file, interval or callable")
-    description: str = Field(default="", description="Why it runs, as passed with description=")
-    payload: Any = Field(
-        default=None, description="Value given to after()/every(); delivered as result/values"
+    state: JobStateName
+    target: str = Field(default="", description="Command, file, interval or callable")
+    description: str = ""
+    payload: Any = Field(default=None, description="after()/every() payload")
+    log_path: str | None = Field(default=None, description="run(log_path=): full output")
+    started_at: str = Field(description="ISO time")
+    finished_at: str | None = None
+    throttle: Annotated[Throttle | None, spec(hidden=True)] = Field(
+        default=None, description="Current batching, None if off"
     )
-    log_path: str | None = Field(
-        default=None, description="run with log_path=: the file getting its full output"
-    )
-    started_at: str = Field(description="Start time (ISO, seconds)")
-    finished_at: str | None = Field(default=None, description="End time, None while running")
-    throttle: Throttle | None = Field(default=None, description="Current batching, None if off")
-    pending: int = Field(
-        default=0,
-        description=(
-            "Values held back by the throttle for the next update (an items= batch waits"
-            " for N values or the end; seconds= bounds the wait). 0 once the job ends"
-        ),
+    pending: Annotated[int, spec(hidden=True)] = Field(
+        default=0, description="Values the throttle holds for the next update; 0 once ended"
     )
     last: list["JobUpdate"] = Field(
         default_factory=list,
-        description=(
-            "Its latest updates (up to 5) as sent to the jobs queue: the newest may not"
-            " have reached notification['jobs'] yet"
-        ),
+        description="Latest updates (up to 5); the newest may not be in notification yet",
     )
 
 
 @spec(hide_empty=True)
 class JobUpdate(BaseModel):
-    """What a job delivers to ``notification["jobs"]``: new ``lines``/``values`` while it runs, then one ``done=True`` update.
+    """What a job delivers to ``notification["jobs"]``; its last update has ``done=True``.
 
     A ``run`` ends with ``returncode``, ``timed_out``, ``stdout`` and
     ``stderr``; a coroutine ``spawn`` or ``after`` with ``result``. Every
@@ -138,47 +129,33 @@ class JobUpdate(BaseModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    name: str = Field(description="The job's name")
-    path: str = Field(default="", description="The job's path: your session's path plus /name")
-    done: bool = Field(default=False, description="True on the job's one final update")
-    error: str | None = Field(
-        default=None,
-        description="Why the job failed ('ExceptionType: message'), on the done update only",
-    )
-    returncode: int | None = Field(
-        default=None, description="run, done update: the exit code (124 on timeout)"
-    )
-    timed_out: bool = Field(default=False, description="run, done update: hit its timeout")
+    name: str
+    path: str = Field(default="", description="Your session's path plus /name")
+    done: bool = Field(default=False, description="True on the one final update")
+    error: str | None = Field(default=None, description="Why it failed, on the done update")
+    returncode: int | None = Field(default=None, description="run: exit code (124 on timeout)")
+    timed_out: bool = False
     stdout: Annotated[str, spec(max_string=2000)] = Field(
-        default="", description="run, done update: the last 20,000 chars of stdout"
+        default="", description="run: the last 20,000 chars"
     )
     stderr: Annotated[str, spec(max_string=2000)] = Field(
-        default="", description="run, done update: the last 20,000 chars of stderr"
+        default="", description="run: the last 20,000 chars"
     )
-    log_path: str | None = Field(
-        default=None,
-        description="run with log_path=, done update: the file with its full output",
-    )
+    log_path: str | None = Field(default=None, description="run(log_path=): full output")
     lines: Annotated[list[str], spec(max_length=20, max_string=500)] = Field(
-        default_factory=list,
-        description=(
-            "Output lines since the last update, without the newline: a throttled run's"
-            " stdout, or tail"
-        ),
+        default_factory=list, description="New stdout lines (throttled run, tail)"
     )
     stderr_lines: Annotated[list[str], spec(max_length=20, max_string=500)] = Field(
-        default_factory=list,
-        description="A throttled run's stderr lines since the last update, without the newline",
+        default_factory=list, description="New stderr lines (throttled run)"
     )
     values: Annotated[list[Any], spec(max_length=10, max_string=500)] = Field(
-        default_factory=list,
-        description="Values since the last update: an async-iterator spawn's yields or every() ticks",
+        default_factory=list, description="New spawn yields or every() ticks"
     )
     result: Annotated[Any, spec(max_string=2000)] = Field(
-        default=None,
-        description="Done update: a coroutine spawn's return value or after()'s payload",
+        default=None, description="Coroutine spawn's return value or after()'s payload"
     )
 
+    @spec(hidden=True)
     def status_source(self) -> str:
         """The job's path, for the per-turn ``Unread:`` count (never its content)."""
         return self.path or self.name

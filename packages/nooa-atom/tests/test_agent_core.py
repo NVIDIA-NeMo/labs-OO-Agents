@@ -463,6 +463,7 @@ def test_the_repo_tool_docs_offer_cwd():
 
 async def test_replace_contract_survives_the_default_concise_tool_context(tmp_path):
     from nooa_atom.agent.activity import ActivityShellTools
+    from nooa_atom.agent.jobs import JobsApi
     from nooa_atom.tools.repo_tools import RepoTools
 
     from nooa.agentdoc import doc
@@ -471,7 +472,8 @@ async def test_replace_contract_survives_the_default_concise_tool_context(tmp_pa
     # Construct only: strict exhaustion forbids even an accidental fake model call.
     agent = AtomAgent(llm=FakeLLMClient(strict_exhaustion=True), cwd=tmp_path)
     try:
-        tools = doc(RepoTools, ActivityShellTools, TodoManager, concise=True)
+        tools = doc(RepoTools, ActivityShellTools, TodoManager, JobsApi, concise=True)
+        assert "async def run(self, cmd: str, *, name: str" in tools
         assert str(agent.context["python_cell_tools"]) == tools
         for rendered in (tools, doc(ActivityShellTools, concise=True)):
             assert "replace(self, path: str, old: str, new: str)" in rendered
