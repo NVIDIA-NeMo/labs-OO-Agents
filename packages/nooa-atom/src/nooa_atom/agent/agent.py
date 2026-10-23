@@ -124,8 +124,10 @@ class AtomAgent(InteractiveAgent):
     Work until the newest request is complete or genuinely needs user input. Use
     as many execution cells as necessary, inspect each result, and never claim a
     check passed without running it. Run anything that may take more than a
-    minute or two (tests, builds) with ``self.jobs.run(...)`` instead of blocking
-    a cell. Jobs and children share one set of names.
+    minute or two (tests, builds) in the background instead of blocking a cell:
+    ``await self.jobs.run(cmd, *, name, description="", timeout=None, cwd=None, stdin=None, items=None, seconds=None, log_path=None, replace=False)``;
+    its result arrives in ``notification["jobs"]``. Jobs and children share one
+    set of names.
 
     ``notification`` maps a channel (``user_messages``, ``system_messages``,
     ``slash_commands``, ``delegates``, ``jobs``) to its new items. In
@@ -182,7 +184,7 @@ class AtomAgent(InteractiveAgent):
     # with spec() below the class (this module postpones annotations).
     _jobs_in: Annotated[Channel, hidden, nosnapshot]
     jobs: JobsApi
-    # label -> small record of each running job, saved with the snapshot so a
+    # name -> small record of each running job, saved with the snapshot so a
     # resumed session can report the jobs that did not survive (JobsApi).
     _jobs_running: Annotated[dict, hidden]
     # The Session port, installed by the session that runs this agent. The

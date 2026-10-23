@@ -106,7 +106,7 @@ RESULT = (
 # truthful API text plus the child-session docs, 273 characters more in the system
 # prompt for every row (was 14,909). Measured values plus about 2% headroom.
 # Raised for self.jobs (2026-10-19): the class doc says to run long work with
-# self.jobs.run(...) and wait on its label, and the self doc lists the
+# self.jobs.run(...) and wait on its name, and the self doc lists the
 # jobs attribute: 224 characters more in the system prompt and in total for
 # every row (handle measured 18,475 total before, not 18,240). Measured values
 # plus about 2% headroom.
@@ -122,11 +122,16 @@ RESULT = (
 # doc grew by 158, which put the system prompt over 16,000: the system limit
 # was raised to the measured 16,080 rounded up to the next 100, and handle's
 # total limit lowered to its measured value plus about 2%.
+# Raised when the class doc gave self.jobs.run's full signature (name=, not
+# label=) and said results arrive in notification["jobs"] (feat/atom-jobs-reland):
+# 199 characters more in the system prompt and in total for every row (before,
+# 16,080 system and 18,150 / 18,409 / 18,924 / 20,404 total). Limits: measured
+# values plus about 2%, rounded up to the next 100 (system: next 100).
 LIMITS = {
-    (ATOM, "handle"): (16_100, 18_600),  # measured 16,080 / 18,150
-    (ATOM, "handle_batch"): (16_100, 18_600),  # measured 16,080 / 18,409
-    (ATOM, "handle_work"): (16_100, 19_000),  # measured 16,080 / 18,924
-    (ATOM, "handle_orchestrate"): (16_100, 20_600),  # measured 16,080 / 20,404
+    (ATOM, "handle"): (16_300, 18_800),  # measured 16,279 / 18,349
+    (ATOM, "handle_batch"): (16_300, 19_000),  # measured 16,279 / 18,608
+    (ATOM, "handle_work"): (16_300, 19_600),  # measured 16,279 / 19,123
+    (ATOM, "handle_orchestrate"): (16_300, 21_100),  # measured 16,279 / 20,603
 }
 # The bench guard's system-prompt ceiling; every agent stays under it.
 BENCH_SYSTEM_LIMIT = 20_000
