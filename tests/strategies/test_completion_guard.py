@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Scope-sensitive coverage for CodeAct's reserved completion binding."""
 
+import textwrap
+
 import pytest
 
 from nooa.strategies._completion_guard import completion_binding_errors
@@ -11,6 +13,8 @@ from nooa.strategies._completion_guard import completion_binding_errors
     "code",
     [
         "return_result = 42",
+        "await helper()\nreturn_result = 42",
+        "return_result = 42\nreturn 42",
         "return_result = answer = 42",
         "return_result: int",
         "return_result: int = 42",
@@ -121,6 +125,31 @@ def test_reports_the_binding_source_line():
 def test_syntax_errors_keep_the_existing_execution_diagnostic():
     """Malformed Python is left to the normal cell traceback path."""
     assert completion_binding_errors("return_result = (") == []
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "return_result = 1\nglobal return_result",
+        "return_result(1)\nglobal return_result\nreturn_result = 1",
+        "return_result: int = 1\nglobal return_result",
+        "def helper(return_result):\n    global return_result\n    return_result = 1",
+        "def return_result(value):\n    return value\nglobal return_result",
+        "return_result = 1\nnonlocal return_result",
+        "await helper()\nreturn_result = 1\nglobal return_result",
+        "return_result = 1\nreturn 42\nglobal return_result",
+    ],
+)
+def test_semantic_syntax_errors_preserve_python_diagnostics(code):
+    """Compiler-only errors retain their native message and original cell source line."""
+    with pytest.raises(SyntaxError) as expected:
+        compile("async def cell():\n" + textwrap.indent(code, "    "), "<cell>", "exec")
+
+    with pytest.raises(SyntaxError) as actual:
+        completion_binding_errors(code)
+
+    assert actual.value.msg == expected.value.msg
+    assert actual.value.lineno == expected.value.lineno - 1
 
 
 @pytest.mark.parametrize("binding_first", [False, True])
