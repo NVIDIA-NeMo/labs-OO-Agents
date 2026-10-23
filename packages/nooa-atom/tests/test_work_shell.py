@@ -404,3 +404,124 @@ async def test_owner_closes_its_shells_and_their_background_processes(manager, t
     assert kept.summary() == "closed"
     assert (await kept.run("echo again")).stdout == "again\n"  # usable again: a new bash
     await kept.aclose()
+
+
+# ---- the wrapper under the user's shell options and traps ----
+
+
+async def test_set_e_persists_and_ordinary_commands_still_succeed(tmp_path):
+    async with Shell(tmp_path, timeout=10) as sh:
+        assert (await sh.run("set -e")).returncode == 0
+        r = await sh.run("printf ok")
+        assert (r.returncode, r.stdout, r.stderr) == (0, "ok", "")
+        r = await sh.run("false && true; echo [$?]")  # not an errexit failure
+        assert (r.returncode, r.stdout) == (0, "[1]\n")
+        r = await sh.run("! true")  # a nonzero status that errexit ignores: bash stays
+        assert r.returncode == 1 and "bash ended" not in r.stderr
+        r = await sh.run("[ -f missing ] && . missing")  # a common last line under set -e
+        assert r.returncode == 1 and "bash ended" not in r.stderr
+        r = await sh.run("case $- in *e*) echo on;; esac; X=1")
+        assert r.stdout == "on\n"  # the option is the user's, in force again
+        r = await sh.run("false; echo never")  # errexit ends the shell, as in a terminal
+        assert r.returncode == 1 and r.stdout == ""
+        assert "bash ended during this command (exit 1)" in r.stderr
+        r = await sh.run('echo "[$X]"; case $- in *e*) echo on;; esac')
+        assert (r.returncode, r.stdout) == (0, "[]\n")  # a new bash: options, variables gone
+
+
+async def test_nonzero_statuses_are_reported_as_is(tmp_path):
+    async with Shell(tmp_path, timeout=10) as sh:
+        assert (await sh.run("false")).returncode == 1
+        assert (await sh.run("(exit 7)")).returncode == 7
+        assert (await sh.run("sh -c 'kill -TERM $$'")).returncode == 143
+        r = await sh.run("exit 7")
+        assert r.returncode == 7 and "bash ended during this command (exit 7)" in r.stderr
+        r = await sh.run("exit 0")
+        assert r.returncode == 0 and "bash ended during this command (exit 0)" in r.stderr
+        assert (await sh.run("echo back")).stdout == "back\n"
+
+
+async def test_nounset_and_pipefail(tmp_path):
+    async with Shell(tmp_path, timeout=10) as sh:
+        await sh.run("set -u -o pipefail")
+        r = await sh.run("false | true; echo [$?]; echo ${DEFINED:-d}")
+        assert (r.returncode, r.stdout, r.stderr) == (0, "[1]\nd\n", "")
+        r = await sh.run("set -o | grep -E '^(nounset|pipefail)' | tr -s ' \t' ' '")
+        assert r.stdout == "nounset on\npipefail on\n"
+        r = await sh.run("set -eu -o pipefail; printf ok; Y=2")
+        assert (r.returncode, r.stdout) == (0, "ok")
+        assert (await sh.run('echo "$Y"')).stdout == "2\n"
+        r = await sh.run("echo $NOT_SET")  # nounset ends a non-interactive bash
+        assert r.returncode != 0 and "bash ended during this command" in r.stderr
+
+
+async def test_user_traps_persist_and_work(tmp_path):
+    async with Shell(tmp_path, timeout=10) as sh:
+        await sh.run("trap 'echo got >>usr1.log' USR1; trap ':' DEBUG; trap 'echo bye' EXIT")
+        r = await sh.run("trap -p USR1 DEBUG EXIT")
+        assert r.stdout == (
+            "trap -- 'echo got >>usr1.log' SIGUSR1\ntrap -- ':' DEBUG\ntrap -- 'echo bye' EXIT\n"
+        )
+        await sh.run("kill -USR1 $$; true")
+        assert (tmp_path / "usr1.log").read_text() == "got\n"  # the user's trap, not ours
+        await sh.run("trap - DEBUG")
+        r = await sh.run("trap -p DEBUG; trap -p USR1")
+        assert r.stdout == "trap -- 'echo got >>usr1.log' SIGUSR1\n"
+
+
+async def test_user_usr1_trap_makes_an_interrupt_restart_explicitly(tmp_path):
+    async with Shell(tmp_path, timeout=0.5) as sh:
+        await sh.run("trap ':' USR1; KEEP=1")
+        r = await sh.run(f"sleep 30; touch {tmp_path}/after")
+        assert r.timed_out and "the shell restarted" in r.stderr  # no silent half-stop
+        assert not (tmp_path / "after").exists()
+        r = await sh.run('echo "[$KEEP]"; trap -p USR1')
+        assert r.stdout.startswith("[]\n") and "':'" not in r.stdout  # a new bash: user trap gone
+
+
+async def test_timeout_leaves_no_helper_state_and_keeps_the_users(tmp_path):
+    async with Shell(tmp_path, timeout=0.5) as sh:
+        await sh.run("set -u -o pipefail; trap ':' DEBUG; KEEP=1")
+        r = await sh.run(f"sleep 30; touch {tmp_path}/after; echo never")
+        assert (r.returncode, r.timed_out, r.stdout) == (124, True, "")
+        assert not (tmp_path / "after").exists()
+        r = await sh.run(
+            "compgen -v __nooa; shopt -p extdebug; trap -p DEBUG; "
+            "set -o | grep -E '^(nounset|pipefail|errtrace|functrace)' | tr -s ' \t' ' '; "
+            'echo "$KEEP"'
+        )
+        assert r.stdout == (
+            "shopt -u extdebug\ntrap -- ':' DEBUG\n"
+            "errtrace off\nfunctrace off\nnounset on\npipefail on\n1\n"
+        )
+
+
+async def test_timeout_under_errexit_reports_the_lost_shell(tmp_path):
+    async with Shell(tmp_path, timeout=0.5) as sh:
+        await sh.run("set -e; KEEP=1")
+        r = await sh.run("sleep 30; echo never")
+        assert (r.returncode, r.timed_out, r.stdout) == (124, True, "")
+        assert "bash ended during this command" in r.stderr  # errexit on the stopped sleep
+        r = await sh.run('echo "[$KEEP]"')
+        assert r.stdout == "[]\n" and r.returncode == 0
+
+
+async def test_unparsable_command_runs_nothing_and_the_shell_goes_on(tmp_path):
+    async with Shell(tmp_path, timeout=10) as sh:
+        await sh.run("set -e; K=1")
+        r = await sh.run("touch before; echo 'open quote")
+        assert r.returncode == 2 and "unexpected" in r.stderr and not (tmp_path / "before").exists()
+        r = await sh.run("cat <<EOF\nno end")
+        assert r.returncode != 0 and r.stdout == ""
+        r = await sh.run('echo "$K"; case $- in *e*) echo e;; esac; compgen -v __nooa; trap -p')
+        assert r.stdout.startswith("1\ne\n") and "__nooa_" not in r.stdout.split("trap --")[0]
+
+
+async def test_xtrace_shows_the_users_commands_not_the_wrapper(tmp_path):
+    async with Shell(tmp_path, timeout=10) as sh:
+        await sh.run("set -x")
+        r = await sh.run("echo hi")
+        assert r.stdout == "hi\n" and "+ echo hi" in r.stderr
+        assert "__nooa" not in r.stderr and "_nemo_ec" not in r.stderr
+        await sh.run("set +x")
+        assert (await sh.run("echo quiet")).stderr == ""

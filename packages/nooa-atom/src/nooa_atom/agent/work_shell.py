@@ -26,7 +26,6 @@ when the summary was cut.
 from __future__ import annotations
 
 import asyncio
-import base64
 import contextlib
 import contextvars
 import itertools
@@ -63,8 +62,25 @@ _CHUNK_BYTES = 64 * 1024
 _INTERRUPT_GRACE = 2.0
 # Seconds past a command's deadline before the bash session's own timeout fires.
 _BACKSTOP_SECONDS = 60.0
-# Skips each command once an interrupt set __nooa_stop, except the wrapper's own epilogue.
-_STOP_TRAP = '[[ -z $__nooa_stop || $BASH_COMMAND == "__nooa_rc=\\$?" || $BASH_COMMAND == "trap - DEBUG USR1" ]]'
+# Skips each command once an interrupt set __nooa_stop, except the epilogue's first.
+# `!` keeps a failing test from tripping errexit; ${...-} keeps nounset quiet.
+_GUARD = "! [[ -n ${__nooa_stop-} && $BASH_COMMAND != __nooa_rc=* ]]"
+# The SIGUSR1 trap: note the user's options, DEBUG trap and extdebug; then skip the rest.
+_ON_INTERRUPT = (
+    "__nooa_e=$-; set +e; __nooa_stop=1; __nooa_ud=$(trap -p DEBUG); "
+    "__nooa_xd=$(shopt -p extdebug); shopt -s extdebug; trap " + shlex.quote(_GUARD) + " DEBUG"
+)
+# Runs after the command under the user's options: the first line turns them off
+# (its trace to /dev/null); then it restores the user's traps and reports
+# "status options user-usr1-trap" and returns the command's status.
+_EPILOGUE = """\
+{ __nooa_rc=$? __nooa_f=${__nooa_e-$-} __nooa_was=${__nooa_stop-} __nooa_stop=; set +euxv; } 2>/dev/null
+__nooa_p=; if [[ -o pipefail ]]; then __nooa_p=p; set +o pipefail; fi
+if [[ -n $__nooa_was ]]; then eval "${__nooa_ud:-trap - DEBUG}"; eval "$__nooa_xd"; fi
+case "$(trap -p USR1)" in *__nooa_stop=1*) trap - USR1; __nooa_t=0 ;; '') __nooa_t=0 ;; *) __nooa_t=1 ;; esac
+printf '%s %s %s\\n' "$__nooa_rc" "-$__nooa_f$__nooa_p" "$__nooa_t" >STATUSFILE
+eval "unset __nooa_rc __nooa_f __nooa_was __nooa_stop __nooa_p __nooa_t __nooa_e __nooa_ud __nooa_xd; (exit $__nooa_rc)"
+"""
 # Seconds to wait for output still in the pipes.
 _DRAIN_SECONDS = 0.5
 
@@ -262,10 +278,13 @@ class Shell:
 
     Launched, it is a job: ``sh = self.jobs.launch(Shell(), name="sh")``; each
     ``sh.send("make")`` is a request job whose result is a ``CommandResult``,
-    in the same bash as ``run`` on that object. Cancelling a command
-    interrupts it and keeps the shell's state (a command that will not stop
-    restarts bash, and the next result says the variables were lost);
-    cancelling the job closes its bash.
+    in the same bash as ``run`` on that object. A timeout or cancel stops the
+    whole command (the rest of it is skipped) and keeps the shell's state.
+    When that cannot be done safely (a builtin loop that will not stop, or the
+    user's own USR1 trap) bash restarts; under ``set -e`` the stopped command
+    ends bash. Either way the result says the state was lost. Cancelling the
+    job closes its bash. Options (``set -euxo pipefail``) and traps persist;
+    ``exit N`` ends bash with status N, and the next command starts a new one.
 
     Closing ends bash and its background processes: ``await sh.aclose()``,
     ``async with Shell() as sh:``, or when the object is dropped. An agent
@@ -302,6 +321,10 @@ class Shell:
         self._confirmed_cwd: str | None = None
         self._busy: str | None = None  # the command running now
         self._lost = False  # restarted since the last command: state was lost
+        # The user's shell options (of "euxvp", p: pipefail) and whether a user
+        # USR1 trap is set, as bash last reported them (see ``_wrap``).
+        self._options = ""
+        self._user_usr1 = False
 
     def __repr__(self) -> str:
         return f"Shell(cwd={self.cwd!r}, timeout={self.timeout:g}; {self.summary()})"
@@ -365,6 +388,7 @@ class Shell:
         self._session, self._note = session, ""
         self._bash = (pid, _start_time(pid))
         self._confirmed_cwd, self._busy, self._lost = str(session.cwd), None, False
+        self._reset_tracked()
         owner = shell_owner.get()
         if owner is not None:
             owner.adopt(self)
@@ -444,25 +468,9 @@ class Shell:
                 write_fds.add(opened[-1][2])
             for capture, (reader, transport, _) in zip((out, err), opened, strict=True):
                 pumps.append((asyncio.create_task(capture.pump(reader)), transport, capture))
-            blob = base64.b64encode(command.encode()).decode()
-            # The pid first (it identifies the bash that runs it), then a group,
-            # not a subshell: cd/export/variables stay in the shell. An interrupt
-            # sends bash SIGUSR1 before it stops the running process; the DEBUG
-            # trap (extdebug: a failing trap skips the command) then skips the
-            # rest of the command, so `sleep 60; make install` stops as a whole.
-            wrapped = (
-                f"echo $$ >{shlex.quote(str(pidfile))}\n"
-                "__nooa_stop=; shopt -q extdebug; __nooa_xd=$?\n"
-                "trap __nooa_stop=1 USR1; shopt -s extdebug\n"
-                f"trap {shlex.quote(_STOP_TRAP)} DEBUG\n"
-                f'{{ eval "$(printf %s {blob} | base64 -d)"\n}}'
-                f" <{shlex.quote(source)} >{shlex.quote(str(fifos[0]))}"
-                f" 2>{shlex.quote(str(fifos[1]))}\n"
-                "__nooa_rc=$?\n"
-                "trap - DEBUG USR1\n"
-                '[ "$__nooa_xd" = 0 ] || shopt -u extdebug\n'
-                'eval "unset __nooa_stop __nooa_xd __nooa_rc; (exit $__nooa_rc)"'
-            )
+            statusfile = directory / f"{stem}.status"
+            fifos.append(statusfile)  # removed with the FIFOs
+            wrapped = self._wrap(command, pidfile, statusfile, source, fifos[0], fifos[1])
             # Earlier background jobs of this bash: an interrupt never signals them.
             before = _descendants(self._bash[0]) if self._bash and self._bash_alive() else {}
             # Our own deadline (the session's is a backstop): a timeout stops the
@@ -490,8 +498,14 @@ class Shell:
             finally:
                 _close_fds(write_fds)  # bash's ends close with the group: then EOF
             await self._settle([pump for pump, _, _ in pumps])
+            self._read_status(statusfile)
+            ended = False
+            if code == -1:  # no status from bash: did it exit (`exit 7`, errexit)?
+                status = await self._exit_status(session)
+                if status is not None:
+                    ended, code = True, status
             if restart_notes is None:
-                notes = self._check_bash(pidfile, code, timed_out)
+                notes = self._check_bash(pidfile, code, timed_out, ended)
             else:  # restarted at the deadline: this result says so
                 notes = restart_notes
             result = _result(code, timed_out, out, err, str(session.cwd))
@@ -520,6 +534,77 @@ class Shell:
             result.stderr = f"{result.stderr}\n{extra}" if result.stderr else extra
         return result
 
+    # ---- the command wrapper ---------------------------------------------------
+    #
+    # Each command runs in bash as: prologue, the command in a { } group (not a
+    # subshell, so its state stays), epilogue. Between commands the user's
+    # errexit/nounset/xtrace/verbose/pipefail are off, so neither the wrapper
+    # nor BashSession's protocol can trip them; the epilogue reports them (and
+    # the exit status) in a status file and the next prologue sets them again,
+    # only in the same bash. No variable, trap or option of ours is left set.
+    #
+    # Interrupting: while a command runs, bash has a SIGUSR1 trap (unless the
+    # user has one). An interrupt sends SIGUSR1, then stops the running process;
+    # the trap sets a DEBUG trap with extdebug (a failing DEBUG trap skips the
+    # command) so the rest of the command is skipped. The epilogue puts the
+    # user's DEBUG trap and extdebug setting back. With a user USR1 trap there
+    # is no safe way to skip the rest, so an interrupt restarts bash (reported).
+    # Under the user's `set -e` bash exits when the stopped process fails; that,
+    # too, is reported as a lost shell.
+
+    def _wrap(
+        self, command: str, pidfile: Path, statusfile: Path, source: str, out: Path, err: Path
+    ) -> str:
+        # The prologue and the command are one parse unit: a command that does
+        # not parse (an open quote or here-document) runs nothing of either.
+        # The command is spliced in as text, not eval'd: under `set -e` a final
+        # `[ -f x ] && . x` must not end bash as a failed `eval` would.
+        # (BashSession sends all of this base64-encoded, so stdin cannot cut it.)
+        lines = [f"{{ echo $$ >{shlex.quote(str(pidfile))}"]
+        if not self._user_usr1:
+            lines.append(f"trap {shlex.quote(_ON_INTERRUPT)} USR1")
+        restore = self._options_restore()
+        if restore and self._bash is not None:
+            lines.append(f'if [ "$$" = {self._bash[0]} ]; then {restore}; fi')
+        lines += [
+            f"{{ {command}\n}}"
+            f" <{shlex.quote(source)} >{shlex.quote(str(out))} 2>{shlex.quote(str(err))}\n}}",
+            _EPILOGUE.replace("STATUSFILE", shlex.quote(str(statusfile))),
+        ]
+        return "\n".join(lines)
+
+    def _options_restore(self) -> str:
+        flags = "".join(f for f in "euxv" if f in self._options)
+        parts = [f"set -{flags}"] if flags else []
+        if "p" in self._options:
+            parts.append("set -o pipefail")
+        return "; ".join(parts)
+
+    def _read_status(self, statusfile: Path) -> None:
+        """Take the options and USR1-trap state the epilogue reported (none: bash ended first)."""
+        try:
+            _rc, flags, usr1 = statusfile.read_text().split()
+        except (OSError, ValueError):
+            return
+        self._options = "".join(f for f in "euxvp" if f in flags)
+        self._user_usr1 = usr1 == "1"
+
+    def _reset_tracked(self) -> None:
+        self._options, self._user_usr1 = "", False
+
+    @staticmethod
+    async def _exit_status(session: BashSession) -> int | None:
+        """The status bash exited with (``exit 7``, or errexit); None if it has not exited."""
+        proc = getattr(session, "_process", None)
+        if proc is None:
+            return None
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(asyncio.shield(proc.wait()), 1.0)
+        returncode = proc.returncode
+        if returncode is None:
+            return None
+        return 128 - returncode if returncode < 0 else returncode
+
     async def _settle(self, pumps: list[asyncio.Task[None]]) -> None:
         """Wait briefly for the output still in the pipes."""
         with contextlib.suppress(TimeoutError):
@@ -527,7 +612,7 @@ class Shell:
                 asyncio.shield(asyncio.gather(*pumps, return_exceptions=True)), _DRAIN_SECONDS
             )
 
-    def _check_bash(self, pidfile: Path, code: int, timed_out: bool) -> list[str]:
+    def _check_bash(self, pidfile: Path, code: int, timed_out: bool, ended: bool) -> list[str]:
         """Notice a bash that was replaced before, or died during, this command."""
         notes = []
         if self._note:
@@ -547,19 +632,23 @@ class Shell:
                 "environment and shell variables lost]"
             )
             self._bash = (ran_in, _start_time(ran_in))
-        if (code == -1 or timed_out) and not self._bash_alive():
+        if ended or (timed_out and not self._bash_alive()):
             self._lost = True
             self._bash = None
+            self._reset_tracked()
+            status = f" (exit {code})" if ended else ""
             notes.append(
-                "[bash ended during this command; the next command starts a new shell: "
-                "cwd kept, environment and shell variables lost]"
+                f"[bash ended during this command{status}; the next command starts a new "
+                "shell: cwd kept, environment, shell variables, options and traps lost]"
             )
         return notes
 
     async def _interrupt(self, inner: asyncio.Future[Any], before: dict[int, str]) -> bool:
         """Stop the running command; restart bash (state lost, True) only if it will not stop."""
         bash = self._running_bash()
-        if bash is not None:
+        if self._user_usr1:
+            bash = None  # no trap of ours to skip the rest with: restart, said so
+        elif bash is not None:
             _signal({bash: _start_time(bash) or ""}, signal.SIGUSR1)  # skip the rest of it
         for sig in (signal.SIGTERM, signal.SIGKILL):
             if bash is None:
@@ -580,6 +669,7 @@ class Shell:
         await session.start()  # keeps the last cwd
         pid = await self._bash_pid(session)
         self._bash, self._lost = (pid, _start_time(pid)), True
+        self._reset_tracked()
         self._note = (
             "[the shell restarted: an interrupted command did not stop; "
             "cwd kept, environment and shell variables lost]"
