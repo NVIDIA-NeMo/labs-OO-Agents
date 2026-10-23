@@ -14,7 +14,7 @@ from nooa import Agent
 from nooa.interactive import Done
 from nooa.runtime.hooks import compose_hooks, get_hooks, set_hooks
 from nooa_atom.agent.factory import create_session_agent
-from nooa_atom.session.loader import ATOM_AGENT
+from nooa_atom.session.loader import ATOM_AGENT, load_agent_class
 from nooa_atom.session.options import SessionOptions
 from nooa_atom.session.registry import SessionRegistry
 from nooa_atom.session.store import SessionStore, sessions_root
@@ -22,22 +22,31 @@ from nooa_atom.session.store import SessionStore, sessions_root
 from responses_api_agents.nooa_agent.task_agent import _latest_user_text
 
 
-# Root turn methods a Gym rollout may run; children always run handle_batch.
+# Root turn methods a Gym rollout may run; Atom picks the children's turn method.
 TURN_METHODS = ("handle_batch", "handle_orchestrate")
 
 
 class GymAtomAgent(Agent):
     """Gym construction shell; the actual task agent is Atom's native session.
 
-    ``turn_method`` comes from the Gym runner's ``nooa.init_kwargs`` and picks
-    the root session's turn method.
+    ``turn_method`` and ``agent_spec`` come from the Gym runner's
+    ``nooa.init_kwargs``. ``turn_method`` picks the root session's turn
+    method. ``agent_spec`` names the session's agent class as
+    ``module:Class`` (default Atom's ``AtomAgent``); delegated children
+    inherit it. The spec is loaded here so a bad value fails at construction.
     """
 
-    def __init__(self, *args, turn_method: str = "handle_batch", **kwargs):
+    def __init__(
+        self, *args, turn_method: str = "handle_batch", agent_spec: str = ATOM_AGENT, **kwargs
+    ):
         if turn_method not in TURN_METHODS:
             raise ValueError(f"turn_method must be one of {TURN_METHODS}, got {turn_method!r}")
+        # Raises AgentSpecError (a ValueError) for a malformed or unimportable
+        # spec, or a class that is not an InteractiveAgent.
+        load_agent_class(agent_spec)
         super().__init__(*args, **kwargs)
         self.turn_method = turn_method
+        self.agent_spec = agent_spec
 
 
 async def invoke_atom(agent: GymAtomAgent, request: NeMoGymResponseCreateParamsNonStreaming) -> TaskResult:
@@ -68,7 +77,7 @@ async def invoke_atom(agent: GymAtomAgent, request: NeMoGymResponseCreateParamsN
 
     options = SessionOptions(
         workspace=Path.cwd(),
-        agent_spec=ATOM_AGENT,
+        agent_spec=agent.agent_spec,
         llm=agent.llm,
         turn_method=agent.turn_method,
         sessions_dir=trace_dir / "sessions",

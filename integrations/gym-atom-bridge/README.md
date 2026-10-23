@@ -20,7 +20,32 @@ init_kwargs: {}  # or {turn_method: handle_orchestrate}
 ```
 `init_kwargs.turn_method` picks the root session's turn method:
 `handle_batch` (the default) or `handle_orchestrate` (needs an Atom that has
-it). Delegated children always run `handle_batch`; other values are rejected.
+it); other values are rejected. Delegated children run the turn method Atom
+gives them (`handle_work` in Atom `7f9a09dc1` and later), not this setting.
+
+`init_kwargs.agent_spec` picks the session's agent class as `module:Class`
+(or `path/to/file.py:Class`); the default is `nooa_atom.agent:AtomAgent`, so
+omitting it keeps the behavior above. Delegated children inherit the spec.
+For example, the unified-work experiment overrides only the class:
+```yaml
+init_kwargs:
+  turn_method: handle_orchestrate
+  agent_spec: nooa_atom.agent.unified:UnifiedAtomAgent
+```
+The spec is loaded with Atom's `nooa_atom.session.loader.load_agent_class`
+when Gym constructs `GymAtomAgent`, so a malformed spec, an unimportable
+module, a missing class or a class that is not an `InteractiveAgent` fails
+with `AgentSpecError` (a `ValueError`) before any model call. The class must
+also define the chosen `turn_method`; that is not checked at construction.
+
+Compatibility: `agent_spec` needs only `load_agent_class` and
+`SessionOptions.agent_spec`, which Atom has had since before this bridge.
+Offline-tested (section below) against Atom `7f9a09dc14a31c8b71ca620d53c07332eb50cb3c`
+(default and file-spec classes, both turn methods) and the unified-work spike
+`9ea274d7218bb6448d25dd56b63f6616a4904973` (additionally
+`nooa_atom.agent.unified:UnifiedAtomAgent` with `handle_orchestrate`), each
+with Gym `eeaf3743ac9c070e57e741ff0fb935f340fa7d6e`. `UnifiedAtomAgent` exists
+only in the spike; naming it with an Atom that lacks it fails at construction.
 Gym supplies `nemo_gym` and `responses_api_agents.nooa_agent` in its task
 runtime archive. This package deliberately does **not** depend on full Gym.
 It declares `nooa`, `nooa-atom`, and the runner's `jsonschema` requirement;
@@ -67,14 +92,22 @@ Then, from the Gym checkout (absolute paths below are caller-provided):
 ```sh
 GYM_ROOT="$PWD" PYTHONPATH="$PWD" OTLP_ENDPOINT=http://127.0.0.1:1/v1/traces \
   uv run --no-project --python "$OFFLINE_ENV/bin/python" python -m pytest \
-  --confcutdir="$BRIDGE_ROOT/tests" -q -s "$BRIDGE_ROOT/tests/test_external_atom.py"
+  -c "$BRIDGE_ROOT/pyproject.toml" --rootdir="$BRIDGE_ROOT" \
+  --confcutdir="$BRIDGE_ROOT/tests" -q -s -rs "$BRIDGE_ROOT/tests/test_external_atom.py"
 uv build --no-sources --wheel --sdist --out-dir "$BUILD_DIR" "$BRIDGE_ROOT"
 ```
-The two tests are adapted from the external `test_external_atom.py`: one checks
+The first two tests are adapted from the external `test_external_atom.py`: one checks
 that Gym archives requirements text but not external wheels/Atom code; the other
 runs the actual `InProcessNOOARunner` with a fake HTTP policy (two calls), native
 root and delegated child, result/trajectory capture, policy URL/cookies and
-131072 output-token propagation. Temporary requirements and trajectories stay
+131072 output-token propagation. The rest check `init_kwargs` with the same
+runner and one fake policy call: the root turn method, the default
+`agent_spec`, a file-spec `AtomAgent` subclass with each turn method, the
+unified agent (skipped when the installed Atom lacks it; set
+`GYM_ATOM_BRIDGE_REQUIRE_UNIFIED=1` to make that a failure), and invalid specs.
+The `-c`/`--rootdir` options keep pytest from adopting this repository's root
+configuration, under which the tests import the checkout's own `nooa_atom`
+instead of the installed candidate; check the installed paths with `-s`. Temporary requirements and trajectories stay
 in pytest's temporary directory. No model, benchmark, or job is called.
 
 The unchanged bridge writes complete native traces and session state to a fresh

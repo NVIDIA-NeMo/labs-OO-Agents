@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+import inspect
 import io
 import json
 import os
@@ -102,3 +103,106 @@ def test_unknown_turn_method_is_rejected():
 
     with pytest.raises(ValueError, match="turn_method must be one of"):
         GymAtomAgent(turn_method="handle")
+
+
+# A file spec (``path.py:Class``) loads like any module spec, so this alternate
+# agent class works with every Atom that has ``load_agent_class``.
+MARKED_AGENT = """
+import os
+from pathlib import Path
+
+from nooa_atom.agent import AtomAgent
+
+
+class MarkedAtomAgent(AtomAgent):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        Path(os.environ["MARKED_AGENT_LOG"]).open("a").write(type(self).__name__ + "\\n")
+"""
+
+
+async def _run_root(init_kwargs):
+    calls = []
+
+    async def post(**kwargs):
+        calls.append(kwargs)
+        out = NeMoGymResponseFunctionToolCall(id="f1", call_id="c1", name="python_cell", arguments=json.dumps({"code": ROOT_RESULT}))
+        return FakeHTTPResponse(model_response(out, response_id="r1"))
+
+    invocation = NOOAInvocationConfig(
+        agent_class="gym_atom_bridge:GymAtomAgent", invocation_adapter="gym_atom_bridge:invoke_atom", init_kwargs=init_kwargs
+    )
+    validate_invocation(invocation)
+    runner = InProcessNOOARunner(
+        invocation=invocation, server_client=SimpleNamespace(post=post), model_server_name="policy", max_policy_calls=1, context_window=1048576,
+    )
+    result = await runner.run(NOOARunRequest(responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="offline agent spec fixture"), model_url_path="/fixture/v1/responses", model_cookies={}))
+    assert result.return_value.evidence == "root evidence"
+    assert len(calls) == 1
+    return calls[0]["json"].model_dump_json()
+
+
+def test_default_agent_spec_is_atom_agent():
+    from gym_atom_bridge import ATOM_AGENT, GymAtomAgent
+
+    assert ATOM_AGENT == "nooa_atom.agent:AtomAgent"
+    assert inspect.signature(GymAtomAgent.__init__).parameters["agent_spec"].default == ATOM_AGENT
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("turn_method", ["handle_batch", "handle_orchestrate"])
+async def test_init_kwargs_agent_spec_selects_the_session_agent_class(tmp_path, monkeypatch, turn_method):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    agent_file = tmp_path / "marked_agent.py"
+    agent_file.write_text(MARKED_AGENT)
+    log = tmp_path / "constructed.txt"
+    monkeypatch.setenv("MARKED_AGENT_LOG", str(log))
+    await _run_root({"turn_method": turn_method, "agent_spec": f"{agent_file}:MarkedAtomAgent"})
+    # Only the session's own agent is the selected class (Gym's construction
+    # shell is GymAtomAgent), so exactly one root was built from the spec.
+    assert log.read_text().splitlines() == ["MarkedAtomAgent"]
+
+
+UNIFIED_AGENT = "nooa_atom.agent.unified:UnifiedAtomAgent"
+
+
+@pytest.mark.asyncio
+async def test_unified_agent_spec_runs_the_unified_root(tmp_path, monkeypatch):
+    # Needs an Atom with the unified-work spike; set GYM_ATOM_BRIDGE_REQUIRE_UNIFIED=1
+    # to make its absence a failure instead of a skip.
+    try:
+        from nooa_atom.agent.unified import UnifiedAtomAgent
+    except ImportError:
+        if os.environ.get("GYM_ATOM_BRIDGE_REQUIRE_UNIFIED") == "1":
+            raise
+        pytest.skip("installed Atom has no nooa_atom.agent.unified")
+    monkeypatch.chdir(tmp_path)
+    built = []
+    original = UnifiedAtomAgent.__init__
+
+    def record(self, *args, **kwargs):
+        original(self, *args, **kwargs)
+        built.append(type(self))
+
+    monkeypatch.setattr(UnifiedAtomAgent, "__init__", record)
+    await _run_root({"turn_method": "handle_orchestrate", "agent_spec": UNIFIED_AGENT})
+    assert built == [UnifiedAtomAgent]
+
+
+@pytest.mark.parametrize(
+    "agent_spec",
+    [
+        "nooa_atom.agent.AtomAgent",  # no ':Class' part
+        "nooa_atom.no_such_module:AtomAgent",
+        "nooa_atom.agent:NoSuchAgent",
+        "nooa:Agent",  # importable, but not an InteractiveAgent
+    ],
+)
+def test_invalid_agent_spec_is_rejected_at_construction(agent_spec):
+    from gym_atom_bridge import GymAtomAgent
+    from nooa_atom.session.loader import AgentSpecError
+
+    with pytest.raises(AgentSpecError):
+        GymAtomAgent(agent_spec=agent_spec)
