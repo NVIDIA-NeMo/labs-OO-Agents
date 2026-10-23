@@ -126,17 +126,33 @@ async def _run_root(init_kwargs):
 
     async def post(**kwargs):
         calls.append(kwargs)
-        out = NeMoGymResponseFunctionToolCall(id="f1", call_id="c1", name="python_cell", arguments=json.dumps({"code": ROOT_RESULT}))
+        out = NeMoGymResponseFunctionToolCall(
+            id="f1", call_id="c1", name="python_cell", arguments=json.dumps({"code": ROOT_RESULT})
+        )
         return FakeHTTPResponse(model_response(out, response_id="r1"))
 
     invocation = NOOAInvocationConfig(
-        agent_class="gym_atom_bridge:GymAtomAgent", invocation_adapter="gym_atom_bridge:invoke_atom", init_kwargs=init_kwargs
+        agent_class="gym_atom_bridge:GymAtomAgent",
+        invocation_adapter="gym_atom_bridge:invoke_atom",
+        init_kwargs=init_kwargs,
     )
     validate_invocation(invocation)
     runner = InProcessNOOARunner(
-        invocation=invocation, server_client=SimpleNamespace(post=post), model_server_name="policy", max_policy_calls=1, context_window=1048576,
+        invocation=invocation,
+        server_client=SimpleNamespace(post=post),
+        model_server_name="policy",
+        max_policy_calls=1,
+        context_window=1048576,
     )
-    result = await runner.run(NOOARunRequest(responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="offline agent spec fixture"), model_url_path="/fixture/v1/responses", model_cookies={}))
+    result = await runner.run(
+        NOOARunRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+                input="offline agent spec fixture"
+            ),
+            model_url_path="/fixture/v1/responses",
+            model_cookies={},
+        )
+    )
     assert result.return_value.evidence == "root evidence"
     assert len(calls) == 1
     return calls[0]["json"].model_dump_json()
@@ -151,7 +167,9 @@ def test_default_agent_spec_is_atom_agent():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("turn_method", ["handle_batch", "handle_orchestrate"])
-async def test_init_kwargs_agent_spec_selects_the_session_agent_class(tmp_path, monkeypatch, turn_method):
+async def test_init_kwargs_agent_spec_selects_the_session_agent_class(
+    tmp_path, monkeypatch, turn_method
+):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     monkeypatch.chdir(workspace)
