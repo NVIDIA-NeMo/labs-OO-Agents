@@ -121,3 +121,32 @@ def test_reports_the_binding_source_line():
 def test_syntax_errors_keep_the_existing_execution_diagnostic():
     """Malformed Python is left to the normal cell traceback path."""
     assert completion_binding_errors("return_result = (") == []
+
+
+@pytest.mark.parametrize("binding_first", [False, True])
+@pytest.mark.parametrize(
+    "deep_code",
+    [
+        pytest.param("answer = " + "+".join(["1"] * 1500), id="expression-traversal"),
+        pytest.param("answer = " + "+".join(["1"] * 10000), id="parser"),
+        pytest.param(
+            "if False:\n    pass\n" + "elif False:\n    pass\n" * 1500,
+            id="elif-traversal",
+        ),
+        pytest.param(
+            "def helper():\n    answer = " + "+".join(["1"] * 1500),
+            id="scope-discovery",
+        ),
+    ],
+)
+def test_recursion_errors_reject_the_whole_cell(deep_code, binding_first):
+    """Incomplete parsing or traversal must not allow unchecked or partially checked code."""
+    binding = "return_result = 0"
+    code = "\n".join([binding, deep_code] if binding_first else [deep_code, binding])
+
+    [error] = completion_binding_errors(code)
+
+    assert "too deeply" in error
+    assert "return_result" in error
+    assert "split" in error
+    assert "retry" in error

@@ -103,6 +103,57 @@ async def test_rejected_cell_does_not_poison_completion(backend, strategy_type, 
 @pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.parametrize("strategy_type", [CodeActStrategy, CodeActV2])
 @pytest.mark.parametrize(
+    "deep_code",
+    [
+        pytest.param("answer = " + "+".join(["1"] * 1500), id="expression-traversal"),
+        pytest.param("answer = " + "+".join(["1"] * 10000), id="parser"),
+        pytest.param(
+            "def helper():\n    answer = " + "+".join(["1"] * 1500),
+            id="scope-discovery",
+        ),
+    ],
+)
+async def test_deep_cell_is_rejected_and_next_cell_can_complete(backend, strategy_type, deep_code):
+    """Depth failures return correctable feedback without executing or poisoning the session."""
+    tool_name = "python_cell" if strategy_type is CodeActV2 else "execute_python"
+    code = "self.effects.append('executed')\n" + deep_code + "\nreturn_result = 0"
+    llm = _client(code, tool_name)
+
+    class TestAgent(Agent, llm=llm):
+        """Expose any premature execution of a rejected deep cell."""
+
+        @strategy(
+            strategy_type(
+                config=CodeActConfig(
+                    prefill=None,
+                    execution_backend=backend,
+                    sandbox=SandboxConfig(require=False, filesystem=False, network=True),
+                )
+            )
+        )
+        async def answer(self) -> int:
+            """Return the computed integer."""
+            ...
+
+    agent = TestAgent()
+    agent.effects = []
+    try:
+        assert await agent.answer() == 42
+        assert agent.effects == []
+        outputs = list(agent.events.query(type="PythonOutput"))
+        assert len(outputs) == 2
+        assert "too deeply" in outputs[0].error
+        assert "split" in outputs[0].error
+        assert "retry" in outputs[0].error
+        assert not outputs[1].error
+        assert len(llm.calls) == 2
+    finally:
+        await agent.aclose()
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize("strategy_type", [CodeActStrategy, CodeActV2])
+@pytest.mark.parametrize(
     "code",
     [
         "answer = 42",

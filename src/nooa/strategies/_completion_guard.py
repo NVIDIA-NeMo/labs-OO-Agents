@@ -137,8 +137,13 @@ def completion_binding_errors(code: str) -> list[str]:
     """Reject CodeAct helper rebinding before imports or helper compilation can run."""
     try:
         tree = ast.parse(code)
+        visitor = _CompletionBindings()
+        visitor.visit(tree)
     except SyntaxError:
         return []  # Preserve the normal execution path's syntax-error diagnostics.
-    visitor = _CompletionBindings()
-    visitor.visit(tree)
+    except RecursionError:
+        return [
+            "Cell nests too deeply to check for `return_result` rebinding; "
+            "split the deeply nested code into smaller statements, then retry."
+        ]
     return visitor.errors
