@@ -202,14 +202,23 @@ async def test_unified_agent_shows_the_short_list_and_a_brief_arrives_active(
     ]
     # The child's copy of its brief is already active: no id, no activate.
     models.scripts["fix"] = [
-        cell("self.todo.comment('patched parser.py')\nself.todo.complete()\n" + WORK_RESULT.format(e="ok", r="FIXED"))
+        cell(
+            "self.todo.comment('patched parser.py')\nself.todo.complete()\n"
+            + WORK_RESULT.format(e="ok", r="FIXED")
+        )
     ]
     root = await registry.create(options)
     assert await asyncio.wait_for(root.prompt("go"), TIMEOUT) == Done(explanation="FIXED")
     call = models.llms[None].calls[0]
     rendered = "\n".join(str(m.get("content", "")) for m in call.messages)
     assert "class TodoList" in rendered and "def complete(self) -> None" in rendered
-    for gone in ("def set_var(", "def list_todos(", "deps: list[str]", "class TodoComment", "TodoManager"):
+    for gone in (
+        "def set_var(",
+        "def list_todos(",
+        "deps: list[str]",
+        "class TodoComment",
+        "TodoManager",
+    ):
         assert gone not in rendered, gone
     todos = root._agent.todo
     assert isinstance(todos, TodoList)
@@ -241,18 +250,25 @@ async def _loaded_todo(sessions_dir, session_id):
         await registry.close_all()
 
 
-async def test_a_saved_todo_list_reloads_with_ids_notes_and_the_active_item(sessions_dir, options, models):
+async def test_a_saved_todo_list_reloads_with_ids_notes_and_the_active_item(
+    sessions_dir, options, models
+):
     def build(agent):
         agent.todo.add("Read the code")
         agent.todo.add("Fix it", description="the brief")
         agent.todo.activate("2")
         agent.todo.comment("found it")
 
-    todos, plan = await _loaded_todo(sessions_dir, await _saved(sessions_dir, options, models, build))
+    todos, plan = await _loaded_todo(
+        sessions_dir, await _saved(sessions_dir, options, models, build)
+    )
     assert isinstance(todos, TodoList) and all(isinstance(t, Todo) for t in todos.list_todos())
     assert [t.id for t in todos.list_todos()] == ["1", "2"] and todos.active().id == "2"
     assert [c.body for c in todos.get("2").comments] == ["found it"]
-    assert [(p.content, p.status) for p in plan] == [("Read the code", "pending"), ("Fix it", "in_progress")]
+    assert [(p.content, p.status) for p in plan] == [
+        ("Read the code", "pending"),
+        ("Fix it", "in_progress"),
+    ]
     todos.complete()
     assert todos.add("Verify").id == "3"
 
@@ -270,7 +286,9 @@ async def test_an_earlier_todo_manager_reloads_as_a_todo_list(sessions_dir, opti
         agent.todo.activate(legacy)
         agent.todo.comment(legacy, "half done")
 
-    todos, plan = await _loaded_todo(sessions_dir, await _saved(sessions_dir, options, EarlierAtom(), build))
+    todos, plan = await _loaded_todo(
+        sessions_dir, await _saved(sessions_dir, options, EarlierAtom(), build)
+    )
     assert isinstance(todos, TodoList)
     [item] = todos.list_todos()
     assert len(item.id) == 8 and todos.active().id == item.id  # the saved hex id is kept

@@ -37,7 +37,9 @@ _DONE_SHOWN = 3
 class Todo(_Todo):
     """An item on your plan; the active one's description and notes show in todo_status."""
 
-    id: str = Field(default_factory=lambda: uuid.uuid4().hex[:8], description='"1", "2", … for items you add')
+    id: str = Field(
+        default_factory=lambda: uuid.uuid4().hex[:8], description='"1", "2", … for items you add'
+    )
     status: Literal["open", "done"] = "open"
     deps: Annotated[list[str], hidden] = Field(default_factory=list)
     created_at: Annotated[str, hidden] = Field(default_factory=lambda: _Todo().created_at)
@@ -140,7 +142,11 @@ class TodoList(Skill):
         rows = [t for t in todos if t.id not in folded]
         lines = [f"(+{len(folded)} done)"] if folded else []
         for t in rows[:max_items]:
-            mark = "▸" if active is not None and t.id == active.id else ("✓" if t.status == "done" else "·")
+            mark = (
+                "▸"
+                if active is not None and t.id == active.id
+                else ("✓" if t.status == "done" else "·")
+            )
             lines.append(f"{mark} {t.id}  {_one_line(t.title, _TITLE_CHARS)}")
         if len(rows) > max_items:
             lines.append(f"(+{len(rows) - max_items} more)")
@@ -148,7 +154,11 @@ class TodoList(Skill):
             lines += ["", f"Active: {active.id}  {_one_line(active.title, _TITLE_CHARS)}"]
             text = active.description.strip()
             if text:
-                lines.append(text if len(text) <= _DESCRIPTION_CHARS else text[: _DESCRIPTION_CHARS - 1].rstrip() + "…")
+                lines.append(
+                    text
+                    if len(text) <= _DESCRIPTION_CHARS
+                    else text[: _DESCRIPTION_CHARS - 1].rstrip() + "…"
+                )
             notes = active.comments[-_NOTES_SHOWN:]
             if notes:
                 earlier = len(active.comments) - len(notes)
@@ -219,6 +229,8 @@ TodoList.add.__signature__ = _signature(  # type: ignore[attr-defined]
     inspect.Parameter("description", _P, default="", annotation=str),
     returns=Todo,
 )
-TodoList.comment.__signature__ = _signature(inspect.Parameter("text", _P, annotation=str), returns=None)  # type: ignore[attr-defined]
+TodoList.comment.__signature__ = _signature(
+    inspect.Parameter("text", _P, annotation=str), returns=None
+)  # type: ignore[attr-defined]
 TodoList.complete.__signature__ = _signature(returns=None)  # type: ignore[attr-defined]
 spec(TodoList, "source_dir", hidden=True)
