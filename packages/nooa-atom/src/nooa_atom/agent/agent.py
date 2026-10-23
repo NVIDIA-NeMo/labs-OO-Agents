@@ -24,7 +24,7 @@ from nooa.strategies import CodeActV2, PredictStrategy
 from nooa.tools import MethodWriting, SkillWriting, Todo, TodoManager
 from nooa.tools.shell_tools import ShellTools
 from nooa_atom.agent.activity import ActivityShellTools
-from nooa_atom.agent.instructions import render_agent_instructions
+from nooa_atom.agent.instructions import RepositoryInstructions
 from nooa_atom.agent.slash_commands import SlashCommandRegistry
 
 # Visible to generated cells (cells see this module's globals): the model
@@ -161,6 +161,7 @@ class AtomAgent(InteractiveAgent):
     libs: Annotated[SkillWriting, nosnapshot]
     skills: Annotated[SkillManager, nosnapshot]
     _base_shell: Annotated[ShellTools, hidden, nosnapshot]
+    _instructions: Annotated[RepositoryInstructions, hidden, nosnapshot]
     _summarizers: Annotated[list[Any], hidden, nosnapshot]
     _delegates_in: Annotated[Any, hidden, nosnapshot]
     delegates: Annotated[ChannelReader, nosnapshot]
@@ -239,14 +240,22 @@ class AtomAgent(InteractiveAgent):
         self.context["context_usage"] = Context(
             expr="self.context_stats.format() if self.context_stats else ''"
         )
-        instructions = render_agent_instructions(self.cwd)
-        if instructions:
-            self.context["repository_instructions"] = Context(instructions, prefix=True)
+        # Re-read from the startup folder whenever an AGENTS.md changes, is
+        # created, or is removed; the block is empty while there is none.
+        self._instructions = RepositoryInstructions(self.cwd)
+        self.context["repository_instructions"] = Context(
+            expr="self._repository_instructions()", prefix=True
+        )
         spec(self, "context", hidden=False)
         spec(self, "events", hidden=False)
 
         self._summarization = summarization or SummarizationConfig()
         install_summarizer(self._summarization, self)
+
+    @no_trace
+    def _repository_instructions(self) -> str:
+        """Return current AGENTS.md guidance from the startup folder, or ''."""
+        return self._instructions.render()
 
     @no_trace
     def _workspace_state_context(self) -> str:

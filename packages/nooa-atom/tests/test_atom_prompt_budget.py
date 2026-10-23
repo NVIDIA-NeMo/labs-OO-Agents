@@ -106,7 +106,7 @@ RESULT = (
 # truthful API text plus the child-session docs, 273 characters more in the system
 # prompt for every row (was 14,909). Measured values plus about 2% headroom.
 LIMITS = {
-    (ATOM, "handle"): (15_500, 18_600),  # measured 15,182 / 18,240
+    (ATOM, "handle"): (15_500, 18_700),  # measured total 18,660 incl. empty AGENTS.md block
     (ATOM, "handle_batch"): (15_500, 18_100),  # measured 15,182 / 17,732
     (ATOM, "handle_work"): (15_500, 18_600),  # measured 15,182 / 18,202
     (ATOM, "handle_orchestrate"): (15_500, 20_100),  # measured 15,182 / 19,684
