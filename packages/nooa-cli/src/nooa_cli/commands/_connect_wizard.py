@@ -2025,10 +2025,10 @@ def choose_reasoning(state: WizardState, *, deferred=False, edit=False) -> bool:
             levels["on"] = previous_on  # retain the wizard's reviewed allowance across edits
     if levels is None:
         levels = server_effort_levels(state)
-    if levels is None:
-        levels = discovered_effort_levels(state)
-    if levels is None:
-        levels = discovered_toggle_levels(state)
+    if not levels:
+        # What this interface actually did in discovery wins over a server
+        # listing that says the model doesn't reason.
+        levels = discovered_effort_levels(state) or discovered_toggle_levels(state) or levels
     if levels is None:
         # Only exact OpenRouter metadata retains known effort templates here.
         candidate = state.candidate or {}
