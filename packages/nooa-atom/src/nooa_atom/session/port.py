@@ -111,6 +111,7 @@ class SessionPort:
         kept: bool = False,
         permission_mode: str | None = None,
         todo: Any = None,
+        route: Any = None,
         **removed: Any,
     ) -> ChildRef:
         """Create a child session that works on ``prompt``; return its ``ChildRef``.
@@ -131,6 +132,9 @@ class SessionPort:
                 the child's own list (the agent's ``receive_delegated_todo``)
                 and the ref records its id (provenance only). Nothing flows
                 back; the child's result is its ``TaskResult``.
+            route: For a work adapter (hidden from the model): a
+                ``ChildRoute`` that gets the child's messages and outcomes
+                instead of ``delegates``, installed before its first turn.
         """
         _reject_removed("delegate", removed)
         self.check_child_name(name)
@@ -146,6 +150,8 @@ class SessionPort:
         registry = self._registry
 
         async def hand_over(child: Session) -> None:
+            if route is not None:
+                registry.route_child(child.id, route)
             if description and str(description).strip():
                 await child.set_title(str(description).strip())
             receive = getattr(child._agent, "receive_delegated_todo", None)
