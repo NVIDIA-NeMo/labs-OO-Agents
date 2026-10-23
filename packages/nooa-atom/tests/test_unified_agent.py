@@ -420,9 +420,16 @@ async def test_first_call_offers_one_work_vocabulary(
         ROLE_INSTRUCTIONS[MODES[method]],
         "# Work: everything that runs is a job on self.jobs.",
         "documented in the python_cell_tools block",
+        "class SkillManager",
+        "def status(self) -> str:",
+        "Names must be valid Python identifiers;",
+        "<python_cell_state>\nCell locals: notification (dict)\n</python_cell_state>",
     ):
         assert wanted in rendered, wanted
     for legacy in (
+        "<skills",
+        "## Python cell state",
+        "includes method inputs",
         "self.delegate",
         "self.spawn",
         "ChildRef",
@@ -744,3 +751,39 @@ def test_command_output_is_shown_cut_but_kept_whole():
     assert len(shown) < 4_500  # was 14,202 with both streams in full
     assert "stdout_path='/w/out'" in shown
     assert (len(result.stdout), len(result.stderr)) == (9000, 5000)
+
+
+async def test_skills_are_documented_statically_and_activation_still_works(tmp_path):
+    agent = await _agent(tmp_path)
+    try:
+        assert "skills" not in agent.context
+        tools = str(agent.context["python_cell_tools"])
+        assert "class SkillManager" in tools and "def activate(" in tools
+        assert "shell" not in agent.skills.status().splitlines()[0]
+        print(await agent.skills.activate(["shell"]))
+        assert "shell" in agent.skills.status().splitlines()[0]
+        assert "skills" not in agent.context  # activation does not bring the block back
+        agent.after_restore()
+        assert "skills" not in agent.context
+    finally:
+        await agent.aclose()
+
+
+async def test_the_cell_state_block_is_one_line(tmp_path):
+    from types import SimpleNamespace
+
+    from nooa_atom.agent.agent import AtomCodeAct
+
+    strategy = AtomCodeAct()
+    call = SimpleNamespace(
+        execution_locals={"r1": 1, "job": "x", "re": __import__("re"), "_hidden": 2},
+        session_locals=None,
+        bound_parameters=lambda: {"notification": {}},
+    )
+    text = await strategy.python_cell_state_context(SimpleNamespace(current_call=call))
+    assert text == "Cell locals: job (str), notification (dict), r1 (int); imports: re → re"
+    empty = SimpleNamespace(execution_locals=None, session_locals=None, bound_parameters=dict)
+    assert (
+        await strategy.python_cell_state_context(SimpleNamespace(current_call=empty))
+        == "Cell locals: none"
+    )

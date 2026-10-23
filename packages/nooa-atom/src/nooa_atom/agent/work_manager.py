@@ -611,7 +611,7 @@ class WorkManager:
     Each outcome goes to one place: a pending ``await job`` or ``async for x
     in job``, else a ``JobEvent`` in a later turn's ``notification["jobs"]``.
     Jobs outlive the turn: end it with ``Waiting(on=[name])`` while they run,
-    and cancel what you no longer need. Names are Python identifiers; a
+    and cancel what you no longer need. Names must be valid Python identifiers; a
     resource's requests are ``<name>#1``, ``<name>#2``...
     """
 

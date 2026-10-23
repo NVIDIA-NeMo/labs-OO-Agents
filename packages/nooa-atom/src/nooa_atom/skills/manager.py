@@ -190,9 +190,11 @@ class SkillManager(Skill):
     # The context block
     # ------------------------------------------------------------------
 
-    @hidden
     def status(self) -> str:
-        """The ``<skills>`` block: what is active, and how to find the rest."""
+        """Which skills are active now, and how many more there are (sync).
+
+        Also the text of the ``<skills>`` block of agents that show one.
+        """
         active, rest_kinds, rest = [], [], 0
         for name, kind, key in self._index():
             if self._is_active(kind, key):
