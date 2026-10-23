@@ -273,22 +273,45 @@ class Shell:
         directory = self._directory()
         describe(f"$ {command} · in {directory}")
         out, err = _captures(job_dir(), f"cmd-{next(self._count)}", self._max_output)
+        # Our own pipes, not asyncio's: Process.wait() then waits for bash
+        # alone, not for a background process that inherited stdout/stderr.
+        fds: set[int] = set()
+        transports: list[asyncio.BaseTransport] = []
+        pumps: list[asyncio.Task[None]] = []
         try:
-            proc = await asyncio.create_subprocess_exec(
-                "bash",
-                "-c",
-                command,
-                stdin=asyncio.subprocess.PIPE if stdin is not None else asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=directory,
-                start_new_session=True,
-            )
-            assert proc.stdout is not None and proc.stderr is not None
-            pumps = [
-                asyncio.create_task(out.pump(proc.stdout)),
-                asyncio.create_task(err.pump(proc.stderr)),
-            ]
+            readers = []
+            write_ends = []
+            for _ in range(2):
+                read_fd, write_fd = os.pipe()
+                fds.update((read_fd, write_fd))
+                readers.append(read_fd)
+                write_ends.append(write_fd)
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    "bash",
+                    "-c",
+                    command,
+                    stdin=(
+                        asyncio.subprocess.PIPE if stdin is not None else asyncio.subprocess.DEVNULL
+                    ),
+                    stdout=write_ends[0],
+                    stderr=write_ends[1],
+                    cwd=directory,
+                    start_new_session=True,
+                )
+            finally:
+                for fd in write_ends:  # bash holds its own copies now
+                    fds.discard(fd)
+                    os.close(fd)
+            loop = asyncio.get_running_loop()
+            for capture, read_fd in zip((out, err), readers, strict=True):
+                reader = asyncio.StreamReader(limit=2**20)
+                transport, _ = await loop.connect_read_pipe(
+                    lambda r=reader: asyncio.StreamReaderProtocol(r), os.fdopen(read_fd, "rb", 0)
+                )
+                fds.discard(read_fd)  # the transport owns it
+                transports.append(transport)
+                pumps.append(asyncio.create_task(capture.pump(reader)))
 
             async def feed() -> None:
                 assert proc.stdin is not None and stdin is not None
@@ -315,6 +338,12 @@ class Shell:
             code = 124 if timed_out else (proc.returncode or 0)
             return _result(code, timed_out, out, err, directory)
         finally:
+            for pump in pumps:
+                pump.cancel()
+            await asyncio.gather(*pumps, return_exceptions=True)
+            for transport in transports:  # a background writer now gets EPIPE
+                transport.close()
+            _close_fds(fds)
             out.close()
             err.close()
 
