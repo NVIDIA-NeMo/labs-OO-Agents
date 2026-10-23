@@ -91,6 +91,16 @@ class _AgentJobs(WorkManager):
         return super().launch(work, name=name)
 
 
+# CodeActV2's python_cell description names the legacy delegation method.
+_LEGACY_TOOL_HINT: Annotated[str, hidden] = (
+    "If `self` exposes delegation, inspect its documentation with `print(doc(self.delegate))`."
+)
+_TOOL_HINT: Annotated[str, hidden] = (
+    "Run commands and child agents as `self.jobs` work (`Shell`, `Subagent`); "
+    "see `print(doc(self.jobs))`."
+)
+
+
 @hidden
 class UnifiedCodeAct(CodeActV2):
     """CodeActV2 whose cells see the agent's own module only (no inherited legacy names).
@@ -112,9 +122,21 @@ class UnifiedCodeAct(CodeActV2):
         if agent_module is None:
             return ""
         context = self._extract_module_context(agent_module, agent=runtime.agent)
+        # The stub lists only names worth using; private or hidden helper types
+        # (``_AgentJobs`` behind ``self.jobs``) stay bound in cells, unlisted.
+        context = {
+            name: value
+            for name, value in context.items()
+            if not name.startswith("_") and getattr(value, "_agentdoc_hidden", False) is not True
+        }
         return self._render_execution_context_stub(
             context, {agent_module.__name__}, self.config.restrictions.blocked_modules
         )
+
+    def _build_execute_python_tool(self) -> Any:
+        tool = super()._build_execute_python_tool()
+        tool.description = tool.description.replace(_LEGACY_TOOL_HINT, _TOOL_HINT)
+        return tool
 
     def _build_builtins(self, runtime: Any, call: Any) -> dict[str, Any]:
         cwd = getattr(runtime.agent, "cwd", None)

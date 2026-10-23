@@ -371,7 +371,11 @@ async def test_first_call_offers_one_work_vocabulary(
     models.scripts[None] = [cell(code)]
     root = await registry.create(options.model_copy(update={"turn_method": method}))
     await asyncio.wait_for(root.prompt("hello"), TIMEOUT)
-    rendered = "\n".join(str(m.get("content", "")) for m in models.llms[None].calls[0].messages)
+    call = models.llms[None].calls[0]
+    tools = "\n".join(str(getattr(tool, "description", tool)) for tool in call.tools or ())
+    assert "Run commands and child agents as `self.jobs` work" in tools
+    messages = "\n".join(str(m.get("content", "")) for m in call.messages)
+    rendered = messages + "\n" + tools  # what the model reads: the messages and the tool
     for wanted in (
         "self.jobs.launch",
         "class WorkManager",
@@ -408,6 +412,8 @@ async def test_first_call_offers_one_work_vocabulary(
         "def running(",
         "def records(",
         "status_source",
+        "doc(self.delegate)",
+        "_AgentJobs",
     ):
         assert legacy not in rendered, legacy
 
@@ -531,3 +537,133 @@ async def test_reserved_names_and_snapshots(tmp_path):
         await job.cancel()
     finally:
         await agent.aclose()
+
+
+# ---- Subagent routing, against a fake session port -------------------------------
+
+
+class _FakeChild:
+    def __init__(self, stops: bool) -> None:
+        self.stops = stops
+        self.cancelled = 0
+
+    async def cancel(self, *, by: str) -> bool:
+        self.cancelled += 1
+        return self.stops
+
+
+class _FakeRegistry:
+    def __init__(self, child: _FakeChild) -> None:
+        self.child = child
+
+    def get(self, child_id: str):
+        return self.child
+
+
+class _FakePort:
+    """Enough of a SessionPort for a kept Subagent: one child, its route captured."""
+
+    path = "/root"
+
+    def __init__(self, *, stops: bool) -> None:
+        self.child = _FakeChild(stops)
+        self._registry = _FakeRegistry(self.child)
+        self.route = None
+        self.sent: list[str] = []
+        self.closed: list[str] = []
+
+    def check_child_name(self, name: str) -> None:
+        return None
+
+    async def delegate(self, description, prompt, *, name, model, kept, todo, route):
+        from types import SimpleNamespace
+
+        self.route = route
+        return SimpleNamespace(id="c1", name=name)
+
+    async def send_child(self, child_id: str, item, *, channel: str):
+        self.sent.append(item)
+
+    async def close_child(self, child_id: str) -> None:
+        self.closed.append(child_id)
+
+
+def _failed(error: str):
+    from nooa_atom.session.items import ChildFailed, ChildRef
+
+    ref = ChildRef(id="c1", name="review", path="/root/review", depth=1, status="idle")
+    return ChildFailed(child=ref, error=error)
+
+
+async def _armed(port: _FakePort, rounds: int = 200) -> None:
+    for _ in range(rounds):
+        if port.route is not None and port.route.future is not None:
+            return
+        await asyncio.sleep(0)
+    raise AssertionError("the request never armed its route")
+
+
+@pytest.fixture
+async def fake_work(tmp_path):
+    from nooa_atom.agent.work_manager import WorkManager
+    from nooa_atom.session.port import current_port
+
+    from nooa.runtime.channels import QueueManager
+
+    outbox = QueueManager().queue("jobs")
+    manager = WorkManager(outbox, scratch=tmp_path)
+
+    def start(*, stops: bool):
+        from nooa_atom.agent.work_subagent import Subagent
+
+        port = _FakePort(stops=stops)
+        token = current_port.set(port)
+        try:
+            rev = manager.launch(Subagent("review"), name="review")
+        finally:
+            current_port.reset(token)
+        return port, rev
+
+    yield start, outbox
+    await manager.aclose()
+
+
+async def test_a_stale_drop_flag_never_swallows_the_next_requests_failure(fake_work):
+    """A cancel that stopped no failing turn must not hide the next request's failure."""
+    start, outbox = fake_work
+    port, rev = start(stops=True)  # cancel() says it stopped a turn ...
+    first = rev.send("T1")
+    await _armed(port)
+    await first.cancel()  # ... but no failure for that turn ever arrives
+    assert first.status == "cancelled" and port.child.cancelled == 1
+    second = rev.send("T2")
+    await _armed(port)
+    assert port.route.drop_failure is False
+    port.route.outcome(_failed("real failure"))
+    with pytest.raises(RuntimeError, match="real failure"):
+        await second
+    assert outbox.qsize() == 0
+
+
+async def test_cancel_after_the_outcome_was_handed_over_drops_it(fake_work):
+    """Pinned: the owner's cancel wins over an outcome its request had not read yet.
+
+    The request ends ``cancelled`` with no event; the outcome is not re-delivered
+    anywhere; the child stays open and takes the next request.
+    """
+    from types import SimpleNamespace
+
+    start, outbox = fake_work
+    port, rev = start(stops=False)  # the turn had already ended: nothing to stop
+    first = rev.send("T1")
+    await _armed(port)
+    port.route.outcome(SimpleNamespace(report="LATE"))  # handed to the future ...
+    await first.cancel()  # ... before the request task resumed
+    assert first.status == "cancelled"
+    assert outbox.qsize() == 0  # neither the result nor an event
+    assert port.route.drop_failure is False and port.closed == []
+    second = rev.send("T2")
+    await _armed(port)
+    port.route.outcome(SimpleNamespace(report="NEXT"))
+    assert (await second).report == "NEXT"
+    assert port.sent == ["T2"]  # the follow-up went to the same child

@@ -110,10 +110,10 @@ First call, workspace path counted as a placeholder (`test_atom_prompt_budget.py
 | AtomAgent | handle_batch | 19,737 | 22,066 | 948 |
 | AtomAgent | handle_work | 19,737 | 22,581 | 1,467 |
 | AtomAgent | handle_orchestrate | 19,737 | 24,061 | 2,919 |
-| UnifiedAtomAgent | handle | 18,269 | 19,865 | 161 |
-| UnifiedAtomAgent | handle_batch | 18,269 | 19,885 | 157 |
-| UnifiedAtomAgent | handle_work | 18,269 | 19,882 | 158 |
-| UnifiedAtomAgent | handle_orchestrate | 18,269 | 19,922 | 170 |
+| UnifiedAtomAgent | handle | 18,247 | 19,843 | 161 |
+| UnifiedAtomAgent | handle_batch | 18,247 | 19,863 | 157 |
+| UnifiedAtomAgent | handle_work | 18,247 | 19,860 | 158 |
+| UnifiedAtomAgent | handle_orchestrate | 18,247 | 19,900 | 170 |
 
 The turn docstring is re-sent with every turn; the stable mode guidance moved
 into the class doc (system prompt, 3,030 characters vs. AtomAgent's 3,353), once.
@@ -127,5 +127,12 @@ into the class doc (system prompt, 3,030 characters vs. AtomAgent's 3,353), once
 - The repo-tool docs are shared; this agent's tools block rewrites their
   three legacy-shell phrases (`_DOC_FIXES`), so a doc change upstream needs
   the list updated (the vocabulary test fails if `self.shell` reappears).
+- Routes are in memory. After a restore, a `Subagent` resource that was
+  running is reported lost like any job, but its child session (which the
+  store keeps) is not re-routed: if that child ran again, its outcomes would
+  go to the legacy `delegates` channel, which this agent does not read.
+- A request cancelled after its outcome was handed over (before the request
+  read it) ends `cancelled` and the outcome is dropped, without an event;
+  the child stays open (pinned in `test_unified_agent.py`).
 - Lingering pumps of background processes in a persistent shell are released
   only at session exit (stage-1 review, not blocking).
