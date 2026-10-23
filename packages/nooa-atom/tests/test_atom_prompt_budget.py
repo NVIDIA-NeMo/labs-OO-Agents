@@ -138,10 +138,13 @@ LIMITS = {
     # python_cell_tools, the stable mode guidance in the class doc, and turn
     # docs under 300 characters. Measured values plus about 2%.
     # The spike's UnifiedAtomAgent became AtomAgent (2026-10-20): its rows replace the old ones.
-    (ATOM, "handle"): (18_600, 20_200),  # measured 18,262 / 19,858
-    (ATOM, "handle_batch"): (18_600, 20_200),  # measured 18,262 / 19,878
-    (ATOM, "handle_work"): (18_600, 20_200),  # measured 18,262 / 19,875
-    (ATOM, "handle_orchestrate"): (18_600, 20_300),  # measured 18,262 / 19,915
+    # Re-measured for one handle() with a static role block per turn_method, SkillManager
+    # docs in python_cell_tools instead of the <skills> block, and a one-line
+    # python_cell_state (2026-10-20): measured values plus about 2% headroom.
+    (ATOM, "handle"): (19_100, 20_200),  # measured 18,716 / 19,786
+    (ATOM, "handle_batch"): (19_400, 20_500),  # measured 18,944 / 20,014
+    (ATOM, "handle_work"): (19_500, 20_600),  # measured 19,053 / 20,123
+    (ATOM, "handle_orchestrate"): (19_700, 20_800),  # measured 19,247 / 20,317
 }
 # The bench guard's system-prompt ceiling; every agent stays under it.
 BENCH_SYSTEM_LIMIT = 20_000
@@ -241,14 +244,13 @@ class _InstalledSkill:
 
 
 async def test_installed_skills_are_counted_not_listed(monkeypatch, tmp_path, sessions_dir):
-    """With this machine's installed skills and 40 more, the ``<skills>`` block stays small.
+    """With this machine's installed skills and 40 more, none is named in the prompt.
 
     The other tests here turn installed skills off, which hid how the prompt
     grows with them. Each skill is found through ``self.skills.search()``;
     none is named or described in the prompt until it is activated.
     """
     import importlib.metadata
-    import re
 
     extra = [_InstalledSkill(index) for index in range(40)]
     monkeypatch.setattr(
@@ -269,10 +271,10 @@ async def test_installed_skills_are_counted_not_listed(monkeypatch, tmp_path, se
     finally:
         await registry.close_all()
     rendered = "\n".join(str(m.get("content", "")) for m in llm.calls[0].messages)
-    [block] = re.findall(r"<skills[^>]*>\n(.*?)\n</skills>", rendered, re.DOTALL)
-    print(block)
-    assert len(block) < 400
-    assert re.search(r"^\d+ more \(", block.splitlines()[-1])
+    # The Atom agent shows no dynamic <skills> inventory: SkillManager's docs
+    # are in the static python_cell_tools block, and status() is on demand.
+    assert "<skills" not in rendered
+    assert "class SkillManager" in rendered and "def status(self) -> str:" in rendered
     for skill in extra:
         assert skill.description not in rendered
         assert skill.name.split(".")[-1] not in rendered

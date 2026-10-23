@@ -34,6 +34,7 @@ from nooa_atom.agent.work_manager import Job, JobEvent, WorkManager
 from nooa_atom.agent.work_shell import CommandResult, Shell
 from nooa_atom.agent.work_subagent import Question, Subagent
 from nooa_atom.session.items import TaskResult  # noqa: F401
+from nooa_atom.skills.manager import SkillManager
 from nooa_atom.tools.repo_tools import RepoTools
 
 with hidden:
@@ -146,6 +147,33 @@ class AtomCodeAct(CodeActV2):
         return self._render_execution_context_stub(
             context, {agent_module.__name__, __name__}, self.config.restrictions.blocked_modules
         )
+
+    async def python_cell_state_context(self, runtime: Any) -> str:
+        """One line: ``Cell locals: name (type), ...``, then the cell's imports, if any.
+
+        The same inventory as CodeActV2's block (``python_cell_state()`` has
+        all of it), without its heading and explanations.
+        """
+        state = self._cell_state(getattr(runtime, "current_call", None))
+        label = self._python_cell_state_label
+
+        def listing(items: list[str], more: str) -> str:
+            shown = ", ".join(items[:20])
+            return f"{shown} (+{len(items) - 20} more; `{more}`)" if len(items) > 20 else shown
+
+        locals_ = [
+            f"{label(name, max_chars=80)} ({label(kind, max_chars=80)})"
+            for name, kind in sorted(state["cell_locals"].items())
+        ]
+        line = "Cell locals: " + (listing(locals_, "print(python_cell_state())") or "none")
+        imports = [
+            f"{label(name, max_chars=80)} → {label(module, max_chars=80)}"
+            for name, module in sorted(state["cell_imports"].items())
+        ]
+        if imports:
+            more = 'print(python_cell_state()["cell_imports"])'
+            line += "; imports: " + listing(imports, more)
+        return line
 
     def _build_execute_python_tool(self) -> Any:
         tool = super()._build_execute_python_tool()
@@ -439,7 +467,7 @@ class AtomAgent(AtomAgentBase):
         """
         self.context["python_cell_tools"] = Context(
             _tools_doc(
-                doc(RepoTools, Files, TodoManager, concise=True)
+                doc(RepoTools, Files, TodoManager, SkillManager, concise=True)
                 + "\n"
                 + _WORK_EXAMPLES
                 + doc(WorkManager, Job, JobEvent, Shell, CommandResult, Subagent, Question)
@@ -451,6 +479,10 @@ class AtomAgent(AtomAgentBase):
         self.context["context_usage"] = Context(
             expr="self.context_stats.format() if self.context_stats else ''"
         )
+        # Skills are documented in python_cell_tools (SkillManager); the
+        # registry's dynamic inventory block is not shown. self.skills.status()
+        # gives it on demand.
+        self.context.pop("skills", None)
         if self._role_instructions:
             self.context["role"] = Context(self._role_instructions, prefix=True)
         else:
