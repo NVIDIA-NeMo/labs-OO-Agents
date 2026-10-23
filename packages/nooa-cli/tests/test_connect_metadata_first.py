@@ -398,7 +398,7 @@ def test_change_preserves_explicit_level_request_blocks_caps_and_media(guided):
     assert result.output.count("Proposed configuration") == 2
 
 
-def test_save_without_testing_discards_selected_media_tests_but_not_declarations(guided):
+def test_save_without_testing_keeps_selected_media_as_untested(guided):
     flags, path, calls, decisions = guided
     # Existing permissions are declarations, not permission to run the selected tests.
     path.write_text(
@@ -426,7 +426,8 @@ def test_save_without_testing_discards_selected_media_tests_but_not_declarations
     )
     assert result.exit_code == 0, result.output
     assert all(r.method == "GET" for r in calls)
-    assert yaml.safe_load(path.read_text())["models"]["local"]["media_inputs"] == ["pdf"]
+    # Formats selected for testing are kept, marked as not tested.
+    assert yaml.safe_load(path.read_text())["models"]["local"]["media_inputs"] == ["pdf", "image"]
     assert "not tested (manual setup)" in result.output
 
 

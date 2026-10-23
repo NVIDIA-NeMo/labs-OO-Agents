@@ -305,10 +305,11 @@ def test_listed_test_all_selects_known_types_even_unlisted_or_unavailable(
 @pytest.mark.parametrize(
     "media_action,selection,use_action,final_action,expected",
     [
-        ("manual", "image,audio,video,pdf", "test", "save", []),
+        # Saving without testing keeps formats that were waiting for a test, as not tested.
+        ("manual", "image,audio,video,pdf", "test", "save", KINDS),
         ("manual", "image,audio,video,pdf", "enable", "save", KINDS),
         ("manual", "-", None, "save", []),
-        ("test-all", None, None, "save", []),
+        ("test-all", None, None, "save", KINDS),
         ("suggested", None, None, "save", ["image"]),
         ("none", None, None, "save", []),
         ("manual", "image,audio,video,pdf", "test", "test", ["image", "audio", "pdf"]),

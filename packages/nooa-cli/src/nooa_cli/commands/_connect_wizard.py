@@ -902,10 +902,19 @@ def review_replacement_route(state: WizardState, previous, *, discovering=False)
         return False
     state.approval = state.probe if action == "test" else "none"
     if action == "save":
-        state.test_media_inputs = None
+        keep_untested_media(state)
     if discovering:
         state.api_style = None
     return True
+
+
+def keep_untested_media(state: WizardState) -> None:
+    """Saving without testing keeps formats that were waiting for a test, as not tested."""
+    if state.test_media_inputs:
+        current = list(state.media_inputs or [])
+        state.media_inputs = current + [k for k in state.test_media_inputs if k not in current]
+        state.inherit_media_inputs = False
+    state.test_media_inputs = None
 
 
 class RestartSetup(Exception):
@@ -3474,7 +3483,7 @@ def guided_setup(state: WizardState) -> bool:
     approved_snapshot = connect.effective_config_snapshot(state.proposal.entry)
     state.approval = state.probe if action == "test" else "none"
     if action == "save":
-        state.test_media_inputs = None
+        keep_untested_media(state)
     if deferred_style:
         state.manual_limits_deferred = False
         state.api_style = None
@@ -3506,7 +3515,7 @@ def guided_setup(state: WizardState) -> bool:
             return False
         state.approval = state.probe if action == "test" else "none"
         if action == "save":
-            state.test_media_inputs = None
+            keep_untested_media(state)
         if not configure_checks(state):
             return False
     if not run_checks(state):
