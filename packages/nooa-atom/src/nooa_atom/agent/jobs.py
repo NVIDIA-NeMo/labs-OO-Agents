@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Agent-facing JobsApi: run long work in the background, by label.
+"""Agent-facing JobsApi: run long work in the background, by name.
 
 ``JobsApi`` is attached to the Atom agent as ``self.jobs``. It runs
 shell commands in their own bash processes (not the agent's persistent
@@ -9,9 +9,9 @@ their output on the agent's ``jobs`` queue channel. The channel registry
 (``self.queue_manager``) stays hidden; this is the model-facing view of it,
 as ``self.events`` is for ``self.event_manager``.
 
-Every delivered item carries the job's ``label`` and ``path``, so a turn
-can wait with ``Waiting(on=["<label>"])`` (or ``on=["jobs"]`` for any job)
-and find the outcome in ``notification["jobs"]``. A label is a name in the
+Every delivered item carries the job's ``name`` and ``path``, so a turn
+can wait with ``Waiting(on=["<name>"])`` (or ``on=["jobs"]`` for any job)
+and find the outcome in ``notification["jobs"]``. A name is unique in the
 session's one namespace of live names, shared with its open children (see
 ``nooa_atom.session.names``).
 """
@@ -93,8 +93,8 @@ class JobInfo(BaseModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    label: str = Field(description="Name it was started with; items it delivers carry it")
-    path: str = Field(default="", description="Its path: your session's path plus /label")
+    name: str = Field(description="Name it was started with; items it delivers carry it")
+    path: str = Field(default="", description="Its path: your session's path plus /name")
     kind: JobKind = Field(description="The method that started it")
     state: JobStateName = Field(description="running, done, failed or cancelled")
     target: str = Field(default="", description="What runs: command, file, interval or callable")
@@ -132,14 +132,14 @@ class JobUpdate(BaseModel):
     ``stderr``; a coroutine ``spawn`` or ``after`` with ``result``. Every
     job ends with exactly one ``done=True`` update; a cancelled job
     delivers nothing more. Any job's update starts the next turn; check
-    ``u.label`` / ``u.done`` and return ``Waiting`` again if yours has not
+    ``u.name`` / ``u.done`` and return ``Waiting`` again if yours has not
     finished.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    label: str = Field(description="The job's label")
-    path: str = Field(default="", description="The job's path: your session's path plus /label")
+    name: str = Field(description="The job's name")
+    path: str = Field(default="", description="The job's path: your session's path plus /name")
     done: bool = Field(default=False, description="True on the job's one final update")
     error: str | None = Field(
         default=None,
@@ -181,10 +181,10 @@ class JobUpdate(BaseModel):
 
     def status_source(self) -> str:
         """The job's path, for the per-turn ``Unread:`` count (never its content)."""
-        return self.path or self.label
+        return self.path or self.name
 
 
-_LOST_KEYS = ("label", "kind", "target", "description", "started_at")
+_LOST_KEYS = ("name", "kind", "target", "description", "started_at")
 
 
 class JobsLost(EventBase):
@@ -218,7 +218,7 @@ class _Job:
 
     def __init__(
         self,
-        label: str,
+        name: str,
         kind: JobKind,
         throttle: Throttle | None,
         streaming: bool,
@@ -226,8 +226,8 @@ class _Job:
         description: str = "",
         path: str = "",
     ):
-        self.label = label
-        self.path = path or label
+        self.name = name
+        self.path = path or name
         self.kind = kind
         self.target = target
         self.description = description
@@ -255,7 +255,7 @@ class _Job:
 
     def info(self) -> JobInfo:
         return JobInfo(
-            label=self.label,
+            name=self.name,
             path=self.path,
             kind=self.kind,
             state=self.state,
@@ -274,7 +274,7 @@ class _Job:
         """The small, snapshot-safe record kept while the job runs (see ``JobsLost``)."""
         return {
             "id": self.id,
-            "label": self.label,
+            "name": self.name,
             "kind": self.kind,
             "target": self.target,
             "description": self.description,
@@ -284,7 +284,7 @@ class _Job:
     def status_line(self) -> str:
         """One short line for the per-turn status.
 
-        ``/root/label · job · 3m · 2 pending · description or target``: the age
+        ``/root/name · job · 3m · 2 pending · description or target``: the age
         while running (else the end state), the pending count only when above 0.
         """
         state = self.state
@@ -425,38 +425,38 @@ async def _ticks(seconds: float, payload: Any = None) -> AsyncIterator[Any]:
 
 
 class JobsApi(Skill):
-    """Background jobs: long commands and async work that report back by label.
+    """Background jobs: long commands and async work that report back by name.
 
     Use for anything that may take more than a minute or two (test suites,
     builds, evals) instead of blocking a cell. Each ``run`` command gets its
     own fresh bash process, so ``self.shell`` stays free; it starts in the
     shell's current directory with the shell's exported environment. Output
-    arrives as ``JobUpdate`` items in ``notification["jobs"]``, each with ``.label``.
+    arrives as ``JobUpdate`` items in ``notification["jobs"]``, each with ``.name``.
 
-        await self.jobs.run("uv run pytest -q", label="tests", description="full run before pushing")
+        await self.jobs.run("uv run pytest -q", name="tests", description="full run before pushing")
         return_result(Waiting(explanation="tests running", on=["tests"]))
         # next turn: u = notification["jobs"][0]  -> JobUpdate with done=True
         # u.returncode, u.timed_out; u.stdout / u.stderr: the last 20,000 chars of each
 
-        await self.jobs.run("make build", label="build", items=200, seconds=60)
+        await self.jobs.run("make build", name="build", items=200, seconds=60)
         # -> JobUpdate batches of output lines while it runs, then the done update
 
     A ``run``'s output is capped at 20,000 chars per stream: the done
     update keeps the last 20,000 chars of stdout and, separately, of
     stderr. For the full output pass ``log_path=`` to ``run``.
 
-    Any job's update starts the next turn; check ``u.label`` / ``u.done`` and
+    Any job's update starts the next turn; check ``u.name`` / ``u.done`` and
     return ``Waiting`` again if yours has not finished.
 
-    A label is a Python identifier (``tests``, ``ci_check``), unique among
+    A name is a Python identifier (``tests``, ``ci_check``), unique among
     your running jobs and open children; the job's path is your session's
-    path plus ``/label`` (``/root/tests``).
+    path plus ``/name`` (``/root/tests``).
 
     ``tail(path)`` follows a file, ``after(seconds)`` is a timer and
     ``every(seconds)`` ticks. ``run`` and ``cancel`` are awaited; the other
     methods return at once. Every start method takes an optional
     ``description=``; ``JobInfo.target`` says what runs. ``replace=True``
-    restarts a running job with the same label. ``list()``/``get(label)`` show state; ``await cancel(label)`` stops
+    restarts a running job with the same name. ``list()``/``get(name)`` show state; ``await cancel(name)`` stops
     a job (and kills its process).
     """
 
@@ -483,7 +483,7 @@ class JobsApi(Skill):
     @hidden
     def _new_job(
         self,
-        label: str,
+        name: str,
         kind: JobKind,
         throttle: Throttle | None,
         *,
@@ -492,44 +492,44 @@ class JobsApi(Skill):
         replace: bool,
         streaming: bool = True,
     ) -> _Job:
-        """Claim ``label`` (stopping its running job if ``replace``) for a new job.
+        """Claim ``name`` (stopping its running job if ``replace``) for a new job.
 
         ``after`` and a coroutine ``spawn`` pass ``streaming=False`` (they
         cannot be throttled).
         """
         _check_description(description)
-        self._claim(label, replace)
+        self._claim(name, replace)
         job = _Job(
-            label,
+            name,
             kind,
             throttle,
             streaming,
             _short(target),
             description.strip(),
-            path=child_path(self._base_path(), label),
+            path=child_path(self._base_path(), name),
         )
-        if label in self._jobs:
-            self._finished.append(self._jobs[label])
-        self._jobs[label] = job
+        if name in self._jobs:
+            self._finished.append(self._jobs[name])
+        self._jobs[name] = job
         return job
 
     @hidden
-    def _claim(self, label: str, replace: bool) -> None:
-        """Check ``label`` is free, first stopping its running job if ``replace``."""
-        check_name(label, "job", self._queues.channels())
-        child = self._child_using(label)
+    def _claim(self, name: str, replace: bool) -> None:
+        """Check ``name`` is free, first stopping its running job if ``replace``."""
+        check_name(name, "job", self._queues.channels())
+        child = self._child_using(name)
         if child:
             raise ValueError(
-                f"name {label!r} is already used by child {child}; pick another label, or "
-                f"close the child first (await self.child({label!r}).close())"
+                f"name {name!r} is already used by child {child}; pick another name, or "
+                f"close the child first (await self.child({name!r}).close())"
             )
         if replace:
-            self._stop_now(label)
-        current = self._jobs.get(label)
+            self._stop_now(name)
+        current = self._jobs.get(name)
         if current is not None and current.state == "running":
             raise ValueError(
-                f"a job labelled {label!r} is already running; pass replace=True to "
-                f"restart it, or await self.jobs.cancel({label!r})"
+                f"a job named {name!r} is already running; pass replace=True to "
+                f"restart it, or await self.jobs.cancel({name!r})"
             )
 
     @hidden
@@ -547,9 +547,9 @@ class JobsApi(Skill):
     @hidden
     def _start(self, job: _Job, work: Any) -> JobInfo:
         self._channel()
-        job.handle = self._queues.spawn(work, channel=JOBS_CHANNEL, label=job.label)
+        job.handle = self._queues.spawn(work, channel=JOBS_CHANNEL, label=job.name)
         job.handle.describe = job.status_line
-        self._agent._jobs_running[job.label] = job.record()
+        self._agent._jobs_running[job.name] = job.record()
         job.handle.add_done_callback(lambda handle: self._forget(job, handle))
         return job.info()
 
@@ -557,25 +557,25 @@ class JobsApi(Skill):
     def _forget(self, job: _Job, handle: "JobHandle") -> None:
         """Drop a finished job from ``agent._jobs_running``.
 
-        That dict (label -> ``_Job.record()`` of each running job) is saved
+        That dict (name -> ``_Job.record()`` of each running job) is saved
         with the agent's snapshot; ``after_restore`` reads what the previous
         process left there.
         """
         if handle.state == "cancelled" and job.final_state is None:
             return  # stopped by a shutdown, not by the job or the model: it did not survive
         record = self._agent._jobs_running
-        if record.get(job.label, {}).get("id") == job.id:
-            del record[job.label]
+        if record.get(job.name, {}).get("id") == job.id:
+            del record[job.name]
 
     @hidden
-    def _stop_now(self, label: str) -> None:
+    def _stop_now(self, name: str) -> None:
         """Stop a running job without awaiting it (``replace=True``).
 
         Kills a ``run`` command's process group at once, requests the task's
         cancellation and withdraws its queued updates, so the old job
         delivers nothing more.
         """
-        job = self._jobs.get(label)
+        job = self._jobs.get(name)
         if job is None or job.handle is None or job.state != "running":
             return
         if job.proc is not None:
@@ -586,7 +586,7 @@ class JobsApi(Skill):
         channel = self._queues.channels().get(JOBS_CHANNEL)
         if channel is not None:
             for queued in channel.snapshot():
-                if isinstance(queued, JobUpdate) and queued.label == label:
+                if isinstance(queued, JobUpdate) and queued.name == name:
                     channel.remove(queued)
         job.final_state = "cancelled"
         job.finished_at = job.finished_at or _now()
@@ -602,10 +602,10 @@ class JobsApi(Skill):
         """
         kept: dict[str, dict[str, str]] = {}
         lost: list[dict[str, str]] = []
-        for label, entry in self._agent._jobs_running.items():
-            current = self._jobs.get(label)
+        for name, entry in self._agent._jobs_running.items():
+            current = self._jobs.get(name)
             if current is not None and current.id == entry.get("id"):
-                kept[label] = entry
+                kept[name] = entry
             else:
                 lost.append(entry)
         self._agent._jobs_running = kept
@@ -799,10 +799,10 @@ class JobsApi(Skill):
     @hidden
     async def _call_job(self, job: _Job, work: Awaitable[Any]) -> JobUpdate:
         try:
-            item = JobUpdate(label=job.label, path=job.path, result=await work, done=True)
+            item = JobUpdate(name=job.name, path=job.path, result=await work, done=True)
         except Exception as exc:
             item = JobUpdate(
-                label=job.label, path=job.path, done=True, error=f"{type(exc).__name__}: {exc}"
+                name=job.name, path=job.path, done=True, error=f"{type(exc).__name__}: {exc}"
             )
             job.final_state = "failed"
         finally:
@@ -862,7 +862,7 @@ class JobsApi(Skill):
                     "stderr_lines": [str(v) for v in batch if isinstance(v, _StderrLine)],
                 }
             item = JobUpdate(
-                label=job.label,
+                name=job.name,
                 path=job.path,
                 done=done,
                 error=failure[0] if done and failure else None,
@@ -947,7 +947,7 @@ class JobsApi(Skill):
         self,
         cmd: str,
         *,
-        label: str,
+        name: str,
         stdin: str | None = None,
         timeout: float | None = None,
         cwd: str | Path | None = None,
@@ -978,7 +978,7 @@ class JobsApi(Skill):
         chars); lines still batched when it ends arrive only in
         ``stdout``/``stderr``.
 
-            await self.jobs.run("uv run pytest -q", label="tests", log_path="logs/tests.log")
+            await self.jobs.run("uv run pytest -q", name="tests", log_path="logs/tests.log")
             return_result(Waiting(explanation="tests running", on=["tests"]))
         """
         # Every argument is checked before _claim, which stops the old job on replace=True.
@@ -994,7 +994,7 @@ class JobsApi(Skill):
             _check_seconds(timeout)
         _check_description(description)
         throttle = _throttle(items, seconds)
-        self._claim(label, replace)  # fail before the await
+        self._claim(name, replace)  # fail before the await
         context = await self._shell_context()
         log = None
         if log_path is not None:
@@ -1004,7 +1004,7 @@ class JobsApi(Skill):
             # Line-buffered, so the file can be read while the job runs.
             log = open(resolved, "w", encoding="utf-8", errors="replace", buffering=1)  # noqa: SIM115
         job = self._new_job(
-            label, "run", throttle, target=cmd, description=description, replace=replace
+            name, "run", throttle, target=cmd, description=description, replace=replace
         )
         if log is not None:
             job.log_path = log.name
@@ -1014,7 +1014,7 @@ class JobsApi(Skill):
         self,
         work: Any,
         *,
-        label: str,
+        name: str,
         items: int | None = None,
         seconds: float | None = None,
         description: str = "",
@@ -1027,23 +1027,23 @@ class JobsApi(Skill):
         ``JobUpdate`` per yielded value in ``values`` (batched with
         ``items``/``seconds``), then a done update with any values still pending.
 
-            self.jobs.spawn(fetch_report(url), label="report")  # any coroutine
-            self.jobs.spawn(watch_queue(), label="watch", seconds=60)  # an async generator
+            self.jobs.spawn(fetch_report(url), name="report")  # any coroutine
+            self.jobs.spawn(watch_queue(), name="watch", seconds=60)  # an async generator
         """
         if inspect.iscoroutinefunction(work) or inspect.isasyncgenfunction(work):
-            name = getattr(work, "__name__", "work")
-            raise TypeError(f"pass {name}(), not {name}: spawn() takes the call's result")
+            fn = getattr(work, "__name__", "work")
+            raise TypeError(f"pass {fn}(), not {fn}: spawn() takes the call's result")
         try:
-            name = getattr(work, "__qualname__", None) or type(work).__name__
-            about = {"target": f"{name}()", "description": description, "replace": replace}
+            fn = getattr(work, "__qualname__", None) or type(work).__name__
+            about = {"target": f"{fn}()", "description": description, "replace": replace}
             if hasattr(work, "__aiter__"):
-                job = self._new_job(label, "spawn", _throttle(items, seconds), **about)
+                job = self._new_job(name, "spawn", _throttle(items, seconds), **about)
                 return self._start(job, self._stream_job(job, work.__aiter__(), into="values"))
             if not isinstance(work, Awaitable):
                 raise TypeError("spawn() takes a coroutine or an async iterator")
             if items is not None or seconds is not None:
                 raise ValueError("items/seconds apply to async iterators only")
-            job = self._new_job(label, "spawn", None, streaming=False, **about)
+            job = self._new_job(name, "spawn", None, streaming=False, **about)
         except BaseException:
             # Rejected: close the model's coroutine so it is not reported as never awaited.
             if inspect.iscoroutine(work):
@@ -1055,7 +1055,7 @@ class JobsApi(Skill):
         self,
         path: str | Path,
         *,
-        label: str,
+        name: str,
         items: int | None = None,
         seconds: float | None = None,
         description: str = "",
@@ -1067,7 +1067,7 @@ class JobsApi(Skill):
         batch with ``items``/``seconds``. A relative ``path`` is relative to the shell's
         directory.
 
-            self.jobs.tail("logs/server.log", label="server_log", seconds=60)
+            self.jobs.tail("logs/server.log", name="server_log", seconds=60)
         """
         # Every argument (and the file) is checked before _claim, which stops the
         # old job on replace=True.
@@ -1083,7 +1083,7 @@ class JobsApi(Skill):
         offset = resolved.stat().st_size  # deliver what is appended from now on
         target = str(resolved) if str(resolved) == str(path) else f"{path} ({resolved})"
         job = self._new_job(
-            label, "tail", throttle, target=target, description=description, replace=replace
+            name, "tail", throttle, target=target, description=description, replace=replace
         )
         return self._start(job, self._stream_job(job, _tail_lines(resolved, offset), into="lines"))
 
@@ -1091,20 +1091,20 @@ class JobsApi(Skill):
         self,
         seconds: float,
         *,
-        label: str,
+        name: str,
         payload: Any = None,
         description: str = "",
         replace: bool = False,
     ) -> JobInfo:
         """A timer: after ``seconds``, one done update whose ``result`` is ``payload``.
 
-        ``seconds=0`` fires right away; ``cancel(label)`` stops it before it fires.
+        ``seconds=0`` fires right away; ``cancel(name)`` stops it before it fires.
 
-            self.jobs.after(600, label="check_ci", payload="check CI on PR #462 and report")
+            self.jobs.after(600, name="check_ci", payload="check CI on PR #462 and report")
         """
         _check_seconds(seconds, zero_ok=True)
         job = self._new_job(
-            label,
+            name,
             "after",
             None,
             target=f"after {seconds:g}s",
@@ -1119,7 +1119,7 @@ class JobsApi(Skill):
         self,
         seconds: float,
         *,
-        label: str,
+        name: str,
         payload: Any = None,
         description: str = "",
         replace: bool = False,
@@ -1127,13 +1127,13 @@ class JobsApi(Skill):
         """Deliver a tick every ``seconds`` until cancelled.
 
         Each tick is one entry of ``JobUpdate.values``: ``payload`` if given,
-        else the tick count (1, 2, 3, ...); ``throttle(label, ...)`` batches them.
+        else the tick count (1, 2, 3, ...); ``throttle(name, ...)`` batches them.
 
-            self.jobs.every(300, label="poll_ci", payload="check CI and report changes")
+            self.jobs.every(300, name="poll_ci", payload="check CI and report changes")
         """
         _check_seconds(seconds)
         job = self._new_job(
-            label,
+            name,
             "every",
             None,
             target=f"every {seconds:g}s",
@@ -1144,7 +1144,7 @@ class JobsApi(Skill):
         return self._start(job, self._stream_job(job, _ticks(seconds, payload), into="values"))
 
     def throttle(
-        self, label: str, *, items: int | None = None, seconds: float | None = None
+        self, name: str, *, items: int | None = None, seconds: float | None = None
     ) -> JobInfo:
         """Batch a running job's deliveries: one per ``items`` values or ``seconds``.
 
@@ -1153,18 +1153,18 @@ class JobsApi(Skill):
         early once it holds 200 lines/values or 20,000 chars of text (a size
         limit per update, unrelated to a ``run``'s 20,000-char output cap).
         Each call replaces the previous setting (omitted arguments become
-        None), first delivering what was already batched. ``throttle(label)``
+        None), first delivering what was already batched. ``throttle(name)``
         turns batching off: a ``run`` goes quiet until its done update (whose
         ``stdout``/``stderr`` hold the output), other jobs deliver every value.
         Applies at once, without restarting the job.
 
             self.jobs.throttle("build", items=200)
         """
-        job = self._jobs.get(label)
+        job = self._jobs.get(name)
         if job is None:
-            raise KeyError(f"no job labelled {label!r}")
+            raise KeyError(f"no job named {name!r}")
         if not job.streaming:
-            raise ValueError(f"job {label!r} is not a streaming job")
+            raise ValueError(f"job {name!r} is not a streaming job")
         job.throttle = _throttle(items, seconds)
         job.rethrottled = True
         if job.wake is not None:
@@ -1177,21 +1177,21 @@ class JobsApi(Skill):
         jobs = [*self._finished, *self._jobs.values()]
         return [job.info() for job in jobs]
 
-    def get(self, label: str) -> JobInfo | None:
-        """The latest job with ``label`` (``.last`` holds its recent updates), or None."""
-        job = self._jobs.get(label)
+    def get(self, name: str) -> JobInfo | None:
+        """The latest job with ``name`` (``.last`` holds its recent updates), or None."""
+        job = self._jobs.get(name)
         return None if job is None else job.info()
 
-    async def cancel(self, label: str) -> bool:
+    async def cancel(self, name: str) -> bool:
         """Stop a running job (killing its process); True if it was running.
 
         Its updates still queued are dropped; ones already handed to the
         current turn (in ``notification["jobs"]``) are not taken back.
         """
-        job = self._jobs.get(label)
+        job = self._jobs.get(name)
         if job is None or job.handle is None or job.state != "running":
             return False
-        self._stop_now(label)
+        self._stop_now(name)
         await job.handle.cancel()  # waits for the task to unwind
         return True
 

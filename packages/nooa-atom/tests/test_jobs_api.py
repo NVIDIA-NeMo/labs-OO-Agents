@@ -46,16 +46,16 @@ async def _next(agent) -> object:
     return await asyncio.wait_for(agent.queue_manager.get_channel("jobs").get(), TIMEOUT)
 
 
-async def _stream_updates(agent, label: str) -> list[JobUpdate]:
+async def _stream_updates(agent, name: str) -> list[JobUpdate]:
     """Every JobUpdate a streaming job delivers, read until it has ended."""
     channel = agent.queue_manager.get_channel("jobs")
     updates = []
-    while agent.jobs.get(label).state == "running" or channel.qsize():
+    while agent.jobs.get(name).state == "running" or channel.qsize():
         try:
             item = await asyncio.wait_for(channel.get(), 0.2)
         except TimeoutError:
             continue
-        assert isinstance(item, JobUpdate) and item.label == label
+        assert isinstance(item, JobUpdate) and item.name == name
         updates.append(item)
     return updates
 
@@ -68,18 +68,18 @@ async def _until(predicate, timeout: float = TIMEOUT) -> None:
         await asyncio.sleep(0.02)
 
 
-async def test_run_delivers_a_labelled_shell_result(agent):
-    info = await agent.jobs.run("echo out; echo err >&2; exit 3", label="t")
+async def test_run_delivers_a_named_shell_result(agent):
+    info = await agent.jobs.run("echo out; echo err >&2; exit 3", name="t")
     assert info.state == "running" and info.kind == "run"
     assert info.path == "/root/t"  # outside a session tree the agent is /root
     item = await _next(agent)
-    assert (isinstance(item, JobUpdate) and item.done) and item.label == "t"
+    assert (isinstance(item, JobUpdate) and item.done) and item.name == "t"
     assert item.path == "/root/t"
     assert item.returncode == 3 and item.stdout == "out\n"
     assert item.stderr == "err\n"
     # No log file unless log_path= asks for one: the done update is the whole output.
     assert set(JobUpdate.model_fields) == {
-        "label",
+        "name",
         "path",
         "done",
         "error",
@@ -101,7 +101,7 @@ async def test_run_delivers_a_labelled_shell_result(agent):
 async def test_run_starts_in_the_shell_directory_with_its_exports(agent, tmp_path):
     (tmp_path / "sub").mkdir()
     await agent.shell.run("export JOBS_TEST_VAR=from-shell; cd sub")
-    await agent.jobs.run('echo "$JOBS_TEST_VAR"; pwd; cd /; export X=1', label="env")
+    await agent.jobs.run('echo "$JOBS_TEST_VAR"; pwd; cd /; export X=1', name="env")
     item = await _next(agent)
     assert item.stdout.splitlines() == ["from-shell", str(tmp_path / "sub")]
     # The job's cd/export do not leak into the agent's shell.
@@ -113,7 +113,7 @@ async def test_run_starts_in_the_shell_directory_with_its_exports(agent, tmp_pat
 
 async def test_run_takes_stdin_and_cwd(agent, tmp_path):
     (tmp_path / "d").mkdir()
-    await agent.jobs.run("cat; pwd", label="stdin_job", stdin="hello\n", cwd="d")
+    await agent.jobs.run("cat; pwd", name="stdin_job", stdin="hello\n", cwd="d")
     item = await _next(agent)
     assert item.stdout == f"hello\n{tmp_path / 'd'}\n"
 
@@ -121,7 +121,7 @@ async def test_run_takes_stdin_and_cwd(agent, tmp_path):
 async def test_run_log_path_gets_the_full_output_and_keeps_the_exit_code(agent, tmp_path):
     info = await agent.jobs.run(
         "for i in $(seq 1 3000); do echo out line $i; echo err line $i >&2; done; exit 3",
-        label="noisy",
+        name="noisy",
         log_path="logs/noisy.log",
     )
     log = tmp_path / "logs" / "noisy.log"
@@ -137,19 +137,19 @@ async def test_run_log_path_gets_the_full_output_and_keeps_the_exit_code(agent, 
 
 async def test_run_log_path_is_relative_to_the_commands_directory(agent, tmp_path):
     (tmp_path / "sub").mkdir()
-    await agent.jobs.run("echo hi", label="here", cwd="sub", log_path="run.log")
+    await agent.jobs.run("echo hi", name="here", cwd="sub", log_path="run.log")
     update = await _next(agent)
     assert update.log_path == str(tmp_path / "sub" / "run.log")
     assert (tmp_path / "sub" / "run.log").read_text() == "hi\n"
-    await agent.jobs.run("echo again", label="here", cwd="sub", log_path="run.log")
+    await agent.jobs.run("echo again", name="here", cwd="sub", log_path="run.log")
     await _next(agent)
     assert (tmp_path / "sub" / "run.log").read_text() == "again\n"  # overwritten
-    await agent.jobs.run("echo none", label="plain")
+    await agent.jobs.run("echo none", name="plain")
     assert (await _next(agent)).log_path is None
 
 
 async def test_run_does_not_block_the_shell(agent):
-    await agent.jobs.run("sleep 3; echo late", label="slow")
+    await agent.jobs.run("sleep 3; echo late", name="slow")
     started = time.monotonic()
     assert (await agent.shell.run("echo now")).strip() == "now"
     assert time.monotonic() - started < 2.0
@@ -157,7 +157,7 @@ async def test_run_does_not_block_the_shell(agent):
 
 
 async def test_run_timeout_kills_and_reports_124(agent):
-    await agent.jobs.run("echo start; sleep 30", label="to", timeout=0.5)
+    await agent.jobs.run("echo start; sleep 30", name="to", timeout=0.5)
     item = await _next(agent)
     assert item.timed_out and item.returncode == 124
     assert item.stdout == "start\n"
@@ -166,7 +166,7 @@ async def test_run_timeout_kills_and_reports_124(agent):
 async def test_run_timeout_applies_when_the_output_is_redirected(agent):
     # The pipes close at once, so only the wait for the process can time out.
     started = time.monotonic()
-    await agent.jobs.run("sleep 30 > /dev/null 2>&1", label="quiet", timeout=0.5)
+    await agent.jobs.run("sleep 30 > /dev/null 2>&1", name="quiet", timeout=0.5)
     item = await _next(agent)
     assert item.done and item.timed_out and item.returncode == 124
     assert time.monotonic() - started < 5.0
@@ -175,7 +175,7 @@ async def test_run_timeout_applies_when_the_output_is_redirected(agent):
 async def test_cancel_kills_the_process_and_its_group(agent, tmp_path):
     pidfile, childfile = tmp_path / "pid", tmp_path / "child"
     await agent.jobs.run(
-        f"sleep 999 & echo $! > {childfile}; echo $$ > {pidfile}; wait", label="long"
+        f"sleep 999 & echo $! > {childfile}; echo $$ > {pidfile}; wait", name="long"
     )
     await _until(lambda: pidfile.exists() and pidfile.read_text().strip())
     pid, child = int(pidfile.read_text()), int(childfile.read_text())
@@ -206,7 +206,7 @@ async def test_cancel_returns_while_a_chatty_jobs_output_is_buffered(agent, thro
     # ``yes`` prints far more than the 256-slot queues hold, so at the cancel
     # the line pumps are blocked on full queues. Their cleanup must not wait
     # for queue space nobody frees, or cancel() never returns.
-    await agent.jobs.run("yes", label="chatty", **throttle)
+    await agent.jobs.run("yes", name="chatty", **throttle)
     await asyncio.sleep(0.5)
     cancel = asyncio.ensure_future(agent.jobs.cancel("chatty"))
     # asyncio.wait, not wait_for: wait_for would wait for the hung cancel itself.
@@ -217,38 +217,38 @@ async def test_cancel_returns_while_a_chatty_jobs_output_is_buffered(agent, thro
 
 
 async def test_timeout_ends_a_chatty_job(agent):
-    await agent.jobs.run("yes", label="chatty", timeout=0.5)
+    await agent.jobs.run("yes", name="chatty", timeout=0.5)
     item = await asyncio.wait_for(_next(agent), 5.0)
     assert isinstance(item, JobUpdate) and item.done
     assert item.returncode == 124 and item.timed_out
 
 
-async def test_labels_are_unique_among_running_jobs(agent):
-    await agent.jobs.run("sleep 5", label="x")
+async def test_names_are_unique_among_running_jobs(agent):
+    await agent.jobs.run("sleep 5", name="x")
     hint = (
-        "a job labelled 'x' is already running; pass replace=True to restart it, "
+        "a job named 'x' is already running; pass replace=True to restart it, "
         "or await self.jobs.cancel('x')"
     )
     with pytest.raises(ValueError, match=re.escape(hint)):
-        await agent.jobs.run("true", label="x")
+        await agent.jobs.run("true", name="x")
     with pytest.raises(ValueError, match="already running"):
-        agent.jobs.spawn(asyncio.sleep(0), label="x")
+        agent.jobs.spawn(asyncio.sleep(0), name="x")
     for bad in (" ", "ci-check", "class", "1st"):
         with pytest.raises(ValueError, match="is not valid: use a Python identifier"):
-            await agent.jobs.run("true", label=bad)
+            await agent.jobs.run("true", name=bad)
     for reserved in ("jobs", "delegates", "user", "user_messages", "system_messages"):
         with pytest.raises(ValueError, match=f"job name '{reserved}' is reserved: Waiting"):
-            await agent.jobs.run("true", label=reserved)
+            await agent.jobs.run("true", name=reserved)
     agent.queue_manager.queue("mesh")  # a queue-manager channel in use
     work = asyncio.sleep(0)
     with pytest.raises(ValueError, match="job name 'mesh' is reserved"):
-        agent.jobs.spawn(work, label="mesh")
+        agent.jobs.spawn(work, name="mesh")
     work.close()  # refused before it was started
     await agent.jobs.cancel("x")
-    await agent.jobs.run("echo again", label="x")  # free once it stopped
+    await agent.jobs.run("echo again", name="x")  # free once it stopped
     item = await _next(agent)
     assert item.stdout == "again\n"
-    assert [job.label for job in agent.jobs.list()] == ["x", "x"]
+    assert [job.name for job in agent.jobs.list()] == ["x", "x"]
 
 
 async def _collect_run(agent) -> tuple[list[JobUpdate], JobUpdate]:
@@ -263,7 +263,7 @@ async def _collect_run(agent) -> tuple[list[JobUpdate], JobUpdate]:
 
 
 async def test_a_quiet_run_ends_with_one_done_update_holding_the_shell_result(agent):
-    await agent.jobs.run("for i in 1 2 3; do echo $i; done", label="q")
+    await agent.jobs.run("for i in 1 2 3; do echo $i; done", name="q")
     updates, result = await _collect_run(agent)
     assert updates == [] and result.lines == [] and result.returncode == 0
     assert result.stdout == "1\n2\n3\n"
@@ -271,17 +271,17 @@ async def test_a_quiet_run_ends_with_one_done_update_holding_the_shell_result(ag
 
 
 async def test_run_with_progress_delivers_lines_then_its_result(agent):
-    await agent.jobs.run("echo a; echo b >&2; echo c", label="s", items=1)
+    await agent.jobs.run("echo a; echo b >&2; echo c", name="s", items=1)
     updates, result = await _collect_run(agent)
     assert all(len(u.lines) + len(u.stderr_lines) == 1 for u in updates)
     assert [line for u in updates for line in u.lines] == ["a", "c"]  # stdout, no newline
     assert [line for u in updates for line in u.stderr_lines] == ["b"]  # stderr apart
-    assert result.label == "s" and result.returncode == 0
+    assert result.name == "s" and result.returncode == 0
     assert result.stdout == "a\nc\n" and result.stderr == "b\n"
 
 
 async def test_throttle_by_items_batches_and_flushes_before_the_result(agent):
-    await agent.jobs.run("for i in 1 2 3 4 5; do echo $i; done", label="b", items=2)
+    await agent.jobs.run("for i in 1 2 3 4 5; do echo $i; done", name="b", items=2)
     updates, result = await _collect_run(agent)
     texts = [u.lines for u in updates]
     # "5" is still pending at the end: not sent alone, the done update's stdout has it.
@@ -294,7 +294,7 @@ async def test_run_progress_by_seconds(agent):
     # batched, and the window (not the end of the run) delivers it.
     await agent.jobs.run(
         "echo 1; echo 2; sleep 0.6; echo 3; echo 4; sleep 0.6; echo 5; echo 6",
-        label="t",
+        name="t",
         seconds=0.3,
     )
     updates, result = await _collect_run(agent)
@@ -318,7 +318,7 @@ async def test_throttle_turns_run_progress_on_and_off(agent, tmp_path):
         f"while [ ! -e {go}1 ]; do sleep 0.02; done; echo loud1; echo loud2; "
         f"while [ ! -e {go}2 ]; do sleep 0.02; done; echo quiet1; echo quiet2"
     )
-    info = await agent.jobs.run(script, label="r")
+    info = await agent.jobs.run(script, name="r")
     assert info.throttle is None  # quiet by default
     await _until(started.exists)
     assert agent.queue_manager.get_channel("jobs").qsize() == 0
@@ -345,7 +345,7 @@ async def test_throttle_by_seconds_batches_slow_output(agent):
                 yield i
             await asyncio.sleep(0.6)
 
-    agent.jobs.spawn(ticks(), label="tick", seconds=0.3)
+    agent.jobs.spawn(ticks(), name="tick", seconds=0.3)
     updates = await _stream_updates(agent, "tick")
     assert updates[-1].done and [u.done for u in updates].count(True) == 1
     flat = [v for u in updates for v in u.values]
@@ -362,7 +362,7 @@ async def test_throttle_off_flushes_pending_items(agent):
         yield "b"
         await gate.wait()
 
-    agent.jobs.spawn(two_then_wait(), label="p", items=10)
+    agent.jobs.spawn(two_then_wait(), name="p", items=10)
     await _until(lambda: agent.jobs.get("p").pending == 2)
     assert agent.jobs.throttle("p").throttle is None
     # Turning batching off delivers what is pending as soon as more arrives or the job ends.
@@ -374,13 +374,13 @@ async def test_throttle_off_flushes_pending_items(agent):
 
 
 async def test_throttle_rejects_non_streaming_jobs(agent):
-    agent.jobs.after(5, label="r")
+    agent.jobs.after(5, name="r")
     with pytest.raises(ValueError, match="not a streaming job"):
         agent.jobs.throttle("r", items=2)
     with pytest.raises(KeyError):
         agent.jobs.throttle("missing")
     with pytest.raises(ValueError):
-        await agent.jobs.run("true", label="bad", items=0)
+        await agent.jobs.run("true", name="bad", items=0)
 
 
 async def test_spawn_a_coroutine_delivers_one_result_or_its_error(agent):
@@ -391,24 +391,24 @@ async def test_spawn_a_coroutine_delivers_one_result_or_its_error(agent):
     async def broken():
         raise RuntimeError("boom")
 
-    agent.jobs.spawn(compute(42), label="c")
+    agent.jobs.spawn(compute(42), name="c")
     item = await _next(agent)
-    assert (isinstance(item, JobUpdate) and item.done) and item.label == "c" and item.result == 42
+    assert (isinstance(item, JobUpdate) and item.done) and item.name == "c" and item.result == 42
     # The return value is the result as is: None and lists too.
-    agent.jobs.spawn(compute(None), label="n")
+    agent.jobs.spawn(compute(None), name="n")
     assert (await _next(agent)).result is None
-    agent.jobs.spawn(compute([1, 2]), label="l")
+    agent.jobs.spawn(compute([1, 2]), name="l")
     assert (await _next(agent)).result == [1, 2]
-    agent.jobs.spawn(broken(), label="e")
+    agent.jobs.spawn(broken(), name="e")
     item = await _next(agent)
     assert item.done and item.result is None and item.error == "RuntimeError: boom"
     assert agent.jobs.get("e").state == "failed"
     with pytest.raises(TypeError):
-        agent.jobs.spawn(42, label="z")
+        agent.jobs.spawn(42, name="z")
 
 
 async def test_get_shows_recent_items(agent):
-    agent.jobs.spawn(asyncio.sleep(0, result="v"), label="g")
+    agent.jobs.spawn(asyncio.sleep(0, result="v"), name="g")
     await _next(agent)
     info = agent.jobs.get("g")
     assert info.state == "done" and info.last[-1].result == "v"
@@ -416,7 +416,7 @@ async def test_get_shows_recent_items(agent):
 
 
 async def test_status_names_self_jobs_not_the_queue_manager(agent):
-    await agent.jobs.run("sleep 5", label="build")
+    await agent.jobs.run("sleep 5", name="build")
     status = agent.queue_manager.status()
     assert "build" in status
     assert status.endswith("\nCancel a job: await self.jobs.cancel('<name>')")
@@ -429,17 +429,17 @@ async def test_a_delivered_job_makes_the_queue_ready(agent):
     waiter = asyncio.ensure_future(queues.wait_ready())
     await asyncio.sleep(0.05)
     assert not waiter.done()
-    await agent.jobs.run("echo hi", label="w")
+    await agent.jobs.run("echo hi", name="w")
     await asyncio.wait_for(waiter, TIMEOUT)
     batch = queues.claim_batch()
-    assert batch is not None and [item.label for item in batch["jobs"]] == ["w"]
+    assert batch is not None and [item.name for item in batch["jobs"]] == ["w"]
 
 
 async def test_without_a_shell_jobs_use_the_process_environment(tmp_path, monkeypatch):
     monkeypatch.setenv("JOBS_TEST_ENV", "proc")
     agent = _Agent(tmp_path, shell=False)
     jobs = JobsApi(agent)
-    await jobs.run('echo "$JOBS_TEST_ENV"', label="np")
+    await jobs.run('echo "$JOBS_TEST_ENV"', name="np")
     item = await asyncio.wait_for(agent.queue_manager.get_channel("jobs").get(), TIMEOUT)
     assert item.stdout == "proc\n"
     await agent.queue_manager.shutdown()
@@ -461,7 +461,7 @@ async def test_each_throttle_call_replaces_the_setting_and_flushes_the_batch(age
         for i in range(12, 16):
             yield i
 
-    agent.jobs.spawn(numbers(), label="r")
+    agent.jobs.spawn(numbers(), name="r")
     assert [(await _next(agent)).values for _ in range(2)] == [[0], [1]]
     assert agent.jobs.throttle("r", seconds=60).throttle.seconds == 60
     gates[0].set()
@@ -490,7 +490,7 @@ async def test_each_throttle_call_replaces_the_setting_and_flushes_the_batch(age
 async def test_tail_delivers_only_lines_appended_after_the_call(agent, tmp_path):
     log = tmp_path / "app.log"
     log.write_text("existing\n")
-    info = agent.jobs.tail("app.log", label="log")  # relative to the shell's directory
+    info = agent.jobs.tail("app.log", name="log")  # relative to the shell's directory
     assert info.kind == "tail" and info.state == "running"
     with log.open("a") as fh:
         fh.write("line1\nline2\npart")
@@ -506,7 +506,7 @@ async def test_tail_delivers_only_lines_appended_after_the_call(agent, tmp_path)
 async def test_tail_follows_a_file_that_is_truncated(agent, tmp_path):
     log = tmp_path / "out.log"
     log.write_text("old line 1\nold line 2\n")
-    agent.jobs.tail("out.log", label="log")
+    agent.jobs.tail("out.log", name="log")
     log.write_text("new\n")  # truncate and rewrite, as `cmd > out.log` does
     assert (await _next(agent)).lines == ["new"]
     assert await agent.jobs.cancel("log") is True
@@ -515,7 +515,7 @@ async def test_tail_follows_a_file_that_is_truncated(agent, tmp_path):
 async def test_tail_batches_and_rethrottles(agent, tmp_path):
     log = tmp_path / "batch.log"
     log.write_text("")
-    agent.jobs.tail(str(log), label="b", items=3)
+    agent.jobs.tail(str(log), name="b", items=3)
     with log.open("a") as fh:
         fh.write("".join(f"{i}\n" for i in range(5)))
     assert (await _next(agent)).lines == ["0", "1", "2"]
@@ -527,58 +527,58 @@ async def test_tail_batches_and_rethrottles(agent, tmp_path):
 
 async def test_tail_of_a_missing_file_raises_at_once(agent):
     with pytest.raises(FileNotFoundError):
-        agent.jobs.tail("missing.log", label="m")
+        agent.jobs.tail("missing.log", name="m")
     assert agent.jobs.get("m") is None
 
 
 async def test_after_delivers_its_payload_once_none_by_default(agent):
     started = time.monotonic()
-    info = agent.jobs.after(0.2, label="timer")
+    info = agent.jobs.after(0.2, name="timer")
     assert info.kind == "after" and info.payload is None
     item = await _next(agent)
-    assert (isinstance(item, JobUpdate) and item.done) and item.label == "timer"
+    assert (isinstance(item, JobUpdate) and item.done) and item.name == "timer"
     assert item.result is None and item.error is None
     assert time.monotonic() - started >= 0.2
     assert agent.jobs.get("timer").state == "done"
     task = "check CI on PR #462 and report"
-    assert agent.jobs.after(0.05, label="check_ci", payload=task).payload == task
+    assert agent.jobs.after(0.05, name="check_ci", payload=task).payload == task
     assert (await _next(agent)).result == task
     assert agent.jobs.get("check_ci").payload == task
     # Other kinds keep payload None.
-    assert agent.jobs.every(30, label="e").payload is None
-    assert (await agent.jobs.run("true", label="r")).payload is None
+    assert agent.jobs.every(30, name="e").payload is None
+    assert (await agent.jobs.run("true", name="r")).payload is None
     await agent.jobs.cancel("e")
 
 
 async def test_after_can_be_cancelled(agent):
-    agent.jobs.after(30, label="later")
+    agent.jobs.after(30, name="later")
     assert await agent.jobs.cancel("later") is True
     await asyncio.sleep(0.05)
     assert agent.queue_manager.get_channel("jobs").qsize() == 0
 
 
 async def test_every_ticks_until_cancelled(agent):
-    info = agent.jobs.every(0.05, label="tick")
+    info = agent.jobs.every(0.05, name="tick")
     assert info.kind == "every"
     assert [(await _next(agent)).values for _ in range(3)] == [[1], [2], [3]]  # no payload
     assert await agent.jobs.cancel("tick") is True
     assert agent.jobs.get("tick").state == "cancelled"
     with pytest.raises(ValueError):
-        agent.jobs.every(0, label="bad")
+        agent.jobs.every(0, name="bad")
 
 
 async def test_cancel_withdraws_the_jobs_queued_updates_only(agent):
     channel = agent.queue_manager.get_channel("jobs")
-    agent.jobs.after(0, label="other", payload="keep")
-    agent.jobs.every(0.01, label="tick")
-    await _until(lambda: sum(u.label == "tick" for u in channel.snapshot()) >= 2)
+    agent.jobs.after(0, name="other", payload="keep")
+    agent.jobs.every(0.01, name="tick")
+    await _until(lambda: sum(u.name == "tick" for u in channel.snapshot()) >= 2)
     assert await agent.jobs.cancel("tick") is True
     await asyncio.sleep(0.05)
-    assert [(u.label, u.result) for u in channel.snapshot()] == [("other", "keep")]
+    assert [(u.name, u.result) for u in channel.snapshot()] == [("other", "keep")]
 
 
 async def test_a_cancelled_job_has_nothing_pending(agent):
-    agent.jobs.every(0.01, label="tick")
+    agent.jobs.every(0.01, name="tick")
     agent.jobs.throttle("tick", items=1000)
     await _until(lambda: agent.jobs.get("tick").pending >= 2)
     assert await agent.jobs.cancel("tick") is True
@@ -596,7 +596,7 @@ async def test_a_finished_job_leaves_no_stream_end_in_the_models_history(tmp_pat
     agent.queue_manager = QueueManager(event_manager=events)
     agent.queue_manager.queue("jobs")
     agent.jobs = JobsApi(agent)
-    agent.jobs.after(0, label="t")
+    agent.jobs.after(0, name="t")
     assert (await _next(agent)).done
     await _until(lambda: ended)
     assert ended[0].channel_name == "jobs"  # subscribers still get it
@@ -608,29 +608,29 @@ async def test_a_finished_job_leaves_no_stream_end_in_the_models_history(tmp_pat
 
 
 async def test_commands_run_in_their_own_process_group(agent):
-    await agent.jobs.run("ps -o pgid= -p $$", label="pg")
+    await agent.jobs.run("ps -o pgid= -p $$", name="pg")
     item = await _next(agent)
     assert int(item.stdout.strip()) != os.getpgid(os.getpid())
 
 
 async def test_concurrent_jobs_do_not_interfere(agent):
-    await agent.jobs.run("echo A1; sleep 0.1; echo A2", label="a")
-    await agent.jobs.run("echo B1; sleep 0.1; echo B2", label="b")
-    items = {item.label: item for item in [await _next(agent), await _next(agent)]}
+    await agent.jobs.run("echo A1; sleep 0.1; echo A2", name="a")
+    await agent.jobs.run("echo B1; sleep 0.1; echo B2", name="b")
+    items = {item.name: item for item in [await _next(agent), await _next(agent)]}
     assert items["a"].stdout == "A1\nA2\n"
     assert items["b"].stdout == "B1\nB2\n"
 
 
 async def test_cancelling_one_job_leaves_the_other_running(agent):
-    await agent.jobs.run("sleep 999", label="victim")
-    await agent.jobs.run("sleep 0.3; echo survived", label="survivor")
+    await agent.jobs.run("sleep 999", name="victim")
+    await agent.jobs.run("sleep 0.3; echo survived", name="survivor")
     await agent.jobs.cancel("victim")
     item = await _next(agent)
-    assert item.label == "survivor" and item.stdout == "survived\n"
+    assert item.name == "survivor" and item.stdout == "survived\n"
 
 
 async def test_undecodable_output_does_not_end_the_stream(agent):
-    await agent.jobs.run(r"printf 'first\ncaf\xe9\nlast\n'", label="bytes", items=1)
+    await agent.jobs.run(r"printf 'first\ncaf\xe9\nlast\n'", name="bytes", items=1)
     updates, result = await _collect_run(agent)
     texts = [line for u in updates for line in u.lines]
     assert texts == ["first", "caf\ufffd", "last"]
@@ -638,13 +638,13 @@ async def test_undecodable_output_does_not_end_the_stream(agent):
 
 
 async def test_delivered_line_items_never_end_in_a_newline(agent, tmp_path):
-    await agent.jobs.run(r"printf 'crlf\r\nlf\nlast'", label="nl", items=1)
+    await agent.jobs.run(r"printf 'crlf\r\nlf\nlast'", name="nl", items=1)
     updates, result = await _collect_run(agent)
     assert [line for u in updates for line in u.lines] == ["crlf", "lf", "last"]
     assert result.stdout == "crlf\r\nlf\nlast"  # stdout keeps the output as is
     log = tmp_path / "nl.log"
     log.write_text("")
-    agent.jobs.tail(str(log), label="t", items=2)
+    agent.jobs.tail(str(log), name="t", items=2)
     log.write_bytes(b"one\r\ntwo\n")
     assert (await _next(agent)).lines == ["one", "two"]
     await agent.jobs.cancel("t")
@@ -664,26 +664,26 @@ async def test_target_says_what_runs_for_each_kind(agent, tmp_path):
         yield 1
         await asyncio.sleep(30)
 
-    assert (await agent.jobs.run("sleep 30", label="r")).target == "sleep 30"
-    assert agent.jobs.spawn(fetch_report(), label="c").target.endswith("fetch_report()")
-    assert agent.jobs.spawn(lines_of_work(), label="g").target.endswith("lines_of_work()")
-    assert agent.jobs.tail("t.log", label="rel").target == f"t.log ({log})"
-    assert agent.jobs.tail(str(log), label="abs").target == str(log)
-    assert agent.jobs.after(300, label="a").target == "after 300s"
-    assert agent.jobs.every(0.5, label="e").target == "every 0.5s"
-    assert {job.label: job.target for job in agent.jobs.list()}["a"] == "after 300s"
-    for label in ("r", "c", "g", "rel", "abs", "a", "e"):
-        await agent.jobs.cancel(label)
+    assert (await agent.jobs.run("sleep 30", name="r")).target == "sleep 30"
+    assert agent.jobs.spawn(fetch_report(), name="c").target.endswith("fetch_report()")
+    assert agent.jobs.spawn(lines_of_work(), name="g").target.endswith("lines_of_work()")
+    assert agent.jobs.tail("t.log", name="rel").target == f"t.log ({log})"
+    assert agent.jobs.tail(str(log), name="abs").target == str(log)
+    assert agent.jobs.after(300, name="a").target == "after 300s"
+    assert agent.jobs.every(0.5, name="e").target == "every 0.5s"
+    assert {job.name: job.target for job in agent.jobs.list()}["a"] == "after 300s"
+    for name in ("r", "c", "g", "rel", "abs", "a", "e"):
+        await agent.jobs.cancel(name)
 
 
 async def test_description_round_trips(agent):
-    info = await agent.jobs.run("sleep 30", label="tests", description="full run before pushing")
+    info = await agent.jobs.run("sleep 30", name="tests", description="full run before pushing")
     assert info.description == "full run before pushing"
     assert agent.jobs.get("tests").description == "full run before pushing"
     assert agent.jobs.list()[-1].description == "full run before pushing"
-    assert agent.jobs.after(30, label="a").description == ""
+    assert agent.jobs.after(30, name="a").description == ""
     with pytest.raises(TypeError):
-        agent.jobs.every(1, label="bad", description=3)
+        agent.jobs.every(1, name="bad", description=3)
     await agent.jobs.cancel("tests")
     await agent.jobs.cancel("a")
     assert agent.jobs.get("tests").description == "full run before pushing"  # kept after it ends
@@ -691,24 +691,24 @@ async def test_description_round_trips(agent):
 
 async def test_long_targets_are_cut_to_one_short_line(agent):
     cmd = "echo start\n" + "echo " + "x" * 400
-    info = await agent.jobs.run(cmd, label="long")
+    info = await agent.jobs.run(cmd, name="long")
     assert len(info.target) == 200 and info.target.endswith("…")
     assert "\n" not in info.target and info.target.startswith("echo start echo xxx")
     await _next(agent)
 
 
-async def test_the_status_line_shows_label_state_and_description_or_target(agent):
-    await agent.jobs.run("sleep 30", label="tests", description="full run before pushing")
-    agent.jobs.after(300, label="timer")
-    await agent.jobs.run("sleep 30 # " + "y" * 300, label="noisy")
+async def test_the_status_line_shows_name_state_and_description_or_target(agent):
+    await agent.jobs.run("sleep 30", name="tests", description="full run before pushing")
+    agent.jobs.after(300, name="timer")
+    await agent.jobs.run("sleep 30 # " + "y" * 300, name="noisy")
     status = agent.queue_manager.status()
     assert re.search(r"  • /root/tests · job · \d+s · full run before pushing", status)
     assert re.search(r"  • /root/timer · job · \d+s · after 300s", status)
     noisy = next(line for line in status.splitlines() if "noisy" in line)
     assert noisy.endswith("…") and len(noisy) <= 4 + 100
     assert "→ jobs" not in status
-    for label in ("tests", "timer", "noisy"):
-        await agent.jobs.cancel(label)
+    for name in ("tests", "timer", "noisy"):
+        await agent.jobs.cancel(name)
 
 
 # ---- timer payloads ----
@@ -716,7 +716,7 @@ async def test_the_status_line_shows_label_state_and_description_or_target(agent
 
 async def test_every_delivers_its_payload_each_tick(agent):
     payload = {"task": "poll CI", "pr": 462}
-    agent.jobs.every(0.05, label="poll", payload=payload)
+    agent.jobs.every(0.05, name="poll", payload=payload)
     assert [(await _next(agent)).values for _ in range(2)] == [[payload], [payload]]
     assert agent.jobs.get("poll").payload == payload
     assert agent.jobs.list()[-1].payload == payload
@@ -728,12 +728,12 @@ async def test_every_delivers_its_payload_each_tick(agent):
 
 async def test_replace_restarts_a_running_run_job(agent, tmp_path):
     pidfile = tmp_path / "old.pid"
-    await agent.jobs.run(f"echo $$ > {pidfile}; exec sleep 60", label="srv", items=1)
+    await agent.jobs.run(f"echo $$ > {pidfile}; exec sleep 60", name="srv", items=1)
     await _until(lambda: pidfile.exists() and pidfile.read_text().strip())
     old_pid = int(pidfile.read_text())
     with pytest.raises(ValueError, match="already running"):
-        await agent.jobs.run("true", label="srv")
-    info = await agent.jobs.run("echo new", label="srv", replace=True)
+        await agent.jobs.run("true", name="srv")
+    info = await agent.jobs.run("echo new", name="srv", replace=True)
     assert info.state == "running" and info.target == "echo new"
     await _until(lambda: not _alive(old_pid))
     item = await _next(agent)
@@ -757,9 +757,9 @@ async def test_replace_restarts_a_running_spawn_job_from_sync_code(agent):
             yield f"{name}{n}"
             await asyncio.sleep(0.05)
 
-    agent.jobs.spawn(ticking("old"), label="w")
+    agent.jobs.spawn(ticking("old"), name="w")
     assert (await _next(agent)).values == ["old1"]
-    agent.jobs.spawn(ticking("new"), label="w", replace=True)  # sync, no await
+    agent.jobs.spawn(ticking("new"), name="w", replace=True)  # sync, no await
     seen = [(await _next(agent)).values[0] for _ in range(3)]
     assert seen == ["new1", "new2", "new3"]
     assert agent.jobs.list()[-2].state == "cancelled"
@@ -767,7 +767,7 @@ async def test_replace_restarts_a_running_spawn_job_from_sync_code(agent):
 
 
 async def test_replace_without_a_running_job_just_starts(agent):
-    info = agent.jobs.after(0.01, label="t", replace=True, payload="p")
+    info = agent.jobs.after(0.01, name="t", replace=True, payload="p")
     assert info.state == "running"
     assert (await _next(agent)).result == "p"
 
@@ -821,8 +821,8 @@ async def test_jobs_running_at_a_snapshot_are_reported_once_after_restore(tmp_pa
             self.jobs.after_restore()
 
     old = Host(llm=FakeLLMClient())
-    await old.jobs.run("sleep 30", label="tests", description="full run")
-    old.jobs.after(0.01, label="quick")
+    await old.jobs.run("sleep 30", name="tests", description="full run")
+    old.jobs.after(0.01, name="quick")
     await asyncio.wait_for(old.queue_manager.get_channel("jobs").get(), TIMEOUT)
     await _until(lambda: "quick" not in old._jobs_running)  # a finished job is forgotten
     snapshot = AgentSnapshot.from_agent(old)
@@ -836,7 +836,7 @@ async def test_jobs_running_at_a_snapshot_are_reported_once_after_restore(tmp_pa
     assert isinstance(event, JobsLost)
     assert event.jobs == [
         {
-            "label": "tests",
+            "name": "tests",
             "kind": "run",
             "target": "sleep 30",
             "description": "full run",
@@ -850,7 +850,7 @@ async def test_jobs_running_at_a_snapshot_are_reported_once_after_restore(tmp_pa
 
 
 async def test_a_job_cancelled_by_the_model_is_not_reported_lost(agent):
-    await agent.jobs.run("sleep 30", label="x")
+    await agent.jobs.run("sleep 30", name="x")
     await agent.jobs.cancel("x")
     assert agent._jobs_running == {}
 
@@ -864,7 +864,7 @@ async def test_a_failing_stream_sends_its_pending_values_then_an_empty_done_upda
         yield 2
         raise RuntimeError("boom")
 
-    agent.jobs.spawn(breaks(), label="b", items=10)
+    agent.jobs.spawn(breaks(), name="b", items=10)
     updates = await _stream_updates(agent, "b")
     assert [(u.values, u.done, u.error) for u in updates] == [
         ([1, 2], False, None),
@@ -878,7 +878,7 @@ async def test_a_stream_ends_with_its_last_pending_values(agent):
         for i in range(3):
             yield i
 
-    agent.jobs.spawn(three(), label="s", items=2)
+    agent.jobs.spawn(three(), name="s", items=2)
     updates = await _stream_updates(agent, "s")
     assert [(u.values, u.done) for u in updates] == [([0, 1], False), ([2], True)]
 
@@ -890,7 +890,7 @@ async def test_a_big_run_result_keeps_the_last_20000_chars_of_each_stream(agent)
     await agent.jobs.run(
         "python3 -c \"import sys; [print(f'line {i:05d}') for i in range(5000)];"
         " [sys.stderr.write(f'err {i:05d}\\n') for i in range(3000)]\"",
-        label="big",
+        name="big",
     )
     item = await _next(agent)
     result = item
@@ -908,7 +908,7 @@ async def test_a_big_run_result_keeps_the_last_20000_chars_of_each_stream(agent)
 
 async def test_a_run_under_the_cap_is_not_truncated(agent):
     # 2,000 lines of 10 chars: exactly 20,000 chars, kept whole with no notice.
-    await agent.jobs.run("for i in $(seq 2000); do echo 123456789; done", label="fits")
+    await agent.jobs.run("for i in $(seq 2000); do echo 123456789; done", name="fits")
     item = await _next(agent)
     assert item.stdout == "123456789\n" * 2_000
 
@@ -917,11 +917,11 @@ async def test_a_run_under_the_cap_is_not_truncated(agent):
 async def test_seconds_must_be_a_number(agent, bad):
     expected = TypeError
     with pytest.raises(expected, match=re.escape("seconds must be a number of seconds (e.g. 600")):
-        agent.jobs.after(bad, label="a")
+        agent.jobs.after(bad, name="a")
     with pytest.raises(expected, match="seconds must be a number of seconds"):
-        agent.jobs.every(bad, label="e")
+        agent.jobs.every(bad, name="e")
     if bad is not None:  # None turns throttle's seconds off
-        agent.jobs.every(30, label="t")
+        agent.jobs.every(30, name="t")
         with pytest.raises(expected, match="seconds must be a number of seconds"):
             agent.jobs.throttle("t", seconds=bad)
         await agent.jobs.cancel("t")
@@ -929,20 +929,20 @@ async def test_seconds_must_be_a_number(agent, bad):
 
 @pytest.mark.parametrize("bad", ["200", 2.5, True])
 async def test_items_must_be_a_whole_number(agent, bad):
-    agent.jobs.every(30, label="t")
+    agent.jobs.every(30, name="t")
     with pytest.raises(TypeError, match="items must be a whole number"):
         agent.jobs.throttle("t", items=bad)
     with pytest.raises(TypeError, match="items must be a whole number"):
-        await agent.jobs.run("true", label="r", items=bad)
+        await agent.jobs.run("true", name="r", items=bad)
     await agent.jobs.cancel("t")
 
 
 async def test_after_rejects_negative_seconds_and_fires_at_once_on_zero(agent):
     with pytest.raises(ValueError, match="0 or more"):
-        agent.jobs.after(-1, label="a")
+        agent.jobs.after(-1, name="a")
     with pytest.raises(ValueError, match="positive"):
-        agent.jobs.every(0, label="e")
-    agent.jobs.after(0, label="now", payload="go")
+        agent.jobs.every(0, name="e")
+    agent.jobs.after(0, name="now", payload="go")
     item = await _next(agent)
     assert item.done and item.result == "go"
 
@@ -955,9 +955,9 @@ async def test_spawn_of_an_uncalled_async_function_says_to_call_it(agent):
         yield 1
 
     with pytest.raises(TypeError, match=re.escape("pass compute(), not compute")):
-        agent.jobs.spawn(compute, label="c")
+        agent.jobs.spawn(compute, name="c")
     with pytest.raises(TypeError, match=re.escape("pass numbers(), not numbers")):
-        agent.jobs.spawn(numbers, label="n")
+        agent.jobs.spawn(numbers, name="n")
     assert agent.jobs.list() == []
 
 
@@ -973,7 +973,7 @@ async def test_a_5mb_line_stays_bounded_and_later_lines_still_arrive(agent):
     tracemalloc.start()
     try:
         baseline = tracemalloc.get_traced_memory()[0]
-        await agent.jobs.run(_BIG_LINE, label="big", items=1)
+        await agent.jobs.run(_BIG_LINE, name="big", items=1)
         updates = await _stream_updates(agent, "big")
         peak = tracemalloc.get_traced_memory()[1] - baseline
     finally:
@@ -989,7 +989,7 @@ async def test_a_5mb_line_stays_bounded_and_later_lines_still_arrive(agent):
 
 async def test_a_throttled_chatty_run_sends_batches_early_at_the_cap(agent):
     cmd = "python3 -c \"[print(f'line {i}') for i in range(10_000)]\""
-    await agent.jobs.run(cmd, label="chatty", seconds=60)
+    await agent.jobs.run(cmd, name="chatty", seconds=60)
     started = time.monotonic()
     updates = await _stream_updates(agent, "chatty")
     assert time.monotonic() - started < 30  # did not wait for the 60 s window
@@ -1002,7 +1002,7 @@ async def test_a_throttled_chatty_run_sends_batches_early_at_the_cap(agent):
 async def test_tail_caps_a_5mb_line(agent, tmp_path):
     log = tmp_path / "app.log"
     log.write_text("")
-    agent.jobs.tail(log, label="log")
+    agent.jobs.tail(log, name="log")
     with log.open("a") as handle:
         handle.write("y" * 5_000_000 + "\nshort\n")
     first = await _next(agent)
@@ -1029,26 +1029,26 @@ def test_status_line_shows_age_while_running_and_pending_above_zero():
 @pytest.mark.parametrize(
     "start",
     [
-        lambda jobs: jobs.run("true", label="old", description=3, replace=True),
-        lambda jobs: jobs.run("true", label="old", items=0, replace=True),
-        lambda jobs: jobs.run("true", label="old", seconds=-1, replace=True),
-        lambda jobs: jobs.run("true", label="old", timeout="1", replace=True),
-        lambda jobs: jobs.run(["true"], label="old", replace=True),
-        lambda jobs: jobs.tail("missing.log", label="old", replace=True),
-        lambda jobs: jobs.tail("f.log", label="old", description=None, replace=True),
-        lambda jobs: jobs.tail("f.log", label="old", items="2", replace=True),
-        lambda jobs: jobs.spawn(asyncio.sleep(0), label="old", items=2, replace=True),
-        lambda jobs: jobs.spawn(asyncio.sleep(0), label="old", description=1, replace=True),
-        lambda jobs: jobs.spawn(object(), label="old", replace=True),
-        lambda jobs: jobs.after(-1, label="old", replace=True),
-        lambda jobs: jobs.after(1, label="old", description=b"x", replace=True),
-        lambda jobs: jobs.every(0, label="old", replace=True),
-        lambda jobs: jobs.every(1, label="old", description=1, replace=True),
+        lambda jobs: jobs.run("true", name="old", description=3, replace=True),
+        lambda jobs: jobs.run("true", name="old", items=0, replace=True),
+        lambda jobs: jobs.run("true", name="old", seconds=-1, replace=True),
+        lambda jobs: jobs.run("true", name="old", timeout="1", replace=True),
+        lambda jobs: jobs.run(["true"], name="old", replace=True),
+        lambda jobs: jobs.tail("missing.log", name="old", replace=True),
+        lambda jobs: jobs.tail("f.log", name="old", description=None, replace=True),
+        lambda jobs: jobs.tail("f.log", name="old", items="2", replace=True),
+        lambda jobs: jobs.spawn(asyncio.sleep(0), name="old", items=2, replace=True),
+        lambda jobs: jobs.spawn(asyncio.sleep(0), name="old", description=1, replace=True),
+        lambda jobs: jobs.spawn(object(), name="old", replace=True),
+        lambda jobs: jobs.after(-1, name="old", replace=True),
+        lambda jobs: jobs.after(1, name="old", description=b"x", replace=True),
+        lambda jobs: jobs.every(0, name="old", replace=True),
+        lambda jobs: jobs.every(1, name="old", description=1, replace=True),
     ],
 )
 async def test_a_bad_argument_with_replace_leaves_the_old_job_running(agent, tmp_path, start):
     (tmp_path / "f.log").write_text("")
-    await agent.jobs.run("sleep 30", label="old")
+    await agent.jobs.run("sleep 30", name="old")
     old = agent.jobs.get("old")
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", RuntimeWarning)  # closed below, not the point here
@@ -1061,25 +1061,25 @@ async def test_a_bad_argument_with_replace_leaves_the_old_job_running(agent, tmp
     assert current.target == "sleep 30"
 
 
-async def test_a_bad_label_with_replace_leaves_the_old_job_running(agent):
-    await agent.jobs.run("sleep 30", label="old")
+async def test_a_bad_name_with_replace_leaves_the_old_job_running(agent):
+    await agent.jobs.run("sleep 30", name="old")
     with pytest.raises(ValueError, match="is not valid"):
-        await agent.jobs.run("true", label="old-job", replace=True)
+        await agent.jobs.run("true", name="old-job", replace=True)
     assert agent.jobs.get("old").state == "running"
 
 
 async def test_spawn_rejections_close_the_coroutine(agent):
-    agent.jobs.after(30, label="busy")
+    agent.jobs.after(30, name="busy")
 
     async def work():
         return 1
 
     rejections = [
-        lambda: agent.jobs.spawn(work(), label="busy"),  # label taken
-        lambda: agent.jobs.spawn(work(), label="not-valid"),  # bad label
-        lambda: agent.jobs.spawn(work(), label="w", items=2),  # coroutine + items
-        lambda: agent.jobs.spawn(work(), label="w", seconds=1),
-        lambda: agent.jobs.spawn(work(), label="w", description=5),
+        lambda: agent.jobs.spawn(work(), name="busy"),  # name taken
+        lambda: agent.jobs.spawn(work(), name="not-valid"),  # bad name
+        lambda: agent.jobs.spawn(work(), name="w", items=2),  # coroutine + items
+        lambda: agent.jobs.spawn(work(), name="w", seconds=1),
+        lambda: agent.jobs.spawn(work(), name="w", description=5),
     ]
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
@@ -1105,13 +1105,13 @@ def _open_fds_on(path: Path) -> int:
 async def test_tail_cancelled_or_replaced_before_it_starts_holds_no_file(agent, tmp_path):
     log = tmp_path / "t.log"
     log.write_text("")
-    agent.jobs.tail(log, label="tl")
-    agent.jobs.tail(log, label="tl", replace=True)  # replaces the first before it ran
+    agent.jobs.tail(log, name="tl")
+    agent.jobs.tail(log, name="tl", replace=True)  # replaces the first before it ran
     assert await agent.jobs.cancel("tl") is True  # and cancels the second before it ran
     gc.collect()
     assert _open_fds_on(log) == 0
     # A tail that did run closes its file when cancelled.
-    agent.jobs.tail(log, label="tl2")
+    agent.jobs.tail(log, name="tl2")
     await _until(lambda: _open_fds_on(log) == 1)
     assert await agent.jobs.cancel("tl2") is True
     assert _open_fds_on(log) == 0
@@ -1120,7 +1120,7 @@ async def test_tail_cancelled_or_replaced_before_it_starts_holds_no_file(agent, 
 async def test_tail_delivers_lines_appended_after_the_call_before_it_ran(agent, tmp_path):
     log = tmp_path / "early.log"
     log.write_text("old\n")
-    agent.jobs.tail(log, label="early")
+    agent.jobs.tail(log, name="early")
     with log.open("a") as f:  # appended before the job's task first ran
         f.write("new\n")
     item = await _next(agent)
@@ -1131,13 +1131,13 @@ async def test_tail_delivers_lines_appended_after_the_call_before_it_ran(agent, 
 def test_a_job_update_names_its_job_as_its_status_source():
     from nooa_atom.agent.jobs import JobUpdate
 
-    assert JobUpdate(label="build", path="/root/build").status_source() == "/root/build"
-    assert JobUpdate(label="build").status_source() == "build"
-    assert not hasattr(JobUpdate(label="build"), "status_preview")  # no content in the status
+    assert JobUpdate(name="build", path="/root/build").status_source() == "/root/build"
+    assert JobUpdate(name="build").status_source() == "build"
+    assert not hasattr(JobUpdate(name="build"), "status_preview")  # no content in the status
 
 
 async def test_job_updates_are_counted_by_job_path_in_the_unread_list(agent):
-    agent.jobs.every(0.01, label="tick")
+    agent.jobs.every(0.01, name="tick")
     await _until(lambda: agent.queue_manager.get_channel("jobs").qsize() >= 4)
     lines = agent.queue_manager.status().splitlines()
     await agent.jobs.cancel("tick")  # also withdraws its queued ticks
@@ -1145,6 +1145,6 @@ async def test_job_updates_are_counted_by_job_path_in_the_unread_list(agent):
     assert re.fullmatch(r"  • jobs: \d+ \(from /root/tick\)", lines[1])
     assert lines[2] == "Running:"
     assert re.fullmatch(r"  • /root/tick · job · \d+s · every 0.01s", lines[3])
-    agent.jobs.after(0, label="timer", payload="check CI")
+    agent.jobs.after(0, name="timer", payload="check CI")
     await _until(lambda: agent.jobs.get("timer").state == "done")
     assert agent.queue_manager.status() == "Unread:\n  • jobs: 1 (from /root/timer)"

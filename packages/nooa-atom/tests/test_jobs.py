@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""``self.jobs`` on the Atom agent: Waiting on a job's label or path, and the model-facing docs."""
+"""``self.jobs`` on the Atom agent: Waiting on a job's name or path, and the model-facing docs."""
 
 import asyncio
 
@@ -36,8 +36,8 @@ async def test_the_agent_has_jobs(agent):
     assert "self.jobs.run(" in (AtomAgent.__doc__ or "")
 
 
-async def test_waiting_on_a_running_job_by_label_is_accepted(agent):
-    await agent.jobs.run("sleep 30", label="tests")
+async def test_waiting_on_a_running_job_by_name_is_accepted(agent):
+    await agent.jobs.run("sleep 30", name="tests")
     _check(agent, "tests")
     _check(agent, "/root/tests")
     _check(agent, "jobs")
@@ -49,7 +49,7 @@ async def test_waiting_on_a_running_job_by_label_is_accepted(agent):
 
 
 async def test_waiting_on_a_finished_job_with_its_result_buffered_is_accepted(agent):
-    await agent.jobs.run("echo done", label="quick")
+    await agent.jobs.run("echo done", name="quick")
     channel = agent.queue_manager.get_channel("jobs")
     for _ in range(int(TIMEOUT / 0.02)):
         if channel.qsize():
@@ -68,7 +68,7 @@ async def test_waiting_on_a_finished_job_with_its_result_buffered_is_accepted(ag
 async def test_jobs_use_the_agent_shell_directory_and_exports(agent, tmp_path):
     (tmp_path / "pkg").mkdir()
     await agent.shell.run("cd pkg; export ATOM_JOBS_VAR=1")
-    await agent.jobs.run('pwd; echo "$ATOM_JOBS_VAR"', label="where")
+    await agent.jobs.run('pwd; echo "$ATOM_JOBS_VAR"', name="where")
     item = await asyncio.wait_for(agent.queue_manager.get_channel("jobs").get(), TIMEOUT)
     assert item.stdout.splitlines() == [str(tmp_path / "pkg"), "1"]
 
@@ -86,7 +86,7 @@ async def test_a_resumed_session_reports_jobs_that_did_not_survive(tmp_path, ses
     options = SessionOptions(workspace=workspace, agent_spec=ATOM_SPEC, sessions_dir=sessions_dir)
     registry = SessionRegistry(SessionStore(sessions_dir), agent_factory=AtomModels())
     root = await registry.create(options)
-    await root._agent.jobs.run("sleep 30", label="tests", description="full run")
+    await root._agent.jobs.run("sleep 30", name="tests", description="full run")
     root._checkpoint()  # what a settled turn does
     await root.wait_for_checkpoint()
     await registry.close_all()  # the process ends; the job dies with it
@@ -96,7 +96,7 @@ async def test_a_resumed_session_reports_jobs_that_did_not_survive(tmp_path, ses
         loaded = await fresh.load(root.id)
         [event] = loaded._agent.event_manager.filter(type="JobsLost")
         assert isinstance(event, JobsLost)
-        assert [(j["label"], j["kind"], j["target"], j["description"]) for j in event.jobs] == [
+        assert [(j["name"], j["kind"], j["target"], j["description"]) for j in event.jobs] == [
             ("tests", "run", "sleep 30", "full run")
         ]
         assert loaded._agent._jobs_running == {}
@@ -120,7 +120,7 @@ async def test_jobs_lost_is_reported_when_an_older_snapshot_is_restored(tmp_path
     options = SessionOptions(workspace=workspace, agent_spec=ATOM_SPEC, sessions_dir=sessions_dir)
     registry = SessionRegistry(SessionStore(sessions_dir), agent_factory=AtomModels())
     root = await registry.create(options)
-    await root._agent.jobs.run("sleep 30", label="build")
+    await root._agent.jobs.run("sleep 30", name="build")
     root._checkpoint()
     await root.wait_for_checkpoint()
     await registry.close_all()
@@ -138,7 +138,7 @@ async def test_jobs_lost_is_reported_when_an_older_snapshot_is_restored(tmp_path
             "older snapshot" in str(getattr(e, "content", "")) for e in loaded.transcript()
         )
         [event] = loaded._agent.event_manager.filter(type="JobsLost")
-        assert [job["label"] for job in event.jobs] == ["build"]
+        assert [job["name"] for job in event.jobs] == ["build"]
     finally:
         await fresh.close_all()
 

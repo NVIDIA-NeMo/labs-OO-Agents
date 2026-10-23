@@ -80,19 +80,19 @@ qm.spawn(run_job(some_coro(), job_id="batch-7"), channel="jobs")    # {"job_id":
 
 ## `self.jobs` — a model-facing view built on `spawn()` (Atom)
 
-The Atom agent (`nooa_atom.agent.agent.AtomAgent`) registers a `jobs` queue channel and exposes `self.jobs` (`nooa_atom.agent.jobs.JobsApi`), built on `spawn()`; core `InteractiveAgent` has no `self.jobs`. Every item it delivers is a `JobUpdate` with `.label` and `.path`, so a turn can end with `Waiting(on=["<label>"])` and read `notification["jobs"]`. Jobs and child sessions share one namespace of live names per session: a label (or child name) is a Python identifier (`tests`, `ci_check`; not `ci-check`) and a name a running job or open child already has is rejected. Paths are `/root/<name>` (`/root/review_pr_462/verifier` deeper down); the per-turn `queues` block counts what arrived and was not read yet under "Unread:", one line per channel with the senders' paths and never any content (`delegates: 2 (from /root/ask, /root/fix)`, `jobs: 3 (from /root/build)`; an item names its sender with `status_source()`), then a "Read now:" line, your own running jobs and children under "Running:" and retained children with nothing to do under "Idle:", and `Waiting(on=[...])` takes a name, a child's path or id. Exactly one update with `done=True` ends each job: a `run`'s has `returncode`, `timed_out`, `stdout` and `stderr`; a coroutine `spawn`'s or `after`'s has `result` (the return value or the payload). Progress arrives in `lines` (throttled `run` stdout; `tail`) and `stderr_lines` (throttled `run` stderr) or `values` (async-iterator `spawn` yields, `every` ticks).
+The Atom agent (`nooa_atom.agent.agent.AtomAgent`) registers a `jobs` queue channel and exposes `self.jobs` (`nooa_atom.agent.jobs.JobsApi`), built on `spawn()`; core `InteractiveAgent` has no `self.jobs`. Every item it delivers is a `JobUpdate` with `.name` and `.path`, so a turn can end with `Waiting(on=["<name>"])` and read `notification["jobs"]`. Jobs and child sessions share one namespace of live names per session: a job or child name is a Python identifier (`tests`, `ci_check`; not `ci-check`) and a name a running job or open child already has is rejected. Paths are `/root/<name>` (`/root/review_pr_462/verifier` deeper down); the per-turn `queues` block counts what arrived and was not read yet under "Unread:", one line per channel with the senders' paths and never any content (`delegates: 2 (from /root/ask, /root/fix)`, `jobs: 3 (from /root/build)`; an item names its sender with `status_source()`), then a "Read now:" line, your own running jobs and children under "Running:" and retained children with nothing to do under "Idle:", and `Waiting(on=[...])` takes a name, a child's path or id. Exactly one update with `done=True` ends each job: a `run`'s has `returncode`, `timed_out`, `stdout` and `stderr`; a coroutine `spawn`'s or `after`'s has `result` (the return value or the payload). Progress arrives in `lines` (throttled `run` stdout; `tail`) and `stderr_lines` (throttled `run` stderr) or `values` (async-iterator `spawn` yields, `every` ticks).
 
 
 ```python
-await self.jobs.run("uv run pytest -q", label="tests")       # own bash process; one done update (u.returncode, u.stdout, u.stderr)
-await self.jobs.run("make build", label="build", items=200, seconds=60)  # + JobUpdate progress batches
-self.jobs.spawn(fetch_report(url), label="report")            # any coroutine or async iterator
-self.jobs.tail("app.log", label="log", seconds=30)            # lines appended from now on
-self.jobs.after(300, label="wakeup")                          # one done update after 5 minutes
-self.jobs.every(60, label="tick")                             # ticks 1, 2, 3, ... until cancelled
+await self.jobs.run("uv run pytest -q", name="tests")       # own bash process; one done update (u.returncode, u.stdout, u.stderr)
+await self.jobs.run("make build", name="build", items=200, seconds=60)  # + JobUpdate progress batches
+self.jobs.spawn(fetch_report(url), name="report")            # any coroutine or async iterator
+self.jobs.tail("app.log", name="log", seconds=30)            # lines appended from now on
+self.jobs.after(300, name="wakeup")                          # one done update after 5 minutes
+self.jobs.every(60, name="tick")                             # ticks 1, 2, 3, ... until cancelled
 self.jobs.throttle("log", items=100)                          # re-batch a running stream
 await self.jobs.cancel("build")                               # kills the process group
-await self.jobs.run("make serve", label="srv", replace=True)  # restart a running job with that label
+await self.jobs.run("make serve", name="srv", replace=True)  # restart a running job with that name
 ```
 
 - A `run`'s done update keeps only the last 20,000 chars of stdout and, separately, of stderr (after a `[... N chars omitted]` line); for the full output pass `log_path=` (stdout and stderr written there as lines arrive, interleaved; relative to the command's directory; overwritten); the done update and `JobInfo` carry `log_path`.

@@ -4,7 +4,7 @@
 
 The per-turn ``queues`` block lists running ``self.jobs`` jobs and live
 children together, by path (``/root/tests``), under "Unread:", "Running:" and "Idle:";
-``Waiting(on=[name])`` takes a job's label or a child's name (or path). Jobs
+``Waiting(on=[name])`` takes a job's or a child's name (or path). Jobs
 and children share one namespace of live names, so no name is both.
 """
 
@@ -63,7 +63,7 @@ async def test_the_status_lists_jobs_and_live_children_together(tmp_path, sessio
         sessions_dir,
         [
             cell(
-                "await self.jobs.run('sleep 30', label='tests', description='full run before pushing')\n"
+                "await self.jobs.run('sleep 30', name='tests', description='full run before pushing')\n"
                 "self.v.fix = await self.spawn('Fix flaky test', 'fix it', name='fix_flaky_test')\n"
                 "await self.v.fix.wait()\n"
                 "self.v.review = await self.spawn('Review PR 462', 'review it', name='review_pr_462')\n"
@@ -90,7 +90,7 @@ async def test_the_status_lists_jobs_and_live_children_together(tmp_path, sessio
     )
 
 
-async def test_waiting_on_a_child_name_or_a_job_label_is_accepted(tmp_path, sessions_dir):
+async def test_waiting_on_a_child_name_or_a_job_name_is_accepted(tmp_path, sessions_dir):
     calls = await _run(
         tmp_path,
         sessions_dir,
@@ -101,10 +101,10 @@ async def test_waiting_on_a_child_name_or_a_job_label_is_accepted(tmp_path, sess
             ),
             cell(
                 "assert notification['delegates']\n"
-                "await self.jobs.run('sleep 0.2', label='tests')\n"
+                "await self.jobs.run('sleep 0.2', name='tests')\n"
                 "return_result(Waiting(explanation='w', on=['tests']))"
             ),
-            cell("assert notification['jobs'][0].label == 'tests'\n" + DONE),
+            cell("assert notification['jobs'][0].name == 'tests'\n" + DONE),
         ],
         {"worker": _slow_child(0.3)},
     )
@@ -118,11 +118,11 @@ async def test_jobs_and_children_share_one_namespace_of_live_names(tmp_path, ses
         sessions_dir,
         [
             cell(
-                "await self.jobs.run('sleep 30', label='review')\n"
+                "await self.jobs.run('sleep 30', name='review')\n"
                 "try:\n    await self.spawn('Review it', 'review it', name='review')\n"
                 "except ValueError as e:\n    print('CHILD<<' + str(e) + '>>')\n"
                 "self.v.child = await self.spawn('Lint it', 'lint it', name='lint')\n"
-                "try:\n    await self.jobs.run('true', label='lint')\n"
+                "try:\n    await self.jobs.run('true', name='lint')\n"
                 "except ValueError as e:\n    print('JOB<<' + str(e) + '>>')\n"
                 "try:\n    await self.spawn('Lint again', 'lint it', name='lint')\n"
                 "except ValueError as e:\n    print('TWICE<<' + str(e) + '>>')\n"
@@ -130,7 +130,7 @@ async def test_jobs_and_children_share_one_namespace_of_live_names(tmp_path, ses
                 "except ValueError as e:\n    print('BAD<<' + str(e) + '>>')\n"
                 "await self.jobs.cancel('review')\n"
                 "await self.v.child.close()\n"
-                "await self.jobs.run('true', label='lint')\n"  # free again once closed
+                "await self.jobs.run('true', name='lint')\n"  # free again once closed
                 "self.v.again = await self.spawn('Review it', 'review it', name='review')\n"
                 "print('PATHS<<' + self.v.again.path + ' ' + repr(self.v.again) + '>>')\n"
                 "return_result(Waiting(explanation='w', on=['review']))"
@@ -145,7 +145,7 @@ async def test_jobs_and_children_share_one_namespace_of_live_names(tmp_path, ses
         "name, or cancel the job first (await self.jobs.cancel('review'))>>"
     ) in text
     assert (
-        "JOB<<name 'lint' is already used by child /root/lint; pick another label, or close "
+        "JOB<<name 'lint' is already used by child /root/lint; pick another name, or close "
         "the child first (await self.child('lint').close())>>"
     ) in text
     assert "TWICE<<name 'lint' is already used by child /root/lint (" in text
@@ -162,7 +162,7 @@ async def test_an_unknown_name_lists_what_is_running(tmp_path, sessions_dir):
         sessions_dir,
         [
             cell(
-                "await self.jobs.run('sleep 30', label='tests')\n"
+                "await self.jobs.run('sleep 30', name='tests')\n"
                 "self.v.child = await self.spawn('Worker', 'work', name='worker')\n"
                 "return_result(Waiting(explanation='w', on=['lint']))"
             ),
@@ -174,7 +174,7 @@ async def test_an_unknown_name_lists_what_is_running(tmp_path, sessions_dir):
     # may start more turns: only the first two calls matter.)
     text = calls[1]
     assert "Waiting on 'lint', but no running job or child has that name" in text
-    assert "self.jobs.get('lint')" in text and "label='lint'" in text
+    assert "self.jobs.get('lint')" in text and "name='lint'" in text
     running = text.split("Running right now:", 1)[1]
     assert "'tests'" in running and "'worker'" in running
 
@@ -219,8 +219,8 @@ async def test_paths_of_jobs_and_a_grandchild(tmp_path, sessions_dir):
     models = AtomModels()
     root_cells = [
         cell(
-            "await self.jobs.run('sleep 30', label='tests', description='full run before pushing')\n"
-            "self.jobs.every(60, label='ci_check', description='watch CI on PR 462')\n"
+            "await self.jobs.run('sleep 30', name='tests', description='full run before pushing')\n"
+            "self.jobs.every(60, name='ci_check', description='watch CI on PR 462')\n"
             "self.v.review = await self.spawn('Review PR 462', 'review it', name='review_pr_462')\n"
             "async with asyncio.timeout(10):\n"
             "    while True:\n"
@@ -292,10 +292,10 @@ async def test_the_queues_block_reads_unread_running_idle(tmp_path, sessions_dir
     models = AtomModels()
     models.scripts[None] = [
         cell(
-            "await self.jobs.run('sleep 30', label='tests', description='full test run before pushing')\n"
+            "await self.jobs.run('sleep 30', name='tests', description='full test run before pushing')\n"
             "await self.jobs.run('for i in $(seq 1 2000); do echo line $i; sleep 0.02; done',"
-            " label='build', items=50)\n"
-            "self.jobs.every(600, label='ci_check', description='check PR 480 CI every 10 min')\n"
+            " name='build', items=50)\n"
+            "self.jobs.every(600, name='ci_check', description='check PR 480 CI every 10 min')\n"
             "self.v.fix = await self.spawn('Fix flaky test', 'fix it', name='fix_flaky_test')\n"
             "await self.v.fix.wait()\n"
             "self.v.review = await self.spawn('Review PR 480', 'review it', name='review_pr_480')\n"
@@ -314,8 +314,8 @@ async def test_the_queues_block_reads_unread_running_idle(tmp_path, sessions_dir
             "print('STATUS<<' + self._queue_status() + '>>')"
         ),
         cell(
-            "for label in ('tests', 'build', 'ci_check'):\n"
-            "    await self.jobs.cancel(label)\n" + DONE
+            "for job_name in ('tests', 'build', 'ci_check'):\n"
+            "    await self.jobs.cancel(job_name)\n" + DONE
         ),
     ]
     models.scripts["fix_flaky_test"] = [cell(CHILD_DONE)]

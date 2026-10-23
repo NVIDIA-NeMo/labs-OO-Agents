@@ -73,7 +73,7 @@ def check_waiting_targets(agent: Any, result: Any, *, fix: str) -> None:
     The host runs the next turn only when something the turn waits on
     delivers. Each name in ``Waiting.on`` must be one of:
 
-    - a running ``self.jobs`` job by its label (``"tests"``) or path
+    - a running ``self.jobs`` job by its name (``"tests"``) or path
       (``"/root/tests"``), or a job with its result already buffered;
     - one of your children by name, path or id, while it is running,
       ``working`` (its last turn ended Waiting on its own job) or has
@@ -119,9 +119,9 @@ def check_waiting_targets(agent: Any, result: Any, *, fix: str) -> None:
             )
         elif name in running["known_jobs"]:
             reasons.append(
-                f"Waiting on {name!r}, but no job labelled {name!r} is running: it may "
+                f"Waiting on {name!r}, but no job named {name!r} is running: it may "
                 f"have finished already (see self.jobs.get({name!r})), or start it with "
-                f"self.jobs.run(..., label={name!r})."
+                f"self.jobs.run(..., name={name!r})."
             )
         elif (
             name.startswith(running["path"] + "/")
@@ -137,7 +137,7 @@ def check_waiting_targets(agent: Any, result: Any, *, fix: str) -> None:
                 f"Waiting on {name!r}, but no running job or child has that name (nor is it "
                 "'jobs' or 'delegates'), so nothing will arrive. If it was a job, it may have "
                 f"finished already (see self.jobs.get({name!r})), or start it with "
-                f"self.jobs.run(..., label={name!r})."
+                f"self.jobs.run(..., name={name!r})."
             )
     now = sorted(running["now"])
     raise WaitingTargetNotRunning(
@@ -153,8 +153,8 @@ def _running_names(agent: Any) -> dict[str, Any]:
 
     ``children`` maps each of your children's names, paths and ids to
     whether it is running, working or has queued input; ``known_jobs``
-    holds every ``self.jobs`` label, running or not; ``now`` the names that
-    are accepted (shown short: a job's label, a child's name); ``also`` the
+    holds every ``self.jobs`` name, running or not; ``now`` the names that
+    are accepted (shown short: a job's name, a child's name); ``also`` the
     other accepted spellings (paths and ids); ``path`` your own path.
     """
     children: dict[str, bool] = {}
@@ -188,21 +188,21 @@ def _running_names(agent: Any) -> dict[str, Any]:
     # child's outcome on ``delegates``.
     now |= {name for name, channel in channels.items() if channel.qsize() > 0}
     jobs = getattr(agent, "jobs", None)
-    # Every job's channel name and every self.jobs label, running or not.
+    # Every job's channel name and every self.jobs name, running or not.
     known_jobs = set(queues.jobs())
     if jobs is not None:
-        known_jobs |= {info.label for info in jobs.list()}
+        known_jobs |= {info.name for info in jobs.list()}
     if jobs is not None:
         for info in jobs.list():
             if info.state == "running":
-                now.add(info.label)
+                now.add(info.name)
                 also.add(info.path)
-    # A ``self.jobs`` job that already delivered: its labelled item is buffered.
+    # A ``self.jobs`` job that already delivered: its named item is buffered.
     if "jobs" in channels:
         for item in channels["jobs"].snapshot():
-            label = getattr(item, "label", None)
-            if isinstance(label, str) and label:
-                now.add(label)
+            job_name = getattr(item, "name", None)
+            if isinstance(job_name, str) and job_name:
+                now.add(job_name)
                 item_path = getattr(item, "path", None)
                 if item_path:
                     also.add(item_path)

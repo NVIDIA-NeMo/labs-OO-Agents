@@ -979,7 +979,7 @@ async def test_waiting_on_a_finished_job_with_its_result_queued_is_accepted():
     with pytest.raises(WaitingTargetNotRunning, match="'lint'"):
         check_waiting_targets(agent, Waiting(explanation="lint", on=["lint"]), fix=UNATTENDED_FIX)
     queues.channels()["build"].flush()
-    with pytest.raises(WaitingTargetNotRunning, match="no job labelled 'build' is running"):
+    with pytest.raises(WaitingTargetNotRunning, match="no job named 'build' is running"):
         check_waiting_targets(agent, Waiting(explanation="build", on=["build"]), fix=UNATTENDED_FIX)
 
 

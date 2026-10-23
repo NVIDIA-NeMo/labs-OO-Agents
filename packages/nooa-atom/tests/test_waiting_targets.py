@@ -169,8 +169,8 @@ async def test_a_finished_or_cancelled_job_is_rejected(tmp_path, sessions_dir):
     )
     # The strategy allows three rejected results per turn; this uses two.
     assert len(calls) == 3
-    assert "Waiting on 'ci', but no job labelled 'ci' is running: it may" in calls[1]
-    assert "Waiting on 'build', but no job labelled 'build' is running" in calls[2]
+    assert "Waiting on 'ci', but no job named 'ci' is running: it may" in calls[1]
+    assert "Waiting on 'build', but no job named 'build' is running" in calls[2]
     for text in calls[1:]:
         assert HINT in text
 
@@ -211,10 +211,10 @@ async def test_waiting_on_jobs_is_accepted_while_a_self_jobs_job_runs(tmp_path, 
         sessions_dir,
         [
             cell(
-                "await self.jobs.run('sleep 0.3; echo hi', label='slow')\n"
+                "await self.jobs.run('sleep 0.3; echo hi', name='slow')\n"
                 "return_result(Waiting(explanation='w', on=['jobs']))"
             ),
-            cell("assert notification['jobs'][0].label == 'slow'\n" + DONE),
+            cell("assert notification['jobs'][0].name == 'slow'\n" + DONE),
         ],
     )
     assert len(calls) == 2
@@ -227,12 +227,12 @@ async def test_waiting_on_jobs_is_accepted_when_its_result_is_buffered(tmp_path,
         sessions_dir,
         [
             cell(
-                "await self.jobs.run('echo hi', label='quick')\n"
+                "await self.jobs.run('echo hi', name='quick')\n"
                 "while self.jobs.get('quick').state == 'running':\n"
                 "    await asyncio.sleep(0.02)\n"
                 "return_result(Waiting(explanation='w', on=['jobs']))"
             ),
-            cell("assert notification['jobs'][0].label == 'quick'\n" + DONE),
+            cell("assert notification['jobs'][0].name == 'quick'\n" + DONE),
         ],
     )
     assert len(calls) == 2
