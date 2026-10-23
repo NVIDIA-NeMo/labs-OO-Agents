@@ -159,6 +159,22 @@ def setup_diagnostic(state: WizardState, *args, **kwargs):
     return scrub_setup(state, connect.diagnostic_prompt(*args, **kwargs))
 
 
+def reasoning_disabled(params) -> bool:
+    """True when a level's settings ask the model not to reason."""
+    thinking = params.get("thinking")
+    template = params.get("chat_template_kwargs")
+    reasoning = params.get("reasoning")
+    efforts = (
+        params.get("reasoning_effort"),
+        reasoning.get("effort") if isinstance(reasoning, dict) else None,
+    )
+    return (
+        (isinstance(thinking, dict) and thinking.get("type") == "disabled")
+        or (isinstance(template, dict) and template.get("enable_thinking") is False)
+        or any(isinstance(e, str) and e.strip().lower() in {"none", "off"} for e in efforts)
+    )
+
+
 async def show_checks(
     events, *, reasoning_levels=None, summary=True, media_inputs=None, diagnostics=False
 ):
@@ -188,10 +204,17 @@ async def display_checks(
                         "provenance": {"probes": {event.name: event.outcome}},
                     }
                 )
+                ignored_off = (
+                    event.name.startswith("level:")
+                    and event.outcome.get("outcome") == "accepted"
+                    and bool(event.outcome.get("reasoning_observed"))
+                    and reasoning_disabled((reasoning_levels or {}).get(event.name[6:], {}))
+                )
                 progress.update(
                     event.name,
                     event.outcome,
                     missing_reasoning=bool(missing),
+                    ignored_off=ignored_off,
                     media_inputs=media_inputs,
                 )
     finally:
@@ -1910,6 +1933,35 @@ def discovered_effort_levels(state: WizardState):
     return None
 
 
+def discovered_toggle_levels(state: WizardState):
+    """On/Off thinking for chat models that reason by default but ignore effort.
+
+    Many open models served by vLLM/SGLang (Qwen, for example) switch thinking
+    with ``chat_template_kwargs.enable_thinking``. Offered only when discovery
+    saw reasoning on this Chat interface and no effort request changed it; the
+    chosen setting is tested before saving.
+    """
+    if state.api_style != "chat" or state.reasoning_template:
+        return None
+    result = (state.interfaces.results or {}).get("chat") if state.interfaces else None
+    if result is None:
+        return None
+    probes = result.entry.get("provenance", {}).get("probes", {})
+    effort_worked = any(
+        name.startswith("level:")
+        and record.get("outcome") == "accepted"
+        and record.get("reasoning_observed")
+        for name, record in probes.items()
+    )
+    reasons = any(record.get("reasoning_observed") for record in probes.values())
+    if effort_worked or not reasons:
+        return None
+    return {
+        "on": connect.reasoning_settings("toggle", "chat", "on"),
+        "off": connect.reasoning_settings("toggle", "chat", "off"),
+    }
+
+
 def choose_reasoning(state: WizardState, *, deferred=False, edit=False) -> bool:
     """Plain route-specific selection. Nothing is activated by merely listing levels."""
     if state.api_style in connect.DECISION_API_STYLES:
@@ -1975,6 +2027,8 @@ def choose_reasoning(state: WizardState, *, deferred=False, edit=False) -> bool:
         levels = server_effort_levels(state)
     if levels is None:
         levels = discovered_effort_levels(state)
+    if levels is None:
+        levels = discovered_toggle_levels(state)
     if levels is None:
         # Only exact OpenRouter metadata retains known effort templates here.
         candidate = state.candidate or {}

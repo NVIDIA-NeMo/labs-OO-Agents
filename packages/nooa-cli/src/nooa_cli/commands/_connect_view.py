@@ -500,7 +500,9 @@ class CheckProgress:
         )
         self.results[name] = headline
 
-    def update(self, name, record, *, missing_reasoning=False, media_inputs=None):
+    def update(
+        self, name, record, *, missing_reasoning=False, ignored_off=False, media_inputs=None
+    ):
         label = check_label(name)
         outcome = record.get("outcome")
         self._clear()
@@ -584,6 +586,10 @@ class CheckProgress:
             f" · {time.monotonic() - self.started.pop(name):.1f}s" if name in self.started else ""
         )
         headline = check_outcome(name, record, status)
+        if ignored_off:
+            # An "Off" setting that still returned reasoning didn't take effect.
+            headline = "Not available"
+            detail = "Reasoning was still returned; this model may ignore this setting."
         # Accepted requests and finished replies are evidence, not additional outcomes.
         if (
             headline == "Passed"

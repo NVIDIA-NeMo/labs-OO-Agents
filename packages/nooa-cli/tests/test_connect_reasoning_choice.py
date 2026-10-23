@@ -290,3 +290,64 @@ def test_existing_level_named_default_is_not_the_model_default_action(monkeypatc
     monkeypatch.setattr(prompts, "labelled_choice", choose)
     assert wizard.choose_reasoning(state)
     assert state.guided_reasoning_active == "default"
+
+
+def test_toggle_levels_offered_when_chat_model_reasons_but_ignores_effort():
+    from types import SimpleNamespace
+
+    def interfaces(probes):
+        entry = {"provenance": {"probes": probes}}
+        return SimpleNamespace(results={"chat": SimpleNamespace(entry=entry)})
+
+    state = wizard.WizardState()
+    state.api_style = "chat"
+    state.interfaces = interfaces(
+        {
+            "routing": {"outcome": "accepted", "reasoning_observed": True},
+            "level:medium": {"outcome": "failed"},
+        }
+    )
+    levels = wizard.discovered_toggle_levels(state)
+    assert levels == {
+        "on": {"chat_template_kwargs": {"enable_thinking": True}},
+        "off": {"chat_template_kwargs": {"enable_thinking": False}},
+    }
+    # Effort worked: the effort choices are used instead.
+    state.interfaces = interfaces(
+        {"level:medium": {"outcome": "accepted", "reasoning_observed": True}}
+    )
+    assert wizard.discovered_toggle_levels(state) is None
+    # No sign of reasoning at all: nothing to switch.
+    state.interfaces = interfaces({"routing": {"outcome": "accepted"}})
+    assert wizard.discovered_toggle_levels(state) is None
+    # Other interfaces don't use chat template switches.
+    state.api_style = "responses"
+    assert wizard.discovered_toggle_levels(state) is None
+
+
+def test_off_setting_that_still_returns_reasoning_is_reported():
+    import click
+
+    from nooa.unifiedllm import connect
+
+    async def events():
+        yield connect.ProbeUpdate(
+            "level:off", {"outcome": "accepted", "reasoning_observed": True, "answer_correct": True}
+        )
+        yield connect.ConnectResult("x", {})
+
+    @click.command()
+    def command():
+        import asyncio
+
+        asyncio.run(
+            wizard.display_checks(
+                events(),
+                reasoning_levels={"off": {"chat_template_kwargs": {"enable_thinking": False}}},
+            )
+        )
+
+    result = CliRunner().invoke(command)
+    text = " ".join(result.output.split())
+    assert "Reasoning (off): Not available" in text
+    assert "this model may ignore this setting" in text
