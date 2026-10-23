@@ -18,19 +18,23 @@ agent_class: gym_atom_bridge:GymAtomAgent
 invocation_adapter: gym_atom_bridge:invoke_atom
 init_kwargs: {}  # or {turn_method: handle_orchestrate}
 ```
-`init_kwargs.turn_method` picks the root session's turn method:
-`handle_batch` (the default) or `handle_orchestrate` (needs an Atom that has
-it); other values are rejected. Delegated children run the turn method Atom
-gives them (`handle_work` in Atom `7f9a09dc1` and later), not this setting.
+`init_kwargs.turn_method` is the root session's `SessionOptions.turn_method`:
+`handle_batch` (the default) or `handle_orchestrate`; other values are
+rejected. Up to Atom `7f9a09dc1` it names the root's turn method. From the
+single-handle Atom (`f4e0a0d22b12f0b07ae0cd0c8c4733de8524ad4a`) on, every turn
+runs `AtomAgent.handle()` and the value selects the role
+(`nooa_atom.agent.roles`: `handle_batch` unattended, `handle_orchestrate`
+orchestrator), whose instructions form the prompt's `role` block. Delegated
+children get their turn method or role from Atom, not from this setting.
 
 `init_kwargs.agent_spec` picks the session's agent class as `module:Class`
 (or `path/to/file.py:Class`); the default is `nooa_atom.agent:AtomAgent`, so
 omitting it keeps the behavior above. Delegated children inherit the spec.
-For example, the unified-work experiment overrides only the class:
+For example, an agent class from a file in the task workspace:
 ```yaml
 init_kwargs:
   turn_method: handle_orchestrate
-  agent_spec: nooa_atom.agent.unified:UnifiedAtomAgent
+  agent_spec: /abs/path/my_agent.py:MyAtomAgent  # e.g. a subclass of AtomAgent
 ```
 The spec is loaded with Atom's `nooa_atom.session.loader.load_agent_class`
 when Gym constructs `GymAtomAgent`, so a malformed spec, an unimportable
@@ -40,12 +44,12 @@ also define the chosen `turn_method`; that is not checked at construction.
 
 Compatibility: `agent_spec` needs only `load_agent_class` and
 `SessionOptions.agent_spec`, which Atom has had since before this bridge.
-Offline-tested (section below) against Atom `7f9a09dc14a31c8b71ca620d53c07332eb50cb3c`
-(default and file-spec classes, both turn methods) and the unified-work spike
-`9ea274d7218bb6448d25dd56b63f6616a4904973` (additionally
-`nooa_atom.agent.unified:UnifiedAtomAgent` with `handle_orchestrate`), each
-with Gym `eeaf3743ac9c070e57e741ff0fb935f340fa7d6e`. `UnifiedAtomAgent` exists
-only in the spike; naming it with an Atom that lacks it fails at construction.
+Offline-tested (section below) with Gym `eeaf3743ac9c070e57e741ff0fb935f340fa7d6e`
+against Atom `7f9a09dc14a31c8b71ca620d53c07332eb50cb3c` and the single-handle
+Atom `f4e0a0d22b12f0b07ae0cd0c8c4733de8524ad4a`: the default
+`nooa_atom.agent:AtomAgent` and a file-spec `AtomAgent` subclass, each with
+both turn methods. Both Atoms use the same default spec; no other agent class
+is needed for either.
 Gym supplies `nemo_gym` and `responses_api_agents.nooa_agent` in its task
 runtime archive. This package deliberately does **not** depend on full Gym.
 It declares `nooa`, `nooa-atom`, and the runner's `jsonschema` requirement;
@@ -101,10 +105,14 @@ that Gym archives requirements text but not external wheels/Atom code; the other
 runs the actual `InProcessNOOARunner` with a fake HTTP policy (two calls), native
 root and delegated child, result/trajectory capture, policy URL/cookies and
 131072 output-token propagation. The rest check `init_kwargs` with the same
-runner and one fake policy call: the root turn method, the default
-`agent_spec`, a file-spec `AtomAgent` subclass with each turn method, the
-unified agent (skipped when the installed Atom lacks it; set
-`GYM_ATOM_BRIDGE_REQUIRE_UNIFIED=1` to make that a failure), and invalid specs.
+runner and one fake policy call: the root turn method (the selected role's
+text is in the captured request and the other role's is not, for the
+installed Atom's contract), the default `agent_spec`, a file-spec `AtomAgent`
+subclass with each turn method, and invalid specs. One more checks the
+single-handle contract of the default class (one `handle()`, `self.jobs` a
+`WorkManager`, the orchestrator `role` block in the request); it is skipped
+on an earlier Atom, and `GYM_ATOM_BRIDGE_REQUIRE_SINGLE_HANDLE=1` makes that
+a failure.
 The `-c`/`--rootdir` options keep pytest from adopting this repository's root
 configuration, under which the tests import the checkout's own `nooa_atom`
 instead of the installed candidate; check the installed paths with `-s`. Temporary requirements and trajectories stay
