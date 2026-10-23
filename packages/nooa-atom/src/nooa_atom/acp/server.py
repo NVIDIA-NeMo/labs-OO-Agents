@@ -527,8 +527,7 @@ class AtomACPAgent:
             return self._revoke_inject(params)
         dialect = _POOL_STEER_METHODS.get(method)
         if dialect is not None:
-            self._use_pool_dialect(dialect)
-            return await self._pool_steer(params)
+            return await self._pool_steer(params, dialect)
         if method != _DELETE_METHOD:
             raise RequestError.method_not_found(f"_{method}")
         session_id = params.get("sessionId")
@@ -591,7 +590,9 @@ class AtomACPAgent:
         self._injects.setdefault(session_id, {})[receipt.item_id] = receipt
         return {"messageId": receipt.item_id, "delivered": receipt.delivered}
 
-    async def _pool_steer(self, params: dict[str, Any]) -> dict[str, Any]:
+    async def _pool_steer(
+        self, params: dict[str, Any], dialect: PoolDialect | None = None
+    ) -> dict[str, Any]:
         """``_poolside/session_steer``: ``{sessionId, inputId, prompt}`` -> ``{inputId}``.
 
         Pool 2's ``_pool/session_steer`` has the same params and answer.
@@ -626,6 +627,9 @@ class AtomACPAgent:
             raise RequestError.invalid_params(
                 {"reason": "A slash command cannot steer a turn; send it after the turn ends"}
             )
+        # Only a valid steer says which dialect the client speaks.
+        if dialect is not None:
+            self._use_pool_dialect(dialect)
         # Queued, not steered, on purpose until the Pool team says whether
         # this request means queue or steer. Handling it at all keeps the
         # message out of Pool's own queue, where Esc drops it.
