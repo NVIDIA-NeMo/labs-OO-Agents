@@ -111,7 +111,14 @@ _END = object()
 
 
 class _Reader:
-    """``async for x in job``: the job's items, then the end (raises if it failed)."""
+    """``async for x in job``: the job's items, then the end (raises if it failed).
+
+    One reader per job at a time. Leaving early with ``break`` keeps the
+    reader attached while it is referenced (the job waits for it once its
+    buffer is full); ``await reader.aclose()`` (or ``contextlib.aclosing``)
+    detaches it at once, and a dropped reader detaches when collected. On
+    detach its unread items and the end go back to the outbox.
+    """
 
     def __init__(self, job: Job) -> None:
         self._job = job
@@ -124,6 +131,12 @@ class _Reader:
     def __aiter__(self) -> _Reader:
         return self
 
+    async def __aenter__(self) -> _Reader:
+        return self
+
+    async def __aexit__(self, *exc: Any) -> None:
+        self._detach()
+
     async def __anext__(self) -> Any:
         if self._closed:
             raise StopAsyncIteration
@@ -135,6 +148,7 @@ class _Reader:
         if value is _END:
             self._closed = True
             self._job._reader = None
+            self._job._consumed = True
             self._job._outcome()  # the end is this reader's: raise if failed or cancelled
             raise StopAsyncIteration
         return value
@@ -144,6 +158,11 @@ class _Reader:
         if len(self._buffer) >= self._job._manager.max_items:
             self._space.clear()
         self._wake.set()
+
+    def _push_end(self) -> None:
+        if not self._closed:
+            self._buffer.append(_END)  # never dropped, whatever the bound
+            self._wake.set()
 
     async def aclose(self) -> None:
         self._detach()
@@ -157,12 +176,12 @@ class _Reader:
         if job._reader is self:
             job._reader = None
         self._space.set()
-        for value in self._buffer:
+        buffered, self._buffer = list(self._buffer), deque()
+        for value in buffered:
             if value is _END:
-                job._queue_final()
+                job._requeue()
             else:
                 job._queue_item(value)
-        self._buffer.clear()
 
     def __del__(self) -> None:
         with contextlib.suppress(Exception):
@@ -174,11 +193,14 @@ class Job:
 
     ``job.send(x)`` gives a resource input and returns the request ``Job``
     (await it for that input's result). ``await job.cancel()`` stops the
-    work; for a resource it first cancels its requests, then exits it.
+    work and withdraws its undelivered events; for a resource it first
+    cancels its requests, then exits it. Awaiting and iterating may be
+    combined: the awaiter gets the result, the reader the items and the end.
     """
 
     name: str  # Yours, or job#N; a resource's requests are <name>#N
     id: int  # Unique per launch: a reused name gets a new id
+    dropped: int  # Items lost so far to the queue/reader bounds
 
     def __init__(self, manager: WorkManager, name: str, id: int, work: Any, kind: str) -> None:
         self.name = name
@@ -196,10 +218,11 @@ class Job:
         self._queued_final: JobEvent | None = None
         self._waiters: set[asyncio.Future[None]] = set()
         self._handoff: set[asyncio.Future[None]] = set()
-        self._taken = False
+        self._consumed = False  # an awaiter or the reader took the outcome
         self._reader_ref: weakref.ref[_Reader] | None = None  # weak: a dropped reader detaches
         self._items: deque[JobEvent] = deque()  # its item events possibly still in the outbox
-        self._dropped = 0
+        self._dropped = 0  # carried into the next event
+        self.dropped = 0
         self._scratch: tuple[Path, int, int] | None = None
         # Resources.
         self._entered: Any = None
@@ -258,15 +281,26 @@ class Job:
     def __aiter__(self) -> _Reader:
         if self._kind == "resource":
             raise TypeError(f"{self.name} is a resource: iterate or await its requests")
-        reader = _Reader(self)
-        if self._status != "running":
-            reader._push(_END)  # finished: nothing more; the end reports the outcome
-            if self._queued_final is not None and self._manager._outbox.remove(self._queued_final):
-                self._queued_final = None
-            return reader
         if self._reader is not None:
             raise RuntimeError(f"{self.name} already has a reader")
-        self._reader = reader
+        reader = _Reader(self)
+        outbox = self._manager._outbox
+        # Its items still unread in the outbox move to the reader, in order;
+        # ones a turn already took stay taken.
+        for event in self._items:
+            if outbox.remove(event):
+                reader._buffer.append(event.value)
+        self._items.clear()
+        if self._status == "running":
+            self._reader = reader
+            if len(reader._buffer) >= self._manager.max_items:
+                reader._space.clear()
+        else:
+            if self._queued_final is not None and outbox.remove(self._queued_final):
+                self._queued_final = None
+            reader._push_end()  # the end reports the outcome (read back if already taken)
+        if reader._buffer:
+            reader._wake.set()
         return reader
 
     def send(self, item: Any) -> Job:
@@ -290,16 +324,16 @@ class Job:
         """Stop the work (a resource: its requests first, then its exit)."""
         if self._status != "running" or self._task is None:
             return
-        self._silent = True
+        self._withdraw()
         if self._kind == "resource":
             self._closing = True
             requests = [r for r in self._requests if r._status == "running"]
             for request in requests:  # before waking them: they must not run on
-                request._silent = True
+                request._withdraw()
                 if request._task is not None:
                     request._task.cancel()
             self._ready.set()
-            await asyncio.gather(*(r.cancel() for r in requests))
+            await asyncio.gather(*(r._task for r in requests if r._task), return_exceptions=True)
             if self._entered is not None:
                 self._exit.set()
             else:
@@ -307,6 +341,14 @@ class Job:
         else:
             self._task.cancel()
         await asyncio.gather(self._task, return_exceptions=True)
+
+    def _withdraw(self) -> None:
+        """Cancelled by its owner: no more events, and its undelivered ones are taken back."""
+        self._silent = True
+        outbox = self._manager._outbox
+        for event in self._items:
+            outbox.remove(event)  # only this generation's own events, by identity
+        self._items.clear()
 
     # ---- running ----------------------------------------------------------
 
@@ -377,7 +419,7 @@ class Job:
                 *(r._task for r in self._requests if r._task is not None), return_exceptions=True
             )
             await asyncio.shield(work.__aexit__(None, None, None))
-        self._finish("done", None)
+        self._finish("cancelled" if self._silent else "done", None)
 
     async def _request(self, item: Any) -> Any:
         await self._ready.wait()
@@ -395,20 +437,24 @@ class Job:
         if reader is None:
             self._queue_item(value)
             return
-        if len(reader._buffer) >= self._manager.max_items:
-            reader._buffer.popleft()  # a sync emit cannot wait: drop the oldest
+        if len(reader._buffer) >= self._manager.max_items and reader._buffer[0] is not _END:
+            reader._buffer.popleft()  # a sync emit cannot wait: drop the oldest, counted
+            self.dropped += 1
         reader._push(value)
 
     def _queue_item(self, value: Any) -> None:
+        if self._silent:
+            return  # cancelled by its owner: nothing more is delivered
         outbox = self._manager._outbox
         while len(self._items) >= self._manager.max_items:
             oldest = self._items.popleft()
             if outbox.remove(oldest):
                 self._dropped += 1 + oldest.dropped  # its own count carries forward
+                self.dropped += 1
         event = JobEvent(self.name, self.id, "item", value, dropped=self._dropped)
         self._dropped = 0
-        self._items.append(event)
         outbox.put(event)
+        self._items.append(event)
 
     def _finish(self, kind: EventKind, value: Any) -> None:
         if self._status != "running":
@@ -427,23 +473,29 @@ class Job:
         self._dropped = 0
         waiters = {f for f in self._waiters if not f.done()}
         self._waiters.clear()
+        reader = self._reader
+        if reader is not None:
+            reader._push_end()  # a reader always gets its end, awaiters or not
         if waiters:
             self._handoff = waiters
             for future in waiters:
                 future.set_result(None)
-        elif self._reader is not None:
-            self._reader._push(_END)
-        elif self._kind == "resource" and kind == "done":
-            pass  # a resource closed by its owner has no result to report
-        else:
+        elif reader is None:
             self._queue_final()
         self._manager._finished(self)
+
+    def _requeue(self) -> None:
+        """A receiver gave the outcome up: queue it unless another one has or will take it."""
+        reader = self._reader
+        if self._consumed or self._handoff or (reader is not None and _END in reader._buffer):
+            return
+        self._queue_final()
 
     def _queue_final(self) -> None:
         if self._silent or self._final is None or self._queued_final is not None:
             return
+        self._manager._outbox.put(self._final)  # if this raises, nothing claims it was queued
         self._queued_final = self._final
-        self._manager._outbox.put(self._final)
 
     async def _wait(self) -> Any:
         if self._kind == "resource":
@@ -460,11 +512,10 @@ class Job:
                 if future.done() and not future.cancelled():
                     # The outcome was handed to this await, which will not see it.
                     self._handoff.discard(future)
-                    if not self._handoff and not self._taken:
-                        self._queue_final()
+                    self._requeue()
                 raise
             self._handoff.discard(future)
-            self._taken = True
+            self._consumed = True
         elif self._queued_final is not None:
             if self._manager._outbox.remove(self._queued_final):
                 self._queued_final = None  # consumed here, not in a later turn
@@ -514,9 +565,11 @@ class WorkManager:
     ``outbox`` receives ``JobEvent``s nobody awaited (``put``) and gives
     back ones not yet consumed (``remove``). ``scratch`` is the parent
     directory for this manager's own scratch directory (default: the
-    system temp dir). ``keep`` finished jobs are remembered (their scratch
-    directories with them); ``max_items`` bounds a job's queued items and a
-    reader's buffer; ``max_requests`` bounds a resource's requests in flight.
+    system temp dir). ``keep`` finished jobs are remembered with their
+    scratch directories; a job whose event is still unread in the outbox is
+    kept longer, up to ``2 * keep`` finished jobs in all. ``max_items`` bounds
+    a job's queued items and a reader's buffer; ``max_requests`` bounds a
+    resource's requests in flight.
     """
 
     keep: int
@@ -532,6 +585,13 @@ class WorkManager:
         max_items: int = 100,
         max_requests: int = 16,
     ) -> None:
+        for label, value in (
+            ("keep", keep),
+            ("max_items", max_items),
+            ("max_requests", max_requests),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"{label} must be a whole number of at least 1, got {value!r}")
         self._outbox = outbox
         self._scratch_parent = Path(scratch) if scratch is not None else None
         self._scratch_root: tuple[Path, int, int] | None = None
@@ -623,12 +683,32 @@ class WorkManager:
     def _finished(self, job: Job) -> None:
         self._live.pop(job.id, None)
         self._history.append(job)
-        while len(self._history) > self.keep:
-            old = self._history.popleft()
+        excess = len(self._history) - self.keep
+        if excess <= 0:
+            return
+        unread = self._unread()
+        evict = [old for old in self._history if not self._has_unread(old, unread)][:excess]
+        hard = len(self._history) - len(evict) - 2 * self.keep
+        if hard > 0:  # the bound holds even when everything is unread: oldest go first
+            evict += [old for old in self._history if old not in evict][:hard]
+        for old in evict:
+            self._history.remove(old)
             if self._names.get(old.name) is old:
                 del self._names[old.name]
             _remove_owned(old._scratch)
             old._scratch = None
+
+    def _unread(self) -> set[int] | None:
+        """Identities of events still in the outbox, when it can list them."""
+        snapshot = getattr(self._outbox, "snapshot", None)
+        return {id(event) for event in snapshot()} if callable(snapshot) else None
+
+    @staticmethod
+    def _has_unread(job: Job, unread: set[int] | None) -> bool:
+        events = [*job._items, *([job._queued_final] if job._queued_final else [])]
+        if unread is None:
+            return bool(events)  # cannot tell: treat as unread (the hard bound still applies)
+        return any(id(event) in unread for event in events)
 
     def _root(self) -> Path:
         if self._scratch_root is None:

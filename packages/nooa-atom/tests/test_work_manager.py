@@ -4,6 +4,8 @@
 
 import ast
 import asyncio
+import contextlib
+import gc
 from pathlib import Path
 
 import pytest
@@ -451,4 +453,340 @@ async def test_summary_is_bounded_escaped_and_never_raises(setup):
     job = manager.launch(work(), name="described")
     await settle()
     assert job.summary == "step\\t2" and "step" in repr(job)
+    await job.cancel()
+
+
+# ---- hardening: consumption modes, explicit reader lifecycle, cancel, bounds, retention ----
+
+
+async def test_reader_attached_late_takes_unread_items_in_order(setup):
+    manager, channel = setup
+    gate = asyncio.Event()
+
+    async def stream():
+        for i in range(4):
+            yield i
+        await gate.wait()
+        yield 4
+
+    job = manager.launch(stream(), name="late")
+    await settle(10)
+    taken = channel.get_nowait() if hasattr(channel, "get_nowait") else None
+    # A turn claimed the first item (claim_batch pops from the head).
+    first = channel._items.popleft() if taken is None else taken
+    assert first.value == 0
+    reader = aiter(job)
+    assert channel.snapshot() == []  # the rest moved to the reader
+    gate.set()
+    assert [x async for x in reader] == [1, 2, 3, 4]
+    assert channel.snapshot() == []
+
+
+async def test_reader_attached_after_finish_gets_items_and_end(setup):
+    manager, channel = setup
+
+    async def stream():
+        yield "a"
+        yield "b"
+
+    async def boom():
+        yield "x"
+        raise ValueError("late failure")
+
+    ok = manager.launch(stream(), name="ok")
+    bad = manager.launch(boom(), name="bad")
+    await settle(10)
+    assert [x async for x in ok] == ["a", "b"]
+    got = []
+    with pytest.raises(ValueError, match="late failure"):
+        async for x in bad:
+            got.append(x)
+    assert got == ["x"]
+    assert channel.snapshot() == []
+
+
+async def test_awaiter_and_reader_together_both_end(setup):
+    manager, channel = setup
+    gate = asyncio.Event()
+
+    async def stream():
+        yield 1
+        await gate.wait()
+        yield 2
+
+    job = manager.launch(stream(), name="both")
+    reader = asyncio.create_task(_collect(job))
+    waiter = asyncio.create_task(job._wait())
+    await settle()
+    gate.set()
+    assert await asyncio.wait_for(reader, 2) == [1, 2]
+    assert await asyncio.wait_for(waiter, 2) is None
+    assert channel.snapshot() == []
+
+
+async def _collect(job):
+    return [x async for x in job]
+
+
+async def test_reader_retained_after_break_resumes_then_aclose_detaches(setup):
+    manager, channel = setup
+
+    async def stream():
+        for i in range(8):
+            yield i
+
+    job = manager.launch(stream(), name="kept")
+    reader = aiter(job)
+    async for x in reader:
+        if x == 1:
+            break
+    assert job._reader is reader  # still referenced: still attached
+    assert await anext(reader) == 2  # nothing lost while it was held
+    await reader.aclose()  # explicit: no reliance on garbage collection
+    assert job._reader is None
+    await settle(20)
+    values = [e.value for e in channel.snapshot() if e.kind == "item"]
+    assert values == [3, 4, 5, 6, 7] and channel.snapshot()[-1].kind == "done"
+
+
+async def test_aclosing_detaches_deterministically(setup):
+    manager, channel = setup
+
+    async def stream():
+        for i in range(3):
+            yield i
+
+    job = manager.launch(stream(), name="ctx")
+    gc.disable()
+    try:
+        async with contextlib.aclosing(aiter(job)) as items:
+            first = await anext(items)
+        assert job._reader is None
+    finally:
+        gc.enable()
+    assert first == 0
+    await settle(10)
+    assert [e.value for e in channel.snapshot()] == [1, 2, None]
+
+
+async def test_cancel_while_backpressured(setup):
+    manager, channel = setup  # max_items=5
+
+    async def forever():
+        n = 0
+        while True:
+            n += 1
+            yield n
+
+    job = manager.launch(forever(), name="fast")
+    reader = aiter(job)
+    await settle(20)
+    assert len(reader._buffer) == 5  # the producer waits for the reader
+    await asyncio.wait_for(job.cancel(), 2)  # promptly, though backpressured
+    assert [await anext(reader) for _ in range(5)] == [1, 2, 3, 4, 5]
+    with pytest.raises(RuntimeError, match="cancelled"):
+        await anext(reader)
+    assert channel.snapshot() == []
+
+
+async def test_cancelled_pending_anext_takes_nothing(setup):
+    manager, _ = setup
+    gate = asyncio.Event()
+
+    async def stream():
+        yield 1
+        await gate.wait()
+        yield 2
+
+    job = manager.launch(stream(), name="gated")
+    reader = aiter(job)
+    assert await anext(reader) == 1
+    pending = asyncio.create_task(anext(reader))
+    await settle()
+    assert not pending.done()
+    pending.cancel()
+    await asyncio.gather(pending, return_exceptions=True)
+    gate.set()
+    assert await anext(reader) == 2
+    with pytest.raises(StopAsyncIteration):
+        await anext(reader)
+
+
+async def test_emit_into_full_reader_counts_loss(setup):
+    manager, _ = setup
+    gate = asyncio.Event()
+
+    async def work():
+        for i in range(8):
+            emit(i)
+        await gate.wait()
+        return "ok"
+
+    job = manager.launch(work(), name="emitter")
+    reader = aiter(job)
+    await settle()
+    gate.set()
+    assert [x async for x in reader] == [3, 4, 5, 6, 7]
+    assert job.dropped == 3
+
+
+async def test_queue_loss_counted_on_job(setup):
+    manager, _ = setup
+
+    async def many():
+        for i in range(12):
+            yield i
+
+    job = manager.launch(many(), name="lossy")
+    await job
+    assert job.dropped == 7
+
+
+async def test_owner_cancel_withdraws_only_its_generation(setup):
+    manager, channel = setup
+    gate = asyncio.Event()
+
+    async def stream(tag):
+        yield f"{tag}-1"
+        await gate.wait()
+
+    old = manager.launch(stream("old"), name="gen")
+    await settle()
+    await old.cancel()
+    new = manager.launch(stream("new"), name="gen")
+    other = manager.launch(stream("other"), name="other")
+    await settle()
+    await new.cancel()
+    assert [e.value for e in channel.snapshot()] == ["other-1"]
+    assert (old.status, new.status) == ("cancelled", "cancelled")
+    await other.cancel()
+    assert channel.snapshot() == []
+
+
+async def test_resource_cancel_status_is_cancelled(setup):
+    manager, channel = setup
+    res = manager.launch(Toy(), name="toy")
+    await res.send("a")
+    channel._items.clear()
+    await res.cancel()
+    assert res.status == "cancelled"
+    assert channel.snapshot() == []
+
+
+@pytest.mark.parametrize("option", ["keep", "max_items", "max_requests"])
+@pytest.mark.parametrize("value", [0, -1, True, 1.5, None])
+def test_bounds_are_validated(option, value):
+    with pytest.raises(ValueError, match=option):
+        WorkManager(QueueManager().queue("jobs"), **{option: value})
+
+
+async def test_eviction_keeps_output_of_unread_notifications(tmp_path):
+    channel = QueueManager().queue("jobs")
+    manager = WorkManager(channel, scratch=tmp_path, keep=2)
+
+    async def write():
+        directory = job_dir()
+        (directory / "out").write_text("x")
+        return directory
+
+    jobs = [manager.launch(write(), name=f"j{i}") for i in range(4)]
+    await settle(10)
+    dirs = [job.result for job in jobs]
+    assert all(d.exists() for d in dirs)  # 4 > keep, but every event is unread
+    channel._items.clear()  # a turn took them all
+    extra = await manager.launch(write(), name="extra")
+    assert [d.exists() for d in dirs] == [False, False, False, True]
+    assert extra.exists()
+    # The hard bound: at most 2 * keep finished jobs even if nothing is read.
+    for i in range(6):
+        manager.launch(write(), name=f"k{i}")
+    await settle(20)
+    assert len(manager.list()) == 4
+    await manager.aclose()
+
+
+# ---- terminal-state races (inspired by Codex's cell_actor tests) ----
+
+
+class FlakyOutbox:
+    """An outbox whose next put fails once."""
+
+    def __init__(self):
+        self.items, self.fail = [], 0
+
+    def put(self, item):
+        if self.fail:
+            self.fail -= 1
+            raise OSError("outbox unavailable")
+        self.items.append(item)
+
+    def remove(self, item):
+        for i, queued in enumerate(self.items):
+            if queued is item:
+                del self.items[i]
+                return True
+        return False
+
+
+async def test_failed_completion_delivery_leaves_result_readable(tmp_path):
+    outbox = FlakyOutbox()
+    manager = WorkManager(outbox, scratch=tmp_path)
+    outbox.fail = 1
+    job = manager.launch(asyncio.sleep(0, "kept"), name="flaky")
+    await settle()
+    assert outbox.items == [] and job._queued_final is None  # not falsely marked queued
+    assert await job == "kept"  # the stored result is read back
+    await manager.aclose()
+
+
+async def test_dropped_reader_preserves_items_for_the_next_reader(setup):
+    manager, channel = setup
+    gate = asyncio.Event()
+
+    async def stream():
+        for i in range(3):
+            yield i
+        await gate.wait()
+        yield 3
+
+    job = manager.launch(stream(), name="resume")
+    first = aiter(job)
+    assert await anext(first) == 0
+    await settle()
+    await first.aclose()  # 1 and 2 were buffered, unread: back to the outbox
+    assert [e.value for e in channel.snapshot()] == [1, 2]
+    second = aiter(job)  # the next reader takes them back, in order
+    gate.set()
+    assert [x async for x in second] == [1, 2, 3]
+    assert channel.snapshot() == []
+
+
+async def test_only_one_await_claims_a_queued_completion(setup):
+    manager, channel = setup
+    job = manager.launch(asyncio.sleep(0, "once"), name="once")
+    await settle()
+    assert len(channel.snapshot()) == 1
+    results = await asyncio.gather(job._wait(), job._wait(), job._wait())
+    assert results == ["once"] * 3  # one withdraw, the others read back
+    assert channel.snapshot() == []
+
+
+async def test_natural_completion_wins_over_later_cancel(setup):
+    manager, channel = setup
+    job = manager.launch(asyncio.sleep(0, "first"), name="won")
+    await settle()
+    await job.cancel()
+    assert job.status == "done" and job.result == "first"
+    assert [e.kind for e in channel.snapshot()] == ["done"]  # its event is not withdrawn
+    assert await job == "first"
+
+
+async def test_second_concurrent_reader_is_refused(setup):
+    manager, _ = setup
+    job = manager.launch(asyncio.sleep(3600), name="busy_reader")
+    reader = aiter(job)
+    with pytest.raises(RuntimeError, match="already has a reader"):
+        aiter(job)
+    await reader.aclose()
+    aiter(job)  # free again once the first detached
     await job.cancel()
