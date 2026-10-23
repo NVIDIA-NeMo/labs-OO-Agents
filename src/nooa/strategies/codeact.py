@@ -3108,7 +3108,8 @@ Standard Python builtins and agent instance (`self`) are available."""
         # Validate REPL policy (no classes, await async methods)
         validator = GeneratedCodeValidator()
         validation_errors = completion_binding_errors(code)
-        validation_errors.extend(validator.validate(code, runtime.agent))
+        if not validation_errors:
+            validation_errors.extend(validator.validate(code, runtime.agent))
         if validation_errors:
             error_msg = "Code validation failed:\n" + "\n".join(
                 f"• {err}" for err in validation_errors
