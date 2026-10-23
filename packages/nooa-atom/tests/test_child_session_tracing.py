@@ -185,7 +185,7 @@ async def test_a_delegated_child_is_its_own_agent_under_the_delegate_call(
     _assert_named(child_spans, "fix")
     # The root keeps its class name.
     root_spans = [s for s in finished if s.attributes.get(SESSION_NAME_ATTR) is None]
-    assert {s.attributes.get("agent.name") for s in root_spans} - {None} == {"AtomAgent"}
+    assert {s.attributes.get("agent.name") for s in root_spans} - {None} == {"BaseAtom"}
     [child] = atom_registry.children(root.id)
     for span in child_spans:
         assert span.attributes[SESSION_ID_ATTR] == child.id

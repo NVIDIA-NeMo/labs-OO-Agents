@@ -21,7 +21,7 @@ interface, or this agent's spike spelling
 
 from __future__ import annotations
 
-from typing import Annotated, Any
+from typing import Annotated, Any, ClassVar
 
 # Cells see this module's names: the model builds Done/TaskResult/Todo, Shell and
 # Subagent work, and Context/strategy/PredictStrategy for skill and method writing.
@@ -50,8 +50,9 @@ with hidden:
     from nooa.strategy_validation import InvariantError
     from nooa.tools.shell_tools import FileWrite, Match
     from nooa_atom.agent import work_shell
-    from nooa_atom.agent.base import AtomAgentBase
+    from nooa_atom.agent.base import AtomAgentBase, session_title_request  # noqa: F401
     from nooa_atom.agent.conditions import PERSON_NAMES, require_result
+    from nooa_atom.agent.roles import TurnPolicy
 
 __all__ = ["AtomAgent", "Files"]
 
@@ -254,6 +255,41 @@ def require_settled_work(agent: Any, result: Any, call: Any) -> None:
         )
 
 
+_NO_ONE_TO_ASK: Annotated[str, hidden] = (
+    "Nobody can answer questions in an unattended task: decide, state your assumptions in the "
+    "TaskResult report, and return Done (or Waiting while launched work runs)."
+)
+_ONE_TURN_METHOD: Annotated[str, hidden] = (
+    "AtomAgent has one turn method, handle(); the session's turn_method selects its role "
+    "(nooa_atom.agent.roles)"
+)
+
+
+@hidden
+def require_role(agent: Any, result: Any, call: Any) -> None:
+    """The postconditions of the agent's role (``agent._turn_policy``), set by the host.
+
+    - interactive: ``Waiting.on`` names only work that will deliver.
+    - unattended, orchestrator: no ``NeedInput``; ``Done`` carries a result
+      and leaves no running work; ``Waiting`` only on work that will deliver.
+    - child: ``Done`` carries a ``TaskResult``; a one-shot child may not ask
+      (its session port says so); no running work left at ``Done``;
+      ``Waiting`` only on work that will deliver.
+    """
+    policy = getattr(agent, "_turn_policy", "interactive")
+    if policy == "interactive":
+        require_deliverable_wait(agent, result, call)
+        return
+    if policy == "child":
+        require_task_result(agent, result, call)
+    else:
+        if isinstance(result, NeedInput):
+            raise InvariantError(_NO_ONE_TO_ASK)
+        require_result(agent, result, call)
+    require_deliverable_wait_unattended(agent, result, call)
+    require_settled_work(agent, result, call)
+
+
 @hidden
 def _age(seconds: float) -> str:
     seconds = max(0, int(seconds))
@@ -337,26 +373,9 @@ class AtomAgent(AtomAgentBase):
     ``system_messages``...) to new items; ``jobs`` holds the ``JobEvent``s of
     work nobody awaited. Never predict a pending job's result. End every
     turn with exactly one ``return_result(...)``: ``Done(explanation=...)``,
-    ``NeedInput(question=...)`` only when a person must answer, or
+    ``NeedInput(question=...)`` only when someone can answer, or
     ``Waiting(explanation=..., on=[job names])`` while launched work runs.
-
-    Modes (each turn method names its own):
-
-    - interactive: send brief progress notes and the reply with
-      ``self.message()`` (complete Markdown: outcome, evidence, risks), then
-      ``Done``; background jobs may keep running.
-    - unattended, child, orchestrator: the result is what gets read. End
-      with ``Done(explanation=..., result=TaskResult(solution_description=...,
-      evidence=..., how_to_verify=..., report=...))``, also when blocked (say
-      what blocked you). First await or cancel your running jobs; idle
-      shells and subagents may stay. Leave the tree clean.
-    - child: your parent's brief is the task; its first line says whether you
-      may ask (``NeedInput``). ``self.message()`` reaches your parent as a
-      short note: no routine progress notes, the report goes in the result.
-    - orchestrator: split the task into Todo briefs for subagents rather than
-      implementing it; write runnable acceptance checks first, run them
-      yourself (a report is not proof), send failures back with ``send``,
-      and loop until the task is met or another round is not worth it.
+    The ``role`` block, when present, says who reads your result and how to end.
     """
 
     jobs: Annotated[WorkManager, nosnapshot]
@@ -368,8 +387,31 @@ class AtomAgent(AtomAgentBase):
     _restore_pending: Annotated[bool, hidden, nosnapshot]
     _restored_lost: Annotated[set, hidden, nosnapshot]
 
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
+    # The role the host gave this agent (``nooa_atom.agent.roles``): the policy its
+    # handle() turns enforce and the instructions of the ``role`` block.
+    _turn_policy: Annotated[str, hidden, nosnapshot]
+    _role_instructions: Annotated[str | None, hidden, nosnapshot]
+    # The session runs every turn with this method, whatever its turn_method.
+    turn_entry: ClassVar[str] = "handle"
+
+    def __init__(
+        self,
+        *args: Any,
+        policy: TurnPolicy = "interactive",
+        instructions: str | None = None,
+        **kwargs: Any,
+    ) -> None:
+        """``policy`` and ``instructions`` are the role the host gives the agent.
+
+        ``instructions`` become the static ``role`` block of the prompt prefix;
+        ``None``, empty or whitespace-only text adds no block.
+        """
         super().__init__(*args, **kwargs)
+        if policy not in ("interactive", "unattended", "orchestrator", "child"):
+            raise ValueError(f"unknown policy {policy!r}")
+        self._turn_policy = policy
+        text = instructions.strip() if isinstance(instructions, str) else ""
+        self._role_instructions = text or None
         # The legacy JobsApi never started anything; drop it and its cancel hint.
         self.queue_manager._cancel_hints.pop("jobs", None)
         self._work_records = []
@@ -390,8 +432,10 @@ class AtomAgent(AtomAgentBase):
         Restoring a snapshot brings back the context blocks it saved, an
         earlier Atom's among them: its ``python_cell_tools`` doc of
         ``self.shell``, ``JobsApi`` and ``delegate()``, and its ``queues`` block
-        with the child and job hints. These replace them. The other blocks (a
-        user's own, the repository instructions) are left as restored.
+        with the child and job hints. These replace them. The ``role`` block is
+        the host's instructions for this build (none when they are empty), not
+        the saved copy. The other blocks (a user's own, the repository
+        instructions) are left as restored.
         """
         self.context["python_cell_tools"] = Context(
             _tools_doc(
@@ -407,6 +451,10 @@ class AtomAgent(AtomAgentBase):
         self.context["context_usage"] = Context(
             expr="self.context_stats.format() if self.context_stats else ''"
         )
+        if self._role_instructions:
+            self.context["role"] = Context(self._role_instructions, prefix=True)
+        else:
+            self.context.pop("role", None)
         self._status_block()
 
     @hidden
@@ -607,80 +655,28 @@ class AtomAgent(AtomAgentBase):
 
     @hidden
     @strategy(
-        AtomCodeAct(
-            config=CodeActConfig(cell_timeout=1800.0, postconditions=[require_deliverable_wait])
-        ),
+        AtomCodeAct(config=CodeActConfig(cell_timeout=1800.0, postconditions=[require_role])),
         context=_CONTEXT,
     )
     async def handle(
         self, notification: Annotated[dict[str, list[Any]], _NOTIFICATION]
     ) -> Done | NeedInput | Waiting:
-        """Interactive turn (mode: interactive): handle the newest request and whatever else
-        arrived in ``notification``, keeping the user informed with ``self.message()``."""
+        """Handle what arrived in ``notification``, newest input first, as your role says."""
         ...
 
-    @hidden
-    @strategy(
-        AtomCodeAct(
-            config=CodeActConfig(
-                cell_timeout=1800.0,
-                postconditions=[
-                    require_result,
-                    require_deliverable_wait_unattended,
-                    require_settled_work,
-                ],
-            )
-        ),
-        context=_CONTEXT,
-    )
-    async def handle_batch(
-        self, notification: Annotated[dict[str, list[Any]], _NOTIFICATION]
-    ) -> Done | Waiting:
-        """Unattended task (mode: unattended): the task is ``notification["user_messages"]``,
-        its data ``notification.get("context", [])``. Nobody can answer questions."""
-        ...
+    # One turn method: the session's turn_method selects the role, not the method.
 
     @hidden
-    @strategy(
-        AtomCodeAct(
-            config=CodeActConfig(
-                cell_timeout=1800.0,
-                postconditions=[
-                    require_result,
-                    require_deliverable_wait_unattended,
-                    require_settled_work,
-                ],
-            )
-        ),
-        context=_CONTEXT,
-    )
-    async def handle_orchestrate(
-        self, notification: Annotated[dict[str, list[Any]], _NOTIFICATION]
-    ) -> Done | Waiting:
-        """Orchestrator (mode: orchestrator): the task is ``notification["user_messages"]``,
-        its data ``notification.get("context", [])``. You own the result; subagents do the work."""
-        ...
+    async def handle_batch(self, *args: Any, **kwargs: Any) -> Any:
+        raise TypeError(_ONE_TURN_METHOD)
 
     @hidden
-    @strategy(
-        AtomCodeAct(
-            config=CodeActConfig(
-                cell_timeout=1800.0,
-                postconditions=[
-                    require_task_result,
-                    require_deliverable_wait_unattended,
-                    require_settled_work,
-                ],
-            )
-        ),
-        context=_CONTEXT,
-    )
-    async def handle_work(
-        self, notification: Annotated[dict[str, list[Any]], _NOTIFICATION]
-    ) -> Done | NeedInput | Waiting:
-        """Child worker (mode: child): your parent's brief, a follow-up or an answer is in
-        ``notification["user_messages"]``. Your parent reads only your ``TaskResult``."""
-        ...
+    async def handle_work(self, *args: Any, **kwargs: Any) -> Any:
+        raise TypeError(_ONE_TURN_METHOD)
+
+    @hidden
+    async def handle_orchestrate(self, *args: Any, **kwargs: Any) -> Any:
+        raise TypeError(_ONE_TURN_METHOD)
 
 
 for _name in ("shell", "delegates", "producers", "system_messages", "cwd"):

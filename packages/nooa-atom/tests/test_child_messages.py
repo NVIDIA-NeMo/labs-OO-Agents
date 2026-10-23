@@ -233,7 +233,7 @@ async def test_a_closing_or_closed_parent_drops_messages(registry, root_options)
 
 def test_child_message_is_exported():
     import nooa_atom
-    from nooa_atom.agent import agent
+    from nooa_atom.agent import base as agent
 
     assert nooa_atom.ChildMessage is ChildMessage
     assert "ChildMessage" in nooa_atom.__all__ and "ChildMessage" in agent.__all__

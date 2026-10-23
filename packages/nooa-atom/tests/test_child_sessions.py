@@ -303,10 +303,10 @@ async def test_removed_keywords_raise_a_one_line_type_error(
 
 
 def test_the_verbs_take_only_description_prompt_name_brief_model_and_spawns_kept():
-    from nooa_atom.agent.agent import AtomAgent
+    from nooa_atom.agent.base import AtomAgentBase
 
     base = ["self", "description", "prompt", "name", "brief", "model"]
-    for method, extra in ((AtomAgent.spawn, ["kept"]), (AtomAgent.delegate, [])):
+    for method, extra in ((AtomAgentBase.spawn, ["kept"]), (AtomAgentBase.delegate, [])):
         params = inspect.signature(method).parameters
         assert list(params) == base + extra
         assert params["name"].kind is inspect.Parameter.KEYWORD_ONLY
@@ -587,14 +587,14 @@ async def test_a_second_object_with_a_managed_id_works_as_a_brief(
 
 
 def test_receive_delegated_todo_activates_a_local_copy():
-    from nooa_atom.agent.agent import AtomAgent
+    from nooa_atom.agent.base import AtomAgentBase
 
     from nooa.tools.todo import Todo
 
     child = SimpleNamespace(todo=TodoManager())
     other = child.todo.add("already mine")
     brief = Todo(title="brief", description="REQ", status="open")
-    AtomAgent.receive_delegated_todo(child, brief)
+    AtomAgentBase.receive_delegated_todo(child, brief)
     mine = child.todo.get(brief.id)
     assert mine is not brief and mine == brief
     assert child.todo.active() is mine
@@ -606,14 +606,14 @@ def test_receive_delegated_todo_activates_a_local_copy():
 
 def test_receive_delegated_todo_refuses_a_same_id_todo_instead_of_replacing_it():
     """Review-3 finding 7: a brief whose id is already in the child's list raises."""
-    from nooa_atom.agent.agent import AtomAgent
+    from nooa_atom.agent.base import AtomAgentBase
 
     child = SimpleNamespace(todo=TodoManager())
     mine = child.todo.add("already mine", description="keep me")
     clash = mine.model_copy(deep=True)
     clash.description = "the brief"
     with pytest.raises(ValueError, match=f"todo {mine.id!r} is already in this TodoManager"):
-        AtomAgent.receive_delegated_todo(child, clash)
+        AtomAgentBase.receive_delegated_todo(child, clash)
     assert child.todo.get(mine.id) is mine and mine.description == "keep me"
     assert [t.id for t in child.todo.list_todos()] == [mine.id]
 

@@ -8,8 +8,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from atom_test_agents import ATOM_SPEC
 from fake_oauth_mcp import FakeOAuthServer
-from nooa_atom.agent.agent import AtomAgent
+from nooa_atom.agent.base import AtomAgentBase
 from nooa_atom.skills.manager import SkillManager
 from nooa_atom.skills.mcp_servers import MCPServers
 from nooa_atom.workspace.controls import MCPControl, SkillsControl
@@ -84,7 +85,7 @@ async def agent(installed, tmp_path):
         "---\nname: review\ndescription: Review a change for defects\n---\n"
         "Read the diff, then list defects by severity.\n"
     )
-    made = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path, skills_dirs=[skills_dir])
+    made = AtomAgentBase(llm=FakeLLMClient(), cwd=tmp_path, skills_dirs=[skills_dir])
     servers = MCPServers(
         mcp_file=tmp_path / ".mcp.json",
         approval_path=tmp_path / "approvals.json",
@@ -302,7 +303,7 @@ async def test_an_old_snapshot_with_mcp_state_loads_and_the_agent_is_told(
     workspace.mkdir()
     options = SessionOptions(
         workspace=workspace,
-        agent_spec="nooa_atom.agent:AtomAgent",
+        agent_spec=ATOM_SPEC,
         llm=FakeLLMClient(),
         sessions_dir=sessions_dir,
     )

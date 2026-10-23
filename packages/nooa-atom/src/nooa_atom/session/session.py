@@ -270,6 +270,10 @@ class Session:
     def start(self) -> None:
         """Start the agent's turn loop with the options' turn method.
 
+        An agent class with one turn method names it in ``turn_entry`` (the
+        Atom agent: ``handle``); the options' ``turn_method`` then selects
+        its role instead (``nooa_atom.agent.roles``), not the method.
+
         The loop runs in a fresh ``contextvars.Context`` (a session created
         from inside another agent's cell must not inherit that agent's call
         stack, generation state or scoped blocks), after the loop context
@@ -283,7 +287,7 @@ class Session:
         for hook in self._loop_context_hooks:
             context.run(hook)
         self._agent.turns.start(
-            turn_method=self.options.turn_method,
+            turn_method=turn_method_of(self._agent, self.options.turn_method),
             context=context,
             prepare=self._prepare_turn,
             commit=self._commit_turn,
@@ -1293,3 +1297,10 @@ def _explanation(outcome: Any, kind: OutcomeKind) -> str:
 
 def _usage_delta(before: Usage, after: Usage) -> Usage:
     return Usage(**{name: getattr(after, name) - getattr(before, name) for name in USAGE_FIELDS})
+
+
+def turn_method_of(agent: Any, turn_method: str) -> str:
+    """The method a session runs its turns with: the agent's ``turn_entry``, else ``turn_method``."""
+    cls = agent if isinstance(agent, type) else type(agent)
+    entry = getattr(cls, "turn_entry", None)
+    return entry if isinstance(entry, str) and entry else turn_method

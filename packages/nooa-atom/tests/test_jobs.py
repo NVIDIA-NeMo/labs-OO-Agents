@@ -5,7 +5,7 @@
 import asyncio
 
 import pytest
-from nooa_atom.agent.agent import AtomAgent
+from nooa_atom.agent.base import AtomAgentBase
 from nooa_atom.agent.conditions import (
     UNATTENDED_FIX,
     WaitingTargetNotRunning,
@@ -21,7 +21,7 @@ TIMEOUT = 15.0
 
 @pytest.fixture
 async def agent(tmp_path):
-    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    agent = AtomAgentBase(llm=FakeLLMClient(), cwd=tmp_path)
     yield agent
     await agent.aclose()
 
@@ -33,7 +33,7 @@ def _check(agent, *on: str) -> None:
 async def test_the_agent_has_jobs(agent):
     assert isinstance(agent.jobs, JobsApi)
     assert "jobs" in agent.queue_manager.channels()
-    assert "self.jobs.run(" in (AtomAgent.__doc__ or "")
+    assert "self.jobs.run(" in (AtomAgentBase.__doc__ or "")
 
 
 async def test_waiting_on_a_running_job_by_name_is_accepted(agent):
@@ -150,7 +150,7 @@ def _queues_expr(agent) -> str:
 async def test_the_queues_block_does_not_name_the_queue_manager(tmp_path):
     from nooa.storage.snapshot import AgentSnapshot
 
-    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    agent = AtomAgentBase(llm=FakeLLMClient(), cwd=tmp_path)
     try:
         assert "queue_manager" not in _queues_expr(agent)
         assert agent._queue_status() == agent.queue_manager.status()
@@ -159,7 +159,7 @@ async def test_the_queues_block_does_not_name_the_queue_manager(tmp_path):
         for block in snapshot.context:
             if block.key == "queues":
                 block.expr = "self.queue_manager.status()"
-        restored = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
+        restored = AtomAgentBase(llm=FakeLLMClient(), cwd=tmp_path)
         snapshot.restore(restored)
         restored.after_restore()
         assert "queue_manager" not in _queues_expr(restored)

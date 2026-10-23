@@ -71,10 +71,10 @@ def test_the_error_is_the_postcondition_error_type():
 
 
 def test_every_turn_method_checks_what_it_waits_on():
-    from nooa_atom.agent import AtomAgent
+    from nooa_atom.agent.base import AtomAgentBase
 
     def postconditions(method):
-        config = getattr(AtomAgent, method)._plan_strategy.config
+        config = getattr(AtomAgentBase, method)._plan_strategy.config
         return [fn.__name__ for fn in config.postconditions]
 
     assert postconditions("handle") == ["require_running_wait"]
