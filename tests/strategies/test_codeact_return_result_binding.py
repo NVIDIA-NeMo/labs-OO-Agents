@@ -156,6 +156,68 @@ async def test_deep_cell_is_rejected_and_next_cell_can_complete(backend, strateg
 @pytest.mark.parametrize(
     "code",
     [
+        "return_result = 0\nglobal return_result",
+        "return_result(1)\nglobal return_result\nreturn_result = 0",
+        "return_result: int = 0\nglobal return_result",
+        "def helper(return_result):\n    global return_result\n    return_result = 0",
+        "@self.compile_effect\ndef return_result(value):\n    return value\nglobal return_result",
+        "return_result = 0\nnonlocal return_result",
+        "await self.work()\nreturn_result = 0\nglobal return_result",
+        "return_result = 0\nreturn 42\nglobal return_result",
+    ],
+)
+async def test_semantic_syntax_error_precedes_helper_compilation(backend, strategy_type, code):
+    """Invalid declarations report SyntaxError without running code or helper decorators."""
+    tool_name = "python_cell" if strategy_type is CodeActV2 else "execute_python"
+    llm = _client("self.effects.append('executed')\n" + code, tool_name)
+
+    class TestAgent(Agent, llm=llm):
+        """Expose any work performed before a semantic syntax error is reported."""
+
+        def compile_effect(self, function):
+            """Record premature helper compilation without changing the function."""
+            self.effects.append("compiled")
+            return function
+
+        async def work(self):
+            """Record execution of a statement that requires the async cell context."""
+            self.effects.append("awaited")
+
+        @strategy(
+            strategy_type(
+                config=CodeActConfig(
+                    prefill=None,
+                    execution_backend=backend,
+                    sandbox=SandboxConfig(require=False, filesystem=False, network=True),
+                )
+            )
+        )
+        async def answer(self) -> int:
+            """Return the computed integer."""
+            ...
+
+    agent = TestAgent()
+    agent.effects = []
+    try:
+        assert await agent.answer() == 42
+        assert agent.effects == []
+        outputs = list(agent.events.query(type="PythonOutput"))
+        assert len(outputs) == 2
+        assert "SyntaxError:" in outputs[0].error
+        assert "return_result" in outputs[0].error
+        assert "Cell In[1], line" in outputs[0].error
+        assert "Code validation failed" not in outputs[0].error
+        assert not outputs[1].error
+        assert len(llm.calls) == 2
+    finally:
+        await agent.aclose()
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize("strategy_type", [CodeActStrategy, CodeActV2])
+@pytest.mark.parametrize(
+    "code",
+    [
         "answer = 42",
         "answer = [return_result for return_result in [1, 2]]",
         "answer = {return_result: return_result for return_result in [1, 2]}",

@@ -133,14 +133,30 @@ class _CompletionBindings(ast.NodeVisitor):
     visit_GeneratorExp = visit_ListComp
 
 
-def completion_binding_errors(code: str) -> list[str]:
-    """Reject CodeAct helper rebinding before imports or helper compilation can run."""
+def _check_cell_syntax(tree: ast.Module, filename: str) -> None:
+    """Compile, never execute, in an async cell scope while keeping source line numbers."""
+    wrapper = ast.AsyncFunctionDef(
+        name="__completion_guard__",
+        args=ast.arguments(posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[]),
+        body=tree.body,
+        decorator_list=[],
+        type_params=[],
+    )
+    module = ast.fix_missing_locations(ast.Module(body=[wrapper], type_ignores=[]))
+    compile(module, filename, "exec")
+
+
+def completion_binding_errors(code: str, *, filename: str = "<codeact-cell>") -> list[str]:
+    """Reject rebinding before helper compilation; propagate compiler-only SyntaxErrors."""
     try:
-        tree = ast.parse(code)
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            return []  # Preserve the normal execution path's syntax-error diagnostics.
         visitor = _CompletionBindings()
         visitor.visit(tree)
-    except SyntaxError:
-        return []  # Preserve the normal execution path's syntax-error diagnostics.
+        if visitor.errors:
+            _check_cell_syntax(tree, filename)
     except RecursionError:
         return [
             "Cell nests too deeply to check for `return_result` rebinding; "
