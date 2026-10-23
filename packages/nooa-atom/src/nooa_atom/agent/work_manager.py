@@ -38,7 +38,7 @@ from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import Annotated, Any, Literal, Protocol
 
 __all__ = [
     "Job",
@@ -76,7 +76,7 @@ class JobEvent:
     name: str
     id: int
     kind: EventKind
-    value: Any = None
+    value: Annotated[Any, "The item, the result, or the error text"] = None
     dropped: int = 0
 
     def status_source(self) -> str:
@@ -605,8 +605,9 @@ class WorkManager:
     """Background work: ``job = self.jobs.launch(work, name="tests")`` starts it and returns at once.
 
     ``work`` is a coroutine (its value is the result), an async generator
-    (its yields are items) or a resource (``Shell()``, ``Subagent()``): a
-    resource stays open, and each ``job.send(x)`` returns a request job.
+    (its yields are items) or a resource (an async context manager with
+    ``send(x)``): a resource stays open, and each ``job.send(x)`` returns a
+    request job whose result is what the resource returns for ``x``.
     Each outcome goes to one place: a pending ``await job`` or ``async for x
     in job``, else a ``JobEvent`` in a later turn's ``notification["jobs"]``.
     Jobs outlive the turn: end it with ``Waiting(on=[name])`` while they run,

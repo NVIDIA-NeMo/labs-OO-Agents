@@ -142,10 +142,10 @@ LIMITS = {
     # self.jobs vocabulary (WorkManager, Job, Shell, Subagent) documented in
     # python_cell_tools, the stable mode guidance in the class doc, and turn
     # docs under 300 characters. Measured values plus about 2%.
-    (UNIFIED, "handle"): (18_600, 20_200),  # measured 18,247 / 19,843
-    (UNIFIED, "handle_batch"): (18_600, 20_200),  # measured 18,247 / 19,863
-    (UNIFIED, "handle_work"): (18_600, 20_200),  # measured 18,247 / 19,860
-    (UNIFIED, "handle_orchestrate"): (18_600, 20_300),  # measured 18,247 / 19,900
+    (UNIFIED, "handle"): (18_600, 20_200),  # measured 18,262 / 19,858
+    (UNIFIED, "handle_batch"): (18_600, 20_200),  # measured 18,262 / 19,878
+    (UNIFIED, "handle_work"): (18_600, 20_200),  # measured 18,262 / 19,875
+    (UNIFIED, "handle_orchestrate"): (18_600, 20_300),  # measured 18,262 / 19,915
 }
 # The bench guard's system-prompt ceiling; every agent stays under it.
 BENCH_SYSTEM_LIMIT = 20_000

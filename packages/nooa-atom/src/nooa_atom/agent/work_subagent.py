@@ -160,7 +160,7 @@ class Subagent:
         return f"idle · {where}"
 
     async def run(self, task: str | Todo, *, brief: str | None = None) -> TaskResult:
-        """Run ``task`` on a one-shot child and return its ``TaskResult``."""
+        """Run ``task`` (a Todo or text, plus optional ``brief`` instructions) on a one-shot child; return its ``TaskResult``."""
         port = _require_port()
         name = _child_name(port, current_name())
         describe(f"subagent {name}" + (f": {self.description}" if self.description else ""))
