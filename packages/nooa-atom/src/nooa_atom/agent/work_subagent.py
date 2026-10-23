@@ -29,9 +29,9 @@ from typing import Any
 
 from nooa import hidden
 from nooa.tools import Todo as _AnyTodo
-from nooa_atom.tools.todo_list import Todo
 from nooa_atom.agent.work_manager import current_name, describe, emitter
 from nooa_atom.session.items import ChildFailed, ChildQuestion, ChildResult, TaskResult
+from nooa_atom.tools.todo_list import Todo
 
 __all__ = ["Question", "Subagent"]
 

@@ -48,8 +48,8 @@ with hidden:
     from nooa.interactive import InteractiveAgent, require_task_result
     from nooa.runtime.channels import ChannelReader
     from nooa.storage.markers import nosnapshot
-    from nooa.tools import TodoManager
     from nooa.strategy_validation import InvariantError
+    from nooa.tools import TodoManager
     from nooa.tools.shell_tools import FileWrite, Match
     from nooa_atom.agent import work_shell
     from nooa_atom.agent.base import AtomAgentBase, session_title_request  # noqa: F401
