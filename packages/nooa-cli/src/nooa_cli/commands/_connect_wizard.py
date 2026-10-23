@@ -27,6 +27,7 @@ class WizardState:
     """Explicit configuration and evidence carried between wizard steps."""
 
     alias: Any = None
+    last_step: int = 0  # highest step header shown in this attempt
     api_key: Any = None
     api_key_env: Any = None
     api_style: Any = None
@@ -198,6 +199,16 @@ async def display_checks(
     raise click.ClickException("Checks ended without a result.")
 
 
+STEP_TITLES = {1: "Connection", 2: "Model", 3: "Settings", 4: "Test", 5: "Save model"}
+
+
+def show_step(state: WizardState, number: int) -> None:
+    """Print each step header once per attempt, in order; skipped steps keep the total."""
+    if number > state.last_step:
+        state.last_step = number
+        view.step(number, STEP_TITLES[number], total=len(STEP_TITLES))
+
+
 def select_connection(state: WizardState) -> bool:
     """Select connection; return False when the user cancels."""
     from ._connect_input_policy import validate_native_declaration
@@ -341,7 +352,7 @@ def select_connection(state: WizardState) -> bool:
         reasoning_output_tokens=state.reasoning_output_tokens,
     )
     if state.editing is None:
-        view.step(1, "Connection")
+        show_step(state, 1)
     if state.provider and state.provider not in (*connect.PROVIDERS, "custom"):
         raise click.UsageError(
             f"Unknown provider. Choose {', '.join(connect.PROVIDERS)}, or custom."
@@ -537,7 +548,7 @@ def select_connection(state: WizardState) -> bool:
 def select_model(state: WizardState) -> bool:
     """Select model; return False when the user cancels."""
     if state.editing is None:
-        view.step(2, "Model")
+        show_step(state, 2)
     state.discovery_succeeded = None
     state.discovery_endpoint = None
     state.endpoint_models = ()
@@ -779,7 +790,7 @@ def check_interfaces(state: WizardState) -> bool:
 
     if state.api_style:
         validate_native_declaration(state)
-    view.step(3, "Connection checks")
+    show_step(state, 3)
     if state.api_style == "responses":
         view.line(scrub_setup(state, connect.ENCRYPTED_REASONING_EXPLANATION), dim=True)
     if not state.api_style:
@@ -2507,6 +2518,8 @@ def baseline_allows_save(state: WizardState) -> bool:
 
 def run_checks(state: WizardState) -> bool:
     """Run checks; return False when the user cancels."""
+    if not state.no_probe and state.approval != "none":
+        show_step(state, 4)
     if state.api_style in connect.DECISION_API_STYLES:
         checks = ["decision connection", "boolean, choice and score answers"]
         if state.test_media_inputs:
@@ -2648,7 +2661,7 @@ def save_model(state: WizardState) -> bool:
     """Save model; return False when canceled or the baseline is unverified."""
     if not baseline_allows_save(state):
         return False
-    view.step(4, "Save model")
+    show_step(state, 5)
     if state.no_probe or state.approval == "none":
         view.line(scrub_setup(state, "Connection: not tested (manual setup)"), fg="yellow")
     if state.api_style in connect.DECISION_API_STYLES:
@@ -3292,12 +3305,12 @@ def review_guided_proposal(state: WizardState, *, deferred_style=False):
 
 def guided_setup(state: WizardState) -> bool:
     """Prepare a proposal using GETs only; the action below is model-call consent."""
-    if (
-        not select_connection(state)
-        or not select_model(state)
-        or not prepare_metadata(state)
-        or not select_request_interface(state)
-    ):
+    if not select_connection(state) or not select_model(state) or not prepare_metadata(state):
+        return False
+    if not state.metadata_displayed:
+        show_model_metadata(state)  # model details close the Model step
+    show_step(state, 3)
+    if not select_request_interface(state):
         return False
     deferred_style = state.api_style is None
     if deferred_style and state.structured_output_mode_set:
@@ -3336,6 +3349,8 @@ def guided_setup(state: WizardState) -> bool:
     state.approval = state.probe if action == "test" else "none"
     if action == "save":
         keep_untested_media(state)
+    elif not state.no_probe and state.approval != "none":
+        show_step(state, 4)  # approved discovery checks are part of the test
     if deferred_style:
         state.manual_limits_deferred = False
         state.api_style = None

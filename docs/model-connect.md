@@ -32,6 +32,11 @@ proposal and asks:
 
 **Would you like to test these settings?**
 
+Guided setup numbers its steps **1 / 5 Connection**, **2 / 5 Model**, **3 / 5
+Settings** (interface, discovery checks, media, reasoning and the proposal),
+**4 / 5 Test** (only when tests run) and **5 / 5 Save model**; each header is
+shown once, and **Start over?** begins again at step 1.
+
 - **Test now** approves the selected checks with the displayed token budget.
   If the request style is unknown, bounded interface discovery runs first;
   metadata alone never proves an interface works. A known style is tested too.

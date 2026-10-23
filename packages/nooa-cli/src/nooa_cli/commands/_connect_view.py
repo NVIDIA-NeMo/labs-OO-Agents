@@ -450,9 +450,9 @@ def intro(*, checks, output_tokens, budget_tokens, reasoning_output_tokens=4096)
         line("Agent workflow: nooa-connect", dim=True)
 
 
-def step(number, title):
+def step(number, title, *, total=5):
     click.echo()
-    line(f"{number} / 4  ·  {title}", fg="bright_cyan", bold=True)
+    line(f"{number} / {total}  ·  {title}", fg="bright_cyan", bold=True)
     click.echo()
 
 

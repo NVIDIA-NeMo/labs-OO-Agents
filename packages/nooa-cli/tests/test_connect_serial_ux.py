@@ -376,7 +376,7 @@ def test_failed_test_restart_starts_a_fresh_flow_that_can_succeed(monkeypatch, t
     first, second = output.split("Starting again.")
     assert "Save model" not in first and "Write model entry" not in first
     # The whole guided flow runs again from the first step.
-    assert "1 / 4 · Connection" in second and "Context window (tokens)" in second
+    assert "1 / 5 · Connection" in second and "Context window (tokens)" in second
     assert "Would you like to test these settings?" in second
     assert len(posts) == 2
     entry = yaml.safe_load(path.read_text())["models"]["local"]

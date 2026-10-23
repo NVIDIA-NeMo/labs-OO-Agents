@@ -273,3 +273,49 @@ def test_limits_change_does_not_reask_reasoning(monkeypatch, tmp_path):
     after = result.output[result.output.index("What would you like to change?") :]
     assert "Reasoning: Model default (controls unknown)." not in after
     assert yaml.safe_load(path.read_text())["models"]["local"]["max_tokens"] == 2048
+
+
+HEADERS = (
+    "1 / 5 · Connection",
+    "2 / 5 · Model",
+    "3 / 5 · Settings",
+    "4 / 5 · Test",
+    "5 / 5 · Save model",
+)
+
+
+def headers(output):
+    plain = " ".join(output.split())
+    return [h for h in HEADERS if h in plain], [plain.count(h) for h in HEADERS], plain
+
+
+def test_step_headers_once_and_in_order_for_test_and_save(monkeypatch, tmp_path):
+    from tests.unifiedllm.connect.connect_http import response_body
+
+    mock_http(monkeypatch, lambda request: httpx.Response(200, json=response_body("chat")))
+    path = tmp_path / "models.yaml"
+    result = CliRunner().invoke(
+        command,
+        chat_args(path, "--probe", "minimal"),
+        input="32768\n32768\ntest\ny\n",
+    )
+    assert result.exit_code == 0, result.output
+    shown, counts, plain = headers(result.output)
+    assert shown == list(HEADERS) and counts == [1] * 5, result.output
+    positions = [plain.index(h) for h in HEADERS]
+    assert positions == sorted(positions)
+    # Settings covers interface, media, reasoning and the proposal; Test covers the checks.
+    assert positions[1] < plain.index("Model details") < positions[2]
+    assert positions[2] < plain.index("Proposed configuration") < positions[3]
+    assert positions[3] < plain.index("Checking connection") < positions[4]
+
+
+def test_step_headers_skip_test_but_keep_the_total_when_saving_untested(monkeypatch, tmp_path):
+    no_posts(monkeypatch)
+    path = tmp_path / "models.yaml"
+    result = CliRunner().invoke(command, chat_args(path), input="32768\n32768\nsave\ny\n")
+    assert result.exit_code == 0, result.output
+    shown, counts, plain = headers(result.output)
+    assert shown == [h for h in HEADERS if "Test" not in h], result.output
+    assert counts == [1, 1, 1, 0, 1]
+    assert "/ 4 ·" not in plain
