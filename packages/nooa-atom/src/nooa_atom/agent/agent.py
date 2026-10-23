@@ -458,7 +458,7 @@ class AtomAgent(AtomAgentBase):
         self.jobs = _AgentJobs(self, on_change=self._record_work)
         self._shells = work_shell.ShellOwner()
         self.files = Files(self.shell)
-        # Atom's own to-do list: four calls on the surface, TodoManager underneath.
+        # Atom's own to-do list: membership on the list, content on each item.
         self._install_todo_list()
         # Commands run as Shell work; the legacy shell skill stays loaded for
         # self.files and self.repo but is not offered (``/skills`` can still).
@@ -496,12 +496,23 @@ class AtomAgent(AtomAgentBase):
                 doc(RepoTools, Files, TodoList, SkillManager, concise=True)
                 + "\n"
                 + _WORK_EXAMPLES
-                + doc(WorkManager, Job, JobEvent, Shell, CommandResult, Subagent, Question)
+                + doc(
+                    WorkManager,
+                    Job,
+                    JobEvent,
+                    Shell,
+                    CommandResult,
+                    Subagent,
+                    Question,
+                    inline_depth=0,
+                )
+                + "\n"
+                + doc(TaskResult, concise=True)
             ),
             prefix=True,
         )
         self.context["todo_status"] = Context(expr="self.todo.status()")
-        self.context["workspace_state"] = Context(expr="self._workspace_state_context()")
+        self.context["workspace_state"] = Context(self._workspace_state_context(), prefix=True)
         self.context["context_usage"] = Context(
             expr="self.context_stats.format() if self.context_stats else ''"
         )
@@ -531,12 +542,10 @@ class AtomAgent(AtomAgentBase):
         def shown(path: object) -> str:
             return escape(_bounded(str(path), 160), quote=False)
 
-        return (
-            f"Workspace (Shell() starts here; self.files paths are relative to it): "
-            f"{shown(self.cwd)}\n"
-            f"Repository root (the boundary for repo searches): {shown(self.repo.root)}\n"
-            f"`self.v`: {len(self.vars)} persistent vars — list: `print(dict(self.vars))`"
-        )
+        text = f"Workspace: {shown(self.cwd)} — base for file paths and new shells."
+        if self.repo.root != self.cwd:
+            text += f"\nRepository root: {shown(self.repo.root)} (search boundary)."
+        return text
 
     @hidden
     @no_trace

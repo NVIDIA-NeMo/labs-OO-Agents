@@ -112,21 +112,50 @@ vocabulary in all four modes, the status block, and restore.
 
 ## Current results (measured, not evaluated)
 
-First call, workspace path counted as a placeholder (`test_atom_prompt_budget.py`):
+All Atom sessions now execute `handle()`. The saved host `turn_method` selects
+only the policy and static role instructions. The default public agent is
+`nooa_atom.agent:AtomAgent`; no special `--agent` flag is needed.
 
-| agent | mode | system prompt | first-call total | turn docstring |
-|---|---|---|---|---|
-| AtomAgent | handle | 19,737 | 21,807 | 713 |
-| AtomAgent | handle_batch | 19,737 | 22,066 | 948 |
-| AtomAgent | handle_work | 19,737 | 22,581 | 1,467 |
-| AtomAgent | handle_orchestrate | 19,737 | 24,061 | 2,919 |
-| UnifiedAtomAgent | handle | 18,262 | 19,858 | 161 |
-| UnifiedAtomAgent | handle_batch | 18,262 | 19,878 | 157 |
-| UnifiedAtomAgent | handle_work | 18,262 | 19,875 | 158 |
-| UnifiedAtomAgent | handle_orchestrate | 18,262 | 19,915 | 170 |
+Latest first-call measurements (`test_atom_prompt_budget.py`, workspace paths normalized):
 
-The turn docstring is re-sent with every turn; the stable mode guidance moved
-into the class doc (system prompt, 2,637 characters vs. AtomAgent's 3,353), once.
+| Host selection | System prompt | First-call total |
+|---|---:|---:|
+| `handle` | 18,669 | 19,398 |
+| `handle_batch` | 18,897 | 19,626 |
+| `handle_work` | 19,006 | 19,735 |
+| `handle_orchestrate` | 19,200 | 19,929 |
+
+Only the applicable role instructions appear, once in the static prefix.
+Empty externally supplied instructions add no block. Workspace information is
+also static: one line, with a separate repository boundary only when it differs.
+Skills helpers and the work API are documented in `python_cell_tools`; current
+skill inventory is available on demand. The Todo type is documented once.
+
+The old frozen benchmark spike `b612e2d46` used a separately selectable
+`UnifiedAtomAgent` and different turn methods. Its canary/partial results must
+not be presented as results for this rewrite. The paired baseline remains
+`7f9a09dc1`; new runs must pin and report the verified rewrite commit.
+
+## Current shell and messaging behavior
+
+A `Shell` starts lazily and keeps one bash per object. `run()` and a launched
+resource's `send()` share its cwd, variables, functions and serialized commands.
+Use `aclose()` or `async with` for explicit cleanup outside Atom; Atom closes
+its live shells at session shutdown. A temporary shell's background processes
+end when the shell is dropped; retain the object to retain a server. Interrupts
+that require restarting bash report lost state explicitly.
+
+A retained subagent distinguishes a request from a note:
+
+```python
+request = review.send(task)           # await its own TaskResult or Question
+await review.message("also check X")  # admission only; may reach the running turn
+```
+
+Notes that miss the current turn can start another turn; its outcome arrives
+as a resource item. Later requests are queued and matched to their own turn,
+not given the result of an earlier note. Answer a pending question with `send`.
+No old `delegates` delivery path is advertised by this agent.
 
 ## Open questions
 

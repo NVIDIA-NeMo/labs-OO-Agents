@@ -141,10 +141,11 @@ LIMITS = {
     # Re-measured for one handle() with a static role block per turn_method, SkillManager
     # docs in python_cell_tools instead of the <skills> block, and a one-line
     # python_cell_state (2026-10-20): measured values plus about 2% headroom.
-    (ATOM, "handle"): (19_100, 20_200),  # measured 18,716 / 19,786
-    (ATOM, "handle_batch"): (19_400, 20_500),  # measured 18,944 / 20,014
-    (ATOM, "handle_work"): (19_500, 20_600),  # measured 19,053 / 20,123
-    (ATOM, "handle_orchestrate"): (19_700, 20_800),  # measured 19,247 / 20,317
+    # Final prompt cleanup: static workspace, one Todo definition, persistent Shell and Job.message.
+    (ATOM, "handle"): (19_100, 19_800),  # measured 18,669 / 19,398
+    (ATOM, "handle_batch"): (19_300, 20_100),  # measured 18,897 / 19,626
+    (ATOM, "handle_work"): (19_400, 20_200),  # measured 19,006 / 19,735
+    (ATOM, "handle_orchestrate"): (19_600, 20_400),  # measured 19,200 / 19,929
 }
 # The bench guard's system-prompt ceiling; every agent stays under it.
 BENCH_SYSTEM_LIMIT = 20_000
