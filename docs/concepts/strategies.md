@@ -56,6 +56,14 @@ variables, helper definitions persist across cells, and generated code can call
 visible methods and tools on `self`. The loop ends when a value validates
 against the return annotation.
 
+`return_result` is the framework's completion helper. Generated CodeAct cells
+cannot rebind or delete this name in the cell scope, or overwrite it through an
+explicit `global` declaration. Use `result = ...; return_result(result)` instead.
+An invalid cell is rejected before it executes or compiles helper definitions,
+so the model can correct it in the next cell. Independent function parameters,
+function-local variables and comprehension targets may still use the name.
+This is an accidental-rebinding guard, not a Python security boundary.
+
 ### Recovering from a text-only CodeAct turn
 
 CodeAct expects every model turn to call `execute_python` or `return_result`,
