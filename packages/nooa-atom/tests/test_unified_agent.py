@@ -279,6 +279,33 @@ async def test_cancelling_the_resource_closes_the_child_and_session_close_ends_w
             await asyncio.sleep(0.05)
 
 
+async def test_a_shell_timeout_delivers_a_result_and_wakes_the_waiting_turn(
+    registry, options, models
+):
+    """Deadline -> JobEvent -> next turn: a command that never exits still ends the wait."""
+    models.scripts[None] = [
+        cell(
+            "assert Shell().timeout == 1800.0  # the default stays long\n"
+            "self.jobs.launch(Shell(timeout=0.5).run('sleep 30; echo never'), name='slow')\n"
+            "return_result(Waiting(explanation='slow command running', on=['slow']))"
+        ),
+        cell(
+            "[event] = notification['jobs']\n"
+            "assert (event.name, event.kind) == ('slow', 'done'), event\n"
+            "r = event.value\n"
+            "assert isinstance(r, CommandResult), r\n"
+            "assert (r.returncode, r.timed_out, r.stdout) == (124, True, ''), r\n"
+            "return_result(Done(explanation='timed out as expected'))"
+        ),
+    ]
+    root = await registry.create(options)
+    outcome = await asyncio.wait_for(root.prompt("run it"), TIMEOUT)
+    assert outcome == Done(explanation="timed out as expected")
+    assert len(models.llms[None].calls) == 2  # the timeout's event woke the second turn
+    assert root._agent.jobs.get("slow").status == "done"
+    assert root._agent.jobs.running() == []
+
+
 async def test_shell_starts_in_the_workspace(registry, options, models):
     models.scripts[None] = [
         cell(
