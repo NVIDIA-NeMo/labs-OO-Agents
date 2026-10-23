@@ -942,5 +942,6 @@ def _todo_prompt(todo: Todo) -> str:
         lines += ["", todo.description]
     if todo.comments:
         lines += ["", "Notes so far:"]
-        lines += [f"- {comment.body}" for comment in todo.comments]
+        # A core TodoComment carries .body; an Atom Todo keeps notes as plain text.
+        lines += [f"- {getattr(comment, 'body', comment)}" for comment in todo.comments]
     return "\n".join(lines)

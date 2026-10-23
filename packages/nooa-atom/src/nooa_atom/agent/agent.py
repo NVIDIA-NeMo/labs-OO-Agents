@@ -389,7 +389,8 @@ class AtomAgent(AtomAgentBase):
 
     ``self.files`` reads and edits files, ``self.repo`` finds definitions and
     references, ``self.todo`` is your plan for multi-step work (activate the
-    item you work on, comment findings and checks, complete it), and ``self.v`` keeps
+    item you work on, append findings and checks to its ``comments``, complete
+    it), and ``self.v`` keeps
     durable facts (cell locals last one method call). Everything else that
     runs is a job on ``self.jobs``: commands (``Shell``) and child agents
     (``Subagent``); the python_cell_tools block shows each way to run them.
