@@ -40,8 +40,11 @@ from nooa.context_blocks.formatter import (
 from nooa.context_blocks.models import (
     BlockMetadata,
     Context,
+    ContextBlock,
     ContextWindowStats,
     DynamicContext,
+    ExpressionContextBlock,
+    LiteralContextBlock,
     RenderedMessage,
     ResolvedBlock,
     Role,
@@ -58,7 +61,10 @@ from nooa.context_blocks.scoped import ScopedContext
 __all__ = [
     # Core types
     "Context",
+    "ContextBlock",
     "DynamicContext",
+    "LiteralContextBlock",
+    "ExpressionContextBlock",
     "ResolvedBlock",
     "Role",
     "BlockMetadata",
