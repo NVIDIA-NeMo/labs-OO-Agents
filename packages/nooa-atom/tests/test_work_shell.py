@@ -187,3 +187,66 @@ async def test_shell_reports_confirmed_cwd_and_busy_state(manager, tmp_path):
     assert one.stdout == "/\n" and one.cwd == str(tmp_path)  # a one-shot cd does not last
     await manager.aclose()
     assert shell.summary() == "closed"
+
+
+# ---- regressions from the independent review of 83ae65c77 ----
+
+
+async def test_stdin_feed_shares_the_command_deadline():
+    started = asyncio.get_running_loop().time()
+    r = await asyncio.wait_for(Shell(timeout=1).run("sleep 30", stdin="x" * (8 << 20)), 10)
+    assert r.timed_out and r.returncode == 124
+    assert asyncio.get_running_loop().time() - started < 8
+
+
+async def test_bash_exit_is_reported_and_cancel_still_interrupts(manager, tmp_path):
+    shell = Shell(tmp_path)
+    sh = manager.launch(shell, name="sh")
+    await sh.send("export FOO=1")
+    ended = await sh.send("exit 0")
+    assert "bash ended during this command" in ended.stderr
+    assert "restarted, variables lost" in sh.summary
+    r = await sh.send('echo "FOO=$FOO"')
+    assert r.stdout == "FOO=\n"
+    slow = sh.send("sleep 30")
+    await asyncio.sleep(0.5)
+    await asyncio.wait_for(slow.cancel(), 10)
+    assert slow.error is None  # interrupted in the new bash, not restarted
+    assert "restarted" not in (await sh.send("true")).stderr
+    pid = int((await sh.send("echo $$")).stdout)
+    assert shell._bash is not None and shell._bash[0] == pid
+
+
+async def test_same_shell_cannot_be_entered_twice(manager, tmp_path):
+    shell = Shell(tmp_path)
+    first = manager.launch(shell, name="first")
+    second = manager.launch(shell, name="second")
+    request = second.send("true")
+    with pytest.raises(RuntimeError, match="already running|did not start"):
+        await asyncio.wait_for(request._wait(), 10)
+    assert second.status == "failed"
+    pid = int((await first.send("echo $$")).stdout)
+    await manager.aclose()
+    await asyncio.sleep(0.1)
+    assert not alive(pid)
+
+
+async def test_output_limit_is_enforced_while_writing(manager, tmp_path):
+    r = await manager.launch(Shell(max_output=1000).run("head -c 100000 /dev/zero | tr '\\0' a"))
+    assert Path(r.stdout_path).stat().st_size == 1000
+    assert "over the 1,000-byte output limit" in r.stdout and "first 1,000 of 100,000" in r.stdout
+    assert r.stdout.endswith("a" * 100)  # the tail is still shown
+    sh = manager.launch(Shell(tmp_path, max_output=1000), name="sh")
+    r = await sh.send("head -c 50000 /dev/zero | tr '\\0' b; echo done >&2")
+    assert Path(r.stdout_path).stat().st_size == 1000 and r.stderr == "done\n"
+    r = await manager.launch(Shell(timeout=1, max_output=10_000).run("yes"))
+    assert r.timed_out and Path(r.stdout_path).stat().st_size == 10_000
+
+
+async def test_background_job_output_does_not_block_the_session(manager, tmp_path):
+    sh = manager.launch(Shell(tmp_path, max_output=2000), name="sh")
+    r = await asyncio.wait_for(sh.send("(sleep 1; yes | head -c 100000) & echo started"), 10)
+    assert r.stdout == "started\n"  # returned before the background job wrote anything
+    await asyncio.sleep(2)  # the background writer is drained (and capped), not blocked
+    r = await asyncio.wait_for(sh.send("jobs -r | wc -l"), 10)
+    assert r.stdout.strip() == "0"
