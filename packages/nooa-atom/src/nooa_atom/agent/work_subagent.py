@@ -269,7 +269,7 @@ def _child_name(port: Any, job_name: str | None) -> str:
 
 
 def _todo_text(todo: Todo) -> str:
-    from nooa_atom.agent.agent import _todo_prompt
+    from nooa_atom.agent.base import _todo_prompt
 
     return _todo_prompt(todo)
 
@@ -285,7 +285,7 @@ async def _start(
     kept: bool,
 ) -> Any:
     """Create the routed child; the route is installed before its first turn."""
-    from nooa_atom.agent.agent import _child_prompt
+    from nooa_atom.agent.base import _child_prompt
     from nooa_atom.session.names import child_path
     from nooa_atom.session.session import as_data
 

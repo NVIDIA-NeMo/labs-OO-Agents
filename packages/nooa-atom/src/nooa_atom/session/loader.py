@@ -26,6 +26,7 @@ AgentFactory = Callable[[SessionOptions, StorageManager], InteractiveAgent]
 
 
 ATOM_AGENT = "nooa_atom.agent:AtomAgent"
+"""The Atom agent. ``nooa_atom.agent.agent:AtomAgent`` names the same class."""
 LEGACY_AGENT_SPECS = {
     "nooa_cli.tui.agent:TUIAgent": ATOM_AGENT,
     "nooa_cli.coding.legacy_agent:TUIAgent": ATOM_AGENT,
@@ -45,6 +46,8 @@ LEGACY_AGENT_SPECS = {
     # prompt wording and the missing context-usage block, so its saved sessions
     # (and those of the experimental agents before it) load as AtomAgent.
     "nooa_atom.agent:ExperimentalAtomAgent": ATOM_AGENT,
+    # The spike spelling of today's AtomAgent (before it became the Atom agent).
+    "nooa_atom.agent.unified:UnifiedAtomAgent": ATOM_AGENT,
 }
 """Agent specs older hosts saved, and the spec that loads the class that replaced each."""
 

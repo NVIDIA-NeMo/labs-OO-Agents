@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""The experimental ``UnifiedAtomAgent``: shells and subagents as ``self.jobs`` work.
+"""The experimental ``AtomAgent``: shells and subagents as ``self.jobs`` work.
 
 Real sessions (``SessionRegistry``), fake models: each session's model is
 scripted by its name (``None`` for the root), and a ``Subagent`` child is
@@ -19,7 +19,7 @@ from nooa_atom.session.store import SessionStore
 
 from nooa.interactive import Done
 
-UNIFIED = "nooa_atom.agent.unified:UnifiedAtomAgent"
+UNIFIED = "nooa_atom.agent:AtomAgent"
 TIMEOUT = 60
 
 WORK_RESULT = (
@@ -461,7 +461,7 @@ async def test_first_call_offers_one_work_vocabulary(
 
 
 def test_turn_docs_are_short_and_name_their_mode():
-    from nooa_atom.agent.unified import UnifiedAtomAgent
+    from nooa_atom.agent.agent import AtomAgent
 
     for method, mode in (
         ("handle", "interactive"),
@@ -469,28 +469,28 @@ def test_turn_docs_are_short_and_name_their_mode():
         ("handle_work", "child"),
         ("handle_orchestrate", "orchestrator"),
     ):
-        text = getattr(UnifiedAtomAgent, method).__doc__
+        text = getattr(AtomAgent, method).__doc__
         assert len(text) <= 300, (method, len(text))
         assert f"(mode: {mode})" in text
-        assert f"- {mode}" in UnifiedAtomAgent.__doc__ or mode in UnifiedAtomAgent.__doc__
+        assert f"- {mode}" in AtomAgent.__doc__ or mode in AtomAgent.__doc__
 
 
 def test_cells_see_only_the_unified_modules_names():
-    import nooa_atom.agent.unified as unified
+    import nooa_atom.agent.agent as unified
 
     from nooa.agentdoc.visibility import filter_module_globals
 
     names = set(filter_module_globals(unified))
     assert {"Shell", "Subagent", "Job", "JobEvent", "Question", "Todo", "TaskResult"} <= names
-    assert not names & {"ChildRef", "ChildResult", "JobsApi", "ActivityShellTools", "AtomAgent"}
+    assert not names & {"ChildRef", "ChildResult", "JobsApi", "ActivityShellTools", "AtomAgentBase"}
 
 
 async def _agent(tmp_path):
-    from nooa_atom.agent.unified import UnifiedAtomAgent
+    from nooa_atom.agent.agent import AtomAgent
 
     from nooa.unifiedllm import FakeLLMClient
 
-    return UnifiedAtomAgent(
+    return AtomAgent(
         llm=FakeLLMClient([]), cwd=tmp_path, libs_dir=tmp_path / "libs", skills_dirs=[]
     )
 
@@ -550,15 +550,20 @@ async def test_after_restore_reports_lost_jobs_once(tmp_path):
         await agent.aclose()
 
 
-def test_legacy_atom_agent_is_unchanged():
-    """The experiment hides members on its own class only."""
+def test_public_atom_agent_hides_the_base_surface():
+    """The public AtomAgent hides the private base's delegation and JobsApi members."""
     from nooa_atom.agent.agent import AtomAgent
+    from nooa_atom.agent.base import AtomAgentBase
 
     from nooa.agentdoc import doc
 
-    legacy = doc(AtomAgent, concise=True)
+    base = doc(AtomAgentBase, concise=True)
     for name in ("shell:", "delegate(", "spawn(", "jobs: JobsApi"):
-        assert name in legacy, name
+        assert name in base, name
+    public = doc(AtomAgent, concise=True)
+    for name in ("delegate(", "spawn(", "jobs: JobsApi"):
+        assert name not in public, name
+    assert AtomAgent.__name__ == "AtomAgent" and issubclass(AtomAgent, AtomAgentBase)
 
 
 async def test_reserved_names_and_snapshots(tmp_path):

@@ -26,7 +26,6 @@ from nooa_atom.session.store import SessionStore
 from nooa.unifiedllm import FakeLLMClient
 
 ATOM = "nooa_atom.agent:AtomAgent"
-UNIFIED = "nooa_atom.agent.unified:UnifiedAtomAgent"
 RESULT = (
     "return_result(Done(explanation='x', result=TaskResult("
     "solution_description='a', evidence='b', how_to_verify='c')))"
@@ -134,18 +133,15 @@ RESULT = (
 # under BENCH_SYSTEM_LIMIT. Limits: measured totals plus about 2%, rounded up
 # to the next 100 (system: next 100).
 LIMITS = {
-    (ATOM, "handle"): (19_800, 22_300),  # measured 19,737 / 21,807
-    (ATOM, "handle_batch"): (19_800, 22_600),  # measured 19,737 / 22,066
-    (ATOM, "handle_work"): (19_800, 23_100),  # measured 19,737 / 22,581
-    (ATOM, "handle_orchestrate"): (19_800, 24_600),  # measured 19,737 / 24,061
     # The experimental unified-work agent (spike/atom-unified-work): one
     # self.jobs vocabulary (WorkManager, Job, Shell, Subagent) documented in
     # python_cell_tools, the stable mode guidance in the class doc, and turn
     # docs under 300 characters. Measured values plus about 2%.
-    (UNIFIED, "handle"): (18_600, 20_200),  # measured 18,262 / 19,858
-    (UNIFIED, "handle_batch"): (18_600, 20_200),  # measured 18,262 / 19,878
-    (UNIFIED, "handle_work"): (18_600, 20_200),  # measured 18,262 / 19,875
-    (UNIFIED, "handle_orchestrate"): (18_600, 20_300),  # measured 18,262 / 19,915
+    # The spike's UnifiedAtomAgent became AtomAgent (2026-10-20): its rows replace the old ones.
+    (ATOM, "handle"): (18_600, 20_200),  # measured 18,262 / 19,858
+    (ATOM, "handle_batch"): (18_600, 20_200),  # measured 18,262 / 19,878
+    (ATOM, "handle_work"): (18_600, 20_200),  # measured 18,262 / 19,875
+    (ATOM, "handle_orchestrate"): (18_600, 20_300),  # measured 18,262 / 19,915
 }
 # The bench guard's system-prompt ceiling; every agent stays under it.
 BENCH_SYSTEM_LIMIT = 20_000
