@@ -908,6 +908,20 @@ def review_replacement_route(state: WizardState, previous, *, discovering=False)
     return True
 
 
+class RestartSetup(Exception):
+    """The user chose to start setup again from the first step."""
+
+
+def offer_restart(state: WizardState) -> bool:
+    """After a failure, the only choice is to start over; return False to stop."""
+    if state.yes:
+        return False
+    if prompts.confirm("Start over?", default=True):
+        raise RestartSetup
+    view.note("Nothing was saved. Give the prompt above to an agent, or run nooa connect again.")
+    return False
+
+
 def check_interfaces(state: WizardState) -> bool:
     """Check interfaces; return False when the user cancels."""
     if state.structured_output_mode_set and not state.api_style:
@@ -1045,78 +1059,8 @@ def check_interfaces(state: WizardState) -> bool:
                         )
                     )
                     return False
-                view.line(scrub_setup(state, "Change the connection settings and try again."))
-                action = prompts.prompt(
-                    "Next step",
-                    choices=("key", "server", "retry", "longer", "cancel"),
-                    default="longer" if slow else "key",
-                    labels={
-                        "key": "Change key",
-                        "server": "Edit server and model",
-                        "retry": "Try again unchanged",
-                        "longer": "Retry one interface with a 120-second timeout",
-                        "cancel": "Exit without saving",
-                    },
-                )
-                if action == "cancel":
-                    view.note(scrub_setup(state, "Setup cancelled. Nothing was saved."))
-                    return False
-                if action == "longer":
-                    retry_styles = (
-                        prompts.prompt(
-                            "Interface to retry",
-                            choices=tuple(state.interfaces.results),
-                            labels={
-                                style: prompts.choice_label(style)
-                                for style in state.interfaces.results
-                            },
-                            default=state.default_style,
-                        ),
-                    )
-                    interface_timeout = 120
-                    continue
-                retry_styles = ("chat", "responses", "anthropic", *state.interface_endpoints)
-                interface_timeout = 30
-                if action == "key":
-                    source = prompts.prompt(
-                        "Key environment variable (or paste for a temporary key)",
-                        default=state.api_key_env or "paste",
-                        suggestions=prompts.environment_names(["paste"]),
-                    )
-                    if source == "paste":
-                        state.api_key = prompts.prompt(
-                            "API key (used only for this setup)", hide_input=True
-                        )
-                    else:
-                        state.api_key_env = source
-                        state.api_key = os.environ.get(source)
-                        if not state.api_key:
-                            view.line(
-                                scrub_setup(
-                                    state,
-                                    "That variable is unset or empty. You can paste a temporary key instead.",
-                                )
-                            )
-                            state.api_key = prompts.prompt(
-                                "API key (used only for this setup)", hide_input=True
-                            )
-                elif action == "server":
-                    previous = (state.endpoint, state.model)
-                    state.endpoint = connect.normalize_endpoint(
-                        prompts.prompt(
-                            "Model server URL",
-                            default=state.endpoint,
-                            suggestions=state.server_urls,
-                            open_menu=True,
-                        )
-                    )
-                    state.model = prompts.prompt("Exact model ID", default=state.model)
-                    if not review_replacement_route(state, previous, discovering=True):
-                        return False
-                    retry_styles = ("chat", "responses", "anthropic")
-                    if state.approval == "none":
-                        available = retry_styles
-                        break
+                # No working interface: show the result and offer a fresh start.
+                return offer_restart(state)
             if state.interfaces is None:
                 view.note("Replacement API formats have not been tested; choose one explicitly.")
             else:
@@ -3565,41 +3509,38 @@ def guided_setup(state: WizardState) -> bool:
             state.test_media_inputs = None
         if not configure_checks(state):
             return False
-    while not run_checks(state):
-        # The failure and an agent prompt are already shown; offer one retry path.
-        if not prompts.confirm("Try again with different settings?", default=False):
-            view.note(
-                "Nothing was saved. Give the prompt above to an agent, or run nooa connect again."
-            )
-            return False
-        if not configure_checks(state):
-            return False
-        show_guided_proposal(state, updated=True)
-        action = review_guided_proposal(state)
-        if action is None:
-            return False
-        state.approval = state.probe if action == "test" else "none"
-        if action == "save":
-            state.test_media_inputs = None
-        if not configure_checks(state):
-            return False
+    if not run_checks(state):
+        # The failure and an agent prompt are already shown.
+        return offer_restart(state)
     return save_model(state)
 
 
-def run_wizard(**options):
-    """Run ordered steps with one shared budget and an explicit save decision."""
+def new_state(options) -> WizardState:
     state = WizardState(**options)
     state.path = Path(state.output) if state.output else paths.get_user_dir("llm_config.yaml")
     state.api_key = None
     state.explicit_key_env = state.api_key_env is not None
     state.editing = None
+    return state
+
+
+def run_wizard(**options):
+    """Run ordered steps with one shared budget and an explicit save decision."""
+    state = new_state(options)
     try:
         if not state.yes:
-            state.guided = True
-            state.guided_media_explicit = (
-                state.media_inputs is not None or state.test_media_inputs is not None
-            )
-            succeeded = guided_setup(state)
+            while True:
+                state.guided = True
+                state.guided_media_explicit = (
+                    state.media_inputs is not None or state.test_media_inputs is not None
+                )
+                try:
+                    succeeded = guided_setup(state)
+                    break
+                except RestartSetup:
+                    click.echo()
+                    view.note("Starting again.")
+                    state = new_state(options)
             if not succeeded and state.test_failed:
                 view.note(
                     "Approved connection test failed or was cancelled. Nothing saved.", err=True

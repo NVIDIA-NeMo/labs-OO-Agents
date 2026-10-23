@@ -94,12 +94,20 @@ def test_failed_configured_baseline_stops_before_save(monkeypatch, tmp_path, edi
         args += ["--budget-tokens", "1"]
     if yes:
         args += ["--yes"]
-    # Extra default-yes answers must not be consumed by ordinary save/key prompts.
+    # Decline the restart offer; extra default answers must not reach save/key prompts.
     result = CliRunner().invoke(
         command,
         args,
         input="PRIVATE-KEY\n"
-        + ("" if yes else ("" if editing else "262144\n262144\n") + "test\n")
+        + (
+            ""
+            if yes
+            else ("" if editing else "262144\n262144\n")
+            + "test\n"
+            + ("\n" if editing else "")
+            # Decline "Start over?" after the failed test.
+            + "n\n"
+        )
         + "\n" * 12,
     )
     assert result.exit_code != 0, result.output
@@ -163,7 +171,15 @@ def test_missing_baseline_evidence_cannot_reach_wizard_save(
         command,
         args + (["--yes"] if yes else []),
         input="PRIVATE-KEY\n"
-        + ("" if yes else ("" if editing else "262144\n262144\n") + "test\n")
+        + (
+            ""
+            if yes
+            else ("" if editing else "262144\n262144\n")
+            + "test\n"
+            + ("\n" if editing else "")
+            # Decline "Start over?" after the failed test.
+            + "n\n"
+        )
         + "\n" * 12,
     )
     assert result.exit_code != 0, result.output

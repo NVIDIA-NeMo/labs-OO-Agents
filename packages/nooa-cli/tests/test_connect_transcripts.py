@@ -174,9 +174,10 @@ def test_full_check_transcript_and_failure_no_save(monkeypatch, tmp_path, column
     rows = click.unstyle(result.output).splitlines()
     if failure:
         # A failed baseline always prints the copyable agent prompt verbatim.
-        assert "Agent diagnostic prompt:" in output and "Try again with" in output
+        assert "Agent diagnostic prompt:" in output and "Start over?" in output
+        assert "Nothing was saved" in output and "Starting again." not in output
         start = next(i for i, row in enumerate(rows) if "Agent diagnostic prompt:" in row)
-        end = next(i for i, row in enumerate(rows) if "Try again with" in row)
+        end = next(i for i, row in enumerate(rows) if "Start over?" in row)
         rows = rows[:start] + rows[end:]
     assert all(len(row) <= columns for row in rows)
     if color == "no_color" or color is False:

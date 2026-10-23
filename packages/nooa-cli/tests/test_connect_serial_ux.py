@@ -297,7 +297,7 @@ def test_yes_approved_failure_nonzero_and_no_key_or_registry(monkeypatch, tmp_pa
     assert len(calls) == 1
 
 
-def test_unknown_chat_failure_plain_format_recovery_cumulative_budget(monkeypatch, tmp_path):
+def test_unknown_chat_failure_restart_with_plain_format(monkeypatch, tmp_path):
     posts = []
 
     def handle(request):
@@ -314,37 +314,79 @@ def test_unknown_chat_failure_plain_format_recovery_cumulative_budget(monkeypatc
     result = CliRunner().invoke(
         command,
         args(path, style="chat") + ["--no-catalogue", "--budget-tokens", "9216"],
-        # A failed baseline offers one retry; the answer format lives under Change settings.
-        input="32768\n32768\ntest\ny\nchange\nstructured\nanthropic\ntest\ny\n",
+        # The failed baseline offers "Start over?"; the fresh flow changes the answer format.
+        input="32768\n32768\ntest\ny\n32768\n32768\nchange\nstructured\nanthropic\ntest\ny\n",
     )
     assert result.exit_code == 0, result.output
+    assert result.output.count("Starting again.") == 1
     assert len(posts) == 2
     entry = yaml.safe_load(path.read_text())["models"]["local"]
     assert entry["structured_output_mode"] == "anthropic"
     assert "Change answer format" in result.output
 
 
-def test_retry_exhaustion_sends_zero_extra_posts(monkeypatch, tmp_path):
+def test_failed_test_declining_restart_exits_with_nothing_saved(monkeypatch, tmp_path):
     posts = []
 
     def handle(request):
         posts.append(request)
-        return httpx.Response(400, json={"error": {"message": "failed"}})
+        return httpx.Response(400, json={"error": {"message": "PRIVATE-KEY failed"}})
 
     mock_http(monkeypatch, handle)
     path = tmp_path / "models.yaml"
     result = CliRunner().invoke(
         command,
-        args(path, style="chat") + ["--no-catalogue", "--budget-tokens", "4608"],
-        input="32768\n32768\ntest\ny\ntest\nn\n",
+        args(path, style="chat") + ["--no-catalogue"],
+        # Extra default answers must not be consumed after "n".
+        input="32768\n32768\ntest\nn\n" + "\n" * 6,
     )
+    output = " ".join(result.output.split())
     assert result.exit_code != 0, result.output
-    assert len(posts) == 1 and not path.exists()
-    assert "budget used up" in result.output
+    assert "Test failed." in output
+    assert len(posts) == 1 and not path.exists()  # No extra POSTs after the failure.
+    assert not (tmp_path / "user" / "secrets.yaml").exists()
+    assert "Agent diagnostic prompt:" in result.output
+    assert "Start over? [Y/n]: n" in output
+    assert "Nothing was saved. Give the prompt above to an agent, or run nooa connect again." in (
+        output
+    )
+    assert "Starting again." not in output and "Try again with different settings?" not in output
+    assert "Save model" not in output and "Write model entry" not in output
+    assert "PRIVATE-KEY" not in result.output
+
+
+def test_failed_test_restart_starts_a_fresh_flow_that_can_succeed(monkeypatch, tmp_path):
+    posts = []
+
+    def handle(request):
+        posts.append(request)
+        if len(posts) == 1:
+            return httpx.Response(500, json={"error": {"message": "PRIVATE-KEY temporary"}})
+        return httpx.Response(200, json=response_body("chat", '{"value":323}'))
+
+    mock_http(monkeypatch, handle)
+    path = tmp_path / "models.yaml"
+    result = CliRunner().invoke(
+        command,
+        args(path, style="chat") + ["--no-catalogue"],
+        input="32768\n32768\ntest\ny\n16384\n16384\ntest\ny\n",
+    )
+    assert result.exit_code == 0, result.output
+    output = " ".join(result.output.split())
+    assert "Start over? [Y/n]: y" in output
+    first, second = output.split("Starting again.")
+    assert "Save model" not in first and "Write model entry" not in first
+    # The whole guided flow runs again from the first step.
+    assert "1 / 4 · Connection" in second and "Context window (tokens)" in second
+    assert "Would you like to test these settings?" in second
+    assert len(posts) == 2
+    entry = yaml.safe_load(path.read_text())["models"]["local"]
+    assert entry["context_window"] == 16384  # Only the second attempt's answers are saved.
+    assert "PRIVATE-KEY" not in result.output and "PRIVATE-KEY" not in path.read_text()
 
 
 @pytest.mark.parametrize("save_untested", [False, True])
-def test_discovery_failure_changed_unknown_route_requires_new_manual_review(
+def test_discovery_failure_restart_unknown_route_requires_new_manual_review(
     monkeypatch, tmp_path, save_untested
 ):
     events = []
@@ -372,8 +414,8 @@ def test_discovery_failure_changed_unknown_route_requires_new_manual_review(
         reviews = [
             answer for label, answer in events if label == "Would you like to test these settings?"
         ]
-        # Discover approved the a.test checks; b.test needs its own fresh review.
-        assert reviews in (["test"], ["test", "test"])
+        # Discover approved the b.test interface checks; the baseline needs its own review.
+        assert reviews in ([], ["test"])
         assert "PRIVATE-KEY" not in str(request.headers)
         if request.url.path == "/v1/chat/completions":
             return httpx.Response(200, json=response_body("chat"))
@@ -382,11 +424,8 @@ def test_discovery_failure_changed_unknown_route_requires_new_manual_review(
     mock_http(monkeypatch, handle)
     path = tmp_path / "models.yaml"
     flags = [
-        "A",
         "--as",
         "local",
-        "--endpoint",
-        "https://a.test/v1",
         "--api-key-env",
         "UX_KEY",
         "--media-inputs",
@@ -398,20 +437,26 @@ def test_discovery_failure_changed_unknown_route_requires_new_manual_review(
         "--output",
         str(path),
     ]
-    answers = "discover\nserver\nhttps://b.test/v1\nB\n\n32768\n16384\n" + (
-        "save\ny\nchat\nsave\ny\n" if save_untested else "test\ntest\ny\n"
+    # Route A fails discovery; "Start over?" restarts at the provider step for route B.
+    answers = "custom\nhttps://a.test/v1\nA\ndiscover\ny\ncustom\nhttps://b.test/v1\nB\n" + (
+        "chat\nsave\ny\n" if save_untested else "discover\ntest\ny\n"
     )
     result = CliRunner().invoke(command, flags, input=answers)
     assert result.exit_code == 0, result.output
     entry = yaml.safe_load(path.read_text())["models"]["local"]
-    assert entry["model_name"] == "openai/B" and entry["context_window"] == 16384
-    assert entry["api_key_env"] == "" and entry["max_tokens"] == 4096
-    assert result.output.count("Context window (tokens)") == 1
-    assert "Previous source, context and test proof no longer apply" in " ".join(
-        result.output.split()
-    )
-    # The replacement route's review, then the review of the selected interface.
-    assert result.output.count("Would you like to test these settings?") == 2
+    assert entry["model_name"] == "openai/B"
+    assert "context_window" not in entry  # Route A's listed limits do not carry over.
+    # The fresh flow found the key in UX_KEY again without printing it.
+    assert entry["api_key_env"] == "UX_KEY" and entry["max_tokens"] == 4096
+    assert "PRIVATE-KEY" not in result.output and "PRIVATE-KEY" not in path.read_text()
+    first, second = " ".join(result.output.split()).split("Starting again.")
+    assert "Start over? [Y/n]: y" in first
+    # Route A's listed limits apply only to the first attempt; B is entered fresh.
+    assert "99,999" in first and "99,999" not in second
+    assert "Choose a provider" in second and "Model server URL" in second
+    # Only the restarted flow's proposal is reviewed.
+    assert first.count("Would you like to test these settings?") == 0
+    assert second.count("Would you like to test these settings?") == 1
     bposts = [r for r in calls if r.method == "POST" and r.url.host == "b.test"]
     assert not bposts if save_untested else bool(bposts)
     assert all(json.loads(r.content)["model"] == "B" for r in bposts)

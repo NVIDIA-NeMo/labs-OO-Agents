@@ -384,7 +384,8 @@ def test_offline_cli_needs_no_key_and_writes_generated_registry(tmp_path, monkey
     assert "not approved" in result.output
 
 
-def test_recovery_edit_server_preserves_budget_and_saves_only_new_route(tmp_path, monkeypatch):
+def test_discovery_failure_restart_saves_only_the_new_route(tmp_path, monkeypatch):
+    """No working interface: 'Start over' runs a fresh flow; only the new route is saved."""
     import httpx
 
     sent = []
@@ -406,11 +407,8 @@ def test_recovery_edit_server_preserves_budget_and_saves_only_new_route(tmp_path
     result = CliRunner().invoke(
         command,
         [
-            "old-model",
             "--as",
             "local",
-            "--endpoint",
-            "https://old.example/v1",
             "--api-key-env",
             "",
             "--no-catalogue",
@@ -418,28 +416,34 @@ def test_recovery_edit_server_preserves_budget_and_saves_only_new_route(tmp_path
             "minimal",
             "--max-tokens",
             "200",
-            # Small discovery cap so reasoning checks never fit this budget.
             "--output-tokens",
             "200",
+            # Each fresh flow gets its own allowance; enough for discovery plus the test.
             "--budget-tokens",
-            "6000",
+            "12000",
             "--output",
             str(path),
         ],
-        # Discover runs interface checks at once; the server edit precedes the proposal.
-        input="262144\n262144\ndiscover\nserver\nhttps://new.example/v1\nnew-model\n"
-        "65536\n32768\ntest\ntest\ny\n",
+        # First flow fails discovery; "y" starts over from the provider step.
+        input="custom\nhttps://old.example/v1\nold-model\n262144\n262144\ndiscover\ny\n"
+        "custom\nhttps://new.example/v1\nnew-model\n65536\n32768\ndiscover\ntest\ny\n",
     )
     assert result.exit_code == 0, result.output
-    # The replacement route asks before rediscovery, then reviews the chosen route.
-    assert result.output.count("Would you like to test these settings?") == 2
-    assert "Choose an available value" not in result.output
-    assert [r.url.host for r in sent] == ["old.example"] * 3 + ["new.example"] * 4
-    assert "response_format" not in json.loads(sent[3].content)  # Plain discovery acceptance.
+    output = " ".join(result.output.split())
+    assert "Start over? [Y/n]: y" in output and "Starting again." in output
+    restarted = output.split("Starting again.", 1)[1]
+    assert "Choose a provider" in restarted and "Model server URL" in restarted
+    assert "Next step" not in output and "Try again with different settings?" not in output
+    # One model listing plus three failed interface checks on the old route,
+    # then listing, discovery and the configured baseline on the new one.
+    hosts = [r.url.host for r in sent]
+    assert hosts == ["old.example"] * 4 + ["new.example"] * (len(hosts) - 4)
+    assert "response_format" not in json.loads(sent[5].content)  # Plain discovery acceptance.
     assert "response_format" in json.loads(sent[-1].content)  # Fresh configured baseline.
     entry = yaml.safe_load(path.read_text())["models"]["local"]
     assert entry["api_base"] == "https://new.example/v1"
     assert entry["model_name"] == "openai/new-model"
+    assert "old.example" not in path.read_text()
     assert "provenance" not in entry  # budget accounting stays in the session
 
 
@@ -945,7 +949,8 @@ def test_interface_menu_only_offers_successes_or_explicit_manual_escape(
         ],
         input="262144\n262144\ndiscover\ntest\nresponses\ntest\ny\n"
         if responses_ok
-        else "262144\n262144\ndiscover\ntest\ncancel\n",
+        # No working interface: decline "Start over?".
+        else "262144\n262144\ndiscover\nn\n",
     )
     if responses_ok:
         assert result.exit_code == 0, result.output
@@ -957,17 +962,21 @@ def test_interface_menu_only_offers_successes_or_explicit_manual_escape(
         assert not path.exists()
         assert "Nothing was saved" in result.output
         assert "connection check failed" in result.output.lower()
+        assert "Start over? [Y/n]: n" in result.output
+        assert "Next step" not in result.output and "Starting again." not in result.output
 
 
 @pytest.mark.parametrize("recover", [True, False])
-def test_authentication_recovery_keeps_budget_and_secrets(tmp_path, monkeypatch, recover):
+def test_authentication_failure_restart_keeps_secrets_out(tmp_path, monkeypatch, recover):
+    """A rejected key fails discovery; starting over with a new key can succeed."""
     import httpx
     import litellm
 
     from nooa.unifiedllm import connect
 
-    monkeypatch.setenv("CONNECT_BAD", "wrong-test-secret")
-    monkeypatch.setenv("CONNECT_GOOD", "right-test-secret")
+    monkeypatch.delenv("CONNECT_GOOD", raising=False)
+    monkeypatch.setenv("NEMO_OO_USER_DIR", str(tmp_path / "user"))
+    secrets_file = tmp_path / "user" / "secrets.yaml"
     monkeypatch.setattr(litellm, "suppress_debug_info", False)
     sent = []
 
@@ -990,7 +999,8 @@ def test_authentication_recovery_keeps_budget_and_secrets(tmp_path, monkeypatch,
             "--endpoint",
             "https://api.test/v1",
             "--api-key-env",
-            "CONNECT_BAD",
+            "CONNECT_GOOD",
+            "--prompt-key",
             "--no-catalogue",
             "--show-diagnostics",
             "--probe",
@@ -998,21 +1008,23 @@ def test_authentication_recovery_keeps_budget_and_secrets(tmp_path, monkeypatch,
             "--output",
             str(path),
         ],
-        # Discover runs interface checks at once, so key recovery precedes the proposal.
-        input="262144\n262144\ndiscover\nkey\nCONNECT_GOOD\n"
-        "change\nchange\n262144\n262144\nrecommended\ntest\ny\n"
-        if recover
-        else "262144\n262144\ndiscover\ncancel\n",
+        # Discover runs interface checks at once; the rejected key fails before any proposal.
+        input="wrong-test-secret\n262144\n262144\ndiscover\n"
+        + ("y\nright-test-secret\n262144\n262144\ndiscover\ntest\ny\ny\n" if recover else "n\n"),
     )
     assert result.exit_code == (0 if recover else 1), result.output
-    assert result.output.count("Would you like to test these settings?") == (2 if recover else 0)
+    first = result.output.split("Starting again.", 1)[0]
     assert "Approve setup" not in result.output
-    assert "Key rejected by this server" in result.output
+    assert "Key rejected by this server" in first
+    assert "Start over? [Y/n]: " + ("y" if recover else "n") in first
+    assert "Next step" not in result.output
+    assert result.output.count("Starting again.") == (1 if recover else 0)
+    assert result.output.count("Would you like to test these settings?") == (1 if recover else 0)
     assert "Give Feedback" not in result.output
     assert "Provider List" not in result.output
     assert "wrong-test-secret" not in result.output
     assert "right-test-secret" not in result.output
-    handoff = result.output.split("Agent diagnostic prompt:\n", 1)[1]
+    handoff = first.split("Agent diagnostic prompt:\n", 1)[1]
     details, _ = json.JSONDecoder().raw_decode(handoff[handoff.index("{") :])
     context = details["run_context"]
     assert context["target_file"] == str(path.resolve())
@@ -1023,19 +1035,24 @@ def test_authentication_recovery_keeps_budget_and_secrets(tmp_path, monkeypatch,
     assert "skills/nooa-model-configuration/SKILL.md" in handoff
     assert "git clone" not in handoff
     assert litellm.suppress_debug_info is False
-    # check_interfaces now also probes reasoning by default for the one
-    # accepted (chat) interface once recovery succeeds.
+    # Three rejected discovery probes; after starting over, discovery and the
+    # reasoning probe for the accepted chat interface, then the approved test.
     assert len(sent) == (8 if recover else 3)
     if recover:
         entry = yaml.safe_load(path.read_text())["models"]["local"]
         assert entry["api_key_env"] == "CONNECT_GOOD"
         assert "provenance" not in entry
         assert "test-secret" not in path.read_text()
+        # Only the corrected key is stored, after the explicit save prompt.
+        assert "right-test-secret" in secrets_file.read_text()
+        assert "wrong-test-secret" not in secrets_file.read_text()
     else:
         assert not path.exists()
+        assert not secrets_file.exists()
+        assert "Nothing was saved" in result.output
 
 
-def test_retry_stops_when_original_budget_is_exhausted(tmp_path, monkeypatch):
+def test_exhausted_budget_after_failed_discovery_stops_without_restart_offer(tmp_path, monkeypatch):
     import httpx
 
     sent = []
@@ -1058,15 +1075,17 @@ def test_retry_stops_when_original_budget_is_exhausted(tmp_path, monkeypatch):
             "",
             "--no-catalogue",
             "--budget-tokens",
-            str(4 * PER_PROBE),
+            str(3 * PER_PROBE),
             "--output",
             str(path),
         ],
-        input="262144\n262144\ndiscover\nretry\n",
+        # Extra default answers must not start another (budgeted) attempt.
+        input="262144\n262144\ndiscover\n" + "\n" * 6,
     )
     assert result.exit_code != 0, result.output
-    assert len(sent) == 4
+    assert len(sent) == 3  # The three discovery probes spend the whole budget.
     assert "Check budget used up" in result.output
+    assert "Start over?" not in result.output and "Starting again." not in result.output
     # Discover approves the interface checks; their failure precedes any proposal.
     assert result.output.count("Would you like to test these settings?") == 0
     assert "Approve setup" not in result.output
@@ -1132,7 +1151,8 @@ def test_interface_and_later_checks_share_the_cli_budget(tmp_path, monkeypatch):
     assert not path.exists()  # Discovery consumed approval; no typed baseline ran.
     assert "Nothing was saved" in result.output
     assert "Agent diagnostic prompt:" in result.output
-    assert "Try again with different settings?" in result.output
+    assert "Start over? [Y/n]: n" in result.output
+    assert "Try again with different settings?" not in result.output
     assert "Write model entry" not in result.output
     assert "Some tests will be skipped" in result.output
     assert "setup is incomplete; check budget used up before Connection" in result.output

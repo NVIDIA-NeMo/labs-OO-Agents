@@ -156,18 +156,15 @@ def test_stage_plan_reuses_discovery_without_http(tmp_path, monkeypatch):
     assert "different endpoint" in result.output
 
 
-def test_wizard_retries_only_selected_interface_at_120_seconds(tmp_path, monkeypatch):
+def test_wizard_slow_discovery_reports_slow_route_then_offers_restart(tmp_path, monkeypatch):
+    """Timeouts after a working model listing are reported as slow; no 120-second retry menu."""
     posts = []
 
     def handle(request):
         if request.method == "GET":
             return httpx.Response(200, json={"data": [{"id": "model"}]})
         posts.append(request)
-        if len(posts) <= 3:
-            raise httpx.ReadTimeout("private server detail", request=request)
-        assert request.url.path == "/v1/chat/completions"
-        assert request.extensions["timeout"]["read"] == 120
-        return httpx.Response(200, json=response_body("chat"))
+        raise httpx.ReadTimeout("private server detail", request=request)
 
     mock_http(monkeypatch, handle)
     monkeypatch.setenv("REVIEW_KEY", "test-key")
@@ -189,20 +186,18 @@ def test_wizard_retries_only_selected_interface_at_120_seconds(tmp_path, monkeyp
             "--output",
             str(target),
         ],
-        input="model\n262144\n262144\ndiscover\nlonger\nchat\n-\nchange\nchange\n262144\n262144\nrecommended\ntest\ny\n",
+        input="model\n262144\n262144\ndiscover\nn\n",
     )
-    assert result.exit_code == 0, result.output
-    # Configured-cap routing is distinct from interface discovery;
-    # check_interfaces now also probes reasoning by default for chat.
-    assert len(posts) == 6
-    # Discovery runs right after Discover; only the proposal and its re-edit are reviewed.
-    assert result.output.count("Would you like to test these settings?") == 2
-    assert "Approve setup" not in result.output
-    assert result.output.count("Results ·") == 1
+    assert result.exit_code != 0, result.output
+    assert len(posts) == 3  # One discovery probe per interface; no extra retry.
+    assert all(request.extensions["timeout"]["read"] != 120 for request in posts)
     assert "route may be slow" in result.output
+    assert "Start over? [Y/n]: n" in result.output
+    assert "120-second" not in result.output and "Next step" not in result.output
+    assert "Nothing was saved" in result.output
+    assert "Approve setup" not in result.output
     assert "private server detail" not in result.output
-    entry = yaml.safe_load(target.read_text())["models"]["local"]
-    assert "provenance" not in entry
+    assert not target.exists()
 
 
 @pytest.mark.parametrize("correct", [True, False])
