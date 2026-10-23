@@ -14,6 +14,7 @@ import contextvars
 import json
 from typing import Any, ClassVar
 
+from nooa_atom.agent.base import AtomAgentBase
 from nooa_atom.session.items import (  # noqa: F401
     ChildFailed,
     ChildFailedError,
@@ -351,7 +352,20 @@ async def until(predicate: Any, timeout: float = 5) -> None:
     await asyncio.wait_for(poll(), timeout)
 
 
-ATOM_SPEC = "nooa_atom.agent:AtomAgent"
+ATOM_SPEC = "atom_test_agents:BaseAtom"
+"""The private Atom base with its own turn methods, for tests of the shared machinery.
+
+``AtomAgentBase`` keeps the session plumbing the public ``AtomAgent`` builds
+on: ``delegate``/``spawn`` children through the session port, ``JobsApi``,
+the slash commands and skills. Tests of that machinery run it through this
+test-only subclass; the public agent (``nooa_atom.agent:AtomAgent``) is
+tested in ``test_unified_agent.py`` and ``test_atom_resume.py``.
+"""
+PUBLIC_ATOM_SPEC = "nooa_atom.agent:AtomAgent"
+
+
+class BaseAtom(AtomAgentBase):
+    """Test-only: the private ``AtomAgentBase`` as a session agent."""
 
 
 class AtomModels(ScriptedModels):
