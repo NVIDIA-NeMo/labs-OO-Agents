@@ -86,7 +86,7 @@ Views select active history directly. For example, a current-invocation view use
 
 ```python
 for event in agent.event_manager.values():
-    if event.call_id == call.invocation_id and is_model_visible(event):
+    if call.invocation_id in event.related_call_ids and is_model_visible(event):
         yield event
 ```
 

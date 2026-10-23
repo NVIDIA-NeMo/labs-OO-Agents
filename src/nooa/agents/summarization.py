@@ -40,12 +40,12 @@ logger = logging.getLogger(__name__)
 _in_summary_fork = contextvars.ContextVar("in_summary_fork", default=False)
 
 
-def _copy_request_containers(value: Any) -> Any:
-    """Detach mutable request containers while preserving native response state."""
+def copy_request_structure(value: Any) -> Any:
+    """Copy nested lists and dictionaries; preserve response objects and other values."""
     if isinstance(value, dict):
-        return {key: _copy_request_containers(item) for key, item in value.items()}
+        return {key: copy_request_structure(item) for key, item in value.items()}
     if isinstance(value, list):
-        return [_copy_request_containers(item) for item in value]
+        return [copy_request_structure(item) for item in value]
     return value
 
 
@@ -807,11 +807,6 @@ class TokenBudgetSummarizer(SummarizationAgent):
 
         if _in_summary_fork.get() or self._pending_task is not None or self._unsub_llm is None:
             return await nxt(ctx)
-        original_messages = (
-            _copy_request_containers(ctx.messages)
-            if type(ctx.context_view) is DefaultAgentView
-            else None
-        )
         source, text = (), ""
         try:
             if ctx.client is not None:
@@ -842,7 +837,7 @@ class TokenBudgetSummarizer(SummarizationAgent):
         self._pending_range = (source[0][0], source[-1][0])
         # Exact type intentionally excludes customized subclasses. This is only
         # an optimization: unknown views still get independent state compaction.
-        if type(ctx.context_view) is DefaultAgentView and ctx.messages == original_messages:
+        if type(ctx.context_view) is DefaultAgentView:
             self._pending_task = asyncio.create_task(self._run_cached_summary(ctx))
         else:
             self._pending_task = asyncio.create_task(self._run_state_summary(text, ctx.client))
@@ -861,8 +856,8 @@ class TokenBudgetSummarizer(SummarizationAgent):
         try:
             assert self._pending_range is not None
             assert self.target_event_manager is not None
-            messages = _copy_request_containers(ctx.messages)
-            params = _copy_request_containers(ctx.params)
+            messages = copy_request_structure(ctx.messages)
+            params = copy_request_structure(ctx.params)
             params.setdefault("output_model", None)
             start, end = self._pending_range
             messages.append(
@@ -880,9 +875,7 @@ class TokenBudgetSummarizer(SummarizationAgent):
             fork = ctx.model_copy(update={"messages": messages, "params": params, "response": None})
 
             async def dispatch(request: Any) -> Any:
-                request.response = await ctx.client.acall(
-                    _copy_request_containers(messages), **_copy_request_containers(params)
-                )
+                request.response = await request.client.acall(request.messages, **request.params)
                 return request
 
             result = cast(

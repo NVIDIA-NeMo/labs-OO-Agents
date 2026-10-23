@@ -74,14 +74,43 @@ class TestRenderContextBasic:
         assert result[0]["role"] == "system"
         assert result[1] == CacheBoundary()
 
-    def test_leading_and_consecutive_boundaries_are_noops(self):
+    def test_leading_and_consecutive_boundaries_are_preserved(self):
         result = render_context(
             [CacheBoundary(), CacheBoundary(), Block(key="only", content="only")],
             block_formatter=XMLBlockFormatter(),
             provider_formatter=OpenAIProviderFormatter(),
         ).output
-        assert len(result) == 1
-        assert result[0]["role"] == "system"
+        assert result[:2] == [CacheBoundary(), CacheBoundary()]
+        assert len(result) == 3
+        assert result[2]["role"] == "system"
+
+    def test_boundary_survives_omitted_incomplete_history(self):
+        response = LLMResponse(
+            tool_calls=[ToolCall(id="missing", name="execute_python", arguments="{}")],
+            finish_reason="tool_calls",
+        )
+        result = render_context(
+            [response, CacheBoundary(), Block(key="task", content="continue", role=Role.USER)],
+            block_formatter=XMLBlockFormatter(),
+            provider_formatter=OpenAIProviderFormatter(),
+        ).output
+        assert len(result) == 2
+        assert result[0] == CacheBoundary()
+        assert "continue" in result[1]["content"]
+
+    def test_leading_boundary_keeps_explicit_cache_policy(self):
+        from nooa.unifiedllm.cache_policy import apply_cache_policy
+
+        rendered = render_context(
+            [CacheBoundary(), Block(key="task", content="volatile", role=Role.USER)],
+            block_formatter=XMLBlockFormatter(),
+            provider_formatter=OpenAIProviderFormatter(),
+        ).output
+        direct = [CacheBoundary(), {"role": "user", "content": "volatile"}]
+        for messages in (direct, rendered):
+            clean, _, explicit = apply_cache_policy(messages, "openai", responses=True)
+            assert explicit
+            assert "cache_control" not in repr(clean)
 
     def test_boundary_after_tool_event_marks_complete_result(self):
         event = ToolCallEvent(

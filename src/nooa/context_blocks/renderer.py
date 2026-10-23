@@ -112,9 +112,8 @@ def render_context(
     linked_execution_segments: list[tuple[str, str, int]] = []
     for item in blocks:
         if isinstance(item, CacheBoundary):
-            if segment:
-                segments.append((segment, True))
-                segment = []
+            segments.append((segment, True))
+            segment = []
             segment_index += 1
             continue
         if isinstance(item, ResolvedBlock):
@@ -197,12 +196,7 @@ def render_context(
     # Neutral message list → provider wire format.
     messages: list[RenderedMessage] = []
     for segment, boundary_after in segments:
-        rendered = block_formatter.format(segment)
-        if boundary_after:
-            if not rendered:
-                raise UnsupportedContextLayout(
-                    f"{type(block_formatter).__name__} emitted no message before CacheBoundary"
-                )
+        rendered = block_formatter.format(segment) if segment else []
         messages.extend(rendered)
         if boundary_after:
             messages.append(RenderedMessage(role=Role.METADATA, replay_message=CacheBoundary()))

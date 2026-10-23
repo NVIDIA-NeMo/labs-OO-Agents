@@ -1,8 +1,8 @@
 # State compaction
 
 `TokenBudgetSummarizer` pauses the agent while it summarizes older stored events.
-Actual request usage triggers compaction after a model response; the summary
-input comes directly from stored history, independently of the context view.
+Actual request usage triggers compaction after a model response; the source
+range is selected from stored history, independently of the context view.
 Views remain responsible for prompt selection and any prompt-only compression.
 
 ```python
@@ -27,6 +27,7 @@ schema and settings. Tools are never executed by the summary request. Custom
 views use a dedicated Predict request built from stored events with the parent's
 effective client, without inheriting its prompt, tools, schema or cache key.
 At most one summary runs or waits for application.
+Cached-summary requests pass through agent middleware again; use `summary_fork_active()` to distinguish them, and preserve source history and the prefix when cache reuse is desired.
 
 A completed summary applies at the next `BeforeTurn` only if the source range,
 identities and contents still match. Raw events remain accessible in storage.
