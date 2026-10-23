@@ -32,13 +32,24 @@ import os
 import shutil
 import stat
 import tempfile
+import time
 import weakref
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
-__all__ = ["Job", "JobEvent", "WorkManager", "describe", "emit", "job_dir"]
+__all__ = [
+    "Job",
+    "JobEvent",
+    "WorkManager",
+    "current_name",
+    "describe",
+    "emit",
+    "emitter",
+    "job_dir",
+]
 
 EventKind = Literal["item", "done", "failed", "cancelled"]
 Status = Literal["running", "done", "failed", "cancelled"]
@@ -54,7 +65,7 @@ class Outbox(Protocol):
 
 @dataclass(frozen=True, eq=False)
 class JobEvent:
-    """What a job delivers when nobody awaits it.
+    """What a job delivers when nobody awaits it: an item of ``notification["jobs"]``.
 
     ``kind`` is ``item`` (a yielded or emitted value), ``done`` (``value`` is
     the result), ``failed`` (``value`` is the error) or ``cancelled``.
@@ -68,6 +79,10 @@ class JobEvent:
     value: Any = None
     dropped: int = 0
 
+    def status_source(self) -> str:
+        """Who sent it, for a status line: the job's name, never its value."""
+        return self.name
+
 
 _current: contextvars.ContextVar[Job | None] = contextvars.ContextVar(
     "nooa_work_current_job", default=None
@@ -79,6 +94,26 @@ def emit(item: Any) -> None:
     job = _current.get()
     if job is not None:
         job._emit_nowait(item)
+
+
+def emitter() -> Callable[[Any], None]:
+    """``emit`` bound to the running job, for callbacks that run outside it (a no-op outside a job).
+
+    Work that is told about progress by someone else (a listener, a callback)
+    takes it before it waits: ``post = emitter()``, then ``post(item)``.
+    """
+    job = _current.get()
+    return job._emit_nowait if job is not None else _discard
+
+
+def _discard(item: Any) -> None:
+    return None
+
+
+def current_name() -> str | None:
+    """The running job's name (None outside a job)."""
+    job = _current.get()
+    return job.name if job is not None else None
 
 
 def describe(text: str) -> None:
@@ -189,17 +224,18 @@ class _Reader:
 
 
 class Job:
-    """Background work. ``await job`` -> result; ``async for x in job`` -> items.
+    """A running or finished piece of work, from ``self.jobs.launch`` or ``job.send``.
 
-    ``job.send(x)`` gives a resource input and returns the request ``Job``
-    (await it for that input's result). ``await job.cancel()`` stops the
-    work and withdraws its undelivered events; for a resource it first
-    cancels its requests, then exits it (work that swallows the cancellation
-    and returns ends ``done``, still without an event). Awaiting and
-    iterating may be combined: the awaiter gets the result, the reader the
-    items and the end. A resource is neither awaited nor iterated
-    (``TypeError``): await its requests.
+    ``await job`` returns its result (and raises if it failed or was
+    cancelled); ``async for x in job`` reads its items, then the end. A
+    resource is neither awaited nor iterated: ``req = job.send(x)`` returns a
+    request job to await. ``await job.cancel()`` stops the work and withdraws
+    what it had not delivered (a resource: its requests, then it closes).
+    Keep names, not jobs, in ``self.v`` (``self.jobs.get(name)``): work does
+    not survive a restart.
     """
+
+    __nosnapshot__ = True  # live work: a snapshot leaves it out (keep names in self.v)
 
     name: str  # Yours, or job#N; a resource's requests are <name>#N
     id: int  # Unique per launch: a reused name gets a new id
@@ -223,7 +259,7 @@ class Job:
         self._handoff: set[asyncio.Future[None]] = set()
         self._consumed = False  # an awaiter or the reader took the outcome
         self._reader_ref: weakref.ref[_Reader] | None = None  # weak: a dropped reader detaches
-        self._items: deque[JobEvent] = deque()  # its item events possibly still in the outbox
+        self._unread: deque[JobEvent] = deque()  # its item events possibly still in the outbox
         self._dropped = 0  # carried into the next event
         self.dropped = 0
         self._scratch: tuple[Path, int, int] | None = None
@@ -235,6 +271,7 @@ class Job:
         self._requests: list[Job] = []
         self._sent = 0
         self._task: asyncio.Task[None] | None = None
+        self._started = time.monotonic()
 
     # ---- model-facing ---------------------------------------------------
 
@@ -290,10 +327,10 @@ class Job:
         outbox = self._manager._outbox
         # Its items still unread in the outbox move to the reader, in order;
         # ones a turn already took stay taken.
-        for event in self._items:
+        for event in self._unread:
             if outbox.remove(event):
                 reader._buffer.append(event.value)
-        self._items.clear()
+        self._unread.clear()
         if self._status == "running":
             self._reader = reader
             if len(reader._buffer) >= self._manager.max_items:
@@ -349,9 +386,9 @@ class Job:
         """Cancelled by its owner: no more events, and its undelivered ones are taken back."""
         self._silent = True
         outbox = self._manager._outbox
-        for event in self._items:
+        for event in self._unread:
             outbox.remove(event)  # only this generation's own events, by identity
-        self._items.clear()
+        self._unread.clear()
 
     # ---- running ----------------------------------------------------------
 
@@ -449,15 +486,15 @@ class Job:
         if self._silent:
             return  # cancelled by its owner: nothing more is delivered
         outbox = self._manager._outbox
-        while len(self._items) >= self._manager.max_items:
-            oldest = self._items.popleft()
+        while len(self._unread) >= self._manager.max_items:
+            oldest = self._unread.popleft()
             if outbox.remove(oldest):
                 self._dropped += 1 + oldest.dropped  # its own count carries forward
                 self.dropped += 1
         event = JobEvent(self.name, self.id, "item", value, dropped=self._dropped)
         self._dropped = 0
         outbox.put(event)
-        self._items.append(event)
+        self._unread.append(event)
 
     def _finish(self, kind: EventKind, value: Any) -> None:
         if self._status != "running":
@@ -563,17 +600,19 @@ def _remove_owned(owned: tuple[Path, int, int] | None) -> None:
 
 
 class WorkManager:
-    """Owns background jobs: names, cancellation, delivery, scratch cleanup.
+    """Background work: ``job = self.jobs.launch(work, name="tests")`` starts it and returns at once.
 
-    ``outbox`` receives ``JobEvent``s nobody awaited (``put``) and gives
-    back ones not yet consumed (``remove``). ``scratch`` is the parent
-    directory for this manager's own scratch directory (default: the
-    system temp dir). ``keep`` finished jobs are remembered with their
-    scratch directories; a job whose event is still unread in the outbox is
-    kept longer, up to ``2 * keep`` finished jobs in all. ``max_items`` bounds
-    a job's queued items and a reader's buffer; ``max_requests`` bounds a
-    resource's requests in flight.
+    ``work`` is a coroutine (its value is the result), an async generator
+    (its yields are items) or a resource (``Shell()``, ``Subagent()``): a
+    resource stays open, and each ``job.send(x)`` returns a request job.
+    Each outcome goes to one place: a pending ``await job`` or ``async for x
+    in job``, else a ``JobEvent`` in a later turn's ``notification["jobs"]``.
+    Jobs outlive the turn: end it with ``Waiting(on=[name])`` while they run,
+    and cancel what you no longer need. Names are Python identifiers; a
+    resource's requests are ``<name>#1``, ``<name>#2``...
     """
+
+    __nosnapshot__ = True
 
     keep: int
     max_items: int
@@ -587,7 +626,21 @@ class WorkManager:
         keep: int = 100,
         max_items: int = 100,
         max_requests: int = 16,
+        on_change: Callable[[], None] | None = None,
     ) -> None:
+        """A manager whose undelivered events go to ``outbox``.
+
+        ``outbox`` receives ``JobEvent``s nobody awaited (``put``) and gives
+        back ones not yet consumed (``remove``). ``scratch`` is the parent
+        directory for this manager's own scratch directory (default: the
+        system temp dir). ``keep`` finished jobs are remembered with their
+        scratch directories; a job whose event is still unread in the outbox
+        is kept longer, up to ``2 * keep`` finished jobs in all. ``max_items``
+        bounds a job's queued items and a reader's buffer; ``max_requests``
+        bounds a resource's requests in flight. ``on_change()`` is called
+        after a job starts or finishes (to keep ``records()`` saved with a
+        snapshot).
+        """
         for label, value in (
             ("keep", keep),
             ("max_items", max_items),
@@ -606,6 +659,7 @@ class WorkManager:
         self._history: deque[Job] = deque()
         self._names: dict[str, Job] = {}
         self._closed = False
+        self._on_change = on_change
 
     def launch(self, work: Any, *, name: str | None = None) -> Job:
         """Start ``work`` (awaitable, async iterable or resource) and return its Job."""
@@ -681,11 +735,20 @@ class WorkManager:
             job._run(), name=f"work[{job.name}]", context=context
         )
         job._task.add_done_callback(job._task_ended)
+        self._changed()
         return job
+
+    def _changed(self) -> None:
+        if self._on_change is not None:
+            try:
+                self._on_change()
+            except Exception:  # an observer never breaks the work
+                pass
 
     def _finished(self, job: Job) -> None:
         self._live.pop(job.id, None)
         self._history.append(job)
+        self._changed()
         excess = len(self._history) - self.keep
         if excess <= 0:
             return
@@ -708,7 +771,7 @@ class WorkManager:
 
     @staticmethod
     def _has_unread(job: Job, unread: set[int] | None) -> bool:
-        events = [*job._items, *([job._queued_final] if job._queued_final else [])]
+        events = [*job._unread, *([job._queued_final] if job._queued_final else [])]
         if unread is None:
             return bool(events)  # cannot tell: treat as unread (the hard bound still applies)
         return any(id(event) in unread for event in events)

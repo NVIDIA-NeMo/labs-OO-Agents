@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import contextvars
 import itertools
 import os
 import shlex
@@ -30,10 +31,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Any
 
-from nooa.tools._bash_session import BashSession
+from nooa import hidden
+from nooa.tools import BashSession
 from nooa_atom.agent.work_manager import describe, job_dir
 
-__all__ = ["CommandResult", "Shell"]
+__all__ = ["CommandResult", "Shell", "default_cwd"]
+
+default_cwd: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "nooa_work_shell_cwd", default=None
+)
+"""Where a ``Shell()`` without ``cwd`` starts (an agent sets its workspace); else the process's."""
 
 # A stream's summary: whole when at most this many bytes, else head and tail.
 _SUMMARY_BYTES = 10_000
@@ -51,10 +58,12 @@ _DRAIN_SECONDS = 0.5
 
 @dataclass
 class CommandResult:
-    """One command's outcome: exit code, output summaries, directory after it.
+    """One command's outcome: exit code, output, and the shell's directory after it.
 
-    ``cwd`` is the shell's directory after the command (a one-shot command's
-    own ``cd`` does not last). ``*_path`` is set when that summary was cut.
+    ``stdout`` and ``stderr`` are whole up to 10 kB, else head and tail
+    around a marker; ``stdout_path``/``stderr_path`` then name the file with
+    the full output (kept while the job is listed). ``cwd`` is the directory
+    after the command (a one-shot command's ``cd`` does not last).
     """
 
     returncode: int
@@ -212,12 +221,18 @@ async def _open_fifo(path: Path) -> tuple[asyncio.StreamReader, asyncio.BaseTran
 
 
 class Shell:
-    """Shell commands: ``await Shell().run(cmd)`` once, or launch it for a session.
+    """Bash commands: ``await Shell().run("make")`` runs one command in a fresh bash.
 
-    ``cwd`` defaults to the process's directory when used; ``timeout``
-    (seconds) bounds each command. A timed-out command ends with
-    ``returncode`` 124 and ``timed_out=True``.
+    Launched, it is a persistent session: ``sh = self.jobs.launch(Shell(),
+    name="sh")``, then ``await sh.send("cd src && make")``; cd, exports and
+    variables carry over, and commands run one at a time, in order. ``cwd``
+    defaults to the workspace; ``timeout`` (seconds) bounds each command,
+    which then ends with ``returncode`` 124 and ``timed_out=True``.
+    Cancelling a request interrupts its command; cancelling the session ends
+    its bash.
     """
+
+    __nosnapshot__ = True  # a live session's bash is not data
 
     cwd: str | Path | None  # Where it starts; current_dir is where the session is now
     timeout: float  # Seconds per command
@@ -254,6 +269,7 @@ class Shell:
         """The session's directory as bash last reported it (None before it started)."""
         return self._confirmed_cwd
 
+    @hidden
     def summary(self) -> str:
         """The session's state in one line, without asking bash (it may be busy)."""
         if self._session is None:
@@ -266,7 +282,9 @@ class Shell:
         return f"idle · in {self._confirmed_cwd}{lost}"
 
     def _directory(self) -> str:
-        return str(Path(self.cwd).resolve()) if self.cwd is not None else os.getcwd()
+        if self.cwd is not None:
+            return str(Path(self.cwd).resolve())
+        return default_cwd.get() or os.getcwd()
 
     async def run(self, command: str, *, stdin: str | None = None) -> CommandResult:
         """Run one command in a fresh bash process and return its result."""
