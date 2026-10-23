@@ -83,6 +83,18 @@ def http_fixture(monkeypatch, style="chat", text='{"value":323}', finish="stop",
     return bodies, paths
 
 
+@pytest.fixture(autouse=True)
+def fresh_litellm_clients(monkeypatch):
+    """Isolate LiteLLM process state that earlier tests may leave behind."""
+    import litellm
+    from litellm.caching.llm_caching_handler import LLMClientCache
+
+    monkeypatch.setattr(litellm, "in_memory_llm_clients_cache", LLMClientCache())
+    # Another test module sets litellm.drop_params = True at import; dropping
+    # these native fields is exactly what these tests must detect.
+    monkeypatch.setattr(litellm, "drop_params", False)
+
+
 def client(style="chat", **kwargs):
     return CompletionClient(
         "openai/azure/anthropic/claude-opus-5-5" if style == "chat" else "anthropic/model",
