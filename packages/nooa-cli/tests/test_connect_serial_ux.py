@@ -321,7 +321,7 @@ def test_unknown_chat_failure_restart_with_plain_format(monkeypatch, tmp_path):
     assert len(posts) == 2
     entry = yaml.safe_load(path.read_text())["models"]["local"]
     assert entry["structured_output_mode"] == "anthropic"
-    assert "Change answer format" in result.output
+    assert "Answer format" in result.output
 
 
 def test_failed_test_declining_restart_exits_with_nothing_saved(monkeypatch, tmp_path):
@@ -590,8 +590,9 @@ def test_manual_on_reselection_keeps_owned_budget_and_never_adds_level_cap(
 
     mock_http(monkeypatch, handle)
     path = tmp_path / "models.yaml"
-    answers = "on\n2048\nchange\nchange\n32768\n8192\ncustom\n1024\non\n\n" + action
-    answers += "\ncustom\n4096\nsave\ny\n" if action == "adjust" else "\n"
+    # A smaller reply limit cannot fit the reviewed allowance; then reselect "on".
+    answers = "on\n2048\nchange\nlimits\n32768\n8192\ncustom\n1024\n" + action
+    answers += "\ncustom\n4096\nchange\nreasoning\non\n\nsave\ny\n" if action == "adjust" else "\n"
     result = CliRunner().invoke(command, args(path), input=answers)
     assert result.exit_code == 0, result.output
     assert "No cap was changed" in result.output

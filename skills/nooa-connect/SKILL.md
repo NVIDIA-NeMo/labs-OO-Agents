@@ -321,7 +321,7 @@ or fallback. Omission preserves a saved same-route policy; route/model/interface
 client/credential changes do not inherit it. Connect rejects explicit controls on
 Responses/Decision and metadata/interface discovery stages before credential use.
 Keep this framework setting on the entry, not in `extra_body`, level patches or
-catalogue metadata. Guided review offers Change structured output profile;
+catalogue metadata. Guided review offers Change settings → Answer format;
 plan/check/save stages carry it.
 
 A mode change invalidates all prior probe/session evidence; a save-time override

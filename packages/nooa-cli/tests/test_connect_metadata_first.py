@@ -125,7 +125,7 @@ def test_change_then_test_uses_actual_configured_controls(guided):
     result = CliRunner().invoke(
         command,
         [*flags, "--api-style", "chat"],
-        input="change\nchange\n48000\n8192\ncustom\n3000\ntest\ny\n",
+        input="change\nlimits\n48000\n8192\ncustom\n3000\ntest\ny\n",
     )
     assert result.exit_code == 0, result.output
     assert len(decisions) == 2
@@ -385,7 +385,7 @@ def test_change_preserves_explicit_level_request_blocks_caps_and_media(guided):
     result = CliRunner().invoke(
         command,
         [*flags, "--api-style", "chat", "--levels-file", str(levels), "--media-inputs", "pdf"],
-        input="default\nchange\nchange\n\n\nrecommended\ndefault\nsave\ny\n",
+        input="default\nchange\nlimits\n\n\nrecommended\ndefault\nsave\ny\n",
     )
     assert result.exit_code == 0, result.output
     assert all(r.method == "GET" for r in calls)
@@ -586,7 +586,7 @@ def test_guided_decision_permission_change_supersedes_inheritance(
             "--no-catalogue",
             *(["--test-media-inputs", "image"] if retesting else ["--no-probe"]),
         ],
-        input=f"change\n{mode}\nsave\ny\ny\n",
+        input=f"change\nmedia\n{mode}\nsave\ny\ny\n",
     )
     assert result.exit_code == 0, result.output
     entry = yaml.safe_load(path.read_text())["models"]["local"]

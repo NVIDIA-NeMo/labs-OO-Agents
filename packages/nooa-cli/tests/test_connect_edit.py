@@ -66,7 +66,7 @@ def test_edit_jumps_to_settings_preserving_custom_fields(registry, monkeypatch, 
         command,
         ["--edit-model", *selector, "--media-inputs", "", "--no-probe"],
         input=("saved\n" if not selector else "")
-        + "default\nchange\nchange\nrecommended\ndefault\nsave\ny\ny\n",
+        + "default\nchange\nlimits\nrecommended\ndefault\nsave\ny\ny\n",
     )
     assert result.exit_code == 0, result.output
     actual = yaml.safe_load(path.read_text())["models"]["saved"]

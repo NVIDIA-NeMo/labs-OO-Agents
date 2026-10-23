@@ -3130,37 +3130,121 @@ def show_guided_proposal(state: WizardState, *, deferred_style=False, updated=Fa
         view.fields(scrub_setup(state, test_rows))
 
 
+def edit_guided_limits(state: WizardState) -> None:
+    """Change settings → Reply limit and context; reasoning is a separate choice."""
+    if not state.manual_limits_deferred and (state.manual_limits or state.candidate is None):
+        require_manual_limits(state, edit=True)
+        maximum = (
+            state.proposal.entry.get("provenance", {})
+            .get("catalogue_limits", {})
+            .get("max_completion_tokens")
+        )
+        limits = [state.context_window - 1]
+        if isinstance(maximum, int) and not isinstance(maximum, bool) and maximum > 0:
+            limits.append(maximum)
+        else:
+            maximum = None
+        ceiling = min(limits)
+        state.reply_tokens = prompts.choose_reply_limit(
+            min(state.proposal.entry["max_tokens"], ceiling),
+            ceiling,
+            output_ceiling=maximum,
+            source="user",
+        )
+    else:
+        current = deepcopy(state.candidate or {})
+        current.setdefault("id", state.model)
+        entry = state.proposal.entry
+        current["context_length"] = entry.get("context_window")
+        current["top_provider"] = {
+            "max_completion_tokens": entry.get("max_output_tokens")
+            or entry.get("provenance", {}).get("catalogue_limits", {}).get("max_completion_tokens")
+        }
+        maximum = current["top_provider"]["max_completion_tokens"]
+        if not isinstance(maximum, int) or isinstance(maximum, bool) or maximum <= 0:
+            current["top_provider"]["max_completion_tokens"] = None
+        current["reasoning"] = {
+            "supported_efforts": list(entry.get("reasoning_levels", {})),
+            "default_effort": entry.get("reasoning_default"),
+        }
+        state.candidate = prompts.edit_model_details(current, reasoning=False)
+        state.context_window = state.candidate.get("context_length")
+        state.edited_settings = True
+        state.edited_level_patches = deepcopy(entry.get("reasoning_levels"))
+        limits = [
+            v
+            for v in (
+                state.context_window - 1 if state.context_window else None,
+                state.candidate.get("top_provider", {}).get("max_completion_tokens"),
+            )
+            if isinstance(v, int) and not isinstance(v, bool) and v > 0
+        ]
+        ceiling = min(limits) if limits else None
+        state.reply_tokens = prompts.choose_reply_limit(
+            min(entry["max_tokens"], ceiling) if ceiling else entry["max_tokens"],
+            ceiling,
+            output_ceiling=state.candidate.get("top_provider", {}).get("max_completion_tokens"),
+            source=entry.get("provenance", {}).get("reply_limit", {}).get("source", "user"),
+        )
+
+
+def edit_guided_decision_media(state: WizardState) -> bool:
+    """Change settings → Media for decision interfaces (images only)."""
+    mode = prompts.choose_decision_images(state.media_inputs)
+    if mode == "text":
+        state.media_inputs, state.test_media_inputs = [], None
+        state.inherit_media_inputs = False
+    elif mode == "manual":
+        state.media_inputs, state.test_media_inputs = ["image"], None
+        state.inherit_media_inputs = False
+    elif mode == "test":
+        state.test_media_inputs = ["image"]
+    if not configure_media_inputs(state):
+        return False
+    return True
+
+
+def edit_guided_media(state: WizardState) -> bool:
+    """Change settings → Media: pick formats, then test or enable them as usual."""
+    if state.api_style in connect.DECISION_API_STYLES:
+        return edit_guided_decision_media(state)
+    current = (state.proposal.entry.get("media_inputs") if state.proposal else None) or []
+    select_manual_media(state, list(current))
+    return True
+
+
+def change_settings_options(state: WizardState):
+    """The plain Change settings submenu, in order, with only options that apply."""
+    decision = state.api_style in connect.DECISION_API_STYLES
+    options = []
+    if not decision:
+        options += [("limits", "Reply limit and context"), ("reasoning", "Reasoning")]
+    options.append(("media", "Media"))
+    if state.api_style in {"chat", "anthropic"}:
+        options.append(("structured", "Answer format"))
+    if (
+        not decision
+        and state.candidate is not None
+        and state.editing is None
+        and not state.manual_limits_required
+        and not state.manual_limits
+    ):
+        options.append(("skip", "Continue without catalogue settings"))
+    options.append(("back", "Back"))
+    return tuple(options), "media" if decision else "limits"
+
+
 def review_guided_proposal(state: WizardState, *, deferred_style=False):
     """Consent or edit; edits are re-summarized before the next decision."""
     while True:
         options = (("test", "Test now"),) if not state.no_probe and state.probe != "none" else ()
-        profile_options = (
-            (("structured", "Change answer format"),)
-            if state.api_style in {"chat", "anthropic"}
-            else ()
-        )
-        skip_options = (
-            (("skip", "Continue without catalogue settings"),)
-            if state.api_style not in connect.DECISION_API_STYLES
-            and state.candidate is not None
-            and state.editing is None
-            and not state.manual_limits_required
-            and not state.manual_limits
-            else ()
-        )
-        # Keep the main decision short; rarer edits live under Change settings.
+        # Keep the main decision short; every edit lives under Change settings.
         # Ctrl-C cancels without saving.
         action = prompts.labelled_choice(
             "Would you like to test these settings?",
             (*options, ("save", "Save without testing"), ("change", "Change settings")),
             default="test" if options else "save",
         )
-        if action == "change" and (skip_options or profile_options):
-            action = prompts.labelled_choice(
-                "What would you like to change?",
-                (("change", "Limits, reasoning and media"), *profile_options, *skip_options),
-                default="change",
-            )
         if action == "cancel":
             view.note("Setup cancelled. Nothing was saved.")
             return None
@@ -3173,100 +3257,33 @@ def review_guided_proposal(state: WizardState, *, deferred_style=False):
                 ):
                     continue
                 state.failure_ack_snapshot = snapshot
-        if action == "structured":
+        if action != "change":
+            break
+        change_options, change_default = change_settings_options(state)
+        change = prompts.labelled_choice(
+            "What would you like to change?", change_options, default=change_default
+        )
+        if change == "cancel":
+            view.note("Setup cancelled. Nothing was saved.")
+            return None
+        if change == "back":
+            continue
+        if change == "structured":
             state.structured_output_mode = prompts.choose_structured_output_mode(
                 state.proposal.entry.get("structured_output_mode")
             )
             state.structured_output_mode_set = True
-            if not configure_checks(state):
-                return None
-            show_guided_proposal(state, deferred_style=deferred_style, updated=True)
-            continue
-        if action == "skip":
+        elif change == "skip":
             discard_catalogue_settings(state)
-            if not configure_checks(state):
+        elif change == "media":
+            if not edit_guided_media(state):
                 return None
-            show_guided_proposal(state, deferred_style=deferred_style, updated=True)
-            continue
-        if action != "change":
-            break
-        if state.api_style in connect.DECISION_API_STYLES:
-            # Decision metadata never becomes chat/reasoning request parameters.
-            mode = prompts.choose_decision_images(state.media_inputs)
-            if mode == "text":
-                state.media_inputs, state.test_media_inputs = [], None
-                state.inherit_media_inputs = False
-            elif mode == "manual":
-                state.media_inputs, state.test_media_inputs = ["image"], None
-                state.inherit_media_inputs = False
-            elif mode == "test":
-                state.test_media_inputs = ["image"]
-            if not configure_media_inputs(state):
+        elif change == "reasoning":
+            if not choose_reasoning(state, deferred=deferred_style, edit=True):
                 return None
         else:
-            if not state.manual_limits_deferred and (
-                state.manual_limits or state.candidate is None
-            ):
-                require_manual_limits(state, edit=True)
-                maximum = (
-                    state.proposal.entry.get("provenance", {})
-                    .get("catalogue_limits", {})
-                    .get("max_completion_tokens")
-                )
-                limits = [state.context_window - 1]
-                if isinstance(maximum, int) and not isinstance(maximum, bool) and maximum > 0:
-                    limits.append(maximum)
-                else:
-                    maximum = None
-                ceiling = min(limits)
-                state.reply_tokens = prompts.choose_reply_limit(
-                    min(state.proposal.entry["max_tokens"], ceiling),
-                    ceiling,
-                    output_ceiling=maximum,
-                    source="user",
-                )
-            else:
-                current = deepcopy(state.candidate or {})
-                current.setdefault("id", state.model)
-                entry = state.proposal.entry
-                current["context_length"] = entry.get("context_window")
-                current["top_provider"] = {
-                    "max_completion_tokens": entry.get("max_output_tokens")
-                    or entry.get("provenance", {})
-                    .get("catalogue_limits", {})
-                    .get("max_completion_tokens")
-                }
-                maximum = current["top_provider"]["max_completion_tokens"]
-                if not isinstance(maximum, int) or isinstance(maximum, bool) or maximum <= 0:
-                    current["top_provider"]["max_completion_tokens"] = None
-                current["reasoning"] = {
-                    "supported_efforts": list(entry.get("reasoning_levels", {})),
-                    "default_effort": entry.get("reasoning_default"),
-                }
-                state.candidate = prompts.edit_model_details(current, reasoning=False)
-                state.context_window = state.candidate.get("context_length")
-                state.edited_settings = True
-                state.edited_level_patches = deepcopy(entry.get("reasoning_levels"))
-                limits = [
-                    v
-                    for v in (
-                        state.context_window - 1 if state.context_window else None,
-                        state.candidate.get("top_provider", {}).get("max_completion_tokens"),
-                    )
-                    if isinstance(v, int) and not isinstance(v, bool) and v > 0
-                ]
-                ceiling = min(limits) if limits else None
-                state.reply_tokens = prompts.choose_reply_limit(
-                    min(entry["max_tokens"], ceiling) if ceiling else entry["max_tokens"],
-                    ceiling,
-                    output_ceiling=state.candidate.get("top_provider", {}).get(
-                        "max_completion_tokens"
-                    ),
-                    source=entry.get("provenance", {}).get("reply_limit", {}).get("source", "user"),
-                )
+            edit_guided_limits(state)
             # Profile/media declarations and explicit test selections remain unchanged.
-        if not choose_reasoning(state, deferred=deferred_style, edit=True):
-            return None
         if not configure_checks(state):
             return None
         show_guided_proposal(state, deferred_style=deferred_style, updated=True)

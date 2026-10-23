@@ -128,7 +128,9 @@ def test_cancel_reasoning_writes_nothing(native):
 def test_guided_change_reasoning_and_test_same_selected_setting(native):
     flags, path, calls, choices = native
     result = CliRunner().invoke(
-        command, flags, input="low\nchange\nchange\n1000000\n128000\ncustom\n4096\nhigh\ntest\ny\n"
+        command,
+        flags,
+        input="low\nchange\nlimits\n1000000\n128000\ncustom\n4096\nchange\nreasoning\nhigh\ntest\ny\n",
     )
     assert result.exit_code == 0, result.output
     assert "Reasoning levels (comma-separated)" not in result.output
@@ -140,7 +142,7 @@ def test_guided_change_reasoning_and_test_same_selected_setting(native):
         for b in posts
     )
     assert yaml.safe_load(path.read_text())["models"]["local"]["reasoning_level"] == "high"
-    assert result.output.count("Reasoning:") == 3  # two proposals and the selected save summary
+    assert result.output.count("Reasoning:") == 4  # three proposals and the selected save summary
 
 
 def test_edit_keep_current_raw_manual_profile_and_active(native):

@@ -165,7 +165,7 @@ def test_change_revises_both_raw_limits_and_keeps_reply_separate(manual_setup):
     result = CliRunner().invoke(
         command,
         flags + ["--no-catalogue"],
-        input="128000\n64000\nchange\nchange\n48000\n24000\nrecommended\nsave\ny\n",
+        input="128000\n64000\nchange\nlimits\n48000\n24000\nrecommended\nsave\ny\n",
     )
     assert result.exit_code == 0, result.output
     assert len(decisions) == 2 and not calls
@@ -441,7 +441,7 @@ def test_actual_guided_skip_discards_public_guesses_and_requires_manual_numbers(
 def test_one_token_bound_reprompts_in_initial_setup_and_reedit(manual_setup, field, edit):
     flags, path, calls, proposals, decisions = manual_setup
     numbers = "1\n128000\n64000\n" if field == "context" else "128000\n1\n64000\n"
-    answers = "128000\n64000\nchange\nchange\n" if edit else ""
+    answers = "128000\n64000\nchange\nlimits\n" if edit else ""
     answers += numbers + ("recommended\n" if edit else "") + "save\ny\n"
     result = CliRunner().invoke(command, flags + ["--no-catalogue"], input=answers)
     assert result.exit_code == 0, result.output
@@ -511,9 +511,9 @@ def test_deferred_completion_reviews_raw_limits_and_preserves_edited_reply(
     # Discover runs its interface checks at once, so later edits target chat.
     answers = (
         "128000\n64000\ndiscover\n"
-        "change\nchange\n128000\n64000\ncustom\n1234\n"
-        "change\nchange\n128000\n64000\nrecommended\n"
-        "change\nchange\n48000\n24000\nrecommended\n" + action + "\ny\n"
+        "change\nlimits\n128000\n64000\ncustom\n1234\n"
+        "change\nlimits\n128000\n64000\nrecommended\n"
+        "change\nlimits\n48000\n24000\nrecommended\n" + action + "\ny\n"
     )
     result = CliRunner().invoke(command, flags, input=answers)
     assert result.exit_code == 0, result.output
@@ -539,7 +539,7 @@ def test_guided_skip_after_edit_discards_generated_reasoning_and_context(manual_
     result = CliRunner().invoke(
         command,
         flags,
-        input="gateway/wired-model\nchange\nchange\n\n\nrecommended\nchange\nskip\n128000\n64000\nsave\ny\n",
+        input="gateway/wired-model\nchange\nlimits\n\n\nrecommended\nchange\nskip\n128000\n64000\nsave\ny\n",
     )
     assert result.exit_code == 0, result.output
     assert len(proposals) == 3 and all(r.method == "GET" for r in calls)
@@ -559,7 +559,7 @@ def test_guided_skip_after_edit_restores_explicit_context_flag_prefill(manual_se
     result = CliRunner().invoke(
         command,
         flags + ["--context-window", "48000"],
-        input="gateway/wired-model\nchange\nchange\n96000\n\nrecommended\nchange\nskip\n24000\nsave\ny\n",
+        input="gateway/wired-model\nchange\nlimits\n96000\n\nrecommended\nchange\nskip\n24000\nsave\ny\n",
     )
     assert result.exit_code == 0, result.output
     assert all(r.method == "GET" for r in calls)
@@ -610,7 +610,7 @@ def test_final_manual_reedit_can_increase_a_provisional_context_and_reply(monkey
     result = CliRunner().invoke(
         command,
         flags,
-        input="8000\n64000\ndiscover\nchange\nchange\n128000\n64000\ncustom\n10000\nsave\ny\n",
+        input="8000\n64000\ndiscover\nchange\nlimits\n128000\n64000\ncustom\n10000\nsave\ny\n",
     )
     assert result.exit_code == 0, result.output
     assert calls and reviews == [len(calls), len(calls)]  # Save without testing adds none.

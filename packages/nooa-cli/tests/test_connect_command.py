@@ -1277,9 +1277,9 @@ def test_model_settings_can_be_edited_skipped_or_cancelled(
     path = tmp_path / "models.yaml"
     options = [arg for arg in args(path) if arg != "--no-catalogue"]
     answers = {
-        "edit": "change\nchange\n0\n64000\n2048\nrecommended\nsave\ny\n",
-        "keep_context": "change\nchange\n\n2048\nrecommended\nsave\ny\n",
-        "skip": "change\nchange\n-\n-\n-\nsave\ny\n",
+        "edit": "change\nlimits\n0\n64000\n2048\nrecommended\nsave\ny\n",
+        "keep_context": "change\nlimits\n\n2048\nrecommended\nsave\ny\n",
+        "skip": "change\nlimits\n-\n-\n-\nsave\ny\n",
         "cancel": "",
     }
     result = CliRunner().invoke(command, options, input=answers[action])

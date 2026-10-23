@@ -38,9 +38,12 @@ proposal and asks:
 - **Save without testing** skips interface discovery and all model calls. If
   the style is still unknown, choose a provider preset/manual interface before
   saving an explicitly not-tested entry. Saving still needs final confirmation.
-- **Change settings** opens the current settings editor, including the reply
-  limit chooser for chat models, then returns directly to this decision. It
-  shows an updated summary before the next test/save decision. It does not
+- **Change settings** always opens **What would you like to change?** with only
+  the options that apply, in this order: **Reply limit and context**,
+  **Reasoning**, **Media**, **Answer format**, **Continue without catalogue
+  settings** and **Back** (Decision routes offer **Media** and **Back**). Each
+  edit changes only that setting, then shows an updated summary before the next
+  test/save decision; **Back** returns with nothing changed. It does not
   fetch metadata again or discard explicit media declarations or custom
   reasoning-level request blocks.
 
@@ -461,7 +464,7 @@ provider catalogue or a successful discovery ping. Responses and Decision routes
 reject explicit profile controls (including `none` and `auto`) before checks.
 Metadata/interface discovery stages reject the option; select an explicit
 Completion interface for wizard use. Plan, configured check and save stages carry
-it. Guided review offers **Change answer format** on every eligible Completion
+it. Guided review offers **Change settings → Answer format** on every eligible Completion
 route, even without a prior flag. **Standard JSON** uses the usual request format;
 **Native JSON** selects the implemented Anthropic carrier, including on a gateway
 when you explicitly choose and test it. Connect never silently tries all formats.
