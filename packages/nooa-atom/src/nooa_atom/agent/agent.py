@@ -48,6 +48,7 @@ with hidden:
     from nooa.interactive import InteractiveAgent, require_task_result
     from nooa.runtime.channels import ChannelReader
     from nooa.storage.markers import nosnapshot
+    from nooa.tools import TodoManager
     from nooa.strategy_validation import InvariantError
     from nooa.tools.shell_tools import FileWrite, Match
     from nooa_atom.agent import work_shell
@@ -462,7 +463,8 @@ class AtomAgent(AtomAgentBase):
         current = getattr(self, "todo", None)
         if isinstance(current, TodoList):
             return
-        self.todo = TodoList(current.to_dict() if current is not None else None)
+        # An earlier session's TodoManager keeps its items, ids, notes and active item.
+        self.todo = TodoList(manager=current) if isinstance(current, TodoManager) else TodoList()
         self.skills.register("nemo.todo", self.todo)
 
     @hidden

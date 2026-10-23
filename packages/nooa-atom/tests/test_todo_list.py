@@ -127,19 +127,45 @@ def test_snapshot_round_trip_keeps_ids_notes_and_the_active_item():
     assert restored.add("C").id == "3"
 
 
-def test_subclass_hides_what_its_base_documents():
-    from nooa import hidden
+def test_hand_built_todos_get_an_id_and_numeric_ids_are_ascii_only():
+    brief = Todo(title="Hand-built brief")
+    assert brief.id and brief.id != Todo(title="another").id
+    todos = TodoList()
+    todos.insert_copy(Todo(id="²", title="unicode digit id"))  # not ASCII: not counted as a number
+    assert todos.add("next").id == "1"
 
-    class Base:
-        def shown(self) -> None:
-            """Base doc."""
 
-    class Child(Base):
-        @hidden
-        def shown(self) -> None:
-            pass
+def test_comment_takes_a_todo_object_first_and_rejects_ambiguous_ids():
+    todos = TodoList()
+    first = todos.add("one")
+    second = todos.add("two")
+    todos.comment(second, "1")  # the object is the target, "1" is the text
+    assert [c.body for c in second.comments] == ["1"] and first.comments == []
+    todos.comment("on one", first)  # text, then the target
+    assert [c.body for c in first.comments] == ["on one"]
+    with pytest.raises(ValueError, match="ambiguous"):
+        todos.comment("1", "2")
+    with pytest.raises(TypeError, match="two todos"):
+        todos.comment(first, second)
+    assert [c.body for c in second.comments] == ["1"]
 
-    assert "shown" not in doc(Child, concise=True)
+
+def test_legacy_notes_keyword_is_the_description():
+    todos = TodoList()
+    assert todos.add("x", notes="old-style brief").description == "old-style brief"
+    with pytest.raises(ValueError, match="either description or legacy notes"):
+        todos.add("y", description="a", notes="b")
+
+
+def test_the_manager_is_held_not_inherited():
+    from nooa.tools import TodoManager
+
+    todos = TodoList()
+    assert not isinstance(todos, TodoManager)
+    legacy = TodoManager()
+    kept = legacy.add("saved before")
+    wrapped = TodoList(manager=legacy)
+    assert wrapped.list_todos() == [kept] and wrapped.to_dict() == legacy.to_dict()
 
 
 @pytest.fixture

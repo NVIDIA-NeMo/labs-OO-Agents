@@ -1540,8 +1540,6 @@ def _extract_methods(obj: type) -> list[CallableInfo]:
             if name in _PYDANTIC_METHODS:
                 continue
             if is_hidden_method(value) or is_hidden_method(raw):
-                # A subclass may hide what its base shows: the base's copy must not reappear.
-                seen_names.add(name)
                 continue
             seen_names.add(name)
             info = extract_callable_info(value)
