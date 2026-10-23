@@ -122,9 +122,9 @@ class _Route:
 
 
 def _item(item: Any, name: str) -> Any:
-    """An unasked-for outcome as a job item: a failure is a value, never raised."""
+    """An unasked-for outcome as a job item: a failure is its text, never raised."""
     if isinstance(item, ChildFailed):
-        return RuntimeError(f"subagent {name} failed: {item.error}")
+        return f"subagent {name} failed: {item.error}"
     return _value(item, name)
 
 

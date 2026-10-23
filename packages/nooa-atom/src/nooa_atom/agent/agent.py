@@ -751,8 +751,8 @@ for _cls, _members in (
 ):
     for _member in _members:
         spec(_cls, _member, hidden=True)
-# The adapters' own send() is the protocol the manager calls; the model sends
-# through the launched job (Job.send), so only that one is documented.
+# The adapters' own send()/message() are the protocol the manager calls; the model
+# uses the launched job's (Job.send, Job.message), so only those are documented.
 for _method in (
     WorkManager.running,
     WorkManager.records,
@@ -760,6 +760,7 @@ for _method in (
     JobEvent.status_source,
     Shell.send,
     Subagent.send,
+    Subagent.message,
 ):
     spec(_method, hidden=True)
 spec(Shell, "current_dir", hidden=True)  # the status block shows a session's directory
