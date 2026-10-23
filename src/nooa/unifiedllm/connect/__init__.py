@@ -123,6 +123,8 @@ def _include_rejected(exc: Exception) -> bool:
     )
 
 
+REASONING_DISCOVERY_TIMEOUT = 90
+
 CACHE_PARAMS = ("prompt_cache_options", "prompt_cache_breakpoint", "cache_control")
 
 
@@ -3362,7 +3364,9 @@ async def check_interfaces(
             level_probes = tuple(
                 replace(
                     p,
-                    timeout_seconds=timeout_seconds,
+                    # Thinking takes longer than a plain reply; a short wait would
+                    # hide reasoning on slower models.
+                    timeout_seconds=max(timeout_seconds, REASONING_DISCOVERY_TIMEOUT),
                     body={
                         **p.body,
                         "max_output_tokens" if style == "responses" else "max_tokens": (
