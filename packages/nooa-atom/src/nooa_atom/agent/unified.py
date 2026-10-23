@@ -235,6 +235,23 @@ def _bounded(text: str, limit: int = 60) -> str:
     return flat if len(flat) <= limit else flat[: limit - 1] + "…"
 
 
+# Shared repo-tool docs that name the legacy shell; this agent edits through
+# self.files and its repo searches start in the workspace.
+_DOC_FIXES: Annotated[tuple[tuple[str, str], ...], hidden] = (
+    ("self.shell.replace_match()", "self.files.replace_match()"),
+    ("as ShellTools ``Match`` anchors", "as ``Match`` anchors (edit with ``self.files``)"),
+    ("defaults to the shell's current directory", "defaults to the workspace"),
+)
+
+
+@hidden
+def _tools_doc(text: str) -> str:
+    """The tools block for this agent: the shared docs, with only advertised paths."""
+    for old, new in _DOC_FIXES:
+        text = text.replace(old, new)
+    return text
+
+
 _CONTEXT: Annotated[dict[str, Any], hidden] = {
     "state": None,
     "execution_context": None,
@@ -288,13 +305,14 @@ class UnifiedAtomAgent(AtomAgent):
     - interactive: send brief progress notes and the reply with
       ``self.message()`` (complete Markdown: outcome, evidence, risks), then
       ``Done``; background jobs may keep running.
-    - unattended, child, orchestrator: nobody reads ``self.message()``. End
+    - unattended, child, orchestrator: the result is what gets read. End
       with ``Done(explanation=..., result=TaskResult(solution_description=...,
       evidence=..., how_to_verify=..., report=...))``, also when blocked (say
       what blocked you). First await or cancel your running jobs; idle
       shells and subagents may stay. Leave the tree clean.
     - child: your parent's brief is the task; its first line says whether you
-      may ask (``NeedInput``). No routine progress notes.
+      may ask (``NeedInput``). ``self.message()`` reaches your parent as a
+      short note: no routine progress notes, the report goes in the result.
     - orchestrator: split the task into Todo briefs for subagents rather than
       implementing it; write runnable acceptance checks first, run them
       yourself (a report is not proof), send failures back with ``send``,
@@ -318,9 +336,11 @@ class UnifiedAtomAgent(AtomAgent):
         # self.files and self.repo but is not offered (``/skills`` can still).
         self.skills.registry.deactivate(["nemo.shell"])
         self.context["python_cell_tools"] = Context(
-            doc(RepoTools, Files, TodoManager, concise=True)
-            + "\n"
-            + doc(WorkManager, Job, JobEvent, Shell, CommandResult, Subagent, Question),
+            _tools_doc(
+                doc(RepoTools, Files, TodoManager, concise=True)
+                + "\n"
+                + doc(WorkManager, Job, JobEvent, Shell, CommandResult, Subagent, Question)
+            ),
             prefix=True,
         )
         self._status_block()
@@ -366,7 +386,12 @@ class UnifiedAtomAgent(AtomAgent):
             if job._kind == "resource":
                 if not _active(job):
                     idle.append(f"{name} · {summary or 'open'}")
-                continue  # its requests are listed instead
+                continue  # its requests are listed instead, with its summary
+            owner = job._owner
+            if owner is not None and owner._status == "running":
+                # The resource's own line (a shell: the command, busy, its last
+                # confirmed cwd) says more than the request's.
+                summary = owner.summary or summary
             parts = [name, _age(now - job._started), summary]
             running.append(" · ".join(part for part in parts if part))
         hints = {

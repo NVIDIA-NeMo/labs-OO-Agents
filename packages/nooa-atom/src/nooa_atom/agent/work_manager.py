@@ -269,6 +269,7 @@ class Job:
         self._closing = False
         self._exit = asyncio.Event()
         self._requests: list[Job] = []
+        self._owner: Job | None = None  # a request's resource
         self._sent = 0
         self._task: asyncio.Task[None] | None = None
         self._started = time.monotonic()
@@ -357,6 +358,7 @@ class Job:
         self._requests = [r for r in self._requests if r._status == "running"]
         self._sent += 1
         request = self._manager._start(f"{self.name}#{self._sent}", self._request(item), "request")
+        request._owner = self
         self._requests.append(request)
         return request
 

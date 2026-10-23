@@ -152,7 +152,7 @@ class Subagent:
         if route.future is not None:
             return f"working · {where}"
         if route.asking is not None:
-            return f"asking: {route.asking.text} · {where}"
+            return f"asked a question, awaiting your answer (send it) · {where}"
         return f"idle · {where}"
 
     async def run(self, task: str | Todo, *, brief: str | None = None) -> TaskResult:

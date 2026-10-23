@@ -12,6 +12,7 @@ import asyncio
 import pytest
 from atom_test_agents import AtomModels, ask, cell, done, work_done
 from nooa_atom.agent.work_shell import Shell
+from nooa_atom.agent.work_subagent import Question
 from nooa_atom.session.options import SessionOptions
 from nooa_atom.session.registry import SessionRegistry
 from nooa_atom.session.store import SessionStore
@@ -104,8 +105,11 @@ async def test_kept_subagent_question_answer_and_follow_up(registry, options, mo
         cell(
             "rev = self.jobs.launch(Subagent('review'), name='review')\n"
             "q = await rev.send('REVIEW-TASK')\n"
-            "assert isinstance(q, Question) and q.text == 'which file?', q\n"
-            "assert 'asking: which file?' in self.jobs.get('review').summary\n"
+            "assert isinstance(q, Question) and q.text == 'SECRET-Q which file?', q\n"
+            "summary, status = self.jobs.get('review').summary, self._status()\n"
+            "assert 'asked a question, awaiting your answer' in summary, summary\n"
+            "assert 'review · asked a question' in status, status\n"
+            "assert 'SECRET' not in summary + status\n"
             "r1 = await rev.send('ANSWER-42')\n"
             "r2 = await rev.send('FOLLOW-UP')\n"
             "self.v.reports = [r1.report, r2.report]\n"
@@ -114,7 +118,7 @@ async def test_kept_subagent_question_answer_and_follow_up(registry, options, mo
         )
     ]
     models.scripts["review"] = [
-        ask("which file?"),
+        ask("SECRET-Q which file?"),
         cell(
             "assert 'ANSWER-42' in str(notification)\n" + WORK_RESULT.format(e="answered", r="R1")
         ),
@@ -394,7 +398,9 @@ async def test_first_call_offers_one_work_vocabulary(
         "self.jobs.run",
         "JobsApi",
         "JobInfo",
-        "self.shell.run",
+        "self.shell",
+        "ShellTools",
+        "nobody reads ``self.message()``",
         "ActivityShellTools",
         "DepthLimitError",
         "producers",
@@ -447,9 +453,10 @@ async def test_status_counts_unread_by_sender_never_by_value(tmp_path):
     agent = await _agent(tmp_path)
     try:
         agent._jobs_in.put(JobEvent("tests", 1, "done", "SECRET-OUTPUT"))
+        agent._jobs_in.put(JobEvent("review#1", 2, "done", Question("SECRET-Q?")))
         agent._user_messages_in.put("SECRET-USER-TEXT")
         status = agent._status()
-        assert "jobs: 1 (from tests)" in status
+        assert "jobs: 2 (from tests, review#1)" in status
         assert "user_messages: 1" in status
         assert "SECRET" not in status
         assert "Read now: await self.user_messages.get() · next turn's notification" in status
@@ -457,6 +464,20 @@ async def test_status_counts_unread_by_sender_never_by_value(tmp_path):
         status = agent._status()
         assert "Running:\n  • nap · 0s" in status
         await job.cancel()
+        # A shell's running request shows the command, busy, and its last confirmed cwd.
+        (tmp_path / "sub").mkdir()
+        sh = agent.jobs.launch(Shell(tmp_path), name="sh")
+        await sh.send("cd sub")
+        req = sh.send("sleep 5")
+        for _ in range(100):
+            if "running" in sh.summary:
+                break
+            await asyncio.sleep(0.02)
+        status = agent._status()
+        assert f"sh#2 · 0s · running $ sleep 5 · was in {tmp_path.resolve() / 'sub'}" in status
+        assert "  • sh · " not in status  # listed once, by its request
+        await req.cancel()
+        assert f"sh · idle · in {tmp_path.resolve() / 'sub'}" in agent._status()
     finally:
         await agent.aclose()
 
