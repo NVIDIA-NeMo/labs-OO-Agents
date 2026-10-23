@@ -19,6 +19,7 @@ from nooa_atom.session.registry import SessionRegistry
 from nooa_atom.session.store import SessionStore
 
 from nooa.interactive import Done
+from nooa.storage.snapshot_vars import SnapshotVars
 
 UNIFIED = "nooa_atom.agent:AtomAgent"
 TIMEOUT = 60
@@ -450,6 +451,7 @@ async def test_first_call_offers_one_work_vocabulary(
         "documented in the python_cell_tools block",
         "class SkillManager",
         "def status(self) -> str:",
+        "async def message(self, item",  # Job.message
         "Names must be valid Python identifiers;",
         "<python_cell_state>\nCell locals: notification (dict)\n</python_cell_state>",
     ):
@@ -484,6 +486,7 @@ async def test_first_call_offers_one_work_vocabulary(
         "print(doc(self.jobs))",
         "async def send(self, command",  # adapters' send(): the manager's protocol
         "async def send(self, task",
+        "async def message(self, text",  # Subagent's: the model uses Job.message
     ):
         assert legacy not in rendered, legacy
     for other, text in ROLE_INSTRUCTIONS.items():
@@ -664,8 +667,9 @@ def _parent_wait(n):
 _SEE_ITEM = (
     "[event] = notification['jobs']\n"
     "assert (event.name, event.kind) == ('review', 'item'), event\n"
-    "self.v.item = str(event.value) if isinstance(event.value, Exception) else event.value.report\n"
-    "self.v.item_type = type(event.value).__name__\n"
+    "value = event.value\n"
+    "self.v.item = value if isinstance(value, str) else getattr(value, 'report', None) or value.text\n"
+    "self.v.item_type = type(value).__name__\n"
     "return_result(Done(explanation='saw the item'))"
 )
 
@@ -858,8 +862,42 @@ async def test_a_failed_note_turn_is_a_visible_item(registry, options, models):
             break
         await asyncio.sleep(0.05)
     agent = root._agent
-    assert agent.v.item_type == "RuntimeError"
-    assert "subagent review failed" in str(agent.v.item)
+    assert agent.v.item_type == "str"  # plain text: kept by a snapshot as is
+    assert agent.v.item.startswith("subagent review failed:")
+    restored = SnapshotVars.from_data(agent.vars.to_json_data())
+    assert restored["item"] == agent.v.item
+    assert _delegates_empty(root)
+
+
+async def test_a_request_queued_behind_a_note_turn_that_asks_still_gets_its_result(
+    registry, options, models
+):
+    models.scripts[None] = [
+        cell(
+            "rev = self.jobs.launch(Subagent(), name='review')\n"
+            "await rev.send('TASK-1')\n"
+            "await rev.message('NOTE-Q')\n" + _parent_wait(2) + "req = rev.send('TASK-2')\n"
+            "await asyncio.sleep(0.3)\n"
+            "await Shell().run('touch go2')\n"
+            "self.v.report = (await req).report\n"
+            "self.v.summary = self.jobs.get('review').summary\n"
+            "return_result(Done(explanation='ok'))"
+        ),
+        cell(_SEE_ITEM),
+    ]
+    models.scripts["review"] = [
+        work_done("one", report="R-1"),
+        cell(_child_gate(2) + "print('held')"),
+        ask("NOTE-QUESTION which one?"),  # the note's turn ends with a question
+        cell("assert 'TASK-2' in str(notification)\n" + WORK_RESULT.format(e="two", r="R-2")),
+    ]
+    root = await registry.create(options)
+    assert await asyncio.wait_for(root.prompt("go"), TIMEOUT) == Done(explanation="ok")
+    await _settle(root)
+    agent = root._agent
+    assert agent.v.report == "R-2"  # the queued request was not stranded by the question
+    assert (agent.v.item_type, agent.v.item) == ("Question", "NOTE-QUESTION which one?")
+    assert "asked a question" not in agent.v.summary  # its own turn ended the question
     assert _delegates_empty(root)
 
 
