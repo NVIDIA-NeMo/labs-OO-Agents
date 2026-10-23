@@ -327,6 +327,34 @@ async def test_shell_starts_in_the_workspace(registry, options, models):
     assert "Cancel: await self.jobs.get('<name>').cancel()" in status
 
 
+async def test_session_close_ends_shells_its_cells_started(registry, options, models):
+    """A Shell kept as a cell local (not a job) and its background process end with the session."""
+    import os
+
+    models.scripts[None] = [
+        cell(
+            "sh = Shell()\n"
+            "await sh.run('cd / && X=1')\n"
+            "self.v.bg = int((await sh.run('sleep 300 & echo $!')).stdout)\n"
+            "self.v.bash = int((await sh.run('echo $$')).stdout)\n"
+            "self.v.seen = (await sh.run('echo $X $PWD')).stdout\n"
+            "return_result(Done(explanation='ok'))"
+        )
+    ]
+    root = await registry.create(options)
+    assert await asyncio.wait_for(root.prompt("go"), TIMEOUT) == Done(explanation="ok")
+    agent = root._agent
+    assert agent.v.seen == "1 /\n"  # one bash across run() calls
+    pids = (agent.v.bg, agent.v.bash)
+    os.kill(pids[0], 0)  # still running after the turn: the cell local keeps the shell
+    await registry.close(root.id)
+    for pid in pids:
+        with pytest.raises(ProcessLookupError):
+            for _ in range(100):
+                os.kill(pid, 0)
+                await asyncio.sleep(0.05)
+
+
 async def test_unattended_done_waits_for_running_work(registry, options, models):
     options = options.model_copy(update={"turn_method": "handle_batch"})
     result = WORK_RESULT.format(e="ok", r="R")

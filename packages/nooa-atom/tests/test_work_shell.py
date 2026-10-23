@@ -35,7 +35,7 @@ def alive(pid: int) -> bool:
 
 
 async def test_one_shot_result_and_streams(manager, tmp_path):
-    r = await manager.launch(Shell(tmp_path).run("echo out; echo err >&2; exit 3"))
+    r = await manager.launch(Shell(tmp_path).run("echo out; echo err >&2; (exit 3)"))
     assert isinstance(r, CommandResult)
     assert (r.returncode, r.timed_out, r.stdout, r.stderr) == (3, False, "out\n", "err\n")
     assert r.stdout_path is None and r.stderr_path is None  # nothing was cut
@@ -185,7 +185,7 @@ async def test_shell_reports_confirmed_cwd_and_busy_state(manager, tmp_path):
     await sh.send("true")
     assert "restarted" not in sh.summary
     one = await manager.launch(Shell(tmp_path).run("cd /; pwd"))
-    assert one.stdout == "/\n" and one.cwd == str(tmp_path)  # a one-shot cd does not last
+    assert one.stdout == "/\n" and one.cwd == "/"  # the shell's real directory after it
     await manager.aclose()
     assert shell.summary() == "closed"
 
@@ -253,21 +253,154 @@ async def test_background_job_output_does_not_block_the_session(manager, tmp_pat
     assert r.stdout.strip() == "0"
 
 
-async def test_one_shot_background_process_does_not_hold_the_command(tmp_path):
+async def test_background_process_does_not_hold_the_command_and_ends_with_the_shell(tmp_path):
     """A background process that inherits stdout/stderr does not keep run() waiting."""
     loop = asyncio.get_running_loop()
     started = loop.time()
-    r = await asyncio.wait_for(
-        Shell(tmp_path, timeout=2).run("sleep 3 & echo $! >bg.pid; echo hi"), 10
-    )
+    shell = Shell(tmp_path, timeout=2)
+    r = await asyncio.wait_for(shell.run("sleep 30 & echo $! >bg.pid; echo hi"), 10)
     assert (r.returncode, r.timed_out, r.stdout) == (0, False, "hi\n")
     assert loop.time() - started < 1.5
     pid = int((tmp_path / "bg.pid").read_text())
     try:
-        os.kill(pid, 0)  # still ours to stop: run() did not kill it
+        assert alive(pid)  # run() did not kill it: it lives as long as the shell
+        await shell.aclose()  # deterministic: bash and its background processes end
+        await asyncio.sleep(0.1)
+        assert not alive(pid)
     finally:
         with contextlib.suppress(ProcessLookupError):
             os.kill(pid, 9)
     # No transport or pump is left behind: nothing still reads its pipe.
     pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
     assert not pending
+
+
+# ---- one bash per Shell object: run() is persistent ----
+
+
+async def test_run_reuses_the_objects_bash(tmp_path):
+    (tmp_path / "sub").mkdir()
+    async with Shell(tmp_path) as sh:
+        await sh.run("cd sub")
+        await sh.run("export EXPORTED=1")
+        await sh.run("UNEXPORTED=2; f() { echo fn; }")
+        r = await sh.run('echo "$EXPORTED $UNEXPORTED $PWD $(f)"')
+        assert r.stdout == f"1 2 {tmp_path / 'sub'} fn\n" and r.cwd == str(tmp_path / "sub")
+        assert sh.current_dir == str(tmp_path / "sub")
+        pids = {(await sh.run("echo $$")).stdout for _ in range(3)}
+        assert len(pids) == 1  # one bash, not one per call
+        r = await sh.run("cat; echo [$?]", stdin="in\n")
+        assert r.stdout == "in\n[0]\n"
+        r = await asyncio.wait_for(sh.run("cat; echo none"), 10)  # no stdin: reads nothing
+        assert r.stdout == "none\n"
+
+
+async def test_constructor_is_inert_and_objects_are_isolated(tmp_path):
+    a, b = Shell(tmp_path), Shell(tmp_path)
+    assert a.summary() == "not started" and a._session is None
+    try:
+        await a.run("export V=a; W=a; cd /")
+        r = await b.run('echo "[$V][$W] $PWD"')
+        assert r.stdout == f"[][] {tmp_path}\n"
+        assert (await a.run("echo $V$W")).stdout == "aa\n"
+    finally:
+        await a.aclose()
+        await b.aclose()
+
+
+async def test_concurrent_runs_are_fifo(tmp_path):
+    async with Shell(tmp_path) as sh:
+        calls = [sh.run(f"sleep 0.0{5 - i}; echo {i} >> order.txt; X={i}") for i in range(5)]
+        results = await asyncio.gather(*calls, sh.run("echo $X"))
+        assert results[-1].stdout == "4\n"  # queued last, saw the state of the others
+        assert (tmp_path / "order.txt").read_text() == "0\n1\n2\n3\n4\n"
+
+
+async def test_run_and_send_share_one_bash(manager, tmp_path):
+    shell = Shell(tmp_path)
+    await shell.run("cd / && A=1")  # started directly
+    sh = manager.launch(shell, name="sh")
+    r = await sh.send('echo "$A $PWD"; B=2')
+    assert r.stdout == "1 /\n"
+    r = await shell.run('echo "$B"')  # direct use while launched: the same bash, in order
+    assert r.stdout == "2\n"
+    pid = int((await shell.run("echo $$")).stdout)
+    await sh.cancel()  # the job's end closes the shell it entered
+    await asyncio.sleep(0.1)
+    assert not alive(pid) and shell.summary() == "closed"
+
+
+async def test_timeout_stops_the_whole_command_and_keeps_state(tmp_path):
+    async with Shell(tmp_path, timeout=0.5) as sh:
+        await sh.run("KEEP=1")
+        r = await sh.run("sleep 30; touch after; echo never")
+        assert (r.returncode, r.timed_out, r.stdout) == (124, True, "")
+        assert not (tmp_path / "after").exists()  # the rest of the command was skipped
+        r = await sh.run('echo "$KEEP"; echo $?; echo "[$__nooa_stop]"')
+        assert r.stdout == "1\n0\n[]\n"  # state kept; the next command runs whole
+
+
+async def test_cancelled_run_keeps_state_and_the_next_command_runs(tmp_path):
+    async with Shell(tmp_path) as sh:
+        await sh.run("cd / && KEEP=yes")
+        task = asyncio.create_task(sh.run(f"sleep 60; touch {tmp_path}/after"))
+        await asyncio.sleep(0.5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 10)
+        r = await sh.run('echo "$KEEP $PWD"')
+        assert r.stdout == "yes /\n" and "restarted" not in r.stderr
+        assert not (tmp_path / "after").exists()
+
+
+async def test_exit_ends_the_bash_and_says_so(tmp_path):
+    async with Shell(tmp_path) as sh:
+        await sh.run("export FOO=1; cd /")
+        r = await sh.run("exit 3")
+        assert "bash ended during this command" in r.stderr
+        r = await sh.run('echo "[$FOO] $PWD"')
+        assert r.stdout == "[] /\n"  # a new bash: cwd kept, variables lost
+
+
+async def test_named_job_of_run_result_and_event(manager, tmp_path):
+    shell = Shell(tmp_path)
+    try:
+        await shell.run("X=kept")
+        job = manager.launch(shell.run("sleep 0.2; echo $X; Y=new"), name="tests")
+        r = await job
+        assert job.status == "done" and r.stdout == "kept\n"
+        assert (await shell.run("echo $Y")).stdout == "new\n"
+        manager.launch(shell.run("echo later"), name="later")  # nobody awaits: an event
+        outbox = manager._outbox
+        event = await asyncio.wait_for(outbox.get(), 10)
+        assert (event.name, event.kind, event.value.stdout) == ("later", "done", "later\n")
+    finally:
+        await shell.aclose()
+
+
+async def test_dropped_shell_ends_its_bash(tmp_path):
+    pid = int((await Shell(tmp_path).run("echo $$")).stdout)  # a temporary
+    await asyncio.sleep(0.1)
+    assert not alive(pid)
+
+
+async def test_owner_closes_its_shells_and_their_background_processes(manager, tmp_path):
+    from nooa_atom.agent.work_shell import ShellOwner, shell_owner
+
+    owner = ShellOwner()
+    token = shell_owner.set(owner)
+    try:
+        kept = Shell(tmp_path)  # held, as a cell local would be
+        bg = int((await kept.run("sleep 60 & echo $!")).stdout)
+        bash = int((await kept.run("echo $$")).stdout)
+        launched = manager.launch(Shell(tmp_path), name="sh")  # the job's context: same owner
+        other = int((await launched.send("echo $$")).stdout)
+        assert len(owner) == 2
+    finally:
+        shell_owner.reset(token)
+    await owner.aclose()
+    await asyncio.sleep(0.1)
+    assert not alive(bg) and not alive(bash) and not alive(other)
+    assert kept.summary() == "closed"
+    assert (await kept.run("echo again")).stdout == "again\n"  # usable again: a new bash
+    await kept.aclose()

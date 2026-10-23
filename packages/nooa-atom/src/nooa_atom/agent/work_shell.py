@@ -1,18 +1,26 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Shell work for the work manager: one-shot commands and a persistent session.
+"""Shell work for the work manager: one persistent bash per ``Shell`` object.
 
-``Shell(cwd, timeout)`` is inert configuration; nothing starts until it is used.
+``Shell(cwd, timeout)`` is inert configuration; its bash starts on first use.
 
-- ``await Shell().run("make")``: one command in its own bash process.
-- ``sh = manager.launch(Shell(), name="sh")``: a persistent session (cwd,
-  exported and unexported variables survive); ``await sh.send("cd src")``
-  runs one command in it. Commands run one at a time, in order.
+- ``sh = Shell()``; ``await sh.run("cd src")``; ``await sh.run("make")``: the
+  same object, the same bash (cwd, exported and unexported variables carry
+  over). Another ``Shell()`` is another bash.
+- ``sh = manager.launch(Shell(), name="sh")``: the same shell as a job;
+  ``await sh.send("make")`` runs one command in it, like ``run``.
+  Commands run one at a time, in order (FIFO), whichever way they arrive.
+
+Lifecycle: ``await shell.aclose()`` or ``async with Shell() as sh:`` ends
+bash and its background processes; a dropped Shell ends with its object; an
+owner (``ShellOwner`` in ``shell_owner``, which an agent session sets) closes
+the Shells started under it; a launched Shell closes with its job.
 
 A command's stdout and stderr are read through pipes into files in the job's
 scratch directory, each up to an output limit (past it, bytes are counted
-but not kept, and the summary says so). A ``CommandResult`` carries a
-bounded summary of each stream and the file path when the summary was cut.
+but not kept, and the summary says so); outside a job they are not kept. A
+``CommandResult`` carries a bounded summary of each stream and the file path
+when the summary was cut.
 """
 
 from __future__ import annotations
@@ -27,6 +35,7 @@ import shlex
 import signal
 import sys
 import tempfile
+import weakref
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Annotated, Any
@@ -36,7 +45,7 @@ from nooa.agentdoc import spec
 from nooa.tools import BashSession
 from nooa_atom.agent.work_manager import describe, job_dir
 
-__all__ = ["CommandResult", "Shell", "default_cwd"]
+__all__ = ["CommandResult", "Shell", "ShellOwner", "default_cwd", "shell_owner"]
 
 default_cwd: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "nooa_work_shell_cwd", default=None
@@ -52,8 +61,11 @@ _MAX_OUTPUT_BYTES = 64 * 1024 * 1024
 _CHUNK_BYTES = 64 * 1024
 # Seconds a cancelled persistent command gets to end after SIGTERM, then SIGKILL.
 _INTERRUPT_GRACE = 2.0
-# Seconds to wait for a killed process, and for output still in the pipes.
-_REAP_SECONDS = 5.0
+# Seconds past a command's deadline before the bash session's own timeout fires.
+_BACKSTOP_SECONDS = 60.0
+# Skips each command once an interrupt set __nooa_stop, except the wrapper's own epilogue.
+_STOP_TRAP = '[[ -z $__nooa_stop || $BASH_COMMAND == "__nooa_rc=\\$?" || $BASH_COMMAND == "trap - DEBUG USR1" ]]'
+# Seconds to wait for output still in the pipes.
 _DRAIN_SECONDS = 0.5
 
 
@@ -63,8 +75,8 @@ class CommandResult:
 
     ``stdout`` and ``stderr`` are whole up to 10 kB, else head and tail
     around a marker; ``stdout_path``/``stderr_path`` then name the file with
-    the full output (kept while the job is listed). ``cwd`` is the directory
-    after the command (a one-shot command's ``cd`` does not last).
+    the full output (kept while the job is listed). ``cwd`` is the shell's
+    directory after the command, as bash reported it (a ``cd`` lasts).
     """
 
     returncode: int
@@ -144,27 +156,6 @@ def _result(code: int, timed_out: bool, out: _Capture, err: _Capture, cwd: str) 
     return CommandResult(code, timed_out, stdout, stderr, cwd, stdout_path, stderr_path)
 
 
-def _kill_group(proc: asyncio.subprocess.Process) -> None:
-    if proc.returncode is None:
-        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
-            os.killpg(proc.pid, signal.SIGKILL)
-
-
-async def _reap(proc: asyncio.subprocess.Process) -> None:
-    """Wait for a (killed) process, but never forever."""
-    with contextlib.suppress(TimeoutError, Exception):
-        await asyncio.wait_for(asyncio.shield(proc.wait()), _REAP_SECONDS)
-
-
-async def _settle_pumps(pumps: list[asyncio.Task[None]]) -> None:
-    """Let the pipes drain briefly; a background process still holding them is cut off."""
-    with contextlib.suppress(TimeoutError):
-        await asyncio.wait_for(asyncio.gather(*pumps, return_exceptions=True), _DRAIN_SECONDS)
-    for pump in pumps:
-        pump.cancel()
-    await asyncio.gather(*pumps, return_exceptions=True)
-
-
 def _start_time(pid: int) -> str | None:
     """A process's start time (Linux), so a reused pid is never mistaken for it."""
     try:
@@ -223,22 +214,68 @@ async def _open_fifo(path: Path) -> tuple[asyncio.StreamReader, asyncio.BaseTran
     return reader, transport, write_fd
 
 
-class Shell:
-    """Bash commands: ``await Shell().run("make")`` runs one command in a fresh bash.
+class ShellOwner:
+    """Shells started under one owner, closed together: an agent session closes its own.
 
-    Launched, it is a persistent session: ``sh = self.jobs.launch(Shell(),
-    name="sh")``; each ``sh.send("cd src && make")`` is a request whose
-    result is a ``CommandResult``. cd, exports and variables carry over, and
-    commands run one at a time, in order. ``cwd`` defaults to the workspace;
-    ``timeout`` (seconds) bounds each command, which then ends with
-    ``returncode`` 124 and ``timed_out=True``.
-    Cancelling a request interrupts its command; cancelling the session ends
-    its bash.
+    A ``Shell`` that starts bash while ``shell_owner`` names an owner joins
+    it (weakly: a dropped Shell ends with its object). ``await owner.aclose()``
+    ends every one still open; a closed Shell starts a new bash if used again.
     """
 
-    __nosnapshot__ = True  # a live session's bash is not data
+    __nosnapshot__ = True
 
-    cwd: str | Path | None  # Where it starts; current_dir is where the session is now
+    def __init__(self) -> None:
+        self._shells: weakref.WeakSet[Shell] = weakref.WeakSet()
+
+    def adopt(self, shell: Shell) -> None:
+        self._shells.add(shell)
+
+    def __len__(self) -> int:
+        return sum(1 for shell in list(self._shells) if shell._session is not None)
+
+    async def aclose(self) -> None:
+        """Close every open Shell this owner adopted."""
+        shells = list(self._shells)
+        self._shells.clear()
+        results = await asyncio.gather(*(s.aclose() for s in shells), return_exceptions=True)
+        errors = [r for r in results if isinstance(r, BaseException)]
+        if errors:
+            raise errors[0]
+
+
+shell_owner: contextvars.ContextVar[ShellOwner | None] = contextvars.ContextVar(
+    "nooa_work_shell_owner", default=None
+)
+"""Who closes the Shells started here (an agent session sets its own); None: only their users."""
+
+
+class Shell:
+    """One persistent bash per ``Shell`` object: ``sh = Shell()``; ``await sh.run("cd src")``.
+
+    The same object keeps its bash between commands: cd, exports and
+    unexported variables carry over; another ``Shell()`` is a separate bash.
+    Nothing starts until the first command. Commands run one at a time, in
+    order. ``Shell().run(cmd)`` on a new object is a fresh shell whose state
+    ends with it. ``cwd`` defaults to the workspace; ``timeout`` (seconds)
+    bounds each command, which then ends with ``returncode`` 124 and
+    ``timed_out=True`` (bash and its state are kept).
+
+    Launched, it is a job: ``sh = self.jobs.launch(Shell(), name="sh")``; each
+    ``sh.send("make")`` is a request job whose result is a ``CommandResult``,
+    in the same bash as ``run`` on that object. Cancelling a command
+    interrupts it and keeps the shell's state (a command that will not stop
+    restarts bash, and the next result says the variables were lost);
+    cancelling the job closes its bash.
+
+    Closing ends bash and its background processes: ``await sh.aclose()``,
+    ``async with Shell() as sh:``, or when the object is dropped. An agent
+    session closes its own Shells when it ends; keep the object (``sh``) for
+    as long as a background server must run.
+    """
+
+    __nosnapshot__ = True  # a live bash is not data
+
+    cwd: str | Path | None  # Where it starts; current_dir is where the shell is now
     timeout: float  # Seconds per command
 
     def __init__(
@@ -252,15 +289,16 @@ class Shell:
         self.timeout = timeout
         self._max_output = max_output
         self._session: BashSession | None = None
-        self._entering = False
-        self._lock: asyncio.Lock | None = None
+        self._starting = False
+        self._entered = False  # launched (or ``async with``): one owner at a time
+        self._lock = asyncio.Lock()  # FIFO: commands run one at a time, in order
         self._bash: tuple[int, str | None] | None = None  # pid and start time of bash
         self._own_dir: tempfile.TemporaryDirectory[str] | None = None
         self._lingering: set[asyncio.Task[None]] = set()
         self._count = itertools.count(1)
         self._note = ""
         self._pidfile: Path | None = None
-        # Session state as last confirmed by bash itself (never guessed from config).
+        # Shell state as last confirmed by bash itself (never guessed from config).
         self._confirmed_cwd: str | None = None
         self._busy: str | None = None  # the command running now
         self._lost = False  # restarted since the last command: state was lost
@@ -270,14 +308,14 @@ class Shell:
 
     @property
     def current_dir(self) -> str | None:
-        """The session's directory as bash last reported it (None before it started)."""
+        """The shell's directory as bash last reported it (None before it started)."""
         return self._confirmed_cwd
 
     @hidden
     def summary(self) -> str:
-        """The session's state in one line, without asking bash (it may be busy)."""
+        """The shell's state in one line, without asking bash (it may be busy)."""
         if self._session is None:
-            if self._entering:
+            if self._starting:
                 return "starting"
             return "not started" if self._confirmed_cwd is None else "closed"
         lost = " · restarted, variables lost" if self._lost else ""
@@ -291,90 +329,30 @@ class Shell:
         return default_cwd.get() or os.getcwd()
 
     async def run(self, command: str, *, stdin: str | None = None) -> CommandResult:
-        """Run one command in a fresh bash process and return its result."""
-        directory = self._directory()
-        describe(f"$ {command} · in {directory}")
-        out, err = _captures(job_dir(), f"cmd-{next(self._count)}", self._max_output)
-        # Our own pipes, not asyncio's: Process.wait() then waits for bash
-        # alone, not for a background process that inherited stdout/stderr.
-        fds: set[int] = set()
-        transports: list[asyncio.BaseTransport] = []
-        pumps: list[asyncio.Task[None]] = []
-        try:
-            readers = []
-            write_ends = []
-            for _ in range(2):
-                read_fd, write_fd = os.pipe()
-                fds.update((read_fd, write_fd))
-                readers.append(read_fd)
-                write_ends.append(write_fd)
+        """Run one command in this object's bash (started on first use); state carries over.
+
+        ``stdin`` is the command's input (else it reads nothing).
+        """
+        describe(f"$ {command}")
+        async with self._lock:
+            if self._session is None:
+                await self._start()
+            self._busy = command
             try:
-                proc = await asyncio.create_subprocess_exec(
-                    "bash",
-                    "-c",
-                    command,
-                    stdin=(
-                        asyncio.subprocess.PIPE if stdin is not None else asyncio.subprocess.DEVNULL
-                    ),
-                    stdout=write_ends[0],
-                    stderr=write_ends[1],
-                    cwd=directory,
-                    start_new_session=True,
-                )
+                return await self._send_locked(command, stdin)
             finally:
-                for fd in write_ends:  # bash holds its own copies now
-                    fds.discard(fd)
-                    os.close(fd)
-            loop = asyncio.get_running_loop()
-            for capture, read_fd in zip((out, err), readers, strict=True):
-                reader = asyncio.StreamReader(limit=2**20)
-                transport, _ = await loop.connect_read_pipe(
-                    lambda r=reader: asyncio.StreamReaderProtocol(r), os.fdopen(read_fd, "rb", 0)
-                )
-                fds.discard(read_fd)  # the transport owns it
-                transports.append(transport)
-                pumps.append(asyncio.create_task(capture.pump(reader)))
+                self._busy = None
+                session = self._session
+                if session is not None:
+                    self._confirmed_cwd = str(session.cwd)  # bash reports it after each command
 
-            async def feed() -> None:
-                assert proc.stdin is not None and stdin is not None
-                with contextlib.suppress(BrokenPipeError, ConnectionResetError, OSError):
-                    proc.stdin.write(stdin.encode())
-                    await proc.stdin.drain()
-                    proc.stdin.close()
+    async def send(self, command: str) -> CommandResult:
+        """A launched Shell's request (``job.send(command)``): the same as ``run``."""
+        return await self.run(command)
 
-            timed_out = False
-            try:
-                # One deadline for feeding stdin and for the command itself.
-                work = [proc.wait(), *([feed()] if stdin is not None else [])]
-                await asyncio.wait_for(asyncio.gather(*work), self.timeout)
-            except TimeoutError:
-                timed_out = True
-                _kill_group(proc)
-                await _reap(proc)
-            except BaseException:
-                _kill_group(proc)
-                await _reap(proc)
-                await _settle_pumps(pumps)
-                raise
-            await _settle_pumps(pumps)
-            code = 124 if timed_out else (proc.returncode or 0)
-            return _result(code, timed_out, out, err, directory)
-        finally:
-            for pump in pumps:
-                pump.cancel()
-            await asyncio.gather(*pumps, return_exceptions=True)
-            for transport in transports:  # a background writer now gets EPIPE
-                transport.close()
-            _close_fds(fds)
-            out.close()
-            err.close()
-
-    # ---- persistent session ------------------------------------------------
-
-    async def __aenter__(self) -> Shell:
-        if self._session is not None or self._entering:
-            raise RuntimeError("this Shell is already running; launch another Shell()")
-        self._entering = True  # claimed before the first await: a second entry is refused
+    async def _start(self) -> None:
+        """Start bash; the caller holds the lock."""
+        self._starting = True
         session = BashSession(cwd=self._directory())
         try:
             await session.start()
@@ -383,20 +361,46 @@ class Shell:
             await asyncio.shield(session.close())
             raise
         finally:
-            self._entering = False
-        self._session, self._lock, self._note = session, asyncio.Lock(), ""
+            self._starting = False
+        self._session, self._note = session, ""
         self._bash = (pid, _start_time(pid))
         self._confirmed_cwd, self._busy, self._lost = str(session.cwd), None, False
+        owner = shell_owner.get()
+        if owner is not None:
+            owner.adopt(self)
+
+    # ---- lifecycle ---------------------------------------------------------
+
+    async def __aenter__(self) -> Shell:
+        """Start bash now (``async with Shell() as sh``, or a launch); one entry at a time."""
+        if self._entered:
+            raise RuntimeError("this Shell is already running; launch another Shell()")
+        self._entered = True  # claimed before the first await: a second entry is refused
+        try:
+            async with self._lock:
+                if self._session is None:
+                    await self._start()
+        except BaseException:
+            self._entered = False
+            raise
         return self
 
     async def __aexit__(self, *exc: Any) -> None:
+        self._entered = False
+        await self.aclose()
+
+    async def aclose(self) -> None:
+        """End bash and its background processes and remove scratch files; safe to repeat.
+
+        A later ``run`` starts a new bash in ``cwd``.
+        """
         session, self._session = self._session, None
         for pump in self._lingering:
             pump.cancel()
         await asyncio.gather(*self._lingering, return_exceptions=True)
         self._lingering.clear()
         if session is not None:
-            await session.close()
+            await asyncio.shield(session.close())
         if self._own_dir is not None:
             self._own_dir.cleanup()
             self._own_dir = None
@@ -408,65 +412,88 @@ class Shell:
             raise RuntimeError(f"could not start bash (exit {code})")
         return int(out.strip())
 
-    async def send(self, command: str) -> CommandResult:
-        """Run one command in the session; state carries over to the next."""
-        if self._session is None or self._lock is None:
-            raise RuntimeError("the shell session is not running")
-        describe(f"$ {command}")
-        async with self._lock:
-            self._busy = command
-            try:
-                return await self._send_locked(command)
-            finally:
-                self._busy = None
-                session = self._session
-                if session is not None:
-                    self._confirmed_cwd = str(session.cwd)  # bash reports it after each command
-
     def _bash_alive(self) -> bool:
         return self._bash is not None and _start_time(self._bash[0]) == self._bash[1]
 
-    async def _send_locked(self, command: str) -> CommandResult:
+    async def _send_locked(self, command: str, stdin: str | None = None) -> CommandResult:
         session = self._session
         assert session is not None
-        directory = job_dir()
+        directory = kept = job_dir()  # output files are kept only in a job's directory
         if directory is None:
             if self._own_dir is None:
                 self._own_dir = tempfile.TemporaryDirectory(prefix="nooa-shell-")
             directory = Path(self._own_dir.name)
         stem = f"cmd-{next(self._count)}"
-        out, err = _captures(directory, stem, self._max_output)
+        out, err = _captures(kept, stem, self._max_output)
         fifos = [directory / f"{stem}.out.fifo", directory / f"{stem}.err.fifo"]
+        source = "/dev/null"
+        if stdin is not None:  # a file, written before the command starts
+            stdin_path = directory / f"{stem}.stdin"
+            fd = os.open(stdin_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(stdin.encode())
+            source = str(stdin_path)
+            fifos.append(stdin_path)  # removed with the FIFOs
         pidfile = self._pidfile = directory / f"{stem}.pid"
         opened: list[tuple[asyncio.StreamReader, asyncio.BaseTransport, int]] = []
         write_fds: set[int] = set()
         pumps: list[tuple[asyncio.Task[None], asyncio.BaseTransport, _Capture]] = []
         try:
-            for fifo in fifos:
+            for fifo in fifos[:2]:
                 opened.append(await _open_fifo(fifo))
                 write_fds.add(opened[-1][2])
             for capture, (reader, transport, _) in zip((out, err), opened, strict=True):
                 pumps.append((asyncio.create_task(capture.pump(reader)), transport, capture))
             blob = base64.b64encode(command.encode()).decode()
             # The pid first (it identifies the bash that runs it), then a group,
-            # not a subshell: cd/export/variables stay in the session.
+            # not a subshell: cd/export/variables stay in the shell. An interrupt
+            # sends bash SIGUSR1 before it stops the running process; the DEBUG
+            # trap (extdebug: a failing trap skips the command) then skips the
+            # rest of the command, so `sleep 60; make install` stops as a whole.
             wrapped = (
                 f"echo $$ >{shlex.quote(str(pidfile))}\n"
+                "__nooa_stop=; shopt -q extdebug; __nooa_xd=$?\n"
+                "trap __nooa_stop=1 USR1; shopt -s extdebug\n"
+                f"trap {shlex.quote(_STOP_TRAP)} DEBUG\n"
                 f'{{ eval "$(printf %s {blob} | base64 -d)"\n}}'
-                f" >{shlex.quote(str(fifos[0]))} 2>{shlex.quote(str(fifos[1]))}"
+                f" <{shlex.quote(source)} >{shlex.quote(str(fifos[0]))}"
+                f" 2>{shlex.quote(str(fifos[1]))}\n"
+                "__nooa_rc=$?\n"
+                "trap - DEBUG USR1\n"
+                '[ "$__nooa_xd" = 0 ] || shopt -u extdebug\n'
+                'eval "unset __nooa_stop __nooa_xd __nooa_rc; (exit $__nooa_rc)"'
             )
-            # Earlier background jobs of this bash: a cancel never signals them.
+            # Earlier background jobs of this bash: an interrupt never signals them.
             before = _descendants(self._bash[0]) if self._bash and self._bash_alive() else {}
-            inner = asyncio.ensure_future(session.run_with_timeout_flag(wrapped, self.timeout))
+            # Our own deadline (the session's is a backstop): a timeout stops the
+            # whole command the same way a cancel does.
+            inner = asyncio.ensure_future(
+                session.run_with_timeout_flag(wrapped, self.timeout + _BACKSTOP_SECONDS)
+            )
+            restart_notes: list[str] | None = None
             try:
-                stray_out, stray_err, code, timed_out = await asyncio.shield(inner)
+                try:
+                    stray_out, stray_err, code, timed_out = await asyncio.wait_for(
+                        asyncio.shield(inner), self.timeout
+                    )
+                except TimeoutError:
+                    if await self._interrupt(inner, before):
+                        stray_out = stray_err = ""
+                        restart_notes, self._note = [self._note], ""
+                    else:
+                        stray_out, stray_err, _, _ = inner.result()
+                    code, timed_out = 124, True
             except asyncio.CancelledError:
-                await self._interrupt(inner, before)
+                if await self._interrupt(inner, before):
+                    raise asyncio.CancelledError(self._note) from None
                 raise
             finally:
                 _close_fds(write_fds)  # bash's ends close with the group: then EOF
             await self._settle([pump for pump, _, _ in pumps])
-            notes = self._check_bash(pidfile, code, timed_out)
+            if restart_notes is None:
+                notes = self._check_bash(pidfile, code, timed_out)
+            else:  # restarted at the deadline: this result says so
+                notes = restart_notes
             result = _result(code, timed_out, out, err, str(session.cwd))
         finally:
             _close_fds(write_fds)
@@ -529,9 +556,11 @@ class Shell:
             )
         return notes
 
-    async def _interrupt(self, inner: asyncio.Future[Any], before: dict[int, str]) -> None:
-        """Stop the running command; restart bash (state lost) only if it will not stop."""
+    async def _interrupt(self, inner: asyncio.Future[Any], before: dict[int, str]) -> bool:
+        """Stop the running command; restart bash (state lost, True) only if it will not stop."""
         bash = self._running_bash()
+        if bash is not None:
+            _signal({bash: _start_time(bash) or ""}, signal.SIGUSR1)  # skip the rest of it
         for sig in (signal.SIGTERM, signal.SIGKILL):
             if bash is None:
                 break
@@ -542,7 +571,7 @@ class Shell:
             with contextlib.suppress(TimeoutError, Exception):
                 await asyncio.wait_for(asyncio.shield(inner), _INTERRUPT_GRACE)
             if inner.done():
-                return
+                return False
         inner.cancel()
         await asyncio.gather(inner, return_exceptions=True)
         session = self._session
@@ -555,7 +584,7 @@ class Shell:
             "[the shell restarted: an interrupted command did not stop; "
             "cwd kept, environment and shell variables lost]"
         )
-        raise asyncio.CancelledError(self._note)
+        return True
 
     def _running_bash(self) -> int | None:
         """The pid of the bash running the current command, checked against pid reuse."""
