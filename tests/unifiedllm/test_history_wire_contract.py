@@ -14,13 +14,20 @@ import json
 import httpx
 import pytest
 
-from nooa import CacheBoundary
+from nooa import Block, CacheBoundary
 from nooa.context_blocks.events import ToolCallEvent, ToolResult, UserEvent
-from nooa.context_blocks.formatter import OpenAIProviderFormatter
+from nooa.context_blocks.formatter import (
+    BlockFormatter,
+    FormatType,
+    MarkdownBlockFormatter,
+    OpenAIProviderFormatter,
+    XMLBlockFormatter,
+)
 from nooa.context_blocks.models import BlockMetadata, ResolvedBlock, Role
 from nooa.context_blocks.renderer import render_context
 from nooa.context_blocks.renderers.cached import CachedBlockFormatter
 from nooa.nemo_relay_middleware import _reconcile_messages
+from nooa.plain_formatter import PlainBlockFormatter
 from nooa.storage import SQLiteStorageManager
 from nooa.unifiedllm import CompletionClient, ResponsesClient, Tool
 from nooa.unifiedllm.retry_config import RetryConfig
@@ -379,3 +386,130 @@ async def test_wire_assertions_detect_corruption_even_when_http_succeeds(family,
     if corruption == "native":
         with pytest.raises(AssertionError):
             _assert_replay(damaged, family)
+
+
+class BracketFormatter(BlockFormatter):
+    """Application wrappers use stock tool replay without implementing format()."""
+
+    @property
+    def format_type(self):
+        return FormatType.PLAIN
+
+    def wrap_system_block(self, block):
+        return f"[{block.key}] {block.content}"
+
+
+@pytest.mark.parametrize(
+    "formatter_type",
+    [XMLBlockFormatter, MarkdownBlockFormatter, PlainBlockFormatter, BracketFormatter],
+)
+@pytest.mark.parametrize("family", MODELS)
+@pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
+async def test_formatter_choice_preserves_multi_tool_replay_on_http(
+    formatter_type, family, asynchronous, wire, tmp_path
+):
+    """Real SDK capture → SQLite reopen → formatting → actual outgoing JSON.
+
+    Two calls arrive in one native turn; execution records arrive in reverse
+    order. Only block wrappers may change. No tool is executed or network used.
+    """
+    bodies, reply = wire
+    reply.update(_reply(family))
+    second_arguments = '{ "code" : "print(2)", "unicode":"\\u0061", "n":1.00 }'
+    if family == "responses":
+        second = copy.deepcopy(reply["output"][-1])
+        second.update(id="fc_2", call_id="call_2", arguments=second_arguments)
+        reply["output"].append(second)
+        expected_assistant = copy.deepcopy(reply["output"])
+    elif family == "anthropic":
+        second = copy.deepcopy(reply["content"][-1])
+        second.update(id="call_2", input=json.loads(second_arguments))
+        reply["content"].append(second)
+        expected_assistant = copy.deepcopy(reply["content"])
+    else:
+        assistant = reply["choices"][0]["message"]
+        second = copy.deepcopy(assistant["tool_calls"][0])
+        second["id"] = "call_2" + (
+            "__thought__" + SECRET if family.startswith("gemini-compatible") else ""
+        )
+        second["function"]["arguments"] = second_arguments
+        assistant["tool_calls"].append(second)
+        expected_assistant = copy.deepcopy(assistant)
+
+    async with _client(family) as client:
+        turn = await _send(client, [{"role": "user", "content": "Check"}], asynchronous)
+    restored = _resume(turn, tmp_path / "formatter-replay.db")
+    archive = restored.model_dump_json()
+    executions = [
+        ToolCallEvent(
+            tool_call_id=call.id,
+            name=call.name,
+            arguments=json.loads(call.arguments),
+            llm_response_id=restored.id,
+            result=ToolResult(tool_call_id=call.id, content=f"result-{i}"),
+        )
+        for i, call in enumerate(restored.tool_calls)
+    ]
+    messages = render_context(
+        [
+            Block(key="instructions", content="Stable instructions"),
+            restored,
+            *reversed(executions),
+            CacheBoundary(),
+            Block(key="live", content="live-state=changed", role=Role.USER),
+        ],
+        block_formatter=formatter_type(),
+        provider_formatter=OpenAIProviderFormatter(),
+    ).output
+    assert messages[1] is restored
+    assert [message["role"] for message in messages] == [
+        "system",
+        "assistant",
+        "tool",
+        "tool",
+        "metadata",
+        "user",
+    ]
+    async with _client(family) as client:
+        await _send(client, messages, asynchronous)
+
+    body = bodies[-1]
+    if family == "responses":
+        replay = [
+            item for item in body["input"] if item.get("type") in {"reasoning", "function_call"}
+        ]
+        assert replay == expected_assistant
+        results = [item for item in body["input"] if item.get("type") == "function_call_output"]
+        assert [(item["call_id"], item["output"][0]["text"]) for item in results] == [
+            ("call_1", "result-0"),
+            ("call_2", "result-1"),
+        ]
+        assert results[-1]["output"][-1]["prompt_cache_breakpoint"] == {"mode": "explicit"}
+    elif family == "anthropic":
+        assistant = next(item for item in body["messages"] if item["role"] == "assistant")
+        assert assistant["content"] == expected_assistant
+        results = [
+            block
+            for item in body["messages"]
+            for block in item["content"]
+            if block["type"] == "tool_result"
+        ]
+        assert [(item["tool_use_id"], item["content"][0]["text"]) for item in results] == [
+            ("call_1", "result-0"),
+            ("call_2", "result-1"),
+        ]
+        assert results[-1]["content"][-1]["cache_control"] == {"type": "ephemeral"}
+    else:
+        assistant = next(item for item in body["messages"] if item["role"] == "assistant")
+        assert assistant["reasoning_content"] == expected_assistant["reasoning_content"]
+        assert assistant["tool_calls"] == expected_assistant["tool_calls"]
+        results = [item for item in body["messages"] if item["role"] == "tool"]
+        assert [(item["tool_call_id"], item["content"]) for item in results] == [
+            (call["id"], f"result-{i}") for i, call in enumerate(expected_assistant["tool_calls"])
+        ]
+    # The framework marker is consumed; volatile trailing text is never marked.
+    _, suffix = _stable_request(body, family)
+    assert "cache_control" not in json.dumps(suffix)
+    assert "prompt_cache_breakpoint" not in json.dumps(suffix)
+    assert "nooa_cache_boundary" not in json.dumps(body)
+    assert restored.model_dump_json() == archive

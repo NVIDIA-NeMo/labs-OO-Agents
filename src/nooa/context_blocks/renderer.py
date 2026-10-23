@@ -7,13 +7,13 @@ Pipeline:
 1. Expand each item in place into an internal resolved block.
 2. Serialize non-tool events in place.
 3. Hand the ordered list of blocks to ``block_formatter`` — it produces a
-   neutral ``list[RenderedMessage]`` covering system + events + any extra
-   trailing messages the formatter chooses to emit.
-5. Hand the neutral list to ``provider_formatter`` to reshape into the
-   provider-specific wire format.
+   neutral ``list[RenderedMessage]`` in view order, with atomic tool replay.
+4. Preserve cache markers between segments and hand the neutral list to
+   ``provider_formatter`` to reshape into client input. Final wire encoding
+   and native replay remain in the client.
 
-``render_context()`` never mutates its input blocks — truncation and
-serialization produce new :class:`ResolvedBlock` instances via ``model_copy()``.
+``render_context()`` never mutates its inputs. Serialization produces new
+:class:`ResolvedBlock` instances; the view owns truncation and eviction.
 """
 
 from collections.abc import Callable, Sequence
@@ -43,10 +43,10 @@ from nooa.context_blocks.utils import camel_to_snake
 
 
 class RenderResult(NamedTuple):
-    """Result of :func:`render_context`: provider output + utilization stats.
+    """Result of :func:`render_context`: client input + utilization stats.
 
     ``messages`` is the neutral ``list[RenderedMessage]`` produced by the
-    BlockFormatter *after* truncation and *before* provider formatting.
+    BlockFormatter with cache markers, before provider formatting.
     Block-aware formatters populate ``RenderedMessage.parts`` on this list,
     which the journal publisher walks to build a content-addressed skeleton.
     """
@@ -91,9 +91,10 @@ def render_context(
     reserved_output_tokens: int | None = None,
     context_blocks_dropped: int = 0,
 ) -> RenderResult:
-    """Render resolved blocks into provider-specific output with utilization stats.
+    """Render assembled context into client input with utilization stats.
 
-    Never mutates or reorders input items. Budget policy belongs to the view.
+    Preserves inputs and their selected order, subject to the documented
+    atomic canonical tool-replay grouping. Budget policy belongs to the view.
 
     ``event_format`` carries the default structural bounds (max_string /
     max_length / max_depth) for event-field rendering at trajectory build time.
@@ -193,7 +194,7 @@ def render_context(
         reserved_output_tokens=reserved_output_tokens,
     )
 
-    # Neutral message list → provider wire format.
+    # Neutral message list → client input, retaining replay and cache carriers.
     messages: list[RenderedMessage] = []
     for segment, boundary_after in segments:
         rendered = block_formatter.format(segment) if segment else []

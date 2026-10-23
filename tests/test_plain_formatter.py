@@ -150,6 +150,24 @@ class TestPlainBlockFormatterFormatEvent:
         assert result == "Hello there"
         assert "UserEvent(" not in result
 
+    def test_structured_assistant_content_uses_field_serialization(self):
+        """Structured assistant content keeps the plain field serialization."""
+        from typing import ClassVar
+
+        from nooa.context_blocks.events import EventBase
+        from nooa.context_blocks.roles import Role
+        from nooa.plain_formatter import PlainBlockFormatter
+
+        class StructuredAssistantEvent(EventBase):
+            _role: ClassVar[Role] = Role.ASSISTANT
+            content: dict[str, int]
+
+        event = StructuredAssistantEvent(content={"answer": 42})
+        result = PlainBlockFormatter().format_event(event)
+
+        assert result == "{'answer': 42}"
+        assert "StructuredAssistantEvent(" not in result
+
     def test_python_output_captured_locals_not_shown(self):
         """captured_locals is infrastructure — must never appear in plain output."""
         from nooa.context_blocks.events import ResultStatus

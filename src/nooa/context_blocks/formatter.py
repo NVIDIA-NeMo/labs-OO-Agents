@@ -6,13 +6,14 @@ Two orthogonal formatters:
 
 1. :class:`BlockFormatter` — turns a list of resolved blocks (both system-role
    context blocks and event blocks) into a neutral ``list[RenderedMessage]``.
-   Owns semantic choices: how each block is wrapped (XML / Markdown / plain),
-   how events are serialized, how system blocks are concatenated into a single
-   system message.
+   Preserves view-selected order and membership while wrapping blocks
+   (XML / Markdown / plain), serializing events, and coalescing adjacent
+   materialized blocks with the same role. Canonical tool replay is atomic.
 
 2. :class:`ProviderFormatter` — a thin syntactic adapter that reshapes the
-   neutral message list into the OpenAI-compatible ``list[dict]`` that
-   UnifiedLLM accepts. Provider-specific wire translation happens downstream
+   neutral message list into client input: ordinary message dictionaries,
+   retained ``LLMResponse`` objects, and ``CacheBoundary`` markers.
+   Provider-specific wire translation happens downstream
    (LiteLLM, or the client's own projection), never here.
 
 This split keeps the "format" axis (XML / Markdown / Plain) orthogonal to the
@@ -27,7 +28,7 @@ from typing import TYPE_CHECKING, Any, TypeGuard
 
 if TYPE_CHECKING:
     from nooa.config.truncation_config import FormatConfig
-    from nooa.llm_types import LLMResponse
+    from nooa.llm_types import CacheBoundary, LLMResponse
 
 from nooa.agentdoc import pformat
 from nooa.context_blocks.events import CODEACT_INLINE_RETURN, EventBase, ToolCallEvent
@@ -56,7 +57,7 @@ def _is_llm_response(event: EventBase | None) -> TypeGuard["LLMResponse"]:
 
 
 class FormatType(StrEnum):
-    """Format type identifier used for block-level truncation."""
+    """Block/message wrapping style, independent of selection and budgeting."""
 
     XML = "xml"
     MARKDOWN = "markdown"
@@ -76,10 +77,13 @@ FORMAT_PLAIN = FormatType.PLAIN
 class BlockFormatter(ABC):
     """Turn resolved blocks into a neutral list of :class:`RenderedMessage`.
 
-    Subclasses implement :meth:`format` to decide both the ordering of messages
-    and the wrapping of each block's content. The stock implementations
-    partition by ``block.role``: SYSTEM blocks concatenate into a single system
-    message, event blocks emit per-event messages.
+    The view owns selection, placement, eviction, and cache boundaries.
+    Subclasses serialize its ordered inputs without repartitioning by role.
+    Stock implementations coalesce adjacent materialized blocks of the same
+    role and expand canonical tool-call responses with their linked results
+    atomically at the response position. Incomplete replay groups may be
+    omitted; missing results are not invented. Wrapper customizations should
+    reuse the stock formatting path to retain these replay rules.
     """
 
     @property
@@ -87,24 +91,40 @@ class BlockFormatter(ABC):
     def format_type(self) -> FormatType:
         """Return format type (FORMAT_XML / FORMAT_MARKDOWN / FORMAT_PLAIN).
 
-        Used by :func:`render_context` to pick the right block-level truncation
-        strategy for oversized content.
+        Identifies wrapper style for message-formatting helpers; it does not
+        select content or control truncation, eviction, or caching.
         """
         ...
 
-    @abstractmethod
     def format(self, blocks: list[ResolvedBlock]) -> list[RenderedMessage]:
         """Convert all resolved blocks into a neutral message list.
 
         Args:
-            blocks: All resolved blocks, already truncated and with event
-                content pre-serialized by :func:`render_context`. System
-                blocks appear before event blocks.
+            blocks: One ordered segment selected by the view, with non-tool
+                event content serialized by :func:`render_context`. Roles may
+                be interleaved. Cache markers delimit segments outside this
+                method; no renderer-owned eviction or truncation occurs.
 
         Returns:
             A list of :class:`RenderedMessage`, in final display order.
         """
-        ...
+        return _build_messages(
+            blocks,
+            wrap_system=self.wrap_system_block,
+            wrap_message=self.wrap_message_block,
+        )
+
+    def wrap_system_block(self, block: ResolvedBlock) -> str:
+        """Wrap one materialized block, regardless of its selected message role.
+
+        Override this hook to customize presentation while retaining shared
+        ordering and canonical tool-replay handling in :meth:`format`.
+        """
+        return block.content
+
+    def wrap_message_block(self, block: ResolvedBlock) -> str:
+        """Wrap an ordinary event; canonical assistant replay bypasses this hook."""
+        return block.content
 
     def format_event(
         self,
@@ -142,8 +162,9 @@ class BlockFormatter(ABC):
     def format_description(self) -> str:
         """Return a human-readable description of the block format.
 
-        Embedded in the default agent system prompt so the LLM understands
-        how context blocks are structured. Subclasses should override.
+        DefaultAgentView explicitly includes this in the built-in Agent
+        prompt. Custom prompts and views choose their own guidance; rendering
+        never injects instructions. Return an empty string for no guidance.
         """
         return ""
 
@@ -156,10 +177,9 @@ class BlockFormatter(ABC):
 def _xml_system_block(block: ResolvedBlock) -> str:
     """Wrap a system block's content in an XML tag.
 
-    ``expr=`` is only emitted for blocks produced by
-    :meth:`ContextApi.set_dynamic` — static blocks, framework blocks, and
-    strategy overrides render without the attribute so the prompt doesn't
-    leak internal accessor syntax the LLM can't use.
+    ``expr=`` is emitted only when metadata marks a dynamic source, including
+    expression context and default framework sources. Literal declarations
+    and value overrides omit the attribute.
     """
     show_expr = block.metadata.source_dynamic and block.metadata.expr
     attrs = f' expr="{block.metadata.expr}"' if show_expr else ""
@@ -336,8 +356,12 @@ def _event_block_projections(
     """Project each input position, keeping canonical tool batches atomic.
 
     A replayable ``LLMResponse`` expands at its own position to the assistant
-    call batch followed by all linked results. Linked execution sidecars then
-    project to an empty list at their stored positions.
+    call batch followed by all linked results in call order, even when their
+    stored positions are interleaved with other items. Linked execution
+    sidecars then project to an empty list at their stored positions. Missing
+    or incomplete canonical groups are omitted without inventing results.
+    This replay exception does not authorize arbitrary history reordering.
+    Wrapper customizations can reuse this helper through _build_messages().
     """
     replayable_turn_ids = {
         block.event.id
@@ -461,7 +485,9 @@ def _build_messages(
 
 
 class XMLBlockFormatter(BlockFormatter):
-    """Wrap each system block in an XML tag; wrap each event in a role tag.
+    """Wrap materialized blocks in XML; annotate event role/tag metadata.
+
+    Canonical assistant responses replay unwrapped.
 
     Example system output::
 
@@ -471,9 +497,9 @@ class XMLBlockFormatter(BlockFormatter):
 
     Example event output::
 
-        <user_message expr='self.events["1"]' tag="1">
+        <sys tag="1">
         Hello world
-        </user_message>
+        </sys>
     """
 
     @property
@@ -483,7 +509,7 @@ class XMLBlockFormatter(BlockFormatter):
     def format_description(self) -> str:
         return (
             "Your prompt is organized in XML context blocks: `<name>CONTENT</name>`.\n"
-            "Blocks produced by `self.context.set_dynamic()` carry an "
+            "Expression context blocks carry an "
             '`expr="..."` attribute whose value is the Python expression '
             "re-evaluated each turn.\n"
             'Event history: system entries in `<sys tag="N">`; '
@@ -491,22 +517,29 @@ class XMLBlockFormatter(BlockFormatter):
             "as plain assistant turns."
         )
 
-    def format(self, blocks: list[ResolvedBlock]) -> list[RenderedMessage]:
-        return _build_messages(
-            blocks,
-            wrap_system=_xml_system_block,
-            wrap_message=_xml_message_content,
-        )
+    def wrap_system_block(self, block: ResolvedBlock) -> str:
+        return _xml_system_block(block)
+
+    def wrap_message_block(self, block: ResolvedBlock) -> str:
+        return _xml_message_content(block)
 
 
 class MarkdownBlockFormatter(BlockFormatter):
-    """Render each system block as a Markdown section; wrap events with Markdown headers.
+    """Render materialized blocks as Markdown sections and annotate event metadata.
+
+    Canonical assistant responses retain their original text and replay data.
 
     Example system output::
 
         # Notes `{"expr": "self.context['notes']"}`
 
         Here are my notes...
+
+    Example event output::
+
+        ### User Message `{"tag": "1"}`
+
+        Hello world
     """
 
     @property
@@ -517,26 +550,28 @@ class MarkdownBlockFormatter(BlockFormatter):
         return (
             "Your prompt is organized in context blocks with markdown headers: "
             "`# Block Name`.\n"
-            "Blocks produced by `self.context.set_dynamic()` carry an inline "
+            "Expression context blocks carry an inline "
             '`{"expr": "..."}` annotation whose value is the Python expression '
-            "re-evaluated each turn."
+            "re-evaluated each turn.\n"
+            'Event history carries `{"tag": "N"}` metadata; '
+            'reference entries via `self.events["N"]`. Your own messages '
+            "retain their original assistant text and replay data."
         )
 
-    def format(self, blocks: list[ResolvedBlock]) -> list[RenderedMessage]:
-        return _build_messages(
-            blocks,
-            wrap_system=_markdown_system_block,
-            wrap_message=_markdown_message_content,
-        )
+    def wrap_system_block(self, block: ResolvedBlock) -> str:
+        return _markdown_system_block(block)
+
+    def wrap_message_block(self, block: ResolvedBlock) -> str:
+        return _markdown_message_content(block)
 
 
 # ---------------------------------------------------------------------------
-# ProviderFormatter — neutral messages → provider wire format
+# ProviderFormatter — neutral messages → client input
 # ---------------------------------------------------------------------------
 
 
 class ProviderFormatter(ABC):
-    """Reshape a neutral :class:`RenderedMessage` list into provider wire format.
+    """Reshape neutral messages into client input, preserving replay carriers.
 
     Thin syntactic adapter: does not wrap content, does not re-order, does not
     decide what goes where. Just translates message shape and tool-call
@@ -545,11 +580,13 @@ class ProviderFormatter(ABC):
 
     @abstractmethod
     def format(self, messages: list[RenderedMessage]) -> Any:
-        """Return provider-specific output for this message list."""
+        """Return client input; final provider wire encoding happens downstream."""
         ...
 
 
-def _append_openai_image_message(out: list[dict], msg: RenderedMessage) -> None:
+def _append_openai_image_message(
+    out: "list[dict[str, Any] | LLMResponse | CacheBoundary]", msg: RenderedMessage
+) -> None:
     content_parts: list[dict] = [{"type": "text", "text": msg.content or ""}]
     content_parts.extend(msg.images or [])
     out.append({"role": msg.role.value, "content": content_parts})
@@ -563,10 +600,16 @@ def _with_reasoning(message: dict[str, Any], reasoning: str | None) -> dict[str,
 
 
 class OpenAIProviderFormatter(ProviderFormatter):
-    """Emit OpenAI-compatible messages (``list[dict]``)."""
+    """Emit UnifiedLLM input while retaining native replay and cache markers.
 
-    def format(self, messages: list[RenderedMessage]) -> list[dict]:
-        out: list[dict] = []
+    This is not final wire encoding. The client owns provider-specific replay
+    projection, including retained reasoning and exact tool argument strings.
+    """
+
+    def format(
+        self, messages: list[RenderedMessage]
+    ) -> "list[dict[str, Any] | LLMResponse | CacheBoundary]":
+        out: list[dict[str, Any] | LLMResponse | CacheBoundary] = []
         for msg in messages:
             if msg.replay_message is not None:
                 out.append(

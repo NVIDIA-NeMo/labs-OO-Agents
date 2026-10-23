@@ -441,6 +441,14 @@ class DefaultAgentView(ContextView["Agent"]):
             disabled=disabled,
             declaration_keys=declaration_keys,
         )
+        default_prompt = next(
+            (
+                block
+                for block in blocks
+                if block.key == "system_prompt" and "system_prompt" not in declaration_keys
+            ),
+            None,
+        )
         blocks, custom_skill_items = await self._compose_skill_views(
             owner,
             call,
@@ -454,6 +462,30 @@ class DefaultAgentView(ContextView["Agent"]):
             blocks,
             disabled=disabled,
         )
+
+        # Only a surviving built-in prompt receives guidance. Wait until all
+        # overrides have run: even evaluating discarded guidance can fail or
+        # have side effects. Identity also detects a same-text replacement.
+        if default_prompt is not None and any(block is default_prompt for block in blocks):
+            from nooa.agent import Agent
+
+            prompt_class = next((cls for cls in type(owner).__mro__ if cls.__doc__), None)
+            if (
+                prompt_class is Agent
+                and type(owner)._resolve_system_prompt is Agent._resolve_system_prompt
+                and "_resolve_system_prompt" not in vars(owner)
+            ):
+                guidance = owner.render_config.block_formatter.format_description().strip()
+                if guidance:
+                    guided_prompt = default_prompt.model_copy(
+                        update={
+                            "content": default_prompt.content + "\n\n## Context format\n" + guidance
+                        }
+                    )
+                    blocks = tuple(
+                        guided_prompt if block is default_prompt else block for block in blocks
+                    )
+                    manager.update_resolved({"system_prompt": guided_prompt.content})
 
         strategy = call.strategy
         get_order = getattr(strategy, "get_block_order", None) if strategy is not None else None
