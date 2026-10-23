@@ -316,7 +316,7 @@ Use `--structured-output-mode anthropic` only with an explicitly selected
 Completion interface (`chat` or `anthropic`) and authorization for the configured
 checks. It declares native `output_config.format: {type: json_schema, schema: ...}`;
 it does not prove gateway acceptance or change transport. `none` (Python `None`,
-YAML `null`) and `auto` retain the existing carrier, with no inferred native support
+YAML `null`) and `auto` keep the usual request format, with no inferred native support
 or fallback. Omission preserves a saved same-route policy; route/model/interface/
 client/credential changes do not inherit it. Connect rejects explicit controls on
 Responses/Decision and metadata/interface discovery stages before credential use.

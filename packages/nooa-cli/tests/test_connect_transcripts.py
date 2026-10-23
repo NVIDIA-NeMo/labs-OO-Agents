@@ -105,7 +105,8 @@ def test_full_manual_transcript_sources_media_pending_save(
     assert "Media samples: Images, PDFs" in output
     assert "Saved model" in output and "get_llm_client" in "".join(output.split())
     assert "not tested (manual setup)" in output
-    assert yaml.safe_load(target.read_text())["models"]["local"]["media_inputs"] == []
+    # Formats waiting for a test are kept, saved as not tested.
+    assert yaml.safe_load(target.read_text())["models"]["local"]["media_inputs"] == ["image", "pdf"]
     assert len(calls) == 2
     if color == "no_color" or color is False:
         assert "\x1b[" not in result.output

@@ -479,12 +479,8 @@ def select_connection(state: WizardState) -> bool:
         state.api_key_env = (
             default_env
             if state.yes
-            else prompts.prompt(
-                "Key environment variable (new to enter a key; - for no authentication)",
-                default=default_env,
-                suggestions=prompts.environment_names(
-                    [p.api_key_env for p in connect.PROVIDERS.values()] + ["-", "new"]
-                ),
+            else prompts.key_source(
+                default_env, [p.api_key_env for p in connect.PROVIDERS.values()]
             )
         )
         if state.api_key_env == "-":
@@ -2965,7 +2961,7 @@ def structured_output_rows(entry):
             if mode == "anthropic" and profile.get("recommended")
             else "Native JSON (your choice)"
             if mode == "anthropic"
-            else "Standard JSON (existing carrier)",
+            else "Standard JSON",
         ),
         ("Structured output", f"{mode or 'none'} (declared)"),
     ]
@@ -2977,9 +2973,7 @@ def structured_output_rows(entry):
             and baseline.get("structured_output_conflicts_observed") is False
             and baseline.get("settings_sent") is True
         )
-        rows.append(
-            ("Native carrier", "output_config.format observed" if observed else "Not confirmed")
-        )
+        rows.append(("Native JSON", "Observed" if observed else "Not confirmed"))
     return rows
 
 

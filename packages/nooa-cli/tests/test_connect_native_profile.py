@@ -267,4 +267,4 @@ def test_cli_actual_native_predict_wire_and_declared_summary(monkeypatch):
     assert report["checks"]["routing"]["structured_output_schema_observed"]
     rows = dict(structured_output_rows(report["data"]["entry"]))
     assert rows["Structured output"] == "anthropic (declared)"
-    assert rows["Native carrier"] == "output_config.format observed"
+    assert rows["Native JSON"] == "Observed"

@@ -22,7 +22,7 @@ Choose a provider (NVIDIA, NVIDIA Inference Hub, OpenAI, Anthropic,
 Google, OpenRouter, or a custom endpoint), the connection/key, then choose the
 **model** from its list (or enter an exact ID). Connect reads server/OpenRouter
 metadata with GET requests. **Only after the model is selected** does it ask for
-its **Request interface**: a known interface or **Discover request interfaces**.
+its **Request interface**: a known interface or **Find what works**.
 The selected model is shown beside this choice; it never asks for an inference
 interface before the model picker. Provider defaults or `--listing-style` determine
 listing headers independently. No model call is used for these steps. It fills in a
@@ -106,7 +106,7 @@ uv run nooa connect your-model --as my-model \
   Completions), `responses` (OpenAI Responses), `anthropic` (Anthropic Messages),
   `systemone` (System One Decisions), or `openai` (OpenAI Decisions, not Chat).
   An explicit style checks only that style. In guided setup, omit it to choose
-  **Discover request interfaces** or a known interface **after selecting the model**.
+  **Find what works** or a known interface **after selecting the model**.
   After **Test now**, Discover compares chat interfaces plus System One when
   a known or explicit decision endpoint is available. It sends the exact same
   model ID to every candidate; it never translates a completion model into a
@@ -462,7 +462,7 @@ reject explicit profile controls (including `none` and `auto`) before checks.
 Metadata/interface discovery stages reject the option; select an explicit
 Completion interface for wizard use. Plan, configured check and save stages carry
 it. Guided review offers **Change answer format** on every eligible Completion
-route, even without a prior flag. **Standard JSON** retains the existing carrier;
+route, even without a prior flag. **Standard JSON** uses the usual request format;
 **Native JSON** selects the implemented Anthropic carrier, including on a gateway
 when you explicitly choose and test it. Connect never silently tries all formats.
 

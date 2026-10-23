@@ -76,7 +76,7 @@ same scope and evidence rules as the headless skill.
   `type: json_schema` and the compiled object-root output-model schema, preserving
   `output_config.effort`. It excludes generic formats and schema-surrogate tools;
   ordinary tool calls without an output model are unchanged. `auto` and Python
-  `None` / YAML `null` retain the existing carrier. Connect's CLI spelling is
+  `None` / YAML `null` keep the usual request format. Connect's CLI spelling is
   `--structured-output-mode none|auto|anthropic`; omission preserves a saved
   same-route declaration, explicit `none` clears native mode. Do not infer this
   field from a model name or catalogue. Do not put it in `extra_body` or levels.

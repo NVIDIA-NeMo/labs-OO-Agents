@@ -253,10 +253,7 @@ def test_native_anthropic_defaults_without_interface_offer_or_post(
         options += ["--api-style", override]
     result = CliRunner().invoke(command, options, input="-\nsave\ny\n")
     assert result.exit_code == 0, result.output
-    assert (
-        "Request interface" not in result.output
-        and "Discover request interfaces" not in result.output
-    )
+    assert "Request interface" not in result.output and "Find what works" not in result.output
     assert all(r.method == "GET" for r in calls)
     assert result.output.index("Model details") < result.output.index("Media setup")
     entry = yaml.safe_load(setup.read_text())["models"]["local"]

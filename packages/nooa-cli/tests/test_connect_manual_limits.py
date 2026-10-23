@@ -322,7 +322,7 @@ def test_yes_and_native_never_prompt_for_chat_limits(monkeypatch, yes, style):
     assert state.manual_limits is None and state.context_window is None
 
 
-def test_guided_images_test_choice_then_save_clears_pending_permissions(monkeypatch, tmp_path):
+def test_guided_images_test_choice_then_save_keeps_images_untested(monkeypatch, tmp_path):
     monkeypatch.setattr(llm_config, "llm_config_chain", lambda: [])
     monkeypatch.setenv("NEMO_OO_USER_DIR", str(tmp_path / "user"))
     monkeypatch.setenv("NEMO_OO_PROJECT_DIR", str(tmp_path / "project"))
@@ -387,7 +387,8 @@ def test_guided_images_test_choice_then_save_clears_pending_permissions(monkeypa
     assert "Images: Test before enabling" in output
     assert len(decisions) == 1 and calls
     assert proposals[0]["media_inputs"] == []
-    assert yaml.safe_load(path.read_text())["models"]["local"]["media_inputs"] == []
+    # Save without testing keeps the images that were waiting for a test, as not tested.
+    assert yaml.safe_load(path.read_text())["models"]["local"]["media_inputs"] == ["image"]
     assert all(r.method == "GET" for r in calls)
 
 

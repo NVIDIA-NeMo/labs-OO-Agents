@@ -18,13 +18,13 @@ from . import _connect_view as view
 def choose_structured_output_mode(current=None):
     """Explicit connection profile, never provider catalogue metadata."""
     view.note(
-        "Choose how NOOA requests typed JSON answers. Native JSON uses Anthropic’s format; unknown servers must be tested. Standard keeps the existing carrier."
+        "Choose how NOOA requests typed JSON answers. Native JSON uses Anthropic’s format; unknown servers must be tested. Standard uses the usual request format."
     )
     choice = labelled_choice(
         "Answer format",
         (
-            ("none", "Standard JSON (existing carrier)"),
-            ("auto", "Auto (existing carrier)"),
+            ("none", "Standard JSON"),
+            ("auto", "Auto"),
             ("anthropic", "Native JSON (Anthropic format)"),
         ),
         default=current or "none",
@@ -474,7 +474,7 @@ def choose_media_inputs(current=(), *, available=("image", "audio", "video", "pd
 def choice_label(value):
     """Human labels for finite choices; custom reasoning names remain verbatim."""
     return {
-        "discover": "Discover request interfaces",
+        "discover": "Find what works (sends a few small test requests)",
         "systemone": "System One Decisions",
         "openai": "OpenAI Decisions",
         "chat": "OpenAI-compatible Chat",
@@ -483,6 +483,28 @@ def choice_label(value):
         "-": "Unknown / not configured",
         "": "Continue without catalogue settings",
     }.get(value, value)
+
+
+def key_source(default, names):
+    """Where the API key comes from. Terminals get a plain menu; pipes keep the
+    original free-text answer ("new" to paste a key, "-" for no key)."""
+    if not sys.stdin.isatty():
+        return prompt(
+            "Key environment variable (new to enter a key; - for no authentication)",
+            default=default,
+            suggestions=environment_names([*names, "-", "new"]),
+        )
+    found = [name for name in dict.fromkeys([*names, default]) if os.environ.get(name)]
+    options = [(name, f"Use the key in {name}") for name in found]
+    options += [
+        ("new", "Paste a key now"),
+        ("other", "Use another environment variable"),
+        ("-", "No key needed"),
+    ]
+    choice = labelled_choice("API key", tuple(options), default=found[0] if found else "new")
+    if choice == "other":
+        return prompt("Environment variable name", default=default, suggestions=environment_names())
+    return choice
 
 
 def labelled_choice(message, options, *, default):
