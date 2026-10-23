@@ -194,8 +194,11 @@ class Job:
     ``job.send(x)`` gives a resource input and returns the request ``Job``
     (await it for that input's result). ``await job.cancel()`` stops the
     work and withdraws its undelivered events; for a resource it first
-    cancels its requests, then exits it. Awaiting and iterating may be
-    combined: the awaiter gets the result, the reader the items and the end.
+    cancels its requests, then exits it (work that swallows the cancellation
+    and returns ends ``done``, still without an event). Awaiting and
+    iterating may be combined: the awaiter gets the result, the reader the
+    items and the end. A resource is neither awaited nor iterated
+    (``TypeError``): await its requests.
     """
 
     name: str  # Yours, or job#N; a resource's requests are <name>#N

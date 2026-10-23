@@ -790,3 +790,19 @@ async def test_second_concurrent_reader_is_refused(setup):
     await reader.aclose()
     aiter(job)  # free again once the first detached
     await job.cancel()
+
+
+async def test_work_that_swallows_cancel_ends_done_without_notice(setup):
+    manager, channel = setup
+
+    async def stubborn():
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            return "finished anyway"
+
+    job = manager.launch(stubborn(), name="stubborn")
+    await settle()
+    await job.cancel()
+    assert job.status == "done" and await job == "finished anyway"
+    assert channel.snapshot() == []  # cancelled by its owner: no event
