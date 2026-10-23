@@ -28,7 +28,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from nooa import hidden
-from nooa.tools import Todo
+from nooa.tools import Todo as _AnyTodo
+from nooa_atom.tools.todo_list import Todo
 from nooa_atom.agent.work_manager import current_name, describe, emitter
 from nooa_atom.session.items import ChildFailed, ChildQuestion, ChildResult, TaskResult
 
@@ -225,7 +226,7 @@ class Subagent:
                 self._child_id, self._child_name = ref.id, ref.name
             else:
                 future = route.expect(post)
-                text = _todo_text(task) if isinstance(task, Todo) else task
+                text = _todo_text(task) if isinstance(task, _AnyTodo) else task
                 try:
                     await port.send_child(self._child_id, text, channel="user_messages")
                 except BaseException:
@@ -289,7 +290,7 @@ async def _start(
     from nooa_atom.session.names import child_path
     from nooa_atom.session.session import as_data
 
-    handed = as_data(task) if isinstance(task, Todo) else None
+    handed = as_data(task) if isinstance(task, _AnyTodo) else None
     text = _child_prompt(child_path(port.path, name), port.path, task, handed, brief, kept=kept)
     return await port.delegate(
         sub.description or name,
