@@ -17,7 +17,7 @@ import uuid
 from collections.abc import Awaitable, Callable, Iterable
 from contextlib import suppress
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from nooa.events import TuiSessionResumed
 from nooa.interactive import AgentMessage, Done
@@ -64,6 +64,24 @@ logger = logging.getLogger(__name__)
 
 ChildOutcome = ChildResult | ChildQuestion | ChildFailed
 """What a child's turn end puts on its parent's delegates channel (or hands to ``wait()``)."""
+
+
+class ChildRoute(Protocol):
+    """Where a routed child's deliveries go instead of its parent's ``delegates`` channel.
+
+    ``message(text)`` gets each ``self.message()`` note (already cut to
+    ``CHILD_MESSAGE_CHARS``), ``outcome(item)`` each turn outcome nobody
+    ``wait()``s for (a ``ChildResult``, ``ChildQuestion`` or ``ChildFailed``),
+    and ``closed()`` is called once when the child session closes. Each is
+    called from the registry's listeners and must not block or raise.
+    """
+
+    def message(self, text: str) -> None: ...
+
+    def outcome(self, item: ChildOutcome) -> None: ...
+
+    def closed(self) -> None: ...
+
 
 Prepare = Callable[[Session], Awaitable[None]]
 """Host hook run on a built session before it starts and is published."""
@@ -147,6 +165,9 @@ class SessionRegistry:
         # and child id: read once per parent, kept current as names are recorded.
         self._recorded_names: dict[str, dict[str, str]] = {}
         self._paths: dict[str, str] = {}
+        # Children whose deliveries go to their own route instead of the
+        # parent's delegates channel (``route_child``), by child id.
+        self._routes: dict[str, ChildRoute] = {}
 
     # ---- create ------------------------------------------------------
 
@@ -376,6 +397,9 @@ class SessionRegistry:
         if self.sessions.get(session.id) is session:
             del self.sessions[session.id]
         self._forget_parent(session.id)
+        route = self._routes.pop(session.id, None)
+        if route is not None:
+            route.closed()
         if session.parent_id is None:
             return
         self._questions.pop((session.parent_id, session.id), None)
@@ -650,11 +674,29 @@ class SessionRegistry:
         text = str(event.content)
         if len(text) > CHILD_MESSAGE_CHARS:
             text = text[:CHILD_MESSAGE_CHARS] + CHILD_MESSAGE_CUT
+        route = self._routes.get(child.id)
+        if route is not None:
+            route.message(text)
+            return
         item = ChildMessage(child=self.child_ref(child), text=text)
         with suppress(SessionClosedError):
             _admit_delegate(parent, item, f"child:{child.name or child.id}")
 
+    def route_child(self, child_id: str, route: ChildRoute) -> None:
+        """Send this child's messages and unawaited outcomes to ``route``, not to ``delegates``.
+
+        For a work adapter that owns the child: install it before the child's
+        first turn (``SessionPort.delegate(route=...)`` does, in ``prepare``)
+        so nothing is delivered elsewhere first. It holds until the child
+        closes (``route.closed()``).
+        """
+        self._routes[child_id] = route
+
     def _put(self, parent: Session, child_id: str, item: ChildOutcome, source: str) -> None:
+        route = self._routes.get(child_id)
+        if route is not None:
+            route.outcome(item)  # routed: never also on delegates
+            return
         receipt = _admit_delegate(parent, item, source)
         self._queued.setdefault((parent.id, child_id), []).append((receipt, item))
 
