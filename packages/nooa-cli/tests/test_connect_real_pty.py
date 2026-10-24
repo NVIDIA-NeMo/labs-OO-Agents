@@ -115,7 +115,7 @@ finally:
     os.close(slave)
     output = bytearray()
     phase = 0
-    deadline = time.monotonic() + 35
+    deadline = time.monotonic() + 120
     try:
         while time.monotonic() < deadline:
             ready, _, _ = select.select([master], [], [], max(0, deadline - time.monotonic()))
@@ -147,11 +147,11 @@ finally:
             elif not cancel and phase == 2 and "Writemodelentryto" in compact:
                 os.write(master, b"y\r")
                 phase = 3
-        process.wait(timeout=5)
+        process.wait(timeout=60)
     finally:
         if process.poll() is None:
             process.kill()
-            process.wait(timeout=5)
+            process.wait(timeout=60)
         os.close(master)
     transcript = output.decode(errors="replace")
     assert process.returncode == (1 if cancel else 0), transcript

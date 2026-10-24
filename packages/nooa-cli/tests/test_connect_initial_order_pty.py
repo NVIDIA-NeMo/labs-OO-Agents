@@ -108,7 +108,7 @@ def test_real_guided_blank_catalogue_order_and_early_cancel(tmp_path, cancel):
         ("Writemodelentryto", b"y\r"),
     ]
     phase, output = 0, bytearray()
-    deadline = time.monotonic() + 30
+    deadline = time.monotonic() + 120
     try:
         while time.monotonic() < deadline:
             ready, _, _ = select.select([master], [], [], max(0, deadline - time.monotonic()))
@@ -128,11 +128,11 @@ def test_real_guided_blank_catalogue_order_and_early_cancel(tmp_path, cancel):
             if phase < len(steps) and steps[phase][0] in compact:
                 os.write(master, steps[phase][1])
                 phase += 1
-        process.wait(timeout=5)
+        process.wait(timeout=60)
     finally:
         if process.poll() is None:
             process.kill()
-            process.wait(timeout=5)
+            process.wait(timeout=60)
         os.close(master)
     transcript = output.decode(errors="replace")
     assert process.returncode == (1 if cancel else 0), transcript

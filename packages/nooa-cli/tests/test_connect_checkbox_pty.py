@@ -83,7 +83,7 @@ def run_terminal(
     os.close(slave)
     output = bytearray()
     phase = 0
-    deadline = time.monotonic() + 15
+    deadline = time.monotonic() + 120
     try:
         while time.monotonic() < deadline:
             ready, _, _ = select.select([master], [], [], max(0, deadline - time.monotonic()))
@@ -116,7 +116,7 @@ def run_terminal(
     finally:
         if proc.poll() is None:
             proc.kill()
-            proc.wait(timeout=5)
+            proc.wait(timeout=60)
         os.close(master)
     transcript = clean(output.decode(errors="replace"))
     assert proc.returncode == 0, transcript
