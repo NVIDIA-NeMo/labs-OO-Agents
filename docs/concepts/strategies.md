@@ -56,13 +56,20 @@ variables, helper definitions persist across cells, and generated code can call
 visible methods and tools on `self`. The loop ends when a value validates
 against the return annotation.
 
-`return_result` is the framework's completion helper. Generated CodeAct cells
-cannot rebind or delete this name in the cell scope, or overwrite it through an
-explicit `global` declaration. Use `result = ...; return_result(result)` instead.
-An invalid cell is rejected before it executes or compiles helper definitions,
-so the model can correct it in the next cell. Independent function parameters,
-function-local variables and comprehension targets may still use the name.
-This is an accidental-rebinding guard, not a Python security boundary.
+The always-available framework names (`self`, `print`, `pprint`, `doc`, and
+`return_result`, plus `python_cell_state` in CodeActV2) cannot be rebound or
+deleted in cell scope or overwritten through an explicit `global` declaration.
+Use ordinary variable names such as `result`; submit with `return_result(result)`.
+Each strategy derives the protected names from its advertised builtins.
+
+An invalid cell is rejected before it executes or compiles helper definitions.
+Binding and missing-`await` findings are reported together, so the model can
+correct both in the next cell. Python syntax diagnostics keep their native
+message and source location. Independent function parameters, function-local
+variables and comprehension targets may still use these names. Deep code that
+does not rebind a helper is not rejected by the binding guard.
+This is an accidental-rebinding guard, not a Python security boundary; dynamic
+namespace mutation is outside its contract.
 
 ### Recovering from a text-only CodeAct turn
 

@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""CodeAct must reject cells that replace its completion helper before execution."""
+"""CodeAct must protect advertised helpers and collect independent cell diagnostics."""
 
 import json
 
@@ -16,7 +16,9 @@ from nooa.unifiedllm import FakeLLMClient, LLMResponse, ToolCall
 BACKENDS = ["inprocess", pytest.param("sandbox", marks=pytest.mark.sandbox)]
 
 
-def _client(code: str, tool_name: str) -> FakeLLMClient:
+def _client(
+    code: str, tool_name: str, *, recovery_code: str = "return_result(42)"
+) -> FakeLLMClient:
     """Script one attempted binding followed by a valid completion."""
     return FakeLLMClient(
         scripted_responses=[
@@ -30,7 +32,7 @@ def _client(code: str, tool_name: str) -> FakeLLMClient:
                 ],
                 finish_reason="tool_calls",
             )
-            for index, cell in enumerate([code, "return_result(42)"])
+            for index, cell in enumerate([code, recovery_code])
         ],
         strict_exhaustion=True,
     )
@@ -101,6 +103,106 @@ async def test_rejected_cell_does_not_poison_completion(backend, strategy_type, 
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize(
+    "strategy_type,name",
+    [
+        (strategy_type, name.removesuffix("()"))
+        for strategy_type in (CodeActStrategy, CodeActV2)
+        for name in strategy_type()._always_available_builtins()
+    ],
+)
+@pytest.mark.parametrize(
+    "binding",
+    ["{name} = 0", "del {name}", "def helper():\n    global {name}\n    {name} = 0\nhelper()"],
+)
+async def test_all_advertised_helpers_are_protected(backend, strategy_type, name, binding):
+    """Each strategy protects all of its advertised helpers before cell side effects."""
+    tool_name = "python_cell" if strategy_type is CodeActV2 else "execute_python"
+    recovery = "print('ready')\npprint('ready')\nassert doc(self)\n"
+    if strategy_type is CodeActV2:
+        recovery += "assert isinstance(python_cell_state(), dict)\n"
+    recovery += "return_result(42)"
+    llm = _client(
+        "self.effects.append('executed')\n" + binding.format(name=name),
+        tool_name,
+        recovery_code=recovery,
+    )
+
+    class TestAgent(Agent, llm=llm):
+        """Exercise advertised helper availability across rejected and valid cells."""
+
+        @strategy(
+            strategy_type(
+                config=CodeActConfig(
+                    prefill=None,
+                    execution_backend=backend,
+                    sandbox=SandboxConfig(require=False, filesystem=False, network=True),
+                )
+            )
+        )
+        async def answer(self) -> int:
+            """Return the computed integer."""
+            ...
+
+    agent = TestAgent()
+    agent.effects = []
+    try:
+        assert await agent.answer() == 42
+        assert agent.effects == []
+        outputs = list(agent.events.query(type="PythonOutput"))
+        assert len(outputs) == 2
+        assert f"`{name}` is reserved" in outputs[0].error
+        assert not outputs[1].error
+        assert "ready" in outputs[1].stdout
+        assert len(llm.calls) == 2
+    finally:
+        await agent.aclose()
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize("strategy_type", [CodeActStrategy, CodeActV2])
+@pytest.mark.parametrize("name", ["return_result", "doc", "print"])
+async def test_binding_and_missing_await_are_reported_together(backend, strategy_type, name):
+    """One rejection includes both independent diagnostics and the next cell can finish."""
+    tool_name = "python_cell" if strategy_type is CodeActV2 else "execute_python"
+    llm = _client(f"{name} = 0\nself.work()", tool_name)
+
+    class TestAgent(Agent, llm=llm):
+        """Record any work that escaped combined validation."""
+
+        async def work(self):
+            """Expose a visible async method for missing-await validation."""
+            self.effects.append("executed")
+
+        @strategy(
+            strategy_type(
+                config=CodeActConfig(
+                    prefill=None,
+                    execution_backend=backend,
+                    sandbox=SandboxConfig(require=False, filesystem=False, network=True),
+                )
+            )
+        )
+        async def answer(self) -> int:
+            """Return the computed integer."""
+            ...
+
+    agent = TestAgent()
+    agent.effects = []
+    try:
+        assert await agent.answer() == 42
+        assert agent.effects == []
+        outputs = list(agent.events.query(type="PythonOutput"))
+        assert len(outputs) == 2
+        assert f"`{name}` is reserved" in outputs[0].error
+        assert "`work` is async and must be called with `await`" in outputs[0].error
+        assert not outputs[1].error
+        assert len(llm.calls) == 2
+    finally:
+        await agent.aclose()
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.parametrize("strategy_type", [CodeActStrategy, CodeActV2])
 @pytest.mark.parametrize(
     "deep_code",
@@ -142,9 +244,11 @@ async def test_deep_cell_is_rejected_and_next_cell_can_complete(backend, strateg
         assert agent.effects == []
         outputs = list(agent.events.query(type="PythonOutput"))
         assert len(outputs) == 2
-        assert "too deeply" in outputs[0].error
-        assert "split" in outputs[0].error
-        assert "retry" in outputs[0].error
+        if "too deeply" in outputs[0].error:
+            assert "split" in outputs[0].error
+            assert "retry" in outputs[0].error
+        else:
+            assert "`return_result` is reserved" in outputs[0].error
         assert not outputs[1].error
         assert len(llm.calls) == 2
     finally:
@@ -157,6 +261,7 @@ async def test_deep_cell_is_rejected_and_next_cell_can_complete(backend, strateg
     "code",
     [
         "return_result = 0\nglobal return_result",
+        "return_result = 0\nglobal return_result\nself.work()",
         "return_result(1)\nglobal return_result\nreturn_result = 0",
         "return_result: int = 0\nglobal return_result",
         "def helper(return_result):\n    global return_result\n    return_result = 0",
@@ -207,6 +312,7 @@ async def test_semantic_syntax_error_precedes_helper_compilation(backend, strate
         assert "return_result" in outputs[0].error
         assert "Cell In[1], line" in outputs[0].error
         assert "Code validation failed" not in outputs[0].error
+        assert "must be called with `await`" not in outputs[0].error
         assert not outputs[1].error
         assert len(llm.calls) == 2
     finally:

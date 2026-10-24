@@ -3109,12 +3109,21 @@ Standard Python builtins and agent instance (`self`) are available."""
         validator = GeneratedCodeValidator()
         try:
             validation_errors = completion_binding_errors(
-                code, filename=f"Cell In[{session.execution_count}]"
+                code,
+                reserved=frozenset(
+                    name.removesuffix("()") for name in self._always_available_builtins()
+                ),
+                filename=f"Cell In[{session.execution_count}]",
             )
         except SyntaxError as error:
             return ExecutionResult(stdout="", error=error, defined_methods={})
-        if not validation_errors:
+        try:
             validation_errors.extend(validator.validate(code, runtime.agent))
+        except RecursionError:
+            validation_errors.append(
+                "Cell nests too deeply for REPL-policy validation; "
+                "split the deeply nested code into smaller statements, then retry."
+            )
         if validation_errors:
             error_msg = "Code validation failed:\n" + "\n".join(
                 f"• {err}" for err in validation_errors

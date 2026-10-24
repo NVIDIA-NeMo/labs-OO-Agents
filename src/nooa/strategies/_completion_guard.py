@@ -1,29 +1,54 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Guard accidental rebinding of CodeAct's completion helper, not adversarial code."""
+"""Guard accidental rebinding of CodeAct's framework helpers, not adversarial code."""
 
 import ast
+import unicodedata
 from collections.abc import Iterable
 
 
-def _declares_completion_global(nodes: Iterable[ast.AST]) -> bool:
-    """Find global declarations in this scope, excluding nested Python scopes."""
-    for node in nodes:
-        if isinstance(node, ast.Global) and "return_result" in node.names:
-            return True
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
-            if _declares_completion_global(ast.iter_child_nodes(node)):
-                return True
-    return False
+def _declares_completion_globals(
+    nodes: Iterable[ast.AST], reserved: frozenset[str]
+) -> frozenset[str]:
+    """Collect reserved global declarations without recursion or entering nested scopes."""
+    declared: set[str] = set()
+    pending = list(nodes)
+    while pending:
+        node = pending.pop()
+        if isinstance(node, ast.Global):
+            declared.update(reserved.intersection(node.names))
+        elif not isinstance(
+            node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
+        ):
+            pending.extend(ast.iter_child_nodes(node))
+    return frozenset(declared)
 
 
 class _CompletionBindings(ast.NodeVisitor):
     """Find writes to the cell/global binding while preserving independent locals."""
 
-    def __init__(self) -> None:
+    def __init__(self, reserved: frozenset[str]) -> None:
         """Start in the cell scope; None denotes a comprehension's private scope."""
-        self.scopes: list[bool | None] = [True]
+        self.reserved = reserved
+        self.scopes: list[frozenset[str] | None] = [reserved]
+        self._queued: list[tuple[ast.AST, list[frozenset[str] | None]]] | None = None
         self.errors: list[str] = []
+
+    def visit(self, node: ast.AST) -> None:
+        """Walk iteratively, retaining each child's lexical scope and source order."""
+        if self._queued is not None:
+            self._queued.append((node, self.scopes.copy()))
+            return
+        pending = [(node, self.scopes.copy())]
+        try:
+            while pending:
+                current, self.scopes = pending.pop()
+                children: list[tuple[ast.AST, list[frozenset[str] | None]]] = []
+                self._queued = children
+                super().visit(current)
+                pending.extend(reversed(children))
+        finally:
+            self._queued = None
 
     def _binding(
         self,
@@ -36,11 +61,10 @@ class _CompletionBindings(ast.NodeVisitor):
         scope = self.scopes[-1]
         if named_expr:
             scope = next(scope for scope in reversed(self.scopes) if scope is not None)
-        if name == "return_result" and scope:
+        if name is not None and scope and name in scope:
             self.errors.append(
-                f"Line {node.lineno}: `return_result` is reserved for submitting the final "
-                "answer. Do not rebind or delete it; use a variable such as `result`, "
-                "then call `return_result(result)`."
+                f"Line {node.lineno}: `{name}` is reserved by CodeAct. "
+                "Do not rebind or delete it; use a different variable name such as `result`."
             )
 
     def visit_Name(self, node: ast.Name) -> None:
@@ -73,7 +97,7 @@ class _CompletionBindings(ast.NodeVisitor):
 
     def _body(self, body: list[ast.stmt]) -> None:
         """Enter a function/class scope; explicit global writes still affect the helper."""
-        self.scopes.append(_declares_completion_global(body))
+        self.scopes.append(_declares_completion_globals(body, self.reserved))
         for statement in body:
             self.visit(statement)
         self.scopes.pop()
@@ -100,7 +124,7 @@ class _CompletionBindings(ast.NodeVisitor):
     def visit_Lambda(self, node: ast.Lambda) -> None:
         """Lambda defaults run outside its private parameter/body scope."""
         self.visit(node.args)
-        self.scopes.append(False)
+        self.scopes.append(frozenset())
         self.visit(node.body)
         self.scopes.pop()
 
@@ -142,24 +166,31 @@ def _check_cell_syntax(tree: ast.Module, filename: str) -> None:
         decorator_list=[],
         type_params=[],
     )
-    module = ast.fix_missing_locations(ast.Module(body=[wrapper], type_ignores=[]))
+    ast.copy_location(wrapper, tree.body[0])
+    module = ast.Module(body=[wrapper], type_ignores=[])
     compile(module, filename, "exec")
 
 
-def completion_binding_errors(code: str, *, filename: str = "<codeact-cell>") -> list[str]:
+def completion_binding_errors(
+    code: str, *, reserved: frozenset[str], filename: str = "<codeact-cell>"
+) -> list[str]:
     """Reject rebinding before helper compilation; propagate compiler-only SyntaxErrors."""
+    # Python normalizes identifiers; inspect the original source to retain locations.
+    source = code if code.isascii() else unicodedata.normalize("NFKC", code)
+    if not any(name in source for name in reserved):
+        return []
     try:
         try:
             tree = ast.parse(code)
         except SyntaxError:
             return []  # Preserve the normal execution path's syntax-error diagnostics.
-        visitor = _CompletionBindings()
+        visitor = _CompletionBindings(reserved)
         visitor.visit(tree)
         if visitor.errors:
             _check_cell_syntax(tree, filename)
     except RecursionError:
         return [
-            "Cell nests too deeply to check for `return_result` rebinding; "
+            "Cell nests too deeply to check for reserved-name rebinding; "
             "split the deeply nested code into smaller statements, then retry."
         ]
     return visitor.errors
