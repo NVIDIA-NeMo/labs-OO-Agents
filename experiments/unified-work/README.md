@@ -1,14 +1,16 @@
 # Unified work: one `self.jobs` vocabulary for shells and subagents
 
-Status: a spike on `spike/atom-unified-work`. Nothing here has been evaluated
-on a benchmark; no evaluation results are claimed.
+Status: a spike on `spike/atom-unified-work`. The current candidate on this
+branch has not been benchmarked; the one frozen benchmark run of an earlier
+rewrite commit is reported under "Frozen benchmark result" below.
 
 Update: on this branch the spike agent is now the public
 `nooa_atom.agent:AtomAgent`. `agent/unified.py` became `agent/agent.py`, the
 earlier `AtomAgent` became the private `agent/base.py:AtomAgentBase`, and
 there is one turn method, `handle`, with the role selected by `turn_method`
 (see `packages/nooa-atom/README.md`). The architecture notes below describe
-the spike as it was at b612e2d46, which is what frozen benchmark pins measure.
+the spike as it was at b612e2d46 (the old frozen spike, not the commit measured
+in "Frozen benchmark result" below).
 
 ## Research question
 
@@ -135,6 +137,24 @@ The old frozen benchmark spike `b612e2d46` used a separately selectable
 `UnifiedAtomAgent` and different turn methods. Its canary/partial results must
 not be presented as results for this rewrite. The paired baseline remains
 `7f9a09dc1`; new runs must pin and report the verified rewrite commit.
+
+## Frozen benchmark result
+
+SWE-bench Pro, 120-task roster, same model in both arms. The rewrite arm was
+pinned to frozen rewrite commit `f4e0a0d22b12f0b07ae0cd0c8c4733de8524ad4a`; the
+baseline arm to `7f9a09dc14a3`.
+
+| | rewrite `f4e0a0d22` | baseline `7f9a09dc1` |
+|---|---:|---:|
+| Resolved / roster | 58/120 | 54/120 |
+
+Two baseline tasks (task_index 5 and 49) produced no rollout ("Episode timed
+out"; cause UNKNOWN, not diagnosed); they are counted as unresolved. The
+paired difference is not significant (exact McNemar p = 0.541; +3.3 pp, 95% CI
+-4.7 to +11.3 pp). This run is a guardrail only: it does not establish
+equivalence or parity, and no difference is attributed to any single
+component. The current candidate on this branch, which adds later
+integration and per-call shell timeout changes, has not been benchmarked.
 
 ## Current shell and messaging behavior
 
