@@ -843,3 +843,137 @@ async def test_inherited_preserve_scope_keeps_background_past_shell_close(tmp_pa
             with contextlib.suppress(ProcessLookupError):
                 os.kill(bg, 9)
             await until_dead(bg)
+
+
+@pytest.fixture
+def gated_close(monkeypatch):
+    """Hold the first armed ``BashSession.close`` at a gate; record every bash started."""
+    from nooa.tools import BashSession
+
+    state = {"armed": False, "entered": asyncio.Event(), "gate": asyncio.Event(), "spawned": []}
+    original_close, original_start = BashSession.close, BashSession.start
+
+    async def close(self):
+        if state["armed"]:
+            state["armed"] = False
+            state["entered"].set()
+            await state["gate"].wait()
+        return await original_close(self)
+
+    async def start(self):
+        await original_start(self)
+        state["spawned"].append(self._process.pid)
+
+    monkeypatch.setattr(BashSession, "close", close)
+    monkeypatch.setattr(BashSession, "start", start)
+    yield state
+    state["gate"].set()  # only frees a broken run; cleanup never relies on it
+
+
+async def still_pending(task: asyncio.Future, seconds: float = 0.2) -> bool:
+    """Bounded negative check: ``task`` has not finished within ``seconds``."""
+    done, _ = await asyncio.wait({task}, timeout=seconds)
+    return not done
+
+
+@pytest.mark.parametrize("how", ["cancel", "timeout"])
+async def test_aclose_while_an_interrupt_closes_the_old_bash_starts_none(
+    tmp_path, gated_close, how
+):
+    sh = Shell(tmp_path)
+    bash = int((await sh.run("echo $$")).stdout)
+    gated_close["spawned"].clear()
+    gated_close["armed"] = True  # the interrupt's own close of the old bash is held
+    timeout = 0.5 if how == "timeout" else 1800
+    task = asyncio.create_task(sh.run("while :; do :; done", timeout=timeout))  # a builtin
+    await until(lambda: running(sh))
+    if how == "cancel":
+        task.cancel()
+    await asyncio.wait_for(gated_close["entered"].wait(), 10)
+    await asyncio.wait_for(sh.aclose(), 10)
+    await until_dead(bash)
+    gated_close["gate"].set()  # the interrupt goes on after aclose has finished
+    expected = asyncio.CancelledError if how == "cancel" else RuntimeError
+    with pytest.raises(expected):
+        await asyncio.wait_for(task, 10)
+    assert gated_close["spawned"] == []  # no restart after the close
+    assert sh._session is None
+
+
+async def test_enter_queued_before_aclose_starts_no_bash(tmp_path):
+    sh = Shell(tmp_path)
+    bash = int((await sh.run("echo $$")).stdout)
+    active = asyncio.create_task(sh.run("sleep 1800"))
+    await until(lambda: running(sh))
+    enter = asyncio.create_task(sh.__aenter__())
+    await until(lambda: queued(sh))
+    await asyncio.wait_for(sh.aclose(), 10)
+    results = await asyncio.wait_for(asyncio.gather(active, enter, return_exceptions=True), 10)
+    assert all(isinstance(r, RuntimeError) for r in results), results
+    assert sh._session is None and not sh._entered
+    await until_dead(bash)
+    async with sh:  # a later entry is a new bash
+        assert (await sh.run("echo ok")).stdout == "ok\n"
+
+
+async def test_concurrent_acloses_all_wait_for_the_one_cleanup(tmp_path, gated_close):
+    sh = Shell(tmp_path)
+    bash = int((await sh.run("echo $$")).stdout)
+    gated_close["armed"] = True
+    first = asyncio.create_task(sh.aclose())
+    await asyncio.wait_for(gated_close["entered"].wait(), 10)
+    second = asyncio.create_task(sh.aclose())
+    third = asyncio.create_task(sh.aclose())
+    assert await still_pending(second) and not third.done()  # they join the cleanup
+    first.cancel()  # one closer giving up does not stop the cleanup
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    assert alive(bash) and await still_pending(second)
+    gated_close["gate"].set()
+    await asyncio.wait_for(asyncio.gather(second, third), 10)
+    assert not alive(bash)  # bash had ended when they returned
+
+
+async def test_owner_close_waits_for_a_users_close_in_progress(tmp_path, gated_close):
+    from nooa_atom.agent.work_shell import ShellOwner, shell_owner
+
+    owner = ShellOwner()
+    token = shell_owner.set(owner)
+    try:
+        sh = Shell(tmp_path)
+        bash = int((await sh.run("echo $$")).stdout)
+    finally:
+        shell_owner.reset(token)
+    gated_close["armed"] = True
+    user = asyncio.create_task(sh.aclose())
+    await asyncio.wait_for(gated_close["entered"].wait(), 10)
+    closing = asyncio.create_task(owner.aclose())
+    assert await still_pending(closing)
+    gated_close["gate"].set()
+    await asyncio.wait_for(asyncio.gather(user, closing), 10)
+    assert not alive(bash) and len(owner) == 0
+
+
+async def test_run_during_aclose_waits_and_keeps_its_scratch_files(tmp_path, gated_close):
+    sh = Shell(tmp_path)
+    old = int((await sh.run("echo $$")).stdout)
+    await sh.run("sleep 300 & echo $! >bg.pid")  # output pumps that the close ends too
+    bg = int((tmp_path / "bg.pid").read_text())
+    try:
+        gated_close["armed"] = True
+        closing = asyncio.create_task(sh.aclose())
+        await asyncio.wait_for(gated_close["entered"].wait(), 10)
+        later = asyncio.create_task(sh.run("cat; echo $$", stdin="in\n"))  # stdin: a scratch file
+        assert await still_pending(later)  # it waits for the cleanup, not beside it
+        gated_close["gate"].set()
+        await asyncio.wait_for(closing, 10)
+        r = await asyncio.wait_for(later, 10)
+        lines = r.stdout.split()
+        assert r.returncode == 0 and lines[0] == "in" and int(lines[1]) != old
+        assert alive(int(lines[1])) and not alive(old)
+        assert (await sh.run("cat", stdin="again\n")).stdout == "again\n"
+        await sh.aclose()
+        await until_dead(int(lines[1]), bg)
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(bg, 9)

@@ -17,7 +17,9 @@
 Lifecycle: ``await shell.aclose()`` or ``async with Shell() as sh:`` ends
 bash and its background processes; a dropped Shell ends with its object; an
 owner (``ShellOwner`` in ``shell_owner``, which an agent session sets) closes
-the Shells started under it; a launched Shell closes with its job.
+the Shells started under it; a launched Shell closes with its job. Inside a
+harness's ``preserve_background_services()`` scope, closing ends bash only:
+that external harness owns (and must clean up) the background processes.
 
 A command's stdout and stderr are read through pipes into files in the job's
 scratch directory, each up to an output limit (past it, bytes are counted
@@ -91,6 +93,7 @@ eval "unset __nooa_rc __nooa_f __nooa_was __nooa_stop __nooa_p __nooa_t __nooa_e
 _DRAIN_SECONDS = 0.5
 # How a command ends when its Shell is closed (``aclose``) before or while it runs.
 _CLOSED_BEFORE = "the shell was closed before this command started; it did not run"
+_CLOSED_BEFORE_ENTRY = "the shell was closed before it was entered; no bash started"
 _CLOSED_STARTING = "the shell was closed while bash was starting; the command did not run"
 _CLOSED_DURING = "the shell was closed while this command ran; the command was stopped"
 
@@ -246,6 +249,11 @@ def _cancelling() -> bool:
     return task is not None and task.cancelling() > 0
 
 
+def _closed_error(message: str) -> BaseException:
+    """The error for work its Shell's close ended: the caller's own cancel wins."""
+    return asyncio.CancelledError() if _cancelling() else RuntimeError(message)
+
+
 def _check_timeout(value: Any) -> float:
     """``value`` as a command deadline: a non-bool int or float, finite and positive."""
     if isinstance(value, bool) or not isinstance(value, int | float):
@@ -319,7 +327,9 @@ class Shell:
     Closing ends bash and its background processes: ``await sh.aclose()``,
     ``async with Shell() as sh:``, or when the object is dropped. An agent
     session closes its own Shells when it ends; keep the object (``sh``) for
-    as long as a background server must run.
+    as long as a background server must run. (Under a harness's
+    ``preserve_background_services()`` scope closing ends bash only; that
+    harness owns the cleanup of its background processes.)
     """
 
     __nosnapshot__ = True  # a live bash is not data
@@ -338,6 +348,7 @@ class Shell:
         # Bumped by aclose: work from before it (queued, running, starting) is void.
         self._generation = 0
         self._start_job: asyncio.Task[int] | None = None  # bash starting; aclose cancels it
+        self._closing: asyncio.Task[None] | None = None  # the cleanup every closer awaits
         self._bash: tuple[int, str | None] | None = None  # pid and start time of bash
         self._own_dir: tempfile.TemporaryDirectory[str] | None = None
         self._lingering: set[asyncio.Task[None]] = set()
@@ -388,6 +399,7 @@ class Shell:
         """
         timeout = _check_timeout(timeout)
         describe(f"$ {command}")
+        await self._closed()
         generation = self._generation
         async with self._lock:
             if self._generation != generation:
@@ -430,6 +442,8 @@ class Shell:
         closed and this raises ``RuntimeError(closed)`` (``CancelledError`` if the
         caller itself was cancelled).
         """
+        if self._generation != generation:  # closed already: start nothing
+            raise _closed_error(closed)
         job = self._start_job = asyncio.ensure_future(self._boot(session))
         try:
             try:
@@ -439,7 +453,7 @@ class Shell:
                     raise
                 raise RuntimeError(closed) from None
             if self._generation != generation:  # closed just after bash came up
-                raise RuntimeError(closed)
+                raise _closed_error(closed)
             return pid
         finally:
             if self._start_job is job:
@@ -463,9 +477,13 @@ class Shell:
             raise RuntimeError("this Shell is already running; launch another Shell()")
         self._entered = True  # claimed before the first await: a second entry is refused
         try:
+            await self._closed()
+            generation = self._generation
             async with self._lock:
+                if self._generation != generation:
+                    raise RuntimeError(_CLOSED_BEFORE_ENTRY)
                 if self._session is None:
-                    await self._start(self._generation)
+                    await self._start(generation)
         except BaseException:
             self._entered = False
             raise
@@ -478,29 +496,51 @@ class Shell:
     async def aclose(self) -> None:
         """End bash and its background processes and remove scratch files; safe to repeat.
 
-        A later ``run`` starts a new bash in ``cwd``.
+        Returns once that is done (a close already under way is joined). A
+        later ``run`` starts a new bash in ``cwd``. Under a harness's
+        ``preserve_background_services()`` scope only bash ends: that external
+        harness owns (and must clean up) its background processes.
         """
         # Never waits for the lock: the running command is stopped by closing its
         # bash, queued commands are refused, and a start (first use or an
-        # interrupt's restart) is cancelled, so no bash comes back for them.
-        # (Inside a harness's ``preserve_background_services`` scope, the scope
-        # keeps background processes: closing then ends bash only.)
-        self._generation += 1
-        start, self._start_job = self._start_job, None
-        if start is not None:
-            start.cancel()
-        session, self._session = self._session, None
-        for pump in self._lingering:
+        # interrupt's restart) is cancelled, so no bash comes back for them. One
+        # cleanup task per close; every closer (user, owner, job) awaits it,
+        # shielded, and new commands wait for it before they start.
+        closing = self._closing
+        if closing is None or closing.done():
+            self._generation += 1
+            start, self._start_job = self._start_job, None
+            if start is not None:
+                start.cancel()
+            session, self._session = self._session, None
+            pumps, self._lingering = self._lingering, set()
+            own_dir, self._own_dir = self._own_dir, None
+            closing = self._closing = asyncio.ensure_future(
+                self._cleanup(start, session, pumps, own_dir)
+            )
+        await asyncio.shield(closing)
+
+    @staticmethod
+    async def _cleanup(
+        start: asyncio.Task[int] | None,
+        session: BashSession | None,
+        pumps: set[asyncio.Task[None]],
+        own_dir: tempfile.TemporaryDirectory[str] | None,
+    ) -> None:
+        for pump in pumps:
             pump.cancel()
-        await asyncio.gather(*self._lingering, return_exceptions=True)
-        self._lingering.clear()
+        await asyncio.gather(*pumps, return_exceptions=True)
         if start is not None:
             await asyncio.gather(start, return_exceptions=True)  # it closes what it started
         if session is not None:
-            await asyncio.shield(session.close())
-        if self._own_dir is not None:
-            self._own_dir.cleanup()
-            self._own_dir = None
+            await session.close()
+        if own_dir is not None:
+            own_dir.cleanup()
+
+    async def _closed(self) -> None:
+        """Wait for a close under way to finish (its outcome is the closers')."""
+        while (closing := self._closing) is not None and not closing.done():
+            await asyncio.wait({closing})
 
     @staticmethod
     async def _bash_pid(session: BashSession) -> int:
@@ -726,7 +766,7 @@ class Shell:
 
     def _check_open(self, generation: int) -> None:
         if self._generation != generation:
-            raise RuntimeError(_CLOSED_DURING)
+            raise _closed_error(_CLOSED_DURING)
 
     async def _interrupt(
         self,
@@ -760,6 +800,8 @@ class Shell:
         if self._generation != generation:
             return None  # closed: aclose ended bash; no restart
         await session.close()
+        if self._generation != generation:  # closed while that close ran
+            return None
         pid = await self._start_session(session, generation, _CLOSED_DURING)  # keeps the cwd
         self._bash, self._lost = (pid, _start_time(pid)), True
         self._reset_tracked()
