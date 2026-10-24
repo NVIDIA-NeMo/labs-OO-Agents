@@ -2,7 +2,7 @@
 name = "nooa-cli"
 # Version is derived from git tags at build time by uv-dynamic-versioning.
 dynamic = ["version"]
-description = "CLI for nemo-oo-agents (`nooa` command: eval runner, trace viewer, config)"
+description = "CLI for nooa (`nooa` command: eval runner, trace viewer, config)"
 license = {text = "Apache-2.0"}
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
