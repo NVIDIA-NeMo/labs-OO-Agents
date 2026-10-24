@@ -115,7 +115,10 @@ async def test_insufficient_budget_never_substitutes_smaller_cap(monkeypatch):
     assert result.entry["provenance"]["tokens_charged_to_budget"] == 0
     assert all(r["outcome"] == "not_probed" for r in result.entry["provenance"]["probes"].values())
     assert not connect.verdict(result.entry).ok
-    assert any("unverified" in warning for warning in connect.entry_warnings(result.entry))
+    assert any(
+        "Reply limit not tested with the saved settings" in warning
+        for warning in connect.entry_warnings(result.entry)
+    )
 
 
 def test_refresh_after_edit_rebuilds_detached_requests_and_estimates():

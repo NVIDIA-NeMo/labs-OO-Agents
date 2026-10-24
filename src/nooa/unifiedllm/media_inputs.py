@@ -39,6 +39,10 @@ def filter_media_messages(messages, enabled: tuple[MediaInput, ...]):
             result.append(message)
             continue
         item = dict(message)
+        kind = attachment_kind(item)
+        if kind in {"audio", "video"} and kind not in enabled:
+            result.append({"role": "user", "content": removed_media_notice(kind)})
+            continue
         slot = "output" if item.get("type") == "function_call_output" else "content"
         if isinstance(item.get(slot), tuple):
             # A tuple of blocks is sent like a list, so it must be filtered like one.
@@ -75,16 +79,25 @@ def filter_media_messages(messages, enabled: tuple[MediaInput, ...]):
     return result
 
 
-def guard_native_media(native: Mapping[str, Any], enabled: tuple[MediaInput, ...] | None) -> None:
-    """Adapter-owned compatible envelopes are indivisible; never recurse."""
-    if enabled is None:
-        return  # Direct projection helpers retain their existing contract.
-    content = native.get("content")
-    kinds = ["audio"] if native.get("audio") is not None else []
-    if isinstance(content, (list, tuple)):
-        kinds.extend(attachment_kind(block) for block in content if isinstance(block, Mapping))
-    if any(kind is not None and kind not in enabled for kind in kinds):
-        raise ReasoningReplayError(
-            "Cannot remove disabled media from opaque assistant state; "
-            "supply a portable assistant turn instead."
-        )
+def guard_native_media(
+    native: Mapping[str, Any], enabled: tuple[MediaInput, ...] | None, *, interface: str = "chat"
+) -> None:
+    """Adapter-owned compatible envelopes are indivisible; never recurse.
+
+    Preserve the disabled-opaque-state guard FIRST, then reject unimplemented
+    native input before reconstructing any vendor text/state. None retains
+    direct projection helpers' permission contract, not an unsupported mapping.
+    """
+    if enabled is not None:
+        content = native.get("content")
+        kinds = ["audio"] if native.get("audio") is not None else []
+        if isinstance(content, (list, tuple)):
+            kinds.extend(attachment_kind(block) for block in content if isinstance(block, Mapping))
+        if any(kind is not None and kind not in enabled for kind in kinds):
+            raise ReasoningReplayError(
+                "Cannot remove disabled media from opaque assistant state; "
+                "supply a portable assistant turn instead."
+            )
+    from nooa.media_policy import reject_unsupported_media
+
+    reject_unsupported_media([native], interface)

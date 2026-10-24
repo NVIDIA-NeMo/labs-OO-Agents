@@ -52,16 +52,30 @@ class ProbeRecord(TypedDict, total=False):
     request: dict[str, Any]
     baseline_kind: str
     typed_result_validated: bool
+    typed_result: Any
     final_answer_observed: bool
     request_accepted: bool
     access_reported: bool
     attachment_observed: bool
+    implementation_supported: bool  # Derived implementation ceiling, not model support.
     output_settings_observed: bool
+    structured_output_mode: str | None
+    structured_output_carrier: str
+    structured_output_schema_observed: bool
+    structured_output_conflicts_observed: bool
+    verification_config: dict[str, Any]
+    verification_fingerprint: str
+    verification_current: bool
+    verification_execution: dict[str, Any]
 
 
 def public_record(record: dict) -> dict:
     """Select documented evidence; never expose private requests or new raw fields."""
-    return {k: v for k, v in record.items() if k in ProbeRecord.__annotations__ and k != "request"}
+    return {
+        k: v
+        for k, v in record.items()
+        if k in ProbeRecord.__annotations__ and k not in {"request", "verification_config"}
+    }
 
 
 TYPED_TEXT_BASELINE = "predict_int_v1"
@@ -70,13 +84,21 @@ TYPED_TEXT_BASELINE = "predict_int_v1"
 def text_baseline_passed(record: dict) -> bool:
     """One configured baseline criterion for UI verdicts and media gating."""
     return (
-        record.get("baseline_kind") == TYPED_TEXT_BASELINE
+        isinstance(record.get("verification_fingerprint"), str)
+        and record.get("verification_current") is True
+        and record.get("baseline_kind") == TYPED_TEXT_BASELINE
         and record.get("outcome") == "accepted"
         and record.get("typed_result_validated") is True
         and record.get("answer_correct") is True
         and record.get("final_answer_observed") is True
         and record.get("settings_sent") is True
         and record.get("finish_reason") == "stop"
+        and (
+            record.get("structured_output_mode") != "anthropic"
+            or record.get("structured_output_schema_observed") is True
+            and record.get("structured_output_conflicts_observed") is False
+            and record.get("structured_output_carrier") == "output_config.format"
+        )
     )
 
 
@@ -101,13 +123,35 @@ def text_baseline_reason(record: dict) -> str:
     return "Validated integer 323 with a complete final answer and configured settings observed"
 
 
-def check_status(name: str, record: dict, *, missing_reasoning=False) -> str:
+def check_status(
+    name: str, record: dict, *, entry: dict | None = None, missing_reasoning=False
+) -> str:
     """One verdict policy for progress rows, JSON stages and final summaries."""
     outcome = record.get("outcome")
+    if name.startswith("media:") and entry is not None:
+        from nooa.media_policy import entry_input_interface, implemented_input_kinds
+
+        if name[6:] not in implemented_input_kinds(entry_input_interface(entry)):
+            return "skipped" if outcome == "not_probed" else "attention"
+    current = False
+    if outcome not in {"not_probed", "running"}:
+        from ._verification import verification_is_current
+
+        current = (
+            verification_is_current(record, entry, name)
+            if entry is not None
+            else isinstance(record.get("verification_fingerprint"), str)
+            and record.get("verification_current") is True
+        )
+        if not current:
+            return "attention"  # Historical proof is not current trust.
     # Decision models have no text baseline; their routing check stands alone.
     if name == "routing" and outcome != "not_probed" and record.get("client") != "decision":
         if record.get("baseline_kind") != "interface_acceptance":
-            return "passed" if text_baseline_passed(record) else "attention"
+            # Candidate equality, not a cached flag from an earlier edit,
+            # controls both the verdict and the shared exact save gate.
+            baseline = {**record, "verification_current": current}
+            return "passed" if text_baseline_passed(baseline) else "attention"
     if name.startswith("media:") and outcome == "passed":
         return "passed"
     if outcome == "not_probed" and not record.get("error"):

@@ -60,6 +60,7 @@ class LLMDecisionModel(DecisionModel):
         """
         if max_attempts < 1:
             raise ValueError("max_attempts must be at least 1")
+        self.media_inputs = ()  # JSON-only adapter; chat modality permissions do not apply.
         self.llm = llm
         self.model = getattr(llm, "model", "") or ""
         self.max_attempts = max_attempts
@@ -70,6 +71,10 @@ class LLMDecisionModel(DecisionModel):
         Raises:
             InvalidDecisionResponseError: If no reply matches the response schema.
         """
+        if request.attachments:
+            raise ValueError(
+                "DecisionModel.from_llm does not support decision image attachments; use a native decision client"
+            )
         output_model = _answer_model(request)
         messages: list[Any] = [
             {"role": "system", "content": _SYSTEM_PROMPT},

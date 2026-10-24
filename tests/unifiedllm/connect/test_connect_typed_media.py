@@ -269,7 +269,11 @@ async def test_no_fake_acceptance_or_retry_on_provider_transport_errors(monkeypa
 async def test_context_recovery_blocked_before_second_runtime_call(monkeypatch, kind):
     entry = plan().entry
     entry.update(context_window=8000, max_tokens=5000, media_inputs=[kind])
-    client = registry.client_from_config("local", entry, api_key="fake")
+    # Explicit credentials replace the alias's credential scope. This fixture
+    # intentionally declares the same input cap for its synthetic replacement.
+    client = registry.client_from_config(
+        "local", entry, api_key="fake", context_window=entry["context_window"]
+    )
     client.acall = AsyncMock(
         side_effect=ContextWindowExceededError(
             message="context too large", model="model", llm_provider="openai"

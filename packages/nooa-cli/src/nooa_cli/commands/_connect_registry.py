@@ -167,9 +167,8 @@ def diagnostic_context(
             )
             if not context["target_in_registry_chain"]:
                 context["target_load_note"] = (
-                    "Target is not in the current registry chain. Saved entries will not load "
-                    "from this working directory unless the target is added to the chain; "
-                    "they may load when running in the target project."
+                    "To load this file from the current working directory, add it to the registry "
+                    "chain or load it explicitly. Entries may already load in the target project."
                 )
         found = entries().get(alias) if alias else None
         context["effective_alias_source"] = str(found[1]) if found else None

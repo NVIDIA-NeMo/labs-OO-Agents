@@ -32,6 +32,7 @@ def installation_context():
 
     package = Path(_version.__file__).resolve().parent
     relative = (
+        "skills/nooa-connect/SKILL.md",
         "skills/nooa-model-configuration/SKILL.md",
         "docs/model-connect.md",
         "docs/model-configuration.md",

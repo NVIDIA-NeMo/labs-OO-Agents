@@ -12,7 +12,7 @@ from nooa.decorators import strategy
 from nooa.media import Audio, File, Image, Video
 from nooa.strategies.predict import PredictStrategy
 
-from ._baseline import _typed_call
+from ._baseline import _probe_agent, _typed_call
 from ._media import pdf_fixture, png_fixture, video_fixture, wav_fixture
 
 
@@ -48,7 +48,7 @@ class _DocumentAccess(Agent):
         ...
 
 
-async def typed_media(client, kind):
+async def typed_media(client, kind, *, observe_output_model=None):
     """The standard Predict media collector attaches each original argument once."""
     contracts = {
         "image": (_ImageAccess, Image, png_fixture, "image/png"),
@@ -57,5 +57,10 @@ async def typed_media(client, kind):
         "pdf": (_DocumentAccess, File, pdf_fixture, "application/pdf"),
     }
     cls, media_type, fixture, mime = contracts[kind]
-    agent = cls(llm=client)
-    return await _typed_call(agent, agent.access, media_type.from_bytes(fixture(), media_type=mime))
+    agent = _probe_agent(cls, llm=client)
+    return await _typed_call(
+        agent,
+        agent.access,
+        media_type.from_bytes(fixture(), media_type=mime),
+        observe_output_model=observe_output_model,
+    )

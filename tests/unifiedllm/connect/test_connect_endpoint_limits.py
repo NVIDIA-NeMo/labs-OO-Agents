@@ -27,8 +27,8 @@ CATALOGUE = {
             "endpoint_input_limit",
         ),
         ({"context_window": 120000, "max_output_tokens": 24000}, 120000, 24000, "endpoint"),
-        ({"max_input_tokens": 100000}, 100000, 180000, "endpoint_input_limit"),
-        ({"max_input_tokens": True, "max_output_tokens": -1}, 200000, 180000, "catalogue"),
+        ({"max_input_tokens": 100000}, 100000, None, "endpoint_input_limit"),
+        ({"max_input_tokens": True, "max_output_tokens": -1}, 200000, None, "catalogue"),
     ],
 )
 def test_plan_prefers_endpoint_limits(endpoint, window, ceiling, source):
@@ -43,9 +43,9 @@ def test_plan_prefers_endpoint_limits(endpoint, window, ceiling, source):
         endpoint_model=endpoint,
     ).entry
     assert entry["context_window"] == window
-    assert entry["provenance"]["catalogue_limits"]["max_completion_tokens"] == ceiling
+    assert entry["provenance"]["catalogue_limits"].get("max_completion_tokens") == ceiling
     assert entry["provenance"]["limit_sources"]["context_length"] == source
-    assert entry["max_tokens"] <= min(window, ceiling)
+    assert entry["max_tokens"] <= min(window, ceiling) if ceiling else entry["max_tokens"] <= window
     assert CATALOGUE == before
 
 
@@ -78,4 +78,26 @@ async def test_discovery_keeps_input_and_context_distinct(monkeypatch):
 
 def test_unknown_context_is_visible_in_library_plan():
     entry = connect.plan("local", "model", "chat", "https://models.example/v1", "").entry
-    assert "Context window unknown" in entry["provenance"]["warnings"][0]
+    assert "Context window not listed" in entry["provenance"]["warnings"][0]
+
+
+@pytest.mark.parametrize("context", [None, 8192])
+def test_unknown_context_warning_has_a_concrete_action_and_preserves_entry(context):
+    from copy import deepcopy
+
+    entry = connect.plan("local", "model", "chat", "https://models.example/v1", "").entry
+    entry["context_window"] = context
+    before = deepcopy(entry)
+    warnings = connect.entry_warnings(entry)
+    if context is None:
+        assert warnings[0] == (
+            "Context window not listed. NOOA will use its default; supply --context-window "
+            "or your server model details if you know the limit."
+        )
+    else:
+        assert not any("Context window not listed" in warning for warning in warnings)
+    assert (
+        "Reply limit not tested with the saved settings. Run a connection check to test it."
+        in warnings
+    )
+    assert entry == before

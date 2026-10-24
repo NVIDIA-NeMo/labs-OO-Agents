@@ -81,18 +81,10 @@ def pdf_fixture():
 
 def media_content(kind, style):
     """Return planned attachment content or an honest local skip reason."""
-    if kind == "video" and style != "chat":
-        return (
-            None,
-            None,
-            "This interface has no native video input mapping here; select video manually as unverified.",
-        )
-    if kind == "audio" and style != "chat":
-        return (
-            None,
-            None,
-            "This interface has no portable inline WAV input shape here; select audio manually as unverified.",
-        )
+    from nooa.media_policy import implemented_input_kinds, unsupported_input_reason
+
+    if kind not in implemented_input_kinds(style):
+        return None, None, unsupported_input_reason(style, [kind])
     if kind == "image":
         block = {"type": "image_url", "image_url": {"url": _data_url("image/png", png_fixture())}}
     elif kind == "video":
@@ -225,6 +217,24 @@ def explicitly_rejected(exc, kind):
         "pdf": r"pdfs?|documents?|files?",
     }[kind]
     noun = rf"(?:{names})(?: (?:input|content|format|type|data|url|attachment|processing)s?)?"
+    # Text-only models: the whole request is refused because it has media.
+    if re.search(r"\bnot a multimodal model\b|\bdoes(?: not|n't) support multimodal", text):
+        return True
+    # "Unsupported content part type: 'file'" names the wire part for this format.
+    part = re.search(
+        r"unsupported (?:chat )?(?:content(?: part)?|media) type:?\s*[\\'\"]*([a-z_]+)", text
+    )
+    parts = {
+        "image": {"image_url", "input_image"},
+        "audio": {"input_audio", "audio_url"},
+        "video": {"video_url"},
+        "pdf": {"file", "input_file", "document"},
+    }[kind]
+    if part and part.group(1) in parts:
+        return True
+    # A strict server whose message schema has no variant for this media part.
+    if "did not match any variant of untagged enum" in text and "messagecontent" in text:
+        return True
     return bool(
         re.search(
             rf"\b{noun}\b (?:is |are |was |were )?(?:not supported|unsupported|not allowed|rejected|invalid)\b",

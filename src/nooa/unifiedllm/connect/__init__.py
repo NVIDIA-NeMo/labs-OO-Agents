@@ -22,7 +22,7 @@ import tempfile
 import time
 from collections import deque
 from collections.abc import AsyncIterator, Mapping
-from contextlib import aclosing
+from contextlib import aclosing, contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -35,6 +35,8 @@ import yaml
 
 from nooa.unifiedllm.limits import REPLY_CAP_KEYS
 
+from ._advertised_media import advertised_media_suggestions, media_metadata
+from ._context_limits import apply_context_window, bound_context_window, scoped_endpoint_limits
 from ._records import (
     TYPED_TEXT_BASELINE,
     ProbeRecord,
@@ -43,8 +45,26 @@ from ._records import (
     text_baseline_passed,
     text_baseline_reason,
 )
+from ._server_details import ModelDetails as ModelDetails
+from ._server_details import bounded_json, openrouter_facts, token_limit
+from ._server_details import server_details as server_details
+from ._verification import (
+    effective_config_fingerprint as effective_config_fingerprint,
+)
+from ._verification import (
+    effective_config_snapshot as effective_config_snapshot,
+)
+from ._verification import (
+    effective_route_scope,
+    invalidate_verification,
+    routing_allows_save,
+    stamp_verification,
+    verification_is_current,
+)
 
 CATALOGUE_URL = "https://openrouter.ai/api/v1/models"
+# OpenRouter defaults to text output, excluding native decision models.
+OPENROUTER_MODEL_OUTPUTS = "text,decisions"
 # Effectively unlimited: no real check plan approaches this, so an unset
 # --budget-tokens never causes checks to be skipped. A finite sentinel (not
 # float("inf")) keeps every arithmetic site, type annotation, and JSON
@@ -103,6 +123,41 @@ def _include_rejected(exc: Exception) -> bool:
     )
 
 
+REASONING_DISCOVERY_TIMEOUT = 90
+
+CACHE_PARAMS = ("prompt_cache_options", "prompt_cache_breakpoint", "cache_control")
+
+
+def _cache_options_rejected(exc: Exception) -> bool:
+    """Recognize a server that refuses explicit prompt-cache fields."""
+    if getattr(exc, "status_code", None) not in {400, 422}:
+        return False
+    body = getattr(exc, "body", None)
+    error = body.get("error", body) if isinstance(body, dict) else {}
+    param = error.get("param") if isinstance(error, dict) else None
+    message = str(exc).lower()
+    if isinstance(param, str) and param in CACHE_PARAMS:
+        return True
+    return any(name in message for name in CACHE_PARAMS) and bool(
+        re.search(
+            r"unsupported|unknown|unrecognized|not supported|not allowed|invalid|extra", message
+        )
+    )
+
+
+def _disable_explicit_cache(entry: dict, status: int) -> dict:
+    entry["cache_breakpoint"] = None
+    record = {
+        "source": "connect",
+        "outcome": "rejected",
+        "status_code": status,
+        "reason": "The endpoint rejected explicit prompt caching; it is turned off for this model.",
+        "checked_at": datetime.now(UTC).isoformat(),
+    }
+    entry["provenance"]["explicit_cache"] = record
+    return record
+
+
 def _disable_encrypted_reasoning(entry: dict, status: int) -> dict:
     # Explicit empty include suppresses the runtime's native-endpoint default too.
     entry["include"] = []
@@ -117,7 +172,44 @@ def _disable_encrypted_reasoning(entry: dict, status: int) -> dict:
     return record
 
 
+# Omission preserves a saved declaration; explicit None clears it.
+STRUCTURED_OUTPUT_UNSET = object()
+
+
+def _validate_structured_output(entry: dict, override=STRUCTURED_OUTPUT_UNSET):
+    """Validate route-local declarations before credentials or request construction."""
+    from nooa.unifiedllm.structured_output import validate_structured_output_mode
+
+    def reject_payload(value):
+        if isinstance(value, dict):
+            if "structured_output_mode" in value:
+                raise ValueError(
+                    "structured_output_mode belongs on the connection, not request settings"
+                )
+            for child in value.values():
+                reject_payload(child)
+        elif isinstance(value, (list, tuple)):
+            for child in value:
+                reject_payload(child)
+
+    reject_payload(entry.get("extra_body"))
+    reject_payload(entry.get("reasoning_levels"))
+    if "structured_output_mode" in entry:
+        validate_structured_output_mode(entry["structured_output_mode"])
+    if override is not STRUCTURED_OUTPUT_UNSET:
+        validate_structured_output_mode(override)
+    declared = "structured_output_mode" in entry or override is not STRUCTURED_OUTPUT_UNSET
+    if declared and (
+        entry.get("client_type", "completion") != "completion"
+        or entry.get("api_style", "chat") not in {"chat", "anthropic"}
+    ):
+        raise ValueError(
+            "structured_output_mode is a Completion-only profile control (chat or anthropic)"
+        )
+
+
 _RESERVED = {
+    "structured_output_mode",
     "media_inputs",
     "model",
     "messages",
@@ -228,6 +320,13 @@ class InterfaceResult:
         )
 
     @property
+    def accepted_client_types(self) -> tuple[str, ...]:
+        """Distinct accepted runtime client types, in accepted interface order."""
+        return tuple(
+            dict.fromkeys(self.results[style].entry["client_type"] for style in self.accepted)
+        )
+
+    @property
     def reasoning_observed(self) -> dict[str, bool]:
         """Which interfaces put a reasoning item on the wire, not merely accepted a call.
 
@@ -246,11 +345,14 @@ class InterfaceResult:
 
     @property
     def recommended_style(self) -> str | None:
-        """The accepted interface to prefer: the first (by ``styles`` order) that
-        actually showed reasoning, or else the first accepted interface, or
-        None if nothing was accepted.
+        """Prefer accepted order when decision and chat-family clients both accept.
+
+        For chat-family-only comparisons, prefer observed reasoning, then order.
+        No interface is recommended if nothing was accepted.
         """
         accepted = self.accepted
+        if "decision" in self.accepted_client_types and len(self.accepted_client_types) > 1:
+            return accepted[0]
         observed = self.reasoning_observed
         for style in accepted:
             if observed.get(style):
@@ -290,7 +392,7 @@ def verdict(entry: dict) -> Verdict:
         **provenance.get("session_checks", {}),
     }.items():
         status = check_status(
-            name, record, missing_reasoning=name.removeprefix("level:") in missing
+            name, record, entry=entry, missing_reasoning=name.removeprefix("level:") in missing
         )
         groups[status].append(name)
     return Verdict(
@@ -300,18 +402,25 @@ def verdict(entry: dict) -> Verdict:
 
 @dataclass(frozen=True)
 class Discovery:
-    """Models advertised by the selected endpoint, not a public catalogue."""
+    """Advertised models, not verified interface support.
+
+    ``api_base`` remains the inference base (legacy root discovery may resolve /v1).
+    ``models_url`` records the actual listing source, independent of inference.
+    """
 
     api_base: str
     models: tuple[dict[str, Any], ...]
+    models_url: str | None = None
+    request_count: int = 0
 
 
 class DiscoveryError(ValueError):
     """Safe discovery failure; frontends can offer a new key on 401 or 403."""
 
-    def __init__(self, message: str, *, status_code: int | None = None):
+    def __init__(self, message: str, *, status_code: int | None = None, request_count: int = 0):
         super().__init__(message)
         self.status_code = status_code
+        self.request_count = request_count
 
 
 def normalize_endpoint(endpoint: str) -> str:
@@ -338,59 +447,91 @@ def _headers(style: str, key: str | None) -> dict[str, str]:
     return {"Authorization": f"Bearer {key}"} if key else {}
 
 
+def validate_models_url(models_url: str) -> str:
+    """Validate an explicit full catalogue GET URL, without rewriting its path."""
+    normalize_endpoint(models_url)  # Same HTTPS/credential/query restrictions.
+    return models_url.strip()
+
+
 async def discover(
-    endpoint: str, *, api_style: str = "chat", api_key: str | None = None
+    endpoint: str,
+    *,
+    api_style: str = "chat",
+    api_key: str | None = None,
+    models_url: str | None = None,
+    listing_style: str | None = None,
 ) -> Discovery:
     """List endpoint models without saving credentials or making generation calls.
 
+    ``models_url`` is an explicit full GET URL, required for decision routes.
+    It never changes the inference endpoint and gets no root-path fallback.
+    ``listing_style`` chooses listing authentication/pagination, not inference.
+    ``api_key`` authenticates listing only; callers must choose its source explicitly.
     Root URLs try /models, then /v1/models only on 404. Anthropic pagination
     uses the same fetcher. Limits apply to the whole discovery: 30 seconds,
     5 MiB and 5,000 entries. Redirects and automatic retries are disabled.
     """
-    if api_style in DECISION_API_STYLES:
+    if api_style in DECISION_API_STYLES and models_url is None:
         raise ValueError(
-            "Decision endpoints do not list decision models; supply the exact decision model ID"
+            "Decision endpoints do not list decision models themselves; supply models_url "
+            "for a shared catalogue or the exact decision model ID"
         )
     if api_style not in _PATHS:
-        raise ValueError("api_style must be chat, responses or anthropic")
+        raise ValueError("Unknown api_style")
+    style = listing_style or ("chat" if api_style in DECISION_API_STYLES else api_style)
+    if style not in {"chat", "responses", "anthropic"}:
+        raise ValueError("listing_style must be chat, responses or anthropic")
     base = normalize_endpoint(endpoint)
-    root = not urlsplit(base).path
+    url = validate_models_url(models_url) if models_url is not None else base + "/models"
+    root = models_url is None and not urlsplit(base).path
     models: dict[str, dict] = {}
     cursors: set[str] = set()
-    params = {"limit": "100"} if api_style == "anthropic" else {}
+    params = {"limit": "100"} if style == "anthropic" else {}
+    if url == CATALOGUE_URL:
+        params["output_modalities"] = OPENROUTER_MODEL_OUTPUTS
     size = 0
     count = 0
+    request_count = 0
     try:
         async with (
             asyncio.timeout(30),
             httpx.AsyncClient(timeout=15, follow_redirects=False) as client,
         ):
             while True:
+                request_count += 1
                 async with client.stream(
-                    "GET", base + "/models", headers=_headers(api_style, api_key), params=params
+                    "GET", url, headers=_headers(style, api_key), params=params
                 ) as response:
                     if response.status_code == 404 and root:
                         base += "/v1"
+                        url = base + "/models"
                         root = False
                         continue
                     if not response.is_success:
                         raise DiscoveryError(
                             f"Model discovery returned HTTP {response.status_code}",
                             status_code=response.status_code,
+                            request_count=request_count,
                         )
                     chunks = []
                     async for chunk in response.aiter_bytes():
                         size += len(chunk)
                         if size > 5 * 1024 * 1024:
-                            raise DiscoveryError("Model discovery exceeds 5 MiB")
+                            raise DiscoveryError(
+                                "Model discovery exceeds 5 MiB", request_count=request_count
+                            )
                         chunks.append(chunk)
                 payload = json.loads(b"".join(chunks))
                 data = payload.get("data") if isinstance(payload, dict) else None
                 if not isinstance(data, list):
-                    raise DiscoveryError("Model discovery must contain a data list")
+                    raise DiscoveryError(
+                        "Model discovery must contain a data list", request_count=request_count
+                    )
                 count += len(data)
                 if count > 5000:
-                    raise DiscoveryError("Model discovery exceeds 5,000 entries")
+                    raise DiscoveryError(
+                        "Model discovery exceeds 5,000 entries", request_count=request_count
+                    )
                 for item in data:
                     name = item.get("id") if isinstance(item, dict) else None
                     if (
@@ -410,16 +551,112 @@ async def discover(
                                 "max_model_len",
                             ),
                         ),
-                        ("max_output_tokens", ("max_output_tokens", "max_completion_tokens")),
+                        (
+                            "max_output_tokens",
+                            ("max_output_tokens", "max_completion_tokens", "max_tokens")
+                            if style == "anthropic"
+                            else ("max_output_tokens", "max_completion_tokens"),
+                        ),
                         ("max_input_tokens", ("max_input_tokens",)),
                     ):
                         for candidate in candidates:
                             value = item.get(candidate)
-                            if isinstance(value, int) and not isinstance(value, bool) and value > 0:
-                                model[field] = value
+                            if token_limit(value) is not None:
+                                model[field] = token_limit(value)
+                                if field != candidate:
+                                    model.setdefault("metadata_fields", {})[field] = (
+                                        "data[]." + candidate
+                                    )
                                 break
+                    # Advertised hints only: do not enable interfaces or media from these.
+                    for field in (
+                        "name",
+                        "display_name",
+                        "description",
+                        "client_type",
+                        "model_type",
+                    ):
+                        value = item.get(field)
+                        if (
+                            isinstance(value, str)
+                            and len(value) <= 4096
+                            and not any(ord(c) < 32 and c not in "\n\t" for c in value)
+                        ):
+                            model[field] = value
+                    for field in (
+                        "supported_interfaces",
+                        "input_modalities",
+                        "output_modalities",
+                        "supported_parameters",
+                    ):
+                        value = item.get(field)
+                        if (
+                            isinstance(value, list)
+                            and len(value) <= 100
+                            and all(
+                                isinstance(v, str)
+                                and len(v) <= 200
+                                and not any(ord(c) < 32 for c in v)
+                                for v in value
+                            )
+                        ):
+                            model[field] = value
+                    architecture = item.get("architecture")
+                    if isinstance(architecture, dict):
+                        hints = {
+                            k: v
+                            for k, v in architecture.items()
+                            if k in {"input_modalities", "output_modalities"}
+                            and isinstance(v, list)
+                            and len(v) <= 100
+                            and all(
+                                isinstance(s, str)
+                                and len(s) <= 200
+                                and not any(ord(c) < 32 for c in s)
+                                for s in v
+                            )
+                        }
+                        if hints:
+                            model["architecture"] = hints
+                    # Published OpenRouter route ceilings can only tighten a listing.
+                    top = item.get("top_provider")
+                    if isinstance(top, dict):
+                        for raw, field in (
+                            ("context_length", "context_window"),
+                            ("max_completion_tokens", "max_output_tokens"),
+                        ):
+                            value = top.get(raw)
+                            if token_limit(value) is not None:
+                                value = token_limit(value)
+                                old = model.get(field)
+                                model[field] = min(old, value) if isinstance(old, int) else value
+                                if old is None or value < old:
+                                    model.setdefault("metadata_fields", {})[field] = (
+                                        "data[].top_provider." + raw
+                                    )
+                    media = media_metadata(item)
+                    if "architecture" in media:
+                        media["architecture"] = {
+                            **model.get("architecture", {}),
+                            **media["architecture"],
+                        }
+                    model.update(media)
+                    from ._reasoning import reasoning_metadata
+
+                    reasoning_facts = reasoning_metadata(item)
+                    if reasoning_facts:
+                        model.setdefault("capabilities", {}).update(reasoning_facts["capabilities"])
+                    if media:
+                        model["media_source"] = url
+                    if url == CATALOGUE_URL:
+                        model["public_model"] = openrouter_facts(item)
+                    if name in models:
+                        raise DiscoveryError(
+                            "Model listing contains duplicate model IDs",
+                            request_count=request_count,
+                        )
                     models[name] = model
-                if api_style != "anthropic" or not payload.get("has_more"):
+                if style != "anthropic" or not payload.get("has_more"):
                     break
                 cursor = payload.get("last_id")
                 if (
@@ -428,42 +665,47 @@ async def discover(
                     or cursor in cursors
                     or len(cursors) >= 50
                 ):
-                    raise DiscoveryError("Invalid or excessive model discovery pagination")
+                    raise DiscoveryError(
+                        "Invalid or excessive model discovery pagination",
+                        request_count=request_count,
+                    )
                 cursors.add(cursor)
                 params["after_id"] = cursor
     except (httpx.HTTPError, TimeoutError):
-        raise DiscoveryError("Model discovery connection failed or timed out") from None
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        raise DiscoveryError("Model discovery did not return valid JSON") from None
+        raise DiscoveryError(
+            "Model discovery connection failed or timed out", request_count=request_count
+        ) from None
+    except (ValueError, UnicodeDecodeError) as exc:
+        if isinstance(exc, DiscoveryError):
+            raise
+        raise DiscoveryError(
+            "Model discovery did not return valid JSON", request_count=request_count
+        ) from None
     if not models:
-        raise DiscoveryError("Endpoint advertised no usable model IDs; supply a model explicitly")
-    return Discovery(base, tuple(models[name] for name in sorted(models)))
+        raise DiscoveryError(
+            "Endpoint advertised no usable model IDs; supply a model explicitly",
+            request_count=request_count,
+        )
+    return Discovery(base, tuple(models[name] for name in sorted(models)), url, request_count)
 
 
 async def catalogue() -> list[dict]:
     """Fetch public metadata without sending the endpoint's credentials."""
     async with asyncio.timeout(30), httpx.AsyncClient(timeout=15, follow_redirects=False) as client:
-        response = await client.get(CATALOGUE_URL)
-        response.raise_for_status()
-        payload = response.json()
+        payload = await bounded_json(
+            client, CATALOGUE_URL, params={"output_modalities": OPENROUTER_MODEL_OUTPUTS}
+        )
         data = payload.get("data") if isinstance(payload, dict) else None
         if not isinstance(data, list) or any(not isinstance(item, dict) for item in data):
             raise ValueError("Catalogue response must contain a list of model objects")
+        if len(data) > 5000:
+            raise ValueError("Catalogue exceeds 5,000 entries")
+        data = [openrouter_facts(item) for item in data]
+        if len({item["id"] for item in data}) != len(data):
+            raise ValueError("Catalogue contains duplicate model IDs")
         for item in data:
-            if not isinstance(item.get("id"), str) or not item["id"].strip():
-                raise ValueError("Catalogue models must have a non-empty string id")
-            for field in ("top_provider", "reasoning"):
-                if not isinstance(item.get(field), dict):
-                    item[field] = {}
-            reasoning = item["reasoning"]
-            efforts = reasoning.get("supported_efforts")
-            reasoning["supported_efforts"] = (
-                [value for value in efforts if isinstance(value, str) and value.strip()]
-                if isinstance(efforts, list)
-                else []
-            )
-            if not isinstance(reasoning.get("default_effort"), str):
-                reasoning.pop("default_effort", None)
+            if media_metadata(item):
+                item["media_source"] = CATALOGUE_URL
         return data
 
 
@@ -596,12 +838,23 @@ def unobserved_reasoning_levels(entry: dict) -> list[str]:
     return missing
 
 
-def configure_entry(entry: dict, *, reply_tokens: int | None = None) -> dict:
+def configure_entry(
+    entry: dict,
+    *,
+    reply_tokens: int | None = None,
+    cache_enabled: bool | None = None,
+    structured_output_mode=STRUCTURED_OUTPUT_UNSET,
+) -> dict:
     """Apply safe persisted defaults to a detached entry, without doing any I/O.
 
     ``max_tokens`` is the runtime cap on every interface. Published ceilings
     remain provenance, not request allocations. ``include: []`` is an explicit
     opt-out from carrying encrypted reasoning on stateless Responses calls.
+    ``structured_output_mode`` is a Completion-only declaration: omission
+    preserves it, explicit None clears native mode, and 'auto' keeps the legacy
+    carrier. Only explicit 'anthropic' selects output_config.format.
+    ``cache_enabled=False`` disables explicit cache options/markers, not provider
+    automatic caching. None preserves the entry; True selects the runtime auto policy.
     """
 
     def reject_credentials(value):
@@ -625,21 +878,64 @@ def configure_entry(entry: dict, *, reply_tokens: int | None = None) -> dict:
             for child in value:
                 reject_credentials(child)
 
+    if cache_enabled is not None and not isinstance(cache_enabled, bool):
+        raise ValueError("cache_enabled must be a boolean or None")
+    _validate_structured_output(entry, structured_output_mode)
     reject_credentials(entry)
     from nooa.unifiedllm.media_inputs import validate_media_inputs
 
     result = deepcopy(entry)
-    if result.get("client_type") == "decision":
-        if result.get("media_inputs"):
-            raise ValueError("Decision models do not take media inputs")
-        result.pop("media_inputs", None)
-    else:
-        result["media_inputs"] = list(validate_media_inputs(result.get("media_inputs")))
+    effective_mode = (
+        entry.get("structured_output_mode")
+        if structured_output_mode is STRUCTURED_OUTPUT_UNSET
+        else structured_output_mode
+    )
+    provenance = result.get("provenance") or {}
+    if not isinstance(provenance, dict):
+        raise ValueError("provenance must be a mapping")
+    snapshot = provenance.get("structured_output_profile")
+    if (
+        "structured_output_mode" in entry
+        or structured_output_mode is not STRUCTURED_OUTPUT_UNSET
+        or snapshot is not None
+    ):
+        result.setdefault("provenance", {})["structured_output_profile"] = (
+            {**deepcopy(snapshot), "mode": effective_mode}
+            if isinstance(snapshot, dict) and snapshot.get("mode") == effective_mode
+            else {"mode": effective_mode}
+        )
+    if structured_output_mode is not STRUCTURED_OUTPUT_UNSET:
+        result["structured_output_mode"] = structured_output_mode
+    from nooa.media_policy import entry_input_interface, validate_implemented_media_inputs
+
+    interface = entry_input_interface(result)
+    result["media_inputs"] = list(
+        validate_implemented_media_inputs(result.get("media_inputs"), interface)
+        if interface in {"anthropic", "responses"}
+        else validate_media_inputs(result.get("media_inputs"))
+    )
     for patch in (result.get("reasoning_levels") or {}).values():
         if "media_inputs" in patch or "media_inputs" in (patch.get("extra_body") or {}):
             raise ValueError("media_inputs belongs on the connection, not a reasoning level")
     result.setdefault("transport", "direct")
     if result.get("client_type") == "decision":
+        if cache_enabled is not None:
+            raise ValueError("Decision models do not configure chat caching")
+        from nooa.decisions.media import decision_media_inputs
+
+        result["media_inputs"] = list(decision_media_inputs(result["media_inputs"]))
+        result.setdefault("decision_image_transport", "json")
+        result.setdefault("typesafe_danger_zone_images", False)
+        image_transport = result["decision_image_transport"]
+        optin = result["typesafe_danger_zone_images"]
+        if image_transport not in {"json", "typesafe_multipart"}:
+            raise ValueError("decision_image_transport must be json or typesafe_multipart")
+        if not isinstance(optin, bool):
+            raise ValueError("typesafe_danger_zone_images must be an explicit boolean")
+        if image_transport == "typesafe_multipart" and result.get("api_style") != "systemone":
+            raise ValueError("typesafe_multipart requires api_style=systemone")
+        if optin and image_transport != "typesafe_multipart":
+            raise ValueError("typesafe_danger_zone_images requires typesafe_multipart transport")
         if result.get("api_style") not in DECISION_API_STYLES:
             raise ValueError("Decision entries require api_style: systemone or openai")
         if not isinstance(result.get("endpoint"), str) or not result["endpoint"].strip():
@@ -651,8 +947,10 @@ def configure_entry(entry: dict, *, reply_tokens: int | None = None) -> dict:
             "max_output_tokens",
             "reasoning_levels",
             "reasoning_default",
+            "reasoning_level",
             "store",
             "include",
+            "cache_breakpoint",
         }
         present = sorted(forbidden & result.keys())
         if present:
@@ -667,7 +965,42 @@ def configure_entry(entry: dict, *, reply_tokens: int | None = None) -> dict:
             "not_probed",
             ["context_window", "reasoning", "tools", "sessions", "reply_limit"],
         )
-        return result
+        return invalidate_verification(result)
+    provenance = result.setdefault("provenance", {})
+    if not isinstance(provenance, dict):
+        raise ValueError("provenance must be a mapping")
+    if cache_enabled is False:
+
+        def reject_cache_options(value):
+            if isinstance(value, dict):
+                if {
+                    "prompt_cache_options",
+                    "prompt_cache_breakpoint",
+                    "cache_control",
+                    "nooa_cache_boundary",
+                } & value.keys():
+                    raise ValueError(
+                        "cache_enabled=False conflicts with explicit cache options/markers; "
+                        "remove them from the profile settings first"
+                    )
+                for child in value.values():
+                    reject_cache_options(child)
+            elif isinstance(value, (list, tuple)):
+                for child in value:
+                    reject_cache_options(child)
+
+        # Custom bodies/level patches are preserved, not silently rewritten.
+        reject_cache_options({k: v for k, v in result.items() if k != "provenance"})
+    if cache_enabled is not None:
+        cache_breakpoint = "auto" if cache_enabled else None
+        result["cache_breakpoint"] = cache_breakpoint
+    from nooa.unifiedllm.reasoning import ReasoningConfig
+
+    declaration = ReasoningConfig(
+        levels=result.get("reasoning_levels"), default=result.get("reasoning_default")
+    )
+    if result.get("reasoning_level") is not None:
+        declaration.settings(result["reasoning_level"])
     extra = result.get("extra_body") or {}
     if not isinstance(extra, dict):
         raise ValueError("extra_body must be a mapping")
@@ -684,13 +1017,56 @@ def configure_entry(entry: dict, *, reply_tokens: int | None = None) -> dict:
     provenance = result.setdefault("provenance", {})
     if not isinstance(provenance, dict):
         raise ValueError("provenance must be a mapping")
+    window = result.get("context_window")
+    if window is not None:
+        model = result.get("model_name", "").split("/", 1)[-1]
+        endpoint_limits = scoped_endpoint_limits(result)
+        context_evidence = bound_context_window(window, model=model, endpoint_model=endpoint_limits)
+        result["context_window"] = context_evidence["effective"]
+        previous = provenance.get("context_window") or {}
+        if previous and provenance.get("endpoint_limits") and not endpoint_limits:
+            # Keep the CURRENT literal declaration, not an old endpoint ceiling
+            # or its larger historical declaration after a route/scope edit.
+            provenance["context_window"] = context_evidence
+            previous = context_evidence
+        if previous.get("effective", window) != window:
+            previous = {
+                **previous,
+                "declared": window,
+                "value": window,
+                "effective_source": context_evidence["effective_source"],
+            }
+        if previous or endpoint_limits.get("id") == model:
+            # Reconfiguration/import may lower the bound, never resurrect a
+            # larger declaration after an intentional edit to the effective value.
+            provenance["context_window"] = {
+                **context_evidence,
+                "source": provenance.get("limit_sources", {}).get("context_length", "entry"),
+                **previous,
+                "effective": context_evidence["effective"],
+            }
+            if context_evidence["effective"] < window:
+                provenance["context_window"]["effective_source"] = context_evidence[
+                    "effective_source"
+                ]
     ceiling = result.pop("max_output_tokens", None)
     limits = provenance.setdefault("catalogue_limits", {})
     if not isinstance(limits, dict):
         raise ValueError("catalogue_limits must be a mapping")
     if isinstance(ceiling, int) and not isinstance(ceiling, bool) and ceiling > 0:
         limits["max_completion_tokens"] = ceiling
+    supplied_ceiling = ceiling
     ceiling = limits.get("max_completion_tokens")
+    if (
+        supplied_ceiling is None
+        and str(provenance.get("limit_sources", {}).get("max_completion_tokens", "")).startswith(
+            "endpoint"
+        )
+        and not scoped_endpoint_limits(result)
+    ):
+        # An endpoint-derived output ceiling is historical on another route too.
+        # A newly supplied literal ceiling still applies during initial planning.
+        ceiling = None
     known_limits = [
         v
         for v in (ceiling, result.get("context_window"))
@@ -774,8 +1150,25 @@ def configure_entry(entry: dict, *, reply_tokens: int | None = None) -> dict:
             elif result["include"] and "reasoning.encrypted_content" not in result["include"]:
                 result["include"].append("reasoning.encrypted_content")
                 provenance["encrypted_reasoning"] = {"source": "connect", "outcome": "not_probed"}
+    active = result.get("reasoning_level")
+    controls = {
+        "thinking",
+        "reasoning",
+        "reasoning_effort",
+        "output_config",
+        "chat_template_kwargs",
+    }
+    base = {k: deepcopy(result[k]) for k in controls if k in result}
+    extra_controls = {
+        k: deepcopy(v) for k, v in (result.get("extra_body") or {}).items() if k in controls
+    }
+    effective = {**extra_controls, **base}
+    if active is not None:
+        effective.update((result.get("reasoning_levels") or {})[active])
+    snapshot = {"level": active, "settings": effective, "reply_cap": configured_reply_cap(result)}
+    provenance["active_reasoning"] = snapshot
     provenance["warnings"] = entry_warnings(result)
-    return result
+    return invalidate_verification(result)
 
 
 def model_metadata(
@@ -788,6 +1181,14 @@ def model_metadata(
     """
     result = deepcopy(catalogue or {"id": model})
     sources = result.setdefault("limit_sources", {})
+    route_context = (result.get("top_provider") or {}).get("context_length")
+    if token_limit(route_context) is not None:
+        context = result.get("context_length")
+        result["context_length"] = (
+            min(context, token_limit(route_context))
+            if token_limit(context) is not None
+            else token_limit(route_context)
+        )
     for field, value in (
         ("context_length", result.get("context_length")),
         ("max_completion_tokens", (result.get("top_provider") or {}).get("max_completion_tokens")),
@@ -795,6 +1196,9 @@ def model_metadata(
         if isinstance(value, int) and not isinstance(value, bool) and value > 0:
             sources.setdefault(field, "catalogue")
     endpoint_model = endpoint_model or {}
+    # Legacy callers may omit the ID; an explicit neighbour is never evidence.
+    if "id" in endpoint_model and endpoint_model["id"] != model:
+        endpoint_model = {}
     reported = {}
     for key in ("context_window", "context_length", "max_input_tokens", "max_output_tokens"):
         value = endpoint_model.get(key)
@@ -817,18 +1221,91 @@ def model_metadata(
         sources["max_completion_tokens"] = "endpoint"
     if reported:
         result["endpoint_limits"] = reported
+    # Keep input advertisements separate from limits/settings; endpoint facts win
+    # only for the exact selected model, never a neighbour on a shared hub.
+    media = media_metadata(endpoint_model) if endpoint_model.get("id") == model else {}
+    if media:
+        for key in ("architecture", "input_modalities", "capabilities"):
+            result.pop(key, None)
+        result.update(media)
+        result["media_source"] = endpoint_model.get("media_source", "endpoint listing")
+        result["media_model_id"] = endpoint_model["id"]
+    return result
+
+
+def decision_metadata(
+    model: str, catalogue: dict | None = None, endpoint_model: dict | None = None
+) -> dict:
+    """Bounded descriptive/media facts only; a supplied catalogue is an explicit mapping.
+
+    Never interpret descriptions as capabilities or copy chat settings. Attribution
+    is constructed here, not accepted from provider records. Exact endpoint media
+    facts take priority over the mapped OpenRouter route's advertisements.
+    """
+    result = {}
+    for record, source in (
+        (catalogue, CATALOGUE_URL),
+        (
+            endpoint_model if endpoint_model and endpoint_model.get("id") == model else None,
+            "endpoint listing",
+        ),
+    ):
+        if not isinstance(record, dict):
+            continue
+        name = record.get("id")
+        if (
+            not isinstance(name, str)
+            or not name.strip()
+            or len(name) > 500
+            or any(ord(c) < 32 for c in name)
+        ):
+            raise ValueError("Decision metadata requires a bounded explicit model ID")
+        result.setdefault("id", name)
+        result.setdefault("media_source", source)
+        result.setdefault("media_model_id", name)
+        description = record.get("description")
+        if (
+            isinstance(description, str)
+            and len(description) <= 4096
+            and not any(ord(c) < 32 for c in description)
+        ):
+            result["description"] = description
+        media = media_metadata(record)
+        if media:
+            for key in ("architecture", "input_modalities", "capabilities"):
+                result.pop(key, None)
+            result.update(media)
+            result["media_source"] = source
+            result["media_model_id"] = name
+            result["id"] = name
     return result
 
 
 def entry_warnings(entry: dict) -> list[str]:
     """Configuration warnings shared by the wizard, library and stage reports."""
     if entry.get("client_type") == "decision":
+        if (
+            "image" in entry.get("media_inputs", [])
+            and entry.get("api_style") == "systemone"
+            and not (
+                entry.get("decision_image_transport") == "typesafe_multipart"
+                and entry.get("typesafe_danger_zone_images") is True
+            )
+        ):
+            reason = (
+                "TypeSafe multipart requires explicit experimental image opt-in before sending"
+                if entry.get("decision_image_transport") == "typesafe_multipart"
+                else "System One JSON blocks image requests before sending"
+            )
+            return [
+                f"Images are enabled, but {reason}. Use OpenAI Decisions or an approved direct TypeSafe multipart connection, or turn images off."
+            ]
         return []
     warnings = (
         []
         if entry.get("context_window")
         else [
-            "Context window unknown: runtime fallback applies; supply --context-window or endpoint discovery metadata."
+            "Context window not listed. NOOA will use its default; supply --context-window or your server model details if you know the limit."
         ]
     )
     cap = entry.get("max_tokens")
@@ -839,9 +1316,10 @@ def entry_warnings(entry: dict) -> list[str]:
         and r.get("tested_reply_tokens") == cap
         and r.get("settings_sent") is True
         for r in records
+        if isinstance(r, dict)
     ):
         warnings.append(
-            "Saved reply budget unverified: no accepted check sent this configured cap on the wire."
+            "Reply limit not tested with the saved settings. Run a connection check to test it."
         )
     return warnings
 
@@ -853,7 +1331,11 @@ def same_media_route(previous: dict, entry: dict) -> bool:
         style = value.get("api_style") or (
             "responses" if value.get("client_type") == "responses" else "chat"
         )
-        endpoint = value.get("api_base")
+        endpoint = (
+            value.get("endpoint")
+            if value.get("client_type") == "decision"
+            else value.get("api_base")
+        )
         if not endpoint or not value.get("model_name"):
             return None
         endpoint = normalize_endpoint(endpoint)
@@ -864,6 +1346,8 @@ def same_media_route(previous: dict, entry: dict) -> bool:
             endpoint,
             style,
             value.get("client_type", "responses" if style == "responses" else "completion"),
+            value.get("decision_image_transport", "json"),
+            value.get("typesafe_danger_zone_images", False),
         )
 
     old = route(previous)
@@ -874,7 +1358,7 @@ def configured_reply_cap(entry: dict, level: str | None = None) -> int:
     """The saved request cap, optionally replaced by a selected reasoning level."""
     if level is None:
         level = entry.get("reasoning_level")
-    settings = entry.get("reasoning_levels", {}).get(level, {})
+    settings = (entry.get("reasoning_levels") or {}).get(level, {})
     return next((settings[k] for k in REPLY_CAP_KEYS if k in settings), entry["max_tokens"])
 
 
@@ -901,7 +1385,20 @@ def refresh_plan(proposal: ConnectPlan) -> ConnectPlan:
             level = (
                 probe.name[6:] if probe.name.startswith("level:") else entry.get("reasoning_level")
             )
-            settings = entry.get("reasoning_levels", {}).get(level, {})
+            settings = (entry.get("reasoning_levels") or {}).get(level, {})
+            # refresh can start from a previously selected patch. Remove owned
+            # fields before applying the new selection (e.g. adaptive -> Off
+            # must not retain the old effort block or manual thinking budget).
+            controlled = {
+                key for patch in (entry.get("reasoning_levels") or {}).values() for key in patch
+            }
+            controlled.update(
+                (proposal.entry.get("provenance") or {})
+                .get("active_reasoning", {})
+                .get("settings", {})
+            )
+            for key in controlled:
+                body.pop(key, None)
             body.update(settings)
             cap = configured_reply_cap(
                 entry, probe.name[6:] if probe.name.startswith("level:") else None
@@ -932,6 +1429,9 @@ def refresh_plan(proposal: ConnectPlan) -> ConnectPlan:
     )
 
 
+REASONING_SELECTION_UNSET = object()
+
+
 def plan(
     alias: str,
     model: str,
@@ -940,29 +1440,91 @@ def plan(
     api_key_env: str,
     *,
     catalogue: dict | None = None,
+    catalogue_settings: bool = False,
     endpoint_model: dict | None = None,
+    endpoint_models_url: str | None = None,
+    context_window: int | None = None,
     reasoning_levels: dict | None = None,
+    reasoning_level=REASONING_SELECTION_UNSET,
     budget_tokens: int = DEFAULT_CHECK_BUDGET,
     output_tokens: int = DISCOVERY_OUTPUT_TOKENS,
     reasoning_output_tokens: int = DEFAULT_REASONING_OUTPUT_TOKENS,
     existing_entry: dict | None = None,
     session_checks: bool = False,
     reply_tokens: int | None = None,
+    cache_enabled: bool | None = None,
+    structured_output_mode=STRUCTURED_OUTPUT_UNSET,
     media_inputs: list[str] | tuple[str, ...] | None = None,
     test_media_inputs: list[str] | tuple[str, ...] | None = None,
+    decision_image_transport: str | None = None,
+    typesafe_danger_zone_images: bool | None = None,
+    decision_checks: bool = True,
+    checked_levels: list[str] | tuple[str, ...] | None = None,
 ) -> ConnectPlan:
     """Prepare requests without reading credentials, files or network resources.
+
+    ``checked_levels`` limits reasoning-level checks to those labels (for
+    example only the level the user chose); None checks every level.
+
+    ``structured_output_mode='anthropic'`` explicitly selects the native carrier
+    for Completion chat/anthropic routes. Omission preserves a same-route saved
+    declaration (including credential identity); explicit None clears it. None
+    and 'auto' retain the existing carrier, never infer or discover native support.
+    ``cache_enabled=False`` saves ``cache_breakpoint: null`` (no explicit cache
+    options/markers). None preserves the default or same-route existing policy;
+    True explicitly selects auto. This does not disable provider automatic caching
+    or establish live compatibility.
+
+    ``reasoning_level`` is the active saved selection, not ``reasoning_default``.
+    Omission preserves a compatible same-route selection; None clears it.
 
     ``model`` is the exact endpoint model ID, without a LiteLLM prefix. The
     returned entry adds the prefix needed by today's runtime. Each request reserves
     its output cap plus 512 estimated input tokens (4,096 for selected generated
-    media samples). Reported usage can increase that charge. Servers can ignore
+    media samples). ``endpoint_models_url`` is the verified listing source,
+    independent of record media hints; omitted sources use the legacy /models URL.
+    ``context_window`` is an explicit declaration clamped to positive literal
+    context/input limits on the exact ID-bearing ``endpoint_model`` only. It
+    never allocates a reply cap; declared/effective/source remain in provenance.
+    Reported usage can increase that charge. Servers can ignore
     caps, so this is not a billing limit. Media facts never change declarations.
-    Non-Chat video and audio remain transparently not tested.
+    Non-Chat video and audio remain transparently not tested. For decisions, a
+    ``catalogue_settings=True`` is reserved for explicitly user-authored settings
+    (e.g. a settings editor), not automatic provider metadata. Published foreign
+    route/model profiles never supply reasoning defaults, allocations or prices.
+    For decisions, supplied ``catalogue`` is an explicit OpenRouter ID mapping: only bounded
+    descriptions, media facts and provenance are retained, never chat settings.
     """
+    if cache_enabled is not None and not isinstance(cache_enabled, bool):
+        raise ValueError("cache_enabled must be a boolean or None")
+    if api_style in DECISION_API_STYLES and reasoning_level is not REASONING_SELECTION_UNSET:
+        raise ValueError("Decision models do not configure chat reasoning")
+    if api_style in DECISION_API_STYLES and cache_enabled is not None:
+        raise ValueError("Decision models do not configure chat caching")
+    _validate_structured_output({"api_style": api_style}, structured_output_mode)
+    if existing_entry is not None:
+        _validate_structured_output(existing_entry)
     if api_style not in _PATHS:
         raise ValueError("api_style must be chat, responses, anthropic, systemone or openai")
     api_base = normalize_endpoint(api_base)
+    if (
+        not catalogue_settings
+        and catalogue is not None
+        and "id" in catalogue
+        and (api_base + "/models" != CATALOGUE_URL or catalogue["id"] != model)
+        and api_style not in DECISION_API_STYLES
+    ):
+        # Published OpenRouter records fill facts, not unrelated route profiles.
+        # ID-less dictionaries remain explicit hand-authored legacy settings.
+        catalogue = deepcopy(catalogue)
+        for field in ("reasoning", "default_parameters", "pricing", "top_provider"):
+            catalogue.pop(field, None)
+        # General model context remains a fallback; OpenRouter deployment
+        # input/output ceilings belong to the OpenRouter route only.
+        if isinstance(catalogue.get("limit_sources"), dict):
+            catalogue["limit_sources"].pop("max_completion_tokens", None)
+    if endpoint_models_url is not None:
+        endpoint_models_url = validate_models_url(endpoint_models_url)
     if (
         not alias.strip()
         or not model.strip()
@@ -979,24 +1541,75 @@ def plan(
     from nooa.unifiedllm.media_inputs import validate_media_inputs
 
     tested_media = validate_media_inputs(test_media_inputs)
+    decision_facts = (
+        decision_metadata(model, catalogue, endpoint_model)
+        if api_style in DECISION_API_STYLES
+        else None
+    )
+    selected_media_model = (
+        decision_facts
+        if api_style in DECISION_API_STYLES
+        else (
+            endpoint_model
+            if endpoint_model is not None
+            and endpoint_model.get("id") == model
+            and media_metadata(endpoint_model)
+            else catalogue
+        )
+    )
+    endpoint_media_selected = (
+        endpoint_model is not None
+        and endpoint_model.get("id") == model
+        and bool(media_metadata(endpoint_model))
+    )
+    if endpoint_media_selected:
+        # Internal attribution keys in a record are never a listing contract.
+        selected_media_model = {
+            **selected_media_model,
+            "media_model_id": model,
+            "media_source": endpoint_models_url or "endpoint listing",
+        }
+    media_suggestions = advertised_media_suggestions(
+        selected_media_model,
+        source=(selected_media_model or {}).get(
+            "media_source",
+            "endpoint listing"
+            if endpoint_media_selected
+            else CATALOGUE_URL
+            if selected_media_model
+            else "unknown",
+        ),
+        api_style=api_style,
+        decision_image_transport=decision_image_transport
+        or (existing_entry or {}).get("decision_image_transport", "json"),
+        typesafe_danger_zone_images=typesafe_danger_zone_images
+        if typesafe_danger_zone_images is not None
+        else (existing_entry or {}).get("typesafe_danger_zone_images", False),
+    )
     if api_style in DECISION_API_STYLES:
-        if catalogue is not None or endpoint_model is not None:
-            raise ValueError("Decision models do not use chat model catalogue metadata")
         if reasoning_levels:
             raise ValueError("Decision models do not configure reasoning levels")
         if session_checks:
             raise ValueError("Decision models are stateless and do not use session checks")
         if reply_tokens is not None:
             raise ValueError("Decision models do not use reply-token budgets")
-        if tested_media:
-            raise ValueError("Decision models do not take media inputs")
+        from nooa.decisions.media import decision_media_inputs
+
+        decision_media_inputs(tested_media)
+        decision_media_inputs(media_inputs)
         entry = {
             "model_name": model,
             "client_type": "decision",
+            "media_inputs": list(decision_media_inputs(media_inputs)),
+            "decision_image_transport": decision_image_transport or "json",
+            "typesafe_danger_zone_images": typesafe_danger_zone_images
+            if typesafe_danger_zone_images is not None
+            else False,
             "api_style": api_style,
             "endpoint": api_base,
             "api_key_env": api_key_env,
             "provenance": {
+                "media_suggestions": media_suggestions,
                 "probes": {},
                 "requests_accepted": [],
                 "not_probed": [
@@ -1008,26 +1621,90 @@ def plan(
                 ],
             },
         }
-        body = {
-            "model": model,
-            "state": {"statement": "The support request requires a decision."},
-            "questions": {
-                "supported": {
-                    "type": "noul",
-                    "instructions": "Does the state contain a support request?",
-                }
-            },
-        }
+        if catalogue is not None:
+            entry["provenance"]["catalogue"] = {
+                "url": CATALOGUE_URL,
+                "id": catalogue["id"],
+                "model_id": model,
+            }
+            entry["provenance"]["catalogue_metadata"] = decision_metadata(model, catalogue)
+        if decision_facts and "description" in decision_facts:
+            entry["provenance"]["model_description"] = decision_facts["description"]
+        # Inherit permissions and controls only for the identical normalized route.
+        if existing_entry:
+            candidate = {**entry}
+            if decision_image_transport is None:
+                candidate["decision_image_transport"] = existing_entry.get(
+                    "decision_image_transport", "json"
+                )
+            if typesafe_danger_zone_images is None:
+                candidate["typesafe_danger_zone_images"] = existing_entry.get(
+                    "typesafe_danger_zone_images", False
+                )
+            if same_media_route(existing_entry, candidate):
+                entry = candidate
+                if media_inputs is None:
+                    entry["media_inputs"] = list(
+                        decision_media_inputs(existing_entry.get("media_inputs"))
+                    )
+        entry["provenance"]["media_suggestions"] = advertised_media_suggestions(
+            selected_media_model,
+            source=media_suggestions["source"],
+            api_style=api_style,
+            decision_image_transport=entry["decision_image_transport"],
+            typesafe_danger_zone_images=entry["typesafe_danger_zone_images"],
+        )
+        if (
+            tested_media
+            and api_style == "systemone"
+            and not (
+                entry["decision_image_transport"] == "typesafe_multipart"
+                and entry["typesafe_danger_zone_images"] is True
+            )
+        ):
+            raise ValueError(
+                "Image testing isn't available with System One JSON. Use --decision-image-transport typesafe_multipart and --typesafe-danger-zone-images for an approved direct TypeSafe connection, or leave images off"
+            )
+        if endpoint_model is not None and endpoint_model.get("id") == model:
+            # Preserve catalogue facts as advertised evidence, never chat configuration.
+            entry["provenance"]["advertised_model"] = deepcopy(endpoint_model)
+        from ._decision import planned_body
+
+        body = {"model": model, **planned_body("routing")}
+        probes = [Probe("routing", body, 512, uses_configured_cap=False)]
+        if decision_checks:
+            probes.extend(
+                Probe(name, planned_body(name), 512, uses_configured_cap=False)
+                for name in ("decision:typed", "decision:positive", "decision:negative")
+            )
+        if tested_media:
+            probes.append(
+                Probe(
+                    "media:image",
+                    planned_body("media:image"),
+                    4096,
+                    uses_configured_cap=False,
+                    input_reservation=4096,
+                )
+            )
         proposal = ConnectPlan(
             alias,
             configure_entry(entry),
-            (Probe("routing", body, 512, uses_configured_cap=False),),
+            tuple(probes),
             budget_tokens,
-            512,
+            sum(p.token_estimate for p in probes),
             None,
         )
         if existing_entry:
-            keys = ("model_name", "endpoint", "api_key_env", "client_type", "api_style")
+            keys = (
+                "model_name",
+                "endpoint",
+                "api_key_env",
+                "client_type",
+                "api_style",
+                "decision_image_transport",
+                "typesafe_danger_zone_images",
+            )
             if all(existing_entry.get(key) == proposal.entry.get(key) for key in keys):
                 previous = existing_entry.get("provenance", {}).get("probes", {})
                 if "routing" in previous:
@@ -1035,6 +1712,8 @@ def plan(
                         previous["routing"]
                     )
         return proposal
+    if decision_image_transport is not None or typesafe_danger_zone_images is not None:
+        raise ValueError("Decision image transport options require a decision interface")
     vendor = "anthropic" if api_style == "anthropic" else "openai"
     entry: dict[str, Any] = {
         "model_name": f"{vendor}/{model}",
@@ -1047,7 +1726,16 @@ def plan(
     }
     if media_inputs is None and existing_entry and same_media_route(existing_entry, entry):
         entry["media_inputs"] = list(validate_media_inputs(existing_entry.get("media_inputs")))
+    if existing_entry and same_media_route(existing_entry, entry):
+        if "cache_breakpoint" in existing_entry:
+            entry["cache_breakpoint"] = deepcopy(existing_entry["cache_breakpoint"])
+        if (
+            existing_entry.get("api_key_env", "") == entry.get("api_key_env", "")
+            and "structured_output_mode" in existing_entry
+        ):
+            entry["structured_output_mode"] = existing_entry["structured_output_mode"]
     provenance: dict[str, Any] = {
+        "media_suggestions": media_suggestions,
         "probes": {},
         "requests_accepted": [],
         "reasoning_observed": [],
@@ -1064,10 +1752,14 @@ def plan(
         catalogue = model_metadata(model, catalogue, endpoint_model)
         provenance["limit_sources"] = deepcopy(catalogue.get("limit_sources", {}))
         if catalogue.get("endpoint_limits"):
+            if (endpoint_model or {}).get("id") == model:
+                provenance["endpoint_model_id"] = model
             provenance["endpoint_limits"] = {
-                "url": api_base + "/models",
                 **catalogue["endpoint_limits"],
+                "url": endpoint_models_url or api_base + "/models",
             }
+            if (endpoint_model or {}).get("id") == model:
+                provenance["endpoint_limit_scope"] = effective_route_scope(entry)
         if any(
             v == "catalogue" for v in catalogue.get("limit_sources", {}).values()
         ) or catalogue.get("reasoning"):
@@ -1120,22 +1812,47 @@ def plan(
         entry["allowed_openai_params"] = sorted({key for patch in levels.values() for key in patch})
     if (default := reasoning.get("default_effort")) in levels:
         entry["reasoning_default"] = default
+    if existing_entry and same_media_route(existing_entry, entry):
+        if reasoning_levels is None and "reasoning_levels" in existing_entry:
+            entry["reasoning_levels"] = deepcopy(existing_entry["reasoning_levels"])
+            levels = entry["reasoning_levels"] or {}
+        if existing_entry.get("reasoning_default") in levels:
+            entry["reasoning_default"] = existing_entry["reasoning_default"]
+        if existing_entry.get("reasoning_level") in levels:
+            entry["reasoning_level"] = existing_entry["reasoning_level"]
+        retained = existing_entry.get("allowed_openai_params") or []
+        if retained:
+            entry["allowed_openai_params"] = sorted(
+                set(entry.get("allowed_openai_params", [])) | set(retained)
+            )
+    # Inherited declarations need the same filtering permissions as newly
+    # authored ones; retaining an active selector alone must not drop controls.
+    if levels:
+        entry["allowed_openai_params"] = sorted(
+            set(entry.get("allowed_openai_params", []))
+            | {key for patch in levels.values() for key in patch}
+        )
+    if reasoning_level is not REASONING_SELECTION_UNSET:
+        if reasoning_level is None:
+            entry.pop("reasoning_level", None)
+        else:
+            entry["reasoning_level"] = reasoning_level
     if api_style == "responses":
         entry["store"] = False
         entry["include"] = ["reasoning.encrypted_content"]
         provenance["encrypted_reasoning"] = {"source": "connect", "outcome": "not_probed"}
-        route_keys = ("model_name", "api_base", "api_key_env", "api_style")
         if (
             existing_entry
-            and all(existing_entry.get(key) == entry.get(key) for key in route_keys)
-            and existing_entry.get("include") == []
-            and existing_entry.get("provenance", {}).get("encrypted_reasoning", {}).get("outcome")
-            == "rejected"
+            and same_media_route(existing_entry, entry)
+            and existing_entry.get("api_key_env") == entry.get("api_key_env")
         ):
-            entry["include"] = []
-            provenance["encrypted_reasoning"] = deepcopy(
-                existing_entry["provenance"]["encrypted_reasoning"]
-            )
+            # Declarations survive supported saves, which strip provenance.
+            for field in ("store", "include"):
+                if field in existing_entry:
+                    entry[field] = deepcopy(existing_entry[field])
+            previous = existing_entry.get("provenance", {}).get("encrypted_reasoning")
+            if entry["include"] == [] and previous and previous.get("outcome") == "rejected":
+                provenance["encrypted_reasoning"] = deepcopy(previous)
     token_key = "max_output_tokens" if api_style == "responses" else "max_tokens"
     body = {
         "model": model,
@@ -1145,7 +1862,7 @@ def plan(
         ],
     }
     if api_style == "responses":
-        body["store"] = False
+        body["store"] = entry["store"]
         body["include"] = list(entry["include"])
     probes = [Probe("routing", body, output_tokens + 512)]
     tool_body = deepcopy(body)
@@ -1168,6 +1885,8 @@ def plan(
     )
     probes.append(Probe("tools", tool_body, output_tokens + 512))
     for label, params in levels.items():
+        if checked_levels is not None and label not in checked_levels:
+            continue
         level_body = deepcopy(body)
         level_body[token_key] = reasoning_output_tokens
         level_body["input" if api_style == "responses" else "messages"][0]["content"] = (
@@ -1194,6 +1913,11 @@ def plan(
             )
         )
     entry["provenance"] = provenance
+    if context_window is not None:
+        entry = apply_context_window(
+            entry, context_window, model=model, endpoint_model=endpoint_model
+        )
+        provenance = entry["provenance"]
     if reply_tokens is None:
         recommendation = ((catalogue or {}).get("default_parameters") or {}).get("max_tokens")
         if (
@@ -1210,7 +1934,38 @@ def plan(
                 "source": "catalogue_recommendation",
                 "value": entry["max_tokens"],
             }
-    entry = configure_entry(entry, reply_tokens=reply_tokens)
+    # Exact native Messages metadata can recommend its implemented carrier.
+    # Unknown gateways and explicit declarations (including None/auto) stay untouched.
+    from ._reasoning import native_metadata_matches
+
+    native_format = (
+        structured_output_mode is STRUCTURED_OUTPUT_UNSET
+        and "structured_output_mode" not in entry
+        and native_metadata_matches(
+            endpoint_model,
+            model_id=model,
+            api_style=api_style,
+            source=endpoint_models_url,
+            endpoint=api_base,
+        )
+        and endpoint_model.get("capabilities", {}).get("structured_outputs", {}).get("supported")
+        is True
+    )
+    if native_format:
+        structured_output_mode = "anthropic"
+    entry = configure_entry(
+        entry,
+        reply_tokens=reply_tokens,
+        cache_enabled=cache_enabled,
+        structured_output_mode=structured_output_mode,
+    )
+    if native_format:
+        entry["provenance"]["structured_output_profile"].update(
+            source=endpoint_models_url,
+            model_id=model,
+            field="data[].capabilities.structured_outputs.supported",
+            recommended=True,
+        )
     provenance = entry["provenance"]
     for probe in probes:
         if probe.name.startswith("level:"):
@@ -1218,8 +1973,19 @@ def plan(
     if existing_entry:
         # Each probe is also compared to its exact request in run_steps. Adding
         # a level must not invalidate an unchanged routing or tool check.
-        keys = ("model_name", "api_base", "api_key_env", "api_style")
-        if all(existing_entry.get(key) == entry.get(key) for key in keys):
+        keys = (
+            "model_name",
+            "api_base",
+            "api_key_env",
+            "api_style",
+            "client_type",
+            "structured_output_mode",
+            "reasoning_level",
+            "reasoning_levels",
+        )
+        if all(existing_entry.get(key) == entry.get(key) for key in keys) and existing_entry.get(
+            "cache_breakpoint", "auto"
+        ) == entry.get("cache_breakpoint", "auto"):
             previous = existing_entry.get("provenance", {}).get("probes", {})
             provenance["probes"] = {
                 probe.name: deepcopy(previous[probe.name])
@@ -1290,7 +2056,7 @@ async def _run_probe(alias: str, entry: dict, probe: Probe, api_key: str | None)
         # A level can set the cap itself; do not pass a conflicting override.
         params["reasoning_level"] = label
     elif selected := entry.get("reasoning_level"):
-        settings = entry.get("reasoning_levels", {}).get(selected, {})
+        settings = (entry.get("reasoning_levels") or {}).get(selected, {})
         for key in settings:
             params.pop(key, None)
         if REPLY_CAP_KEYS & settings.keys():
@@ -1321,11 +2087,21 @@ async def _run_probe(alias: str, entry: dict, probe: Probe, api_key: str | None)
     schema_completed = False
     schema_value = None
     send_started = False
+    native = typed and entry.get("structured_output_mode") == "anthropic"
+    expected_format = None
+    carrier_evidence = {}
+
+    def capture_output_model(output_model):
+        nonlocal expected_format
+        from nooa.unifiedllm.structured_output import anthropic_output_format
+
+        # The actual Predict-generated contract, including strict fields/titles.
+        expected_format = anthropic_output_format(output_model)
 
     async def capture_status(response):
         nonlocal schema_completed, schema_value
         response_status.append(response.status_code)
-        if typed_media_check and response.is_success:
+        if (typed_media_check or native) and response.is_success:
             # Keep envelope facts even when native schema validation fails.
             # Do not score access or retain reply text. Only correlate a schema
             # carrier with the exact requested output contract; native Predict
@@ -1407,41 +2183,40 @@ async def _run_probe(alias: str, entry: dict, probe: Probe, api_key: str | None)
             raise RuntimeError("Configured typed check permits only one outbound send")
         send_started = True
 
-        expected = {k: v for k, v in probe.body.items() if k in REPLY_CAP_KEYS}
-        if probe.name.startswith("level:"):
-            expected = {
-                **{k: v for k, v in settings.items() if k not in REPLY_CAP_KEYS},
-                **expected,
-            }
-        if typed:
-            # Resolve the same defaults/selected effort as the impending native
-            # call. Observe request settings, not catalogue/declaration metadata.
-            resolved = client._prepare_call_config({})
-            selected_level = entry.get("reasoning_level", client.reasoning_level)
-            selected_settings = entry.get("reasoning_levels", {}).get(selected_level, {})
-            expected = {
-                **{
-                    k: resolved[k]
-                    for k in (
-                        "temperature",
-                        "top_p",
-                        "reasoning",
-                        "reasoning_effort",
-                        "store",
-                        "include",
-                        *REPLY_CAP_KEYS,
-                    )
-                    if k in resolved
-                },
-                **{
-                    k: v
-                    for k, v in selected_settings.items()
-                    if k not in REPLY_CAP_KEYS and k != "extra_body"
-                },
-                **(resolved.get("extra_body") or {}),
-            }
+        # Typed calls use the constructor defaults; ordinary probes also carry
+        # their planned overrides. Resolve controls exactly as runtime dispatch
+        # does, including selected levels and flattened SDK extra_body values.
+        resolved = client._prepare_call_config({} if typed else params)
+        selected_level = params.get(
+            "reasoning_level", entry.get("reasoning_level", client.reasoning_level)
+        )
+        selected_settings = (entry.get("reasoning_levels") or {}).get(selected_level, {})
+        control_keys = {
+            "temperature",
+            "top_p",
+            "reasoning",
+            "reasoning_effort",
+            "thinking",
+            "chat_template_kwargs",
+            "output_config",
+            "store",
+            "include",
+            *REPLY_CAP_KEYS,
+        } | (selected_settings.keys() - {"extra_body"})
+        expected = {
+            **{key: entry[key] for key in control_keys - REPLY_CAP_KEYS if key in entry},
+            **{key: resolved[key] for key in control_keys if key in resolved},
+            # A faulty adapter dropping a selected control from resolution must
+            # not erase the obligation to observe that declaration on the wire.
+            **{
+                key: resolved.get(key, value)
+                for key, value in selected_settings.items()
+                if key not in REPLY_CAP_KEYS and key != "extra_body"
+            },
+            **(resolved.get("extra_body") or {}),
+        }
         wire = json.loads(request.content)
-        if typed_media_check and entry["api_style"] == "anthropic":
+        if typed_media_check and entry["api_style"] == "anthropic" and not native:
             tools = wire.get("tools", [])
             choice = wire.get("tool_choice", {})
             if len(tools) == 1 and choice.get("type") == "tool":
@@ -1455,7 +2230,47 @@ async def _run_probe(alias: str, entry: dict, probe: Probe, api_key: str | None)
                     and schema["properties"]["value"].get("type") == "boolean"
                 ):
                     schema_carrier = tool["name"]
-        observed = settings_on_wire(expected, wire)
+        # Responses SDKs omit an explicit empty include list. Absence is the
+        # same opt-out, but a nonempty include must still fail observation.
+        controls_wire = (
+            {**wire, "include": []}
+            if expected.get("include") == [] and "include" not in wire
+            else wire
+        )
+        observed = settings_on_wire(expected, controls_wire)
+        if native:
+            output = wire.get("output_config")
+            exact = (
+                expected_format is not None
+                and isinstance(output, dict)
+                and output.get("format") == expected_format
+            )
+            # Typed Predict does not request tools: any tools/tool_choice here
+            # would be a schema surrogate. Explicit no-output_model tool probes
+            # remain untouched. A wrapped extra_body is not the native wire shape.
+            conflicts = any(
+                k in wire
+                for k in ("response_format", "text.format", "output_format", "tools", "tool_choice")
+            )
+            conflicts |= isinstance(wire.get("text"), dict) and "format" in wire["text"]
+            conflicts |= isinstance(wire.get("extra_body"), dict) and any(
+                k in wire["extra_body"]
+                for k in (
+                    "output_config",
+                    "output_format",
+                    "response_format",
+                    "tools",
+                    "tool_choice",
+                    "text",
+                )
+            )
+            carrier_evidence.update(
+                structured_output_mode="anthropic",
+                structured_output_carrier="output_config.format" if exact else "unconfirmed",
+                structured_output_schema_observed=bool(exact),
+                structured_output_conflicts_observed=bool(conflicts),
+            )
+            observed = observed and exact and not conflicts
         output_settings_sent.append(observed)
         if probe.name.startswith("media:"):
             from ._media import media_on_wire
@@ -1484,9 +2299,15 @@ async def _run_probe(alias: str, entry: dict, probe: Probe, api_key: str | None)
             if typed_media_check:
                 from ._typed_media import typed_media
 
-                response, result = await typed_media(client, probe.name[6:])
+                response, result = await typed_media(
+                    client,
+                    probe.name[6:],
+                    **({"observe_output_model": capture_output_model} if native else {}),
+                )
             else:
-                response, result = await typed_baseline(client)
+                response, result = await typed_baseline(
+                    client, **({"observe_output_model": capture_output_model} if native else {})
+                )
             response.parsed = result  # Transient native method result, never persisted.
         else:
             response = await client.acall(messages=messages, **params)
@@ -1505,6 +2326,7 @@ async def _run_probe(alias: str, entry: dict, probe: Probe, api_key: str | None)
         observed = (len(settings_sent) == 1 and all(settings_sent)) if settings_sent else None
         response.metadata["connect_evidence"] = {
             **reply_evidence,
+            **carrier_evidence,
             "request_accepted": bool(response_status and 200 <= response_status[-1] < 300),
             "attachment_observed": len(attachments_sent) == 1 and all(attachments_sent),
             "output_settings_observed": len(output_settings_sent) == 1
@@ -1514,6 +2336,7 @@ async def _run_probe(alias: str, entry: dict, probe: Probe, api_key: str | None)
     except Exception as exc:
         exc._connect_evidence = {
             **reply_evidence,
+            **carrier_evidence,
             "settings_sent": (len(settings_sent) == 1 and all(settings_sent))
             if settings_sent
             else None,
@@ -1533,53 +2356,102 @@ async def _run_probe(alias: str, entry: dict, probe: Probe, api_key: str | None)
         await client.aclose()
 
 
-async def _run_decision_probe(
-    alias: str,
-    entry: dict,
-    probe: Probe,
-    api_key: str | None,
-):
-    """Run one System One probe through the configured decision-client factory."""
-    from nooa.decisions import DecisionClient
-    from nooa.decisions.client import BooleanQuestion, DecisionRequest
+async def _run_decision_probe(alias: str, entry: dict, probe: Probe, api_key: str | None):
+    """One native typed call; only sanitized facts leave this function."""
+    import json
+    from email import policy
+    from email.parser import BytesParser
+
     from nooa.unifiedllm import RetryConfig
     from nooa.unifiedllm.registry import client_from_config
 
-    response_status: list[int] = []
+    from ._decision import typed_decision
+    from ._media import png_fixture
 
-    async def capture_status(response: httpx.Response) -> None:
-        response_status.append(response.status_code)
+    statuses = []
+    observed_usage = {}
+    wire = {"attachment_observed": False}
+    sent = False
+
+    async def capture_request(request):
+        nonlocal sent
+        if sent:
+            raise RuntimeError("Decision check permits only one outbound request")
+        sent = True
+        if probe.name != "media:image":
+            return
+        body = await request.aread()
+        if entry["api_style"] == "openai":
+            from ._media import _data_url
+
+            payload = json.loads(body)
+            blocks = payload.get("input", [{}])[0].get("content", [])
+            wire["attachment_observed"] = any(
+                block.get("type") == "input_image"
+                and block.get("image_url") == _data_url("image/png", png_fixture())
+                for block in blocks
+            )
+        else:
+            message = BytesParser(policy=policy.default).parsebytes(
+                ("Content-Type: " + request.headers.get("content-type", "") + "\r\n\r\n").encode()
+                + body
+            )
+            parts = list(message.iter_parts())
+            wire["attachment_observed"] = request.headers.get(
+                "TypeSafe-Danger-Zone-Images"
+            ) == "true" and any(
+                part.get_content_type() == "image/png"
+                and part.get_payload(decode=True) == png_fixture()
+                for part in parts
+            )
+
+    async def capture_status(response):
+        statuses.append(response.status_code)
+        # Usage is independent of schema validity. Read locally, retain only counts.
+        await response.aread()
+        try:
+            usage = response.json().get("usage", {})
+            if isinstance(usage, dict):
+                for field in ("input_tokens", "output_tokens"):
+                    value = usage.get(field)
+                    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                        observed_usage[field] = value
+        except (ValueError, AttributeError):
+            pass
 
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
     http_client = httpx.AsyncClient(
         timeout=probe.timeout_seconds,
         headers=headers,
-        event_hooks={"response": [capture_status]},
+        event_hooks={"request": [capture_request], "response": [capture_status]},
     )
-    client = cast(
-        DecisionClient,
-        client_from_config(
+    client = None
+    try:
+        client = client_from_config(
             alias,
-            entry,
+            {**entry, **({"media_inputs": ["image"]} if probe.name == "media:image" else {})},
             api_key=api_key,
             client=http_client,
+            media_inputs=["image"]
+            if probe.name == "media:image"
+            else entry.get("media_inputs", []),
+            decision_image_transport=entry.get("decision_image_transport", "json"),
+            typesafe_danger_zone_images=entry.get("typesafe_danger_zone_images", False),
             retry_config=RetryConfig(max_retries=0, rate_limit_extra_retries=0),
-        ),
-    )
-    question = probe.body["questions"]["supported"]
-    request = DecisionRequest(
-        state=probe.body["state"],
-        questions={"supported": BooleanQuestion(question["instructions"])},
-    )
-    try:
-        response = await client.adecide(request)
-        return response, response_status[-1] if response_status else None
+        )
+        response, facts = await typed_decision(client, probe.name)
+        if probe.name == "media:image":
+            facts.update(wire)
+        return response, statuses[-1] if statuses else None, facts
     except Exception as exc:
-        if response_status:
-            exc._connect_http_status = response_status[-1]  # type: ignore[attr-defined]
+        if statuses:
+            exc._connect_http_status = statuses[-1]
+        exc._connect_usage = observed_usage
+        exc._connect_wire = wire if probe.name == "media:image" else {}
         raise
     finally:
-        await client.aclose()
+        if client is not None:
+            await client.aclose()
         await http_client.aclose()
 
 
@@ -1601,14 +2473,21 @@ async def check_stage(
 ) -> ConnectResult:
     """Run one selected check afresh, without prompts or registry writes.
 
-    Stages are routing, tools, reasoning, session, or all. Calling this function
+    Stages are routing, decision, tools, reasoning, media, session, or all. Calling this function
     explicitly approves that stage within the plan's existing limits. Results
     retain other stages' provenance, but selected checks never reuse old evidence.
     """
-    if stage not in {"routing", "tools", "reasoning", "media", "session", "all"}:
+    if stage not in {"routing", "tools", "reasoning", "media", "decision", "session", "all"}:
         raise ValueError("Unknown check stage")
-    if proposal.entry.get("client_type") == "decision" and stage not in {"routing", "all"}:
-        raise ValueError("Decision models only support the routing check")
+    if proposal.entry.get("client_type") == "decision" and stage not in {
+        "routing",
+        "decision",
+        "media",
+        "all",
+    }:
+        raise ValueError("Decision models support routing, decision, media and all checks")
+    if stage == "decision" and proposal.entry.get("client_type") != "decision":
+        raise ValueError("Decision stage requires a native decision model")
     # A selected level already present in the approved plan can supply the
     # routing/media cap. Never reapprove an edited cap merely by running a stage;
     # callers must explicitly refresh/review such edits first.
@@ -1631,11 +2510,20 @@ async def check_stage(
         for p in proposal.probes
         if stage == "all"
         or p.name == stage
+        or stage == "decision"
+        and (p.name == "routing" or p.name.startswith("decision:"))
         or stage == "reasoning"
         and p.name.startswith("level:")
         or stage == "media"
-        and (p.name == "routing" or p.name.startswith("media:"))
+        and (
+            p.name == "routing"
+            or p.name.startswith("media:")
+            or proposal.entry.get("client_type") == "decision"
+            and p.name.startswith("decision:")
+        )
     )
+    if stage == "decision" and not any(p.name.startswith("decision:") for p in probes):
+        raise ValueError("Decision stage requires a fresh typed decision plan")
     if stage == "media" and not any(p.name.startswith("media:") for p in probes):
         raise ValueError("Media stage requires explicit test_media_inputs")
     if stage == "reasoning" and not probes:
@@ -1648,7 +2536,10 @@ async def check_stage(
         if not api_key:
             raise ValueError("The configured credential variable is unset or empty")
     selected = replace(
-        proposal, entry=entry, probes=probes, session_checks=stage in {"session", "all"}
+        proposal,
+        entry=entry,
+        probes=probes,
+        session_checks=stage in {"session", "all"} and entry.get("client_type") != "decision",
     )
     return await run(selected, approved="all", api_key=api_key)
 
@@ -1693,16 +2584,18 @@ def diagnostic_prompt(
     outcomes = {name: public_record(record) for name, record in checks.items()}
     text = (
         f"Diagnose and fix NOOA Connect stage {stage!r}. "
-        "First read the nooa-model-configuration skill and companion docs located by the "
+        "First read the nooa-connect skill for permission and headless operation, then "
+        "the model-configuration reference and companion docs located by the "
         "installation references below. "
         "Inspect the configuration, credential lookup, and actual request construction. "
-        "Model listing alone does not validate credentials. Distinguish rejection, missing "
-        "evidence, and unsupported features; do not infer support from an HTTP success alone. "
+        "Test the key with a connection check. Distinguish rejection, missing "
+        "evidence, and unsupported features by reviewing the answer and settings sent. "
         "Use nooa.unifiedllm.connect library functions or nooa connect --stage to isolate the failure, "
         "then rerun the affected checks within configured limits. Never print or copy key "
         "values, reasoning text, opaque state, or raw error bodies. Preserve unrelated aliases "
-        "and inspect layer precedence before editing the target file. This handoff does not "
-        "authorize additional paid calls; confirm the remaining allowance before rerunning. "
+        "and inspect layer precedence before editing the target file. Confirm permission for "
+        "additional paid calls, model configuration or writes, and confirm the scope and "
+        "remaining allowance before rerunning. "
         "Report the cause, fix, and evidence.\n"
         + json.dumps(
             {
@@ -1785,18 +2678,18 @@ async def run_steps(
             probe = replace(probe, body={**probe.body, "include": []})
         previous = records.get(probe.name, {})
         if (
-            previous.get("outcome") == "accepted"
+            verification_is_current(previous, entry, probe.name)
+            and previous.get("outcome") == "accepted"
             and previous.get("request") == probe.body
             and previous.get("client") == "unifiedllm"
             and previous.get("settings_sent") is True
+            and previous.get("structured_output_mode") == entry.get("structured_output_mode")
             and (
                 probe.name != "routing"
                 or not probe.uses_configured_cap
                 and previous.get("baseline_kind") == "interface_acceptance"
                 or probe.uses_configured_cap
                 and text_baseline_passed(previous)
-                and previous.get("baseline_config")
-                == {k: v for k, v in entry.items() if k != "provenance"}
             )
         ):
             if probe.name == "routing" and entry.get("include"):
@@ -1806,14 +2699,20 @@ async def run_steps(
             )
             continue
         record: dict[str, Any] = {"outcome": "not_probed"}
+        if "structured_output_mode" in entry:
+            record["structured_output_mode"] = entry["structured_output_mode"]
         records[probe.name] = record
         if approved == "none" or approved == "minimal" and probe.name != "routing":
             record["reason"] = "not approved"
             yield ProbeUpdate(probe.name, deepcopy(record))
             continue
         if probe.name.startswith("media:"):
+            from nooa.media_policy import entry_input_interface, implemented_input_kinds
+
+            if probe.name[6:] not in implemented_input_kinds(entry_input_interface(entry)):
+                record["implementation_supported"] = False
             baseline = records.get("routing", {})
-            if probe.skip_reason or not text_baseline_passed(baseline):
+            if probe.skip_reason or not routing_allows_save(entry, entry):
                 record["reason"] = (
                     probe.skip_reason or text_baseline_reason(baseline) + "; media not tested"
                 )
@@ -1862,6 +2761,7 @@ async def run_steps(
             continue
         spent += probe.token_estimate
         yield ProbeUpdate(probe.name, {"outcome": "running"})
+        stamp_verification(record, entry, probe.name, timeout_seconds=probe.timeout_seconds)
         started = time.monotonic()
         deadline = asyncio.timeout(probe.timeout_seconds)
         record["request_shape"] = {
@@ -2004,6 +2904,10 @@ async def run_steps(
                     outcome="not_confirmed", reason="Reply not understood (ReasoningReplayError)"
                 )
             if probe.name == "routing" and probe.uses_configured_cap:
+                if entry.get("structured_output_mode") == "anthropic":
+                    # Keep observed carrier/settings/envelope facts even when
+                    # original-model validation or final-stop enforcement fails.
+                    record.update(public_record(getattr(exc, "_connect_evidence", {})))
                 record.update(
                     baseline_kind=TYPED_TEXT_BASELINE,
                     typed_result_validated=False,
@@ -2040,6 +2944,18 @@ async def run_steps(
                 pending.appendleft(probe)
                 yield ProbeUpdate(probe.name, deepcopy(record))
                 continue
+            if (
+                probe.name == "routing"
+                and entry.get("cache_breakpoint", "auto") is not None
+                and "explicit_cache" not in entry["provenance"]
+                and _cache_options_rejected(exc)
+            ):
+                rejection = _disable_explicit_cache(entry, status)
+                # Retry once without cache fields; the saved entry keeps caching off.
+                # The rejected attempt is not shown as a failed connection.
+                yield ProbeUpdate("explicit_cache", deepcopy(rejection))
+                pending.appendleft(probe)
+                continue
             spent += max(0, record.get("reported_tokens", 0) - probe.token_estimate)
             stopped = probe.name == "routing" or status in {401, 403}
             yield ProbeUpdate(probe.name, deepcopy(record))
@@ -2075,10 +2991,10 @@ async def run_steps(
                 else "Configured reply cap or settings missing from the actual request",
             )
         if probe.name == "routing":
+            record.update(response.metadata.get("connect_evidence", {}))
             if probe.uses_configured_cap:
                 record.update(
                     baseline_kind=TYPED_TEXT_BASELINE,
-                    baseline_config=deepcopy({k: v for k, v in entry.items() if k != "provenance"}),
                     typed_result_validated=type(response.parsed) is int,
                     answer_correct=type(response.parsed) is int and response.parsed == 323,
                     final_answer_observed=bool((response.content or "").strip()),
@@ -2175,123 +3091,153 @@ async def run_steps(
                 "tokens_charged_to_budget", 0
             )
     provenance["warnings"] = entry_warnings(entry)
-    yield ConnectResult(proposal.alias, entry)
+    yield ConnectResult(proposal.alias, invalidate_verification(entry))
 
 
 async def _run_decision_steps(
-    proposal: ConnectPlan,
-    *,
-    approved: Literal["all", "minimal", "none"],
-    api_key: str | None,
+    proposal: ConnectPlan, *, approved: Literal["all", "minimal", "none"], api_key: str | None
 ) -> AsyncIterator[ProbeUpdate | ConnectResult]:
-    """Execute the single bounded decision-interface probe."""
+    """Share reservations across bounded stateless cases, with no retries."""
+    from ._diagnostics import timeout_details
+
     entry = configure_entry(proposal.entry)
     records = entry["provenance"]["probes"]
-    probe = proposal.probes[0]
-    previous = records.get(probe.name, {})
-    if (
-        previous.get("outcome") == "accepted"
-        and previous.get("request") == probe.body
-        and previous.get("client") == "decision"
-    ):
-        yield ProbeUpdate(probe.name, {**deepcopy(previous), "reason": "previous result reused"})
-        yield ConnectResult(proposal.alias, entry)
-        return
-
-    record: dict[str, Any] = {"outcome": "not_probed"}
-    records[probe.name] = record
-    if approved == "none":
-        record["reason"] = "not approved"
-        yield ProbeUpdate(probe.name, deepcopy(record))
-        entry["provenance"]["requests_accepted"] = []
-        entry["provenance"]["tokens_charged_to_budget"] = 0
-        yield ConnectResult(proposal.alias, entry)
-        return
-    if proposal.budget_tokens < probe.token_estimate:
-        record["reason"] = "budget exhausted"
-        yield ProbeUpdate(probe.name, deepcopy(record))
-        entry["provenance"]["requests_accepted"] = []
-        entry["provenance"]["tokens_charged_to_budget"] = 0
-        yield ConnectResult(proposal.alias, entry)
-        return
-
-    key = api_key
-    if key is None and entry.get("api_key_env"):
-        key = os.environ.get(entry["api_key_env"])
-        if not key:
-            raise ValueError(f"Set {entry['api_key_env']} before probing, or approve none")
-
-    yield ProbeUpdate(probe.name, {"outcome": "running"})
-    started = time.monotonic()
-    deadline = asyncio.timeout(probe.timeout_seconds)
-    record["request_shape"] = {
-        "api_style": entry.get("api_style", "systemone"),
-        "timeout_seconds": probe.timeout_seconds,
-        "question_count": 1,
-    }
-    try:
-        async with deadline:
-            response, status = await _run_decision_probe(proposal.alias, entry, probe, key)
-        from nooa.decisions.client import BooleanAnswer
-
-        answer = response.answers["supported"]
-        if not isinstance(answer, BooleanAnswer):
-            raise TypeError("Decision probe did not return a boolean answer")
-        probability = answer.probability_true
-        if not math.isfinite(probability) or not 0 <= probability <= 1:
-            raise ValueError("Decision probe returned a probability outside [0, 1]")
-        usage = response.usage
-        input_tokens = usage.get("input_tokens")
-        output_tokens = usage.get("output_tokens")
-        reported = sum(
-            value
-            for value in (input_tokens, output_tokens)
-            if isinstance(value, int) and not isinstance(value, bool) and value >= 0
-        )
-    except Exception as exc:
-        from nooa.unifiedllm.connect._diagnostics import timeout_details
-
-        status = getattr(exc, "_connect_http_status", None)
-        record.update(
-            error=type(exc).__name__,
-            elapsed_seconds=round(time.monotonic() - started, 3),
-            outcome="not_probed",
-        )
-        if isinstance(status, int):
-            record["status_code"] = status
-            record["outcome"] = "rejected" if status in {400, 422} else "not_probed"
-            if 200 <= status < 300:
-                record.update(
-                    outcome="not_confirmed",
-                    reason="Reply not understood by the decision client",
+    charged = 0
+    accepted = []
+    baseline_ok = False
+    auth_failed = False
+    for probe in proposal.probes:
+        previous = records.get(probe.name, {})
+        # Only routing acceptance may be reused; all accuracy/media cases are fresh.
+        if (
+            probe.name == "routing"
+            and verification_is_current(previous, entry, probe.name)
+            and previous.get("outcome") == "accepted"
+            and previous.get("request") == probe.body
+            and previous.get("client") == "decision"
+        ):
+            accepted.append(probe.name)
+            baseline_ok = True
+            yield ProbeUpdate(
+                probe.name, {**deepcopy(previous), "reason": "previous result reused"}
+            )
+            continue
+        record = {"outcome": "not_probed"}
+        records[probe.name] = record
+        reason = None
+        if approved == "none" or approved == "minimal" and probe.name != "routing":
+            reason = "not approved"
+        elif probe.skip_reason:
+            reason = probe.skip_reason
+        elif auth_failed:
+            # A rejected key is never sent again in the same run.
+            reason = "Authentication failed; later checks not sent"
+        elif charged + probe.token_estimate > proposal.budget_tokens:
+            reason = "budget exhausted"
+        elif probe.name != "routing" and not baseline_ok:
+            reason = "Decision baseline not accepted; fresh checks not tested"
+        elif probe.name == "media:image" and any(
+            records.get(name, {}).get("answer_correct") is not True
+            for name in ("decision:typed", "decision:positive", "decision:negative")
+        ):
+            reason = "Typed decision baseline did not pass; image not tested"
+        if reason:
+            record["reason"] = reason
+            yield ProbeUpdate(probe.name, deepcopy(record))
+            continue
+        key = api_key
+        if key is None and entry.get("api_key_env"):
+            key = os.environ.get(entry["api_key_env"])
+            if not key:
+                raise ValueError(f"Set {entry['api_key_env']} before probing, or approve none")
+        yield ProbeUpdate(probe.name, {"outcome": "running"})
+        charged += probe.token_estimate
+        stamp_verification(record, entry, probe.name, timeout_seconds=probe.timeout_seconds)
+        started = time.monotonic()
+        deadline = asyncio.timeout(probe.timeout_seconds)
+        record["request_shape"] = {
+            "api_style": entry["api_style"],
+            "timeout_seconds": probe.timeout_seconds,
+            "question_count": len(probe.body["questions"]),
+            "image_transport": "openai_input_image"
+            if entry["api_style"] == "openai"
+            else entry["decision_image_transport"],
+        }
+        try:
+            async with deadline:
+                response, status, facts = await _run_decision_probe(
+                    proposal.alias, entry, probe, key
                 )
-        record.update(timeout_details(exc, deadline_expired=deadline.expired()))
+            record.update(facts)
+            usage = response.usage
+            reported = 0
+            for field in ("input_tokens", "output_tokens"):
+                value = usage.get(field)
+                if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                    record[field] = value
+                    reported += value
+            record.update(
+                request_accepted=True,
+                client="decision",
+                transport="httpx",
+                resolved_model=response.model,
+                reported_tokens=reported,
+                status_code=status,
+                checked_at=datetime.now(UTC).isoformat(),
+            )
+            charged += max(0, reported - probe.token_estimate)
+            record["tokens_charged_to_budget"] = max(probe.token_estimate, reported)
+            if probe.name == "routing":
+                record.update(outcome="accepted", request=deepcopy(probe.body))
+                baseline_ok = True
+            elif probe.name.startswith("decision:"):
+                record["outcome"] = "accepted" if facts["answer_correct"] else "not_confirmed"
+                if not facts["answer_correct"]:
+                    record["reason"] = "Native typed response accepted but fixture answer incorrect"
+            else:
+                passed = (
+                    facts["attachment_observed"]
+                    and facts["access_reported"]
+                    and facts["answer_correct"]
+                )
+                record["outcome"] = "passed" if passed else "not_confirmed"
+                if not passed:
+                    record["reason"] = (
+                        "Image access, known color accuracy and actual wire attachment must all be confirmed"
+                    )
+            if record["request_accepted"]:
+                accepted.append(probe.name)
+        except Exception as exc:
+            status = getattr(exc, "_connect_http_status", None)
+            usage = getattr(exc, "_connect_usage", {})
+            reported = sum(usage.values())
+            record.update(usage)
+            record.update(getattr(exc, "_connect_wire", {}))
+            record["reported_tokens"] = reported
+            charged += max(0, reported - probe.token_estimate)
+            record.update(
+                error=type(exc).__name__,
+                outcome="not_probed",
+                tokens_charged_to_budget=max(probe.token_estimate, reported),
+            )
+            if isinstance(status, int):
+                record["status_code"] = status
+                record["outcome"] = "rejected" if status in {400, 422} else "not_probed"
+                auth_failed = auth_failed or status in {401, 403}
+                if 200 <= status < 300:
+                    record.update(
+                        outcome="not_confirmed",
+                        request_accepted=True,
+                        reason="Reply not understood by the decision client",
+                        typed_result_validated=False,
+                    )
+            record.update(timeout_details(exc, deadline_expired=deadline.expired()))
+        record["elapsed_seconds"] = round(time.monotonic() - started, 3)
         yield ProbeUpdate(probe.name, deepcopy(record))
-        entry["provenance"]["requests_accepted"] = []
-        entry["provenance"]["tokens_charged_to_budget"] = probe.token_estimate
-        yield ConnectResult(proposal.alias, entry)
-        return
-
-    record.update(
-        outcome="accepted",
-        elapsed_seconds=round(time.monotonic() - started, 3),
-        client="decision",
-        transport="httpx",
-        request=deepcopy(probe.body),
-        resolved_model=response.model,
-        probability_true=probability,
-        input_tokens=input_tokens if isinstance(input_tokens, int) else None,
-        output_tokens=output_tokens if isinstance(output_tokens, int) else None,
-        reported_tokens=reported,
-        checked_at=datetime.now(UTC).isoformat(),
+    entry["provenance"].update(
+        requests_accepted=accepted, tokens_charged_to_budget=charged, warnings=entry_warnings(entry)
     )
-    if isinstance(status, int):
-        record["status_code"] = status
-    entry["provenance"]["requests_accepted"] = [probe.name]
-    entry["provenance"]["tokens_charged_to_budget"] = max(probe.token_estimate, reported)
-    yield ProbeUpdate(probe.name, deepcopy(record))
-    entry["provenance"]["warnings"] = entry_warnings(entry)
-    yield ConnectResult(proposal.alias, entry)
+    yield ConnectResult(proposal.alias, invalidate_verification(entry))
 
 
 async def check_interfaces(
@@ -2304,6 +3250,8 @@ async def check_interfaces(
     output_tokens: int = DISCOVERY_OUTPUT_TOKENS,
     api_key: str | None = None,
     styles: tuple[str, ...] = ("chat", "responses", "anthropic"),
+    endpoints: Mapping[str, str] | None = None,
+    allow_cross_origin_credentials: bool = False,
     timeout_seconds: float = 30,
     reasoning_template: str | None = None,
     reasoning_level: str = "medium",
@@ -2333,10 +3281,17 @@ async def check_interfaces(
     anthropic-only comparison needs a matching template (adaptive/budget/
     thinking) passed explicitly.
 
-    Pass one decision style, ``("systemone",)`` or ``("openai",)``, alone to send
-    the single decision probe; a
-    decision endpoint is a different client type, so it is never mixed with
-    chat interfaces.
+    ``endpoints`` overrides ``api_base`` per style. Decision endpoints are full
+    URLs, never inferred from a chat base or by appending a suffix. Mixed styles
+    require an explicit mapping entry for every decision style; a single decision
+    style can still use ``api_base``. All supplied endpoints are validated before
+    any request. With a nonempty ``api_key`` or configured ``api_key_env``,
+    mapped endpoints on a different origin (scheme, host, effective port) require
+    explicit ``allow_cross_origin_credentials=True``. CLI callers opt in with
+    ``--share-interface-key``. No credential is shared across origins by default;
+    unauthenticated comparisons and same-origin path differences are permitted.
+    Reasoning templates apply only to chat-family interfaces and
+    are ignored in a decision-only comparison.
     """
     if (
         not styles
@@ -2344,31 +3299,56 @@ async def check_interfaces(
         or not 1 <= timeout_seconds <= 120
     ):
         raise ValueError("Choose supported interfaces and a timeout between 1 and 120 seconds")
-    decision_styles = [style for style in styles if style in DECISION_API_STYLES]
-    if decision_styles and len(set(styles)) != 1:
-        raise ValueError(
-            f"{decision_styles[0]} is a decision interface and cannot be mixed with other styles"
-        )
-    if decision_styles and reasoning_template:
-        raise ValueError(f"{decision_styles[0]} decision models have no reasoning levels to probe")
+    api_base = normalize_endpoint(api_base)
+    if endpoints is not None and not isinstance(endpoints, Mapping):
+        raise ValueError("endpoints must map API styles to endpoint URLs")
+    selected_endpoints = {}
+    for style, endpoint in (endpoints or {}).items():
+        if style not in _PATHS or not isinstance(endpoint, str):
+            raise ValueError("endpoints must map supported API styles to endpoint URLs")
+        selected_endpoints[style] = normalize_endpoint(endpoint)
+    unique_styles = tuple(dict.fromkeys(styles))
+    if len(unique_styles) > 1:
+        for style in unique_styles:
+            if style in DECISION_API_STYLES and style not in selected_endpoints:
+                raise ValueError(
+                    f"Mixed interfaces require an explicit endpoints entry for {style}"
+                )
+
+    def origin(endpoint: str) -> tuple[str, str | None, int | None]:
+        parsed = urlsplit(endpoint)
+        scheme = parsed.scheme.lower()
+        port = parsed.port if parsed.port is not None else {"https": 443, "http": 80}.get(scheme)
+        return (scheme, parsed.hostname, port)
+
+    if (api_key or api_key_env) and not allow_cross_origin_credentials:
+        source_origin = origin(api_base)
+        for style in unique_styles:
+            if origin(selected_endpoints.get(style, api_base)) != source_origin:
+                raise ValueError(
+                    "Cross-origin interface credentials require "
+                    "allow_cross_origin_credentials=True (--share-interface-key in the CLI)"
+                )
     results = {}
     spent = 0
-    for style in dict.fromkeys(styles):
+    proposals = {}
+    for style in unique_styles:
         style_reasoning_levels = (
             {reasoning_level: reasoning_settings(reasoning_template, style, reasoning_level)}
-            if reasoning_template
+            if reasoning_template and style not in DECISION_API_STYLES
             else None
         )
         proposal = plan(
             alias,
             model,
             style,
-            api_base,
+            selected_endpoints.get(style, api_base),
             api_key_env,
             budget_tokens=budget_tokens,
             output_tokens=output_tokens,
             reasoning_levels=style_reasoning_levels,
             reasoning_output_tokens=reasoning_output_tokens,
+            decision_checks=False,
         )
         if style in DECISION_API_STYLES:
             # The decision probe has no reply-token field to cap.
@@ -2389,7 +3369,9 @@ async def check_interfaces(
             level_probes = tuple(
                 replace(
                     p,
-                    timeout_seconds=timeout_seconds,
+                    # Thinking takes longer than a plain reply; a short wait would
+                    # hide reasoning on slower models.
+                    timeout_seconds=max(timeout_seconds, REASONING_DISCOVERY_TIMEOUT),
                     body={
                         **p.body,
                         "max_output_tokens" if style == "responses" else "max_tokens": (
@@ -2403,11 +3385,14 @@ async def check_interfaces(
                 if p.name.startswith("level:")
             )
             probes = (routing, *level_probes)
-        proposal = replace(
-            proposal,
-            probes=probes,
-            budget_tokens=max(0, budget_tokens - spent),
-        )
+        proposal.entry["provenance"]["interface_endpoint"] = {
+            "api_style": style,
+            "endpoint": proposal.entry.get("endpoint", proposal.entry.get("api_base")),
+            "source": "endpoints" if style in selected_endpoints else "api_base",
+        }
+        proposals[style] = replace(proposal, probes=probes)
+    for style, proposal in proposals.items():
+        proposal = replace(proposal, budget_tokens=max(0, budget_tokens - spent))
         async with aclosing(run_steps(proposal, approved="all", api_key=api_key)) as steps:
             async for event in steps:
                 if isinstance(event, ConnectResult):
@@ -2418,30 +3403,71 @@ async def check_interfaces(
     yield InterfaceResult(results, spent)
 
 
-def write(entry: dict, path: Path, *, alias: str) -> None:
-    """Replace one model; frontends warn before calling this for an existing alias.
+ALIAS_MISSING = object()
+ALIAS_UNCONDITIONAL = object()
 
+
+def alias_target(models: dict, alias: str):
+    """Detached local consent target; missing differs from a null/tombstoned alias.
+
+    Do not serialize this value or hash it: legacy entries may contain secrets.
+    """
+    from copy import deepcopy
+
+    return deepcopy(models[alias]) if alias in models else ALIAS_MISSING
+
+
+@contextmanager
+def registry_write_lock(path: Path):
+    """Hold the existing stable model sidecar for write or rollback inspection.
+
+    Lock order for two-file save/recovery is secret then model. Do not call
+    write() while holding this lock: it acquires its own descriptor. Recovery
+    holds it through credential-dependency inspection and secret rollback.
+    """
+    import fcntl
+
+    path = Path(path).resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Keep the stable sidecar inode: unlinking it lets writers bypass waiters.
+    with path.with_name(f".{path.name}.lock").open("a") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        yield path
+
+
+def write(entry: dict, path: Path, *, alias: str, expected_alias=ALIAS_UNCONDITIONAL) -> None:
+    """Replace one model with optional compare-and-set consent under the sidecar lock.
+
+    Library callers may deliberately omit expected_alias for an unconditional
+    update (backward compatibility). ALL frontends must pass alias_target from
+    their consent snapshot; ALIAS_MISSING means create only. Conflicts require
+    reloading and fresh consent, never automatic retry. No target is reported.
     Splice the selected YAML entry instead of reformatting the whole file, so
     unrelated entries and comments remain intact. The final replace is atomic.
     """
-    entry = configure_entry(entry)
+    candidate = configure_entry(entry)
+    from ._verification import effective_config_snapshot
+    from ._verification import routing_allows_save as current_baseline
+
+    if current_baseline(entry, entry) and effective_config_snapshot(
+        entry
+    ) != effective_config_snapshot(candidate):
+        raise ValueError(
+            "Save normalization changed active settings; review and retest the candidate"
+        )
+    entry = candidate
     # Persist discovered settings only. Probe evidence, request bodies, catalogue
     # data and warnings belong to the connect session (surfaces via
     # ``nooa connect check --json``); embedding them here would write the whole
     # history of the connect call into the registry.
     entry.pop("provenance", None)
-    path = Path(path).resolve()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # Lock a stable sidecar inode, not the registry inode replaced atomically.
-    # Keep the lock file: unlinking it would let a third writer bypass waiters.
-    import fcntl
-
-    with path.with_name(f".{path.name}.lock").open("a") as lock:
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-        _write_entry(entry, path, alias=alias)
+    with registry_write_lock(path) as path:
+        _write_entry(entry, path, alias=alias, expected_alias=expected_alias)
 
 
-def _write_entry(entry: dict, path: Path, *, alias: str) -> None:
+def _write_entry(
+    entry: dict, path: Path, *, alias: str, expected_alias=ALIAS_UNCONDITIONAL
+) -> None:
     """Perform one locked read/modify/replace, retaining a concurrent-edit check."""
     original = path.read_bytes() if path.exists() else None
     mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o600
@@ -2454,6 +3480,15 @@ def _write_entry(entry: dict, path: Path, *, alias: str) -> None:
         data["models"] = {}
     if not isinstance(data, dict) or not isinstance(data.get("models", {}), dict):
         raise ValueError("Registry must be a mapping with a models mapping")
+    current = data.get("models", {})
+    if expected_alias is not ALIAS_UNCONDITIONAL:
+        matches = (
+            alias not in current
+            if expected_alias is ALIAS_MISSING
+            else alias in current and current[alias] == expected_alias
+        )
+        if not matches:
+            raise ValueError("Alias changed since review; reload and confirm replacement again")
     document = yaml.compose(source)
     if any(isinstance(token, (yaml.AnchorToken, yaml.AliasToken)) for token in yaml.scan(source)):
         raise ValueError(
@@ -2524,6 +3559,13 @@ def _write_entry(entry: dict, path: Path, *, alias: str) -> None:
             os.chmod(temporary.name, mode)
             temporary.flush()
             os.fsync(temporary.fileno())
+        from nooa.unifiedllm.registry import load_model_entries
+
+        loaded = load_model_entries(temporary_path).get(alias)
+        if loaded != entry:
+            raise ValueError(
+                "Saved alias did not resolve to the reviewed candidate; no changes made"
+            )
         if (path.read_bytes() if path.exists() else None) != original:
             raise ValueError("Registry changed during write; reload before retrying")
         os.replace(temporary_path, path)

@@ -319,8 +319,8 @@ def test_catalogue_metadata_is_not_claimed_as_probe_evidence():
         }
     )
     assert proposal.entry["context_window"] == 128000
-    assert proposal.entry["provenance"]["catalogue_limits"]["max_completion_tokens"] == 8192
-    assert proposal.entry["max_tokens"] == 8192
+    assert "max_completion_tokens" not in proposal.entry["provenance"]["catalogue_limits"]
+    assert proposal.entry["max_tokens"] == 32768
     assert "context_window" in proposal.entry["provenance"]["not_probed"]
 
 
@@ -375,10 +375,6 @@ def test_connect_uses_existing_registry_discovery(tmp_path, monkeypatch):
 )
 @pytest.mark.asyncio
 async def test_real_httpx_serialization_keeps_level_blocks(monkeypatch, style, patch, response):
-    if style == "chat" and "thinking" in patch:
-        # This case specifically exercises LiteLLM's local rejection; direct
-        # compatible transports forward unknown fields to the server.
-        monkeypatch.setenv("NOOA_LLM_TRANSPORT", "litellm")
     monkeypatch.setenv("CONNECT_TEST_KEY", "private-test-key")
     sent = []
 
@@ -401,12 +397,6 @@ async def test_real_httpx_serialization_keeps_level_blocks(monkeypatch, style, p
         reasoning_levels={"high": patch},
     )
     result = await connect.run(proposal, approved="all")
-    if style == "chat" and "thinking" in patch:
-        # Explicitly preserving an incompatible field must not produce a green
-        # probe after silently dropping it. The legacy SDK rejects this shape.
-        assert len(sent) == 2
-        assert result.entry["provenance"]["probes"]["level:high"]["outcome"] == "not_probed"
-        return
     assert len(sent) == 3, result.entry["provenance"]["probes"]
     assert all(
         body.get("max_output_tokens", body.get("max_tokens", body.get("max_completion_tokens")))
@@ -434,8 +424,11 @@ async def test_budget_template_cannot_raise_approved_output_cap(monkeypatch):
         }
     )
     result = await connect.run(proposal, approved="all")
-    assert len(bodies) == 2
-    assert result.entry["provenance"]["probes"]["level:high"]["outcome"] == "not_probed"
+    assert len(bodies) == 3
+    assert bodies[-1]["thinking"] == {"type": "enabled", "budget_tokens": 4096}
+    assert bodies[-1]["max_tokens"] == 5120
+    assert all(body["max_tokens"] <= proposal.entry["max_tokens"] for body in bodies)
+    assert result.entry["provenance"]["probes"]["level:high"]["settings_sent"] is True
 
 
 @pytest.mark.asyncio
@@ -554,11 +547,16 @@ connect.write(proposal.entry, Path(sys.argv[1]), alias='local')
 
 
 def test_catalogue_efforts_propose_complete_blocks_and_default():
-    proposal = make_plan(
+    proposal = connect.plan(
+        "local",
+        "provider/model",
+        "chat",
+        "https://openrouter.ai/api/v1",
+        "",
         catalogue={
             "id": "provider/model",
             "reasoning": {"supported_efforts": ["low", "high"], "default_effort": "high"},
-        }
+        },
     )
     assert proposal.entry["reasoning_levels"] == {
         "low": {"reasoning_effort": "low"},

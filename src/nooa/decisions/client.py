@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import json
 from abc import abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -13,6 +14,7 @@ import httpx
 from pydantic import JsonValue
 
 from nooa._immutable_json import freeze
+from nooa.decisions.media import DecisionAttachment, decision_media_inputs, validate_attachments
 from nooa.decisions.types import Criterion
 
 if TYPE_CHECKING:
@@ -53,6 +55,7 @@ class DecisionRequest:
 
     state: DecisionState
     questions: dict[str, DecisionQuestion]
+    attachments: tuple[DecisionAttachment, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,6 +191,7 @@ class InvalidDecisionResponseError(DecisionClientError):
 
 
 type DecisionApiStyle = Literal["systemone", "openai"]
+type DecisionImageTransport = Literal["json", "typesafe_multipart"]
 
 
 class DecisionClient(DecisionModel):
@@ -212,6 +216,9 @@ class DecisionClient(DecisionModel):
         retry_config: RetryConfig | None = None,
         client: httpx.AsyncClient | None = None,
         api_style: DecisionApiStyle = "systemone",
+        media_inputs: object = (),
+        decision_image_transport: DecisionImageTransport = "json",
+        typesafe_danger_zone_images: bool = False,
     ) -> None:
         """Configure a decision client.
 
@@ -223,6 +230,13 @@ class DecisionClient(DecisionModel):
             retry_config: Shared retry policy. Defaults to one transient retry.
             client: Optional caller-owned asynchronous HTTP client.
             api_style: Wire format of ``endpoint``: ``"systemone"`` or ``"openai"``.
+            media_inputs: Explicit route-local permission; only ``["image"]``
+                is verified for native decisions. Empty means text-only.
+            decision_image_transport: ``"json"`` keeps JSON proxies unchanged;
+                ``"typesafe_multipart"`` explicitly selects direct TypeSafe's
+                local PNG/JPEG binary transport, never inferred by hostname.
+            typesafe_danger_zone_images: Explicit experimental TypeSafe image
+                opt-in; required along with permission for multipart images.
 
         Raises:
             ValueError: If ``model`` or ``endpoint`` is empty, or ``api_style``
@@ -234,6 +248,17 @@ class DecisionClient(DecisionModel):
             raise ValueError("endpoint must not be empty")
         if api_style not in ("systemone", "openai"):
             raise ValueError(f"api_style must be 'systemone' or 'openai', got {api_style!r}")
+        self.media_inputs = decision_media_inputs(media_inputs)
+        if decision_image_transport not in ("json", "typesafe_multipart"):
+            raise ValueError("decision_image_transport must be json or typesafe_multipart")
+        if decision_image_transport == "typesafe_multipart" and api_style != "systemone":
+            raise ValueError("typesafe_multipart requires api_style=systemone")
+        if not isinstance(typesafe_danger_zone_images, bool):
+            raise ValueError("typesafe_danger_zone_images must be an explicit boolean")
+        if typesafe_danger_zone_images and decision_image_transport != "typesafe_multipart":
+            raise ValueError("typesafe_danger_zone_images requires typesafe_multipart transport")
+        self.decision_image_transport = decision_image_transport
+        self.typesafe_danger_zone_images = typesafe_danger_zone_images
         self.api_style = api_style
         self.model = model
         self.endpoint = endpoint
@@ -260,6 +285,41 @@ class DecisionClient(DecisionModel):
             DecisionRefusedError: If an OpenAI-style endpoint refuses a question.
             InvalidDecisionResponseError: If the response body is malformed.
         """
+        decoded = validate_attachments(request.attachments, self.media_inputs)
+        # Validate state before retry/HTTP even for direct or middleware requests.
+        from nooa.decisions.schema import _json_value
+
+        _json_value(request.state)
+        if request.attachments:
+            if not isinstance(request.state, dict) or not isinstance(
+                request.state.get("inputs"), dict
+            ):
+                raise ValueError(
+                    "Decision image attachments require structured state.inputs named references"
+                )
+            inputs = request.state["inputs"]
+            associations = {
+                name: attachment.alias
+                for attachment in request.attachments
+                for name in attachment.input_names
+            }
+            aliases = {attachment.alias for attachment in request.attachments}
+            if any(inputs.get(name) != alias for name, alias in associations.items()) or any(
+                isinstance(value, str) and value in aliases and associations.get(name) != value
+                for name, value in inputs.items()
+            ):
+                raise ValueError(
+                    "Decision image input names must be referenced by their exact attachment aliases in state.inputs"
+                )
+            if self.api_style == "systemone":
+                if self.decision_image_transport != "typesafe_multipart":
+                    raise ValueError(
+                        "System One JSON blocks image requests before sending. Use typesafe_multipart for an approved direct TypeSafe connection, or leave images off."
+                    )
+                if not self.typesafe_danger_zone_images:
+                    raise ValueError(
+                        "TypeSafe images require explicit typesafe_danger_zone_images=True opt-in"
+                    )
         if self.api_style == "openai":
             from nooa.decisions._openai_wire import openai_payload
 
@@ -273,10 +333,46 @@ class DecisionClient(DecisionModel):
                     for name, question in request.questions.items()
                 },
             }
+        files = None
+        if request.attachments and self.decision_image_transport == "typesafe_multipart":
+            assets: dict[str, Any] = {}
+            image_parts: list[tuple[str, Any]] = []
+            for index, (attachment, data) in enumerate(
+                zip(request.attachments, decoded, strict=True)
+            ):
+                if data is None:
+                    raise ValueError(
+                        "TypeSafe multipart requires locally encoded data URL bytes; remote image URLs are not fetched"
+                    )
+                signature = {"image/png": b"\x89PNG\r\n\x1a\n", "image/jpeg": b"\xff\xd8\xff"}.get(
+                    attachment.media_type
+                )
+                if signature is None or not data.startswith(signature):
+                    raise ValueError(
+                        "TypeSafe multipart images must have matching PNG/JPEG MIME and file signature"
+                    )
+                if attachment.detail is not None:
+                    raise ValueError(
+                        "TypeSafe multipart cannot send an image detail setting. Leave detail unset."
+                    )
+                name = f"asset-{index}"
+                assets[attachment.alias] = {"type": "image", "part": name}
+                image_parts.append((name, (name, data, attachment.media_type)))
+            payload["assets"] = assets
+            files = [
+                (
+                    "request",
+                    (None, json.dumps(payload, ensure_ascii=False).encode(), "application/json"),
+                ),
+                *image_parts,
+            ]
         try:
             from nooa.unifiedllm.retry import with_retry
 
-            response = await with_retry(self._post, payload, config=self.retry_config)
+            if files is None:
+                response = await with_retry(self._post, payload, config=self.retry_config)
+            else:
+                response = await with_retry(self._post_multipart, files, config=self.retry_config)
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code in {401, 403}:
                 raise DecisionAuthenticationError(
@@ -302,6 +398,24 @@ class DecisionClient(DecisionModel):
     async def _post(self, payload: dict[str, Any]) -> httpx.Response:
         """Send one HTTP attempt and raise for non-success status codes."""
         response = await self._client.post(self.endpoint, json=payload)
+        response.raise_for_status()
+        return response
+
+    async def _post_multipart(self, files: list[tuple[str, Any]]) -> httpx.Response:
+        """Send repeatable byte parts; httpx owns boundary and Content-Type."""
+        # Generate the multipart headers independently of caller defaults (a
+        # caller-owned JSON proxy client may have Content-Type: application/json).
+        multipart = httpx.Request("POST", self.endpoint, files=files)
+        content = multipart.read()
+        response = await self._client.post(
+            self.endpoint,
+            content=content,
+            headers={
+                "Content-Type": multipart.headers["Content-Type"],
+                "Content-Length": str(len(content)),
+                "TypeSafe-Danger-Zone-Images": "true",
+            },
+        )
         response.raise_for_status()
         return response
 
@@ -366,6 +480,7 @@ class DecisionClient(DecisionModel):
 
 
 __all__ = [
+    "DecisionAttachment",
     "DecisionAuthenticationError",
     "DecisionClient",
     "DecisionClientError",

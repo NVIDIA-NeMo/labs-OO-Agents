@@ -8,6 +8,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 from nooa.context_blocks import Context, DynamicContext, Role
+from nooa.decisions.media import reject_nested_media
 
 if TYPE_CHECKING:
     from nooa.context_blocks import EventBase
@@ -65,6 +66,13 @@ def _decision_event_payload(event: EventBase) -> dict[str, Any] | None:
         return None
 
     public_fields = {name for name, field in type(event).model_fields.items() if field.repr}
+    # Validate only model-visible fields BEFORE provider/custom serializers
+    # can turn nested native Media into text. repr=False slots stay untouched.
+    for name in public_fields:
+        try:
+            reject_nested_media(getattr(event, name))
+        except TypeError as exc:
+            raise TypeError(f"Decision event {event.event_type!r} field {name!r}: {exc}") from exc
     data = event.model_dump(
         mode="python",
         include=public_fields,

@@ -96,8 +96,10 @@ def test_explicit_noninteractive_test_saves_only_passed_samples(
     entry = yaml.safe_load(path.read_text())["models"]["local"]
     assert entry["media_inputs"] == enabled
     assert "provenance" not in entry
-    assert "Enabled media inputs" in result.output
-    assert "budget exhausted" in result.output
+    assert (
+        "Images: enabled (test passed)" if "image" in enabled else "Images: off"
+    ) in result.output
+    assert "check budget used up" in result.output
     text = " ".join(re.sub(r" · \d+\.\ds", "", result.output).split())
     assert f"Image input: {'Passed' if enabled else 'Failed'}" in text
     assert "Video input: Skipped" in text
@@ -132,23 +134,20 @@ def test_manual_no_probe_makes_no_calls_and_labels_declarations_unverified(monke
     assert result.exit_code == 0, result.output
     assert not calls
     assert yaml.safe_load(path.read_text())["models"]["local"]["media_inputs"] == ["audio", "pdf"]
-    assert "Unverified (manual setup; no model checks)" in result.output
-    assert "Connection: Unverified (manual setup; no model checks)" in " ".join(
-        result.output.split()
-    )
+    assert "not tested (manual setup)" in result.output
+    assert "Connection: not tested (manual setup)" in " ".join(result.output.split())
 
 
 def test_initial_decline_prevents_all_probes_and_writes(monkeypatch, tmp_path):
     calls = fake_http(monkeypatch)
     path = tmp_path / "models.yaml"
     result = CliRunner().invoke(
-        command, options(path) + ["--test-media-inputs", "image"], input="n\n"
+        command, options(path) + ["--test-media-inputs", "image"], input="262144\n262144\nsave\nn\n"
     )
     assert result.exit_code == 0
     assert not calls and not path.exists()
-    assert "generated" in result.output and "No user files" in " ".join(
-        re.sub(r" · \d+\.\ds", "", result.output).split()
-    )
+    assert "Media samples: Images" in " ".join(result.output.split())
+    assert "approved token budget" not in result.output
 
 
 def test_interactive_test_choice_after_single_approval_review_can_manually_enable_unverified(
@@ -157,31 +156,35 @@ def test_interactive_test_choice_after_single_approval_review_can_manually_enabl
     calls = fake_http(monkeypatch, "wrong")
     path = tmp_path / "models.yaml"
     # Approval, test/manual choice, final review/manual choice, declaration, save.
-    result = CliRunner().invoke(command, options(path), input="y\ntest\nmanual\nimage,pdf\ny\n")
+    result = CliRunner().invoke(
+        command, options(path), input="262144\n262144\ntest\ntest\nmanual\nimage,pdf\ny\n"
+    )
     assert result.exit_code == 0, result.output
     assert len(calls) == 3
-    assert result.output.count("Approve setup and optional media checks") == 1
+    assert result.output.count("Would you like to test these settings?") == 1
+    assert "Approve setup" not in result.output
     assert "Test all media inputs (generated samples)" in result.output
     assert "Choose media inputs manually" in result.output
     assert "Formats to TEST" not in result.output
-    assert "Selected media tests: image, audio, video, pdf" in result.output
+    assert "Media samples: Images, Audio, Video, PDFs" in " ".join(result.output.split())
     for kind in ["image", "audio", "video", "pdf"]:
         assert f"Generated {kind} sample:" not in result.output
-    assert "budget exhausted" in result.output
+    assert "check budget used up" in result.output
     text = " ".join(re.sub(r" · \d+\.\ds", "", result.output).split())
     assert "Image input: Failed · Could not read the answer" in text
     for kind in ["Audio", "Video", "PDF"]:
         assert f"{kind} input: Skipped" in text
-    assert "image input remains enabled" in text
-    assert "Media inputs to save: image, pdf" in text
-    assert "unverified" in result.output
+    assert "Images: enabled" in text
+    assert "Images: enabled (not confirmed by this test)" in text
+    assert "PDFs: enabled (not tested)" in text
+    assert "Inputs enabled manually will be saved as not tested." in text
     assert yaml.safe_load(path.read_text())["models"]["local"]["media_inputs"] == ["image", "pdf"]
 
 
 def test_cancel_at_review_does_not_save_or_send_extra_requests(monkeypatch, tmp_path):
     calls = fake_http(monkeypatch)
     path = tmp_path / "models.yaml"
-    result = CliRunner().invoke(command, options(path), input="y\ntest\n")
+    result = CliRunner().invoke(command, options(path), input="262144\n262144\ntest\ntest\n")
     assert result.exit_code == 1
     assert len(calls) == 3 and not path.exists()
 
@@ -340,7 +343,7 @@ def test_edit_retest_preserves_prior_permissions_even_if_not_passed(
             "--yes",
         ],
     )
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == (1 if budget == 1 else 0), result.output
     assert yaml.safe_load(path.read_text())["models"]["local"]["media_inputs"] == [
         "image",
         "audio",
@@ -349,8 +352,8 @@ def test_edit_retest_preserves_prior_permissions_even_if_not_passed(
     assert len(calls) == (0 if budget == 1 else 3)
     if budget != 1:
         text = " ".join(re.sub(r" · \d+\.\ds", "", result.output).split())
-        assert f"{formats} input remains enabled" in text
-        assert f"{formats} support disabled" not in text
+        assert f"{'Images' if formats == 'image' else 'Video'}: enabled" in text
+        assert f"{'Images' if formats == 'image' else 'Video'}: off" not in text
 
 
 @pytest.mark.parametrize("answer,budget,count", [("wrong", 12000, 3), ('{"value":true}', 1, 0)])
@@ -382,12 +385,12 @@ def test_guided_edit_all_formats_retains_prior_declarations(
             "1000",
         ],
         # Approval, TEST, keep context/ceiling/levels, declarations, replace, write.
-        input="y\ntest\n\n\n\nuse\nkeep\ny\ny\n",
+        input="test\ntest\nkeep\ny\ny\n",
     )
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == (1 if budget == 1 else 0), result.output
     assert len(calls) == count
     assert "Formats to TEST" not in result.output
-    assert "Selected media tests: image, audio, video, pdf" in result.output
+    assert "Media samples: Images, Audio, Video, PDFs" in " ".join(result.output.split())
     assert yaml.safe_load(path.read_text())["models"]["local"]["media_inputs"] == ["audio", "video"]
 
 
@@ -455,11 +458,7 @@ def test_http_failure_displays_effective_setting_without_changing_evidence(
     result = CliRunner().invoke(command, args + ["--test-media-inputs", "image", "--yes"])
     assert result.exit_code == 0, result.output
     text = " ".join(re.sub(r" · \d+\.\ds", "", result.output).split())
-    setting = (
-        "image input remains enabled (not confirmed by this test)"
-        if previous
-        else "image support disabled"
-    )
+    setting = "Images: enabled (not confirmed by this test)" if previous else "Images: off"
     assert f"Image input: Failed · Service returned HTTP 400; {setting}." in text
     assert (
         "Image input: Failed · Service returned HTTP 400; image support was not confirmed"
@@ -518,11 +517,12 @@ def test_test_all_media_includes_real_video_and_saves_passed_temporal_sample(
     result = CliRunner().invoke(
         command,
         args + (["--test-media-inputs", "image,audio,video,pdf", "--yes"] if yes else []),
-        input="y\ntest\nkeep\ny\n",
+        input="262144\n262144\ntest\ntest\nkeep\ny\n",
     )
     assert result.exit_code == 0, result.output
     text = " ".join(re.sub(r" · \d+\.\ds", "", result.output).split())
-    assert result.output.count("Approve setup and optional media checks") == (0 if yes else 1)
+    assert result.output.count("Would you like to test these settings?") == (0 if yes else 1)
+    assert "Approve setup" not in result.output
     from nooa.unifiedllm.connect._records import text_baseline_passed
 
     assert captured and all(text_baseline_passed(facts["routing"]) for facts in captured)
@@ -590,13 +590,13 @@ def test_final_review_can_disable_retained_enabled_failed_input(monkeypatch, tmp
             "--budget-tokens",
             "12000",
         ],
-        input="y\n\n\n\nuse\nrecommended\nmanual\n-\ny\ny\n",
+        input="test\nmanual\n-\ny\ny\n",
     )
     assert result.exit_code == 0, result.output
     text = " ".join(re.sub(r" · \d+\.\ds", "", result.output).split())
-    assert "image input remains enabled" in text
-    assert "Media inputs to save: none (text-only)" in text
-    assert "image support disabled." in text.split("Media inputs to save:")[1]
+    assert "Images: enabled" in text
+    assert "Images: off" in text
+    assert "Images: off." in text[text.index("Images: off") :]
     assert len(calls) == 3
     assert yaml.safe_load(path.read_text())["models"]["local"]["media_inputs"] == []
     assert any(
@@ -613,7 +613,8 @@ def test_approved_checks_do_not_repeat_charge_or_price_messages(monkeypatch, tmp
         command, options(tmp_path / "models.yaml") + ["--yes", "--test-media-inputs", "image"]
     )
     assert result.exit_code == 0, result.output
-    assert result.output.count("Checks may incur charges.") == 1
+    assert "Checks may incur charges." not in result.output
+    assert "Uses the approved token budget" not in result.output
     progress = result.output.split("Checking connection", 1)[1]
     for wording in ("charges", "spending cap", "billing", "estimated price", "catalogue prices"):
         assert wording not in progress
@@ -710,20 +711,20 @@ def test_typed_test_all_failed_video_permission_is_accurate(
     result = CliRunner().invoke(
         command,
         args + ["--test-media-inputs", "image,audio,video,pdf"] + ([] if manual else ["--yes"]),
-        input="y\nmanual\ny\n" if manual else None,
+        input=("" if previous else "262144\n262144\n") + "test\nmanual\ny\n" if manual else None,
     )
     assert result.exit_code == 0, result.output
     text = " ".join(re.sub(r" · \d+\.\ds", "", result.output).split())
     assert (
-        f"Video input: {'Not available' if cause == 'Model cannot access this input' else 'Failed'} · {cause}"
+        f"Video input: {'Not available · The model reported no access to this sample' if cause == 'Model cannot access this input' else 'Failed · ' + cause}"
         in text
     )
     assert (
-        "video input remains enabled"
+        "Video: enabled"
         if previous or manual
-        else "video input disabled"
+        else "Video: off"
         if cause == "Model cannot access this input"
-        else "video support disabled"
+        else "Video: off"
     ) in text
     assert "Request accepted;" not in text and "understanding not confirmed" not in text
     assert "private-invalid-schema-answer" not in text
@@ -794,9 +795,24 @@ def test_typed_media_stage_json_acceptance_and_native_validation(
     source.write_text(result.stdout)
     path = tmp_path / "saved.yaml"
     save = CliRunner().invoke(
-        command, ["--stage", "save", "--input", str(source), "--output", str(path)]
+        command,
+        [
+            "--stage",
+            "save",
+            "--input",
+            str(source),
+            "--output",
+            str(path),
+            *(["--allow-unverified"] if not passed else []),
+        ],
     )
     assert save.exit_code == 0, save.output
+    saved_report = json.loads(save.stdout)
+    assert saved_report["saved"] is True
+    assert saved_report["verification"]["state"] == ("verified" if passed else "partial")
+    assert saved_report["checks"][f"media:{kind}"]["verification_current"] is True
+    if not passed:
+        assert saved_report["diagnostic_prompt"]
     assert yaml.safe_load(path.read_text())["models"]["candidate"]["media_inputs"] == (
         [kind] if passed else []
     )
@@ -861,18 +877,22 @@ def test_test_all_boolean_access_summary_and_retained_permissions(monkeypatch, t
     assert result.exit_code == 0, result.output
     output = " ".join(re.sub(r" · \d+\.\ds", "", result.output).split())
     for kind in ["Audio", "Video"]:
-        assert f"{kind} input: Not available · Model cannot access this input" in output
+        assert (
+            f"{kind} input: Not available · The model reported no access to this sample" in output
+        )
         assert f"✓ {kind}" not in output and f"{kind} input: Failed" not in output
     assert "Not available in this test: audio, video" in output
-    assert "Continue with enabled inputs" in output and "choose another model or API" in output
+    assert "Keep these settings" in output and "enable inputs manually as unverified" in output
+    assert "Unavailable inputs were not tested on this connection" in output
+    assert "choose another model or API" not in output
     assert "Review media inputs" not in output
     assert "Wrong answer" not in output and "understanding not confirmed" not in output
     expected = previous + ["image", "pdf"]
     assert yaml.safe_load(path.read_text())["models"]["local"]["media_inputs"] == expected
     if previous:
-        assert "audio input remains enabled (manual choice)" in output
+        assert "Audio: enabled (not tested)" in output
     else:
-        assert "audio input disabled" in output
+        assert "Audio: off" in output
     assert (
         sum(
             any(
