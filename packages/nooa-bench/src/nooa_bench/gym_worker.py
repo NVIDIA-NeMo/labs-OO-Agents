@@ -86,11 +86,16 @@ async def main(input_path: Path, output_path: Path) -> None:
     # `timeout_exceeded` episode. Any other cancellation, and SIGINT, propagate and leave no result,
     # so they stay failures on the Gym side instead of becoming a gradable timeout.
     stop: dict[str, str | None] = {"signal": None}
+    render: list = []  # filled by run_gym_episode once the run starts
     run = asyncio.current_task()
     assert run is not None
 
     def on_sigterm() -> None:
         stop["signal"] = "SIGTERM"
+        # Checkpoint first, synchronously: the supervisor's TERM grace is short and the cancelled
+        # agent's own cleanup may take longer than that. The final write below refreshes it.
+        if render:
+            write(render[0]("timeout_exceeded"))
         run.cancel()
 
     def write(episode) -> None:
@@ -120,9 +125,7 @@ async def main(input_path: Path, output_path: Path) -> None:
             replay_reasoning=bool(payload.get("replay_reasoning", False)),
             media_inputs=tuple(payload.get("media_inputs") or ()),
             interrupt=lambda: "timeout_exceeded" if stop["signal"] else None,
-            # Written the moment the run is interrupted, before the agent and the HTTP client
-            # clean up: the supervisor's TERM grace is short and a slow cleanup must not lose it.
-            checkpoint=write,
+            snapshot=render.append,
         )
     finally:
         loop.remove_signal_handler(signal.SIGTERM)

@@ -598,7 +598,7 @@ async def _wait_for(predicate, timeout: float = 10) -> None:
 
 async def test_an_interrupted_episode_keeps_its_records_when_asked():
     log: list[dict] = []
-    checkpoints: list[GymEpisode] = []
+    render: list = []
     release = asyncio.Event()
     server, task, port = await _serve(_stalling_app(log, release))
     try:
@@ -610,10 +610,12 @@ async def test_an_interrupted_episode_keeps_its_records_when_asked():
                 lambda agent: agent.solve("say hi"),
                 model_url=f"http://127.0.0.1:{port}/ng-rollout/r1/v1",
                 interrupt=lambda: "timeout_exceeded",
-                checkpoint=checkpoints.append,
+                snapshot=render.append,
             )
         )
         await _wait_for(lambda: len(log) == 2)
+        # What a deadline checkpoint would write right now, before anything is cancelled.
+        checkpoint = render[0]("timeout_exceeded")
         run.cancel()
         episode = await run
     finally:
@@ -621,9 +623,9 @@ async def test_an_interrupted_episode_keeps_its_records_when_asked():
         server.should_exit = True
         await task
     assert episode.stop_reason == "timeout_exceeded" and episode.return_value is None
-    # The checkpoint was handed out at the interruption, before cleanup, with the same content.
-    assert [c.stop_reason for c in checkpoints] == ["timeout_exceeded"]
-    assert checkpoints[0].to_json() == episode.to_json()
+    # The snapshot taken before the cancellation equals the finished episode.
+    assert checkpoint.stop_reason == "timeout_exceeded"
+    assert checkpoint.to_json() == episode.to_json()
     assert [r.status_code for r in episode.model_calls] == [
         200,
         None,
@@ -720,7 +722,6 @@ async def test_an_interrupt_that_declines_lets_the_cancellation_propagate():
                 lambda agent: agent.solve("say hi"),
                 model_url=f"http://127.0.0.1:{port}/ng-rollout/r1/v1",
                 interrupt=lambda: None,
-                checkpoint=lambda episode: pytest.fail("no checkpoint without a stop reason"),
             )
         )
         await _wait_for(lambda: len(log) == 2)

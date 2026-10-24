@@ -539,7 +539,7 @@ async def run_gym_episode(
     replay_reasoning: bool = False,
     media_inputs: tuple[str, ...] = (),
     interrupt: Callable[[], str | None] | None = None,
-    checkpoint: Callable[[GymEpisode], None] | None = None,
+    snapshot: Callable[[Callable[[str], GymEpisode]], None] | None = None,
 ) -> GymEpisode:
     """Run one NOOA agent activation against a Gym model server and return the evidence.
 
@@ -550,8 +550,11 @@ async def run_gym_episode(
     ``interrupt`` is consulted when this coroutine is cancelled. It returns the stop reason
     the episode should finish with (the worker answers ``timeout_exceeded`` only after the
     sandbox supervisor's SIGTERM) or ``None`` to let the cancellation propagate, which is
-    also the default. ``checkpoint`` receives the interrupted episode right away, before the
-    agent and the HTTP client clean up, so a slow cleanup cannot lose it.
+    also the default.
+    ``snapshot`` is called once the run starts with a function that renders the episode so
+    far under a given stop reason. A caller that must checkpoint on a deadline (the worker,
+    inside the supervisor's TERM grace) renders and writes it synchronously, before the
+    cancelled agent's own cleanup gets to run.
     """
     model_calls: list[ModelCallRecord] = []
     tool_calls: list[ToolCallRecord] = []
@@ -570,8 +573,9 @@ async def run_gym_episode(
     if cookies:
         client._http.httpx_async.cookies.update(cookies)
     stop_reason, error, return_value = "completed", None, None
+    interrupted = "the agent was stopped before it finished"
 
-    def episode() -> GymEpisode:
+    def render(stop: str, *, error: str | None = None, return_value: Any = None) -> GymEpisode:
         output_items, conversation = _episode_items(model_calls)
         return GymEpisode(
             output_items=output_items,
@@ -579,11 +583,13 @@ async def run_gym_episode(
             model_calls=model_calls,
             tool_calls=tool_calls,
             return_value=return_value,
-            stop_reason=stop_reason,
+            stop_reason=stop,
             error=error,
             resource_cookies=dict(resource_cookies or {}),
         )
 
+    if snapshot is not None:
+        snapshot(lambda stop: render(stop, error=interrupted))
     try:
         agent = agent_factory(client)
         with hooks_scope(_ToolHooks(tool_calls)):
@@ -600,12 +606,10 @@ async def run_gym_episode(
         reason = interrupt() if interrupt is not None else None
         if reason is None:
             raise  # an ordinary cancellation: nobody asked for a finished episode
-        stop_reason, error = reason, "the agent was stopped before it finished"
-        if checkpoint is not None:
-            checkpoint(episode())
+        stop_reason, error = reason, interrupted
     finally:
         cookies_out = {c.name: c.value for c in client._http.httpx_async.cookies.jar}
         if cookies is not None:
             cookies.update(cookies_out)
         await client.aclose()
-    return episode()
+    return render(stop_reason, error=error, return_value=return_value)
