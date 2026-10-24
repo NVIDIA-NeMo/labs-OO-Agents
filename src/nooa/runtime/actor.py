@@ -553,6 +553,63 @@ def _rewrite_never_awaited_warnings(text: str, agent: Any = None) -> str:
     return _NEVER_AWAITED_RE.sub(hint, text)
 
 
+def runtime_cell_globals(agent: Any) -> dict[str, Any]:
+    """Return the names the runtime binds in every generated-code cell.
+
+    ``execute_code`` layers these over the agent's module globals and under the
+    strategy builtins. Strategies use the keys to reserve these names.
+    """
+    import typing as _typing
+
+    from nooa.agentdoc import doc
+    from nooa.decorators import strategy
+    from nooa.media import Audio, File, Image, Media, Video
+    from nooa.runtime.media_capture import show
+    from nooa.runtime.pprint import pprint
+    from nooa.strategies import (
+        CodeActStrategy,
+        CompositeStrategy,
+        PredictStrategy,
+        ReflexionStrategy,
+        TemplateStrategy,
+    )
+    from nooa.strategies.pure_python import PurePythonStrategy
+
+    return {
+        "self": agent,
+        "asyncio": asyncio,
+        "typing": _typing,
+        # Common typing constructs — LLMs use these constantly
+        "Annotated": _typing.Annotated,
+        "Any": _typing.Any,
+        "Literal": _typing.Literal,
+        "Optional": _typing.Optional,
+        "Union": _typing.Union,
+        # agentdoc introspection (doc respects hidden fields)
+        "doc": doc,
+        "methods": methods,
+        "variables": variables,
+        "help": doc,  # Shadow built-in help() to prevent blocking on stdin
+        # Pretty printing with Rich-compatible API
+        "pprint": pprint,
+        # Media display for multimodal models
+        "show": show,
+        "Media": Media,
+        "Image": Image,
+        "Audio": Audio,
+        "Video": Video,
+        "File": File,
+        # decorators and strategies for LLM-generated methods
+        "strategy": strategy,
+        "PurePythonStrategy": PurePythonStrategy,
+        "CodeActStrategy": CodeActStrategy,
+        "ReflexionStrategy": ReflexionStrategy,
+        "PredictStrategy": PredictStrategy,
+        "TemplateStrategy": TemplateStrategy,
+        "CompositeStrategy": CompositeStrategy,
+    }
+
+
 def _make_capture_buffer(
     limit: int, tail_chars: int | None, file_backed: bool
 ) -> TruncatingStringIO:
@@ -1543,61 +1600,7 @@ class ActorRuntime:
 
             exec_globals = filter_mro_module_globals(type(self.agent))
 
-            # Import agentdoc functions for use in generated code
-            # Import decorators and strategies for use in generated code
-            # NOTE: stdout/stderr capture is handled by ContextVarStream wrappers
-            # installed below.
-            import typing as _typing
-
-            from nooa.agentdoc import doc
-            from nooa.decorators import strategy
-            from nooa.media import Audio, File, Image, Media, Video
-            from nooa.runtime.media_capture import show
-            from nooa.runtime.pprint import pprint
-            from nooa.strategies import (
-                CodeActStrategy,
-                CompositeStrategy,
-                PredictStrategy,
-                ReflexionStrategy,
-                TemplateStrategy,
-            )
-            from nooa.strategies.pure_python import PurePythonStrategy
-
-            exec_globals.update(
-                {
-                    "self": self.agent,
-                    "asyncio": asyncio,
-                    "typing": _typing,
-                    # Common typing constructs — LLMs use these constantly
-                    "Annotated": _typing.Annotated,
-                    "Any": _typing.Any,
-                    "Literal": _typing.Literal,
-                    "Optional": _typing.Optional,
-                    "Union": _typing.Union,
-                    # agentdoc introspection (doc respects hidden fields)
-                    "doc": doc,
-                    "methods": methods,
-                    "variables": variables,
-                    "help": doc,  # Shadow built-in help() to prevent blocking on stdin
-                    # Pretty printing with Rich-compatible API
-                    "pprint": pprint,
-                    # Media display for multimodal models
-                    "show": show,
-                    "Media": Media,
-                    "Image": Image,
-                    "Audio": Audio,
-                    "Video": Video,
-                    "File": File,
-                    # decorators and strategies for LLM-generated methods
-                    "strategy": strategy,
-                    "PurePythonStrategy": PurePythonStrategy,
-                    "CodeActStrategy": CodeActStrategy,
-                    "ReflexionStrategy": ReflexionStrategy,
-                    "PredictStrategy": PredictStrategy,
-                    "TemplateStrategy": TemplateStrategy,
-                    "CompositeStrategy": CompositeStrategy,
-                }
-            )
+            exec_globals.update(runtime_cell_globals(self.agent))
 
             # Add strategy builtins (includes reasoning, message, method args)
             if builtins:
