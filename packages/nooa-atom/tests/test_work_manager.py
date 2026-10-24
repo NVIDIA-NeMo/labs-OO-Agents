@@ -89,7 +89,9 @@ async def test_coroutine_result_error_and_cancel(setup):
 async def test_timer_delivers_to_notification(setup):
     manager, channel = setup
     manager.launch(asyncio.sleep(0.01, "check CI"), name="ci")
-    await asyncio.sleep(0.05)
+    async with asyncio.timeout(5):  # wait for the observed event, not a fixed delay
+        while not channel.snapshot():
+            await asyncio.sleep(0.01)
     [event] = channel.snapshot()
     assert (event.name, event.kind, event.value) == ("ci", "done", "check CI")
 

@@ -24,14 +24,23 @@ async def manager(tmp_path):
 
 
 def alive(pid: int) -> bool:
+    """Whether ``pid`` is a live (non-zombie) process; safe if it exits meanwhile."""
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
-    return (
-        Path(f"/proc/{pid}").exists()
-        and "Z" not in Path(f"/proc/{pid}/stat").read_text().split()[2]
-    )
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except (FileNotFoundError, ProcessLookupError):
+        return False  # exited (and was reaped) between the two checks
+    return "Z" not in stat.split()[2]
+
+
+async def until_dead(*pids: int, timeout: float = 10.0) -> None:
+    """Wait, bounded, until none of ``pids`` is alive (killing and reaping are asynchronous)."""
+    async with asyncio.timeout(timeout):
+        while any(alive(pid) for pid in pids):
+            await asyncio.sleep(0.02)
 
 
 async def test_one_shot_result_and_streams(manager, tmp_path):
@@ -74,8 +83,7 @@ async def test_one_shot_cancel_kills_process_group(manager, tmp_path):
         await asyncio.sleep(0.05)
     pid = int(marker.read_text())
     await job.cancel()
-    await asyncio.sleep(0.1)
-    assert not alive(pid)
+    await until_dead(pid)
 
 
 async def test_persistent_state_across_sends(manager, tmp_path):
@@ -161,8 +169,7 @@ async def test_aclose_ends_bash_and_the_shell_is_reusable(manager, tmp_path):
     pid = int((await sh.send("echo $$")).stdout)
     assert alive(pid)
     await manager.aclose()
-    await asyncio.sleep(0.1)
-    assert not alive(pid)
+    await until_dead(pid)
     async with shell:  # the inert config can be entered again
         assert (await shell.send("echo again")).stdout == "again\n"
 
@@ -231,8 +238,7 @@ async def test_same_shell_cannot_be_entered_twice(manager, tmp_path):
     assert second.status == "failed"
     pid = int((await first.send("echo $$")).stdout)
     await manager.aclose()
-    await asyncio.sleep(0.1)
-    assert not alive(pid)
+    await until_dead(pid)
 
 
 async def test_output_limit_is_enforced_while_writing(manager, tmp_path):
@@ -268,8 +274,7 @@ async def test_background_process_does_not_hold_the_command_and_ends_with_the_sh
     try:
         assert alive(pid)  # run() did not kill it: it lives as long as the shell
         await shell.aclose()  # deterministic: bash and its background processes end
-        await asyncio.sleep(0.1)
-        assert not alive(pid)
+        await until_dead(pid)
     finally:
         with contextlib.suppress(ProcessLookupError):
             os.kill(pid, 9)
@@ -329,8 +334,8 @@ async def test_run_and_send_share_one_bash(manager, tmp_path):
     assert r.stdout == "2\n"
     pid = int((await shell.run("echo $$")).stdout)
     await sh.cancel()  # the job's end closes the shell it entered
-    await asyncio.sleep(0.1)
-    assert not alive(pid) and shell.summary() == "closed"
+    await until_dead(pid)
+    assert shell.summary() == "closed"
 
 
 async def test_timeout_stops_the_whole_command_and_keeps_state(tmp_path):
@@ -383,8 +388,7 @@ async def test_named_job_of_run_result_and_event(manager, tmp_path):
 
 async def test_dropped_shell_ends_its_bash(tmp_path):
     pid = int((await Shell(tmp_path).run("echo $$")).stdout)  # a temporary
-    await asyncio.sleep(0.1)
-    assert not alive(pid)
+    await until_dead(pid)
 
 
 async def test_owner_closes_its_shells_and_their_background_processes(manager, tmp_path):
@@ -402,8 +406,7 @@ async def test_owner_closes_its_shells_and_their_background_processes(manager, t
     finally:
         shell_owner.reset(token)
     await owner.aclose()
-    await asyncio.sleep(0.1)
-    assert not alive(bg) and not alive(bash) and not alive(other)
+    await until_dead(bg, bash, other)
     assert kept.summary() == "closed"
     assert (await kept.run("echo again")).stdout == "again\n"  # usable again: a new bash
     await kept.aclose()
