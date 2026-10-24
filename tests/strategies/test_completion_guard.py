@@ -1,14 +1,20 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Scope-sensitive coverage for CodeAct's reserved completion binding."""
+"""Scope-sensitive coverage for CodeAct's advertised framework helper bindings."""
 
 import textwrap
+from unittest.mock import patch
 
 import pytest
 
 from nooa.strategies._completion_guard import completion_binding_errors
+from nooa.strategies.codeact_v2 import CodeActV2
+from nooa.strategies.generated_code import GeneratedCodeValidator
+
+RESERVED = frozenset(name.removesuffix("()") for name in CodeActV2()._always_available_builtins())
 
 
+@pytest.mark.parametrize("name", sorted(RESERVED))
 @pytest.mark.parametrize(
     "code",
     [
@@ -68,14 +74,15 @@ from nooa.strategies._completion_guard import completion_binding_errors
         "def helper():\n    global return_result\n    [(return_result := value) for value in values]",
     ],
 )
-def test_rejects_writes_to_completion_binding(code):
+def test_rejects_writes_to_completion_binding(code, name):
     """Every Python binding form is guarded in the cell or an explicit global scope."""
-    errors = completion_binding_errors(code)
+    errors = completion_binding_errors(code.replace("return_result", name), reserved=RESERVED)
     assert errors
-    assert all("`return_result` is reserved" in error for error in errors)
-    assert all("return_result(result)" in error for error in errors)
+    assert all(f"`{name}` is reserved" in error for error in errors)
+    assert all("use a different variable name" in error for error in errors)
 
 
+@pytest.mark.parametrize("name", sorted(RESERVED))
 @pytest.mark.parametrize(
     "code",
     [
@@ -111,22 +118,25 @@ def test_rejects_writes_to_completion_binding(code):
         "def helper[return_result](value: return_result):\n    return value",
     ],
 )
-def test_preserves_independent_names_and_scopes(code):
+def test_preserves_independent_names_and_scopes(code, name):
     """Attributes, reads, nested locals and comprehension targets remain ordinary Python."""
-    assert completion_binding_errors(code) == []
+    assert completion_binding_errors(code.replace("return_result", name), reserved=RESERVED) == []
 
 
 def test_reports_the_binding_source_line():
     """The model sees the bad target's line instead of a later not-callable failure."""
-    [error] = completion_binding_errors("answer = 42\nif ready:\n    return_result = answer")
+    [error] = completion_binding_errors(
+        "answer = 42\nif ready:\n    return_result = answer", reserved=RESERVED
+    )
     assert error.startswith("Line 3:")
 
 
 def test_syntax_errors_keep_the_existing_execution_diagnostic():
     """Malformed Python is left to the normal cell traceback path."""
-    assert completion_binding_errors("return_result = (") == []
+    assert completion_binding_errors("return_result = (", reserved=RESERVED) == []
 
 
+@pytest.mark.parametrize("name", sorted(RESERVED))
 @pytest.mark.parametrize(
     "code",
     [
@@ -140,13 +150,14 @@ def test_syntax_errors_keep_the_existing_execution_diagnostic():
         "return_result = 1\nreturn 42\nglobal return_result",
     ],
 )
-def test_semantic_syntax_errors_preserve_python_diagnostics(code):
+def test_semantic_syntax_errors_preserve_python_diagnostics(code, name):
     """Compiler-only errors retain their native message and original cell source line."""
+    code = code.replace("return_result", name)
     with pytest.raises(SyntaxError) as expected:
         compile("async def cell():\n" + textwrap.indent(code, "    "), "<cell>", "exec")
 
     with pytest.raises(SyntaxError) as actual:
-        completion_binding_errors(code)
+        completion_binding_errors(code, reserved=RESERVED)
 
     assert actual.value.msg == expected.value.msg
     assert actual.value.lineno == expected.value.lineno - 1
@@ -168,14 +179,95 @@ def test_semantic_syntax_errors_preserve_python_diagnostics(code):
         ),
     ],
 )
-def test_recursion_errors_reject_the_whole_cell(deep_code, binding_first):
-    """Incomplete parsing or traversal must not allow unchecked or partially checked code."""
+def test_deep_cells_with_bindings_are_rejected(deep_code, binding_first):
+    """Deep bindings are rejected whether analysis completes or CPython hits its limit."""
     binding = "return_result = 0"
     code = "\n".join([binding, deep_code] if binding_first else [deep_code, binding])
 
-    [error] = completion_binding_errors(code)
+    [error] = completion_binding_errors(code, reserved=RESERVED)
+    if "too deeply" in error:
+        assert "split" in error
+        assert "retry" in error
+    else:
+        assert "`return_result` is reserved" in error
 
-    assert "too deeply" in error
-    assert "return_result" in error
-    assert "split" in error
-    assert "retry" in error
+
+@pytest.mark.parametrize("mention", ["", "print('ready')\n", "# return_result stays callable\n"])
+@pytest.mark.parametrize(
+    "deep_code",
+    [
+        pytest.param("answer = " + "+".join(["1"] * 1500), id="expression"),
+        pytest.param("if False:\n    pass\n" + "elif False:\n    pass\n" * 1500, id="elif"),
+    ],
+)
+def test_deep_valid_cells_without_rebinding_remain_valid(deep_code, mention):
+    """The binding guard must not reject deep cells that CPython and policy checks accept."""
+
+    class PolicyAgent:
+        """Keep the missing-await walk active even for deep code without method calls."""
+
+        async def work(self):
+            """Provide a visible async method for the policy validator."""
+            pass
+
+    code = mention + deep_code
+    compile("async def cell():\n" + textwrap.indent(code, "    "), "<cell>", "exec")
+    assert GeneratedCodeValidator().validate(code, PolicyAgent()) == []
+    assert completion_binding_errors(code, reserved=RESERVED) == []
+
+
+@pytest.mark.parametrize("reserved", [RESERVED, frozenset()])
+def test_unrelated_source_skips_ast_parsing(reserved):
+    """The source pre-check avoids parsing when no advertised helper can be rebound."""
+    with patch("nooa.strategies._completion_guard.ast.parse", side_effect=AssertionError):
+        assert completion_binding_errors("answer = 42", reserved=reserved) == []
+
+
+@pytest.mark.parametrize(
+    "code,name",
+    [
+        ("ｐｒｉｎｔ = 1", "print"),
+        ("ｄｏｃ = 1", "doc"),
+        ("ｒｅｔｕｒｎ＿ｒｅｓｕｌｔ = 1", "return_result"),
+    ],
+)
+def test_source_precheck_preserves_normalized_identifiers(code, name):
+    """Unicode identifier normalization cannot bypass the literal-name fast path."""
+    [error] = completion_binding_errors(code, reserved=RESERVED)
+    assert f"`{name}` is reserved" in error
+
+
+@pytest.mark.parametrize(
+    "global_name,local_name",
+    [
+        (global_name, local_name)
+        for global_name in sorted(RESERVED)
+        for local_name in sorted(RESERVED)
+        if global_name != local_name
+    ],
+)
+def test_global_declarations_only_protect_the_declared_name(global_name, local_name):
+    """A global declaration for one helper must not reserve independent function locals."""
+    code = f"def helper():\n    global {global_name}\n    {local_name} = 1"
+    assert completion_binding_errors(code, reserved=RESERVED) == []
+    [error] = completion_binding_errors(code + f"\n    {global_name} = 1", reserved=RESERVED)
+    assert f"`{global_name}` is reserved" in error
+
+
+def test_multiple_global_helpers_keep_source_order_and_independent_locals():
+    """Collect every declared helper while preserving source ordering and ordinary locals."""
+    errors = completion_binding_errors(
+        "def helper():\n    global doc, print\n    doc = 1\n    print = 2\n    return_result = 3",
+        reserved=RESERVED,
+    )
+    assert len(errors) == 2
+    assert errors[0].startswith("Line 3: `doc`")
+    assert errors[1].startswith("Line 4: `print`")
+
+
+def test_reserved_names_are_supplied_by_the_caller():
+    """A custom advertised helper is protected without hard-coding it into the visitor."""
+    reserved = frozenset({"custom_helper"})
+    assert completion_binding_errors("print = 1", reserved=reserved) == []
+    [error] = completion_binding_errors("custom_helper = 1", reserved=reserved)
+    assert "`custom_helper` is reserved" in error
