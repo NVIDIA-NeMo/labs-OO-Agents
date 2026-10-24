@@ -142,10 +142,14 @@ LIMITS = {
     # docs in python_cell_tools instead of the <skills> block, and a one-line
     # python_cell_state (2026-10-20): measured values plus about 2% headroom.
     # Final prompt cleanup: static workspace, one Todo definition, persistent Shell and Job.message.
-    (ATOM, "handle"): (19_100, 19_800),  # measured 18,669 / 19,398
-    (ATOM, "handle_batch"): (19_300, 20_100),  # measured 18,897 / 19,626
-    (ATOM, "handle_work"): (19_400, 20_200),  # measured 19,006 / 19,735
-    (ATOM, "handle_orchestrate"): (19_600, 20_400),  # measured 19,200 / 19,929
+    # Re-measured after merging dev/atom's #490 (AGENTS.md reload, 2026-10-24): the
+    # repository_instructions block is now always present, empty without an AGENTS.md,
+    # 230 characters more in the system prompt and in total for every row (was
+    # 18,669 / 19,398 for handle). Within the limits, so they stay.
+    (ATOM, "handle"): (19_100, 19_800),  # measured 18,899 / 19,628
+    (ATOM, "handle_batch"): (19_300, 20_100),  # measured 19,127 / 19,856
+    (ATOM, "handle_work"): (19_400, 20_200),  # measured 19,236 / 19,965
+    (ATOM, "handle_orchestrate"): (19_600, 20_400),  # measured 19,430 / 20,159
 }
 # The bench guard's system-prompt ceiling; every agent stays under it.
 BENCH_SYSTEM_LIMIT = 20_000

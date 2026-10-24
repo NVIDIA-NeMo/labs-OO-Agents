@@ -54,6 +54,7 @@ from nooa.agentdoc import pformat
 from nooa.context_blocks.events import EventBase, ResultStatus, ToolCallEvent
 from nooa.events import LLMResponse, PythonOutput, Summary
 from nooa.interactive import AgentMessage, Done, NeedInput, Waiting
+from nooa_atom.acp.protocol import POOLSIDE_DIALECT, PoolDialect
 from nooa_atom.agent.activity import (
     FileEdit,
     TerminalCommandFinished,
@@ -256,11 +257,15 @@ def end_line(update: Any) -> Any:
     return update
 
 
-POOL_INPUT_EVENT_ID = "poolside/inputEventId"
-POOL_CLIENT_INPUT_ID = "poolside/clientInputId"
+POOL_INPUT_EVENT_ID = POOLSIDE_DIALECT.input_event_id
+POOL_CLIENT_INPUT_ID = POOLSIDE_DIALECT.client_input_id
 
 
-def pool_input_event(item_id: str, client_input_id: str | None = None) -> SessionInfoUpdate:
+def pool_input_event(
+    item_id: str,
+    client_input_id: str | None = None,
+    dialects: tuple[PoolDialect, ...] = (POOLSIDE_DIALECT,),
+) -> SessionInfoUpdate:
     """The update Pool's own agent sends when it takes a person's input.
 
     Pool places a message it queued with ``_poolside/session_steer`` in the
@@ -268,11 +273,14 @@ def pool_input_event(item_id: str, client_input_id: str | None = None) -> Sessio
     ``poolside/clientInputId``; without it the message is never shown.
     Every input also carries a ``poolside/inputEventId``: here the item id,
     so it is the same live and when the transcript is replayed. Measured
-    with Pool 1.0.16 against its own agent (``pool acp``).
+    with Pool 1.0.16 against its own agent (``pool acp``). Pool 2 reads the
+    same two ids under ``pool/`` keys; ``dialects`` names the key sets sent.
     """
-    meta: dict[str, Any] = {POOL_INPUT_EVENT_ID: item_id}
-    if client_input_id is not None:
-        meta = {POOL_CLIENT_INPUT_ID: client_input_id, **meta}
+    meta: dict[str, Any] = {}
+    for dialect in dialects:
+        if client_input_id is not None:
+            meta[dialect.client_input_id] = client_input_id
+        meta[dialect.input_event_id] = item_id
     return SessionInfoUpdate(session_update="session_info_update", field_meta=meta)
 
 
@@ -329,6 +337,8 @@ class ACPEventBridge:
         self.client = client
         self.session_id = session.id
         self.verbosity: Verbosity = "verbose"
+        # The Pool meta key sets of input events (``pool_input_event``).
+        self.pool_dialects: tuple[PoolDialect, ...] = (POOLSIDE_DIALECT,)
         self._resolve_child = resolve_child
         self._own_sources = own_sources
         self._queue: asyncio.Queue[Any] = asyncio.Queue()
@@ -594,7 +604,10 @@ class ACPEventBridge:
 
     def _send_client_input(self, item_id: str, registration: _ClientInput) -> None:
         self._queue.put_nowait(
-            _InputEvent(pool_input_event(item_id, registration.client_id), registration.future)
+            _InputEvent(
+                pool_input_event(item_id, registration.client_id, self.pool_dialects),
+                registration.future,
+            )
         )
 
     def _on_session_update(self, update: Any) -> None:
@@ -696,6 +709,41 @@ class ACPEventBridge:
         if not isinstance(event, AgentMessage):
             return
         self._enqueue(update_agent_message(text_block(event.content)))
+        self._move_rolling_below()
+
+    def _move_rolling_below(self) -> None:
+        """Keep concise activity below the newest message.
+
+        A client shows a card where it was started and changes it in place, so
+        a rolling card updated after a message would stay above that message
+        and the agent would look idle. A slot whose cell has finished is
+        dropped: the next cell starts a new card below. A cell still running
+        moves: its old card is closed with a note, and a new card below the
+        message gets its later output.
+        """
+        for source, slot in list(self._rolling.items()):
+            card = self._open.get(slot.key)
+            if card is None or card.wire_id != slot.wire_id:
+                del self._rolling[source]
+                continue
+            self._enqueue(
+                update_tool_call(
+                    slot.wire_id,
+                    status="completed",
+                    content=_python_content(card.code, "Continued below."),
+                )
+            )
+            slot.wire_id = card.wire_id = f"concise-python-{uuid4()}"
+            self._enqueue(
+                start_tool_call(
+                    card.wire_id,
+                    self._card_title(slot.key, card),
+                    kind="other",
+                    status="in_progress",
+                    content=_python_content(card.code),
+                    raw_input={"code": card.code},
+                )
+            )
 
     def _on_tool_call(self, event: EventBase, source: str | None) -> None:
         if (

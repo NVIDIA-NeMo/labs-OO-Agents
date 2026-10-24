@@ -16,6 +16,7 @@ import inspect
 import logging
 import re
 import signal
+import uuid
 from collections.abc import Callable
 from contextlib import AbstractContextManager, nullcontext, suppress
 from pathlib import Path
@@ -71,7 +72,15 @@ from nooa_atom.acp.event_bridge import (
     pool_input_event,
 )
 from nooa_atom.acp.listing import list_sessions, validate_workspace
-from nooa_atom.acp.protocol import INJECT_CAPABILITY, initialize_response, open_stdio
+from nooa_atom.acp.protocol import (
+    INJECT_CAPABILITY,
+    POOL_DIALECT,
+    POOLSIDE_DIALECT,
+    PoolDialect,
+    initialize_response,
+    open_stdio,
+    pool_dialects,
+)
 from nooa_atom.acp.recover import COMMAND as RECOVER
 from nooa_atom.acp.recover import recover
 from nooa_atom.agent.slash_commands import RESERVED_COMMAND_NAMES
@@ -112,10 +121,11 @@ DEFAULT_REASONING = "default"
 
 _INJECT_METHOD = "nooa/session/inject"
 _REVOKE_METHOD = "nooa/session/revoke_inject"
-_POOL_FORM_METHOD = "poolside/elicitation"
-"""Pool's form request; ``ext_method`` sends it as ``_poolside/elicitation``."""
-_POOL_STEER_METHOD = "poolside/session_steer"
-"""``_poolside/session_steer`` as ``ext_method`` receives it (without the underscore)."""
+_POOL_STEER_METHODS = {
+    dialect.steer_method: dialect for dialect in (POOLSIDE_DIALECT, POOL_DIALECT)
+}
+"""``_poolside/session_steer`` and ``_pool/session_steer`` as ``ext_method``
+receives them (without the underscore), whatever the client's dialect."""
 
 SOURCE = "acp"
 """Already-visible client prompts/Pool inputs and permission answers; do not echo."""
@@ -264,7 +274,10 @@ class AtomACPAgent:
         self.client_capabilities: ClientCapabilities | None = None
         # The client is Pool (``clientInfo.name``): it gets Pool's input events.
         self._pool_client = False
-        # The client is Pool and has not failed a ``_poolside/elicitation`` request.
+        # The Pool dialects of this connection (``pool_dialects``): which
+        # meta keys input events carry and which form request Pool gets.
+        self._pool_dialects: tuple[PoolDialect, ...] = ()
+        # The client is Pool and has not failed a Pool form request.
         self._pool_forms = False
         self._bridges: dict[str, ACPEventBridge] = {}
         self._background: set[asyncio.Task[None]] = set()
@@ -341,9 +354,21 @@ class AtomACPAgent:
     ) -> InitializeResponse:
         del kwargs
         self.client_capabilities = client_capabilities
-        self._pool_client = client_info is not None and client_info.name == "pool"
+        self._pool_dialects = pool_dialects(client_info)
+        self._pool_client = bool(self._pool_dialects)
         self._pool_forms = self._pool_client
-        return initialize_response(protocol_version)
+        return initialize_response(protocol_version, client_info)
+
+    def _use_pool_dialect(self, dialect: PoolDialect) -> None:
+        """Speak only ``dialect`` from now on: the client just used its steer method.
+
+        Only narrows a Pool connection that was speaking several dialects
+        (its version did not say which); a known dialect stays as it is.
+        """
+        if len(self._pool_dialects) > 1 and dialect in self._pool_dialects:
+            self._pool_dialects = (dialect,)
+            for bridge in self._bridges.values():
+                bridge.pool_dialects = self._pool_dialects
 
     # ---- new -----------------------------------------------------------
 
@@ -488,7 +513,8 @@ class AtomACPAgent:
 
     async def ext_method(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         """``_nooa/session/inject``, ``revoke_inject`` (see ``_inject``), Pool's
-        ``_poolside/session_steer`` (see ``_pool_steer``) and ``delete``.
+        ``_poolside/session_steer`` or ``_pool/session_steer`` (see
+        ``_pool_steer``) and ``delete``.
 
         ``_nooa/session/delete``: ``sessionId``, optional ``keepFiles`` and ``cwd``.
 
@@ -499,8 +525,9 @@ class AtomACPAgent:
             return await self._inject(params)
         if method == _REVOKE_METHOD:
             return self._revoke_inject(params)
-        if method == _POOL_STEER_METHOD:
-            return await self._pool_steer(params)
+        dialect = _POOL_STEER_METHODS.get(method)
+        if dialect is not None:
+            return await self._pool_steer(params, dialect)
         if method != _DELETE_METHOD:
             raise RequestError.method_not_found(f"_{method}")
         session_id = params.get("sessionId")
@@ -563,8 +590,12 @@ class AtomACPAgent:
         self._injects.setdefault(session_id, {})[receipt.item_id] = receipt
         return {"messageId": receipt.item_id, "delivered": receipt.delivered}
 
-    async def _pool_steer(self, params: dict[str, Any]) -> dict[str, Any]:
+    async def _pool_steer(
+        self, params: dict[str, Any], dialect: PoolDialect | None = None
+    ) -> dict[str, Any]:
         """``_poolside/session_steer``: ``{sessionId, inputId, prompt}`` -> ``{inputId}``.
+
+        Pool 2's ``_pool/session_steer`` has the same params and answer.
 
         Pool sends what the person types during a running prompt. The text
         is queued for the next turn on ``user_messages``, as ``session/prompt``
@@ -596,6 +627,9 @@ class AtomACPAgent:
             raise RequestError.invalid_params(
                 {"reason": "A slash command cannot steer a turn; send it after the turn ends"}
             )
+        # Only a valid steer says which dialect the client speaks.
+        if dialect is not None:
+            self._use_pool_dialect(dialect)
         # Queued, not steered, on purpose until the Pool team says whether
         # this request means queue or steer. Handling it at all keeps the
         # message out of Pool's own queue, where Esc drops it.
@@ -685,7 +719,7 @@ class AtomACPAgent:
             await self._request_title(session, text)
             receipt = await session.submit(text, source=SOURCE)
             if self._pool_client:
-                bridge.publish(pool_input_event(receipt.item_id))
+                bridge.publish(pool_input_event(receipt.item_id, dialects=self._pool_dialects))
             self._prompts.setdefault(session_id, []).append(receipt)
             try:
                 return await self._finish(session, bridge, receipt.item_id)
@@ -772,12 +806,12 @@ class AtomACPAgent:
     async def _ask_verbosity(self, session: Session, question: str) -> Any:
         """Ask the client to pick a verbosity level in a form of its own.
 
-        Pool's ``_poolside/elicitation`` when the client is Pool, else a
-        standard ``elicitation/create`` form when the client advertised
-        ``elicitation.form``. Returns the chosen level, ``_DISMISSED`` when
-        the person declined or dismissed it, ``_CANCELLED`` when Stop ended
-        it, or ``None`` when no form could be shown or the answer is not a
-        level. A failed Pool request turns Pool forms off for this connection.
+        Pool's ``_poolside/elicitation`` (Pool 2: ``_pool/elicitation``) when
+        the client is Pool, else a standard ``elicitation/create`` form when
+        the client advertised ``elicitation.form``. Returns the chosen level,
+        ``_DISMISSED`` when the person declined or dismissed it, ``_CANCELLED``
+        when Stop ended it, or ``None`` when no form could be shown or the
+        answer is not a level. A failed Pool request turns Pool forms off for this connection.
         """
         conn = self._require_conn()
         via_pool = self._pool_forms
@@ -799,7 +833,12 @@ class AtomACPAgent:
                     "required": ["verbosity"],
                 },
             }
-            request = conn.ext_method(_POOL_FORM_METHOD, params)
+            # A Pool whose version did not say gets Pool 1's request.
+            dialect = self._pool_dialects[0]
+            if dialect.form_has_id:
+                # Pool 2 requires it: it ties the answer to the request.
+                params["elicitationId"] = uuid.uuid4().hex
+            request = conn.ext_method(dialect.form_method, params)
         elif self._client_shows_forms():
             field = ElicitationStringPropertySchema(
                 type="string",
@@ -1231,6 +1270,8 @@ class AtomACPAgent:
     def _attach(self, session: Session) -> ACPEventBridge:
         conn = self._require_conn()
         bridge = ACPEventBridge(session, conn, resolve_child=self.session)
+        if self._pool_dialects:
+            bridge.pool_dialects = self._pool_dialects
         bridge.set_verbosity(load_acp_verbosity(session.options.workspace))
         self._bridges[session.id] = bridge
 
@@ -1389,7 +1430,7 @@ class AtomACPAgent:
                 update_user_message(block) if entry.role == "user" else update_agent_message(block)
             )
             if pool and entry.role == "user" and entry.item_id:
-                bridge.publish(pool_input_event(entry.item_id))
+                bridge.publish(pool_input_event(entry.item_id, dialects=bridge.pool_dialects))
 
     @staticmethod
     def _prompt_text(prompt: list[Any]) -> str:

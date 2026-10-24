@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 from nooa_atom.agent import (
+    AtomAgent,
     SlashCommandRegistry,
     discover_agent_instruction_files,
 )
@@ -49,9 +50,72 @@ async def test_atom_agent_uses_observed_shell_and_instruction_context(tmp_path):
     agent = AtomAgentBase(llm=FakeLLMClient(), cwd=tmp_path)
     try:
         assert agent.shell.session is agent._base_shell.session
-        assert "run the focused tests" in str(agent.context["repository_instructions"])
+        assert "run the focused tests" in agent._repository_instructions()
         assert "nemo.shell" in agent.skills.activated()
         assert "nemo.repo" in agent.skills.activated()
+    finally:
+        await agent.aclose()
+
+
+async def test_repository_instructions_follow_file_changes(tmp_path):
+    """The block is hidden with no AGENTS.md, appears once one exists, and tracks edits."""
+    import os
+
+    (tmp_path / ".git").mkdir()
+    path = tmp_path / "AGENTS.md"
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    try:
+        raw = dict(agent.context_manager._raw_items())["repository_instructions"]
+        assert raw.expr == "self._repository_instructions()"
+        assert agent._repository_instructions() == ""
+
+        path.write_text("first rule")
+        os.utime(path, (1_800_000_000, 1_800_000_000))
+        first = agent._repository_instructions()
+        assert "first rule" in first
+        assert f"Instructions from {path} (updated 2027-01-15 08:00 UTC):" in first
+        assert agent._repository_instructions() is first  # unchanged: cached text
+
+        path.write_text("second rule, longer")
+        os.utime(path, (1_800_000_060, 1_800_000_060))
+        second = agent._repository_instructions()
+        assert "second rule" in second and "first rule" not in second
+        assert "(updated 2027-01-15 08:01 UTC)" in second
+
+        path.unlink()
+        assert agent._repository_instructions() == ""
+    finally:
+        await agent.aclose()
+
+
+async def test_repository_instructions_stay_with_the_startup_folder(tmp_path):
+    """Changing the shell's directory does not change which AGENTS.md is read."""
+    start, other = tmp_path / "start", tmp_path / "other"
+    for folder, rule in ((start, "start rule"), (other, "other rule")):
+        (folder / ".git").mkdir(parents=True)
+        (folder / "AGENTS.md").write_text(rule)
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=start)
+    try:
+        await agent.shell.run(f"cd {other}")
+        text = agent._repository_instructions()
+        assert "start rule" in text and "other rule" not in text
+    finally:
+        await agent.aclose()
+
+
+async def test_restored_static_instructions_become_the_dynamic_block(tmp_path):
+    """An earlier Atom saved AGENTS.md as static text; a restore sets the dynamic block again."""
+    from nooa import Context
+
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "AGENTS.md").write_text("current rule")
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    try:
+        agent.context["repository_instructions"] = Context("stale saved rule", prefix=True)
+        agent._install_context()  # what after_restore does with the restored blocks
+        raw = dict(agent.context_manager._raw_items())["repository_instructions"]
+        assert raw.expr == "self._repository_instructions()"
+        assert "current rule" in agent._repository_instructions()
     finally:
         await agent.aclose()
 

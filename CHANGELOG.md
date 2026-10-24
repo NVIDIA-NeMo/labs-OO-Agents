@@ -6,6 +6,13 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- `nooa-atom`: the ACP server speaks Pool 2's `pool/*` extensions as well as
+  Pool 1's `poolside/*` ones, picked per connection from `clientInfo`
+  (`name: "pool"`; version major 1 or 2; both for an unversioned build until
+  it steers). Pool 2 gets `pool/session_steer` advertised, `pool/inputEventId`
+  and `pool/clientInputId` input events, and `_pool/elicitation` forms with an
+  `elicitationId`; `_poolside/session_steer` and `_pool/session_steer` are both
+  accepted. Pool 1 and other clients get exactly what they got before.
 - `nooa-atom`: `/compact` is a built-in slash command. It sends the agent a
   short directive on its `slash_commands` channel ("Please compact your history
   now using self.events.collapse(...)", plus what to keep), and the agent

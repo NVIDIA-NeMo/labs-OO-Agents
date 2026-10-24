@@ -488,8 +488,9 @@ class AtomAgent(AtomAgentBase):
         ``self.shell``, ``JobsApi`` and ``delegate()``, and its ``queues`` block
         with the child and job hints. These replace them. The ``role`` block is
         the host's instructions for this build (none when they are empty), not
-        the saved copy. The other blocks (a user's own, the repository
-        instructions) are left as restored.
+        the saved copy. The ``repository_instructions`` block is set again as
+        the dynamic block over this run's startup folder (an earlier Atom saved
+        a static copy). The other blocks (a user's own) are left as restored.
         """
         self.context["python_cell_tools"] = Context(
             _tools_doc(
@@ -525,6 +526,11 @@ class AtomAgent(AtomAgentBase):
         else:
             self.context.pop("role", None)
         self._status_block()
+        # AGENTS.md from the startup folder, re-read when a file changes
+        # (``AtomAgentBase._repository_instructions``); empty while there is none.
+        self.context["repository_instructions"] = Context(
+            expr="self._repository_instructions()", prefix=True
+        )
 
     @hidden
     @no_trace

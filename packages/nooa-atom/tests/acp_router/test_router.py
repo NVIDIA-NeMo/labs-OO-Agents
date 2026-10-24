@@ -265,6 +265,19 @@ async def test_initialize_is_answered_without_a_worker(harness):
     assert harness.spawned == []
 
 
+async def test_initialize_advertises_pool_2_steer_to_pool_2(harness):
+    params = {
+        "protocolVersion": PROTOCOL_VERSION,
+        "clientCapabilities": {},
+        "clientInfo": {"name": "pool", "version": "v2.0.0-alpha"},
+    }
+    frame = await harness.initialize(params)
+    meta = frame.message["result"]["agentCapabilities"]["_meta"]
+    assert meta["pool/session_steer"] is True
+    assert "poolside/session_steer" not in meta
+    assert harness.spawned == []
+
+
 async def test_authenticate_and_unknown_methods_are_method_not_found(harness):
     for method in ("authenticate", "logout", "_nooa/other"):
         frame = await harness.call(method, {})
