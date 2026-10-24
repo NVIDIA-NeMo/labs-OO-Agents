@@ -67,6 +67,7 @@ class WizardState:
     probe: Any = None
     prompt_key: Any = None
     proposal: Any = None
+    saved_alias: Any = None
     provider: Any = None
     reasoning_level: Any = None
     reasoning_output_tokens: Any = None
@@ -1309,6 +1310,7 @@ def save_model(state: WizardState) -> bool:
                         fg="yellow",
                     )
         connect.write(state.result.entry, state.path, alias=state.alias)
+        state.saved_alias = state.alias
         click.echo(f"Saved {state.alias} to {state.path}.")
         view.line(
             f"Interface: {state.api_style} · decision model: {state.result.entry['model_name']}"
@@ -1337,7 +1339,11 @@ def save_model(state: WizardState) -> bool:
 
 
 def run_wizard(**options):
-    """Run ordered steps with one shared budget and an explicit save decision."""
+    """Run ordered steps with one shared budget and an explicit save decision.
+
+    Returns the alias written, or ``None`` when nothing was saved (``nooa
+    atom --connect`` reports that as its exit code; ``nooa connect`` ignores it).
+    """
     state = WizardState(**options)
     state.path = Path(state.output) if state.output else paths.get_user_dir("llm_config.yaml")
     state.api_key = None
@@ -1355,7 +1361,7 @@ def run_wizard(**options):
             save_model,
         ):
             if not step(state):
-                return
+                return None
     except (ValueError, OSError, yaml.YAMLError, httpx.HTTPError) as exc:
         detail = view.local_failure(exc, api_key=state.api_key, api_key_env=state.api_key_env)
         if state.show_diagnostics:
@@ -1381,3 +1387,4 @@ def run_wizard(**options):
         else:
             view.line("For troubleshooting details, rerun with --show-diagnostics.", dim=True)
         raise click.ClickException(detail) from None
+    return state.saved_alias
