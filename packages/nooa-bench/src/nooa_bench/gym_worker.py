@@ -10,6 +10,9 @@ When the sandbox supervisor stops the worker at the agent's time budget it sends
 SIGTERM and waits a short grace period before SIGKILL. The worker uses that window
 to stop the agent and write the episode it has so far with stop reason
 ``timeout_exceeded``, so Gym grades the sandbox state instead of failing the rollout.
+The checkpoint is written the moment the run is interrupted, before any cleanup, and
+only SIGTERM earns it: SIGINT, an internal cancellation or a crash leave no result and
+stay failures. Gym cross-checks the stop reason against the supervisor's receipt.
 """
 
 from __future__ import annotations
@@ -79,12 +82,30 @@ async def main(input_path: Path, output_path: Path) -> None:
     accepts_any = any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
     kwargs = extra if accepts_any else {k: v for k, v in extra.items() if k in params}
 
-    # The supervisor's SIGTERM at the time budget cancels the run; run_gym_episode turns that
-    # into a `timeout_exceeded` episode and the result below is still written.
+    # Only the supervisor's SIGTERM (sent at the agent's time budget) makes a cancelled run a
+    # `timeout_exceeded` episode. Any other cancellation, and SIGINT, propagate and leave no result,
+    # so they stay failures on the Gym side instead of becoming a gradable timeout.
+    stop: dict[str, str | None] = {"signal": None}
     run = asyncio.current_task()
     assert run is not None
+
+    def on_sigterm() -> None:
+        stop["signal"] = "SIGTERM"
+        run.cancel()
+
+    def write(episode) -> None:
+        episode.runtime = {
+            "python": sys.executable,
+            "version": sys.version.split()[0],
+            "hostname": socket.gethostname(),
+            **({"stop_signal": stop["signal"]} if stop["signal"] else {}),
+        }
+        tmp = output_path.with_suffix(".tmp")
+        tmp.write_text(episode.to_json())
+        tmp.replace(output_path)
+
     loop = asyncio.get_running_loop()
-    loop.add_signal_handler(signal.SIGTERM, run.cancel)
+    loop.add_signal_handler(signal.SIGTERM, on_sigterm)
     try:
         episode = await run_gym_episode(
             lambda llm: agent_cls(llm=llm, **kwargs),
@@ -98,18 +119,14 @@ async def main(input_path: Path, output_path: Path) -> None:
             context_window=payload.get("context_window"),
             replay_reasoning=bool(payload.get("replay_reasoning", False)),
             media_inputs=tuple(payload.get("media_inputs") or ()),
-            interrupt_stop_reason="timeout_exceeded",
+            interrupt=lambda: "timeout_exceeded" if stop["signal"] else None,
+            # Written the moment the run is interrupted, before the agent and the HTTP client
+            # clean up: the supervisor's TERM grace is short and a slow cleanup must not lose it.
+            checkpoint=write,
         )
     finally:
         loop.remove_signal_handler(signal.SIGTERM)
-    episode.runtime = {
-        "python": sys.executable,
-        "version": sys.version.split()[0],
-        "hostname": socket.gethostname(),
-    }
-    tmp = output_path.with_suffix(".tmp")
-    tmp.write_text(episode.to_json())
-    tmp.replace(output_path)
+    write(episode)
 
 
 if __name__ == "__main__":

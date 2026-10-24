@@ -598,6 +598,7 @@ async def _wait_for(predicate, timeout: float = 10) -> None:
 
 async def test_an_interrupted_episode_keeps_its_records_when_asked():
     log: list[dict] = []
+    checkpoints: list[GymEpisode] = []
     release = asyncio.Event()
     server, task, port = await _serve(_stalling_app(log, release))
     try:
@@ -608,7 +609,8 @@ async def test_an_interrupted_episode_keeps_its_records_when_asked():
                 ),
                 lambda agent: agent.solve("say hi"),
                 model_url=f"http://127.0.0.1:{port}/ng-rollout/r1/v1",
-                interrupt_stop_reason="timeout_exceeded",
+                interrupt=lambda: "timeout_exceeded",
+                checkpoint=checkpoints.append,
             )
         )
         await _wait_for(lambda: len(log) == 2)
@@ -619,6 +621,9 @@ async def test_an_interrupted_episode_keeps_its_records_when_asked():
         server.should_exit = True
         await task
     assert episode.stop_reason == "timeout_exceeded" and episode.return_value is None
+    # The checkpoint was handed out at the interruption, before cleanup, with the same content.
+    assert [c.stop_reason for c in checkpoints] == ["timeout_exceeded"]
+    assert checkpoints[0].to_json() == episode.to_json()
     assert [r.status_code for r in episode.model_calls] == [
         200,
         None,
@@ -696,5 +701,109 @@ async def test_worker_checkpoints_its_episode_on_sigterm(tmp_path):
         await task
     episode = GymEpisode.from_json(result.read_text())
     assert episode.stop_reason == "timeout_exceeded"
+    assert episode.runtime["stop_signal"] == "SIGTERM"
     assert [r.status_code for r in episode.model_calls] == [200, None]
     assert episode.runtime["python"] == sys.executable
+
+
+async def test_an_interrupt_that_declines_lets_the_cancellation_propagate():
+    """`interrupt` returning None is the worker's answer to any cancellation it did not ask for."""
+    log: list[dict] = []
+    release = asyncio.Event()
+    server, task, port = await _serve(_stalling_app(log, release))
+    try:
+        run = asyncio.create_task(
+            run_gym_episode(
+                lambda llm: ShellAgent(
+                    llm=llm, run_command=lambda c: asyncio.sleep(0, result="hi\n[exit 0]")
+                ),
+                lambda agent: agent.solve("say hi"),
+                model_url=f"http://127.0.0.1:{port}/ng-rollout/r1/v1",
+                interrupt=lambda: None,
+                checkpoint=lambda episode: pytest.fail("no checkpoint without a stop reason"),
+            )
+        )
+        await _wait_for(lambda: len(log) == 2)
+        run.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await run
+    finally:
+        release.set()
+        server.should_exit = True
+        await task
+
+
+class SelfCancellingAgent(ShellAgent):
+    """Probe: an internal cancellation of the worker's task, not requested by the supervisor."""
+
+    async def solve(self, task: str) -> str:
+        asyncio.current_task().cancel()
+        await asyncio.sleep(0)
+        return "unreachable"
+
+
+async def _worker(tmp_path, port: int, agent: str, *, env_extra: dict | None = None):
+    import os
+    import sys
+
+    inputs, result = tmp_path / "input.json", tmp_path / "result.json"
+    inputs.write_text(
+        json.dumps(
+            {
+                "task": "say hi",
+                "agent": agent,
+                "model_url": f"http://127.0.0.1:{port}/ng-rollout/r1/v1",
+                "workdir": str(tmp_path),
+            }
+        )
+    )
+    env = dict(os.environ)
+    # The probe agents live in this test module; make it importable by the worker process.
+    env["PYTHONPATH"] = os.pathsep.join(
+        filter(None, [str(__import__("pathlib").Path(__file__).parent), env.get("PYTHONPATH")])
+    )
+    env.update(env_extra or {})
+    process = await asyncio.create_subprocess_exec(
+        sys.executable, "-m", "nooa_bench.gym_worker", str(inputs), str(result), env=env
+    )
+    return process, result
+
+
+async def test_worker_leaves_no_result_on_sigint(tmp_path):
+    import signal
+
+    log: list[dict] = []
+    release = asyncio.Event()
+    server, task, port = await _serve(_stalling_app(log, release))
+    process, result = await _worker(tmp_path, port, "nooa_bench.gym:ShellAgent")
+    try:
+        await _wait_for(lambda: len(log) == 2, timeout=60)
+        process.send_signal(signal.SIGINT)
+        async with asyncio.timeout(10):
+            code = await process.wait()
+    finally:
+        if process.returncode is None:
+            process.kill()
+            await process.wait()
+        release.set()
+        server.should_exit = True
+        await task
+    assert code != 0 and not result.exists()
+
+
+async def test_worker_leaves_no_result_on_an_internal_cancellation(tmp_path):
+    log: list[dict] = []
+    release = asyncio.Event()
+    server, task, port = await _serve(_stalling_app(log, release))
+    process, result = await _worker(tmp_path, port, "test_gym:SelfCancellingAgent")
+    try:
+        async with asyncio.timeout(60):
+            code = await process.wait()
+    finally:
+        if process.returncode is None:
+            process.kill()
+            await process.wait()
+        release.set()
+        server.should_exit = True
+        await task
+    assert code != 0 and not result.exists()
