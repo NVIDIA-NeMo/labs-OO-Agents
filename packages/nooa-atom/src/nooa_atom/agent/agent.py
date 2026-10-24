@@ -548,7 +548,10 @@ class AtomAgent(AtomAgentBase):
         def shown(path: object) -> str:
             return escape(_bounded(str(path), 160), quote=False)
 
-        text = f"Workspace: {shown(self.cwd)} — base for file paths and new shells."
+        text = (
+            f"Workspace: {shown(self.cwd)} — files/repo/new Shells.\n"
+            "Python paths use cell cwd, not Shell cwd."
+        )
         if self.repo.root != self.cwd:
             text += f"\nRepository root: {shown(self.repo.root)} (search boundary)."
         return text

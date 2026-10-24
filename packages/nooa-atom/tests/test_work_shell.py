@@ -386,6 +386,58 @@ async def test_named_job_of_run_result_and_event(manager, tmp_path):
         await shell.aclose()
 
 
+async def test_coroutine_job_summary_uses_cwd_when_command_starts(manager, tmp_path, monkeypatch):
+    """A queued command must not inherit the cwd from before the preceding cd."""
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    async with Shell(tmp_path) as shell:
+        await shell.run("true")
+        original = shell._session.run_with_timeout_flag
+        started = [asyncio.Event(), asyncio.Event()]
+        release = [asyncio.Event(), asyncio.Event()]
+        calls = 0
+
+        async def gated(*args, **kwargs):
+            nonlocal calls
+            index = calls
+            calls += 1
+            started[index].set()
+            await release[index].wait()
+            return await original(*args, **kwargs)
+
+        monkeypatch.setattr(shell._session, "run_with_timeout_flag", gated)
+        first = manager.launch(shell.run("cd sub"), name="change_directory")
+        second = None
+        try:
+            await asyncio.wait_for(started[0].wait(), 5)
+            queued = asyncio.Event()
+
+            async def queued_run():
+                queued.set()
+                return await shell.run("pwd")
+
+            second = manager.launch(queued_run(), name="probe")
+            await asyncio.wait_for(queued.wait(), 5)
+            assert second.summary == "$ pwd"  # no guessed directory while queued
+            release[0].set()
+            await first
+            await asyncio.wait_for(started[1].wait(), 5)
+            assert second.status == "running"
+            assert second.summary == f"$ pwd · cwd {sub}"
+            assert manager.get("probe").summary == second.summary
+            release[1].set()
+            assert (await second).stdout == f"{sub}\n"
+        finally:
+            for gate in release:
+                gate.set()
+            await asyncio.wait_for(
+                asyncio.gather(
+                    *[job for job in (first, second) if job is not None], return_exceptions=True
+                ),
+                10,
+            )
+
+
 async def test_dropped_shell_ends_its_bash(tmp_path):
     pid = int((await Shell(tmp_path).run("echo $$")).stdout)  # a temporary
     await until_dead(pid)
