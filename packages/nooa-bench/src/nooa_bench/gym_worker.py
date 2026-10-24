@@ -4,7 +4,12 @@
 
 The worker needs NOOA only. Gym's model server already holds the authoritative
 copy of every model call, so the result file is the episode summary, not the
-sole evidence; there is nothing to checkpoint.
+sole evidence.
+
+When the sandbox supervisor stops the worker at the agent's time budget it sends
+SIGTERM and waits a short grace period before SIGKILL. The worker uses that window
+to stop the agent and write the episode it has so far with stop reason
+``timeout_exceeded``, so Gym grades the sandbox state instead of failing the rollout.
 """
 
 from __future__ import annotations
@@ -14,6 +19,7 @@ import importlib
 import inspect
 import json
 import shlex
+import signal
 import socket
 import sys
 from pathlib import Path
@@ -73,19 +79,29 @@ async def main(input_path: Path, output_path: Path) -> None:
     accepts_any = any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
     kwargs = extra if accepts_any else {k: v for k, v in extra.items() if k in params}
 
-    episode = await run_gym_episode(
-        lambda llm: agent_cls(llm=llm, **kwargs),
-        lambda agent: agent.solve(payload["task"]),
-        model_url=payload["model_url"],
-        model_name=payload.get("model_name", "gym-policy"),
-        max_policy_calls=payload.get("max_policy_calls"),
-        extra_headers=payload.get("headers") or {},
-        cookies=payload.get("cookies") or {},
-        resource_cookies=resource_cookies,
-        context_window=payload.get("context_window"),
-        replay_reasoning=bool(payload.get("replay_reasoning", False)),
-        media_inputs=tuple(payload.get("media_inputs") or ()),
-    )
+    # The supervisor's SIGTERM at the time budget cancels the run; run_gym_episode turns that
+    # into a `timeout_exceeded` episode and the result below is still written.
+    run = asyncio.current_task()
+    assert run is not None
+    loop = asyncio.get_running_loop()
+    loop.add_signal_handler(signal.SIGTERM, run.cancel)
+    try:
+        episode = await run_gym_episode(
+            lambda llm: agent_cls(llm=llm, **kwargs),
+            lambda agent: agent.solve(payload["task"]),
+            model_url=payload["model_url"],
+            model_name=payload.get("model_name", "gym-policy"),
+            max_policy_calls=payload.get("max_policy_calls"),
+            extra_headers=payload.get("headers") or {},
+            cookies=payload.get("cookies") or {},
+            resource_cookies=resource_cookies,
+            context_window=payload.get("context_window"),
+            replay_reasoning=bool(payload.get("replay_reasoning", False)),
+            media_inputs=tuple(payload.get("media_inputs") or ()),
+            interrupt_stop_reason="timeout_exceeded",
+        )
+    finally:
+        loop.remove_signal_handler(signal.SIGTERM)
     episode.runtime = {
         "python": sys.executable,
         "version": sys.version.split()[0],

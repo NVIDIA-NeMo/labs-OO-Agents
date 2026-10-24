@@ -88,7 +88,7 @@ class GymEpisode:
     model_calls: list[ModelCallRecord]
     tool_calls: list[ToolCallRecord]
     return_value: Any
-    stop_reason: str  # completed | policy_budget_exceeded | max_output_tokens_exceeded | max_iterations_exceeded | loop_detected | retry_limit_exceeded | error
+    stop_reason: str  # completed | policy_budget_exceeded | max_output_tokens_exceeded | max_iterations_exceeded | loop_detected | retry_limit_exceeded | timeout_exceeded | error
     error: str | None = None
     resource_cookies: dict[str, str] = field(default_factory=dict)
     # Where the agent ran (interpreter path, version, host), filled in by the worker.
@@ -538,6 +538,7 @@ async def run_gym_episode(
     context_window: int | None = None,
     replay_reasoning: bool = False,
     media_inputs: tuple[str, ...] = (),
+    interrupt_stop_reason: str | None = None,
 ) -> GymEpisode:
     """Run one NOOA agent activation against a Gym model server and return the evidence.
 
@@ -545,6 +546,10 @@ async def run_gym_episode(
     :func:`resource_tools` update it in place and the episode reports it back.
     ``media_inputs`` lists what the policy accepts (``image``, ``audio``, ``video``, ``pdf``);
     empty is text-only.
+    ``interrupt_stop_reason`` turns a cancellation of this coroutine into a finished episode
+    with that stop reason, keeping the model and tool calls made so far (the worker uses it
+    when the sandbox supervisor stops it at the agent's time budget). By default a
+    cancellation propagates.
     """
     model_calls: list[ModelCallRecord] = []
     tool_calls: list[ToolCallRecord] = []
@@ -575,6 +580,10 @@ async def run_gym_episode(
         stop_reason, error = _classify(exc)
     except Exception as exc:
         stop_reason, error = _classify(exc)
+    except asyncio.CancelledError:
+        if interrupt_stop_reason is None:
+            raise
+        stop_reason, error = interrupt_stop_reason, "the agent was stopped before it finished"
     finally:
         cookies_out = {c.name: c.value for c in client._http.httpx_async.cookies.jar}
         if cookies is not None:

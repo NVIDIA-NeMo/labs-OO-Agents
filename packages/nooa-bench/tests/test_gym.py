@@ -550,3 +550,151 @@ async def test_images_are_replaced_by_a_note_when_media_is_off():
     content = await _image_request_content(media_inputs=())
     assert all(block["type"] == "input_text" for block in content), content
     assert len(content) == 2 and "image" in content[1]["text"].lower(), content
+
+
+# --- stopping at the time budget --------------------------------------------------------------
+
+
+def _stalling_app(log: list[dict], release: asyncio.Event) -> FastAPI:
+    """First turn: a shell call; the second request stalls until ``release`` is set."""
+    app = FastAPI()
+
+    @app.post("/ng-rollout/{rollout_id}/v1/responses")
+    async def responses(rollout_id: str, request: Request):
+        log.append({"body": await request.json()})
+        if len(log) > 1:
+            await asyncio.wait_for(release.wait(), 30)
+        return JSONResponse(
+            {
+                "id": "resp_1",
+                "object": "response",
+                "created_at": 1,
+                "status": "completed",
+                "error": None,
+                "incomplete_details": None,
+                "model": "gym-policy",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "id": "fc_1",
+                        "call_id": "call_1",
+                        "name": "shell",
+                        "status": "completed",
+                        "arguments": json.dumps({"command": "echo hi"}),
+                    }
+                ],
+                "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+            }
+        )
+
+    return app
+
+
+async def _wait_for(predicate, timeout: float = 10) -> None:
+    async with asyncio.timeout(timeout):
+        while not predicate():
+            await asyncio.sleep(0.02)
+
+
+async def test_an_interrupted_episode_keeps_its_records_when_asked():
+    log: list[dict] = []
+    release = asyncio.Event()
+    server, task, port = await _serve(_stalling_app(log, release))
+    try:
+        run = asyncio.create_task(
+            run_gym_episode(
+                lambda llm: ShellAgent(
+                    llm=llm, run_command=lambda c: asyncio.sleep(0, result="hi\n[exit 0]")
+                ),
+                lambda agent: agent.solve("say hi"),
+                model_url=f"http://127.0.0.1:{port}/ng-rollout/r1/v1",
+                interrupt_stop_reason="timeout_exceeded",
+            )
+        )
+        await _wait_for(lambda: len(log) == 2)
+        run.cancel()
+        episode = await run
+    finally:
+        release.set()
+        server.should_exit = True
+        await task
+    assert episode.stop_reason == "timeout_exceeded" and episode.return_value is None
+    assert [r.status_code for r in episode.model_calls] == [
+        200,
+        None,
+    ]  # the stalled call stays pending
+    assert [t.name for t in episode.tool_calls] == ["shell"]
+    # The summary comes from the last finished call; the stalled call's input is not replayed.
+    assert [i["type"] for i in episode.output_items] == ["function_call"]
+    GymEpisode.from_json(episode.to_json())  # the checkpoint is a complete, serialisable episode
+
+
+async def test_an_interrupted_episode_propagates_the_cancellation_by_default():
+    log: list[dict] = []
+    release = asyncio.Event()
+    server, task, port = await _serve(_stalling_app(log, release))
+    try:
+        run = asyncio.create_task(
+            run_gym_episode(
+                lambda llm: ShellAgent(
+                    llm=llm, run_command=lambda c: asyncio.sleep(0, result="hi\n[exit 0]")
+                ),
+                lambda agent: agent.solve("say hi"),
+                model_url=f"http://127.0.0.1:{port}/ng-rollout/r1/v1",
+            )
+        )
+        await _wait_for(lambda: len(log) == 2)
+        run.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await run
+    finally:
+        release.set()
+        server.should_exit = True
+        await task
+
+
+async def test_worker_checkpoints_its_episode_on_sigterm(tmp_path):
+    """The sandbox supervisor sends SIGTERM at the agent's time budget and waits a short grace
+    period; the worker must leave result.json behind so Gym grades the sandbox state."""
+    import os
+    import signal
+    import sys
+
+    log: list[dict] = []
+    release = asyncio.Event()
+    server, task, port = await _serve(_stalling_app(log, release))
+    inputs, result = tmp_path / "input.json", tmp_path / "result.json"
+    inputs.write_text(
+        json.dumps(
+            {
+                "task": "say hi",
+                "agent": "nooa_bench.gym:ShellAgent",
+                "model_url": f"http://127.0.0.1:{port}/ng-rollout/r1/v1",
+                "workdir": str(tmp_path),
+            }
+        )
+    )
+    process = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-m",
+        "nooa_bench.gym_worker",
+        str(inputs),
+        str(result),
+        env=dict(os.environ),
+    )
+    try:
+        await _wait_for(lambda: len(log) == 2, timeout=60)
+        process.send_signal(signal.SIGTERM)
+        async with asyncio.timeout(10):  # well inside the supervisor's TERM grace
+            assert await process.wait() == 0
+    finally:
+        if process.returncode is None:
+            process.kill()
+            await process.wait()
+        release.set()
+        server.should_exit = True
+        await task
+    episode = GymEpisode.from_json(result.read_text())
+    assert episode.stop_reason == "timeout_exceeded"
+    assert [r.status_code for r in episode.model_calls] == [200, None]
+    assert episode.runtime["python"] == sys.executable
