@@ -33,6 +33,7 @@ with _hidden:
 
     from nooa import Agent, Context, no_trace, strategy
     from nooa.agentdoc import doc, spec
+    from nooa.atif import atif_scope
     from nooa.config import CodeActConfig, LoopGuardConfig
     from nooa.interactive import SummarizationConfig, install_summarizer
     from nooa.strategies import CodeActV2
@@ -260,7 +261,8 @@ class BenchAgent(
             summarization=self._summarization,
         )
         try:
-            return await subagent._solve_task(str(objective), supplied_context=supplied_context)
+            async with atif_scope(subagent, inherit_parent=True):
+                return await subagent._solve_task(str(objective), supplied_context=supplied_context)
         finally:
             await subagent.close()
 
