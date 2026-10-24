@@ -735,9 +735,10 @@ async def test_an_interrupt_that_declines_lets_the_cancellation_propagate():
 
 
 class SelfCancellingAgent(ShellAgent):
-    """Probe: an internal cancellation of the worker's task, not requested by the supervisor."""
+    """Probe: an internal cancellation of the worker's task, raised from inside a tool call
+    (so the probe has made one model call before it misbehaves)."""
 
-    async def solve(self, task: str) -> str:
+    async def shell(self, command: str) -> str:
         asyncio.current_task().cancel()
         await asyncio.sleep(0)
         return "unreachable"
@@ -807,4 +808,5 @@ async def test_worker_leaves_no_result_on_an_internal_cancellation(tmp_path):
         release.set()
         server.should_exit = True
         await task
+    assert len(log) == 1  # the probe ran: one model call, then it cancelled itself
     assert code != 0 and not result.exists()
