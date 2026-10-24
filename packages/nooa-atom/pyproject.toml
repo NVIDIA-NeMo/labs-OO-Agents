@@ -18,6 +18,9 @@ dependencies = [
     "websockets>=14",
 ]
 
+[project.entry-points."nooa.skills"]
+"nemo.multimodal" = "nooa_atom.skills.multimodal:Multimodal"
+
 [project.entry-points."nooa_cli.commands"]
 atom = "nooa_atom.acp.cli:command"
 
