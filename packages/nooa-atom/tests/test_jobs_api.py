@@ -1148,3 +1148,73 @@ async def test_job_updates_are_counted_by_job_path_in_the_unread_list(agent):
     agent.jobs.after(0, name="timer", payload="check CI")
     await _until(lambda: agent.jobs.get("timer").state == "done")
     assert agent.queue_manager.status() == "Unread:\n  • jobs: 1 (from /root/timer)"
+
+
+# ---- replace=True: the old job is stopped only once the new one can start ----
+
+
+async def test_replace_with_a_log_that_cannot_be_opened_leaves_the_old_job_running(agent, tmp_path):
+    await agent.jobs.run("sleep 30", name="old")
+    old = agent.jobs.get("old")
+    (tmp_path / "afile").write_text("")
+    with pytest.raises(OSError):  # the log's parent is a file
+        await agent.jobs.run("true", name="old", log_path="afile/out.log", replace=True)
+    current = agent.jobs.get("old")
+    assert current.state == "running" and current.started_at == old.started_at
+    assert current.target == "sleep 30"
+    await agent.jobs.cancel("old")
+
+
+def _gate_shell_context(agent, during):
+    """Run ``during()`` inside ``run``'s await, before the job is created."""
+    original = agent.jobs._shell_context
+
+    async def gated():
+        context = await original()
+        during()
+        return context
+
+    agent.jobs._shell_context = gated
+
+
+@pytest.mark.skipif(not Path("/proc/self/fd").exists(), reason="needs /proc")
+async def test_a_name_taken_by_a_child_during_the_await_keeps_the_old_job_and_closes_the_log(
+    agent, tmp_path
+):
+    await agent.jobs.run("sleep 30", name="srv")
+    old = agent.jobs.get("srv")
+    log = tmp_path / "new.log"
+    _gate_shell_context(
+        agent,
+        lambda: setattr(agent, "_child_using_name", lambda n: "/root/srv" if n == "srv" else None),
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with pytest.raises(ValueError, match="already used by child"):
+            await agent.jobs.run("true", name="srv", log_path=log, replace=True)
+        gc.collect()
+    assert _open_fds_on(log) == 0
+    assert [
+        w for w in caught if issubclass(w.category, ResourceWarning)
+    ] == []  # closed, not leaked
+    current = agent.jobs.get("srv")
+    assert current.state == "running" and current.started_at == old.started_at
+    del agent._child_using_name
+    await agent.jobs.cancel("srv")
+
+
+@pytest.mark.skipif(not Path("/proc/self/fd").exists(), reason="needs /proc")
+async def test_a_name_taken_by_a_job_during_the_await_closes_the_log(agent, tmp_path):
+    log = tmp_path / "new.log"
+    _gate_shell_context(agent, lambda: agent.jobs.after(30, name="t"))
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with pytest.raises(ValueError, match="already running"):
+            await agent.jobs.run("true", name="t", log_path=log)
+        gc.collect()
+    assert _open_fds_on(log) == 0
+    assert [
+        w for w in caught if issubclass(w.category, ResourceWarning)
+    ] == []  # closed, not leaked
+    assert agent.jobs.get("t").kind == "after"
+    await agent.jobs.cancel("t")

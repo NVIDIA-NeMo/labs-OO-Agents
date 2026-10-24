@@ -493,6 +493,13 @@ class JobsApi(Skill):
     @hidden
     def _claim(self, name: str, replace: bool) -> None:
         """Check ``name`` is free, first stopping its running job if ``replace``."""
+        self._check_free(name, replace)
+        if replace:
+            self._stop_now(name)
+
+    @hidden
+    def _check_free(self, name: str, replace: bool) -> None:
+        """Raise unless ``_claim(name, replace)`` would succeed; stops nothing."""
         check_name(name, "job", self._queues.channels())
         child = self._child_using(name)
         if child:
@@ -501,7 +508,7 @@ class JobsApi(Skill):
                 f"close the child first (await self.child({name!r}).close())"
             )
         if replace:
-            self._stop_now(name)
+            return
         current = self._jobs.get(name)
         if current is not None and current.state == "running":
             raise ValueError(
@@ -958,7 +965,8 @@ class JobsApi(Skill):
             await self.jobs.run("uv run pytest -q", name="tests", log_path="logs/tests.log")
             return_result(Waiting(explanation="tests running", on=["tests"]))
         """
-        # Every argument is checked before _claim, which stops the old job on replace=True.
+        # Every argument, the name and the log file are checked before _claim (in
+        # _new_job), which stops the old job on replace=True.
         if not isinstance(cmd, str):
             raise TypeError(f"cmd must be a string, got {cmd!r}")
         if stdin is not None and not isinstance(stdin, str):
@@ -971,7 +979,7 @@ class JobsApi(Skill):
             _check_seconds(timeout)
         _check_description(description)
         throttle = _throttle(items, seconds)
-        self._claim(name, replace)  # fail before the await
+        self._check_free(name, replace)  # fail before the await, stopping nothing
         context = await self._shell_context()
         log = None
         if log_path is not None:
@@ -980,9 +988,15 @@ class JobsApi(Skill):
             resolved.parent.mkdir(parents=True, exist_ok=True)
             # Line-buffered, so the file can be read while the job runs.
             log = open(resolved, "w", encoding="utf-8", errors="replace", buffering=1)  # noqa: SIM115
-        job = self._new_job(
-            name, "run", throttle, target=cmd, description=description, replace=replace
-        )
+        try:
+            # Claims again: a child or job may have taken the name during the await.
+            job = self._new_job(
+                name, "run", throttle, target=cmd, description=description, replace=replace
+            )
+        except BaseException:
+            if log is not None:
+                log.close()
+            raise
         if log is not None:
             job.log_path = log.name
         return self._start(job, self._run_job(job, cmd, stdin, timeout, cwd, context, log))
