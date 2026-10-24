@@ -185,7 +185,7 @@ async def test_shell_reports_confirmed_cwd_and_busy_state(manager, tmp_path):
     slow = sh.send("cd / && sleep 60")
     await asyncio.sleep(0.3)
     assert sh.summary.startswith("running $ cd / && sleep 60 · was in ")  # pending, not guessed
-    assert slow.summary == "$ cd / && sleep 60"
+    assert slow.summary == f"$ cd / && sleep 60 · cwd {tmp_path / 'later' / 'd'}"
     await slow.cancel()
     assert shell.current_dir == "/"  # confirmed by bash once the command ended
     spin = sh.send("while :; do :; done")
