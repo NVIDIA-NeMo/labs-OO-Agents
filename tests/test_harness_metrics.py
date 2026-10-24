@@ -986,27 +986,13 @@ class TestToolUsageMetrics:
             m.repo_failure(f"method_{i}", f"msg_{i}")
         assert len(m.repo_failures) == _MAX_LIST_ITEMS
 
-    def test_tool_avoided(self):
-        m = HarnessMetrics()
-        m.tool_avoided("bash(sed -i 's/foo/bar/g' file.py) -> should use shell.edit")
-        assert len(m.tool_avoidance) == 1
-        assert "sed -i" in m.tool_avoidance[0]
-
-    def test_tool_avoided_respects_max_items(self):
-        m = HarnessMetrics()
-        for i in range(_MAX_LIST_ITEMS + 5):
-            m.tool_avoided(f"avoidance_{i}")
-        assert len(m.tool_avoidance) == _MAX_LIST_ITEMS
-
     def test_tool_usage_span_attributes(self):
         m = HarnessMetrics()
         m.shell_failure("bash:exit_2", "No such file")
         m.repo_failure("search_symbol:no_results", "No matches for 'foo'")
-        m.tool_avoided("bash(cat foo.py) -> should use shell.view")
         attrs = m.to_span_attributes()
         assert attrs["harness.shell_failure.count"] == 1
         assert attrs["harness.repo_failure.count"] == 1
-        assert attrs["harness.tool_avoidance.count"] == 1
         assert attrs["harness.shell_failure.methods"] == ["bash:exit_2"]
         assert attrs["harness.repo_failure.methods"] == ["search_symbol:no_results"]
 
@@ -1015,10 +1001,8 @@ class TestToolUsageMetrics:
         attrs = m.to_span_attributes()
         assert "harness.shell_failure.count" not in attrs
         assert "harness.repo_failure.count" not in attrs
-        assert "harness.tool_avoidance.count" not in attrs
 
     def test_null_metrics_tool_methods_are_noop(self):
         null = _NullMetrics()
         null.shell_failure("bash:exit_1", "msg")
         null.repo_failure("filemap:file_not_found", "msg")
-        null.tool_avoided("detail")
