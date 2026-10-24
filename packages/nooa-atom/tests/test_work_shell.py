@@ -551,6 +551,21 @@ def test_timeout_is_a_run_parameter_not_shell_configuration():
     assert not hasattr(Shell(), "timeout")
     with pytest.raises(TypeError):
         Shell(timeout=30)  # type: ignore[call-arg]
+    # The docs keep a raw Shell (sh) apart from its Job: a Job has no run().
+    docs = (Shell.__doc__ or "") + (inspect.getmodule(Shell).__doc__ or "")
+    assert "sh = self.jobs.launch(" not in docs and "sh = manager.launch(" not in docs
+    assert 'job = self.jobs.launch(sh, name="sh")' in docs
+    assert "sh.run(cmd, timeout=60)" in docs
+
+
+async def test_the_documented_launched_shell_and_timed_run_variant(manager, tmp_path):
+    """``job = launch(sh)``; ``job.send(...)``; ``launch(sh.run(cmd, timeout=...))``."""
+    sh = Shell(tmp_path)
+    job = manager.launch(sh, name="sh")
+    await job.send("KEEP=1")
+    r = await manager.launch(sh.run("sleep 30; echo never", timeout=0.3))
+    assert (r.returncode, r.timed_out) == (124, True)
+    assert (await job.send('echo "$KEEP"')).stdout == "1\n"  # one bash, state kept
 
 
 @pytest.mark.parametrize(

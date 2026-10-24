@@ -3,14 +3,14 @@
 """Shell work for the work manager: one persistent bash per ``Shell`` object.
 
 ``Shell(cwd)`` is inert configuration; its bash starts on first use. Each
-``run(command, timeout=...)`` has its own deadline (default 30 minutes).
+``run(command, timeout=...)`` has its own deadline.
 
 - ``sh = Shell()``; ``await sh.run("cd src")``; ``await sh.run("make")``: the
   same object, the same bash (cwd, exported and unexported variables carry
   over). Another ``Shell()`` is another bash.
-- ``sh = manager.launch(Shell(), name="sh")``: the same shell as a job;
-  ``await sh.send("make")`` runs one command in it, like ``run`` with its
-  default timeout; for another deadline in the background, launch the call:
+- ``job = manager.launch(sh, name="sh")``: the same shell as a job;
+  ``await job.send("make")`` runs one command in it, like ``sh.run`` with
+  its default timeout; for another, launch the call:
   ``manager.launch(sh.run("make", timeout=60))``.
   Commands run one at a time, in order (FIFO), whichever way they arrive.
 
@@ -287,14 +287,13 @@ class Shell:
     unexported variables carry over; another ``Shell()`` is a separate bash.
     Nothing starts until the first command. Commands run one at a time, in
     order. ``Shell().run(cmd)`` on a new object is a fresh shell whose state
-    ends with it. ``cwd`` defaults to the workspace. ``run(cmd, timeout=60)``
-    bounds that one command (seconds, default 1800); past it the command ends
-    with ``returncode`` 124 and ``timed_out=True`` (bash and its state are kept).
+    ends with it. ``cwd`` defaults to the workspace; ``run``'s ``timeout``
+    (seconds) bounds that command, which then ends with ``returncode`` 124 and
+    ``timed_out=True`` (bash and its state are kept).
 
-    Launched, it is a job: ``sh = self.jobs.launch(Shell(), name="sh")``; each
-    ``sh.send("make")`` is a request job whose result is a ``CommandResult``,
-    in the same bash as ``run`` on that object, with the default timeout (for
-    another, launch the call: ``self.jobs.launch(sh.run("make", timeout=60))``).
+    Launched, it is a job: ``job = self.jobs.launch(sh, name="sh")``; each
+    ``job.send("make")`` is a request job whose result is a ``CommandResult``,
+    like ``sh.run`` (default timeout; else launch ``sh.run(cmd, timeout=60)``).
     A timeout or cancel stops the whole command (the rest of it is skipped)
     and keeps the shell's state.
     When that cannot be done safely (a builtin loop that will not stop, or the
@@ -367,10 +366,8 @@ class Shell:
     ) -> CommandResult:
         """Run one command in this object's bash (started on first use); state carries over.
 
-        ``stdin`` is the command's input (else it reads nothing). ``timeout``
-        is this command's deadline in seconds (finite, positive), counted from
-        when it starts after any earlier command; past it the command is
-        stopped and the result has ``returncode`` 124 and ``timed_out=True``.
+        ``stdin`` is the command's input (else it reads nothing); ``timeout``
+        is its deadline in seconds (finite, positive) from when it starts.
         """
         timeout = _check_timeout(timeout)
         describe(f"$ {command}")

@@ -363,7 +363,6 @@ sh = Shell()                                               # one bash per object
 r = await sh.run("cd src && export X=1")                   # -> CommandResult; cd/variables persist
 r = await sh.run("make")                                   # same bash: in src, X set
 self.jobs.launch(sh.run("pytest -q"), name="tests")        # long: a JobEvent arrives later
-r = await sh.run("make check", timeout=60)                 # this command's deadline (default 1800 s)
 job = self.jobs.launch(Shell(), name="sh")                 # a shell as a job; cancel closes it
 r = await job.send("make")                                 # a request -> CommandResult
 done = await Subagent("fix parser").run(todo)              # one-shot child -> TaskResult
