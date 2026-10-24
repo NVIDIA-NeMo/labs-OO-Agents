@@ -585,7 +585,18 @@ class OpenInferenceHooks:
         # OpenInference-standard input: JSON {"code": ...} is the single
         # canonical representation of the executed code (the legacy flat ``code``
         # attr is no longer emitted; ``code.length`` metadata is retained).
-        code_args_json = self._safe_json_value({"code": capped_code})
+        code_args: dict[str, Any] = {"code": capped_code}
+        # Named texts bound before the cell (python_cell ``texts``): names and full
+        # lengths always; values capped like code and bounded by _safe_json_value.
+        cell_texts = kwargs.pop("cell_texts", None)
+        if isinstance(cell_texts, dict) and cell_texts:
+            names = [str(name) for name in cell_texts]
+            span.set_attribute("code.texts.names", names)
+            span.set_attribute("code.texts.lengths", [len(str(v)) for v in cell_texts.values()])
+            code_args["texts"] = [
+                {"name": str(name), "text": str(text)[:10000]} for name, text in cell_texts.items()
+            ]
+        code_args_json = self._safe_json_value(code_args)
         span.set_attribute(SpanAttributes.INPUT_VALUE, code_args_json)
         span.set_attribute(SpanAttributes.INPUT_MIME_TYPE, OpenInferenceMimeTypeValues.JSON.value)
         # Tool-call identity. No model tool-call id here, so fall back to

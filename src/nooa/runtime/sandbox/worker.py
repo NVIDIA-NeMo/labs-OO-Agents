@@ -495,6 +495,10 @@ def _run_one(
     max_error: int | None = None,
     tail_chars: int | None = None,
 ) -> ResultDTO:
+    # Named texts are data: assigned into the namespace, never spliced into source.
+    bindings = request.get("bindings")
+    if isinstance(bindings, dict):
+        namespace.update({str(k): str(v) for k, v in bindings.items()})
     result = loop.run_until_complete(
         run_cell_source(
             request["code"],

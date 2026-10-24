@@ -248,8 +248,17 @@ class SandboxedExecutor:
         return self._req_id
 
     # --- running a cell ----------------------------------------------------
-    async def run_cell(self, code: str, *, execution_count: int = 1) -> ExecutionResult:
+    async def run_cell(
+        self,
+        code: str,
+        *,
+        execution_count: int = 1,
+        bindings: dict[str, str] | None = None,
+    ) -> ExecutionResult:
         """Execute one cell in the worker and return an ``ExecutionResult``.
+
+        ``bindings`` (named ``python_cell`` texts) are assigned into the worker's
+        persistent namespace as plain ``str`` values before ``code`` runs.
 
         Output is buffered in the worker and transferred with the final result.
         If the process is hard-killed (timeout, resource limit, or crash), output
@@ -271,9 +280,15 @@ class SandboxedExecutor:
             assert self._conn is not None
             req_id = self._next_id()
             try:
-                self._conn.send(
-                    {"op": "run", "id": req_id, "code": code, "execution_count": execution_count}
-                )
+                request: dict[str, Any] = {
+                    "op": "run",
+                    "id": req_id,
+                    "code": code,
+                    "execution_count": execution_count,
+                }
+                if bindings:
+                    request["bindings"] = {str(k): str(v) for k, v in bindings.items()}
+                self._conn.send(request)
             except (BrokenPipeError, OSError) as exc:
                 # The worker died between _ensure_worker and this send (e.g. an
                 # OOM kill); treat it like any other worker death, not an escape.

@@ -1487,6 +1487,7 @@ class ActorRuntime:
         execution_count: int = 1,
         restrictions: "RestrictionsConfig | None" = None,
         sandbox_executor: Any = None,
+        text_bindings: dict[str, str] | None = None,
     ) -> "ExecutionResult":
         """Execute Python code with namespace + strategy builtins (RuntimeServices protocol).
 
@@ -1504,6 +1505,9 @@ class ActorRuntime:
                 guarded worker process instead of in-process. The surrounding
                 middleware pipeline, before/after_code_execution hooks and events
                 still run here on the parent, so the sandbox composes with them.
+            text_bindings: Named texts (``python_cell`` ``texts``) to bind as plain ``str``
+                values in the cell namespace before ``code`` runs. They are assigned as
+                data, never spliced into source, and recorded on the code_execution span.
 
         Returns:
             ExecutionResult with stdout, error, defined_methods, and optionally returned_value.
@@ -1526,6 +1530,8 @@ class ActorRuntime:
                 "restrictions": restrictions,
                 "sandbox_executor": sandbox_executor,
             }
+            if text_bindings:
+                ep_params["text_bindings"] = text_bindings
             ep_ctx = ExecutePythonContext(
                 code=code,
                 params=ep_params,
@@ -1575,6 +1581,7 @@ class ActorRuntime:
             execution_id=execution_id,
             generation_id=current_generation_id,
             tool_call_id=tool_call_id,  # LLM's tool call ID for trace correlation
+            **({"cell_texts": text_bindings} if text_bindings else {}),
         )
 
         result: ExecutionResult | None = None
@@ -1605,6 +1612,9 @@ class ActorRuntime:
             # Add strategy builtins (includes reasoning, message, method args)
             if builtins:
                 exec_globals.update(builtins)
+            # Named texts are data: bound as values, never interpolated into source.
+            if text_bindings:
+                exec_globals.update(text_bindings)
 
             # ── Pre-execution cleanup ────────────────────────────────────
             # Intercept point: all code cleanup transforms are bundled here.
@@ -1689,7 +1699,10 @@ class ActorRuntime:
             # still wrap the cell on the parent. The worker owns the namespace,
             # stdout capture and wrapper, so we skip the in-process exec below.
             if sandbox_executor is not None:
-                result = await sandbox_executor.run_cell(code, execution_count=execution_count)
+                sandbox_kwargs = {"bindings": text_bindings} if text_bindings else {}
+                result = await sandbox_executor.run_cell(
+                    code, execution_count=execution_count, **sandbox_kwargs
+                )
                 return cast(ExecutionResult, result)
 
             # Set up stdout/stderr capture BEFORE ast.parse/compile so that

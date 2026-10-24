@@ -1309,6 +1309,68 @@ Standard Python builtins and agent instance (`self`) are available."""
         code = f"result = {call_expr}\nprint(result)"
         return code
 
+    def _record_rejected_cell(
+        self,
+        runtime: RuntimeServices,
+        tool_call: Any,
+        tool_call_event_id: str,
+        execution_count: int,
+        error: str,
+    ) -> None:
+        """Record a cell rejected before running: an error result and its output."""
+        runtime.event_manager.update(
+            tool_call_event_id,
+            result=ToolResult(
+                tool_call_id=tool_call.id,
+                content="status: error",
+                result_status=ResultStatus.ERROR,
+            ),
+        )
+        runtime.event_manager.add(
+            PythonOutput(
+                tool_call_id=tool_call.id,
+                execution_count=execution_count,
+                stdout="",
+                stderr="",
+                error=error,
+                value=None,
+                explicit_return=False,
+                execution_status=ResultStatus.ERROR,
+            )
+        )
+
+    def _supports_cell_texts(self) -> bool:
+        """Whether the Python tool accepts named ``texts`` (CodeActV2's ``python_cell``)."""
+        return False
+
+    def _reserved_cell_names(
+        self, runtime: RuntimeServices, builtins: dict[str, Any], call: "CurrentCall"
+    ) -> frozenset[str]:
+        """Names a ``texts`` entry may not bind: everything the runtime puts in a cell.
+
+        Derived from the sources that build the cell namespace, so new helpers
+        are reserved automatically: the runtime globals (``self``, ``doc``,
+        ``pprint``, ``show``, ``asyncio``...), the agent's MRO module globals
+        (skills, tools, types), the strategy builtins (``return_result``,
+        ``python_cell_state``...) and Python's builtins. Method parameters are
+        ordinary locals and may be rebound.
+        """
+        from nooa.agentdoc.visibility import filter_mro_module_globals
+        from nooa.runtime.actor import runtime_cell_globals
+        from nooa.strategies.cell_texts import PYTHON_BUILTIN_NAMES
+
+        parameters = set(call.kwargs)
+        return frozenset(
+            {
+                *runtime_cell_globals(runtime.agent),
+                *filter_mro_module_globals(type(runtime.agent)),
+                *(name for name in builtins if name not in parameters),
+                *PYTHON_BUILTIN_NAMES,
+                *self._SESSION_INTERNAL_KEYS,
+                "_call",  # bound in sandbox workers for prefill/introspection cells
+            }
+        )
+
     def _empty_code_error(self, args: dict[str, Any]) -> str:
         """Explain an empty cell, naming misplaced argument keys when present."""
         extra = sorted(str(k) for k in args if k != "code")
@@ -1865,6 +1927,24 @@ Standard Python builtins and agent instance (`self`) are available."""
         code = args.get("code", "")
         execution_count = session.record_execution()
 
+        # Named texts (python_cell ``texts``): validate before anything runs.
+        texts: dict[str, str] = {}
+        if self._supports_cell_texts() and args.get("texts") is not None:
+            from nooa.strategies.cell_texts import CellTextsError, parse_cell_texts
+
+            try:
+                texts = parse_cell_texts(
+                    args["texts"], self._reserved_cell_names(runtime, builtins, call)
+                )
+            except CellTextsError as exc:
+                session.record_error()
+                self._record_rejected_cell(
+                    runtime, tool_call, tool_call_event_id, execution_count, f"Texts error: {exc}"
+                )
+                return None
+            if texts and not (code or "").strip():
+                code = "pass"  # texts only: a no-op cell that just binds the names
+
         # Strip markdown fences early — validator and helper binding below
         # run ast.parse() which fails on fenced input. (runtime.execute_code
         # also strips fences as a safety net for non-CodeAct code paths.)
@@ -1874,28 +1954,14 @@ Standard Python builtins and agent instance (`self`) are available."""
         if fence_token:
             get_harness_metrics().fence_removal(fence_token)
 
-        if not code.strip():
+        if not code.strip() and not texts:
             session.record_error()
-            # Update ToolCallEvent with error result
-            runtime.event_manager.update(
+            self._record_rejected_cell(
+                runtime,
+                tool_call,
                 tool_call_event_id,
-                result=ToolResult(
-                    tool_call_id=tool_call.id,
-                    content="status: error",
-                    result_status=ResultStatus.ERROR,
-                ),
-            )
-            runtime.event_manager.add(
-                PythonOutput(
-                    tool_call_id=tool_call.id,
-                    execution_count=execution_count,
-                    stdout="",
-                    stderr="",
-                    error=self._empty_code_error(args),
-                    value=None,
-                    explicit_return=False,
-                    execution_status=ResultStatus.ERROR,
-                )
+                execution_count,
+                self._empty_code_error(args),
             )
             return None
 
@@ -1915,7 +1981,13 @@ Standard Python builtins and agent instance (`self`) are available."""
         # Nested agent calls may add their events to the event manager during this execution
         with get_harness_metrics().timer("time_code_execution"):
             result = await self._execute_code(
-                runtime, code, builtins, session, method_name, tool_call_id=tool_call.id
+                runtime,
+                code,
+                builtins,
+                session,
+                method_name,
+                tool_call_id=tool_call.id,
+                texts=texts or None,
             )
 
         # Determine final status
@@ -3126,8 +3198,13 @@ Standard Python builtins and agent instance (`self`) are available."""
         target_method_name: str,
         tool_call_id: str | None = None,
         output_metadata: dict[str, Any] | None = None,
+        texts: dict[str, str] | None = None,
     ) -> Any:
         """Execute Python code via the runtime.
+
+        ``texts`` (validated named texts) are bound as plain ``str`` cell locals
+        before the code runs: in-process into ``session_locals`` (so they persist
+        like assigned locals), in the sandbox into the worker's namespace.
 
         If the cell is cancelled while it runs, the cancel is recorded with
         ``_record_cancelled_cell`` (tagged with ``output_metadata``) under
@@ -3162,6 +3239,9 @@ Standard Python builtins and agent instance (`self`) are available."""
             # Validation of restrictions and the cell guard still runs on the parent.
             run_kwargs = {"sandbox_executor": session.sandbox_executor}
         else:
+            # Data-only binding: values go into the namespace, never into source.
+            if texts:
+                session.session_locals.update(texts)
             # Build execution namespace
             strategy_extras: dict[str, Any] = {
                 "CodeActStrategy": type(self),
@@ -3199,6 +3279,8 @@ Standard Python builtins and agent instance (`self`) are available."""
 
             # Execute with session locals
             run_kwargs = {"builtins": {**builtins, **session.session_locals}}
+        if texts:
+            run_kwargs["text_bindings"] = texts
 
         # Track this execution so the /activity slash command can report that
         # the agent is currently running a code cell (vs blocked on an LLM call).
