@@ -35,32 +35,101 @@ def test_archive_does_not_distribute_external_artifacts(tmp_path):
     print("archive", fingerprint, "members", len(names), "external requirements preserved but artifacts absent")
 
 
+CHILD_RESULT = "return_result(Done(explanation='child', result=TaskResult(solution_description='child', evidence='native child evidence', how_to_verify='offline', report='child')))"
+
+
+def _child_markers():
+    """Prompt text that marks a delegated child's request, for the installed Atom."""
+    try:
+        from nooa_atom.agent.roles import ROLE_INSTRUCTIONS
+    except ImportError:  # one method per role: a child runs handle_work
+        return ["Task: handle_work"]
+    return [ROLE_INSTRUCTIONS["child"]]
+
+
+def _start_child_code():
+    """Root cell code that runs one child on the installed Atom's public API."""
+    try:
+        import nooa_atom.agent.work_subagent  # noqa: F401  (single-handle Atom: self.jobs work)
+    except ImportError:
+        return (
+            "child = await self.delegate('offline child', 'return child evidence', name='offline_child')\n"
+            "evidence = child.result.evidence\n"
+        )
+    return "child = await Subagent('offline child').run('return child evidence')\nevidence = child.evidence\n"
+
+
 @pytest.mark.asyncio
 async def test_regular_runner_native_root_and_child(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     code = [
-        "child = await self.delegate('offline child', 'return child evidence')\nreturn_result(Done(explanation='root', result=TaskResult(solution_description='root', evidence=child.result.evidence, how_to_verify='offline', report='native root and child')))",
-        "return_result(Done(explanation='child', result=TaskResult(solution_description='child', evidence='native child evidence', how_to_verify='offline', report='child')))",
+        _start_child_code()
+        + "return_result(Done(explanation='root', result=TaskResult(solution_description='root', "
+        "evidence=evidence, how_to_verify='offline', report='native root and child')))",
+        CHILD_RESULT,
     ]
     calls = []
+
     async def post(**kwargs):
         calls.append(kwargs)
         assert len(calls) <= 2
-        out = NeMoGymResponseFunctionToolCall(id=f"f{len(calls)}", call_id=f"c{len(calls)}", name="python_cell", arguments=json.dumps({"code": code[len(calls)-1]}))
+        out = NeMoGymResponseFunctionToolCall(
+            id=f"f{len(calls)}",
+            call_id=f"c{len(calls)}",
+            name="python_cell",
+            arguments=json.dumps({"code": code[len(calls) - 1]}),
+        )
         return FakeHTTPResponse(model_response(out, response_id=f"r{len(calls)}"))
+
     runner = InProcessNOOARunner(
-        invocation=NOOAInvocationConfig(agent_class="gym_atom_bridge:GymAtomAgent", invocation_adapter="gym_atom_bridge:invoke_atom"),
-        server_client=SimpleNamespace(post=post), model_server_name="policy", max_policy_calls=2, context_window=1048576,
+        invocation=NOOAInvocationConfig(
+            agent_class="gym_atom_bridge:GymAtomAgent",
+            invocation_adapter="gym_atom_bridge:invoke_atom",
+        ),
+        server_client=SimpleNamespace(post=post),
+        model_server_name="policy",
+        max_policy_calls=2,
+        context_window=1048576,
     )
-    result = await runner.run(NOOARunRequest(responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="offline native fixture", max_output_tokens=131072), model_url_path="/fixture/v1/responses", model_cookies={"session":"fixture"}))
+    result = await runner.run(
+        NOOARunRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+                input="offline native fixture", max_output_tokens=131072
+            ),
+            model_url_path="/fixture/v1/responses",
+            model_cookies={"session": "fixture"},
+        )
+    )
+    # Only the root's own Done carries this report: a root that failed to start
+    # the child and answered from the second (child) reply would report "child".
+    assert result.return_value.report == "native root and child"
     assert result.return_value.evidence == "native child evidence"
     assert result.termination_reason is None
     assert len(calls) == len(result.trajectory.turns) == 2
     assert len(result.trajectory.invocations) >= 2
-    assert all(call["server_name"] == "policy" and call["url_path"] == "/fixture/v1/responses" for call in calls)
+    root_text, child_text = ("\n".join(_strings(call["json"].model_dump())) for call in calls)
+    # The first request is the root's task; the second is the child's brief,
+    # under the child header, with no error from the root's cell before it.
+    _assert_root_role(root_text, "handle_batch")
+    assert "offline native fixture" in root_text and "return child evidence" not in root_text
+    for marker in _child_markers():
+        assert marker in child_text and marker not in root_text
+    assert "return child evidence" in child_text and "offline native fixture" not in child_text
+    assert not any("Traceback" in text or "Error:" in text for text in (root_text, child_text))
+    assert all(
+        call["server_name"] == "policy" and call["url_path"] == "/fixture/v1/responses"
+        for call in calls
+    )
     assert all(call["json"].max_output_tokens == 131072 for call in calls)
     assert all(call["cookies"]["session"] == "fixture" for call in calls)
-    print("native result", result.return_value.model_dump(), "turns", len(result.trajectory.turns), "invocations", len(result.trajectory.invocations))
+    print(
+        "native result",
+        result.return_value.model_dump(),
+        "turns",
+        len(result.trajectory.turns),
+        "invocations",
+        len(result.trajectory.invocations),
+    )
     (tmp_path / "offline-trajectory.json").write_text(result.trajectory.model_dump_json(indent=2))
 
 
