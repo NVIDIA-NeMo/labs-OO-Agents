@@ -1404,6 +1404,14 @@ def _format_nested_instance(
         ):
             field_names.append(name)
 
+    # spec(hide_empty=True) fields are left out before truncation, so a hidden
+    # field takes no max_length slot and is not counted in "... +N".
+    field_names = [
+        name
+        for name in field_names
+        if not (_is_empty(values[name]) and _hides_empty(obj_type, name))
+    ]
+
     # Truncate fields if needed
     truncated_count = 0
     if nested_max_length is not None and len(field_names) > nested_max_length:
@@ -1415,8 +1423,6 @@ def _format_nested_instance(
     for name in field_names:
         if name in values:
             value = values[name]
-            if _is_empty(value) and _hides_empty(obj_type, name):
-                continue
             # Per-field spec(max_string=..., max_length=...) overrides the caller's default.
             field_max_string = _field_spec_override(obj_type, name, "max_string")
             if field_max_string is _MISSING:

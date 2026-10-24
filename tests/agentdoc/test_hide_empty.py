@@ -18,6 +18,13 @@ class _Update(BaseModel):
     shown: Annotated[list[str], spec(hide_empty=False)] = Field(default_factory=list)
 
 
+@spec(hide_empty=True)
+class _EmptyFirst(BaseModel):
+    error: str | None = None
+    label: str = "x"
+    done: bool = False
+
+
 class _Plain(BaseModel):
     a: str = ""
     b: Annotated[str | None, spec(hide_empty=True)] = None
@@ -31,6 +38,15 @@ def test_hide_empty_applies_nested_in_a_large_budget_print():
     text = pformat({"jobs": [_Update(label="x", lines=["a"])]}, max_string=100_000, max_length=100)
     assert "_Update(label='x', done=False, lines=['a'], shown=[])" in text
     assert "error" not in text
+
+
+def test_hidden_fields_take_no_nested_max_length_slot():
+    # Nested (inside a container), the field list is cut to max_length: a hidden
+    # empty field must not take a slot nor be counted in "... +N".
+    assert pformat([_EmptyFirst()], max_length=2) == "[_EmptyFirst(label='x', done=False)]"
+    assert pformat([_EmptyFirst()], max_length=1) == "[_EmptyFirst(label='x', ... +1)]"
+    shown = pformat([_EmptyFirst(error="boom")], max_length=2)
+    assert shown == "[_EmptyFirst(error='boom', label='x', ... +1)]"  # non-empty: not hidden
 
 
 def test_a_field_spec_alone_hides_only_that_field():
