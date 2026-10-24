@@ -254,7 +254,7 @@ finish the task. In particular, a trailing string is not shown; use `print(text)
 when you want to inspect prose before submitting it.
 
 For long text (reports, file contents, scripts, briefs), pass it in `texts` as
-[{{"name": "report", "text": "..."}}] and use `report` in code; no escaping needed.
+[{{"name": "report", "text": "..."}}] and use `report` in code (`code` may be ""); no escaping needed.
 
 Use Python for arithmetic, iteration, transforms, and batches rather than manually
 constructing large outputs. Define reusable helpers at the top of a cell. Existing

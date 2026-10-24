@@ -3203,8 +3203,11 @@ Standard Python builtins and agent instance (`self`) are available."""
         """Execute Python code via the runtime.
 
         ``texts`` (validated named texts) are bound as plain ``str`` cell locals
-        before the code runs: in-process into ``session_locals`` (so they persist
-        like assigned locals), in the sandbox into the worker's namespace.
+        when execution starts, on both backends: a cell rejected before running
+        (syntax, compile, restriction or helper-compile error) binds nothing and
+        leaves same-named variables unchanged; once it starts they persist like
+        assignments, even if the code raises. In-process they come back in
+        ``captured_locals``; in the sandbox the worker binds them itself.
 
         If the cell is cancelled while it runs, the cancel is recorded with
         ``_record_cancelled_cell`` (tagged with ``output_metadata``) under
@@ -3239,9 +3242,12 @@ Standard Python builtins and agent instance (`self`) are available."""
             # Validation of restrictions and the cell guard still runs on the parent.
             run_kwargs = {"sandbox_executor": session.sandbox_executor}
         else:
-            # Data-only binding: values go into the namespace, never into source.
-            if texts:
-                session.session_locals.update(texts)
+            # Named texts are data, never source. They are visible to this cell's
+            # helper defs (bodies, decorators, defaults) via the namespace, but
+            # session_locals is not touched here: the runtime returns them in
+            # captured_locals only once execution starts, and the caller merges
+            # those, so a cell rejected before it runs binds nothing.
+            cell_texts = texts or {}
             # Build execution namespace
             strategy_extras: dict[str, Any] = {
                 "CodeActStrategy": type(self),
@@ -3254,7 +3260,8 @@ Standard Python builtins and agent instance (`self`) are available."""
                 pass
 
             namespace = ExecutionNamespaceBuilder.build(
-                runtime.agent, extra={**builtins, **session.session_locals, **strategy_extras}
+                runtime.agent,
+                extra={**builtins, **session.session_locals, **cell_texts, **strategy_extras},
             )
 
             # Pre-compile helper function defs so @strategy decorators can see
@@ -3277,8 +3284,8 @@ Standard Python builtins and agent instance (`self`) are available."""
             if helper_result.installed:
                 logger.debug(f"[CODEACT] Compiled helpers: {helper_result.installed}")
 
-            # Execute with session locals
-            run_kwargs = {"builtins": {**builtins, **session.session_locals}}
+            # Execute with session locals (texts included so REPL rebinds work)
+            run_kwargs = {"builtins": {**builtins, **session.session_locals, **cell_texts}}
         if texts:
             run_kwargs["text_bindings"] = texts
 

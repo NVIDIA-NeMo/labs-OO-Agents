@@ -495,15 +495,20 @@ def _run_one(
     max_error: int | None = None,
     tail_chars: int | None = None,
 ) -> ResultDTO:
-    # Named texts are data: assigned into the namespace, never spliced into source.
-    bindings = request.get("bindings")
-    if isinstance(bindings, dict):
-        namespace.update({str(k): str(v) for k, v in bindings.items()})
+    # Named texts are data, never spliced into source. run_cell_source binds them
+    # only once execution starts, so a cell rejected before running binds nothing.
+    raw_bindings = request.get("bindings")
+    bindings = (
+        {str(k): str(v) for k, v in raw_bindings.items()}
+        if isinstance(raw_bindings, dict)
+        else None
+    )
     result = loop.run_until_complete(
         run_cell_source(
             request["code"],
             namespace,
             execution_count=int(request.get("execution_count", 1)),
+            bindings=bindings,
         )
     )
     return _serialize(

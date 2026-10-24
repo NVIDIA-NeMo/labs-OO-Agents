@@ -410,7 +410,7 @@ async def test_history_keeps_texts_in_arguments_and_output_does_not_echo_them():
         await agent.aclose()
 
 
-def test_code_execution_span_records_texts():
+def _code_span(cell_texts):
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import SimpleSpanProcessor
     from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
@@ -423,9 +423,8 @@ def test_code_execution_span_records_texts():
     hooks = OpenInferenceHooks(tracer=provider.get_tracer("test"))
     agent = MagicMock()
     type(agent).__name__ = "TestAgent"
-    texts = {"report": "a\nb", "big": "x" * 20_000}
     ctx = hooks.before_code_execution(
-        agent=agent, code="print(report)", execution_id="e1", cell_texts=texts
+        agent=agent, code="print(report)", execution_id="e1", cell_texts=cell_texts
     )
     hooks.after_code_execution(
         agent=agent,
@@ -436,11 +435,211 @@ def test_code_execution_span_records_texts():
         execution_id="e1",
     )
     (span,) = exporter.get_finished_spans()
-    attrs = span.attributes
+    return span.attributes
+
+
+def test_code_execution_span_records_text_names_and_lengths_only():
+    attrs = _code_span({"report": "SECRET-BODY\nb", "big": "x" * 20_000})
     assert list(attrs["code.texts.names"]) == ["report", "big"]
-    assert list(attrs["code.texts.lengths"]) == [3, 20_000]
-    payload = json.loads(attrs["input.value"])
-    assert payload["code"] == "print(report)"
-    assert payload["texts"][0] == {"name": "report", "text": "a\nb"}
-    assert len(payload["texts"][1]["text"]) == 10_000
+    assert list(attrs["code.texts.lengths"]) == [13, 20_000]
+    assert attrs["code.texts.count"] == 2
+    assert attrs["code.texts.truncated"] is False
+    assert json.loads(attrs["input.value"]) == {"code": "print(report)"}
+    assert not any("SECRET-BODY" in str(value) for value in attrs.values())
     assert "tool.cell_texts" not in attrs
+
+
+def test_code_execution_span_text_metadata_is_bounded():
+    texts = {f"n{i}_" + "a" * 300: "v" for i in range(80)}
+    attrs = _code_span(texts)
+    assert attrs["code.texts.count"] == 80
+    assert attrs["code.texts.truncated"] is True
+    assert len(attrs["code.texts.names"]) == 50
+    assert len(attrs["code.texts.lengths"]) == 50
+    assert max(len(name) for name in attrs["code.texts.names"]) == 100
+    assert json.loads(attrs["input.value"]) == {"code": "print(report)"}
+
+
+def test_code_execution_span_without_texts_has_no_text_attributes():
+    attrs = _code_span(None)
+    assert not any(key.startswith("code.texts") for key in attrs)
+
+
+# --- Binding contract: same on both backends ------------------------------------
+#
+# A cell rejected before it runs leaves every binding unchanged; once execution
+# starts, texts persist like ordinary assignments, even if the code then raises.
+
+PRE_EXECUTION_FAILURES = {
+    "syntax error": "x = (1,",
+    "unterminated string": "x = 'never closed",
+    "restricted code": "import subprocess",
+    "compile-time error": "for i in range(2):\n    pass\nbreak",
+}
+
+_PROBE = (
+    "try:\n    seen = report\nexcept NameError:\n    seen = None\n"
+    "return_result([seen, len(self.effects)])"
+)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize("kind", list(PRE_EXECUTION_FAILURES))
+async def test_pre_execution_failure_binds_no_fresh_name(backend, kind):
+    code = f"self.effects.append('ran')\n{PRE_EXECUTION_FAILURES[kind]}"
+    agent = _agent(
+        _llm({"code": code, "texts": [{"name": "report", "text": "new"}]}, {"code": _PROBE}),
+        backend,
+    )
+    try:
+        assert await agent.answer() == [None, 0]
+        assert _outputs(agent)[0].error
+    finally:
+        await agent.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize("kind", list(PRE_EXECUTION_FAILURES))
+async def test_pre_execution_failure_keeps_existing_value(backend, kind):
+    code = f"self.effects.append('ran')\n{PRE_EXECUTION_FAILURES[kind]}"
+    agent = _agent(
+        _llm(
+            {"code": "report = 'old'"},
+            {"code": code, "texts": [{"name": "report", "text": "new"}]},
+            {"code": _PROBE},
+        ),
+        backend,
+    )
+    try:
+        assert await agent.answer() == ["old", 0]
+        assert _outputs(agent)[1].error
+    finally:
+        await agent.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", BACKENDS)
+async def test_runtime_error_after_start_keeps_texts(backend):
+    agent = _agent(
+        _llm(
+            {"code": "report = 'old'"},
+            {
+                "code": "used = report + '!'\nraise ValueError('boom')",
+                "texts": [{"name": "report", "text": "new"}, {"name": "fresh", "text": "f"}],
+            },
+            {"code": "return_result([report, fresh, used])"},
+        ),
+        backend,
+    )
+    try:
+        assert await agent.answer() == ["new", "f", "new!"]
+        assert "ValueError" in (_outputs(agent)[1].error or "")
+    finally:
+        await agent.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", BACKENDS)
+async def test_texts_read_back_in_next_cell_on_success(backend):
+    agent = _agent(
+        _llm(
+            {"code": "print(len(report))", "texts": [{"name": "report", "text": "abc"}]},
+            {"code": "return_result(report)"},
+        ),
+        backend,
+    )
+    try:
+        assert await agent.answer() == "abc"
+    finally:
+        await agent.aclose()
+
+
+_HELPERS = """\
+def tag(fn):
+    fn.tag = report
+    return fn
+
+@tag
+def f():
+    return report
+
+def g(x=report):
+    return x
+"""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", BACKENDS)
+async def test_texts_visible_to_same_cell_helpers_decorators_and_defaults(backend):
+    agent = _agent(
+        _llm(
+            {
+                "code": _HELPERS + "same = [f(), f.tag, g()]",
+                "texts": [{"name": "report", "text": "R"}],
+            },
+            {"code": "return_result([same, f(), f.tag, g()])"},
+        ),
+        backend,
+    )
+    try:
+        assert await agent.answer() == [["R", "R", "R"], "R", "R", "R"]
+    finally:
+        await agent.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", BACKENDS)
+async def test_texts_from_earlier_cell_visible_to_helpers(backend):
+    agent = _agent(
+        _llm(
+            {"code": "", "texts": [{"name": "report", "text": "R"}]},
+            {"code": _HELPERS + "same = [f(), f.tag, g()]"},
+            {"code": "return_result([same, f(), f.tag, g()])"},
+        ),
+        backend,
+    )
+    try:
+        assert await agent.answer() == [["R", "R", "R"], "R", "R", "R"]
+    finally:
+        await agent.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.sandbox
+async def test_reserved_set_covers_every_sandbox_worker_name(monkeypatch):
+    """The sandbox worker builds its namespace on its own; capture the real one.
+
+    Every name in a live worker cell's globals that the cell did not define must
+    be reserved, so a text can never shadow something the worker injects.
+    (``globals()`` is a restricted call, so the cell reads its frame's globals.)
+    """
+    seen: list[frozenset[str]] = []
+    original = CodeActStrategy._reserved_cell_names
+
+    def recording(self, runtime, builtins, call):
+        reserved = original(self, runtime, builtins, call)
+        seen.append(reserved)
+        return reserved
+
+    monkeypatch.setattr(CodeActStrategy, "_reserved_cell_names", recording)
+    agent = _agent(
+        _llm(
+            {"code": "mine = 1"},
+            {
+                "code": "import sys\nreturn_result(sorted(sys._getframe(0).f_globals))",
+                "texts": [{"name": "report", "text": "x"}],
+            },
+        ),
+        "sandbox",
+    )
+    try:
+        names = set(await agent.answer())
+    finally:
+        await agent.aclose()
+    (reserved,) = seen
+    cell_defined = {"mine", "report", "topic", "sys"}  # cell locals, texts, parameters
+    injected = {n for n in names - cell_defined if not (n.startswith("__") and n.endswith("__"))}
+    assert {"self", "return_result", "mine", "report"} <= names  # the live worker namespace
+    assert injected - reserved == set()

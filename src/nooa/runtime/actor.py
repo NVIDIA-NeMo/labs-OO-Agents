@@ -1802,6 +1802,17 @@ class ActorRuntime:
 
             returned_value = _NO_RETURN
             captured_locals: dict[str, Any] = {}
+            # Named texts persist like assignments once execution starts, even if the
+            # cell then raises; a cell rejected before that (syntax, compile, policy)
+            # never reaches here or leaves this False, so it binds nothing.
+            execution_started = False
+
+            def cell_locals() -> dict[str, Any]:
+                captured = _extract_captured_locals(exec_globals)
+                if execution_started and text_bindings:
+                    return {**text_bindings, **captured}
+                return captured
+
             wrapper_line_offset = 0  # Lines of wrapper before user code (for error adjustment)
 
             try:
@@ -1860,6 +1871,7 @@ class ActorRuntime:
                     )
 
                     exec(compile(wrapper, cell_filename, "exec"), exec_globals)
+                    execution_started = True
                     # Execute with async safety (blocks Future.result() etc from event loop)
                     from nooa.runtime.async_safety import agent_async_safety_context
 
@@ -1877,7 +1889,7 @@ class ActorRuntime:
                             result_value = await coro
 
                     # Extract captured locals (filter out non-serializable/internal items)
-                    captured_locals = _extract_captured_locals(exec_globals)
+                    captured_locals = cell_locals()
                     # Same-cell names (imports, dicts, ...) were wrapper locals. Publish
                     # them into this cell's exec_globals, which is the __globals__ of the
                     # top-level functions re-bound below, so those functions still
@@ -1944,6 +1956,7 @@ class ActorRuntime:
                     ]
 
                     # Execute function definitions
+                    execution_started = True
                     if func_defs:
                         func_tree = ast.Module(body=func_defs, type_ignores=[])
                         exec(compile(func_tree, cell_filename, "exec"), exec_globals)
@@ -2014,7 +2027,7 @@ class ActorRuntime:
                     defined_methods=defined_methods,
                     returned_value=returned_value,
                     explicit_return=has_explicit_return,
-                    captured_locals=captured_locals,
+                    captured_locals={**(text_bindings or {}), **captured_locals},
                     wrapper_line_offset=wrapper_line_offset,
                     images=media_buffer.blocks,
                 )
@@ -2025,7 +2038,7 @@ class ActorRuntime:
                 # The wrapper function's finally block still runs before this handler,
                 # populating exec_globals["__repl_captured_locals__"] with all variables
                 # that were defined before the signal was raised.
-                captured_locals = _extract_captured_locals(exec_globals)
+                captured_locals = cell_locals()
 
                 result = ExecutionResult(
                     stdout=stdout_buffer.getvalue(),
@@ -2050,7 +2063,7 @@ class ActorRuntime:
                 # ordinary execution error so one cell cannot terminate the parent run.
                 # NOTE: asyncio.CancelledError (also BaseException) is deliberately NOT
                 # caught here — real cancellation must still propagate.
-                captured_locals = _extract_captured_locals(exec_globals)
+                captured_locals = cell_locals()
 
                 # ExecutionResult.error is typed Exception | None, so wrap the
                 # BaseException in a RuntimeError (original kept as __cause__).
@@ -2079,7 +2092,7 @@ class ActorRuntime:
                 # The wrapper function's finally block still runs before this handler,
                 # populating exec_globals["__repl_captured_locals__"] with all variables
                 # that were defined before the exception was raised.
-                captured_locals = _extract_captured_locals(exec_globals)
+                captured_locals = cell_locals()
 
                 result = ExecutionResult(
                     stdout=stdout_buffer.getvalue(),
