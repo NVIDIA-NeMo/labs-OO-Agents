@@ -240,7 +240,10 @@ async def test_workspace_is_static_and_only_names_a_distinct_search_root(tmp_pat
     try:
         initial = agent.context["workspace_state"]
         assert agent.context_manager.is_static("workspace_state")
-        assert initial == f"Workspace: {tmp_path} — base for file paths and new shells."
+        assert initial == (
+            f"Workspace: {tmp_path} — files/repo/new Shells.\n"
+            "Python paths use cell cwd, not Shell cwd."
+        )
         agent.v.changed = True
         assert agent.context["workspace_state"] == initial
         from nooa_atom.tools.repo_tools import RepoTools
@@ -249,5 +252,34 @@ async def test_workspace_is_static_and_only_names_a_distinct_search_root(tmp_pat
         agent._install_context()
         assert "Repository root:" in agent.context["workspace_state"]
         assert str(tmp_path / "other") in agent.context["workspace_state"]
+    finally:
+        await agent.aclose()
+
+
+async def test_workspace_shell_and_python_paths_remain_independent(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    from nooa_atom.agent.work_shell import Shell
+
+    python_dir = tmp_path / "python"
+    workspace = tmp_path / "workspace"
+    shell_dir = workspace / "sub"
+    python_dir.mkdir()
+    shell_dir.mkdir(parents=True)
+    for directory, value in [
+        (python_dir, "python"),
+        (workspace, "workspace"),
+        (shell_dir, "shell"),
+    ]:
+        (directory / "marker").write_text(value)
+    monkeypatch.chdir(python_dir)
+    agent = _agent(workspace)
+    try:
+        async with Shell(workspace) as shell:
+            await shell.run("cd sub")
+            assert (await shell.run("cat marker")).stdout == "shell"
+            assert Path("marker").read_text() == "python"
+            assert (await agent.files.read("marker")).text == "workspace"
+        assert "Python paths use cell cwd, not Shell cwd." in agent.context["workspace_state"]
     finally:
         await agent.aclose()
