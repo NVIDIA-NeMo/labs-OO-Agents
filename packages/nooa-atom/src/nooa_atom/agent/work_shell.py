@@ -324,12 +324,11 @@ class Shell:
     job closes its bash. Options (``set -euxo pipefail``) and traps persist;
     ``exit N`` ends bash with status N, and the next command starts a new one.
 
-    Closing ends bash and its background processes: ``await sh.aclose()``,
-    ``async with Shell() as sh:``, or when the object is dropped. An agent
-    session closes its own Shells when it ends; keep the object (``sh``) for
-    as long as a background server must run. (Under a harness's
-    ``preserve_background_services()`` scope closing ends bash only; that
-    harness owns the cleanup of its background processes.)
+    Closing ends bash and its background processes (under a harness's
+    ``preserve_background_services()`` scope, bash only; the harness cleans
+    up): ``await sh.aclose()``, ``async with Shell() as sh:``, or when the
+    object is dropped. An agent session closes its own Shells when it ends;
+    keep ``sh`` for as long as a background server must run.
     """
 
     __nosnapshot__ = True  # a live bash is not data
@@ -494,12 +493,10 @@ class Shell:
         await self.aclose()
 
     async def aclose(self) -> None:
-        """End bash and its background processes and remove scratch files; safe to repeat.
+        """End bash, its background processes (see the class doc) and scratch files.
 
-        Returns once that is done (a close already under way is joined). A
-        later ``run`` starts a new bash in ``cwd``. Under a harness's
-        ``preserve_background_services()`` scope only bash ends: that external
-        harness owns (and must clean up) its background processes.
+        Safe to repeat; concurrent calls wait for one cleanup. A later ``run``
+        starts a new bash.
         """
         # Never waits for the lock: the running command is stopped by closing its
         # bash, queued commands are refused, and a start (first use or an
