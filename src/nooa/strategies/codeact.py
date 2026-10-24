@@ -66,6 +66,7 @@ from nooa.strategies.composite import CompositeStrategy
 from nooa.strategies.generated_code import (
     ExecutionNamespaceBuilder,
     GeneratedCodeValidator,
+    HelperApplyResult,
     HelperFunctionManager,
 )
 from nooa.strategies.loop_guard import LoopGuard, action_fingerprint, mentions_return_result
@@ -3203,11 +3204,20 @@ Standard Python builtins and agent instance (`self`) are available."""
         """Execute Python code via the runtime.
 
         ``texts`` (validated named texts) are bound as plain ``str`` cell locals
-        when execution starts, on both backends: a cell rejected before running
-        (syntax, compile, restriction or helper-compile error) binds nothing and
-        leaves same-named variables unchanged; once it starts they persist like
-        assignments, even if the code raises. In-process they come back in
-        ``captured_locals``; in the sandbox the worker binds them itself.
+        when execution starts: a cell rejected before running binds nothing and
+        leaves same-named variables and helpers unchanged; once it starts they
+        persist like assignments, even if the code raises. In-process they come
+        back in ``captured_locals``; in the sandbox the worker binds them itself.
+
+        The pre-execution stages differ by backend. Both run the REPL-policy
+        validator, then the runtime's restriction/validation policy, parse and
+        wrapper compile (``ActorRuntime.check_code`` / ``execute_code``; in the
+        sandbox the parent validates and the worker parses and compiles).
+        In-process only, helper defs are then pre-compiled before the cell runs
+        (so ``@strategy`` sees ``_generated_source``), which evaluates their
+        decorators and defaults: an error there (e.g. an undefined ``@stratgy``)
+        rejects the cell before execution starts. The sandbox has no such stage,
+        so the same error is a runtime error after execution started.
 
         If the cell is cancelled while it runs, the cancel is recorded with
         ``_record_cancelled_cell`` (tagged with ``output_metadata``) under
@@ -3264,14 +3274,44 @@ Standard Python builtins and agent instance (`self`) are available."""
                 extra={**builtins, **session.session_locals, **cell_texts, **strategy_extras},
             )
 
+            # Run the runtime's own pre-execution checks (restriction/validation
+            # policy, parse, wrapper compile) BEFORE pre-compiling helpers: helper
+            # pre-compilation evaluates decorators and defaults and installs helpers
+            # whose globals hold this cell's texts, so a cell the runtime rejects
+            # must not reach it. A rejected cell skips the helper stage and goes to
+            # execute_code, which rejects it with the same error (hooks and events
+            # still fire there).
+            # (Runtimes without check_code, e.g. test doubles, skip this gate.)
+            check_code = getattr(runtime, "check_code", None)
+            rejected_by_runtime = check_code is not None and isinstance(
+                check_code(
+                    code,
+                    builtins={**builtins, **session.session_locals, **cell_texts},
+                    validate=True,
+                    wrap_in_function=True,
+                    execution_count=session.execution_count,
+                    restrictions=self.config.restrictions,
+                    text_bindings=texts,
+                ),
+                BaseException,
+            )
+
             # Pre-compile helper function defs so @strategy decorators can see
             # _generated_source at decoration time. Helpers are never attached to the agent.
+            # Known stage difference: an undefined name in a decorator or default
+            # (``@stratgy``) is rejected here, before execution starts, so nothing
+            # binds; the sandbox has no pre-compile stage and fails at runtime, after
+            # execution started, so the texts persist there.
             helper_compiler = HelperFunctionManager()
-            helper_result = helper_compiler.apply(
-                code,
-                runtime.agent,
-                session.session_locals,
-                namespace=namespace,
+            helper_result = (
+                helper_compiler.apply(
+                    code,
+                    runtime.agent,
+                    session.session_locals,
+                    namespace=namespace,
+                )
+                if not rejected_by_runtime
+                else HelperApplyResult(installed=[])
             )
 
             if helper_result.errors:

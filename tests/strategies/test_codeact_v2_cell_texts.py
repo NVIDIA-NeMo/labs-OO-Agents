@@ -52,6 +52,14 @@ def _agent(llm: FakeLLMClient, backend: str = "inprocess", returns: Any = Any) -
 
         effects: list[str] = []
 
+        def record(self, effect: str) -> None:
+            """Record a side effect (a method call, so it reaches the parent from the sandbox)."""
+            self.effects.append(effect)
+
+        def recorded(self) -> list[str]:
+            """Return the recorded side effects."""
+            return list(self.effects)
+
         def namespace_names(self) -> list[str]:
             """Return the names bound in the calling cell's namespace."""
             frame = sys._getframe(1)
@@ -643,3 +651,195 @@ async def test_reserved_set_covers_every_sandbox_worker_name(monkeypatch):
     injected = {n for n in names - cell_defined if not (n.startswith("__") and n.endswith("__"))}
     assert {"self", "return_result", "mine", "report"} <= names  # the live worker namespace
     assert injected - reserved == set()
+
+
+# --- Rejected cells install no helpers ------------------------------------------
+#
+# In-process, helper defs are pre-compiled before the runtime runs the cell (so
+# ``@strategy`` sees ``_generated_source``). That pre-compilation is gated on the
+# runtime's own pre-execution checks: a cell the runtime would reject (restricted
+# code, compile error) runs no decorator or default and installs or replaces no
+# helper, so a rejected text cannot escape through a helper's globals.
+
+HELPER_STAGE_REJECTIONS = {
+    "restricted code": "import subprocess",
+    "compile-time error": "for i in range(2):\n    pass\nbreak",
+}
+
+_SIDE_EFFECT_HELPERS = """\
+def deco(fn):
+    self.record('deco')
+    return fn
+
+@deco
+def f():
+    return report
+
+def k(x=self.record('default')):
+    return report
+"""
+
+_HELPER_PROBE = (
+    "out = []\n"
+    "for probe in (lambda: report, lambda: f(), lambda: k()):\n"
+    "    try:\n        out.append(probe())\n"
+    "    except NameError:\n        out.append(None)\n"
+    "return_result([out, self.recorded()])"
+)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize("kind", list(HELPER_STAGE_REJECTIONS))
+async def test_rejected_cell_installs_no_helper_capturing_its_texts(backend, kind):
+    code = _SIDE_EFFECT_HELPERS + HELPER_STAGE_REJECTIONS[kind]
+    agent = _agent(
+        _llm({"code": code, "texts": [{"name": "report", "text": "new"}]}, {"code": _HELPER_PROBE}),
+        backend,
+    )
+    try:
+        # No text, no helper, and neither the decorator nor the default ran.
+        assert await agent.answer() == [[None, None, None], []]
+        assert _outputs(agent)[0].error
+    finally:
+        await agent.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize("kind", list(HELPER_STAGE_REJECTIONS))
+async def test_rejected_cell_keeps_existing_text_and_helper(backend, kind):
+    agent = _agent(
+        _llm(
+            {"code": "report = 'old'\ndef f():\n    return report\n\ndef k():\n    return report"},
+            {
+                "code": _SIDE_EFFECT_HELPERS + HELPER_STAGE_REJECTIONS[kind],
+                "texts": [{"name": "report", "text": "new"}],
+            },
+            {"code": _HELPER_PROBE},
+        ),
+        backend,
+    )
+    try:
+        assert await agent.answer() == [["old", "old", "old"], []]
+        assert _outputs(agent)[1].error
+    finally:
+        await agent.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", BACKENDS)
+async def test_accepted_cell_still_binds_texts_and_helpers(backend):
+    """Control: the same cells without the rejected line run and persist."""
+    agent = _agent(
+        _llm(
+            {"code": "report = 'old'"},
+            {"code": _SIDE_EFFECT_HELPERS, "texts": [{"name": "report", "text": "new"}]},
+            {"code": _HELPER_PROBE},
+        ),
+        backend,
+    )
+    try:
+        values, effects = await agent.answer()
+        assert values == ["new", "new", "new"]
+        # Decorators and defaults may run more than once (pre-compile and rebind).
+        assert {"deco", "default"} == set(effects)
+    finally:
+        await agent.aclose()
+
+
+# Known stage difference (kept): in-process, helper pre-compilation evaluates
+# decorators and defaults before the cell runs, so an undefined name there (a
+# typo such as ``@stratgy``) rejects the cell before execution starts. The
+# sandbox has no pre-compile stage: the name fails at runtime, after execution
+# started, so the texts persist like assignments.
+_TYPO_HELPER = "self.record('ran')\n@stratgy\ndef f():\n    return report\n"
+
+
+@pytest.mark.asyncio
+async def test_undefined_decorator_rejects_before_execution_in_process():
+    agent = _agent(
+        _llm({"code": _TYPO_HELPER, "texts": [{"name": "report", "text": "new"}]}, {"code": _PROBE})
+    )
+    try:
+        assert await agent.answer() == [None, 0]
+        assert "Failed to define helper" in (_outputs(agent)[0].error or "")
+    finally:
+        await agent.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.sandbox
+async def test_undefined_decorator_fails_at_runtime_in_sandbox():
+    agent = _agent(
+        _llm(
+            {"code": _TYPO_HELPER, "texts": [{"name": "report", "text": "new"}]}, {"code": _PROBE}
+        ),
+        "sandbox",
+    )
+    try:
+        assert await agent.answer() == ["new", 1]  # execution started in the worker
+        assert "NameError" in (_outputs(agent)[0].error or "")
+    finally:
+        await agent.aclose()
+
+
+# --- Runtime API: the non-wrapper path ------------------------------------------
+#
+# CodeAct and PurePython always run cells with ``wrap_in_function=True``; the
+# ``wrap_in_function=False`` path of ``ActorRuntime.execute_code`` is only
+# reachable through the runtime API, so it is tested there.
+
+
+class _PlainAgent(Agent, llm=FakeLLMClient(scripted_responses=[])):
+    """Agent for runtime-API tests (no LLM calls)."""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "code,bound,error",
+    [
+        ("x = report + '!'", True, None),
+        ("x = report\nraise ValueError('boom')", True, "ValueError"),
+        ("x = (1,", False, "SyntaxError"),
+        ("import subprocess", False, "subprocess"),
+    ],
+)
+async def test_non_wrapper_execute_code_binds_texts_once_started(code, bound, error):
+    agent = _PlainAgent()
+    try:
+        result = await agent.runtime.execute_code(code, text_bindings={"report": "R"})
+        if error is None:
+            assert result.error is None
+        else:
+            assert error in f"{type(result.error).__name__}: {result.error}"
+        assert (result.captured_locals.get("report") == "R") is bound
+        assert ("report" in result.captured_locals) is bound
+    finally:
+        await agent.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "code,error",
+    [
+        ("import subprocess", "subprocess"),
+        ("for i in range(2):\n    pass\nbreak", "break"),
+        ("x = (1,", "SyntaxError"),
+    ],
+)
+async def test_check_code_matches_execute_code_rejection(code, error):
+    """``check_code`` runs the runtime's own pre-execution checks and executes nothing."""
+    agent = _PlainAgent()
+    try:
+        runtime = agent.runtime
+        checked = runtime.check_code(code, wrap_in_function=True, text_bindings={"report": "R"})
+        assert checked is not None
+        executed = await runtime.execute_code(
+            code, wrap_in_function=True, text_bindings={"report": "R"}
+        )
+        assert type(checked) is type(executed.error)
+        assert error in f"{type(checked).__name__}: {checked}"
+        assert runtime.check_code("x = report", wrap_in_function=True) is None
+    finally:
+        await agent.aclose()
