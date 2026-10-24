@@ -140,6 +140,29 @@ def test_concurrent_registry_writers_serialize_the_entire_update(tmp_path):
     assert set(yaml.safe_load(path.read_text())["models"]) == {"first", "second"}
 
 
+def test_windows_registry_lock_timeout_raises_runtime_error(tmp_path, monkeypatch):
+    import sys
+    from unittest.mock import MagicMock
+
+    import pytest
+
+    mock_msvcrt = MagicMock()
+    mock_msvcrt.locking.side_effect = OSError(36, "Resource deadlock avoided")
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setitem(sys.modules, "fcntl", None)
+    monkeypatch.setitem(sys.modules, "msvcrt", mock_msvcrt)
+
+    path = tmp_path / "registry.yaml"
+    path.write_text("models:\n")
+
+    with pytest.raises(RuntimeError, match="Timed out waiting for registry lock") as exc_info:
+        connect.write({"model_name": "openai/model"}, path, alias="test")
+
+    assert isinstance(exc_info.value.__cause__, OSError)
+    assert f".{path.name}.lock" in str(exc_info.value)
+
+
+
 async def test_unobserved_unauthenticated_request_is_not_called_dropped_settings(monkeypatch):
     from unittest.mock import AsyncMock
 

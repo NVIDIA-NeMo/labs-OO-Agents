@@ -38,7 +38,20 @@ try:
 
     _HAS_MEMORY = True
 except ImportError:
+    from typing import Any
+
     _HAS_MEMORY = False
+    EmbeddingConfig = Any  # type: ignore[misc, assignment]
+    ForgetPolicy = Any  # type: ignore[misc, assignment]
+    RetrievalConfig = Any  # type: ignore[misc, assignment]
+    get_embedder = Any  # type: ignore[misc, assignment]
+    ForgettingEngine = Any  # type: ignore[misc, assignment]
+    per_memory_usage = Any  # type: ignore[misc, assignment]
+    store_kpis = Any  # type: ignore[misc, assignment]
+    RetrievalEngine = Any  # type: ignore[misc, assignment]
+    Memory = Any  # type: ignore[misc, assignment]
+    MemorySchemaError = Exception  # type: ignore[misc, assignment]
+    MemoryStore = Any  # type: ignore[misc, assignment]
 
 router = APIRouter(prefix="/api/memory")
 
@@ -93,6 +106,9 @@ def _resolve_db(db: str) -> Path:
 
 
 def _get_store(db: str) -> MemoryStore:
+    """Retrieve or initialize a cached MemoryStore instance for the given database."""
+    if not _HAS_MEMORY:
+        raise HTTPException(status_code=503, detail="nooa-memory package is not installed")
     key = str(_resolve_db(db))
     store = _stores.get(key)
     if store is None:
@@ -127,14 +143,17 @@ def _validate_owner(owner: str | None) -> str | None:
 
 
 def _forgetting(store: MemoryStore) -> ForgettingEngine:
+    """Instantiate a default ForgettingEngine for the given store."""
     return ForgettingEngine(store, ForgetPolicy())
 
 
 def _head(text: str, chars: int) -> str:
+    """Return a whitespace-collapsed prefix of text up to the specified character limit."""
     return " ".join(text.split())[:chars]
 
 
 def _record_row(m: Memory) -> dict:
+    """Format a Memory model instance into a JSON-serializable dictionary."""
     return {
         "id": m.id,
         "type": m.type.value,
