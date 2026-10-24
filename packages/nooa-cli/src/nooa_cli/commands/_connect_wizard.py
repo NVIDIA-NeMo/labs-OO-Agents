@@ -685,9 +685,17 @@ def select_model(state: WizardState) -> bool:
 def known_decision_model(state: WizardState) -> bool:
     """Only explicit selected-model type facts can bypass provisional chat limits."""
     metadata = state.selected_endpoint_model or state.candidate or {}
-    outputs = (metadata.get("architecture") or {}).get("output_modalities") or metadata.get(
-        "output_modalities", []
-    )
+
+    def declared_outputs(record):
+        return (record.get("architecture") or {}).get("output_modalities") or record.get(
+            "output_modalities"
+        )
+
+    # A listing declaration stays authoritative; an exact catalogue record fills the gap.
+    outputs = declared_outputs(metadata)
+    if outputs is None and state.candidate:
+        outputs = declared_outputs(state.candidate)
+    outputs = outputs or []
     return (
         (isinstance(outputs, list) and "decisions" in outputs and "text" not in outputs)
         or any(metadata.get(field) == "decision" for field in ("model_type", "client_type"))
@@ -702,9 +710,13 @@ def discard_chat_limits(state: WizardState):
     state.manual_limits = None
     state.manual_limits_required = False
     state.manual_limits_deferred = False
+    # A record merged with this server's facts is not an OpenRouter mapping;
+    # passing it as the catalogue would credit OpenRouter with server facts.
+    mapping = state.candidate
+    if isinstance(mapping, dict) and mapping.get("endpoint_limits"):
+        mapping = None
     state.candidate = (
-        connect.decision_metadata(state.model, state.candidate, state.selected_endpoint_model)
-        or None
+        connect.decision_metadata(state.model, mapping, state.selected_endpoint_model) or None
     )
     state.media_hints = state.candidate
 
@@ -1060,6 +1072,9 @@ def public_models_for_setup(state: WizardState):
         return []
     if (
         public_listing
+        # Only a real fetched or file listing is the public catalogue; one
+        # selected record from server details is not.
+        and state.listing_api_base is not None
         and state.endpoint_models is not None
         and state.discovery_endpoint == state.endpoint
         and not any(

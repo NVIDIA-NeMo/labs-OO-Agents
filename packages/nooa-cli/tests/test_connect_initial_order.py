@@ -424,3 +424,46 @@ def test_media_the_interface_cannot_send_needs_no_diagnosis():
     assert wizard.media_cannot_apply({"reason": "Video testing not implemented for this route"})
     assert not wizard.media_cannot_apply({"reason": "not approved"})
     assert not wizard.media_cannot_apply({"outcome": "failed", "reason": "HTTP 400"})
+
+
+def test_exact_catalogue_modalities_fill_a_listing_without_them():
+    state = wizard.WizardState()
+    state.selected_endpoint_model = {"id": "vendor/jev"}
+    state.candidate = {"id": "vendor/jev", "architecture": {"output_modalities": ["decisions"]}}
+    assert wizard.known_decision_model(state)
+    # An explicit listing declaration stays authoritative.
+    state.selected_endpoint_model = {"id": "vendor/jev", "output_modalities": ["text"]}
+    assert not wizard.known_decision_model(state)
+
+
+def test_one_selected_record_is_not_the_public_catalogue(monkeypatch):
+    """Without a real listing, the public catalogue is fetched so an explicit mapping works."""
+    fetched = []
+
+    async def catalogue():
+        fetched.append(True)
+        return [{"id": "vendor/other", "context_length": 64000}]
+
+    monkeypatch.setattr(connect, "catalogue", catalogue)
+    state = wizard.WizardState()
+    state.endpoint = "https://custom.test/v1"
+    state.discovery_endpoint = state.endpoint
+    state.models_url = connect.CATALOGUE_URL
+    state.endpoint_models_url = connect.CATALOGUE_URL
+    state.endpoint_models = ({"id": "vendor/model", "context_window": 128000},)
+    state.listing_api_base = None  # no fetched or file listing
+    models = wizard.public_models_for_setup(state)
+    assert fetched and any(item["id"] == "vendor/other" for item in models)
+
+
+def test_server_merged_record_is_not_credited_to_openrouter():
+    state = wizard.WizardState()
+    state.model = "wire/model"
+    state.selected_endpoint_model = {"id": "wire/model", "input_modalities": ["text", "image"]}
+    state.candidate = {
+        "id": "wire/model",
+        "endpoint_limits": {"context_window": 64000},
+        "input_modalities": ["text", "image"],
+    }
+    wizard.discard_chat_limits(state)
+    assert state.candidate["media_source"] == "endpoint listing"

@@ -317,6 +317,27 @@ async def test_invalid_schema_usage_stops_later_cases(monkeypatch):
     assert result.entry["provenance"]["tokens_charged_to_budget"] == 100512
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [401, 403])
+async def test_rejected_key_stops_later_decision_cases(monkeypatch, status):
+    seen = []
+
+    def handle(request):
+        seen.append(request)
+        if len(seen) == 1:
+            return fixture_response(request)
+        return httpx.Response(status, json={"error": {"message": "key rejected"}})
+
+    mock_http(monkeypatch, handle)
+    result = await connect.run(proposal(image=True), approved="all")
+    records = result.entry["provenance"]["probes"]
+    assert len(seen) == 2  # routing, then the rejected typed case; nothing after it
+    assert records["decision:typed"]["status_code"] == status
+    for name in ("decision:positive", "decision:negative", "media:image"):
+        assert records[name]["outcome"] == "not_probed"
+        assert records[name]["reason"] == "Authentication failed; later checks not sent"
+
+
 def test_routing_preview_matches_actual_schema_recipe():
     from nooa.unifiedllm.connect._decision import planned_body
 

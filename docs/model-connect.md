@@ -690,6 +690,7 @@ a masked credential on endpoint checks; use `--api-key-env` for unattended use.
 |---|---|
 | `discover` | List the endpoint's models. |
 | `catalogue` | Read public model details. |
+| `model-info` | Read the selected model's details from the server and catalogue. No model calls. |
 | `interfaces` | Find which API styles work. |
 | `plan` | Build an unsaved entry. No network. |
 | `routing` | Chat: configured typed text baseline. Native decisions: routing acceptance. |

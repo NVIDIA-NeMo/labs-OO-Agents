@@ -3105,6 +3105,7 @@ async def _run_decision_steps(
     charged = 0
     accepted = []
     baseline_ok = False
+    auth_failed = False
     for probe in proposal.probes:
         previous = records.get(probe.name, {})
         # Only routing acceptance may be reused; all accuracy/media cases are fresh.
@@ -3128,6 +3129,9 @@ async def _run_decision_steps(
             reason = "not approved"
         elif probe.skip_reason:
             reason = probe.skip_reason
+        elif auth_failed:
+            # A rejected key is never sent again in the same run.
+            reason = "Authentication failed; later checks not sent"
         elif charged + probe.token_estimate > proposal.budget_tokens:
             reason = "budget exhausted"
         elif probe.name != "routing" and not baseline_ok:
@@ -3219,6 +3223,7 @@ async def _run_decision_steps(
             if isinstance(status, int):
                 record["status_code"] = status
                 record["outcome"] = "rejected" if status in {400, 422} else "not_probed"
+                auth_failed = auth_failed or status in {401, 403}
                 if 200 <= status < 300:
                     record.update(
                         outcome="not_confirmed",
