@@ -32,6 +32,11 @@ dependencies = [
     "httpx>=0.27.0",
     "openinference-instrumentation-litellm>=0.1.30",
     "msgpack>=1.2.1",
+    # Published floors for existing core runtime transitive dependencies.
+    # These refresh candidates are not a claim that all advisories are fixed.
+    "anyio>=4.14.2",
+    "urllib3>=2.8.0",
+    "setuptools>=83.0.0",
 ]
 
 [project.urls]
@@ -64,6 +69,11 @@ nooa-bench = { workspace = true }
 # Extra index URLs to search for packages (in addition to PyPI)
 # Ignore packages uploaded less than 7 days ago to mitigate supply-chain attacks
 exclude-newer = "2026-08-18T00:00:00Z"
+# Narrow refresh exceptions: PyJWT 2.15.1 (Sep 28) and urllib3 2.8.0
+# (Sep 15) were published after the global cutoff. Sep 29 retains at least
+# seven days of quarantine on the Oct 6, 2026 refresh date; other packages
+# remain subject to the original cutoff. Requires uv with package cutoffs.
+exclude-newer-package = { pyjwt = "2026-09-29T00:00:00Z", urllib3 = "2026-09-29T00:00:00Z" }
 
 [tool.uv.workspace]
 members = [
@@ -119,6 +129,9 @@ sandbox = [
 # pydantic-core wheels that only target manylinux_2_28). See issue 189.
 mcp = [
     "mcp>=1.0.0",
+    # MCP already requires PyJWT[crypto]; keep crypto out of bare core.
+    "PyJWT[crypto]>=2.15.1",
+    "cryptography>=50.0.0",
 ]
 # NeMo Relay integration (guardrails, intercepts, event subscribers, ATIF
 # export).
