@@ -29,9 +29,9 @@ mesh identity in `_mesh_vars`). Earlier Atoms recorded the spec
 specs load as they are. On restore the agent sets its own context blocks
 again (`python_cell_tools`, `status`, `role`...; the old `queues` block goes)
 and keeps any other block. A job that was running when the session stopped
-is reported once as a `failed` `JobEvent` ("lost: ..."), and so is each
-child session from before the restart that is not closed ("not adopted:
-..."): neither one is running anymore.
+is reported once as a `failed` `JobEvent` ("lost: ...") and is not
+relaunched. Child sessions from before the restart are not adopted as jobs
+and are not reported; their saved sessions stay on disk.
 
 The agent has one turn method, `handle`. The host picks the agent's role
 with `SessionOptions.turn_method`, which the session records, so a resumed
