@@ -2,13 +2,16 @@
 # SPDX-License-Identifier: Apache-2.0
 """Shell work for the work manager: one persistent bash per ``Shell`` object.
 
-``Shell(cwd, timeout)`` is inert configuration; its bash starts on first use.
+``Shell(cwd)`` is inert configuration; its bash starts on first use. Each
+``run(command, timeout=...)`` has its own deadline (default 30 minutes).
 
 - ``sh = Shell()``; ``await sh.run("cd src")``; ``await sh.run("make")``: the
   same object, the same bash (cwd, exported and unexported variables carry
   over). Another ``Shell()`` is another bash.
 - ``sh = manager.launch(Shell(), name="sh")``: the same shell as a job;
-  ``await sh.send("make")`` runs one command in it, like ``run``.
+  ``await sh.send("make")`` runs one command in it, like ``run`` with its
+  default timeout; for another deadline in the background, launch the call:
+  ``manager.launch(sh.run("make", timeout=60))``.
   Commands run one at a time, in order (FIFO), whichever way they arrive.
 
 Lifecycle: ``await shell.aclose()`` or ``async with Shell() as sh:`` ends
@@ -29,6 +32,7 @@ import asyncio
 import contextlib
 import contextvars
 import itertools
+import math
 import os
 import shlex
 import signal
@@ -60,6 +64,8 @@ _MAX_OUTPUT_BYTES = 64 * 1024 * 1024
 _CHUNK_BYTES = 64 * 1024
 # Seconds a cancelled persistent command gets to end after SIGTERM, then SIGKILL.
 _INTERRUPT_GRACE = 2.0
+# Seconds a command may run by default (``Shell.run``'s ``timeout``).
+_DEFAULT_TIMEOUT = 1800.0
 # Seconds past a command's deadline before the bash session's own timeout fires.
 _BACKSTOP_SECONDS = 60.0
 # Skips each command once an interrupt set __nooa_stop, except the epilogue's first.
@@ -230,6 +236,15 @@ async def _open_fifo(path: Path) -> tuple[asyncio.StreamReader, asyncio.BaseTran
     return reader, transport, write_fd
 
 
+def _check_timeout(value: Any) -> float:
+    """``value`` as a command deadline: a non-bool int or float, finite and positive."""
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise TypeError(f"timeout must be seconds (an int or float), got {value!r}")
+    if not (math.isfinite(value) and value > 0):
+        raise ValueError(f"timeout must be a finite, positive number of seconds, got {value!r}")
+    return float(value)
+
+
 class ShellOwner:
     """Shells started under one owner, closed together: an agent session closes its own.
 
@@ -272,14 +287,16 @@ class Shell:
     unexported variables carry over; another ``Shell()`` is a separate bash.
     Nothing starts until the first command. Commands run one at a time, in
     order. ``Shell().run(cmd)`` on a new object is a fresh shell whose state
-    ends with it. ``cwd`` defaults to the workspace; ``timeout`` (seconds)
-    bounds each command, which then ends with ``returncode`` 124 and
-    ``timed_out=True`` (bash and its state are kept).
+    ends with it. ``cwd`` defaults to the workspace. ``run(cmd, timeout=60)``
+    bounds that one command (seconds, default 1800); past it the command ends
+    with ``returncode`` 124 and ``timed_out=True`` (bash and its state are kept).
 
     Launched, it is a job: ``sh = self.jobs.launch(Shell(), name="sh")``; each
     ``sh.send("make")`` is a request job whose result is a ``CommandResult``,
-    in the same bash as ``run`` on that object. A timeout or cancel stops the
-    whole command (the rest of it is skipped) and keeps the shell's state.
+    in the same bash as ``run`` on that object, with the default timeout (for
+    another, launch the call: ``self.jobs.launch(sh.run("make", timeout=60))``).
+    A timeout or cancel stops the whole command (the rest of it is skipped)
+    and keeps the shell's state.
     When that cannot be done safely (a builtin loop that will not stop, or the
     user's own USR1 trap) bash restarts; under ``set -e`` the stopped command
     ends bash. Either way the result says the state was lost. Cancelling the
@@ -295,17 +312,11 @@ class Shell:
     __nosnapshot__ = True  # a live bash is not data
 
     cwd: str | Path | None  # Where it starts; current_dir is where the shell is now
-    timeout: float  # Seconds per command
 
     def __init__(
-        self,
-        cwd: str | Path | None = None,
-        *,
-        timeout: float = 1800.0,
-        max_output: int = _MAX_OUTPUT_BYTES,
+        self, cwd: str | Path | None = None, *, max_output: int = _MAX_OUTPUT_BYTES
     ) -> None:
         self.cwd = cwd
-        self.timeout = timeout
         self._max_output = max_output
         self._session: BashSession | None = None
         self._starting = False
@@ -327,7 +338,7 @@ class Shell:
         self._user_usr1 = False
 
     def __repr__(self) -> str:
-        return f"Shell(cwd={self.cwd!r}, timeout={self.timeout:g}; {self.summary()})"
+        return f"Shell(cwd={self.cwd!r}; {self.summary()})"
 
     @property
     def current_dir(self) -> str | None:
@@ -351,18 +362,24 @@ class Shell:
             return str(Path(self.cwd).resolve())
         return default_cwd.get() or os.getcwd()
 
-    async def run(self, command: str, *, stdin: str | None = None) -> CommandResult:
+    async def run(
+        self, command: str, *, stdin: str | None = None, timeout: float = _DEFAULT_TIMEOUT
+    ) -> CommandResult:
         """Run one command in this object's bash (started on first use); state carries over.
 
-        ``stdin`` is the command's input (else it reads nothing).
+        ``stdin`` is the command's input (else it reads nothing). ``timeout``
+        is this command's deadline in seconds (finite, positive), counted from
+        when it starts after any earlier command; past it the command is
+        stopped and the result has ``returncode`` 124 and ``timed_out=True``.
         """
+        timeout = _check_timeout(timeout)
         describe(f"$ {command}")
         async with self._lock:
             if self._session is None:
                 await self._start()
             self._busy = command
             try:
-                return await self._send_locked(command, stdin)
+                return await self._send_locked(command, stdin, timeout)
             finally:
                 self._busy = None
                 session = self._session
@@ -370,7 +387,7 @@ class Shell:
                     self._confirmed_cwd = str(session.cwd)  # bash reports it after each command
 
     async def send(self, command: str) -> CommandResult:
-        """A launched Shell's request (``job.send(command)``): the same as ``run``."""
+        """A launched Shell's request (``job.send(command)``): ``run`` with its default timeout."""
         return await self.run(command)
 
     async def _start(self) -> None:
@@ -439,7 +456,7 @@ class Shell:
     def _bash_alive(self) -> bool:
         return self._bash is not None and _start_time(self._bash[0]) == self._bash[1]
 
-    async def _send_locked(self, command: str, stdin: str | None = None) -> CommandResult:
+    async def _send_locked(self, command: str, stdin: str | None, timeout: float) -> CommandResult:
         session = self._session
         assert session is not None
         directory = kept = job_dir()  # output files are kept only in a job's directory
@@ -476,13 +493,13 @@ class Shell:
             # Our own deadline (the session's is a backstop): a timeout stops the
             # whole command the same way a cancel does.
             inner = asyncio.ensure_future(
-                session.run_with_timeout_flag(wrapped, self.timeout + _BACKSTOP_SECONDS)
+                session.run_with_timeout_flag(wrapped, timeout + _BACKSTOP_SECONDS)
             )
             restart_notes: list[str] | None = None
             try:
                 try:
                     stray_out, stray_err, code, timed_out = await asyncio.wait_for(
-                        asyncio.shield(inner), self.timeout
+                        asyncio.shield(inner), timeout
                     )
                 except TimeoutError:
                     if await self._interrupt(inner, before):

@@ -287,8 +287,9 @@ async def test_a_shell_timeout_delivers_a_result_and_wakes_the_waiting_turn(
     """Deadline -> JobEvent -> next turn: a command that never exits still ends the wait."""
     models.scripts[None] = [
         cell(
-            "assert Shell().timeout == 1800.0  # the default stays long\n"
-            "self.jobs.launch(Shell(timeout=0.5).run('sleep 30; echo never'), name='slow')\n"
+            "import inspect\n"
+            "assert inspect.signature(Shell.run).parameters['timeout'].default == 1800.0\n"
+            "self.jobs.launch(Shell().run('sleep 30; echo never', timeout=0.5), name='slow')\n"
             "return_result(Waiting(explanation='slow command running', on=['slow']))"
         ),
         cell(

@@ -44,7 +44,7 @@ async def test_one_shot_result_and_streams(manager, tmp_path):
 
 
 async def test_one_shot_timeout(manager):
-    r = await manager.launch(Shell(timeout=0.3).run("sleep 30; echo never"))
+    r = await manager.launch(Shell().run("sleep 30; echo never", timeout=0.3))
     assert (r.returncode, r.timed_out, r.stdout) == (124, True, "")
 
 
@@ -133,9 +133,12 @@ async def test_cancel_builtin_loop_restarts_with_explicit_note(manager, tmp_path
 
 
 async def test_persistent_timeout_recovers(manager, tmp_path):
-    sh = manager.launch(Shell(tmp_path, timeout=0.5), name="sh")
+    shell = Shell(tmp_path)
+    sh = manager.launch(shell, name="sh")
     await sh.send("KEEP=1")
-    r = await sh.send("sleep 30")
+    r = await manager.launch(
+        shell.run("sleep 30", timeout=0.5)
+    )  # a launched call: its own deadline
     assert (r.returncode, r.timed_out) == (124, True)
     r = await sh.send("echo $KEEP")
     assert r.stdout == "1\n"  # interrupted, not restarted
@@ -195,7 +198,7 @@ async def test_shell_reports_confirmed_cwd_and_busy_state(manager, tmp_path):
 
 async def test_stdin_feed_shares_the_command_deadline():
     started = asyncio.get_running_loop().time()
-    r = await asyncio.wait_for(Shell(timeout=1).run("sleep 30", stdin="x" * (8 << 20)), 10)
+    r = await asyncio.wait_for(Shell().run("sleep 30", stdin="x" * (8 << 20), timeout=1), 10)
     assert r.timed_out and r.returncode == 124
     assert asyncio.get_running_loop().time() - started < 8
 
@@ -240,7 +243,7 @@ async def test_output_limit_is_enforced_while_writing(manager, tmp_path):
     sh = manager.launch(Shell(tmp_path, max_output=1000), name="sh")
     r = await sh.send("head -c 50000 /dev/zero | tr '\\0' b; echo done >&2")
     assert Path(r.stdout_path).stat().st_size == 1000 and r.stderr == "done\n"
-    r = await manager.launch(Shell(timeout=1, max_output=10_000).run("yes"))
+    r = await manager.launch(Shell(max_output=10_000).run("yes", timeout=1))
     assert r.timed_out and Path(r.stdout_path).stat().st_size == 10_000
 
 
@@ -257,8 +260,8 @@ async def test_background_process_does_not_hold_the_command_and_ends_with_the_sh
     """A background process that inherits stdout/stderr does not keep run() waiting."""
     loop = asyncio.get_running_loop()
     started = loop.time()
-    shell = Shell(tmp_path, timeout=2)
-    r = await asyncio.wait_for(shell.run("sleep 30 & echo $! >bg.pid; echo hi"), 10)
+    shell = Shell(tmp_path)
+    r = await asyncio.wait_for(shell.run("sleep 30 & echo $! >bg.pid; echo hi", timeout=2), 10)
     assert (r.returncode, r.timed_out, r.stdout) == (0, False, "hi\n")
     assert loop.time() - started < 1.5
     pid = int((tmp_path / "bg.pid").read_text())
@@ -331,9 +334,9 @@ async def test_run_and_send_share_one_bash(manager, tmp_path):
 
 
 async def test_timeout_stops_the_whole_command_and_keeps_state(tmp_path):
-    async with Shell(tmp_path, timeout=0.5) as sh:
+    async with Shell(tmp_path) as sh:
         await sh.run("KEEP=1")
-        r = await sh.run("sleep 30; touch after; echo never")
+        r = await sh.run("sleep 30; touch after; echo never", timeout=0.5)
         assert (r.returncode, r.timed_out, r.stdout) == (124, True, "")
         assert not (tmp_path / "after").exists()  # the rest of the command was skipped
         r = await sh.run('echo "$KEEP"; echo $?; echo "[$__nooa_stop]"')
@@ -410,7 +413,7 @@ async def test_owner_closes_its_shells_and_their_background_processes(manager, t
 
 
 async def test_set_e_persists_and_ordinary_commands_still_succeed(tmp_path):
-    async with Shell(tmp_path, timeout=10) as sh:
+    async with Shell(tmp_path) as sh:
         assert (await sh.run("set -e")).returncode == 0
         r = await sh.run("printf ok")
         assert (r.returncode, r.stdout, r.stderr) == (0, "ok", "")
@@ -430,7 +433,7 @@ async def test_set_e_persists_and_ordinary_commands_still_succeed(tmp_path):
 
 
 async def test_nonzero_statuses_are_reported_as_is(tmp_path):
-    async with Shell(tmp_path, timeout=10) as sh:
+    async with Shell(tmp_path) as sh:
         assert (await sh.run("false")).returncode == 1
         assert (await sh.run("(exit 7)")).returncode == 7
         assert (await sh.run("sh -c 'kill -TERM $$'")).returncode == 143
@@ -442,7 +445,7 @@ async def test_nonzero_statuses_are_reported_as_is(tmp_path):
 
 
 async def test_nounset_and_pipefail(tmp_path):
-    async with Shell(tmp_path, timeout=10) as sh:
+    async with Shell(tmp_path) as sh:
         await sh.run("set -u -o pipefail")
         r = await sh.run("false | true; echo [$?]; echo ${DEFINED:-d}")
         assert (r.returncode, r.stdout, r.stderr) == (0, "[1]\nd\n", "")
@@ -456,7 +459,7 @@ async def test_nounset_and_pipefail(tmp_path):
 
 
 async def test_user_traps_persist_and_work(tmp_path):
-    async with Shell(tmp_path, timeout=10) as sh:
+    async with Shell(tmp_path) as sh:
         await sh.run("trap 'echo got >>usr1.log' USR1; trap ':' DEBUG; trap 'echo bye' EXIT")
         r = await sh.run("trap -p USR1 DEBUG EXIT")
         assert r.stdout == (
@@ -470,9 +473,9 @@ async def test_user_traps_persist_and_work(tmp_path):
 
 
 async def test_user_usr1_trap_makes_an_interrupt_restart_explicitly(tmp_path):
-    async with Shell(tmp_path, timeout=0.5) as sh:
+    async with Shell(tmp_path) as sh:
         await sh.run("trap ':' USR1; KEEP=1")
-        r = await sh.run(f"sleep 30; touch {tmp_path}/after")
+        r = await sh.run(f"sleep 30; touch {tmp_path}/after", timeout=0.5)
         assert r.timed_out and "the shell restarted" in r.stderr  # no silent half-stop
         assert not (tmp_path / "after").exists()
         r = await sh.run('echo "[$KEEP]"; trap -p USR1')
@@ -480,9 +483,9 @@ async def test_user_usr1_trap_makes_an_interrupt_restart_explicitly(tmp_path):
 
 
 async def test_timeout_leaves_no_helper_state_and_keeps_the_users(tmp_path):
-    async with Shell(tmp_path, timeout=0.5) as sh:
+    async with Shell(tmp_path) as sh:
         await sh.run("set -u -o pipefail; trap ':' DEBUG; KEEP=1")
-        r = await sh.run(f"sleep 30; touch {tmp_path}/after; echo never")
+        r = await sh.run(f"sleep 30; touch {tmp_path}/after; echo never", timeout=0.5)
         assert (r.returncode, r.timed_out, r.stdout) == (124, True, "")
         assert not (tmp_path / "after").exists()
         r = await sh.run(
@@ -497,9 +500,9 @@ async def test_timeout_leaves_no_helper_state_and_keeps_the_users(tmp_path):
 
 
 async def test_timeout_under_errexit_reports_the_lost_shell(tmp_path):
-    async with Shell(tmp_path, timeout=0.5) as sh:
+    async with Shell(tmp_path) as sh:
         await sh.run("set -e; KEEP=1")
-        r = await sh.run("sleep 30; echo never")
+        r = await sh.run("sleep 30; echo never", timeout=0.5)
         assert (r.returncode, r.timed_out, r.stdout) == (124, True, "")
         assert "bash ended during this command" in r.stderr  # errexit on the stopped sleep
         r = await sh.run('echo "[$KEEP]"')
@@ -507,7 +510,7 @@ async def test_timeout_under_errexit_reports_the_lost_shell(tmp_path):
 
 
 async def test_unparsable_command_runs_nothing_and_the_shell_goes_on(tmp_path):
-    async with Shell(tmp_path, timeout=10) as sh:
+    async with Shell(tmp_path) as sh:
         await sh.run("set -e; K=1")
         r = await sh.run("touch before; echo 'open quote")
         assert r.returncode == 2 and "unexpected" in r.stderr and not (tmp_path / "before").exists()
@@ -518,10 +521,99 @@ async def test_unparsable_command_runs_nothing_and_the_shell_goes_on(tmp_path):
 
 
 async def test_xtrace_shows_the_users_commands_not_the_wrapper(tmp_path):
-    async with Shell(tmp_path, timeout=10) as sh:
+    async with Shell(tmp_path) as sh:
         await sh.run("set -x")
         r = await sh.run("echo hi")
         assert r.stdout == "hi\n" and "+ echo hi" in r.stderr
         assert "__nooa" not in r.stderr and "_nemo_ec" not in r.stderr
         await sh.run("set +x")
         assert (await sh.run("echo quiet")).stderr == ""
+
+
+# ---- each run has its own deadline ----
+
+
+async def test_run_takes_a_timeout_per_call(tmp_path):
+    """The reported call shape: ``Shell().run(command, timeout=30)``."""
+    r = await Shell(tmp_path).run("echo ok", timeout=30)
+    assert (r.returncode, r.timed_out, r.stdout) == (0, False, "ok\n")
+    r = await Shell(tmp_path).run("cat", stdin="in", timeout=30.5)
+    assert r.stdout == "in"
+
+
+def test_timeout_is_a_run_parameter_not_shell_configuration():
+    import inspect
+
+    params = inspect.signature(Shell.run).parameters
+    assert params["timeout"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert params["timeout"].default == 1800.0  # omitted: 30 minutes
+    assert "timeout" not in inspect.signature(Shell).parameters
+    assert not hasattr(Shell(), "timeout")
+    with pytest.raises(TypeError):
+        Shell(timeout=30)  # type: ignore[call-arg]
+
+
+@pytest.mark.parametrize(
+    ("value", "error"),
+    [
+        (0, ValueError),
+        (-1, ValueError),
+        (float("inf"), ValueError),
+        (float("nan"), ValueError),
+        (None, TypeError),
+        (True, TypeError),
+        ("30", TypeError),
+    ],
+)
+async def test_run_rejects_a_timeout_that_is_not_a_finite_positive_number(tmp_path, value, error):
+    shell = Shell(tmp_path)
+    with pytest.raises(error, match="timeout"):
+        await shell.run("touch ran", timeout=value)
+    assert not (tmp_path / "ran").exists() and shell.summary() == "not started"
+
+
+async def test_successive_runs_have_independent_deadlines(tmp_path):
+    async with Shell(tmp_path) as sh:
+        await sh.run("KEEP=1")
+        r = await sh.run("sleep 30; echo never", timeout=0.3)
+        assert (r.returncode, r.timed_out) == (124, True)
+        r = await sh.run("sleep 0.6; echo slow", timeout=5)  # longer than the last deadline
+        assert (r.returncode, r.timed_out, r.stdout) == (0, False, "slow\n")
+        r = await sh.run('sleep 0.6; echo "$KEEP"')  # omitted: the default, not the last one
+        assert (r.returncode, r.timed_out, r.stdout) == (0, False, "1\n")
+
+
+async def test_concurrent_runs_queue_and_keep_their_own_deadlines(tmp_path):
+    async with Shell(tmp_path) as sh:
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        short, long_, default = await asyncio.wait_for(
+            asyncio.gather(
+                sh.run("sleep 30; echo never", timeout=0.3),
+                sh.run("sleep 0.6; echo long", timeout=5),
+                sh.run("sleep 0.6; echo default"),
+            ),
+            20,
+        )
+        assert (short.returncode, short.timed_out) == (124, True)
+        assert (long_.returncode, long_.timed_out, long_.stdout) == (0, False, "long\n")
+        assert (default.timed_out, default.stdout) == (False, "default\n")
+        assert loop.time() - started < 10
+        # A queued short deadline counts from its own start, not from when it was asked.
+        first, second = await asyncio.wait_for(
+            asyncio.gather(
+                sh.run("sleep 0.6; echo first", timeout=5),
+                sh.run("sleep 30; echo never", timeout=0.3),
+            ),
+            20,
+        )
+        assert (first.timed_out, first.stdout) == (False, "first\n")
+        assert (second.returncode, second.timed_out) == (124, True)
+
+
+async def test_a_launched_run_with_a_timeout_ends_its_job(manager, tmp_path):
+    shell = Shell(tmp_path)
+    job = manager.launch(shell.run("sleep 30; echo never", timeout=0.3), name="slow")
+    r = await asyncio.wait_for(job, 10)
+    assert (r.returncode, r.timed_out, r.stdout) == (124, True, "")
+    assert (await shell.run("echo after")).stdout == "after\n"  # the shell goes on
