@@ -35,7 +35,9 @@ from nooa.agentdoc._docs import spec
 from nooa.agentdoc._pformat import _pformat
 from nooa.agentdoc._truncating_stream import (
     FileBackedTruncatingStringIO,
+    LineSplitter,
     TruncatingStringIO,
+    bounded_lines,
 )
 from nooa.agentdoc._visibility import hidden
 from nooa.agentdoc.core import doc
@@ -167,5 +169,7 @@ __all__ = [
     "pprint",
     "truncating_pformat",
     "FileBackedTruncatingStringIO",
+    "LineSplitter",
     "TruncatingStringIO",
+    "bounded_lines",
 ]

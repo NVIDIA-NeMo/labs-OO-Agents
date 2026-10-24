@@ -516,7 +516,7 @@ async def test_waiter_cancelled_after_cross_thread_put_item_not_lost(mode: str):
 
 
 async def test_status_reflects_pending_items(producer: ProducerHelper, mode: str):
-    """Channel.status() shows pending count and preview."""
+    """Channel.status() shows the unread count, never the content."""
     ch = Channel[str]("test", "queue")
     assert ch.status() == ""
 
@@ -525,8 +525,7 @@ async def test_status_reflects_pending_items(producer: ProducerHelper, mode: str
     await asyncio.sleep(0.05)
 
     status = ch.status()
-    assert "test: 2 pending" in status
-    assert "hello" in status
+    assert status == "test: 2 unread"
 
 
 async def test_queue_manager_status_composite(producer: ProducerHelper, mode: str):
@@ -541,8 +540,7 @@ async def test_queue_manager_status_composite(producer: ProducerHelper, mode: st
     await asyncio.sleep(0.05)
 
     status = qm.status()
-    assert "alpha: 1 pending" in status
-    assert "beta: 2 pending" in status
+    assert status == "Unread:\n  • alpha: 1\n  • beta: 2"
 
 
 # ---------------------------------------------------------------------------

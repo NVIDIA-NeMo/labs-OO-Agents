@@ -48,7 +48,7 @@ async def _spawn_and_collect(registry, root_options, models, *, keep):
     how = ", kept=True" if keep else ""
     models.scripts[None] = [
         cell(
-            f"await self.session.delegate('Kid', 'work'{how})\n"
+            f"await self.session.delegate('kid', 'work'{how}, name='kid')\n"
             "return_result(Waiting(explanation='child working', on=['delegates']))"
         ),
         collect(),
@@ -56,7 +56,7 @@ async def _spawn_and_collect(registry, root_options, models, *, keep):
         collect(),
     ]
     # The messages and the turn end come from one cell, as close together as they get.
-    models.scripts["Kid"] = [
+    models.scripts["kid"] = [
         cell(
             "self.message('first')\n"
             "self.message('second')\n"
@@ -96,7 +96,7 @@ async def test_a_kept_childs_messages_arrive_in_order_before_its_result(
         ("ChildMessage", "second"),
         ("ChildResult", "kid done"),
     ]
-    [child_options] = [o for o in models.built if o.name == "Kid"]
+    [child_options] = [o for o in models.built if o.name == "kid"]
     assert child_options.turn_method == "handle_work"
 
 
@@ -110,7 +110,7 @@ async def test_the_childs_messages_stay_in_its_own_events(registry, root_options
 async def test_a_message_wakes_a_parent_waiting_on_delegates(registry, root_options, models):
     models.scripts[None] = [
         cell(
-            "await self.session.delegate('Kid', 'work', kept=True)\n"
+            "await self.session.delegate('kid', 'work', kept=True, name='kid')\n"
             "return_result(Waiting(explanation='child working', on=['delegates']))"
         ),
         cell(
@@ -119,7 +119,7 @@ async def test_a_message_wakes_a_parent_waiting_on_delegates(registry, root_opti
         ),
     ]
     # The child only messages and then waits itself: no result is delivered.
-    models.scripts["Kid"] = [
+    models.scripts["kid"] = [
         cell(
             "self.message('progress')\n"
             "return_result(Waiting(explanation='idle', on=['user_messages']))"
@@ -127,25 +127,25 @@ async def test_a_message_wakes_a_parent_waiting_on_delegates(registry, root_opti
     ]
     root = await registry.create(root_options)
     outcome = await asyncio.wait_for(root.prompt("go"), TIMEOUT)
-    assert outcome == Done(explanation="ChildMessage: progress from Kid")
+    assert outcome == Done(explanation="ChildMessage: progress from kid")
     [(_t, raw)] = [
         r
         for r in registry.store.load_rows(root.id, frozenset({"ItemAdmitted"}))
         if r[1].get("channel") == "delegates"
     ]
-    assert raw["source"] == "child:Kid"
+    assert raw["source"] == "child:kid"
 
 
 async def test_a_message_does_not_resolve_wait(registry, root_options, models):
     models.scripts[None] = [
         cell(
-            "child = await self.session.delegate('Kid', 'work')\n"
+            "child = await self.session.delegate('kid', 'work', name='kid')\n"
             "done = (await child.wait()).done\n"
             "return_result(Done(explanation=f'waited: {done.explanation}'))"
         ),
         collect(),
     ]
-    models.scripts["Kid"] = [
+    models.scripts["kid"] = [
         cell(
             "self.message('note')\nreturn_result(Done(explanation='kid done', result=TaskResult(solution_description='s', evidence='e', how_to_verify='v')))"
         )
@@ -165,14 +165,14 @@ async def test_a_message_does_not_resolve_wait(registry, root_options, models):
 async def test_a_grandchilds_messages_go_only_to_its_parent(registry, root_options, models):
     models.scripts[None] = [
         cell(
-            "c = await self.session.delegate('Mid', 'm')\n"
+            "c = await self.session.delegate('mid', 'm', name='mid')\n"
             "d = (await c.wait()).done\n"
             "return_result(Done(explanation=d.explanation))"
         )
     ]
-    models.scripts["Mid"] = [
+    models.scripts["mid"] = [
         cell(
-            "g = await self.session.delegate('Leaf', 'l')\n"
+            "g = await self.session.delegate('leaf', 'l', name='leaf')\n"
             "d = (await g.wait()).done\n"
             "self.v.mid_seen = d.explanation\n"
             "return_result(Done(explanation='mid ok', result=TaskResult(solution_description='s', evidence='e', how_to_verify='v')))"
@@ -180,7 +180,7 @@ async def test_a_grandchilds_messages_go_only_to_its_parent(registry, root_optio
         # Mid's later turn for the leaf's message.
         work_done("mid saw the leaf's message"),
     ]
-    models.scripts["Leaf"] = [
+    models.scripts["leaf"] = [
         cell(
             "self.message('leaf note')\nreturn_result(Done(explanation='leaf ok', result=TaskResult(solution_description='s', evidence='e', how_to_verify='v')))"
         )
@@ -208,7 +208,7 @@ async def test_a_roots_messages_go_to_the_host_not_delegates(registry, root_opti
 async def test_a_closing_or_closed_parent_drops_messages(registry, root_options):
     root = await registry.create(root_options)
     child = await registry.create(
-        root_options.model_copy(update={"name": "Kid", "kept": True}), parent_id=root.id
+        root_options.model_copy(update={"name": "kid", "kept": True}), parent_id=root.id
     )
     delegates = root._agent.queue_manager.get_channel("delegates")
     root._closing = True
@@ -233,9 +233,70 @@ async def test_a_closing_or_closed_parent_drops_messages(registry, root_options)
 
 def test_child_message_is_exported():
     import nooa_atom
-    from nooa_atom.agent import agent
+    from nooa_atom.agent import base as agent
 
     assert nooa_atom.ChildMessage is ChildMessage
     assert "ChildMessage" in nooa_atom.__all__ and "ChildMessage" in agent.__all__
     ref = ChildRef(id="x", name="x", depth=1, status="running")
     assert ChildMessage.model_validate_json(ChildMessage(child=ref, text="t").model_dump_json())
+
+
+async def test_a_long_child_message_is_cut_for_the_parent_and_the_child_is_told(
+    registry, root_options, models
+):
+    from nooa_atom.session.items import CHILD_MESSAGE_CHARS, CHILD_MESSAGE_CUT
+
+    models.scripts[None] = [
+        cell(
+            "await self.session.delegate('kid', 'work', name='kid')\n"
+            "return_result(Waiting(explanation='child working', on=['delegates']))"
+        ),
+        collect(),
+        collect(),
+    ]
+    models.scripts["kid"] = [
+        cell("self.message('x' * 3000)"),
+        cell(
+            "return_result(Done(explanation='kid done', result=TaskResult("
+            "solution_description='s', evidence='e', how_to_verify='v')))"
+        ),
+    ]
+    root = await registry.create(root_options)
+    await asyncio.wait_for(root.prompt("go"), TIMEOUT)
+    kind, text = _delegates(registry, root.id)[0]
+    assert kind == "ChildMessage"
+    assert text == "x" * CHILD_MESSAGE_CHARS + CHILD_MESSAGE_CUT
+
+
+async def test_an_atom_child_is_told_when_its_message_is_cut(tmp_path, sessions_dir):
+    from atom_test_agents import ATOM_SPEC, AtomModels
+    from nooa_atom import SessionOptions, SessionStore
+    from nooa_atom.session.registry import SessionRegistry
+
+    models = AtomModels()
+    models.scripts[None] = [
+        cell(
+            "self.v.kid = await self.spawn('Kid', 'work', name='kid')\n"
+            "await self.v.kid.wait()\n"
+            "return_result(Done(explanation='done'))"
+        )
+    ]
+    models.scripts["kid"] = [
+        cell("self.message('x' * 3000)"),
+        cell(
+            "return_result(Done(explanation='kid done', result=TaskResult("
+            "solution_description='s', evidence='e', how_to_verify='v')))"
+        ),
+    ]
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    options = SessionOptions(workspace=workspace, agent_spec=ATOM_SPEC, sessions_dir=sessions_dir)
+    registry = SessionRegistry(SessionStore(sessions_dir), agent_factory=models)
+    try:
+        root = await registry.create(options)
+        await asyncio.wait_for(root.prompt("go"), TIMEOUT)
+    finally:
+        await registry.close_all()
+    kid_calls = models.llms["kid"].calls
+    after_message = str(kid_calls[1].messages[len(kid_calls[0].messages) :])
+    assert "your parent gets only the first 1,000 characters" in after_message

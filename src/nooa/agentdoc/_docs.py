@@ -124,7 +124,7 @@ class Spec:
         ] = None,
         max_length: Annotated[
             int | None,
-            "Override max items per container in pformat — parameter annotations only, e.g. Annotated[list, spec(max_length=20)] (not honored on class fields)",
+            "Override max items per container in pformat for this annotation (parameter annotation or class field), e.g. Annotated[list, spec(max_length=20)]",
         ] = _SENTINEL,
         max_string: Annotated[
             int | None,
@@ -134,6 +134,10 @@ class Spec:
             int | None,
             "Override max nesting depth in pformat — parameter annotations only (not honored on class fields)",
         ] = _SENTINEL,
+        hide_empty: Annotated[
+            bool | None,
+            "In pformat, leave out a field whose value is None or empty ('', [], {}); on a class (all its fields) or one field. doc() still lists it",
+        ] = None,
     ) -> SpecAnnotation | None:
         """Specify documentation metadata — step 1.
 
@@ -189,6 +193,8 @@ class Spec:
             kwargs["max_string"] = max_string
         if max_depth is not _SENTINEL:
             kwargs["max_depth"] = max_depth
+        if hide_empty is not None:
+            kwargs["hide_empty"] = hide_empty
 
         if target is _SENTINEL:
             return SpecAnnotation(**kwargs)

@@ -29,7 +29,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# AtomAgent subclasses already warned about parameters they do not accept.
+# Atom agents (AtomAgentBase subclasses) already warned about parameters they do not accept.
 _warned_classes: set[type] = set()
 
 
@@ -44,7 +44,12 @@ def create_session_agent(options: SessionOptions, storage: StorageManager) -> In
     default model) and passes the result here. Without an ``llm_factory``
     and without ``options.llm``, the class's own default client applies.
 
-    An Atom agent (an ``AtomAgent`` subclass) also gets the workspace's
+    ``AtomAgent`` (or a subclass) also gets its role from ``options.turn_method``
+    (``nooa_atom.agent.roles.role_for``): the ``policy`` its ``handle`` turns
+    enforce and the ``instructions`` of its static ``role`` block.
+
+    An Atom agent (``nooa_atom.agent:AtomAgent``, a subclass of it, or any
+    other subclass of its private base ``AtomAgentBase``) also gets the workspace's
     settings (``AtomOptions``): ``cwd``, ``skills_dirs``, ``summarization``
     and a ``libs_dir`` inside the workspace, each one its ``__init__``
     accepts (a warning names the ones it does not), and then its MCP
@@ -54,11 +59,13 @@ def create_session_agent(options: SessionOptions, storage: StorageManager) -> In
     host's ``prepare`` hook. Any other agent gets only ``storage`` and ``llm``.
     """
     from nooa_atom.agent.agent import AtomAgent
+    from nooa_atom.agent.base import AtomAgentBase
+    from nooa_atom.agent.roles import role_for
 
     agent_class = load_agent_class(options.agent_spec, base=options.workspace)
     # Only an Atom agent gets the workspace: an unrelated agent's own
     # cwd/summarization/... parameters mean something else and are left alone.
-    is_atom = isinstance(agent_class, type) and issubclass(agent_class, AtomAgent)
+    is_atom = isinstance(agent_class, type) and issubclass(agent_class, AtomAgentBase)
     atom_options = AtomOptions.load(options.workspace) if is_atom else None
 
     kwargs: dict[str, Any] = {"storage": storage}
@@ -69,12 +76,16 @@ def create_session_agent(options: SessionOptions, storage: StorageManager) -> In
         accepts_any = any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values())
         workspace = Path(atom_options.working_dir)
         missing = []
-        for name, value in {
+        settings: dict[str, Any] = {
             "cwd": workspace,
             "skills_dirs": atom_options.skills_dirs,
             "summarization": atom_options.summarization,
             "libs_dir": workspace / ".nooa" / "libs",
-        }.items():
+        }
+        if issubclass(agent_class, AtomAgent):
+            # One turn method (handle): the session's turn_method selects the role.
+            settings["policy"], settings["instructions"] = role_for(options.turn_method)
+        for name, value in settings.items():
             if name in parameters or accepts_any:
                 kwargs[name] = value
             else:
@@ -90,7 +101,7 @@ def create_session_agent(options: SessionOptions, storage: StorageManager) -> In
             )
     agent = agent_class(**kwargs)
 
-    if atom_options is not None and isinstance(agent, AtomAgent):
+    if atom_options is not None and isinstance(agent, AtomAgentBase):
         for warning in configure_session_skills(agent, atom_options):
             logger.warning("Session in %s: %s", options.workspace, warning)
         # The /skills and /mcp controls belong to the agent, not to one host:

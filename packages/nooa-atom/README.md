@@ -11,6 +11,61 @@ headless in-process host (`open_tree`). The Atom agent runs on that layer:
 `nooa_atom.agent:AtomAgent` is the agent spec a host passes in
 `SessionOptions.agent_spec`.
 
+## The Atom agent, its role and resuming sessions
+
+`nooa atom` with no `--agent` serves `nooa_atom.agent:AtomAgent` (also
+spelled `nooa_atom.agent.agent:AtomAgent`). Commands and child agents are
+its `self.jobs` work (`Shell`, `Subagent`), and files are `self.files`. It
+builds on a private base, `nooa_atom.agent.base.AtomAgentBase`, which holds
+the session plumbing and is not offered as an agent. `--agent` picks the
+class for *new* sessions only; a loaded session uses the agent spec it
+recorded.
+
+A session an earlier Atom saved resumes as this agent in place: the same
+session id, history, todos, `self.v` and skill-private vars (such as the
+mesh identity in `_mesh_vars`). Earlier Atoms recorded the spec
+`nooa_atom.agent:AtomAgent` (or a legacy spelling); the spike's
+`nooa_atom.agent.unified:UnifiedAtomAgent` loads it too. Custom and file
+specs load as they are. On restore the agent sets its own context blocks
+again (`python_cell_tools`, `status`, `role`...; the old `queues` block goes)
+and keeps any other block. A job that was running when the session stopped
+is reported once as a `failed` `JobEvent` ("lost: ..."), and so is each
+child session from before the restart that is not closed ("not adopted:
+..."): neither one is running anymore.
+
+The agent has one turn method, `handle`. The host picks the agent's role
+with `SessionOptions.turn_method`, which the session records, so a resumed
+session keeps its role (`nooa_atom.agent.roles`):
+
+| `turn_method` | Role | Enforced at the end of a turn |
+| --- | --- | --- |
+| `handle` (default) | interactive | `Waiting` only on work that will deliver |
+| `handle_batch` | unattended | no `NeedInput`; `Done` has a result; no running work at `Done` |
+| `handle_orchestrate` | orchestrator (unattended; subagents do the work) | as unattended |
+| `handle_work` (every child session) | child | `Done` has a `TaskResult`; a one-shot child may not ask; no running work at `Done` |
+
+The agent factory turns that selection into the agent's `policy` and its
+`instructions`. The instructions are one static `role` block in the prompt
+prefix, and empty instructions add no block. Code that builds the agent
+itself can pass `AtomAgent(policy=..., instructions=...)`. Whatever the
+`turn_method`, the session calls `handle` (`AtomAgent.turn_entry`); an
+agent without `turn_entry` still runs the method its `turn_method` names.
+
+Hosts and benchmarks select the role with that same field, so no other
+flag is needed:
+
+- `nooa atom` and Pool: new sessions are interactive (`handle`); children
+  are `handle_work`.
+- `run_task` / `nooa-bench run` / the Harbor `atom` agent type:
+  unattended (`handle_batch`, the default), or the orchestrator with
+  `--turn-method handle_orchestrate` (`options.turn_method`).
+
+Benchmark runs pinned to the frozen spike commits (b612e2d46 and the 7f9…
+pin) measure the code at those commits: the earlier `AtomAgent` with its
+four turn methods, and the spike agent selected by its spike spec. They are
+not repinned. Runs from this branch measure today's `AtomAgent` with one
+`handle` and the role table above.
+
 Atom reads its settings from the `atom` section of `settings.yaml` (user and
 workspace `.nooa/`). The TUI and `nooa-acp` read `coding`; the first time
 Atom reads a settings file that has `coding` and no `atom`, it adds an `atom`
@@ -29,14 +84,15 @@ for all workspaces instead. A `SessionRegistry` serves one such directory;
 a subagent's session goes in its root's.
 
 `run_task(options, task)` runs one task unattended in a new tree: the root
-runs `handle_batch` turns until the agent returns `Done`, follows a turn
-that ends `Waiting` to the next one, and stops at `max_turns` or `timeout`.
-With `options.turn_method="handle_orchestrate"` the root runs
-`handle_orchestrate` turns instead: it plans the task, hands the work to
+runs unattended turns (`turn_method="handle_batch"`) until the agent returns
+`Done`, follows a turn that ends `Waiting` to the next one, and stops at
+`max_turns` or `timeout`. With `options.turn_method="handle_orchestrate"`
+the root is an orchestrator instead: it plans the task, hands the work to
 child sessions, verifies their results and does not edit files itself.
-Its children run `handle_work`, whether started with `delegate()` (one-shot)
-or `spawn()` (kept). `nooa-bench run --turn-method handle_orchestrate` picks it
-from the command line.
+Its children are `handle_work` sessions (`Subagent` work). For the Atom
+agent these values select a role, and every turn runs `handle` (see above).
+`nooa-bench run --turn-method handle_orchestrate` picks it from the command
+line.
 It returns a `TaskRun` with the final `Done` and its `TaskResult`, the
 reason it stopped otherwise, the turn count, the usage and the root agent's
 events. `nooa-bench run` and the benchmark runner's `atom` agent type use

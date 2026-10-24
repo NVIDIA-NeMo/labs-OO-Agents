@@ -82,7 +82,7 @@ async def test_waiting_on_mesh_without_a_pump_is_rejected(tmp_path, sessions_dir
         ],
     )
     assert len(calls) == 2
-    assert "Waiting on 'mesh', but it is not a running job" in calls[1]
+    assert "Waiting on 'mesh', but no running job or child has that name" in calls[1]
     assert HINT in calls[1]
     assert "Running right now: nothing." in calls[1]
 
@@ -102,7 +102,8 @@ async def test_waiting_on_the_person_is_rejected_with_the_done_or_need_input_hin
     assert "Waiting on 'user_messages', but the person is not a job." in calls[1]
     assert HINT in calls[1]
     # What is running is listed, and the person is never among it.
-    assert "Running right now: 'jobs', 'mesh', 'mesh inbox pump'." in calls[1]
+    # The mesh pump is a queue-manager task, not a ``self.jobs`` job: no 'jobs'.
+    assert "Running right now: 'mesh', 'mesh inbox pump'." in calls[1]
 
 
 async def test_waiting_on_delegates_is_accepted_with_a_running_child(tmp_path, sessions_dir):
@@ -111,13 +112,13 @@ async def test_waiting_on_delegates_is_accepted_with_a_running_child(tmp_path, s
         sessions_dir,
         [
             cell(
-                "self.v.child = await self.spawn('Worker', 'fix it')\n"
+                "self.v.child = await self.spawn('Worker', 'fix it', name='worker')\n"
                 "return_result(Waiting(explanation='w', on=['delegates']))"
             ),
             cell("[item] = notification['delegates']\n" + DONE),
         ],
         {
-            "Worker": [
+            "worker": [
                 cell(
                     "await asyncio.sleep(0.2)\n"
                     "return_result(Done(explanation='fixed', result=TaskResult("
@@ -153,7 +154,7 @@ async def test_a_finished_or_cancelled_job_is_rejected(tmp_path, sessions_dir):
                 "await asyncio.sleep(0.05)\n"
                 "assert done_job.state != 'running', done_job.state\n"
                 "self.queue_manager.get_channel('ci').flush()\n"
-                "return_result(Waiting(explanation='w', on=['jobs:ci-1']))"
+                "return_result(Waiting(explanation='w', on=['ci']))"
             ),
             cell(
                 "self.queue_manager.queue('build')\n"
@@ -168,8 +169,8 @@ async def test_a_finished_or_cancelled_job_is_rejected(tmp_path, sessions_dir):
     )
     # The strategy allows three rejected results per turn; this uses two.
     assert len(calls) == 3
-    assert "Waiting on 'jobs:ci-1', but no such job is running." in calls[1]
-    assert "Waiting on 'build', but no such job is running." in calls[2]
+    assert "Waiting on 'ci', but no job named 'ci' is running: it may" in calls[1]
+    assert "Waiting on 'build', but no job named 'build' is running" in calls[2]
     for text in calls[1:]:
         assert HINT in text
 
@@ -181,5 +182,92 @@ async def test_waiting_on_jobs_without_a_running_job_is_rejected(tmp_path, sessi
         [cell("return_result(Waiting(explanation='w', on=['jobs']))"), cell(DONE)],
     )
     assert len(calls) == 2
-    assert "Waiting on 'jobs', but no such job is running." in calls[1]
+    assert "Waiting on 'jobs', but no job is running and nothing is queued" in calls[1]
     assert HINT in calls[1]
+
+
+async def test_waiting_on_jobs_with_only_a_queue_manager_task_is_rejected(tmp_path, sessions_dir):
+    # A queue-manager task on its own channel never delivers on ``jobs``.
+    calls = await _run(
+        tmp_path,
+        sessions_dir,
+        [
+            cell(
+                "self.queue_manager.queue('ci')\n"
+                "self.queue_manager.spawn(asyncio.sleep(0.3), channel='ci', label='ci-1')\n"
+                "return_result(Waiting(explanation='w', on=['jobs']))"
+            ),
+            cell(DONE),
+        ],
+    )
+    assert len(calls) == 2
+    assert "Waiting on 'jobs', but no job is running and nothing is queued" in calls[1]
+    assert HINT in calls[1]
+
+
+async def test_waiting_on_jobs_is_accepted_while_a_self_jobs_job_runs(tmp_path, sessions_dir):
+    calls = await _run(
+        tmp_path,
+        sessions_dir,
+        [
+            cell(
+                "await self.jobs.run('sleep 0.3; echo hi', name='slow')\n"
+                "return_result(Waiting(explanation='w', on=['jobs']))"
+            ),
+            cell("assert notification['jobs'][0].name == 'slow'\n" + DONE),
+        ],
+    )
+    assert len(calls) == 2
+    assert not _rejected(calls[1])
+
+
+async def test_waiting_on_jobs_is_accepted_when_its_result_is_buffered(tmp_path, sessions_dir):
+    calls = await _run(
+        tmp_path,
+        sessions_dir,
+        [
+            cell(
+                "await self.jobs.run('echo hi', name='quick')\n"
+                "while self.jobs.get('quick').state == 'running':\n"
+                "    await asyncio.sleep(0.02)\n"
+                "return_result(Waiting(explanation='w', on=['jobs']))"
+            ),
+            cell("assert notification['jobs'][0].name == 'quick'\n" + DONE),
+        ],
+    )
+    assert len(calls) == 2
+    assert not _rejected(calls[1])
+
+
+async def test_waiting_on_a_finished_child_with_an_unread_result_is_accepted(
+    tmp_path, sessions_dir
+):
+    """Its result is still on ``delegates``: the next turn starts at once and gets it."""
+    calls = await _run(
+        tmp_path,
+        sessions_dir,
+        [
+            cell(
+                "self.v.child = await self.spawn('Reader', 'read docs', name='docs_reader')\n"
+                "delegates = self.queue_manager.get_channel('delegates')\n"
+                "async with asyncio.timeout(10):\n"
+                "    while not delegates.qsize() or self.v.child.status == 'running':\n"
+                "        await asyncio.sleep(0.02)\n"
+                "return_result(Waiting(explanation='w', on=['docs_reader']))"
+            ),
+            cell(
+                "[item] = notification['delegates']\n"
+                "assert item.child.name == 'docs_reader', item\n" + DONE
+            ),
+        ],
+        {
+            "docs_reader": [
+                cell(
+                    "return_result(Done(explanation='read', result=TaskResult("
+                    "solution_description='s', evidence='e', how_to_verify='h')))"
+                )
+            ]
+        },
+    )
+    assert len(calls) == 2
+    assert not _rejected(calls[1])

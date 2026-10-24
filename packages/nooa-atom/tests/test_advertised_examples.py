@@ -13,7 +13,7 @@ from types import SimpleNamespace
 from unittest.mock import create_autospec
 
 import pytest
-from nooa_atom.agent import AtomAgent
+from nooa_atom.agent.base import AtomAgentBase
 from nooa_atom.skills.manager import SkillManager
 
 from nooa.context_blocks.models import ContextWindowStats
@@ -66,7 +66,7 @@ async def agent(tmp_path, monkeypatch):
     (skills_dir / "review" / "SKILL.md").write_text(
         "---\nname: review\ndescription: Review a change\n---\nRead the diff.\n"
     )
-    made = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path, skills_dirs=[skills_dir])
+    made = AtomAgentBase(llm=FakeLLMClient(), cwd=tmp_path, skills_dirs=[skills_dir])
     yield made
     await made.aclose()
 

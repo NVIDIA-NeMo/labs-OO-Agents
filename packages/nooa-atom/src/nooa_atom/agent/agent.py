@@ -1,841 +1,783 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Host-neutral interactive Atom agent, run by a Session."""
+"""The Atom agent: one work vocabulary, ``self.jobs`` runs shells and subagents.
+
+``AtomAgent`` is the agent ``nooa atom`` runs (spec ``nooa_atom.agent:AtomAgent``,
+also spelled ``nooa_atom.agent.agent:AtomAgent``). It builds on the private
+``AtomAgentBase`` (``nooa_atom.agent.base``): the workspace tools (files,
+repo, todos, skills, ``self.v``) and the session plumbing. On top of that it
+has its own turn methods, and background jobs and child sessions are the
+generic ``WorkManager`` with its ``Shell`` and ``Subagent`` work.
+
+Its cells see this module's names (``AtomCodeAct``), not the base module's
+names that inheritance would otherwise bring in. A subclass defined
+elsewhere sees this module's names plus its own module's names.
+
+A session saved by an earlier Atom (the ``delegate``/``spawn``/``JobsApi``
+interface, or this agent's spike spelling
+``nooa_atom.agent.unified:UnifiedAtomAgent``) loads as this class. See
+``AtomAgent.after_restore`` for what carries over.
+"""
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any, ClassVar
+from typing import Annotated, Any, ClassVar
 
-from nooa import Context, hidden, no_trace, strategy
+# Cells see this module's names: the model builds Done/TaskResult/Todo, Shell and
+# Subagent work, and Context/strategy/PredictStrategy for skill and method writing.
+from nooa import Context, hidden, strategy
 from nooa.agentdoc import doc, spec
-from nooa.config import CodeActConfig, PredictConfig
-from nooa.interactive import (
-    Done,
-    InteractiveAgent,
-    NeedInput,
-    SummarizationConfig,
-    Waiting,
-    install_summarizer,
-)
-from nooa.paths import get_project_dir
-from nooa.storage.markers import nosnapshot
-from nooa.strategies import CodeActV2, PredictStrategy
-from nooa.tools import MethodWriting, SkillWriting, Todo, TodoManager
-from nooa.tools.shell_tools import ShellTools
-from nooa_atom.agent.activity import ActivityShellTools
-from nooa_atom.agent.instructions import RepositoryInstructions
-from nooa_atom.agent.slash_commands import SlashCommandRegistry
-
-# Visible to generated cells (cells see this module's globals): the model
-# builds TaskResult for unattended turns, matches what arrives on the
-# ``delegates`` channel and catches the delegation errors.
-from nooa_atom.session.items import (
-    ChildFailed,
-    ChildFailedError,
-    ChildMessage,
-    ChildQuestion,
-    ChildRef,
-    ChildResult,
-    PlanEntry,
-    TaskResult,
-)
-from nooa_atom.session.registry import DepthLimitError
+from nooa.interactive import Done, NeedInput, Waiting
+from nooa.strategies import CodeActV2, PredictStrategy  # noqa: F401
+from nooa_atom.agent.work_manager import Job, JobEvent, WorkManager
+from nooa_atom.agent.work_shell import CommandResult, Shell
+from nooa_atom.agent.work_subagent import Question, Subagent
+from nooa_atom.session.items import TaskResult  # noqa: F401
 from nooa_atom.skills.manager import SkillManager
 from nooa_atom.tools.repo_tools import RepoTools
+from nooa_atom.tools.todo_list import Todo, TodoList  # noqa: F401
 
 with hidden:
-    from nooa.agents import TokenBudgetSummarizer
-    from nooa.runtime.channels import Channel, ChannelReader
-    from nooa_atom.agent.conditions import (
-        require_result,
-        require_running_wait,
-        require_running_wait_unattended,
-        require_task_result,
+    import inspect
+    import sys
+    import time
+    import types
+
+    from nooa import no_trace
+    from nooa.config import CodeActConfig
+    from nooa.interactive import InteractiveAgent, require_task_result
+    from nooa.runtime.channels import ChannelReader
+    from nooa.storage.markers import nosnapshot
+    from nooa.strategy_validation import InvariantError
+    from nooa.tools import TodoManager
+    from nooa.tools.shell_tools import FileWrite, Match
+    from nooa_atom.agent import work_shell
+    from nooa_atom.agent.base import AtomAgentBase, session_title_request  # noqa: F401
+    from nooa_atom.agent.conditions import PERSON_NAMES, require_result
+    from nooa_atom.agent.roles import TurnPolicy
+
+__all__ = ["AtomAgent", "Files"]
+
+
+class Files:
+    """Read and edit workspace files (paths relative to the workspace); run commands with ``Shell``."""
+
+    __nosnapshot__ = True
+
+    def __init__(self, shell: Any) -> None:
+        self._shell = shell
+
+    async def read(self, path: str, lines: tuple[int, int] | None = None) -> Match:
+        """Read a file, or a 1-indexed inclusive line range, as a ``Match``."""
+        return await self._shell.read(path, lines)
+
+    async def replace(self, path: str, old: str, new: str) -> FileWrite:
+        """Replace the one occurrence of ``old`` in the file with ``new``."""
+        return await self._shell.replace(path, old, new)
+
+    async def replace_match(self, match: Match, new: str) -> FileWrite:
+        """Rewrite the lines a ``Match`` covers (from ``read`` or ``self.repo``)."""
+        return await self._shell.replace_match(match, new)
+
+    async def write_file(self, path: str, content: str) -> FileWrite:
+        """Create or overwrite a file."""
+        return await self._shell.write_file(path, content)
+
+
+@hidden
+class _AgentJobs(WorkManager):
+    """The agent's ``self.jobs``: also refuses names a ``Waiting`` already means."""
+
+    def __init__(self, agent: Any, **kwargs: Any) -> None:
+        super().__init__(agent._jobs_in, **kwargs)
+        self._agent = agent
+
+    def launch(self, work: Any, *, name: str | None = None) -> Job:
+        if name is not None and (
+            name in PERSON_NAMES or name in self._agent.queue_manager.channels()
+        ):
+            if inspect.iscoroutine(work):
+                work.close()
+            raise ValueError(f"{name!r} names a channel or the person; pick another job name")
+        return super().launch(work, name=name)
+
+
+# CodeActV2's python_cell description names the legacy delegation method.
+_LEGACY_TOOL_HINT: Annotated[str, hidden] = (
+    "If `self` exposes delegation, inspect its documentation with `print(doc(self.delegate))`."
+)
+_TOOL_HINT: Annotated[str, hidden] = (
+    "Run commands and child agents as `self.jobs` work (`Shell`, `Subagent`), "
+    "documented in the python_cell_tools block."
+)
+
+
+@hidden
+class AtomCodeAct(CodeActV2):
+    """CodeActV2 whose cells see this module's names, not the base module's legacy names.
+
+    An ``AtomAgent`` subclass defined in another module (a ``file.py:Class``
+    agent) sees this module's names too, and its own module's names win.
+    It also makes the agent's workspace the default ``cwd`` of ``Shell()``
+    for the turn (and the jobs it launches), and the agent the owner that
+    closes the Shells they start.
+    """
+
+    def _extract_module_context(
+        self, agent_module: types.ModuleType, agent: Any | None = None
+    ) -> dict[str, Any]:
+        this_module = sys.modules[__name__]
+        context = super()._extract_module_context(this_module, agent=None)
+        if agent_module is not this_module:
+            context.update(super()._extract_module_context(agent_module, agent=None))
+        if agent is not None:
+            self._import_dynamic_classes(agent, agent_module, context)
+        return context
+
+    async def python_cell_context(self, runtime: Any) -> str:
+        agent_module = inspect.getmodule(type(runtime.agent))
+        if agent_module is None:
+            return ""
+        context = self._extract_module_context(agent_module, agent=runtime.agent)
+        # The stub lists only names worth using; private or hidden helper types
+        # (``_AgentJobs`` behind ``self.jobs``) stay bound in cells, unlisted.
+        context = {
+            name: value
+            for name, value in context.items()
+            if not name.startswith("_") and getattr(value, "_agentdoc_hidden", False) is not True
+        }
+        return self._render_execution_context_stub(
+            context, {agent_module.__name__, __name__}, self.config.restrictions.blocked_modules
+        )
+
+    async def python_cell_state_context(self, runtime: Any) -> str:
+        """One line: ``Cell locals: name (type), ...``, then the cell's imports, if any.
+
+        The same inventory as CodeActV2's block (``python_cell_state()`` has
+        all of it), without its heading and explanations.
+        """
+        state = self._cell_state(getattr(runtime, "current_call", None))
+        label = self._python_cell_state_label
+
+        def listing(items: list[str], more: str) -> str:
+            shown = ", ".join(items[:20])
+            return f"{shown} (+{len(items) - 20} more; `{more}`)" if len(items) > 20 else shown
+
+        locals_ = [
+            f"{label(name, max_chars=80)} ({label(kind, max_chars=80)})"
+            for name, kind in sorted(state["cell_locals"].items())
+        ]
+        line = "Cell locals: " + (listing(locals_, "print(python_cell_state())") or "none")
+        imports = [
+            f"{label(name, max_chars=80)} → {label(module, max_chars=80)}"
+            for name, module in sorted(state["cell_imports"].items())
+        ]
+        if imports:
+            more = 'print(python_cell_state()["cell_imports"])'
+            line += "; imports: " + listing(imports, more)
+        return line
+
+    def _build_execute_python_tool(self) -> Any:
+        tool = super()._build_execute_python_tool()
+        tool.description = tool.description.replace(_LEGACY_TOOL_HINT, _TOOL_HINT)
+        return tool
+
+    def _build_builtins(self, runtime: Any, call: Any) -> dict[str, Any]:
+        cwd = getattr(runtime.agent, "cwd", None)
+        if cwd is not None:
+            work_shell.default_cwd.set(str(cwd))
+        owner = getattr(runtime.agent, "_shells", None)
+        if owner is not None:  # the session closes the Shells its cells start
+            work_shell.shell_owner.set(owner)
+        return super()._build_builtins(runtime, call)
+
+
+# ---- turn conditions ---------------------------------------------------------
+
+
+@hidden
+def _active(job: Job) -> bool:
+    """Running work that will deliver: not a resource with nothing in flight."""
+    if job._kind != "resource":
+        return True
+    return any(request._status == "running" for request in job._requests)
+
+
+@hidden
+def _deliverable(agent: Any) -> set[str]:
+    """Names a ``Waiting`` may name: what will deliver, or already has (unread)."""
+    names: set[str] = set()
+    jobs: WorkManager = agent.jobs
+    for job in jobs.running():
+        if _active(job):
+            names.add(job.name)
+            names.add("jobs")
+    channels = agent.queue_manager.channels()
+    unread = channels.get("jobs")
+    if unread is not None and unread.qsize():
+        names.add("jobs")
+        for event in unread.snapshot():
+            name = getattr(event, "name", None)
+            if isinstance(name, str):
+                names.update({name, name.split("#", 1)[0]})
+    names |= {name for name, channel in channels.items() if channel.qsize() > 0}
+    for handle in agent.queue_manager.running_handles():
+        names.update(key for key in (handle.name, handle.label) if key)
+    return names - PERSON_NAMES
+
+
+@hidden
+def _check_waiting(agent: Any, result: Any, *, fix: str) -> None:
+    if not isinstance(result, Waiting):
+        return
+    ok = _deliverable(agent)
+    unmet = [name for name in result.on if name not in ok]
+    if not unmet:
+        return
+    reasons = []
+    for name in unmet:
+        job = agent.jobs.get(name) if isinstance(name, str) else None
+        if name in PERSON_NAMES:
+            reasons.append(f"Waiting on {name!r}, but the person is not a job.")
+        elif job is not None and job.status == "running":
+            reasons.append(
+                f"{name!r} is an idle resource: nothing arrives until you send it work "
+                f"(req = self.jobs.get({name!r}).send(...)); then wait on the request."
+            )
+        elif job is not None:
+            reasons.append(
+                f"{name!r} already {job.status}: read self.jobs.get({name!r}) (.result or .error)."
+            )
+        else:
+            reasons.append(f"Waiting on {name!r}, but no running job has that name.")
+    shown = ", ".join(repr(name) for name in sorted(ok)) or "nothing"
+    raise InvariantError(
+        " ".join(reasons) + f" Waiting is only for work that will deliver. {fix} "
+        f"Can deliver now: {shown}."
     )
-    from nooa_atom.session.port import SessionPort, _reject_removed
 
-if TYPE_CHECKING:
-    from nooa.unifiedllm import UnifiedLLM
 
-__all__ = [
-    "ChildFailed",
-    "ChildFailedError",
-    "ChildMessage",
-    "ChildQuestion",
-    "ChildRef",
-    "ChildResult",
-    "AtomAgent",
-    "DepthLimitError",
-    "Done",
-    "NeedInput",
-    "TaskResult",
-    "Waiting",
-    "session_title_request",
-]
+@hidden
+def require_deliverable_wait(agent: Any, result: Any, call: Any) -> None:
+    """Interactive turns: ``Waiting.on`` names only work that will deliver."""
+    _check_waiting(agent, result, fix="If the work is done, return Done; to ask, NeedInput.")
 
-# CodeActV2 replaces the framework context blocks with a concise self doc: the
-# ``state`` dump and the execution-context stub go, and the strategy adds its
-# own compact ``python_cell_state`` block.
-_V2_CONTEXT: Annotated[dict[str, Any], hidden] = {
+
+@hidden
+def require_deliverable_wait_unattended(agent: Any, result: Any, call: Any) -> None:
+    """Unattended turns: the same check, with the unattended fix."""
+    _check_waiting(agent, result, fix="Launch or send the work first, or finish with Done.")
+
+
+@hidden
+def require_settled_work(agent: Any, result: Any, call: Any) -> None:
+    """Unattended turns: ``Done`` leaves no running command, task or request behind.
+
+    Idle resources (an open shell or kept subagent with nothing in flight)
+    may stay; the session closes them.
+    """
+    if not isinstance(result, Done):
+        return
+    live = [job.name for job in agent.jobs.running() if _active(job)]
+    if live:
+        names = ", ".join(repr(name) for name in live)
+        raise InvariantError(
+            f"Done while work still runs: {names}. Await it, cancel it "
+            "(await self.jobs.get(name).cancel()), or return Waiting(on=[...]) until it "
+            "delivers. Idle shells and subagents may stay open."
+        )
+
+
+_NO_ONE_TO_ASK: Annotated[str, hidden] = (
+    "Nobody can answer questions in an unattended task: decide, state your assumptions in the "
+    "TaskResult report, and return Done (or Waiting while launched work runs)."
+)
+_ONE_TURN_METHOD: Annotated[str, hidden] = (
+    "AtomAgent has one turn method, handle(); the session's turn_method selects its role "
+    "(nooa_atom.agent.roles)"
+)
+
+
+@hidden
+def require_role(agent: Any, result: Any, call: Any) -> None:
+    """The postconditions of the agent's role (``agent._turn_policy``), set by the host.
+
+    - interactive: ``Waiting.on`` names only work that will deliver.
+    - unattended, orchestrator: no ``NeedInput``; ``Done`` carries a result
+      and leaves no running work; ``Waiting`` only on work that will deliver.
+    - child: ``Done`` carries a ``TaskResult``; a one-shot child may not ask
+      (its session port says so); no running work left at ``Done``;
+      ``Waiting`` only on work that will deliver.
+    """
+    policy = getattr(agent, "_turn_policy", "interactive")
+    if policy == "interactive":
+        require_deliverable_wait(agent, result, call)
+        return
+    if policy == "child":
+        require_task_result(agent, result, call)
+    else:
+        if isinstance(result, NeedInput):
+            raise InvariantError(_NO_ONE_TO_ASK)
+        require_result(agent, result, call)
+    require_deliverable_wait_unattended(agent, result, call)
+    require_settled_work(agent, result, call)
+
+
+@hidden
+def _age(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m"
+    return f"{seconds // 3600}h{seconds % 3600 // 60:02d}m"
+
+
+@hidden
+def _bounded(text: str, limit: int = 60) -> str:
+    flat = "".join(c if c.isprintable() else "?" for c in str(text))
+    return flat if len(flat) <= limit else flat[: limit - 1] + "…"
+
+
+# Shared repo-tool docs that name the legacy shell; this agent edits through
+# self.files and its repo searches start in the workspace.
+_DOC_FIXES: Annotated[tuple[tuple[str, str], ...], hidden] = (
+    ("self.shell.replace_match()", "self.files.replace_match()"),
+    ("as ShellTools ``Match`` anchors", "as ``Match`` anchors (edit with ``self.files``)"),
+    ("defaults to the shell's current directory", "defaults to the workspace"),
+)
+
+
+@hidden
+def _tools_doc(text: str) -> str:
+    """The tools block for this agent: the shared docs, with only advertised paths."""
+    for old, new in _DOC_FIXES:
+        text = text.replace(old, new)
+    return text
+
+
+# The one place the work workflows are shown (the tools block, before the work types).
+_WORK_EXAMPLES: Annotated[str, hidden] = """\
+# Work: everything that runs is a job on self.jobs.
+sh = Shell()                                               # one bash per object, started on first use
+r = await sh.run("cd src && export X=1")                   # -> CommandResult; cd/variables persist
+r = await sh.run("make")                                   # same bash: in src, X set
+self.jobs.launch(sh.run("pytest -q"), name="tests")        # long: a JobEvent arrives later
+job = self.jobs.launch(Shell(), name="sh")                 # a shell as a job; cancel closes it
+r = await job.send("make")                                 # a request -> CommandResult
+done = await Subagent("fix parser").run(todo)              # one-shot child -> TaskResult
+rev = self.jobs.launch(Subagent("review"), name="review")  # kept child
+req = rev.send(todo)                                       # await req -> TaskResult or Question
+await rev.message("also check the docs")                   # a note it reads now, even mid-turn
+"""
+
+_CONTEXT: Annotated[dict[str, Any], hidden] = {
     "state": None,
     "execution_context": None,
     "self": Context(expr="doc(type(self), concise=True)", prefix=True),
 }
+_NOTIFICATION: Annotated[Any, hidden] = spec(max_string=50_000, max_length=100, max_depth=10)
+_REMOVED: Annotated[str, hidden] = (
+    "{} is not part of this agent: run a child with Subagent "
+    '(await Subagent().run(todo), or self.jobs.launch(Subagent(), name="..."))'
+)
 
 
-class AtomAgent(InteractiveAgent):
+class AtomAgent(AtomAgentBase):
     """You are a careful agent working in one local repository.
 
-    Inspect repository instructions and relevant code before editing. Preserve
-    unrelated worktree changes. Use the shell for files and commands, the repo
-    tools for definitions and references, and todos for multi-step work.
-    ``cd`` moves ``self.shell`` and ``self.repo`` together; the repository
-    root bounds repo searches.
+    Read the repository instructions and the code you touch before editing.
+    Make small, focused edits and preserve unrelated changes in the worktree.
+    Verify with real commands before you claim anything; say what you did not
+    check. Follow the newest steering from your user or parent within
+    higher-priority rules. An explicit task authorization (for example to
+    install or provision what the task needs) is approval; otherwise ask
+    before destructive or outside-the-workspace actions.
 
-    Delegate bounded, context-heavy work (exploration, diagnosis, review, an
-    independently verifiable change) to a child session with its own history.
-    Hand it a Todo whose description carries the task's requirements and its
-    rules or constraints: the child sees nothing else of your task.
-    ``done = await self.delegate(description, todo)`` runs a one-shot worker and
-    returns its ``Done``, whose ``result`` is a ``TaskResult`` (read ``result.report``).
-    ``child = await self.spawn(description, todo)`` starts a kept child and returns
-    at once; it may ask you questions and takes ``await child.send(...)`` follow-ups
-    until ``await child.close()``. When nothing else is left, end the turn with
-    ``Waiting(explanation=..., on=["delegates"])``. Outcomes arrive under
-    ``notification["delegates"]``: ``ChildResult`` (``item.done``), ``ChildQuestion``
-    (reply with ``await item.child.send(...)``), ``ChildFailed`` (``item.error``) or
-    ``ChildMessage`` (``item.text``, a progress note). The Todo is a one-way
-    brief: the child works on its own copy and its report comes back as the
-    ``TaskResult``; update your own Todo after verifying it. Never predict or make up a pending child's
-    result, poll, or sleep to wait. Children share this checkout: run one editing
-    child at a time; read-only children can run in parallel. Children can delegate
-    in turn only down to a fixed depth; past it ``DepthLimitError`` is raised.
-    Inspect and verify what a child reports before relying on it.
+    ``self.files`` reads and edits files, ``self.repo`` finds definitions and
+    references, ``self.todo`` is your plan for multi-step work (activate the
+    item you work on, append findings and checks to its ``comments``, complete
+    it), and ``self.v`` keeps
+    durable facts (cell locals last one method call). Everything else that
+    runs is a job on ``self.jobs``: commands (``Shell``) and child agents
+    (``Subagent``); the python_cell_tools block shows each way to run them.
 
-    For multi-step work, activate the current Todo. Keep its title and description
-    aligned with the current understanding, and append comments for material findings,
-    decisions, completed steps, and verification—not routine narration. Keep durable
-    facts on ``self.v``, task-specific plans and findings on the Todo's ``v``, and
-    scratch in cell locals; neither store is a dump.
+    A subagent sees only its brief: a Todo whose description carries the
+    requirements, constraints and acceptance checks. Verify what it reports;
+    run one editing subagent at a time (they share this checkout).
 
-    Work until the newest request is complete or genuinely needs user input. Use
-    as many execution cells as necessary, inspect each result, and never claim a
-    check passed without running it. Send each user-facing answer through
-    ``self.message()`` as a complete Markdown document.
-
-    End every turn with exactly one ``return_result(...)``: ``Done`` after
-    completing the request (reply with ``self.message()`` first),
-    ``NeedInput(question=...)`` only when a person must answer,
-    and ``Waiting(explanation=..., on=[...])`` only while something you started
-    is still running, naming the channel or job it waits on.
+    ``notification`` maps a channel (``user_messages``, ``jobs``,
+    ``system_messages``...) to new items; ``jobs`` holds the ``JobEvent``s of
+    work nobody awaited. Never predict a pending job's result. End every
+    turn with exactly one ``return_result(...)``: ``Done(explanation=...)``,
+    ``NeedInput(question=...)`` only when someone can answer, or
+    ``Waiting(explanation=..., on=[job names])`` while launched work runs.
+    The ``role`` block, when present, says who reads your result and how to end.
     """
 
-    # Attributes carrying this agent's own tools. The skill registry refuses
-    # to let a later skill — a workspace SKILL.md, a client-forwarded MCP
-    # server — take one over, which would remove the tool while the model is
-    # still told it has it.
+    jobs: Annotated[WorkManager, nosnapshot]
+    files: Annotated[Files, nosnapshot]
+    todo: TodoList
+    # Small records of the running jobs, saved with the snapshot so a resumed
+    # session reports the ones that did not survive (``after_restore``).
+    _work_records: Annotated[list, hidden]
+    # Set by after_restore until the child sessions from before it are reported.
+    _restore_pending: Annotated[bool, hidden, nosnapshot]
+    _restored_lost: Annotated[set, hidden, nosnapshot]
+    # The Shells this session's cells and jobs started: closed with the session.
+    _shells: Annotated[work_shell.ShellOwner, hidden, nosnapshot]
 
-    __protected_skill_attrs__ = frozenset(
-        {"shell", "repo", "todo", "libs", "skills", "workspace_settings", "session"}
-    )
-
-    cwd: Annotated[Path, nosnapshot]
-    # Host-driven input channels. These live here rather than on
-    # InteractiveAgent because they are host concepts: slash commands
-    # are a UI affordance whose registry is in this package, and
-    # system_messages carries host-provided system input. A host that sends
-    # a command's output to the agent puts it on the slash_commands channel.
-    _slash_commands_in: Annotated[Channel, hidden, nosnapshot]
-    # The command registry the Session lists and runs (Session.commands(),
-    # Session.invoke_command()). create_session_agent() installs the /skills and
-    # /mcp controls with set_controls().
-    slash_commands: Annotated[SlashCommandRegistry, hidden, nosnapshot]
-    # Set by the registry that binds itself to this agent (skills use it).
-    _command_registry: Annotated[Any, hidden, nosnapshot]
-    _system_messages_in: Annotated[Channel, hidden, nosnapshot]
-    system_messages: Annotated[Any, nosnapshot]
-    shell: Annotated[ActivityShellTools, nosnapshot]
-    repo: Annotated[RepoTools, nosnapshot]
-    todo: TodoManager
-    libs: Annotated[SkillWriting, nosnapshot]
-    skills: Annotated[SkillManager, nosnapshot]
-    _base_shell: Annotated[ShellTools, hidden, nosnapshot]
-    _instructions: Annotated[RepositoryInstructions, hidden, nosnapshot]
-    _summarizers: Annotated[list[Any], hidden, nosnapshot]
-    _delegates_in: Annotated[Any, hidden, nosnapshot]
-    delegates: Annotated[ChannelReader, nosnapshot]
-    # The Session port, installed by the session that runs this agent. The
-    # model uses the flat delegation methods below, not the port.
-    session: Annotated[SessionPort | None, hidden, nosnapshot]
-    # Tells install_port() not to document the port to the model.
-    session_port_visible: ClassVar[bool] = False
+    # The role the host gave this agent (``nooa_atom.agent.roles``): the policy its
+    # handle() turns enforce and the instructions of the ``role`` block.
+    _turn_policy: Annotated[str, hidden, nosnapshot]
+    _role_instructions: Annotated[str | None, hidden, nosnapshot]
+    # The session runs every turn with this method, whatever its turn_method.
+    turn_entry: ClassVar[str] = "handle"
 
     def __init__(
         self,
-        llm: UnifiedLLM | None = None,
-        *,
-        cwd: str | Path = ".",
-        summarization: SummarizationConfig | None = None,
-        skills_dirs: list[Path] | None = None,
-        libs_dir: Path | None = None,
+        *args: Any,
+        policy: TurnPolicy = "interactive",
+        instructions: str | None = None,
         **kwargs: Any,
     ) -> None:
-        super().__init__(llm=llm, **kwargs)
-        self.session = None
-        self._slash_commands_in = self.queue_manager.queue("slash_commands")
-        self._system_messages_in = self.queue_manager.queue("system_messages")
-        self.system_messages = self._system_messages_in.reader
-        self.cwd = Path(cwd).resolve()
-        self._base_shell = ShellTools(cwd=str(self.cwd))
-        self.shell = ActivityShellTools(self._base_shell, self.event_manager)
-        self.repo = RepoTools(root=self.cwd, session=self.shell.session)
-        # The Session port finds this channel and does not declare its own.
-        self._delegates_in = self.queue_manager.queue("delegates")
-        self.delegates = self._delegates_in.reader
-        self.todo = TodoManager()
-        # Libraries live at <project>/.nooa/libs. get_project_dir() resolves
-        # that per process, which is what a one-workspace host like the TUI
-        # wants. A host serving several workspaces at once must say which
-        # project it means, or every session shares one directory — and
-        # SkillWriting puts it on sys.path and activates local.*, so that
-        # would expose one workspace's agent-authored code to another.
+        """``policy`` and ``instructions`` are the role the host gives the agent.
 
-        self.libs = SkillWriting(self, path=libs_dir or get_project_dir("libs"))
+        ``instructions`` become the static ``role`` block of the prompt prefix;
+        ``None``, empty or whitespace-only text adds no block.
+        """
+        super().__init__(*args, **kwargs)
+        if policy not in ("interactive", "unattended", "orchestrator", "child"):
+            raise ValueError(f"unknown policy {policy!r}")
+        self._turn_policy = policy
+        text = instructions.strip() if isinstance(instructions, str) else ""
+        self._role_instructions = text or None
+        # The legacy JobsApi never started anything; drop it and its cancel hint.
+        self.queue_manager._cancel_hints.pop("jobs", None)
+        self._work_records = []
+        self.jobs = _AgentJobs(self, on_change=self._record_work)
+        self._shells = work_shell.ShellOwner()
+        self.files = Files(self.shell)
+        # Atom's own to-do list: membership on the list, content on each item.
+        self._install_todo_list()
+        # Commands run as Shell work; the legacy shell skill stays loaded for
+        # self.files and self.repo but is not offered (``/skills`` can still).
+        self.skills.registry.deactivate(["nemo.shell"])
+        self._restore_pending = False
+        self._restored_lost: set[str] = set()
+        self._install_context()
 
-        self.skills = SkillManager(self)
-        self.skills.register("nemo.shell", self.shell)
-        self.skills.register("nemo.repo", self.repo)
+    @hidden
+    @no_trace
+    def _install_todo_list(self) -> None:
+        """Make ``self.todo`` a ``TodoList``, keeping the items of a restored earlier ``TodoManager``."""
+        current = getattr(self, "todo", None)
+        if isinstance(current, TodoList):
+            return
+        # An earlier session's TodoManager keeps its items, ids, notes and active item.
+        self.todo = TodoList(manager=current) if isinstance(current, TodoManager) else TodoList()
         self.skills.register("nemo.todo", self.todo)
-        self.skills.register("nemo.libwriting", self.libs)
-        self.skills.register("nemo.methodwriting", MethodWriting())
-        self.skills.registry.activate(
-            ["nemo.shell", "nemo.repo", "nemo.todo", "nemo.libwriting", "nemo.methodwriting"]
-        )
-        # Installed ``nooa.skills`` entry points are part of the shared host
-        # surface. Load them so hosts can expose ``@slash_command`` methods,
-        # but leave them inactive until the user opts in with ``/skills``.
-        # Memory integration is deferred; do not auto-load its entry point.
-        # Also ignore the retired web publisher entry point in older installed
-        # package metadata.
-        loaded = set(self.skills.loaded())
-        installed = []
-        for name in self.skills.discovered():
-            attr_name = name.rsplit(".", 1)[-1].replace("-", "_")
-            if name in {"nemo.memory", "nemo.web"} or name in loaded or hasattr(self, attr_name):
-                continue
-            installed.append(name)
-        if installed:
-            self.skills.load(installed)
-        if skills_dirs:
-            self.skills.discover_skills_dirs(skills_dirs)
-        self.slash_commands = SlashCommandRegistry(self, skills_dirs=skills_dirs or ())
 
+    @hidden
+    @no_trace
+    def _install_context(self) -> None:
+        """Set this agent's own context blocks; ``after_restore`` sets them again.
+
+        Restoring a snapshot brings back the context blocks it saved, an
+        earlier Atom's among them: its ``python_cell_tools`` doc of
+        ``self.shell``, ``JobsApi`` and ``delegate()``, and its ``queues`` block
+        with the child and job hints. These replace them. The ``role`` block is
+        the host's instructions for this build (none when they are empty), not
+        the saved copy. The ``repository_instructions`` block is set again as
+        the dynamic block over this run's startup folder (an earlier Atom saved
+        a static copy). The other blocks (a user's own) are left as restored.
+        """
         self.context["python_cell_tools"] = Context(
-            doc(RepoTools, ActivityShellTools, TodoManager, concise=True),
+            _tools_doc(
+                doc(RepoTools, Files, TodoList, SkillManager, concise=True)
+                + "\n"
+                + _WORK_EXAMPLES
+                + doc(
+                    WorkManager,
+                    Job,
+                    JobEvent,
+                    Shell,
+                    CommandResult,
+                    Subagent,
+                    Question,
+                    inline_depth=0,
+                )
+                + "\n"
+                + doc(TaskResult, concise=True)
+            ),
             prefix=True,
         )
         self.context["todo_status"] = Context(expr="self.todo.status()")
-        self.context["workspace_state"] = Context(expr="self._workspace_state_context()")
+        self.context["workspace_state"] = Context(self._workspace_state_context(), prefix=True)
         self.context["context_usage"] = Context(
             expr="self.context_stats.format() if self.context_stats else ''"
         )
-        # Re-read from the startup folder whenever an AGENTS.md changes, is
-        # created, or is removed; the block is empty while there is none.
-        self._instructions = RepositoryInstructions(self.cwd)
+        # Skills are documented in python_cell_tools (SkillManager); the
+        # registry's dynamic inventory block is not shown. self.skills.status()
+        # gives it on demand.
+        self.context.pop("skills", None)
+        if self._role_instructions:
+            self.context["role"] = Context(self._role_instructions, prefix=True)
+        else:
+            self.context.pop("role", None)
+        self._status_block()
+        # AGENTS.md from the startup folder, re-read when a file changes
+        # (``AtomAgentBase._repository_instructions``); empty while there is none.
         self.context["repository_instructions"] = Context(
             expr="self._repository_instructions()", prefix=True
         )
-        spec(self, "context", hidden=False)
-        spec(self, "events", hidden=False)
 
-        self._summarization = summarization or SummarizationConfig()
-        install_summarizer(self._summarization, self)
-
+    @hidden
     @no_trace
-    def _repository_instructions(self) -> str:
-        """Return current AGENTS.md guidance from the startup folder, or ''."""
-        return self._instructions.render()
+    def _status_block(self) -> None:
+        """The ``status`` block replaces ``queues`` (its legacy child and job lines)."""
+        self.context.pop("queues", None)
+        self.context["status"] = Context(expr="self._status()")
 
+    @hidden
     @no_trace
     def _workspace_state_context(self) -> str:
-        """Describe the workspace state without exposing stored values."""
+        """Where work happens, without exposing stored values."""
         from html import escape
 
         def shown(path: object) -> str:
-            text = str(path).replace("\\", "\\\\").replace("\n", "\\n").replace("\r", "\\r")
-            return escape(text[:159] + "…" if len(text) > 160 else text, quote=False)
+            return escape(_bounded(str(path), 160), quote=False)
 
-        cwd, root = shown(self.shell.cwd), shown(self.repo.root)
-        count = len(self.vars)
-        return (
-            f"Working directory (already active for `self.shell` and `self.repo`; persists across cells and turns): {cwd}\n"
-            f"Repository root (the boundary for repo searches): {root}\n"
-            "Use relative paths; call `cd` only to intentionally change directories.\n"
-            f"`self.v`: {count} persistent vars — list: `print(dict(self.vars))`; "
-            "remove one: `del self.v.<name>`; clear all: `self.vars.clear()`"
-        )
-
-    async def rename_session(self, title: str) -> str:
-        """Set this session's title and return the normalized title.
-
-        Use this when a host system message asks you to title the session. Keep
-        the title descriptive and very short (usually 2-5 words). This changes
-        session metadata only; do not call it in place of answering the user. A
-        title the person chose is kept.
-        """
-        normalized = " ".join(str(title).strip().strip('"').strip("'").split())[:60]
-        if not normalized:
-            raise ValueError("Session title cannot be empty")
-        await self._port().rename(normalized)
-        return normalized
-
-    async def delegate(
-        self,
-        description: str,
-        prompt: str | Todo,
-        *,
-        brief: str | None = None,
-        model: str | None = None,
-        **removed: Any,
-    ) -> Done:
-        """Run a one-shot worker child on ``prompt``, wait for it, and return its ``Done``.
-
-        The child works in this checkout with its own history, cannot ask you
-        questions (it decides and states its assumptions), and is closed after
-        its result. ``done.result`` is its ``TaskResult`` (read
-        ``result.report``). Use it only when you need the report before
-        continuing; otherwise use ``spawn()``. A Todo prompt is a one-way
-        brief, as in ``spawn()``: nothing is written to your Todo. Record
-        what you verified on it yourself.
-
-        Raises ``ChildFailedError`` when the child's turn fails, and
-        ``DepthLimitError`` when a child would exceed the depth limit.
-
-        Args:
-            description: Short label (2-6 words); the child's name and title.
-            prompt: A ``Todo`` carrying the task's requirements, rules and
-                acceptance checks, or the full task as text.
-            brief: Extra instructions sent with the prompt.
-            model: Model alias for the child; yours when omitted.
-        """
-        _reject_removed("delegate", removed)
-        child = await _start_child(self, description, prompt, brief, model, kept=False)
-        outcome = await child.wait()
-        if not isinstance(outcome, ChildResult):  # a one-shot worker's question is a failure
-            raise ChildFailedError(f"Child {description!r} did not return a result")
-        return outcome.done
-
-    async def spawn(
-        self,
-        description: str,
-        prompt: str | Todo,
-        *,
-        brief: str | None = None,
-        model: str | None = None,
-        **removed: Any,
-    ) -> ChildRef:
-        """Start a kept child on ``prompt`` and return its ``ChildRef`` at once.
-
-        Its outcomes arrive under ``notification["delegates"]``: a
-        ``ChildResult`` (``item.done.result`` is a ``TaskResult``), a
-        ``ChildQuestion`` (reply with ``await item.child.send(...)``) or a
-        ``ChildFailed``, after any ``ChildMessage`` progress notes;
-        ``item.child.id`` matches the returned ref (keep it in ``self.v``).
-        Send follow-ups with ``await ref.send(text)``; it stays open until
-        ``await ref.close()``.
-
-        A ``Todo`` prompt (managed or hand-built) is a one-way brief: the child
-        gets its fields and works on its own copy; nothing flows back to your
-        Todo. The result comes back as a ``TaskResult``: update your own Todo
-        (``self.todo.comment``, ``self.todo.complete``) after verifying it. To
-        change a child's task, send the new brief as text or a Todo; the child
-        decides how to update its own Todo.
-
-        Args:
-            description: Short label (2-6 words); the child's name and title.
-            prompt: A ``Todo`` carrying the task's requirements, rules and
-                acceptance checks, or the full task as text.
-            brief: Extra instructions sent with the prompt.
-            model: Model alias for the child; yours when omitted.
-        """
-        _reject_removed("spawn", removed)
-        return await _start_child(self, description, prompt, brief, model, kept=True)
+        text = f"Workspace: {shown(self.cwd)} — base for file paths and new shells."
+        if self.repo.root != self.cwd:
+            text += f"\nRepository root: {shown(self.repo.root)} (search boundary)."
+        return text
 
     @hidden
-    def receive_delegated_todo(self, todo: Todo) -> None:
-        """Called on a child before its first turn: a local copy of its brief becomes its active Todo.
+    @no_trace
+    def _record_work(self) -> None:
+        self._work_records = self.jobs.records()
 
-        The copy is this child's own working copy: nothing in it flows back
-        to the parent, whose result is the ``TaskResult``. It keeps the
-        brief's id (the id named in the child's first message); a Todo with
-        that id already in the child's list raises ``ValueError`` rather
-        than being replaced. A done brief is added but not activated.
+    @hidden
+    @no_trace
+    def _status(self) -> str:
+        """Unread counts and senders, read hints, running and idle work, cancel hint."""
+        self._report_unadopted_children()
+        now = time.monotonic()
+        running: list[str] = []
+        idle: list[str] = []
+        for job in self.jobs.running():
+            name = _bounded(job.name)
+            summary = job.summary
+            if job._kind == "resource":
+                if not _active(job):
+                    idle.append(f"{name} · {summary or 'open'}")
+                continue  # its requests are listed instead, with its summary
+            owner = job._owner
+            if owner is not None and owner._status == "running":
+                # The resource's own line (a shell: the command, busy, its last
+                # confirmed cwd) says more than the request's.
+                summary = owner.summary or summary
+            parts = [name, _age(now - job._started), summary]
+            running.append(" · ".join(part for part in parts if part))
+        hints = {
+            "user_messages": "await self.user_messages.get()",
+            "jobs": "next turn's notification, or await the job",
+        }
+        for name in self.queue_manager.channels():
+            reader = getattr(self, name, None)
+            if name not in hints and isinstance(reader, ChannelReader) and name != "delegates":
+                hints[name] = f"await self.{name}.get()"
+        status = self.queue_manager.status(more_work=running, idle=idle, read_hints=hints)
+        if running or idle:
+            status += "\nCancel: await self.jobs.get('<name>').cancel()"
+        return status
+
+    # ---- legacy surface, hidden ------------------------------------------------
+
+    @hidden
+    async def delegate(self, *args: Any, **kwargs: Any) -> Any:
+        raise AttributeError(_REMOVED.format("delegate()"))
+
+    @hidden
+    async def spawn(self, *args: Any, **kwargs: Any) -> Any:
+        raise AttributeError(_REMOVED.format("spawn()"))
+
+    @hidden
+    def children(self) -> Any:
+        return super().children()
+
+    @hidden
+    def child(self, name: str) -> Any:
+        return super().child(name)
+
+    @hidden
+    @no_trace
+    def get_summarization_status(self) -> dict[str, Any]:
+        return super().get_summarization_status()
+
+    def message(self, text: str, *, echo: bool = False) -> None:
+        """Send a Markdown message to the user (a child's goes to its parent, cut at 1,000 chars).
+
+        Each call renders as its own block, so make it a complete Markdown
+        document. With ``echo=True`` it is also printed for you to see.
         """
-        self.todo.insert_copy(todo)
-
-    def children(self) -> list[ChildRef]:
-        """Handles on the child sessions you started, with live status and any unanswered question."""
-        return self._port().children()
+        super().message(text, echo=echo)
 
     @hidden
     def after_restore(self) -> None:
-        """Called by the session registry after it restores a snapshot into this agent."""
+        """Set up a restored snapshot: current context blocks, and lost work reported once.
+
+        The snapshot may come from this agent or from an earlier Atom (the
+        ``delegate``/``spawn``/``JobsApi`` interface). History, todos,
+        ``self.v`` and other saved attributes (such as a skill's private vars)
+        are kept as restored. This agent's own context blocks are set again
+        (``_install_context``), which replaces an earlier Atom's
+        ``python_cell_tools`` and ``queues`` blocks. Work does not survive a
+        restart, so each job that was running (this agent's ``self.jobs``
+        work, or an earlier Atom's ``self.jobs.run()``/``spawn()`` jobs) gets
+        one ``failed`` ``JobEvent`` saying it was lost. Child sessions from
+        before the restart are not adopted as jobs; once the session port is
+        installed, each one that is not closed also gets one notice
+        (``_report_unadopted_children``).
+        """
         from nooa_atom.workspace.options import drop_stale_memory_context
 
+        InteractiveAgent.after_restore(self)
+        self._install_todo_list()
+        self._install_context()
         drop_stale_memory_context(self)
         self.skills.after_restore()
+        lost, self._work_records = list(self._work_records or []), []
+        for record in lost:
+            name = str(record.get("name", "?"))
+            self._restored_lost.add(name)
+            self._jobs_in.put(
+                JobEvent(
+                    name,
+                    0,
+                    "failed",
+                    "lost: the session restarted while it ran; launch it again if needed",
+                )
+            )
+        # An earlier Atom's JobsApi records (name -> record of each running job).
+        legacy, self._jobs_running = dict(self._jobs_running or {}), {}
+        for name in legacy:
+            self._restored_lost.add(str(name))
+            self._jobs_in.put(
+                JobEvent(
+                    str(name),
+                    0,
+                    "failed",
+                    "lost: a job of the earlier Atom (self.jobs.run/spawn) that stopped when "
+                    "the session restarted; run it again as Shell or Subagent work if needed",
+                )
+            )
+        self._restore_pending = True
+        self._report_unadopted_children()
 
     @hidden
-    def _port(self) -> SessionPort:
-        if self.session is None:
-            raise RuntimeError("This agent is not running in a session")
-        return self.session
+    @no_trace
+    def _report_unadopted_children(self) -> None:
+        """After a restore: one notice for each child session from before it that is not closed.
+
+        Those children (an earlier Atom's ``delegate()``/``spawn()`` children,
+        or this agent's ``Subagent`` children) are not jobs of the restored
+        session and nothing of theirs is running for it. A child already
+        reported as a lost job is not reported again. Runs once, as soon as
+        the session port is installed (from ``prepare_tools`` or the
+        ``status`` block).
+        """
+        if not self._restore_pending or self.session is None:
+            return
+        self._restore_pending = False
+        try:
+            children = self.session.children()
+        except Exception:
+            return
+        for child in children:
+            if child.status == "closed" or child.name in self._restored_lost:
+                continue
+            self._jobs_in.put(
+                JobEvent(
+                    child.name,
+                    0,
+                    "failed",
+                    f"not adopted: the child session {child.name!r} ({child.status}) is from "
+                    "before the session restarted; it is not a job here and is not running. "
+                    "Start new work with Subagent if needed",
+                )
+            )
 
     @hidden
     async def prepare_tools(self) -> list[str]:
-        """Connect the MCP servers this workspace remembers; return warnings.
-
-        Called through ``Session.prepare_tools()`` by a host before the
-        first turn. The ``/skills`` and ``/mcp`` controls come from the
-        agent factory.
-        """
-        from nooa_atom.workspace.options import AtomOptions, connect_session_mcp
-
-        return await connect_session_mcp(self, AtomOptions.load(self.cwd))
-
-    @hidden
-    @no_trace
-    def plan(self) -> list[PlanEntry]:
-        """The todo list as ACP plan entries, read through ``Session.plan()``.
-
-        A done todo is ``completed``, the active one ``in_progress``, the
-        rest ``pending``.
-        """
-        active = self.todo.active()
-        return [
-            PlanEntry(
-                content=todo.title,
-                status=(
-                    "completed"
-                    if todo.status == "done"
-                    else "in_progress"
-                    if active is not None and todo.id == active.id
-                    else "pending"
-                ),
-            )
-            for todo in self.todo.list_todos()
-        ]
-
-    @no_trace
-    def get_summarization_status(self) -> dict[str, Any]:
-        """Return compact history information for host status displays."""
-        tags = self.event_manager.keys()
-        summary_tags = [tag for tag in tags if ".." in tag]
-        summarizers = getattr(self, "_summarizers", [])
-        summarizer = summarizers[0] if summarizers else None
-        config = getattr(summarizer, "config", None) if summarizer else None
-        pending = getattr(summarizer, "_pending_task", None) if summarizer else None
-        automatic = bool(getattr(summarizer, "_automatic_context_budget", False))
-        declared_policy = getattr(summarizer, "policy", None) if summarizer else None
-        policy = (
-            declared_policy
-            if isinstance(declared_policy, str) and declared_policy
-            else "token_budget"
-            if isinstance(summarizer, TokenBudgetSummarizer)
-            else "custom"
-            if summarizer is not None
-            else "none"
-        )
-        stats = self.context_stats
-        return {
-            "active_events": len(tags),
-            "summary_count": len(summary_tags),
-            "summary_tags": summary_tags,
-            "has_summarizer": summarizer is not None,
-            "policy": policy,
-            "current_tokens": getattr(stats, "prompt_tokens", 0) if stats else 0,
-            "max_tokens": getattr(config, "max_tokens", 0) if config else 0,
-            "threshold_fraction": (
-                getattr(summarizer, "_automatic_context_budget_percent", None)
-                if automatic
-                else None
-            ),
-            "preserve_recent": getattr(config, "preserve_recent", 0) if config else 0,
-            "compaction_pending": pending is not None,
-            "compaction_ready": bool(
-                pending is not None
-                and pending.done()
-                and getattr(summarizer, "_pending_summary", None)
-                and getattr(summarizer, "_pending_range", None)
-            ),
-        }
-
-    @hidden
-    @strategy(PredictStrategy(PredictConfig(output_serialization="tool_call")))
-    async def name_session(self, user_message: str) -> str:
-        """Generate an ultra-short 2-5 word session title for the conversation
-        opened by the given user message."""
-        ...
-
-    @hidden
-    @strategy(
-        CodeActV2(config=CodeActConfig(cell_timeout=1800.0, postconditions=[require_running_wait])),
-        context=_V2_CONTEXT,
-    )
-    async def handle(
-        self,
-        notification: Annotated[
-            dict[str, list[Any]], spec(max_string=50_000, max_length=100, max_depth=10)
-        ],
-    ) -> Done | NeedInput | Waiting:
-        """Handle one interactive turn: the newest request and anything else that arrived.
-
-        ``notification`` maps a channel name to the items that arrived on it:
-        ``"user_messages"`` (text from the person, or from your parent agent if
-        you are a child), ``"system_messages"``
-        (host housekeeping), ``"slash_commands"`` (command output sent to you)
-        and ``"delegates"`` (results of children you spawned). Do all the work
-        the request needs before ending the turn; use as many cells as it
-        takes, and run checks rather than assume them.
-
-        You are event-driven: queues shows running producers and pending
-        inputs, while notification contains events delivered for this turn; a
-        producer may finish before its result is consumed.
-
-        Use ``self.message()`` regularly to keep the user informed with brief
-        progress updates while you work, especially during tool use or longer
-        tasks. Updates should explain what you are doing, what you have
-        learned, and what comes next.
-
-        End with exactly one ``return_result(...)``:
-
-        - ``Done(explanation=...)`` when the request is complete. Send the
-          reply with ``self.message()`` first; ``explanation`` is a short
-          status line for the host, not the reply::
-
-              self.message("Fixed the off-by-one in `parse()`; the parser tests pass.")
-              return_result(Done(explanation="fixed parse() and ran its tests"))
-
-        - ``NeedInput(question=...)`` when you cannot go on without an
-          answer from the person. The host shows ``question``, so do not also
-          send it with ``self.message()``. The next message answers it as
-          plain text; put any suggested answers in the question.
-
-        - ``Waiting(explanation=..., on=[...])`` when a job you started is
-          still running and nothing else is left to do. ``on`` names what
-          you wait for, for example ``["jobs"]``; the next turn starts when
-          it delivers.
-
-        Python locals live for one method call; when the call returns they
-        are gone. Anything you need later goes in ``self.v`` (durable,
-        snapshot-backed) or the todo list. Do not rely on a variable from an
-        earlier call.
-        """
-        ...
-
-    @hidden
-    @strategy(
-        CodeActV2(
-            config=CodeActConfig(
-                cell_timeout=1800.0,
-                postconditions=[require_result, require_running_wait_unattended],
-            )
-        ),
-        context=_V2_CONTEXT,
-    )
-    async def handle_batch(
-        self,
-        notification: Annotated[
-            dict[str, list[Any]], spec(max_string=50_000, max_length=100, max_depth=10)
-        ],
-    ) -> Done | Waiting:
-        """Work on one task unattended and return a structured result.
-
-        The task is the text in ``notification["user_messages"]``; data sent
-        with it is in ``notification.get("context", [])``. Nobody is watching
-        and nobody can answer a question, and ``self.message()`` reaches
-        nobody: the result is the only thing the requester reads.
-
-        Do the task completely, verify it, then end with::
-
-            return_result(Done(
-                explanation="fixed the parser bug",
-                result=TaskResult(
-                    solution_description="What was done, including modified paths",
-                    evidence="Commands run and what they showed",
-                    how_to_verify="How someone else can check it",
-                    report="The full report for the requester",
-                ),
-            ))
-
-        If something blocks you, still return ``Done`` with a ``TaskResult``
-        that says what blocked you and what you tried. Return
-        ``Waiting(explanation=..., on=[...])`` only while a job you started
-        is still running.
-
-        Python locals live for one method call; when the call returns they
-        are gone. Anything you need later goes in ``self.v`` (durable,
-        snapshot-backed) or the todo list. Do not rely on a variable from an
-        earlier call.
-        """
-        ...
-
-    @hidden
-    @strategy(
-        CodeActV2(
-            config=CodeActConfig(
-                cell_timeout=1800.0,
-                postconditions=[require_result, require_running_wait_unattended],
-            )
-        ),
-        context=_V2_CONTEXT,
-    )
-    async def handle_orchestrate(
-        self,
-        notification: Annotated[
-            dict[str, list[Any]], spec(max_string=50_000, max_length=100, max_depth=10)
-        ],
-    ) -> Done | Waiting:
-        """You are a recursive language model agent.
-
-        You work on one task on your own. Nobody is watching and nobody can
-        answer a question; the result you return is the only thing the
-        requester reads.
-
-        The task is the text in ``notification["user_messages"]``; data sent
-        with it is in ``notification.get("context", [])``.
-
-        You are the orchestrator. You decide how the work is split and who does
-        each part, and you are responsible for the result. Do not implement the
-        work yourself; understanding, writing requirements and measuring are yours.
-
-        Work in this loop:
-        1. Understand the request. Read what you need, or have a read-only child
-           explore.
-        2. Write the requirements: how success will be measured. Put them in a
-           Todo (``self.todo.add(title, description=...)``): the goal, the exact
-           requirements and constraints from the task, and acceptance checks
-           that can be run. When a requirement is best written as code (for
-           example a failing test), decide who writes it, and confirm it fails
-           before the work starts.
-        3. Do the work: hand each Todo to a child with
-           ``child = await self.spawn(description, todo)`` and keep ``child`` in
-           ``self.v``. The Todo is all the child sees of the task: put the
-           task's requirements and its rules or constraints in it. Children
-           share one checkout: run one editing child at a time; read-only work
-           can run in parallel. While children run, end the turn with
-           ``Waiting(explanation=..., on=["delegates"])``.
-        4. Measure: results arrive in ``notification["delegates"]`` (a
-           ``ChildResult`` whose ``item.done.result`` is the child's
-           ``TaskResult``, a ``ChildQuestion``: ``await item.child.send(...)``, or
-           a ``ChildFailed``; a ``ChildMessage`` (``item.text``) is a progress
-           note). Its report is the TaskResult; record what you verified on
-           your own Todo.
-           Run every acceptance check yourself; a report is
-           not proof. Record each result with ``self.todo.comment(todo, ...)``.
-        5. Loop: if a requirement is not met, send the child the failing check
-           and its output with ``await child.send(...)`` and wait again. Decide
-           when another round is not worth it given the time left.
-
-        Finish with ``Done`` and a ``TaskResult`` whose ``evidence`` is what you
-        measured in step 4; if requirements are still unmet, say which.
-        Before ``Done``, leave the tree clean: no scratch files.
-        Leave children open; the host closes them after grading.
-
-            return_result(Done(
-                explanation="fixed the parser bug",
-                result=TaskResult(
-                    solution_description="What was done, including modified paths",
-                    evidence="The checks you ran and what they showed",
-                    how_to_verify="How someone else can check it",
-                    report="The full report for the requester",
-                ),
-            ))
-
-        If something blocks you, still return ``Done`` with a ``TaskResult``
-        that says what blocked you and what was tried.
-
-        Python locals live for one method call; when the call returns they
-        are gone. Anything you need later goes in ``self.v`` (durable,
-        snapshot-backed) or the todo list. Do not rely on a variable from an
-        earlier call.
-        """
-        ...
-
-    @hidden
-    @strategy(
-        CodeActV2(config=CodeActConfig(cell_timeout=1800.0, postconditions=[require_task_result])),
-        context=_V2_CONTEXT,
-    )
-    async def handle_work(
-        self,
-        notification: Annotated[
-            dict[str, list[Any]], spec(max_string=50_000, max_length=100, max_depth=10)
-        ],
-    ) -> Done | NeedInput | Waiting:
-        """Work on a task for your parent agent and report back to it.
-
-        You are a child session. Your parent is an agent, not a person, and it
-        reads only your result. The task is in ``notification["user_messages"]``;
-        its first line says whether you can ask your parent questions (later
-        messages there are follow-ups). Your task is the brief; your
-        ``TaskResult`` is your report; a Todo in your list is your own
-        working copy (nothing in it goes back to your parent).
-
-        Assume you are the only one editing this checkout, and leave it clean:
-        remove scratch files before ``Done``.
-
-        End with exactly one ``return_result(...)``:
-
-        - ``Done`` with a ``TaskResult``, when the task is finished or blocked
-          (then say what blocked you and what you tried)::
-
-              return_result(Done(
-                  explanation="fixed the parser bug",
-                  result=TaskResult(
-                      solution_description="What was done, including modified paths",
-                      evidence="Commands run and what they showed",
-                      how_to_verify="How someone else can check it",
-                      report="The full report for your parent",
-                  ),
-              ))
-
-        - ``NeedInput(question=...)`` only if you can ask and cannot go on
-          without your parent's answer; it arrives as your next message.
-        - ``Waiting(explanation=..., on=[...])`` only while a job you started
-          is still running.
-
-        ``self.message()`` sends your parent a progress note; it does not
-        replace the result.
-
-        Python locals live for one method call; when the call returns they
-        are gone. Anything you need later goes in ``self.v`` (durable,
-        snapshot-backed) or the todo list. Do not rely on a variable from an
-        earlier call.
-        """
-        ...
+        """Connect remembered MCP servers; report child sessions a restore did not adopt."""
+        self._report_unadopted_children()
+        return await super().prepare_tools()
 
     @hidden
     async def aclose(self) -> None:
-        """Release the agent's background work, skills (MCP servers) and shell.
-
-        The session calls this when it closes. The model client is not
-        closed here: the session closes it when it created it, and a client
-        passed in belongs to whoever passed it.
-        """
-        # Closing the skills unregisters them, and with them self.shell.
-        shell = self.shell
-        self.slash_commands.close()
+        """Cancel this session's jobs, close the Shells it started, then release the agent."""
+        if self.turns.in_turn:
+            raise RuntimeError("an executing turn cannot close its own agent")
         try:
-            await super().aclose()
-        finally:
             try:
-                await self.skills.aclose()
+                await self.jobs.aclose()
             finally:
-                await shell.close()
+                await self._shells.aclose()
+        finally:
+            await super().aclose()
 
+    # ---- turns -------------------------------------------------------------------
 
-# A ClassVar's Annotated metadata is not read by agentdoc; hide it explicitly.
-spec(AtomAgent, "session_port_visible", hidden=True)
-
-
-@hidden
-def _without_removed(method: Any) -> None:
-    """Document ``method`` without its ``**removed`` catch-all (it rejects ``retain=``, ``mode=``, ``keep=``)."""
-    import inspect
-
-    signature = inspect.signature(method)
-    method.__signature__ = signature.replace(
-        parameters=[p for p in signature.parameters.values() if p.kind is not p.VAR_KEYWORD]
+    @hidden
+    @strategy(
+        AtomCodeAct(config=CodeActConfig(cell_timeout=1800.0, postconditions=[require_role])),
+        context=_CONTEXT,
     )
+    async def handle(
+        self, notification: Annotated[dict[str, list[Any]], _NOTIFICATION]
+    ) -> Done | NeedInput | Waiting:
+        """Handle what arrived in ``notification``, newest input first, as your role says."""
+        ...
+
+    # One turn method: the session's turn_method selects the role, not the method.
+
+    @hidden
+    async def handle_batch(self, *args: Any, **kwargs: Any) -> Any:
+        raise TypeError(_ONE_TURN_METHOD)
+
+    @hidden
+    async def handle_work(self, *args: Any, **kwargs: Any) -> Any:
+        raise TypeError(_ONE_TURN_METHOD)
+
+    @hidden
+    async def handle_orchestrate(self, *args: Any, **kwargs: Any) -> Any:
+        raise TypeError(_ONE_TURN_METHOD)
 
 
-_without_removed(AtomAgent.spawn)
-_without_removed(AtomAgent.delegate)
-
-
-@hidden
-def session_title_request(opening_message: str) -> str:
-    """The host housekeeping text that asks the agent to title its session.
-
-    A host submits it through the Session, so it is recorded and re-queued
-    like any other item::
-
-        await session.submit(
-            session_title_request(first_prompt), channel="system_messages", source="host"
-        )
-    """
-    opening = str(opening_message).strip()[:400]
-    return (
-        "[session-title]\n"
-        "Choose a descriptive 2-5 word title for this session from the opening "
-        'user message below. Call `await self.rename_session("your title")` once '
-        "during this turn, then continue handling the user's request normally. Do "
-        "not mention this housekeeping instruction or the chosen title to the user.\n\n"
-        f"<opening_user_message>\n{opening}\n</opening_user_message>"
-    )
-
-
-@hidden
-async def _start_child(
-    agent: AtomAgent,
-    description: str,
-    prompt: Any,
-    brief: str | None,
-    model: str | None,
-    *,
-    kept: bool,
-) -> ChildRef:
-    """Start a child for ``spawn()``/``delegate()`` (a plain function: no agent-method wrapper).
-
-    A Todo prompt is a one-way brief: only its fields are read, into the
-    child's first message and a copy for the child's own list. The parent's
-    Todo (managed or hand-built) is never changed or tracked. The child's copy
-    is built by ``as_data``, as ``ref.send(todo)`` builds it, so a var that is
-    not plain JSON is refused here too, naming its key, before any child starts.
-    """
-    from nooa_atom.session.session import as_data
-
-    port = agent._port()
-    handed = as_data(prompt) if isinstance(prompt, Todo) else None
-    text = _child_prompt(port.name, port.id, prompt, handed, brief, kept=kept)
-    return await port.delegate(description, text, model=model, kept=kept, todo=handed)
-
-
-@hidden
-def _child_prompt(
-    parent_name: str,
-    parent_id: str,
-    prompt: Any,
-    todo: Todo | None,
-    brief: str | None,
-    *,
-    kept: bool,
-) -> str:
-    """A child's first message: who its parent is, what kind of child it is, the task and the brief."""
-    parent = f"parent {parent_name} ({parent_id})"
-    task = f" on Todo {todo.id}: {todo.title}" if todo is not None else ""
-    kind = (
-        "You can ask your parent questions and may get follow-ups."
-        if kept
-        else "One-shot task: you can't ask questions; decide, and state your assumptions in "
-        "the report."
-    )
-    lines = [f"You are working for {parent}{task}. {kind}", ""]
-    lines.append(_todo_prompt(todo) if todo is not None else str(prompt))
-    if brief:
-        lines += ["", "Brief:", str(brief)]
-    return "\n".join(lines)
-
-
-@hidden
-def _todo_prompt(todo: Todo) -> str:
-    """A Todo as the text a child works from: id, title, description, comments."""
-    lines = [f"Task [{todo.id}]: {todo.title}"]
-    if todo.description:
-        lines += ["", todo.description]
-    if todo.comments:
-        lines += ["", "Notes so far:"]
-        lines += [f"- {comment.body}" for comment in todo.comments]
-    return "\n".join(lines)
+for _name in ("shell", "delegates", "producers", "system_messages", "cwd"):
+    spec(AtomAgent, _name, hidden=True)
+spec(AtomAgent, "jobs", description="Run and track work: see WorkManager")
+# Host-facing members of the work types stay out of the model's docs.
+for _cls, _members in (
+    (WorkManager, ("keep", "max_items", "max_requests")),
+    (Job, ("id", "dropped")),
+):
+    for _member in _members:
+        spec(_cls, _member, hidden=True)
+# The adapters' own send()/message() are the protocol the manager calls; the model
+# uses the launched job's (Job.send, Job.message), so only those are documented.
+for _method in (
+    WorkManager.running,
+    WorkManager.records,
+    WorkManager.aclose,
+    JobEvent.status_source,
+    Shell.send,
+    Subagent.send,
+    Subagent.message,
+):
+    spec(_method, hidden=True)
+spec(Shell, "current_dir", hidden=True)  # the status block shows a session's directory
+spec(Question, "id", hidden=True)
+del _name, _cls, _members, _member, _method

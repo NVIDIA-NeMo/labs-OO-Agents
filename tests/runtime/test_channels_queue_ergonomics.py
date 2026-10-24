@@ -425,3 +425,85 @@ class TestIntegrationSpawnFlushReplaceRespawn:
         assert h.state == "cancelled"
 
         await qm.shutdown()
+
+
+async def test_status_counts_items_and_names_their_senders_never_their_content():
+    class Asked:
+        def __init__(self, sender):
+            self.sender = sender
+
+        def status_source(self):
+            return self.sender
+
+        def status_preview(self):  # an old hook: ignored, no content is shown
+            return "Worker asks: Which branch?"
+
+    qm = QueueManager()
+    ch = qm.queue("delegates")
+    for sender in ("/root/a", "/root/b", "/root/a"):
+        ch.put(Asked(sender))
+    ch.put("a plain string has no sender")
+    assert qm.status() == "Unread:\n  • delegates: 4 (from /root/a, /root/b)"
+    assert ch.status() == "delegates: 4 unread (from /root/a, /root/b)"
+    assert "Which branch" not in qm.status()
+
+
+def test_status_unread_caps_senders_and_has_one_line_per_channel():
+    class From:
+        def __init__(self, sender):
+            self.sender = sender
+
+        def status_source(self):
+            return self.sender
+
+    qm = QueueManager()
+    messages = qm.queue("user_messages")
+    jobs = qm.queue("jobs")
+    for text in ("one", "two"):
+        messages.put(text)
+    for sender in ("/root/a", "/root/b", "/root/c", "/root/" + "x" * 200):
+        jobs.put(From(sender))
+    assert qm.status(max_items=2).splitlines() == [
+        "Unread:",
+        "  • user_messages: 2",
+        "  • jobs: 4 (from /root/a, /root/b, +2 more)",
+    ]
+    # A long sender name is cut at max_chars.
+    last = qm.status(max_items=10).splitlines()[-1]
+    assert last.endswith(", /root/" + "x" * 73 + "…)")
+
+
+def test_status_read_now_lists_hints_of_unread_channels_only():
+    qm = QueueManager()
+    qm.queue("user_messages").put("hi")
+    delegates = qm.queue("delegates")
+    hints = {"user_messages": "await self.user_messages.get()", "delegates": "d.get()"}
+    assert qm.status(read_hints=hints) == (
+        "Unread:\n  • user_messages: 1\nRead now: await self.user_messages.get()"
+    )
+    delegates.put("x")
+    assert qm.status(read_hints=hints).splitlines()[-1] == (
+        "Read now: await self.user_messages.get() · d.get()"
+    )
+    assert QueueManager().status(read_hints=hints) == "(nothing queued)"
+
+
+def test_status_sections_order_and_omission():
+    qm = QueueManager()
+    qm.queue("delegates").put("hi")
+    status = qm.status(
+        more_unread=["/root/a · child · question not answered yet"],
+        more_work=["/root/b · child · 4s"],
+        idle=["/root/c · child · retained"],
+    )
+    assert status == (
+        "Unread:\n  • delegates: 1\n  • /root/a · child · question not answered yet\n"
+        "Running:\n  • /root/b · child · 4s\n"
+        "Idle:\n  • /root/c · child · retained"
+    )
+    assert QueueManager().status(idle=["/root/c · child · retained"]) == (
+        "Idle:\n  • /root/c · child · retained"
+    )
+    empty = QueueManager()
+    empty.queue("delegates")
+    assert empty.status(more_work=[""], idle=[]) == "(nothing queued)"

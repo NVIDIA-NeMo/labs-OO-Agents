@@ -19,8 +19,10 @@ from nooa_atom.session.items import (
     SessionInfo,
     Usage,
 )
+from nooa_atom.session.names import check_name, child_path
 from nooa_atom.session.options import reject_removed_options
 from nooa_atom.session.session import Session, as_data
+from nooa_atom.session.store import InvalidSessionIdError, SessionNotFoundError
 
 if TYPE_CHECKING:
     from nooa_atom.session.registry import SessionRegistry
@@ -43,9 +45,10 @@ class SessionPort:
     """Your own session: delegate work to child sessions and manage them.
 
     A child is another agent session with its own history. You give it a
-    short ``description`` (its name and title) and the full ``prompt`` it
-    works from, and get back a ``ChildRef``: a small handle you can keep in
-    ``self.v`` across turns and sessions. Every child runs the worker turn
+    ``name`` (a Python identifier, unique among your open children; its
+    path is yours plus ``/name``), a short ``description`` (its title) and
+    the full ``prompt`` it works from, and get back a ``ChildRef``: a small
+    handle you can keep in ``self.v`` across turns and sessions. Every child runs the worker turn
     (``handle_work``): each ``Done`` carries a ``TaskResult``.
 
     - ``kept=False`` (the default) is a one-shot worker: it may not ask
@@ -103,17 +106,23 @@ class SessionPort:
         description: str,
         prompt: str,
         *,
+        name: str,
         model: str | None = None,
         kept: bool = False,
         permission_mode: str | None = None,
         todo: Any = None,
+        route: Any = None,
         **removed: Any,
     ) -> ChildRef:
         """Create a child session that works on ``prompt``; return its ``ChildRef``.
 
         Args:
-            description: Short label; becomes the child's name and title.
+            description: Short label; becomes the child's title.
             prompt: The full task the child works from.
+            name: The child's name, a Python identifier; its path is this
+                session's path plus ``/name``. ``ValueError`` if it is not
+                valid or an open child of this session already has it (a
+                closed child's name can be used again).
             model: Model alias for the child; the same as yours when omitted.
             kept: ``False``: a one-shot worker, closed after its first result,
                 that may not ask questions. ``True``: it may ask, takes
@@ -123,11 +132,15 @@ class SessionPort:
                 the child's own list (the agent's ``receive_delegated_todo``)
                 and the ref records its id (provenance only). Nothing flows
                 back; the child's result is its ``TaskResult``.
+            route: For a work adapter (hidden from the model): a
+                ``ChildRoute`` that gets the child's messages and outcomes
+                instead of ``delegates``, installed before its first turn.
         """
         _reject_removed("delegate", removed)
+        self.check_child_name(name)
         parent = self._session
         options = parent.options.inherit(
-            name=description,
+            name=name,
             model=model,
             permission_mode=permission_mode,
             kept=kept,
@@ -137,8 +150,12 @@ class SessionPort:
         registry = self._registry
 
         async def hand_over(child: Session) -> None:
+            if route is not None:
+                registry.route_child(child.id, route)
+            if description and str(description).strip():
+                await child.set_title(str(description).strip())
             receive = getattr(child._agent, "receive_delegated_todo", None)
-            if callable(receive):
+            if todo is not None and callable(receive):
                 receive(todo)
 
         child = await registry.create(
@@ -146,9 +163,30 @@ class SessionPort:
             parent_id=parent.id,
             initial_items=[("user_messages", prompt)],
             initial_source=_parent_source(parent),
-            prepare=hand_over if todo is not None else None,
+            prepare=hand_over,
         )
         return registry.child_ref(child)
+
+    @hidden
+    def check_child_name(self, name: str) -> None:
+        """Raise ``ValueError`` unless ``name`` is a valid name no open child of this session has.
+
+        Reserved names and this agent's channel names are refused too (``check_name``).
+        """
+        queues = getattr(getattr(self._session, "_agent", None), "queue_manager", None)
+        check_name(name, "child", queues.channels() if queues is not None else ())
+        for info in self._registry.children(self._session.id):
+            if info.name == name and info.status != "closed":
+                raise ValueError(
+                    f"name {name!r} is already used by child {child_path(self.path, name)} "
+                    f"({info.status}); close it first (await self.child({name!r}).close()) "
+                    "or pick another name"
+                )
+
+    @property
+    def path(self) -> str:
+        """This session's path in the tree: ``/root``, ``/root/review_pr_462``, ..."""
+        return self._registry.path(self._session.id)
 
     @property
     def name(self) -> str:
@@ -162,6 +200,7 @@ class SessionPort:
             ChildRef(
                 id=info.id,
                 name=info.name or "",
+                path=self._registry.path(info.id),
                 depth=info.depth,
                 status=info.status,
                 parent_id=info.parent_id,
@@ -190,6 +229,9 @@ class SessionPort:
         idle, and ``ChildFailedError`` says which.
         """
         registry = self._registry
+        if self.is_ancestor_of(child_id) and registry.get(child_id) is not None:
+            if registry.get(child_id).parent_id != self._session.id:
+                return await self._watch_descendant(child_id)
         queued = registry.take_queued_result(self._session, child_id)
         if queued is not None:
             return queued
@@ -217,7 +259,56 @@ class SessionPort:
             raise
 
     @hidden
-    async def send_child(self, child_id: str, item: Any, *, channel: str) -> Receipt:
+    def is_ancestor_of(self, session_id: str) -> bool:
+        """Whether ``session_id`` is this session's child, grandchild, and so on."""
+        return self._registry.is_ancestor(self._session.id, session_id)
+
+    @hidden
+    async def _watch_descendant(self, session_id: str) -> ChildResult | ChildQuestion:
+        """A deeper session's next outcome, as a copy: its own parent still gets it."""
+        registry = self._registry
+        live = registry.get(session_id)
+        path = registry.path(session_id)
+        if live is None or live.closing:
+            raise ChildFailedError(f"{path} is not running")
+        if registry.is_idle(live):
+            raise ChildFailedError(
+                f"{path} is idle with nothing queued, so wait() would never return"
+            )
+        return await asyncio.shield(registry.watcher(session_id))
+
+    @hidden
+    def descendant(self, path: str) -> ChildRef:
+        """A read-only ref on a deeper session by its full path (``KeyError`` if there is none)."""
+        registry = self._registry
+        own = self.path
+        if not path.startswith(own + "/"):
+            raise KeyError(f"{path!r} is not under {own}")
+        session_id = self._session.id
+        info: SessionInfo | None = None
+        for name in path[len(own) + 1 :].split("/"):
+            matches = [c for c in registry.children(session_id) if c.name == name]
+            open_ = [c for c in matches if c.status != "closed"]
+            found = open_ or matches
+            if not found:
+                raise KeyError(f"no session at {path!r}")
+            info = found[-1]
+            session_id = info.id
+        assert info is not None
+        return ChildRef(
+            id=info.id,
+            name=info.name or "",
+            path=registry.path(info.id),
+            depth=info.depth,
+            status=info.status,
+            parent_id=info.parent_id,
+            todo_id=info.todo_id,
+        )
+
+    @hidden
+    async def send_child(
+        self, child_id: str, item: Any, *, channel: str, steer: bool = True
+    ) -> Receipt:
         """Admit ``item`` on one of a child's channels (loading the child if needed).
 
         Text on ``user_messages`` steers a running turn (it reads it before
@@ -225,6 +316,7 @@ class SessionPort:
         a turn. A new turn of the child ends its pending question. A Todo
         is an ordinary data item: to change a child's task, send the new
         brief as text or a Todo; the child decides how to update its own Todo.
+        With ``steer=False`` text is only queued: it waits for a turn of its own.
         """
         child = await self._registry.open_child(self._session, child_id)
         source = _parent_source(self._session)
@@ -232,9 +324,16 @@ class SessionPort:
             return await child.submit(as_data(item), channel=channel, source=source)
         # A message answers a pending question, as the turn it starts would.
         self._registry.clear_question(self._session, child_id)
-        if isinstance(item, str):
+        if isinstance(item, str) and steer:
             return await child.steer(item, source=source)
         return await child.submit(as_data(item), channel=channel, source=source)
+
+    @hidden
+    def withdraw_child(self, child_id: str, receipt: Receipt) -> bool:
+        """Take back an item sent to a child that nothing has consumed yet; return whether it was."""
+        self._registry.check_owner(self._session, child_id)
+        child = self._registry.get(child_id)
+        return child is not None and child.withdraw(receipt)
 
     @hidden
     def pending_question(self, child_id: str) -> ChildQuestion | None:
@@ -248,8 +347,23 @@ class SessionPort:
 
     @hidden
     def child_status(self, child_id: str) -> ChildStatus:
-        """A child's live status (``ChildRef.status``)."""
-        return self._registry.child_status(self._session, child_id)
+        """A child's live status (``ChildRef.status``); a deeper session's too."""
+        registry = self._registry
+        live = registry.get(child_id)
+        if live is not None:
+            parent_id = live.parent_id
+        else:
+            try:
+                parent_id = registry.info(child_id).parent_id
+            except (SessionNotFoundError, InvalidSessionIdError) as exc:
+                # ChildRef.status falls back to its stored value on this error.
+                raise ChildFailedError(f"Child {child_id!r} does not exist") from exc
+        if parent_id != self._session.id and self.is_ancestor_of(child_id):
+            parent = registry.get(parent_id) if parent_id else None
+            if parent is not None:
+                return registry.child_status(parent, child_id)
+            return registry.info(child_id).status
+        return registry.child_status(self._session, child_id)
 
     @hidden
     def info(self) -> SessionInfo:

@@ -17,7 +17,7 @@ import uuid
 from collections.abc import Awaitable, Callable, Iterable
 from contextlib import suppress
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from nooa.events import TuiSessionResumed
 from nooa.interactive import AgentMessage, Done
@@ -25,9 +25,12 @@ from nooa.storage.sqlite import SessionAlreadyActiveError
 from nooa_atom.session.events import (
     ChildClosed,
     ChildDeleted,
+    ChildNamed,
     SnapshotRestoreFailed,
 )
 from nooa_atom.session.items import (
+    CHILD_MESSAGE_CHARS,
+    CHILD_MESSAGE_CUT,
     AgentEventUpdate,
     ChildCreatedUpdate,
     ChildFailed,
@@ -45,6 +48,7 @@ from nooa_atom.session.items import (
     question_id,
 )
 from nooa_atom.session.loader import AgentFactory, load_typed
+from nooa_atom.session.names import ROOT_PATH, child_path, is_valid_name
 from nooa_atom.session.options import SessionOptions
 from nooa_atom.session.port import install_port
 from nooa_atom.session.session import Session, SessionClosedError
@@ -60,6 +64,27 @@ logger = logging.getLogger(__name__)
 
 ChildOutcome = ChildResult | ChildQuestion | ChildFailed
 """What a child's turn end puts on its parent's delegates channel (or hands to ``wait()``)."""
+
+
+class ChildRoute(Protocol):
+    """Where a routed child's deliveries go instead of its parent's ``delegates`` channel.
+
+    ``message(text)`` gets each ``self.message()`` note (already cut to
+    ``CHILD_MESSAGE_CHARS``), ``outcome(item)`` each turn outcome nobody
+    ``wait()``s for (a ``ChildResult``, ``ChildQuestion`` or ``ChildFailed``),
+    and ``closed()`` is called once when the child session closes. Each is
+    called from the registry's listeners and must not block or raise.
+
+    A route may also define ``turn_started(item_ids)``: called as each of the
+    child's turns starts, with the ids of the admitted items it carries.
+    """
+
+    def message(self, text: str) -> None: ...
+
+    def outcome(self, item: ChildOutcome) -> None: ...
+
+    def closed(self) -> None: ...
+
 
 Prepare = Callable[[Session], Awaitable[None]]
 """Host hook run on a built session before it starts and is published."""
@@ -131,6 +156,21 @@ class SessionRegistry:
         self._closed_children: dict[str, set[str]] = {}
         self._queued: dict[tuple[str, str], list[tuple[Receipt, ChildOutcome]]] = {}
         self._background: set[asyncio.Task[None]] = set()
+        # Ancestors further up watching a session's next outcome (a deeper
+        # ``ChildRef.wait()``), by the watched session's id. They get a copy;
+        # the outcome still goes to the session's parent.
+        self._watchers: dict[str, list[asyncio.Future[ChildResult | ChildQuestion]]] = {}
+        # Names derived for children whose record has no valid name (older
+        # records, named by their description), and every path computed so
+        # far: a session's name and parent never change.
+        self._derived_names: dict[str, str] = {}
+        # Derived names each parent has recorded (``ChildNamed``), by parent id
+        # and child id: read once per parent, kept current as names are recorded.
+        self._recorded_names: dict[str, dict[str, str]] = {}
+        self._paths: dict[str, str] = {}
+        # Children whose deliveries go to their own route instead of the
+        # parent's delegates channel (``route_child``), by child id.
+        self._routes: dict[str, ChildRoute] = {}
 
     # ---- create ------------------------------------------------------
 
@@ -287,6 +327,8 @@ class SessionRegistry:
             )
             agent, restored, note = await self._restore_older(agent, options, handle, exc)
             handle.events.add(SnapshotRestoreFailed(error=note))
+            if restored and callable(after_restore := getattr(agent, "after_restore", None)):
+                after_restore()
         agent.event_manager.add(TuiSessionResumed(session_id=handle.id, restored=restored))
         return agent
 
@@ -358,12 +400,18 @@ class SessionRegistry:
         if self.sessions.get(session.id) is session:
             del self.sessions[session.id]
         self._forget_parent(session.id)
+        route = self._routes.pop(session.id, None)
+        if route is not None:
+            route.closed()
         if session.parent_id is None:
             return
         self._questions.pop((session.parent_id, session.id), None)
         waiter = self._waiters.pop((session.parent_id, session.id), None)
         if waiter is not None and not waiter.done():
             waiter.set_exception(ChildFailedError(f"Child {session.name!r} was closed"))
+        for watcher in self._watchers.pop(session.id, []):
+            if not watcher.done():
+                watcher.set_exception(ChildFailedError(f"{self.path(session.id)} was closed"))
 
     # ---- child results -----------------------------------------------
 
@@ -371,7 +419,8 @@ class SessionRegistry:
         """A data handle on a live child."""
         return ChildRef(
             id=child.id,
-            name=child.name or "",
+            name=child.name if is_valid_name(child.name) else self.child_name(child.info),
+            path=self.path(child.id),
             depth=child.depth,
             status=_live_status(child),
             parent_id=child.parent_id,
@@ -395,6 +444,141 @@ class SessionRegistry:
         if owner != parent.id:
             raise ChildFailedError(f"Session {child_id!r} is not a child of {parent.id!r}")
 
+    # ---- names and paths ---------------------------------------------
+
+    def child_name(self, info: SessionInfo) -> str:
+        """A child's name: the stored one, or for an older record without a valid one, ``child_<n>``.
+
+        ``n`` is the child's place among its parent's children by creation,
+        bumped past every name a sibling already has (a stored one, or one
+        derived before). The names of all such siblings are derived together,
+        so they never collide, and each is recorded in the parent
+        (``ChildNamed``) when first derived, so it stays the same in a later
+        process even if siblings are deleted. A root's name is its own.
+        """
+        if info.parent_id is None or is_valid_name(info.name):
+            return info.name or ""
+        derived = self._derived_names.get(info.id)
+        if derived is None:
+            self._derive_names(info.parent_id, extra=info)
+            derived = self._derived_names[info.id]
+        return derived
+
+    def _derive_names(self, parent_id: str, *, extra: SessionInfo | None = None) -> None:
+        """Derive (and record) a ``child_<n>`` name for every child of ``parent_id`` lacking one.
+
+        ``extra`` is a child not (yet) listed by the store; it comes last.
+        A name is recorded only while the parent is live (its record is
+        written through its own handle); one derived while it is not is
+        recorded on a later call once it is.
+        """
+        siblings = sorted(
+            (other for other in self.store.list(roots_only=False) if other.parent_id == parent_id),
+            key=lambda other: other.created_at,
+        )
+        if extra is not None and all(other.id != extra.id for other in siblings):
+            siblings.append(extra)
+        legacy = [other for other in siblings if not is_valid_name(other.name)]
+        recorded = self._recorded_of(parent_id)
+        for other in legacy:
+            name = recorded.get(other.id)
+            if name is not None and other.id not in self._derived_names:
+                self._derived_names[other.id] = name
+        taken = {other.name for other in siblings if is_valid_name(other.name)}
+        taken.update(self._derived_names[o.id] for o in legacy if o.id in self._derived_names)
+        legacy_ids = {other.id for other in legacy}
+        for place, other in enumerate(siblings, 1):
+            if other.id in legacy_ids and other.id not in self._derived_names:
+                n = place
+                while f"child_{n}" in taken:
+                    n += 1
+                self._derived_names[other.id] = f"child_{n}"
+                taken.add(f"child_{n}")
+        parent = self.sessions.get(parent_id)
+        if parent is None or parent.closing:
+            return
+        for other in legacy:
+            name = self._derived_names[other.id]
+            if recorded.get(other.id) != name:
+                with suppress(Exception):
+                    parent.handle.events.add(ChildNamed(child_id=other.id, name=name))
+                    recorded[other.id] = name
+
+    def _recorded_of(self, parent_id: str) -> dict[str, str]:
+        """The ``child_<n>`` names ``parent_id`` recorded (``ChildNamed``), by child id; read once."""
+        recorded = self._recorded_names.get(parent_id)
+        if recorded is None:
+            recorded = {}
+            with suppress(Exception):
+                for _kind, raw in self.store.load_rows(parent_id, frozenset({"ChildNamed"})):
+                    child_id, name = str(raw.get("child_id") or ""), raw.get("name")
+                    if child_id and isinstance(name, str) and is_valid_name(name):
+                        recorded.setdefault(child_id, name)  # the first record wins
+            self._recorded_names[parent_id] = recorded
+        return recorded
+
+    def path(self, session_id: str) -> str:
+        """A session's path: ``/root`` for a root, else its parent's path, ``/`` and its name."""
+        known = self._paths.get(session_id)
+        if known is not None:
+            return known
+        live = self.sessions.get(session_id)
+        try:
+            info = live.info if live is not None else self.store.get(session_id)
+        except (SessionNotFoundError, InvalidSessionIdError):
+            return session_id
+        if info.parent_id is None:
+            found = ROOT_PATH
+        else:
+            name = live.name if live is not None and is_valid_name(live.name) else None
+            found = child_path(self.path(info.parent_id), name or self.child_name(info))
+        self._paths[session_id] = found
+        return found
+
+    def is_ancestor(self, ancestor_id: str, session_id: str) -> bool:
+        """Whether ``ancestor_id`` is ``session_id``'s parent, grandparent, and so on."""
+        current = session_id
+        seen: set[str] = set()
+        while current not in seen:
+            seen.add(current)
+            live = self.sessions.get(current)
+            try:
+                parent_id = (
+                    live.parent_id if live is not None else self.store.get(current).parent_id
+                )
+            except (SessionNotFoundError, InvalidSessionIdError):
+                return False
+            if parent_id is None:
+                return False
+            if parent_id == ancestor_id:
+                return True
+            current = parent_id
+        return False
+
+    def watcher(self, session_id: str) -> asyncio.Future[ChildResult | ChildQuestion]:
+        """A future for a deeper session's next outcome, for an ancestor further up.
+
+        A copy: the outcome still goes to the session's own parent.
+        """
+        future: asyncio.Future[ChildResult | ChildQuestion] = (
+            asyncio.get_running_loop().create_future()
+        )
+        self._watchers.setdefault(session_id, []).append(future)
+        return future
+
+    def _notify_watchers(
+        self, session_id: str, outcome: "ChildResult | ChildQuestion | ChildFailedError | None"
+    ) -> None:
+        if outcome is None:
+            return
+        for future in self._watchers.pop(session_id, []):
+            if future.done():
+                continue
+            if isinstance(outcome, ChildFailedError):
+                future.set_exception(ChildFailedError(str(outcome)))
+            else:
+                future.set_result(outcome)
+
     def _deliver(self, child: Session, update: SessionEvent) -> None:
         """Route a child's messages and turn result to its live parent (a detached child keeps its own)."""
         if isinstance(update, AgentEventUpdate) and isinstance(update.event, AgentMessage):
@@ -405,6 +589,9 @@ class SessionRegistry:
             # submit), ends the child's pending question.
             if child.parent_id is not None:
                 self._questions.pop((child.parent_id, child.id), None)
+            started = getattr(self._routes.get(child.id), "turn_started", None)
+            if started is not None:
+                started(list(update.item_ids))
             return
         if not isinstance(update, TurnEndedUpdate):
             return
@@ -426,11 +613,12 @@ class SessionRegistry:
             waiter = None
         # One place only: a waiting wait() gets the outcome, else delegates does.
         delivered = False
+        watched: ChildResult | ChildQuestion | ChildFailedError | None = None
         try:
             if kind == "done":
                 self._questions.pop(key, None)
                 # Built for both paths: ChildResult rebuilds a TaskResult sent as data.
-                result = ChildResult(child=ref, done=_rebuild_done(update))
+                result = watched = ChildResult(child=ref, done=_rebuild_done(update))
                 if waiter is not None:
                     waiter.set_result(result)
                 else:
@@ -450,12 +638,13 @@ class SessionRegistry:
                         "a one-shot worker cannot ask questions, but it asked: "
                         f"{update.outcome.get('question', '')!r}"
                     )
+                watched = ChildFailedError(error)
                 if waiter is not None:
                     waiter.set_exception(ChildFailedError(error))
                 else:
                     self._put(parent, child.id, ChildFailed(child=ref, error=error), source)
             else:
-                question = _question_from_outcome(ref, update.outcome)
+                question = watched = _question_from_outcome(ref, update.outcome)
                 # Pending until answered; it does not block the parent's Done.
                 self._questions[key] = question
                 if waiter is not None:
@@ -463,6 +652,7 @@ class SessionRegistry:
                 else:
                     self._put(parent, child.id, question, source)
             delivered = True
+            self._notify_watchers(child.id, watched)
         finally:
             # Keep a child's own durable result available if parent admission fails.
             if delivered and not child.options.kept:
@@ -479,6 +669,7 @@ class SessionRegistry:
         parent before the result of the same turn. The message stays in the
         child's own events too. A ``Done``'s message (marked
         ``is_result_text``) is not sent: it arrives with the ``ChildResult``.
+        Text over ``CHILD_MESSAGE_CHARS`` is cut, with a note saying so.
         A closing or closed parent drops it.
         """
         if getattr(event, "is_result_text", False):
@@ -486,11 +677,32 @@ class SessionRegistry:
         parent = self.sessions.get(child.parent_id) if child.parent_id else None
         if parent is None or parent.closing:
             return
-        item = ChildMessage(child=self.child_ref(child), text=str(event.content))
+        text = str(event.content)
+        if len(text) > CHILD_MESSAGE_CHARS:
+            text = text[:CHILD_MESSAGE_CHARS] + CHILD_MESSAGE_CUT
+        route = self._routes.get(child.id)
+        if route is not None:
+            route.message(text)
+            return
+        item = ChildMessage(child=self.child_ref(child), text=text)
         with suppress(SessionClosedError):
             _admit_delegate(parent, item, f"child:{child.name or child.id}")
 
+    def route_child(self, child_id: str, route: ChildRoute) -> None:
+        """Send this child's messages and unawaited outcomes to ``route``, not to ``delegates``.
+
+        For a work adapter that owns the child: install it before the child's
+        first turn (``SessionPort.delegate(route=...)`` does, in ``prepare``)
+        so nothing is delivered elsewhere first. It holds until the child
+        closes (``route.closed()``).
+        """
+        self._routes[child_id] = route
+
     def _put(self, parent: Session, child_id: str, item: ChildOutcome, source: str) -> None:
+        route = self._routes.get(child_id)
+        if route is not None:
+            route.outcome(item)  # routed: never also on delegates
+            return
         receipt = _admit_delegate(parent, item, source)
         self._queued.setdefault((parent.id, child_id), []).append((receipt, item))
 
@@ -581,6 +793,7 @@ class SessionRegistry:
         read again on demand (``_closed_of``, ``load``, ``pending_question``).
         """
         self._closed_children.pop(parent_id, None)
+        self._recorded_names.pop(parent_id, None)
         for key in [key for key in self._questions if key[0] == parent_id]:
             del self._questions[key]
 
@@ -633,7 +846,8 @@ class SessionRegistry:
         closed = info.parent_id is not None and self.is_closed(info.parent_id, child_id)
         return ChildRef(
             id=info.id,
-            name=info.name or "",
+            name=self.child_name(info),
+            path=self.path(info.id),
             depth=info.depth,
             status="closed" if closed else "on_disk",
             parent_id=info.parent_id,
@@ -764,9 +978,12 @@ class SessionRegistry:
             # that opens a relative checks after taking its own lock too, so
             # of two overlapping loads at least one sees the other.
             self._refuse_if_tree_active_elsewhere(session_id, handle.info.parent_id)
-            session = await self._build(
-                self._stored_options(handle.info, overrides), handle, restore=True
-            )
+            info = handle.info
+            if info.parent_id is not None and not is_valid_name(info.name):
+                # An older record, named by its description: it gets child_<n>.
+                info.name = self.child_name(info)
+            session = await self._build(self._stored_options(info, overrides), handle, restore=True)
+            session.name = session.info.name = info.name
             if prepare is not None:
                 await prepare(session)
             elif session.parent_id in self.sessions:
@@ -947,17 +1164,20 @@ class SessionRegistry:
         A child its parent closed reads ``closed``; one merely not loaded, ``on_disk``.
         """
         found = {
-            info.id: (
-                info.model_copy(update={"status": "closed"})
-                if self.is_closed(parent_id, info.id)
-                else info
+            info.id: info.model_copy(
+                update={
+                    "name": self.child_name(info),
+                    **({"status": "closed"} if self.is_closed(parent_id, info.id) else {}),
+                }
             )
             for info in self.store.list(roots_only=False)
             if info.parent_id == parent_id
         }
         for session in self.sessions.values():
             if session.parent_id == parent_id:
-                found[session.id] = self.live_info(session)
+                info = self.live_info(session)
+                info.name = self.child_name(info)
+                found[session.id] = info
         return sorted(found.values(), key=lambda info: info.created_at)
 
     def list(

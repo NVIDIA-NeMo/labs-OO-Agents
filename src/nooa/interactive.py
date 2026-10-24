@@ -32,7 +32,9 @@ from pydantic import (
 )
 
 from nooa import hidden, strategy
-from nooa.agentdoc import doc  # noqa: F401  # visible in the REPL, as on base
+from nooa.agentdoc import (
+    doc,  # noqa: F401  # visible in the REPL, as on base
+)
 from nooa.context_blocks import Metadata
 from nooa.context_blocks.roles import Role
 from nooa.runtime.turn_loop import ResultKind
@@ -160,9 +162,8 @@ class NeedInput(BaseModel):
 class Waiting(BaseModel):
     """Turn result: waiting on a background job or queue, not on a person.
 
-    ``on`` lists what is being waited on by name: a queue channel
-    (``"delegates"``, ``"jobs"``), a spawned job's label, a subagent's name.
-    ``explanation`` says why, for the host. ``message`` is an optional line
+    ``on`` lists what is being waited on by name: queue channels or names
+    the host defines. ``explanation`` says why, for the host. ``message`` is an optional line
     the host shows the user. The host keeps the request open and runs the
     next turn when one of them delivers.
     """
@@ -171,7 +172,8 @@ class Waiting(BaseModel):
     explanation: str = Field(description="Why the turn is waiting")
     message: str | None = Field(default=None, description="Line to show the user while waiting")
     on: list[str] = Field(
-        min_length=1, description="Names of the channels, jobs or subagents being waited on"
+        min_length=1,
+        description="Names of what is being waited on: queue channels or names the host defines",
     )
 
     _check_explanation = field_validator("explanation")(_non_blank)
@@ -232,7 +234,7 @@ def require_task_result(agent: Any, result: Any, call: Any) -> None:
     """Reject a worker ``Done`` whose ``result`` is not a ``TaskResult``, and a one-shot question.
 
     The postcondition of every worker turn (``handle_work``). A worker's
-    parent reads ``done.result``; ``self.message()`` text reaches it only as
+    parent reads it as ``ChildResult.result``; ``self.message()`` text reaches it only as
     progress notes. A dict that validates as a ``TaskResult`` is accepted
     (the parent receives it as one). A one-shot worker may not ask: its
     session port says so (``agent.session.may_ask``).
@@ -429,6 +431,11 @@ class AgentVars:
         return repr(self._agent.vars)
 
 
+# The ``queues`` context block. Its expression is shown to the model, so it
+# goes through a hidden method rather than naming ``self.queue_manager``.
+_QUEUES_EXPR: Annotated[str, hidden] = "self._queue_status()"
+
+
 @hidden
 class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
     """Base class for agents driven by an outer dispatcher (TUI, harness, ...).
@@ -437,15 +444,14 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
     agent. ``message()`` is provided for free.
 
     **Input queues.** Every ``InteractiveAgent`` has a ``self.user_messages``
-    queue (``InputQueue``) that the host feeds when the human types.
-    Subclasses may declare additional queues as instance attributes for
-    other producers (long-running job output, monitor streams, etc.).
+    queue that the host feeds when the human types. Subclasses may declare
+    additional queues as instance attributes for other producers.
 
-    Each queue is two objects: an ``InputQueue`` (full producer +
-    dispatcher API, hidden from the LLM under ``_<name>_in``) and an
-    ``OutputQueue`` reader facade exposed under the public name. The
-    LLM can ``await self.user_messages.get()`` to dequeue mid-turn;
-    everything else (put, snapshot, qsize, etc.) is dispatcher-only.
+    Each queue is two objects: a ``Channel`` (full producer + dispatcher
+    API, hidden from the LLM under ``_<name>_in``) and a ``ChannelReader``
+    facade exposed under the public name. The LLM can
+    ``await self.user_messages.get()`` to dequeue mid-turn; everything else
+    (put, snapshot, etc.) is dispatcher-only.
 
     ``handle()`` runs *per turn* — the outer dispatcher calls it with
     the next notification (a ``dict[str, list]``). Use ``self.v`` for
@@ -488,7 +494,7 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
         # ``QueueManager.status()`` so adding new channels Just Works.
         from nooa import Context
 
-        self.context["queues"] = Context(expr="self.queue_manager.status()")
+        self.context["queues"] = Context(expr=_QUEUES_EXPR)
 
     @hidden
     @no_trace
@@ -512,6 +518,26 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
             await self.turns.stop()
         finally:
             await self.queue_manager.shutdown()
+
+    @hidden
+    def after_restore(self) -> None:
+        """Called by a host after it restores a snapshot into this agent.
+
+        Subclasses extend it to repair state that did not survive the restart.
+        """
+        # A snapshot from before the queues block stopped naming the hidden
+        # queue_manager restores the old expression; put the current one back.
+        from nooa import Context
+
+        self.context["queues"] = Context(expr=_QUEUES_EXPR)
+
+    @hidden
+    @no_trace
+    def _queue_status(self) -> str:
+        """The ``queues`` context block: unread counts per channel, how to read them, running jobs."""
+        return self.queue_manager.status(
+            read_hints={"user_messages": "await self.user_messages.get()"}
+        )
 
     @property
     def v(self) -> AgentVars:
@@ -539,10 +565,6 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
 
     def message(self, text: str, *, echo: bool = False) -> None:
         """Send a Markdown message to the user.
-
-        In a child session the text goes to the parent instead, as a
-        ``ChildMessage`` on its ``delegates`` channel: a progress note, not
-        the child's result.
 
         Each call renders as an independent block — so every call must be a
         complete, self-contained Markdown document.  In particular, never split
@@ -625,10 +647,10 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
 
         - ``Waiting(message=..., explanation=..., on=[...])`` — waiting on a
           background job or queue, not on a person. ``message`` is shown to
-          the user; ``on`` names what you wait for: a channel, a job label,
-          a subagent::
+          the user; ``on`` names what you wait for, such as a queue
+          channel::
 
-              return_result(Waiting(message="Tests are running; I will report when they finish.", explanation="tests running", on=["jobs:ci-42"]))
+              return_result(Waiting(message="CI is running; I will report when it finishes.", explanation="CI running", on=["ci"]))
 
         ## Available queues
 
@@ -644,8 +666,7 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
 
         Hosts declare the rest. ``CodingAgent`` adds ``"slash_commands"``
         (``SlashCommandResult``) and ``"system_messages"`` (host-owned
-        prompts such as keep-going continuations); a harness might add
-        ``"job_outputs"``. The
+        prompts such as keep-going continuations). The
         ``<queue_status>`` context block lists the pending count per
         queue each turn. After any result, the dispatcher races every
         declared queue/event and re-enters with the first arrival.
@@ -713,7 +734,9 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
         - ``Waiting(explanation=..., on=[...])`` only while a job you started
           is still running.
 
-        ``self.message()`` sends your parent a progress note (a
-        ``ChildMessage``); it does not replace the result.
+        Your parent reads your result: do not send routine progress notes.
+        Use ``self.message()`` (it reaches your parent as a ``ChildMessage``)
+        only for a short note your parent needs before you finish, never the
+        report. The full report goes only in ``TaskResult.report``.
         """
         ...

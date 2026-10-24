@@ -8,7 +8,7 @@ import hashlib
 import pytest
 from atom_test_agents import ATOM_SPEC, AtomModels, CellLLM, cell
 from nooa_atom import SessionOptions, SessionStore, run_task
-from nooa_atom.agent import AtomAgent
+from nooa_atom.agent.base import AtomAgentBase
 from nooa_atom.session.registry import SessionRegistry
 from nooa_atom.session.store import sessions_root
 from pydantic import ValidationError
@@ -21,7 +21,7 @@ TIMEOUT = 30
 ORCHESTRATOR_TEXT = (
     "You are the orchestrator. You decide how the work is split and who does",
     "Write the requirements: how success will be measured.",
-    "await self.spawn(description, todo)",
+    "await self.spawn(description, todo, name=...)",
     "task's requirements and its rules or constraints in it.",
     "run one editing child at a time",
     "a ``ChildMessage`` (``item.text``) is a progress",
@@ -37,9 +37,11 @@ UNCHANGED_PROMPTS = {
     # handle() as on dev/atom after #447 and #451 (#451's "or from your parent
     # agent if you are a child" line and #447's NeedInput free-text wording),
     # plus the regular progress-update guidance, and NeedInput as a plain-text
-    # question (no options).
-    "handle": "4e6aa53b2bb8ad8d061843e9917dff06d27b5e6bb05dec64426fd4162eecdf95",
-    "handle_batch": "9124c2874abd30f61a26f313abacbdc925f02a20efac8b4d7e3319a22ab545f0",
+    # question (no options). Then the stable turn instructions moved into the
+    # class doc: handle() keeps three sentences, and the locals paragraph left
+    # every turn method's doc.
+    "handle": "f4558376a3b74ecd3f6685a44b534581336a1e1ea701e3e71f55afac858d72ad",
+    "handle_batch": "9eef8eb5f2d8067d02c0eb742c4f6b8006ae8fff001130277e119a8510f6027d",
 }
 
 RESULT = (
@@ -52,19 +54,19 @@ RESULT = (
 def test_handle_orchestrate_has_the_orchestrator_prompt():
     from nooa.strategies import CodeActV2
 
-    prompt = AtomAgent.handle_orchestrate.__doc__
+    prompt = AtomAgentBase.handle_orchestrate.__doc__
     assert prompt.startswith("You are a recursive language model agent.")
     for phrase in ORCHESTRATOR_TEXT:
         assert phrase in prompt
     # The return contract is kept from the earlier prompt.
     assert "result=TaskResult(" in prompt
     assert "If something blocks you, still return ``Done`` with a ``TaskResult``" in prompt
-    assert "Python locals live for one method call" in prompt
+    assert "Locals last one method call" in AtomAgentBase.__doc__  # said once, in the class doc
     # The orchestrator no longer closes its children; the host does.
     assert "child.close()" not in prompt
     # Nobody can answer a question, so the prompt never offers NeedInput.
     assert "NeedInput" not in prompt
-    assert isinstance(AtomAgent.handle_orchestrate._plan_strategy, CodeActV2)
+    assert isinstance(AtomAgentBase.handle_orchestrate._plan_strategy, CodeActV2)
 
 
 def test_handle_orchestrate_returns_only_done_or_waiting():
@@ -73,7 +75,7 @@ def test_handle_orchestrate_returns_only_done_or_waiting():
     from nooa.interactive import Done, NeedInput, Waiting
 
     def returns(method):
-        return typing.get_type_hints(getattr(AtomAgent, method))["return"]
+        return typing.get_type_hints(getattr(AtomAgentBase, method))["return"]
 
     assert returns("handle_orchestrate") == Done | Waiting
     # handle() and handle_batch() keep their return types.
@@ -89,7 +91,7 @@ async def test_handle_orchestrate_rejects_need_input(tmp_path):
             cell(RESULT),
         ]
     )
-    agent = AtomAgent(llm=llm, cwd=tmp_path)
+    agent = AtomAgentBase(llm=llm, cwd=tmp_path)
     try:
         outcome = await agent.handle_orchestrate({"user_messages": ["fix it"]})
         assert outcome.result.report == "VERIFIED"
@@ -103,7 +105,7 @@ async def test_handle_orchestrate_rejects_need_input(tmp_path):
 
 @pytest.mark.parametrize("method", list(UNCHANGED_PROMPTS))
 def test_the_interactive_and_batch_prompts_are_unchanged(method):
-    prompt = getattr(AtomAgent, method).__doc__
+    prompt = getattr(AtomAgentBase, method).__doc__
     assert hashlib.sha256(prompt.encode()).hexdigest() == UNCHANGED_PROMPTS[method]
     for phrase in ORCHESTRATOR_TEXT:
         assert phrase not in prompt
@@ -111,9 +113,9 @@ def test_the_interactive_and_batch_prompts_are_unchanged(method):
 
 async def test_handle_orchestrate_is_hidden_from_the_model(tmp_path):
     """Hosts call it as a turn method; the model never sees it listed."""
-    assert "handle_orchestrate" not in doc(AtomAgent, concise=True)
-    assert "handle_orchestrate" not in doc(AtomAgent)
-    agent = AtomAgent(llm=CellLLM([cell("return_result(Done(explanation='x'))")]), cwd=tmp_path)
+    assert "handle_orchestrate" not in doc(AtomAgentBase, concise=True)
+    assert "handle_orchestrate" not in doc(AtomAgentBase)
+    agent = AtomAgentBase(llm=CellLLM([cell("return_result(Done(explanation='x'))")]), cwd=tmp_path)
     try:
         await agent.handle({"user_messages": ["hi"]})
         call = agent.llm.calls[0]
@@ -184,24 +186,24 @@ async def test_an_orchestrating_root_leaves_children_open_for_the_host_to_close(
         cell(
             "todo = self.todo.add('Fix parse()', description='Goal: fix it. Check: pytest')\n"
             "self.v.todo_id = todo.id\n"
-            "self.v.child = await self.spawn('Fix parser', todo)\n"
+            "self.v.child = await self.spawn('fix_parser', todo, name='fix_parser')\n"
             "return_result(Waiting(explanation='worker running', on=['delegates']))"
         ),
         cell(
             "[item] = notification['delegates']\n"
             "assert isinstance(item, ChildResult) and item.child.id == self.v.child.id\n"
-            "self.todo.comment(self.v.todo_id, 'first try: ' + item.done.explanation)\n"
+            "self.todo.comment(self.v.todo_id, 'first try: ' + item.summary)\n"
             "await self.v.child.send('FEEDBACK: the empty-input case still fails')\n"
             "return_result(Waiting(explanation='follow-up running', on=['delegates']))"
         ),
         cell(
             "[item] = notification['delegates']\n"
-            "assert item.done.explanation == 'fixed the empty case'\n"
+            "assert item.summary == 'fixed the empty case'\n"
             "[ref] = self.children()\n"
             "assert ref.status != 'closed', ref.status\n" + RESULT
         ),
     ]
-    models.scripts["Fix parser"] = [
+    models.scripts["fix_parser"] = [
         cell(
             "return_result(Done(explanation='first try', result=TaskResult("
             "solution_description='s', evidence='e', how_to_verify='h', report='first try')))"
@@ -235,9 +237,9 @@ async def test_an_orchestrating_root_leaves_children_open_for_the_host_to_close(
     store = SessionStore(sessions_root(options.workspace, sessions_dir))
     assert store.get(run.session_id).turn_method == "handle_orchestrate"
     [child] = [info for info in store.list(roots_only=False) if info.parent_id == run.session_id]
-    assert (child.name, child.turn_method, child.retained) == ("Fix parser", "handle_work", True)
+    assert (child.name, child.turn_method, child.retained) == ("fix_parser", "handle_work", True)
     root_prompt = str(models.llms[None].calls[0].messages)
-    child_prompts = str([call.messages for call in models.llms["Fix parser"].calls])
+    child_prompts = str([call.messages for call in models.llms["fix_parser"].calls])
     assert ORCHESTRATOR_TEXT[0] in root_prompt
     assert ORCHESTRATOR_TEXT[0] not in child_prompts
     # The worker got the Todo as its prompt, then the feedback.
@@ -253,9 +255,9 @@ async def test_an_orchestrating_roots_one_shot_children_run_handle_work(tmp_path
     )
     models = AtomModels()
     models.scripts[None] = [
-        cell("done = await self.delegate('Worker', 'fix it')\n" + RESULT),
+        cell("done = await self.delegate('worker', 'fix it', name='worker')\n" + RESULT),
     ]
-    models.scripts["Worker"] = [cell(child_result)]
+    models.scripts["worker"] = [cell(child_result)]
     registry = SessionRegistry(SessionStore(sessions_dir), agent_factory=models)
     try:
         root = await registry.create(
@@ -264,6 +266,6 @@ async def test_an_orchestrating_roots_one_shot_children_run_handle_work(tmp_path
         await asyncio.wait_for(root.prompt("fix it"), TIMEOUT)
         [child] = registry.children(root.id)
         assert child.turn_method == "handle_work"
-        assert ORCHESTRATOR_TEXT[0] not in str(models.llms["Worker"].calls[0].messages)
+        assert ORCHESTRATOR_TEXT[0] not in str(models.llms["worker"].calls[0].messages)
     finally:
         await registry.close_all()

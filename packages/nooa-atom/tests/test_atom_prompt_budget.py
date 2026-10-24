@@ -105,11 +105,51 @@ RESULT = (
 # Re-measured after merging dev/atom with #447 into #451 (2026-10-19): #447's
 # truthful API text plus the child-session docs, 273 characters more in the system
 # prompt for every row (was 14,909). Measured values plus about 2% headroom.
+# Raised for self.jobs (2026-10-19): the class doc says to run long work with
+# self.jobs.run(...) and wait on its name, and the self doc lists the
+# jobs attribute: 224 characters more in the system prompt and in total for
+# every row (handle measured 18,475 total before, not 18,240). Measured values
+# plus about 2% headroom.
+# Raised for path names (feat/atom-jobs-skill): spawn()/delegate() take a
+# required name= (in the self doc's signatures and the class doc's examples),
+# ChildRef has path, and the class doc says jobs and children share one set of
+# names: about 110 characters more in the system prompt and in total for every
+# row. Measured values plus about 2% headroom.
+# Re-measured when the stable turn instructions moved from handle() into the
+# class doc (feat/atom-jobs-reland): before, 15,922 system for every row and
+# 19,285 / 18,465 / 18,980 / 20,460 total. The handle() doc fell from 2,005 to
+# 290 characters, so its total (repeated every turn) fell by 1,557; the class
+# doc grew by 158, which put the system prompt over 16,000: the system limit
+# was raised to the measured 16,080 rounded up to the next 100, and handle's
+# total limit lowered to its measured value plus about 2%.
+# Raised when the class doc gave self.jobs.run's full signature (name=, not
+# label=) and said results arrive in notification["jobs"] (feat/atom-jobs-reland):
+# 199 characters more in the system prompt and in total for every row (before,
+# 16,080 system and 18,150 / 18,409 / 18,924 / 20,404 total). Limits: measured
+# values plus about 2%, rounded up to the next 100 (system: next 100).
+# Raised when self.jobs (JobsApi with JobInfo/JobUpdate) joined the
+# python_cell_tools block and the class doc went back to the short self.jobs
+# sentence (feat/atom-jobs-reland): system 16,279 -> 19,737 (+3,458), still
+# under BENCH_SYSTEM_LIMIT. Limits: measured totals plus about 2%, rounded up
+# to the next 100 (system: next 100).
 LIMITS = {
-    (ATOM, "handle"): (15_500, 18_700),  # measured total 18,660 incl. empty AGENTS.md block
-    (ATOM, "handle_batch"): (15_500, 18_100),  # measured 15,182 / 17,732
-    (ATOM, "handle_work"): (15_500, 18_600),  # measured 15,182 / 18,202
-    (ATOM, "handle_orchestrate"): (15_500, 20_100),  # measured 15,182 / 19,684
+    # The experimental unified-work agent (spike/atom-unified-work): one
+    # self.jobs vocabulary (WorkManager, Job, Shell, Subagent) documented in
+    # python_cell_tools, the stable mode guidance in the class doc, and turn
+    # docs under 300 characters. Measured values plus about 2%.
+    # The spike's UnifiedAtomAgent became AtomAgent (2026-10-20): its rows replace the old ones.
+    # Re-measured for one handle() with a static role block per turn_method, SkillManager
+    # docs in python_cell_tools instead of the <skills> block, and a one-line
+    # python_cell_state (2026-10-20): measured values plus about 2% headroom.
+    # Final prompt cleanup: static workspace, one Todo definition, persistent Shell and Job.message.
+    # Re-measured after merging dev/atom's #490 (AGENTS.md reload, 2026-10-24): the
+    # repository_instructions block is now always present, empty without an AGENTS.md,
+    # 230 characters more in the system prompt and in total for every row (was
+    # 18,669 / 19,398 for handle). Within the limits, so they stay.
+    (ATOM, "handle"): (19_100, 19_800),  # measured 18,899 / 19,628
+    (ATOM, "handle_batch"): (19_300, 20_100),  # measured 19,127 / 19,856
+    (ATOM, "handle_work"): (19_400, 20_200),  # measured 19,236 / 19,965
+    (ATOM, "handle_orchestrate"): (19_600, 20_400),  # measured 19,430 / 20,159
 }
 # The bench guard's system-prompt ceiling; every agent stays under it.
 BENCH_SYSTEM_LIMIT = 20_000
@@ -209,14 +249,13 @@ class _InstalledSkill:
 
 
 async def test_installed_skills_are_counted_not_listed(monkeypatch, tmp_path, sessions_dir):
-    """With this machine's installed skills and 40 more, the ``<skills>`` block stays small.
+    """With this machine's installed skills and 40 more, none is named in the prompt.
 
     The other tests here turn installed skills off, which hid how the prompt
     grows with them. Each skill is found through ``self.skills.search()``;
     none is named or described in the prompt until it is activated.
     """
     import importlib.metadata
-    import re
 
     extra = [_InstalledSkill(index) for index in range(40)]
     monkeypatch.setattr(
@@ -237,10 +276,10 @@ async def test_installed_skills_are_counted_not_listed(monkeypatch, tmp_path, se
     finally:
         await registry.close_all()
     rendered = "\n".join(str(m.get("content", "")) for m in llm.calls[0].messages)
-    [block] = re.findall(r"<skills[^>]*>\n(.*?)\n</skills>", rendered, re.DOTALL)
-    print(block)
-    assert len(block) < 400
-    assert re.search(r"^\d+ more \(", block.splitlines()[-1])
+    # The Atom agent shows no dynamic <skills> inventory: SkillManager's docs
+    # are in the static python_cell_tools block, and status() is on demand.
+    assert "<skills" not in rendered
+    assert "class SkillManager" in rendered and "def status(self) -> str:" in rendered
     for skill in extra:
         assert skill.description not in rendered
         assert skill.name.split(".")[-1] not in rendered

@@ -749,7 +749,7 @@ class AtomACPAgent:
             return
         if any(entry.role == "user" for entry in session.transcript()):
             return
-        from nooa_atom.agent.agent import session_title_request
+        from nooa_atom.agent.base import session_title_request
 
         await session.submit(session_title_request(text), channel="system_messages", source="host")
 

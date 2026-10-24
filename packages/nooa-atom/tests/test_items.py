@@ -235,3 +235,71 @@ def test_a_child_ref_reads_status_live_in_its_parents_turn():
         assert ref.model_dump()["status"] == "idle"
     finally:
         current_port.reset(token)
+
+
+def test_delegate_items_name_their_child_as_status_source():
+    ref = items.ChildRef(id="c1", name="probe", depth=1, status="idle")
+    done = items.Done(explanation="ok")
+    for item in (
+        items.ChildResult(child=ref, done=done),
+        items.ChildFailed(child=ref, error="boom"),
+        items.ChildMessage(child=ref, text="half way"),
+        items.ChildQuestion(child=ref, question="which?"),
+    ):
+        assert item.status_source() == "probe"  # the sender only, never the content
+        assert not hasattr(item, "status_preview")
+
+
+def test_child_items_are_flat_with_the_child_last():
+    from nooa_atom.session.items import ChildMessage
+
+    from nooa.agentdoc import pformat
+
+    ref = _CHILD.model_copy(update={"path": "/root/review"})
+    done = Done(
+        explanation="reviewed",
+        evidence=[f"e{i}" for i in range(8)],
+        result=TaskResult(
+            solution_description="s", evidence="ev", how_to_verify="h", report="R" * 4_800
+        ),
+    )
+    result = ChildResult(child=ref, done=done)
+    assert (result.name, result.path, result.summary) == ("Review auth", "/root/review", "reviewed")
+    assert result.result.report == "R" * 4_800 and result.result == done.result
+    assert not hasattr(result, "report")  # one copy: result.report
+    assert result.evidence == done.evidence and result.done == done
+    for item in (
+        result,
+        ChildQuestion(child=ref, question="q?"),
+        ChildFailed(child=ref, error="boom"),
+        ChildMessage(child=ref, text="note"),
+    ):
+        assert list(type(item).model_fields)[-1 if item is not result else -2] == "child"
+        assert item.path == "/root/review" and item.status_source() == "/root/review"
+    rendered = pformat({"delegates": [result]}, max_string=100_000, max_length=100, max_depth=10)
+    assert "R" * 4_800 in rendered and "evidence=list(len=8" in rendered  # shown whole
+    assert "done=" not in rendered  # kept for delegate(), hidden from the display
+    assert len(rendered) < 7_000
+    long_report = done.result.model_copy(update={"report": "R" * 20_000})
+    long = ChildResult(child=ref, done=done.model_copy(update={"result": long_report}))
+    rendered = pformat({"delegates": [long]}, max_string=100_000, max_length=100, max_depth=10)
+    assert "report=str(len=20000" in rendered and "R" * 20_000 not in rendered
+    assert len(rendered) < 12_000
+
+
+def test_a_child_result_report_falls_back_to_the_done_message():
+    result = ChildResult(child=_CHILD, done=Done(explanation="x", message="hello"))
+    assert result.message == "hello" and result.result is None and result.path == "Review auth"
+
+
+def test_a_child_result_dumps_child_and_done_only_and_loads_old_records():
+    done = Done(
+        explanation="ok",
+        result={"solution_description": "s", "evidence": "e", "how_to_verify": "v", "report": "r"},
+    )
+    result = ChildResult(child=_CHILD, done=done)
+    assert isinstance(result.result, TaskResult) and result.result.report == "r"
+    dumped = result.model_dump(mode="json")
+    assert set(dumped) == {"child", "done"}  # the flat fields are derived on load
+    again = ChildResult.model_validate(dumped)
+    assert again == result and again.result.report == "r"

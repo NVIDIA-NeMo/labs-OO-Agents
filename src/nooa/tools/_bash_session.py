@@ -382,10 +382,62 @@ class BashSession:
         async with self._lock:
             return await self._run_unlocked(command, timeout)
 
-    async def _run_unlocked(self, command: str, timeout: float) -> tuple[str, str, int, bool]:
+    def is_busy(self) -> bool:
+        """True while a command runs in the session or bash is starting.
+
+        A ``run()`` started now would wait for that to finish.
+        """
+        return self._lock.locked() or self._start_lock.locked()
+
+    async def snapshot_cwd_env(self, timeout: float = 5.0) -> tuple[str, dict[str, str]] | None:
+        """The session's current directory and exported environment, if it is idle.
+
+        Returns ``None`` without waiting or starting bash when the session is
+        not started yet, is busy (``is_busy()``), or the capture fails or
+        takes longer than ``timeout``. The capture runs as one command in the
+        session and changes nothing in it.
+        """
+        self._ensure_lock_on_current_loop()
+        if not self._ready or self.is_busy():
+            return None
+        try:
+            async with self._lock:
+                # Uncapped: a large environment (HPC modules) is far over
+                # MAX_OUTPUT_CHARS, and a cut base64 blob decodes to garbage.
+                out, _err, code, timed_out = await self._run_unlocked(
+                    'printf "%s\\n" "$PWD"; env -0 | base64 | tr -d "\\n"',
+                    timeout,
+                    bounded=False,
+                )
+        except Exception:
+            return None
+        if code != 0 or timed_out:
+            return None
+        first, _, encoded = out.partition("\n")
+        try:
+            # validate=True: anything but a clean base64 blob means the capture
+            # is incomplete or corrupt; the caller falls back rather than use it.
+            raw = base64.b64decode(encoded.strip(), validate=True)
+        except ValueError:  # binascii.Error
+            return None
+        env: dict[str, str] = {}
+        for entry in raw.split(b"\0"):
+            key, sep, value = entry.partition(b"=")
+            if sep and key:
+                env[key.decode(errors="replace")] = value.decode(errors="replace")
+        cwd = first.strip()
+        if not cwd.startswith("/") or not os.path.isdir(cwd) or not env:
+            return None
+        return cwd, env
+
+    async def _run_unlocked(
+        self, command: str, timeout: float, *, bounded: bool = True
+    ) -> tuple[str, str, int, bool]:
         """Actual run implementation (caller must hold self._lock).
 
-        Returns (stdout, stderr, exit_code, timed_out).
+        Returns (stdout, stderr, exit_code, timed_out). With ``bounded=False``
+        the output is returned whole instead of cut to ``MAX_OUTPUT_CHARS``
+        (for internal reads such as ``snapshot_cwd_env`` that must be complete).
         """
         if not self._ready:
             await self.start()
@@ -417,7 +469,8 @@ class BashSession:
                     int(line) for line in ctrl_lines[2:] if line.strip().isdigit()
                 )
 
-        stdout, stderr = _bounded(stdout), _bounded(stderr)
+        if bounded:
+            stdout, stderr = _bounded(stdout), _bounded(stderr)
 
         if timed_out:
             exit_code = 124

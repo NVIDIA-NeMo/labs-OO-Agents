@@ -5,7 +5,7 @@
 import asyncio
 
 import pytest
-from atom_test_agents import ATOM_SPEC, CellLLM, ModelFactory, cell
+from atom_test_agents import ATOM_SPEC, PUBLIC_ATOM_SPEC, CellLLM, ModelFactory, cell
 from nooa_atom.agent.agent import AtomAgent
 from nooa_atom.agent.factory import create_session_agent, default_llm_factory
 from nooa_atom.session.options import SessionOptions
@@ -61,9 +61,8 @@ def workspace(tmp_path):
 
 
 def _options(workspace, sessions_dir, **values):
-    return SessionOptions(
-        workspace=workspace, agent_spec=ATOM_SPEC, sessions_dir=sessions_dir, **values
-    )
+    values.setdefault("agent_spec", ATOM_SPEC)
+    return SessionOptions(workspace=workspace, sessions_dir=sessions_dir, **values)
 
 
 async def _close(agent):
@@ -75,9 +74,11 @@ async def test_the_registry_builds_a_workspace_atom_agent_by_default(workspace, 
     llm = FakeLLMClient()
     registry = SessionRegistry(SessionStore(sessions_dir), agent_factory=create_session_agent)
     try:
-        root = await registry.create(_options(workspace, sessions_dir, llm=llm))
+        root = await registry.create(
+            _options(workspace, sessions_dir, llm=llm, agent_spec=PUBLIC_ATOM_SPEC)
+        )
         agent = root._agent
-        assert isinstance(agent, AtomAgent)
+        assert type(agent) is AtomAgent
         assert agent.cwd == workspace.resolve()
         assert agent.llm is llm
         assert agent.libs._path == workspace / ".nooa" / "libs"
@@ -129,8 +130,10 @@ async def test_a_mistyped_setting_does_not_abort_session_creation(workspace, ses
     registry = SessionRegistry(SessionStore(sessions_dir), agent_factory=create_session_agent)
     try:
         with caplog.at_level("WARNING"):
-            root = await registry.create(_options(workspace, sessions_dir, llm=FakeLLMClient()))
-        assert isinstance(root._agent, AtomAgent)
+            root = await registry.create(
+                _options(workspace, sessions_dir, llm=FakeLLMClient(), agent_spec=PUBLIC_ATOM_SPEC)
+            )
+        assert type(root._agent) is AtomAgent
         assert root._agent.cwd == workspace.resolve()
         [warning] = [r.getMessage() for r in caplog.records if str(settings) in r.getMessage()]
         assert "active_skills" in warning
@@ -260,7 +263,7 @@ async def test_a_child_with_another_model_gets_its_own_client(workspace, session
     parent_llm = CellLLM(
         [
             cell(
-                "done = await self.delegate('Other', 'use the other model', model='other')\n"
+                "done = await self.delegate('other', 'use the other model', model='other', name='other')\n"
                 "return_result(Done(explanation=done.result.report))"
             )
         ]

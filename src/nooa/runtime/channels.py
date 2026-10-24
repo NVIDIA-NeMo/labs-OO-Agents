@@ -21,7 +21,7 @@ import inspect
 import logging
 import threading
 from collections import deque
-from collections.abc import AsyncGenerator, Callable, Coroutine
+from collections.abc import AsyncGenerator, Callable, Coroutine, Mapping, Sequence
 from functools import wraps
 from typing import Annotated, Any, ClassVar, Literal
 
@@ -87,11 +87,16 @@ class ChannelItemsDiscarded(EventBase):
 
 
 class StreamEnd(EventBase):
-    """Emitted to the agent's event channel when a spawned job finishes.
+    """Published through the agent's event manager when a spawned job finishes.
 
-    Signals that no more values will arrive on ``channel_name``.
-    Lives here (not in events.py) per the additive-only constraint.
+    Signals that no more values will arrive on ``channel_name``. A runtime
+    event, like ``ChannelItemConsumed``: subscribers
+    (``event_manager.on("StreamEnd", ...)``) receive it, but it is never
+    recorded and never shown to the model (the job's own result says it
+    ended). Lives here (not in events.py) per the additive-only constraint.
     """
+
+    _role: ClassVar[Role] = Role.RUNTIME_EVENT
 
     channel_name: str
 
@@ -135,6 +140,9 @@ class JobHandle:
         self.name = name
         self.label = label or name
         self.state: JobState = "running"
+        # Optional one-line summary for ``QueueManager.status()``, set by the
+        # model-facing API that owns the job; called at render time.
+        self.describe: Callable[[], str] | None = None
         self._task = task
         if buffer is True:
             self._values: list[Any] | deque[Any] = []
@@ -149,6 +157,40 @@ class JobHandle:
         if self._values is None:
             return []
         return list(self._values)
+
+    def done(self) -> bool:
+        """True once the job's task has finished (done, failed or cancelled)."""
+        return self._task.done()
+
+    def add_done_callback(self, fn: Callable[["JobHandle"], object]) -> None:
+        """Call ``fn(handle)`` once the job's task has finished, however it ended.
+
+        Runs from the event loop like ``asyncio.Task.add_done_callback``
+        (right away, soon, if the task has already finished). ``state`` is
+        final by then: a task cancelled before it started reads
+        ``"cancelled"`` too.
+        """
+
+        def _call(task: asyncio.Task[Any]) -> None:
+            if task.cancelled() and self.state == "running":
+                self.state = "cancelled"
+            fn(self)
+
+        self._task.add_done_callback(_call)
+
+    def cancel_nowait(self) -> bool:
+        """Request cancellation without waiting; True if the job was still running.
+
+        Sets ``state`` to ``"cancelled"`` at once. The task unwinds (its
+        ``finally`` blocks run) on a later loop iteration; ``await cancel()``
+        waits for that instead.
+        """
+        if self._task.done():
+            return False
+        self._task.cancel()
+        if self.state == "running":
+            self.state = "cancelled"
+        return True
 
     async def cancel(self) -> None:
         """Cancel the underlying task and await its unwinding."""
@@ -174,24 +216,35 @@ class JobHandle:
 ChannelMode = Literal["queue", "event"]
 
 
-def _preview_item(item: Any, max_chars: int) -> str:
-    """Single-line bounded preview for the queue ``status()`` block.
+def _item_source(item: Any) -> str | None:
+    """Who sent ``item``: its ``status_source()`` (a name or path) on one line, else ``None``.
 
-    Strings render as-is; non-strings go through ``pformat`` so deeply
-    nested dicts/lists come out bounded by default. Newlines and tabs
-    flatten to single chars so previews stay one line, then the whole
-    thing is clipped to ``max_chars`` with an ellipsis when needed.
+    Only the sender, never the content: the status block says that
+    something is waiting and from where, not what it says.
     """
-    from nooa.agentdoc import pformat
+    source = getattr(item, "status_source", None)
+    if isinstance(item, str) or not callable(source):
+        return None
+    return " ".join(str(source() or "").split()) or None
 
-    if isinstance(item, str):
-        text = item
-    else:
-        text = pformat(item, max_length=max_chars, max_string=max_chars, max_depth=2)
-    text = text.replace("\r\n", "\n").replace("\n", "↵").replace("\t", " ")
-    if len(text) > max_chars:
-        text = text[: max_chars - 1] + "…"
-    return text
+
+def _count_line(
+    name: str, items: Sequence[Any], *, max_items: int, max_chars: int, unit: str = ""
+) -> str:
+    """``<name>: 3 (from /root/a, /root/b)``: the count and distinct senders, no content.
+
+    At most ``max_items`` senders are named, then ``+N more``; each is cut at
+    ``max_chars``. Items without a ``status_source()`` add to the count only.
+    """
+    sources = list(dict.fromkeys(s for s in map(_item_source, items) if s))
+    line = f"{name}: {len(items)}{unit}"
+    if sources:
+        shown = ", ".join(
+            s if len(s) <= max_chars else s[: max_chars - 1] + "…" for s in sources[:max_items]
+        )
+        extra = len(sources) - max_items
+        line += f" (from {shown}{f', +{extra} more' if extra > 0 else ''})"
+    return line
 
 
 def _default_event_preview(value: Any) -> str:
@@ -558,25 +611,19 @@ class Channel[T]:
         return len(dropped)
 
     def status(self, *, max_items: int = 3, max_chars: int = 80) -> str:
-        """Pending-count summary + short preview of waiting items.
+        """How many items wait unread, and from whom: ``delegates: 2 unread (from /root/a)``.
 
-        Returns an empty string when:
-        - the channel is event-mode (no buffer),
-        - or the queue is drained.
-
-        Both make it cheap for ``QueueManager.status()`` to compose
-        the per-channel parts and skip empty ones.
+        Never shows item content (read it with ``get()``). Senders come from
+        each item's ``status_source()``; at most ``max_items`` are named, each
+        cut at ``max_chars``. Returns an empty string when the channel is
+        event-mode (no buffer) or drained, so ``QueueManager.status()`` can
+        skip it.
         """
         if self.mode != "queue" or not self._items:
             return ""
-        lines = [f"{self.name}: {len(self._items)} pending"]
-        snapshot = list(self._items)
-        for i, item in enumerate(snapshot[:max_items], start=1):
-            lines.append(f"  {i}. {_preview_item(item, max_chars)}")
-        overflow = len(snapshot) - max_items
-        if overflow > 0:
-            lines.append(f"  … {overflow} more")
-        return "\n".join(lines)
+        return _count_line(
+            self.name, list(self._items), max_items=max_items, max_chars=max_chars, unit=" unread"
+        )
 
     # ---- lifecycle -------------------------------------------------------
 
@@ -647,9 +694,9 @@ class ChannelReader[T]:
     def status(self, *, max_items: int = 3, max_chars: int = 80) -> str:
         """Delegate to the underlying ``Channel.status()``.
 
-        Exposed so the LLM can peek at pending items mid-turn —
-        ``self.user_messages.status()`` — without reaching into the
-        producer-side handle.
+        Exposed so the LLM can see mid-turn how many items wait and from
+        whom (``self.user_messages.status()``), without their content and
+        without reaching into the producer-side handle.
         """
         return self._source.status(max_items=max_items, max_chars=max_chars)
 
@@ -713,6 +760,21 @@ class QueueManager:
         # TUI) react to puts — such as (re)starting its dispatcher — via a
         # supported API instead of monkey-patching _set_notify.
         self._notify_callback: Callable[[], None] | None = None
+        # channel name -> one status() line saying how to cancel its jobs.
+        self._cancel_hints: dict[str, str] = {}
+
+    def set_cancel_hint(self, channel: str, hint: str) -> None:
+        """Show ``hint`` once, after the status sections, while jobs on ``channel`` run.
+
+        One plain line naming the call with a placeholder, e.g.
+        ``"Stop a monitor: await self.ci.stop('<label>')"``; the labels
+        are already in the list above it.
+
+        For channels owned by a model-facing API: ``status()``
+        then names that API instead of the hidden ``queue_manager`` and does
+        not offer the channel for removal.
+        """
+        self._cancel_hints[channel] = hint
 
     def set_notify_callback(self, callback: Callable[[], None] | None) -> None:
         """Register an extra callback fired after each channel ``put()``.
@@ -891,49 +953,72 @@ class QueueManager:
 
     # ---- composite status block -----------------------------------------
 
-    def status(self, *, max_items: int = 3, max_chars: int = 80) -> str:
-        """Composite ``status`` across queue-mode channels and active spawns.
+    def status(
+        self,
+        *,
+        max_items: int = 3,
+        max_chars: int = 80,
+        more_work: Sequence[str] = (),
+        more_unread: Sequence[str] = (),
+        idle: Sequence[str] = (),
+        read_hints: Mapping[str, str] | None = None,
+    ) -> str:
+        """Composite ``status`` block: "Unread:", "Read now:", "Running:", "Idle:", then cancel hints.
 
-        Wired into a dynamic context block (``queues``) so the LLM
-        sees pending counts every turn. Event-mode channels skip —
-        they don't accumulate.
+        Wired into a dynamic context block (``queues``) so the LLM sees,
+        every turn, what arrived and was not read yet and what is still
+        working. Each heading starts at the left edge with one ``  • `` line
+        per entry; an empty section is left out.
 
-        Also shows active spawned jobs so the LLM knows background
-        producers are still running even when queues are empty.
-        Returns ``"(nothing queued)"`` when there is no status to show.
+        - ``Unread:`` one line per queue-mode channel with buffered items, in
+          channel order: ``<channel>: <count>``, plus ``(from a, b)`` naming
+          the distinct senders (each item's ``status_source()``; at most
+          ``max_items``, each cut at ``max_chars``). Never any item content:
+          a preview reads as if the item had been read. The host's own
+          ``more_unread`` lines follow.
+        - ``Read now:`` the ``read_hints`` entries (channel name -> how to
+          read it) of the channels listed under "Unread:", joined by `` · ``.
+        - ``Running:`` running spawned jobs (their ``describe()``, else
+          ``<label> → <channel>``), then the host's ``more_work`` lines.
+        - ``Idle:`` the host's ``idle`` lines (work with nothing to do).
+
+        Returns ``"(nothing queued)"`` when there is nothing to show.
         """
-        parts = [
-            ch.status(max_items=max_items, max_chars=max_chars)
-            for ch in self._channels.values()
-            if ch.mode == "queue"
+        waiting = [ch for ch in self._channels.values() if ch.mode == "queue" and ch.qsize()]
+        unread = [
+            _count_line(ch.name, list(ch._items), max_items=max_items, max_chars=max_chars)
+            for ch in waiting
         ]
-        body = "\n".join(p for p in parts if p)
+        unread += [line for line in more_unread if line]
+        hints = [read_hints[ch.name] for ch in waiting if read_hints and ch.name in read_hints]
 
-        # Show active spawns — tells the LLM "monitors are running"
-        # even when no items are pending (items were already delivered).
+        # Active spawns tell the LLM monitors are running even when no
+        # items are pending (items were already delivered).
         active_spawns = [h for h in self._handles if h.state == "running"]
-        if active_spawns:
-            spawn_lines = [f"⚡ {len(active_spawns)} active background job(s):"]
-            for h in active_spawns:
-                spawn_lines.append(f"  • {h.label} → {h.name} (running)")
-            spawn_status = "\n".join(spawn_lines)
-            body = f"{body}\n{spawn_status}" if body else spawn_status
-
-        # Cheat sheet: show cancel/cleanup commands
-        cancel_hints = [f".cancel('{h.name}')" for h in active_spawns]
-        extra = [
-            n
-            for n, ch in self._channels.items()
-            if n != "user_messages" and (ch.mode != "queue" or not ch.is_empty())
+        work = [
+            (h.describe() if h.describe is not None else None) or f"{h.label} → {h.name}"
+            for h in active_spawns
         ]
-        cleanup_hints = [f".remove_channel('{n}')" for n in extra]
-        all_hints = cancel_hints + cleanup_hints
-        if all_hints:
-            hints = " | ".join(all_hints)
-            cheat = f"💡 self.queue_manager{hints} | .shutdown()"
-            body = f"{body}\n{cheat}" if body else cheat
+        work += [line for line in more_work if line]
 
-        return body or "(nothing queued)"
+        lines: list[str] = []
+        for heading, entries in (
+            ("Unread:", unread),
+            ("Running:", work),
+            ("Idle:", [line for line in idle if line]),
+        ):
+            if entries:
+                lines += [heading, *(f"  • {entry}" for entry in entries)]
+            if heading == "Unread:" and hints:
+                lines.append("Read now: " + " · ".join(dict.fromkeys(hints)))
+
+        # Cancel hints come only from the API that owns a channel
+        # (``set_cancel_hint``); the status never names the hidden queue_manager.
+        # Each hint shows once, however many of its jobs are running.
+        owned = self._cancel_hints
+        lines += dict.fromkeys(owned[h.name] for h in active_spawns if h.name in owned)
+
+        return "\n".join(lines) or "(nothing queued)"
 
     def _event_notify(self) -> None:
         with self._batch_lock:
@@ -1163,7 +1248,7 @@ class QueueManager:
 
         Coroutine input
             ``await`` once; ``put(result)`` to the named channel on
-            completion; emit ``StreamEnd`` to the event channel.
+            completion; publish a runtime ``StreamEnd`` (never shown to the model).
 
         Async generator input
             Iterate; ``put(value)`` per yield until exhaustion or
