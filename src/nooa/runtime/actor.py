@@ -16,7 +16,7 @@ import tokenize
 import types
 import warnings
 from collections.abc import Callable
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import asdict
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -553,6 +553,63 @@ def _rewrite_never_awaited_warnings(text: str, agent: Any = None) -> str:
     return _NEVER_AWAITED_RE.sub(hint, text)
 
 
+def runtime_cell_globals(agent: Any) -> dict[str, Any]:
+    """Return the names the runtime binds in every generated-code cell.
+
+    ``execute_code`` layers these over the agent's module globals and under the
+    strategy builtins. Strategies use the keys to reserve these names.
+    """
+    import typing as _typing
+
+    from nooa.agentdoc import doc
+    from nooa.decorators import strategy
+    from nooa.media import Audio, File, Image, Media, Video
+    from nooa.runtime.media_capture import show
+    from nooa.runtime.pprint import pprint
+    from nooa.strategies import (
+        CodeActStrategy,
+        CompositeStrategy,
+        PredictStrategy,
+        ReflexionStrategy,
+        TemplateStrategy,
+    )
+    from nooa.strategies.pure_python import PurePythonStrategy
+
+    return {
+        "self": agent,
+        "asyncio": asyncio,
+        "typing": _typing,
+        # Common typing constructs — LLMs use these constantly
+        "Annotated": _typing.Annotated,
+        "Any": _typing.Any,
+        "Literal": _typing.Literal,
+        "Optional": _typing.Optional,
+        "Union": _typing.Union,
+        # agentdoc introspection (doc respects hidden fields)
+        "doc": doc,
+        "methods": methods,
+        "variables": variables,
+        "help": doc,  # Shadow built-in help() to prevent blocking on stdin
+        # Pretty printing with Rich-compatible API
+        "pprint": pprint,
+        # Media display for multimodal models
+        "show": show,
+        "Media": Media,
+        "Image": Image,
+        "Audio": Audio,
+        "Video": Video,
+        "File": File,
+        # decorators and strategies for LLM-generated methods
+        "strategy": strategy,
+        "PurePythonStrategy": PurePythonStrategy,
+        "CodeActStrategy": CodeActStrategy,
+        "ReflexionStrategy": ReflexionStrategy,
+        "PredictStrategy": PredictStrategy,
+        "TemplateStrategy": TemplateStrategy,
+        "CompositeStrategy": CompositeStrategy,
+    }
+
+
 def _make_capture_buffer(
     limit: int, tail_chars: int | None, file_backed: bool
 ) -> TruncatingStringIO:
@@ -609,6 +666,29 @@ class _TopLevelReturnFinder(ast.NodeVisitor):
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         # Do not recurse into class definitions
         pass
+
+
+def _add_implicit_return(code: str, tree: ast.Module) -> tuple[str, bool]:
+    """Turn a cell's final expression into ``return <expr>`` (REPL/Jupyter style).
+
+    Returns ``(code, added)``. No-op when the cell has a top-level ``return``.
+    The code TEXT is edited (not ``ast.unparse``) to keep comments and line numbers.
+    """
+    if not tree.body or _has_top_level_return(tree):
+        return code, False
+    last_stmt = tree.body[-1]
+    if not isinstance(last_stmt, ast.Expr):
+        return code, False
+    last_line_no = last_stmt.lineno
+    code_lines = code.split("\n")
+    if not 1 <= last_line_no <= len(code_lines):
+        return code, False
+    # Insert 'return ' at the statement's COLUMN (not the line start): a
+    # ';'-compound final line must keep its earlier statements live.
+    original_line = code_lines[last_line_no - 1]
+    col = last_stmt.col_offset
+    code_lines[last_line_no - 1] = f"{original_line[:col]}return {original_line[col:]}"
+    return "\n".join(code_lines), True
 
 
 def _has_top_level_return(tree: ast.Module) -> bool:
@@ -1418,6 +1498,214 @@ class ActorRuntime:
 
         return response, event_id
 
+    def _prepare_cell(
+        self,
+        code: str,
+        *,
+        builtins: dict[str, Any] | None,
+        text_bindings: dict[str, str] | None,
+        restrictions: "RestrictionsConfig | None",
+        validate: bool,
+        execution_count: int,
+        record_metrics: bool,
+    ) -> tuple[str, dict[str, Any], Exception | None]:
+        """Build a cell's globals, clean its code and run the restriction/validation policy.
+
+        Shared by :meth:`execute_code` and :meth:`check_code` so both apply the same
+        policy. Returns ``(code, exec_globals, rejection)``; ``rejection`` is the
+        validation error, or ``None`` when the cell passes. Executes nothing.
+        """
+        # Build execution globals first (needed for validation error messages).
+        # Walk the MRO so an agent inheriting from a parent defined in another
+        # module also gets that module's module-level symbols (functions,
+        # constants, types). Leaf module wins on name collisions.
+        from nooa.agentdoc.visibility import filter_mro_module_globals
+
+        exec_globals = filter_mro_module_globals(type(self.agent))
+
+        exec_globals.update(runtime_cell_globals(self.agent))
+
+        # Add strategy builtins (includes reasoning, message, method args)
+        if builtins:
+            exec_globals.update(builtins)
+        # Named texts are data: bound as values, never interpolated into source.
+        if text_bindings:
+            exec_globals.update(text_bindings)
+
+        # ── Pre-execution cleanup ────────────────────────────────────
+        # Intercept point: all code cleanup transforms are bundled here.
+        # Consider making this an extensible middleware point in the future.
+        from nooa.runtime.response_cleanup import strip_code_fences
+        from nooa.runtime.restrictions import RestrictionsConfig
+
+        hm = get_harness_metrics() if record_metrics else None
+
+        # 1. Strip markdown code fences (safety net — CodeAct already strips
+        #    at the tool-call boundary before helper extraction; this covers
+        #    PurePython and any direct execute_code callers).
+        code, fence_token = strip_code_fences(code)
+        if fence_token and hm is not None:
+            hm.fence_removal(fence_token)
+
+        # 2. Strip blocked modules and their members from exec_globals
+        effective_restrictions = restrictions or RestrictionsConfig()
+        exec_globals = _strip_blocked_modules(exec_globals, effective_restrictions.blocked_modules)
+
+        # 3. Strip redundant imports (from typing import Literal, etc.)
+        from nooa.runtime.code_validator import strip_redundant_imports
+
+        code, stripped_imports = strip_redundant_imports(code, set(exec_globals.keys()))
+        if hm is not None:
+            for stmt in stripped_imports:
+                hm.import_stripped(stmt)
+
+        # Validate code if requested (unified validator handles all checks)
+        timer = hm.timer("time_code_validation") if hm is not None else nullcontext()
+        with timer:
+            if validate:
+                try:
+                    from nooa.runtime.code_validator import (
+                        UnifiedCodeValidator,
+                        ValidationContext,
+                    )
+
+                    # Prevent recursive calls to the method currently being generated
+                    forbidden_self_calls: set[str] = set()
+                    current_call = self._current_call
+                    if current_call and hasattr(current_call, "method_name"):
+                        forbidden_self_calls = {current_call.method_name}
+                    return_type = getattr(current_call, "return_type", None)
+
+                    # Build importable_modules from actual module names (not aliases)
+                    # e.g., 'import pandas as pd' means 'pandas' is importable, not 'os'
+                    importable_modules: set[str] = set()
+                    for obj in exec_globals.values():
+                        if isinstance(obj, types.ModuleType):
+                            actual_name = getattr(obj, "__name__", None)
+                            if actual_name:
+                                importable_modules.add(actual_name)
+
+                    # Create validation context
+                    context = ValidationContext(
+                        code=code,
+                        agent_class=type(self.agent),
+                        available_names=set(exec_globals.keys()),
+                        importable_modules=importable_modules,
+                        restricted_imports=effective_restrictions.restricted_imports,
+                        blocked_modules=effective_restrictions.blocked_modules,
+                        forbidden_self_calls=forbidden_self_calls,
+                        execution_count=execution_count,
+                        agent=self.agent,
+                        exec_globals=exec_globals,
+                        return_type=return_type,
+                    )
+
+                    # Run unified validation (security, blocking calls, REPL policy)
+                    validator = UnifiedCodeValidator(
+                        restrictions=effective_restrictions,
+                    )
+                    validator.validate(code, context)
+                except Exception as e:
+                    return code, exec_globals, e
+
+        return code, exec_globals, None
+
+    def _build_repl_wrapper(self, code: str, builtins: dict[str, Any] | None) -> tuple[str, int]:
+        """Wrap ``code`` in the REPL ``__repl_wrapper__`` coroutine source.
+
+        Returns ``(wrapper_source, wrapper_line_offset)``. Shared by
+        :meth:`execute_code` and :meth:`check_code` so both compile the same source.
+        """
+        indented = self._indent_code(code, "        ")
+        # Build global declarations for session variables (REPL persistence)
+        # This allows code like `x = x + 5` to work when x was defined in a prior call
+        # Without this, Python sees `x = ...` and marks x as local, failing on the RHS
+        # We need to declare as global any variable that was passed in builtins
+        global_vars = [
+            name
+            for name, val in (builtins or {}).items()
+            if (
+                not name.startswith("_")
+                and name not in ("self", "asyncio", "__builtins__")
+                and not callable(val)
+                and not isinstance(val, types.ModuleType)
+            )
+        ]
+        global_decl = f"    global {', '.join(global_vars)}\n" if global_vars else ""
+
+        # Build the set of global var names for the finally block
+        global_var_set = set(global_vars)
+
+        # Calculate wrapper header line count for error line adjustment
+        # User code starts after: "async def __repl_wrapper__():\n" + global_decl + "    try:\n"
+        wrapper_header = f"async def __repl_wrapper__():\n{global_decl}    try:\n"
+        wrapper_line_offset = wrapper_header.count("\n")
+
+        wrapper = f"""async def __repl_wrapper__():
+{global_decl}    try:
+{indented}
+    finally:
+        # Capture locals for REPL persistence (exclude internals and builtins)
+        # Also capture updated global variables that were declared global
+        __repl_captured_locals__.update({{
+            k: v for k, v in locals().items()
+            if not k.startswith('_') and k not in ('self', 'asyncio')
+        }})
+        # Capture updated values of global variables we declared
+        for _gvar in {repr(global_var_set)}:
+            if _gvar in globals():
+                __repl_captured_locals__[_gvar] = globals()[_gvar]
+"""
+        return wrapper, wrapper_line_offset
+
+    def check_code(
+        self,
+        code: str,
+        *,
+        builtins: dict[str, Any] | None = None,
+        validate: bool = True,
+        wrap_in_function: bool = False,
+        execution_count: int = 1,
+        restrictions: "RestrictionsConfig | None" = None,
+        text_bindings: dict[str, str] | None = None,
+    ) -> Exception | None:
+        """Return the error :meth:`execute_code` would reject ``code`` with before running it.
+
+        Runs the same pre-execution stages with the same arguments (code cleanup,
+        restriction/validation policy, parse, and with ``wrap_in_function`` the
+        wrapper compile) and executes nothing: no hooks, middleware, metrics or user
+        code. ``None`` means those stages pass; the cell may still fail at runtime.
+        Without ``wrap_in_function`` the check stops at parsing (that path compiles
+        statements as it executes them). The in-process CodeAct backend calls this
+        before pre-compiling helpers, so a cell the runtime rejects runs none of its
+        decorators or defaults.
+        """
+        code, _exec_globals, rejection = self._prepare_cell(
+            code,
+            builtins=builtins,
+            text_bindings=text_bindings,
+            restrictions=restrictions,
+            validate=validate,
+            execution_count=execution_count,
+            record_metrics=False,
+        )
+        if rejection is not None:
+            return rejection
+        cell_filename = f"Cell In[{execution_count}]"
+        # execute_code captures these warnings into the cell output when it compiles.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            try:
+                tree = ast.parse(code, filename=cell_filename)
+                if not wrap_in_function:
+                    return None
+                code, _ = _add_implicit_return(code, tree)
+                wrapper, _ = self._build_repl_wrapper(code, builtins)
+                compile(wrapper, cell_filename, "exec")
+            except (SyntaxError, ValueError) as e:
+                return e
+        return None
+
     async def execute_code(
         self,
         code: str,
@@ -1430,6 +1718,7 @@ class ActorRuntime:
         execution_count: int = 1,
         restrictions: "RestrictionsConfig | None" = None,
         sandbox_executor: Any = None,
+        text_bindings: dict[str, str] | None = None,
     ) -> "ExecutionResult":
         """Execute Python code with namespace + strategy builtins (RuntimeServices protocol).
 
@@ -1447,6 +1736,9 @@ class ActorRuntime:
                 guarded worker process instead of in-process. The surrounding
                 middleware pipeline, before/after_code_execution hooks and events
                 still run here on the parent, so the sandbox composes with them.
+            text_bindings: Named texts (``python_cell`` ``texts``) to bind as plain ``str``
+                values in the cell namespace before ``code`` runs. They are assigned as
+                data, never spliced into source, and recorded on the code_execution span.
 
         Returns:
             ExecutionResult with stdout, error, defined_methods, and optionally returned_value.
@@ -1469,6 +1761,8 @@ class ActorRuntime:
                 "restrictions": restrictions,
                 "sandbox_executor": sandbox_executor,
             }
+            if text_bindings:
+                ep_params["text_bindings"] = text_bindings
             ep_ctx = ExecutePythonContext(
                 code=code,
                 params=ep_params,
@@ -1518,6 +1812,7 @@ class ActorRuntime:
             execution_id=execution_id,
             generation_id=current_generation_id,
             tool_call_id=tool_call_id,  # LLM's tool call ID for trace correlation
+            **({"cell_texts": text_bindings} if text_bindings else {}),
         )
 
         result: ExecutionResult | None = None
@@ -1535,150 +1830,18 @@ class ActorRuntime:
         # Set parent agent context for LLM inheritance by subagents
         parent_token = _parent_agent_var.set(self.agent)
         try:
-            # Build execution globals first (needed for validation error messages).
-            # Walk the MRO so an agent inheriting from a parent defined in another
-            # module also gets that module's module-level symbols (functions,
-            # constants, types). Leaf module wins on name collisions.
-            from nooa.agentdoc.visibility import filter_mro_module_globals
-
-            exec_globals = filter_mro_module_globals(type(self.agent))
-
-            # Import agentdoc functions for use in generated code
-            # Import decorators and strategies for use in generated code
-            # NOTE: stdout/stderr capture is handled by ContextVarStream wrappers
-            # installed below.
-            import typing as _typing
-
-            from nooa.agentdoc import doc
-            from nooa.decorators import strategy
-            from nooa.media import Audio, File, Image, Media, Video
-            from nooa.runtime.media_capture import show
-            from nooa.runtime.pprint import pprint
-            from nooa.strategies import (
-                CodeActStrategy,
-                CompositeStrategy,
-                PredictStrategy,
-                ReflexionStrategy,
-                TemplateStrategy,
+            code, exec_globals, rejection = self._prepare_cell(
+                code,
+                builtins=builtins,
+                text_bindings=text_bindings,
+                restrictions=restrictions,
+                validate=validate,
+                execution_count=execution_count,
+                record_metrics=True,
             )
-            from nooa.strategies.pure_python import PurePythonStrategy
-
-            exec_globals.update(
-                {
-                    "self": self.agent,
-                    "asyncio": asyncio,
-                    "typing": _typing,
-                    # Common typing constructs — LLMs use these constantly
-                    "Annotated": _typing.Annotated,
-                    "Any": _typing.Any,
-                    "Literal": _typing.Literal,
-                    "Optional": _typing.Optional,
-                    "Union": _typing.Union,
-                    # agentdoc introspection (doc respects hidden fields)
-                    "doc": doc,
-                    "methods": methods,
-                    "variables": variables,
-                    "help": doc,  # Shadow built-in help() to prevent blocking on stdin
-                    # Pretty printing with Rich-compatible API
-                    "pprint": pprint,
-                    # Media display for multimodal models
-                    "show": show,
-                    "Media": Media,
-                    "Image": Image,
-                    "Audio": Audio,
-                    "Video": Video,
-                    "File": File,
-                    # decorators and strategies for LLM-generated methods
-                    "strategy": strategy,
-                    "PurePythonStrategy": PurePythonStrategy,
-                    "CodeActStrategy": CodeActStrategy,
-                    "ReflexionStrategy": ReflexionStrategy,
-                    "PredictStrategy": PredictStrategy,
-                    "TemplateStrategy": TemplateStrategy,
-                    "CompositeStrategy": CompositeStrategy,
-                }
-            )
-
-            # Add strategy builtins (includes reasoning, message, method args)
-            if builtins:
-                exec_globals.update(builtins)
-
-            # ── Pre-execution cleanup ────────────────────────────────────
-            # Intercept point: all code cleanup transforms are bundled here.
-            # Consider making this an extensible middleware point in the future.
-            from nooa.runtime.response_cleanup import strip_code_fences
-            from nooa.runtime.restrictions import RestrictionsConfig
-
-            hm = get_harness_metrics()
-
-            # 1. Strip markdown code fences (safety net — CodeAct already strips
-            #    at the tool-call boundary before helper extraction; this covers
-            #    PurePython and any direct execute_code callers).
-            code, fence_token = strip_code_fences(code)
-            if fence_token:
-                hm.fence_removal(fence_token)
-
-            # 2. Strip blocked modules and their members from exec_globals
-            effective_restrictions = restrictions or RestrictionsConfig()
-            exec_globals = _strip_blocked_modules(
-                exec_globals, effective_restrictions.blocked_modules
-            )
-
-            # 3. Strip redundant imports (from typing import Literal, etc.)
-            from nooa.runtime.code_validator import strip_redundant_imports
-
-            code, stripped_imports = strip_redundant_imports(code, set(exec_globals.keys()))
-            for stmt in stripped_imports:
-                hm.import_stripped(stmt)
-
-            # Validate code if requested (unified validator handles all checks)
-            with get_harness_metrics().timer("time_code_validation"):
-                if validate:
-                    try:
-                        from nooa.runtime.code_validator import (
-                            UnifiedCodeValidator,
-                            ValidationContext,
-                        )
-
-                        # Prevent recursive calls to the method currently being generated
-                        forbidden_self_calls: set[str] = set()
-                        current_call = self._current_call
-                        if current_call and hasattr(current_call, "method_name"):
-                            forbidden_self_calls = {current_call.method_name}
-                        return_type = getattr(current_call, "return_type", None)
-
-                        # Build importable_modules from actual module names (not aliases)
-                        # e.g., 'import pandas as pd' means 'pandas' is importable, not 'os'
-                        importable_modules: set[str] = set()
-                        for obj in exec_globals.values():
-                            if isinstance(obj, types.ModuleType):
-                                actual_name = getattr(obj, "__name__", None)
-                                if actual_name:
-                                    importable_modules.add(actual_name)
-
-                        # Create validation context
-                        context = ValidationContext(
-                            code=code,
-                            agent_class=type(self.agent),
-                            available_names=set(exec_globals.keys()),
-                            importable_modules=importable_modules,
-                            restricted_imports=effective_restrictions.restricted_imports,
-                            blocked_modules=effective_restrictions.blocked_modules,
-                            forbidden_self_calls=forbidden_self_calls,
-                            execution_count=execution_count,
-                            agent=self.agent,
-                            exec_globals=exec_globals,
-                            return_type=return_type,
-                        )
-
-                        # Run unified validation (security, blocking calls, REPL policy)
-                        validator = UnifiedCodeValidator(
-                            restrictions=effective_restrictions,
-                        )
-                        validator.validate(code, context)
-                    except Exception as e:
-                        result = ExecutionResult(stdout="", error=e, defined_methods={})
-                        return result
+            if rejection is not None:
+                result = ExecutionResult(stdout="", error=rejection, defined_methods={})
+                return result
 
             # Sandbox backend: delegate the exec to the guarded worker AFTER the
             # shared cleanup + validation above (so restrictions/cell-guard parity
@@ -1686,7 +1849,10 @@ class ActorRuntime:
             # still wrap the cell on the parent. The worker owns the namespace,
             # stdout capture and wrapper, so we skip the in-process exec below.
             if sandbox_executor is not None:
-                result = await sandbox_executor.run_cell(code, execution_count=execution_count)
+                sandbox_kwargs = {"bindings": text_bindings} if text_bindings else {}
+                result = await sandbox_executor.run_cell(
+                    code, execution_count=execution_count, **sandbox_kwargs
+                )
                 return cast(ExecutionResult, result)
 
             # Set up stdout/stderr capture BEFORE ast.parse/compile so that
@@ -1764,77 +1930,34 @@ class ActorRuntime:
             # because ast.unparse() removes comments and changes line numbers, which
             # breaks error line number reporting for users.
             implicit_return_added = False
-            if wrap_in_function and tree.body and not has_explicit_return:
-                last_stmt = tree.body[-1]
-                if isinstance(last_stmt, ast.Expr):
-                    # Get the line number of the last expression
-                    last_line_no = last_stmt.lineno
-                    code_lines = code.split("\n")
-                    if 1 <= last_line_no <= len(code_lines):
-                        # Insert 'return ' at the statement's COLUMN (not the line
-                        # start): a ';'-compound final line must keep its earlier
-                        # statements live — line-prefixing made them dead code.
-                        # This preserves comments and line structure.
-                        original_line = code_lines[last_line_no - 1]
-                        col = last_stmt.col_offset
-                        code_lines[last_line_no - 1] = (
-                            f"{original_line[:col]}return {original_line[col:]}"
-                        )
-                        code = "\n".join(code_lines)
-                        implicit_return_added = True
-                        get_harness_metrics().implicit_return()
+            if wrap_in_function and not has_explicit_return:
+                code, implicit_return_added = _add_implicit_return(code, tree)
+                if implicit_return_added:
+                    get_harness_metrics().implicit_return()
 
             returned_value = _NO_RETURN
             captured_locals: dict[str, Any] = {}
+            # Named texts persist like assignments once execution starts, even if the
+            # cell then raises; a cell rejected before that (syntax, compile, policy)
+            # never reaches here or leaves this False, so it binds nothing.
+            execution_started = False
+
+            def cell_locals() -> dict[str, Any]:
+                captured = _extract_captured_locals(exec_globals)
+                if execution_started and text_bindings:
+                    return {**text_bindings, **captured}
+                return captured
+
             wrapper_line_offset = 0  # Lines of wrapper before user code (for error adjustment)
 
             try:
                 if wrap_in_function:
                     # REPL mode: wrap entire code in async function to capture return
                     # Use try/finally to capture locals regardless of how function exits
-                    indented = self._indent_code(code, "        ")
                     # Initialize the captured locals dict in exec_globals
                     exec_globals["__repl_captured_locals__"] = {}
 
-                    # Build global declarations for session variables (REPL persistence)
-                    # This allows code like `x = x + 5` to work when x was defined in a prior call
-                    # Without this, Python sees `x = ...` and marks x as local, failing on the RHS
-                    # We need to declare as global any variable that was passed in builtins
-                    global_vars = [
-                        name
-                        for name, val in (builtins or {}).items()
-                        if (
-                            not name.startswith("_")
-                            and name not in ("self", "asyncio", "__builtins__")
-                            and not callable(val)
-                            and not isinstance(val, types.ModuleType)
-                        )
-                    ]
-                    global_decl = f"    global {', '.join(global_vars)}\n" if global_vars else ""
-
-                    # Build the set of global var names for the finally block
-                    global_var_set = set(global_vars)
-
-                    # Calculate wrapper header line count for error line adjustment
-                    # User code starts after: "async def __repl_wrapper__():\n" + global_decl + "    try:\n"
-                    wrapper_header = f"async def __repl_wrapper__():\n{global_decl}    try:\n"
-                    wrapper_line_offset = wrapper_header.count("\n")
-
-                    wrapper = f"""async def __repl_wrapper__():
-{global_decl}    try:
-{indented}
-    finally:
-        # Capture locals for REPL persistence (exclude internals and builtins)
-        # Also capture updated global variables that were declared global
-        __repl_captured_locals__.update({{
-            k: v for k, v in locals().items()
-            if not k.startswith('_') and k not in ('self', 'asyncio')
-        }})
-        # Capture updated values of global variables we declared
-        for _gvar in {repr(global_var_set)}:
-            if _gvar in globals():
-                __repl_captured_locals__[_gvar] = globals()[_gvar]
-"""
+                    wrapper, wrapper_line_offset = self._build_repl_wrapper(code, builtins)
                     # Register wrapper with linecache so traceback can show source lines
                     linecache.cache[cell_filename] = (
                         len(wrapper),
@@ -1844,6 +1967,7 @@ class ActorRuntime:
                     )
 
                     exec(compile(wrapper, cell_filename, "exec"), exec_globals)
+                    execution_started = True
                     # Execute with async safety (blocks Future.result() etc from event loop)
                     from nooa.runtime.async_safety import agent_async_safety_context
 
@@ -1861,7 +1985,7 @@ class ActorRuntime:
                             result_value = await coro
 
                     # Extract captured locals (filter out non-serializable/internal items)
-                    captured_locals = _extract_captured_locals(exec_globals)
+                    captured_locals = cell_locals()
                     # Same-cell names (imports, dicts, ...) were wrapper locals. Publish
                     # them into this cell's exec_globals, which is the __globals__ of the
                     # top-level functions re-bound below, so those functions still
@@ -1928,6 +2052,7 @@ class ActorRuntime:
                     ]
 
                     # Execute function definitions
+                    execution_started = True
                     if func_defs:
                         func_tree = ast.Module(body=func_defs, type_ignores=[])
                         exec(compile(func_tree, cell_filename, "exec"), exec_globals)
@@ -1998,7 +2123,7 @@ class ActorRuntime:
                     defined_methods=defined_methods,
                     returned_value=returned_value,
                     explicit_return=has_explicit_return,
-                    captured_locals=captured_locals,
+                    captured_locals={**(text_bindings or {}), **captured_locals},
                     wrapper_line_offset=wrapper_line_offset,
                     images=media_buffer.blocks,
                 )
@@ -2009,7 +2134,7 @@ class ActorRuntime:
                 # The wrapper function's finally block still runs before this handler,
                 # populating exec_globals["__repl_captured_locals__"] with all variables
                 # that were defined before the signal was raised.
-                captured_locals = _extract_captured_locals(exec_globals)
+                captured_locals = cell_locals()
 
                 result = ExecutionResult(
                     stdout=stdout_buffer.getvalue(),
@@ -2034,7 +2159,7 @@ class ActorRuntime:
                 # ordinary execution error so one cell cannot terminate the parent run.
                 # NOTE: asyncio.CancelledError (also BaseException) is deliberately NOT
                 # caught here — real cancellation must still propagate.
-                captured_locals = _extract_captured_locals(exec_globals)
+                captured_locals = cell_locals()
 
                 # ExecutionResult.error is typed Exception | None, so wrap the
                 # BaseException in a RuntimeError (original kept as __cause__).
@@ -2063,7 +2188,7 @@ class ActorRuntime:
                 # The wrapper function's finally block still runs before this handler,
                 # populating exec_globals["__repl_captured_locals__"] with all variables
                 # that were defined before the exception was raised.
-                captured_locals = _extract_captured_locals(exec_globals)
+                captured_locals = cell_locals()
 
                 result = ExecutionResult(
                     stdout=stdout_buffer.getvalue(),

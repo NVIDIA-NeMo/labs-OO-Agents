@@ -11,6 +11,7 @@ from nooa.context_blocks import DynamicContext
 from nooa.decorators import strategy
 from nooa.events import Error
 from nooa.strategies.base import RuntimeServices
+from nooa.strategies.cell_texts import TEXTS_HINT, CellText, is_string_literal_syntax_error
 from nooa.strategies.codeact import (
     CodeActStrategy,
     TextOnlyResponseAction,
@@ -212,9 +213,32 @@ class CodeActV2(CodeActStrategy):
     def _python_tool_name(self) -> str:
         return "python_cell"
 
+    def _supports_cell_texts(self) -> bool:
+        return True
+
+    def _format_execution_error(
+        self,
+        runtime: RuntimeServices,
+        result: Any,
+        code: str,
+        *,
+        return_type: Any = None,
+    ) -> str:
+        """Point a broken string literal at ``texts``, which needs no escaping."""
+        formatted = super()._format_execution_error(runtime, result, code, return_type=return_type)
+        if formatted and is_string_literal_syntax_error(result.error):
+            formatted = f"{formatted}\n\n{TEXTS_HINT}"
+        return formatted
+
     def _build_execute_python_tool(self) -> Any:
         """Build the sole provider tool, including its complete operating contract."""
         tool = super()._build_execute_python_tool()
+
+        def python_cell(code: str, texts: list[CellText] | None = None) -> str:
+            """Run ``code``; each ``texts`` entry is first bound as a ``str`` variable."""
+            return ""
+
+        tool.callable = python_cell
         tool.description = f"""Execute one cell in the current method call's Python session.
 
 Parameters are pre-loaded as locals. Names defined in one cell remain available in
@@ -228,6 +252,9 @@ To finish, call `return_result(value)` inside the cell. It immediately submits a
 value matching the method's annotated return type. A bare final expression does not
 finish the task. In particular, a trailing string is not shown; use `print(text)`
 when you want to inspect prose before submitting it.
+
+For long text (reports, file contents, scripts, briefs), pass it in `texts` as
+[{{"name": "report", "text": "..."}}] and use `report` in code (`code` may be ""); no escaping needed.
 
 Use Python for arithmetic, iteration, transforms, and batches rather than manually
 constructing large outputs. Define reusable helpers at the top of a cell. Existing

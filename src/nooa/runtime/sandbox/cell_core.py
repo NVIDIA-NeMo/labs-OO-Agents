@@ -77,8 +77,14 @@ async def run_cell_source(
     execution_count: int = 1,
     stdout_hook: Callable[[str], None] | None = None,
     stderr_hook: Callable[[str], None] | None = None,
+    bindings: dict[str, str] | None = None,
 ) -> ExecutionResult:
     """Execute ``code`` in ``namespace`` with REPL semantics; never raises.
+
+    ``bindings`` (named ``python_cell`` texts) are assigned into ``namespace``
+    only once execution starts, after parsing and compiling succeed: a cell
+    rejected before it runs leaves the namespace unchanged, while a cell that
+    starts and then raises keeps them, like ordinary assignments.
 
     Returns an :class:`ExecutionResult`. ``ExecutionSignal`` (``return_result``)
     is captured into ``result.signal``; every other exception into
@@ -148,9 +154,10 @@ async def run_cell_source(
                     implicit_return_added = True
 
             # Names to declare ``global`` so REPL rebinds (``x = x + 1``) work.
+            bindings = bindings or {}
             global_vars = [
                 name
-                for name, val in namespace.items()
+                for name, val in {**namespace, **bindings}.items()
                 if (
                     not name.startswith("_")
                     and name not in ("self", "asyncio", "__builtins__")
@@ -185,7 +192,10 @@ async def run_cell_source(
                 cell_filename,
             )
 
-            exec(compile(wrapper, cell_filename, "exec"), namespace)
+            wrapper_code = compile(wrapper, cell_filename, "exec")
+            # Execution starts here: bind the texts (data, never source) first.
+            namespace.update(bindings)
+            exec(wrapper_code, namespace)
             try:
                 result_value = await namespace["__repl_wrapper__"]()
             finally:
