@@ -89,6 +89,10 @@ eval "unset __nooa_rc __nooa_f __nooa_was __nooa_stop __nooa_p __nooa_t __nooa_e
 """
 # Seconds to wait for output still in the pipes.
 _DRAIN_SECONDS = 0.5
+# How a command ends when its Shell is closed (``aclose``) before or while it runs.
+_CLOSED_BEFORE = "the shell was closed before this command started; it did not run"
+_CLOSED_STARTING = "the shell was closed while bash was starting; the command did not run"
+_CLOSED_DURING = "the shell was closed while this command ran; the command was stopped"
 
 
 @dataclass
@@ -236,6 +240,12 @@ async def _open_fifo(path: Path) -> tuple[asyncio.StreamReader, asyncio.BaseTran
     return reader, transport, write_fd
 
 
+def _cancelling() -> bool:
+    """Whether the current task itself is being cancelled."""
+    task = asyncio.current_task()
+    return task is not None and task.cancelling() > 0
+
+
 def _check_timeout(value: Any) -> float:
     """``value`` as a command deadline: a non-bool int or float, finite and positive."""
     if isinstance(value, bool) or not isinstance(value, int | float):
@@ -257,15 +267,19 @@ class ShellOwner:
 
     def __init__(self) -> None:
         self._shells: weakref.WeakSet[Shell] = weakref.WeakSet()
+        self._closed = False
 
     def adopt(self, shell: Shell) -> None:
+        if self._closed:  # closing is terminal: no bash starts under a closed owner
+            raise RuntimeError("the session that owns this shell has closed; no new bash starts")
         self._shells.add(shell)
 
     def __len__(self) -> int:
         return sum(1 for shell in list(self._shells) if shell._session is not None)
 
     async def aclose(self) -> None:
-        """Close every open Shell this owner adopted."""
+        """Close every open Shell this owner adopted (also one still starting); final."""
+        self._closed = True
         shells = list(self._shells)
         self._shells.clear()
         results = await asyncio.gather(*(s.aclose() for s in shells), return_exceptions=True)
@@ -321,6 +335,9 @@ class Shell:
         self._starting = False
         self._entered = False  # launched (or ``async with``): one owner at a time
         self._lock = asyncio.Lock()  # FIFO: commands run one at a time, in order
+        # Bumped by aclose: work from before it (queued, running, starting) is void.
+        self._generation = 0
+        self._start_job: asyncio.Task[int] | None = None  # bash starting; aclose cancels it
         self._bash: tuple[int, str | None] | None = None  # pid and start time of bash
         self._own_dir: tempfile.TemporaryDirectory[str] | None = None
         self._lingering: set[asyncio.Task[None]] = set()
@@ -371,12 +388,15 @@ class Shell:
         """
         timeout = _check_timeout(timeout)
         describe(f"$ {command}")
+        generation = self._generation
         async with self._lock:
+            if self._generation != generation:
+                raise RuntimeError(_CLOSED_BEFORE)
             if self._session is None:
-                await self._start()
+                await self._start(generation)
             self._busy = command
             try:
-                return await self._send_locked(command, stdin, timeout)
+                return await self._send_locked(command, stdin, timeout, generation)
             finally:
                 self._busy = None
                 session = self._session
@@ -387,25 +407,53 @@ class Shell:
         """A launched Shell's request (``job.send(command)``): ``run`` with its default timeout."""
         return await self.run(command)
 
-    async def _start(self) -> None:
+    async def _start(self, generation: int) -> None:
         """Start bash; the caller holds the lock."""
+        owner = shell_owner.get()
+        if owner is not None:  # before bash exists: the owner's close also ends this start
+            owner.adopt(self)
         self._starting = True
-        session = BashSession(cwd=self._directory())
         try:
-            await session.start()
-            pid = await self._bash_pid(session)
-        except BaseException:
-            await asyncio.shield(session.close())
-            raise
+            session = BashSession(cwd=self._directory())
+            pid = await self._start_session(session, generation, _CLOSED_STARTING)
         finally:
             self._starting = False
         self._session, self._note = session, ""
         self._bash = (pid, _start_time(pid))
         self._confirmed_cwd, self._busy, self._lost = str(session.cwd), None, False
         self._reset_tracked()
-        owner = shell_owner.get()
-        if owner is not None:
-            owner.adopt(self)
+
+    async def _start_session(self, session: BashSession, generation: int, closed: str) -> int:
+        """Start ``session`` and return bash's pid, in a task ``aclose`` cancels.
+
+        If the Shell was closed meanwhile, nothing started stays: the session is
+        closed and this raises ``RuntimeError(closed)`` (``CancelledError`` if the
+        caller itself was cancelled).
+        """
+        job = self._start_job = asyncio.ensure_future(self._boot(session))
+        try:
+            try:
+                pid = await job
+            except asyncio.CancelledError:
+                if self._generation == generation or _cancelling():
+                    raise
+                raise RuntimeError(closed) from None
+            if self._generation != generation:  # closed just after bash came up
+                raise RuntimeError(closed)
+            return pid
+        finally:
+            if self._start_job is job:
+                self._start_job = None
+            if self._generation != generation:
+                await asyncio.shield(session.close())
+
+    async def _boot(self, session: BashSession) -> int:
+        try:
+            await session.start()
+            return await self._bash_pid(session)
+        except BaseException:
+            await asyncio.shield(session.close())
+            raise
 
     # ---- lifecycle ---------------------------------------------------------
 
@@ -417,7 +465,7 @@ class Shell:
         try:
             async with self._lock:
                 if self._session is None:
-                    await self._start()
+                    await self._start(self._generation)
         except BaseException:
             self._entered = False
             raise
@@ -432,11 +480,22 @@ class Shell:
 
         A later ``run`` starts a new bash in ``cwd``.
         """
+        # Never waits for the lock: the running command is stopped by closing its
+        # bash, queued commands are refused, and a start (first use or an
+        # interrupt's restart) is cancelled, so no bash comes back for them.
+        # (Inside a harness's ``preserve_background_services`` scope, the scope
+        # keeps background processes: closing then ends bash only.)
+        self._generation += 1
+        start, self._start_job = self._start_job, None
+        if start is not None:
+            start.cancel()
         session, self._session = self._session, None
         for pump in self._lingering:
             pump.cancel()
         await asyncio.gather(*self._lingering, return_exceptions=True)
         self._lingering.clear()
+        if start is not None:
+            await asyncio.gather(start, return_exceptions=True)  # it closes what it started
         if session is not None:
             await asyncio.shield(session.close())
         if self._own_dir is not None:
@@ -453,7 +512,9 @@ class Shell:
     def _bash_alive(self) -> bool:
         return self._bash is not None and _start_time(self._bash[0]) == self._bash[1]
 
-    async def _send_locked(self, command: str, stdin: str | None, timeout: float) -> CommandResult:
+    async def _send_locked(
+        self, command: str, stdin: str | None, timeout: float, generation: int
+    ) -> CommandResult:
         session = self._session
         assert session is not None
         directory = kept = job_dir()  # output files are kept only in a job's directory
@@ -499,18 +560,24 @@ class Shell:
                         asyncio.shield(inner), timeout
                     )
                 except TimeoutError:
-                    if await self._interrupt(inner, before):
+                    restarted = await self._interrupt(inner, before, session, generation)
+                    self._check_open(generation)
+                    if restarted:
                         stray_out = stray_err = ""
                         restart_notes, self._note = [self._note], ""
                     else:
                         stray_out, stray_err, _, _ = inner.result()
                     code, timed_out = 124, True
             except asyncio.CancelledError:
-                if await self._interrupt(inner, before):
+                if await self._interrupt(inner, before, session, generation):
                     raise asyncio.CancelledError(self._note) from None
+                raise
+            except Exception:
+                self._check_open(generation)  # closed: say so, not how the close broke it
                 raise
             finally:
                 _close_fds(write_fds)  # bash's ends close with the group: then EOF
+            self._check_open(generation)
             await self._settle([pump for pump, _, _ in pumps])
             self._read_status(statusfile)
             ended = False
@@ -657,8 +724,21 @@ class Shell:
             )
         return notes
 
-    async def _interrupt(self, inner: asyncio.Future[Any], before: dict[int, str]) -> bool:
-        """Stop the running command; restart bash (state lost, True) only if it will not stop."""
+    def _check_open(self, generation: int) -> None:
+        if self._generation != generation:
+            raise RuntimeError(_CLOSED_DURING)
+
+    async def _interrupt(
+        self,
+        inner: asyncio.Future[Any],
+        before: dict[int, str],
+        session: BashSession,
+        generation: int,
+    ) -> bool | None:
+        """Stop the running command; restart bash (state lost, True) only if it will not stop.
+
+        None: the Shell was closed meanwhile, so there is nothing to restart.
+        """
         bash = self._running_bash()
         if self._user_usr1:
             bash = None  # no trap of ours to skip the rest with: restart, said so
@@ -677,11 +757,10 @@ class Shell:
                 return False
         inner.cancel()
         await asyncio.gather(inner, return_exceptions=True)
-        session = self._session
-        assert session is not None
+        if self._generation != generation:
+            return None  # closed: aclose ended bash; no restart
         await session.close()
-        await session.start()  # keeps the last cwd
-        pid = await self._bash_pid(session)
+        pid = await self._start_session(session, generation, _CLOSED_DURING)  # keeps the cwd
         self._bash, self._lost = (pid, _start_time(pid)), True
         self._reset_tracked()
         self._note = (
