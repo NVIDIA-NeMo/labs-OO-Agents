@@ -88,6 +88,8 @@ def check_enforceable(config: SandboxConfig, caps: Capabilities | None = None) -
 class SandboxedExecutor:
     """Run CodeAct cells in a guarded worker process with a hard timeout."""
 
+    _max_media: int = 100
+
     def __init__(
         self,
         agent: Any,
@@ -98,6 +100,7 @@ class SandboxedExecutor:
         restrictions: Any = None,
         max_error: int | None = None,
         error_tail: int | None = None,
+        max_media_attachments: int | None = None,
     ):
         self._agent = agent
         self._config = config
@@ -106,6 +109,7 @@ class SandboxedExecutor:
         self._restrictions = restrictions
         self._max_error = effective_error_limit(max_error)
         self._error_tail = error_tail
+        self._max_media = max_media_attachments if max_media_attachments is not None else 100
         self._spec: ResolvedSpec = resolve_spec(config)
         self._codec = wire.Codec(wire.agent_types(agent))
 
@@ -129,7 +133,10 @@ class SandboxedExecutor:
                 "; ".join(missing),
             )
 
-        self._ctx = mp.get_context(config.start_method)
+        start_method = config.start_method
+        if start_method == "fork" and not caps.linux:
+            start_method = "spawn"
+        self._ctx = mp.get_context(start_method)
         self._proc: BaseProcess | None = None
         self._conn: Connection | None = None
         self._lock = asyncio.Lock()
@@ -176,6 +183,7 @@ class SandboxedExecutor:
             "spec": self._spec,
             "max_error": self._max_error,
             "error_tail": self._error_tail,
+            "max_media": self._max_media,
         }
         proc = self._ctx.Process(
             target=worker_main, args=(child_conn, init), daemon=True, name="nooa-sandbox-worker"
@@ -439,89 +447,102 @@ class SandboxedExecutor:
     async def _dispatch_tool_call(self, msg: dict[str, Any]) -> dict[str, Any]:
         """Run a brokered ``self.<path>`` access against the parent's live agent."""
         from nooa.events import ExecutionSignal
+        from nooa.runtime.media_capture import capture_media
 
         path = msg.get("path") or []
         display = ".".join(path)
         kind = msg.get("kind")
         target: Any = None
-        try:
-            if kind == "setattr":
-                # self.<path> = value on the parent's live agent.
-                obj = self._walk_path(path[:-1])
-                setattr(obj, path[-1], msg.get("value"))
-                return {"ok": True, "result": None}
-            if kind == "iter":
-                # Materialize list(obj) on the parent (the iterator isn't picklable).
-                items = list(self._walk_path(path))
-                if not is_picklable(items):
-                    return {
-                        "ok": False,
-                        "error_type": "CellSerializationError",
-                        "error": (
-                            f"iterating self.{display} produced non-picklable items that "
-                            "cannot cross the sandbox boundary."
-                        ),
-                    }
-                return {"ok": True, "result": items}
-            target = self._walk_path(path)
-            if kind == "attr":
-                # Picklable state crosses; a live object becomes a nested proxy.
-                if is_picklable(target):
-                    return {"ok": True, "result": target}
-                return {"ok": True, "result": None, "proxy": True}
-            value = target(*msg.get("args", ()), **msg.get("kwargs", {}))
-            # Record whether the call was async so the worker can re-wrap the
-            # (already-resolved) result in an awaitable — otherwise a cell doing
-            # ``await proxy(...)`` on an async callable reached via a nested proxy
-            # would await a plain value and raise TypeError.
-            was_async = asyncio.iscoroutine(value) or asyncio.isfuture(value)
-            if was_async:
-                value = await value
-            if not is_picklable(value):
-                return {
+        with capture_media(max_attachments=self._max_media) as media_buf:
+            response: dict[str, Any]
+            try:
+                if kind == "setattr":
+                    # self.<path> = value on the parent's live agent.
+                    obj = self._walk_path(path[:-1])
+                    setattr(obj, path[-1], msg.get("value"))
+                    response = {"ok": True, "result": None}
+                elif kind == "iter":
+                    # Materialize list(obj) on the parent (the iterator isn't picklable).
+                    items = list(self._walk_path(path))
+                    if not is_picklable(items):
+                        response = {
+                            "ok": False,
+                            "error_type": "CellSerializationError",
+                            "error": (
+                                f"iterating self.{display} produced non-picklable items that "
+                                "cannot cross the sandbox boundary."
+                            ),
+                        }
+                    else:
+                        response = {"ok": True, "result": items}
+                else:
+                    target = self._walk_path(path)
+                    if kind == "attr":
+                        # Picklable state crosses; a live object becomes a nested proxy.
+                        if is_picklable(target):
+                            response = {"ok": True, "result": target}
+                        else:
+                            response = {"ok": True, "result": None, "proxy": True}
+                    else:
+                        value = target(*msg.get("args", ()), **msg.get("kwargs", {}))
+                        # Record whether the call was async so the worker can re-wrap the
+                        # (already-resolved) result in an awaitable — otherwise a cell doing
+                        # ``await proxy(...)`` on an async callable reached via a nested proxy
+                        # would await a plain value and raise TypeError.
+                        was_async = asyncio.iscoroutine(value) or asyncio.isfuture(value)
+                        if was_async:
+                            value = await value
+                        if not is_picklable(value):
+                            response = {
+                                "ok": False,
+                                "error_type": "CellSerializationError",
+                                "error": (
+                                    f"self.{display} returned a {type(value).__name__!r} that is not "
+                                    "picklable and cannot cross the sandbox boundary. Return a "
+                                    "picklable summary instead."
+                                ),
+                            }
+                        else:
+                            response = {"ok": True, "result": value, "was_async": was_async}
+            except ExecutionSignal as sig:
+                # Some tools end the turn by *raising* a control-flow signal (e.g. an
+                # ARC submit_actions -> return_result). Marshal it back to the cell so
+                # it re-raises there and flows through the normal signal path.
+                payload = getattr(sig, "result", None)
+                payload_is_picklable = is_picklable(payload)
+                response = {
+                    "ok": False,
+                    "error_type": "ExecutionSignal",
+                    "error": _bounded_text(sig, "ExecutionSignal", limit=self._max_error),
+                    "signal_result": payload if payload_is_picklable else None,
+                    "signal_result_dropped": not payload_is_picklable,
+                }
+            except CellSerializationError as exc:
+                response = {
                     "ok": False,
                     "error_type": "CellSerializationError",
-                    "error": (
-                        f"self.{display} returned a {type(value).__name__!r} that is not "
-                        "picklable and cannot cross the sandbox boundary. Return a "
-                        "picklable summary instead."
-                    ),
+                    "error": _bounded_text(exc, "CellSerializationError", limit=self._max_error),
                 }
-            return {"ok": True, "result": value, "was_async": was_async}
-        except ExecutionSignal as sig:
-            # Some tools end the turn by *raising* a control-flow signal (e.g. an
-            # ARC submit_actions -> return_result). Marshal it back to the cell so
-            # it re-raises there and flows through the normal signal path.
-            payload = getattr(sig, "result", None)
-            payload_is_picklable = is_picklable(payload)
-            return {
-                "ok": False,
-                "error_type": "ExecutionSignal",
-                "error": _bounded_text(sig, "ExecutionSignal", limit=self._max_error),
-                "signal_result": payload if payload_is_picklable else None,
-                "signal_result_dropped": not payload_is_picklable,
-            }
-        except CellSerializationError as exc:
-            return {
-                "ok": False,
-                "error_type": "CellSerializationError",
-                "error": _bounded_text(exc, "CellSerializationError", limit=self._max_error),
-            }
-        except Exception as exc:  # noqa: BLE001 - surface tool errors to the cell
-            # The parent still has the resolved target and can safely derive its
-            # agentdoc. The child cannot: it only has a proxy and a traceback-local
-            # surrogate exception. Transport a bounded string hint, never the
-            # callable or traceback itself.
-            from nooa.errors.formatting import _bad_call_agentdoc
+            except Exception as exc:  # noqa: BLE001 - surface tool errors to the cell
+                # The parent still has the resolved target and can safely derive its
+                # agentdoc. The child cannot: it only has a proxy and a traceback-local
+                # surrogate exception. Transport a bounded string hint, never the
+                # callable or traceback itself.
+                from nooa.errors.formatting import _bad_call_agentdoc
 
-            call_hint = _bad_call_agentdoc(exc, target=target)
-            response = {
-                "ok": False,
-                "error_type": _bounded_text(type(exc).__name__, "Exception", limit=self._max_error),
-                "error": _bounded_text(exc, type(exc).__name__, limit=self._max_error),
-            }
-            if call_hint:
-                response["call_hint"] = _bounded_text(call_hint, "", limit=self._max_error)
+                call_hint = _bad_call_agentdoc(exc, target=target)
+                response = {
+                    "ok": False,
+                    "error_type": _bounded_text(
+                        type(exc).__name__, "Exception", limit=self._max_error
+                    ),
+                    "error": _bounded_text(exc, type(exc).__name__, limit=self._max_error),
+                }
+                if call_hint:
+                    response["call_hint"] = _bounded_text(call_hint, "", limit=self._max_error)
+
+            if media_buf.blocks:
+                response["images"] = list(media_buf.blocks)
             return response
 
     # --- error synthesis ---------------------------------------------------
