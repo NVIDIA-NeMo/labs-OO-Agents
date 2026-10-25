@@ -810,3 +810,83 @@ async def test_worker_leaves_no_result_on_an_internal_cancellation(tmp_path):
         await task
     assert len(log) == 1  # the probe ran: one model call, then it cancelled itself
     assert code != 0 and not result.exists()
+
+
+class SwallowingAgent(ShellAgent):
+    """Probe: the agent catches the cancellation and reports success anyway."""
+
+    @strategy(ToolLoopStrategy(("shell",)))
+    async def act(self, task: str) -> str:
+        """Complete the task with the shell tool, then reply with the final answer as plain text."""
+        ...
+
+    async def solve(self, task: str) -> str:
+        try:
+            return await self.act(task)
+        except asyncio.CancelledError:
+            return "done anyway"
+
+
+class RaisingCleanupAgent(ShellAgent):
+    """Probe: the agent's teardown raises while the cancellation unwinds."""
+
+    @strategy(ToolLoopStrategy(("shell",)))
+    async def act(self, task: str) -> str:
+        """Complete the task with the shell tool, then reply with the final answer as plain text."""
+        ...
+
+    async def solve(self, task: str) -> str:
+        try:
+            return await self.act(task)
+        finally:
+            raise RuntimeError("teardown failed")
+
+
+async def _sigterm_result(tmp_path, agent: str) -> GymEpisode:
+    import signal
+
+    log: list[dict] = []
+    release = asyncio.Event()
+    server, task, port = await _serve(_stalling_app(log, release))
+    process, result = await _worker(tmp_path, port, agent)
+    try:
+        await _wait_for(lambda: len(log) == 2, timeout=60)
+        process.send_signal(signal.SIGTERM)
+        async with asyncio.timeout(10):
+            await process.wait()
+    finally:
+        if process.returncode is None:
+            process.kill()
+            await process.wait()
+        release.set()
+        server.should_exit = True
+        await task
+    return GymEpisode.from_json(result.read_text())
+
+
+async def test_a_swallowed_cancellation_keeps_the_timeout_classification(tmp_path):
+    episode = await _sigterm_result(tmp_path, "test_gym:SwallowingAgent")
+    assert episode.stop_reason == "timeout_exceeded" and episode.runtime["stop_signal"] == "SIGTERM"
+    assert (
+        episode.runtime["teardown"] == "completed: None"
+    )  # what the agent claimed, kept as a diagnostic
+    assert [r.status_code for r in episode.model_calls] == [200, None]
+
+
+async def test_an_exception_during_cleanup_keeps_the_timeout_classification(tmp_path):
+    episode = await _sigterm_result(tmp_path, "test_gym:RaisingCleanupAgent")
+    assert episode.stop_reason == "timeout_exceeded" and episode.runtime["stop_signal"] == "SIGTERM"
+    assert episode.runtime["teardown"].startswith("error: RuntimeError: teardown failed")
+
+
+def test_checkpoint_then_cancel_cancels_even_when_the_write_fails(capsys):
+    from nooa_bench.gym_worker import _checkpoint_then_cancel
+
+    cancelled: list[bool] = []
+
+    def failing_checkpoint() -> None:
+        raise OSError("disk full")
+
+    _checkpoint_then_cancel(failing_checkpoint, lambda: cancelled.append(True))
+    assert cancelled == [True]
+    assert "checkpoint failed: OSError: disk full" in capsys.readouterr().err

@@ -25,6 +25,7 @@ import shlex
 import signal
 import socket
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 from nooa_bench.gym import resource_tools, run_gym_episode
@@ -47,6 +48,24 @@ async def _local_shell(command: str, *, cwd: str, timeout: float) -> str:
     if process.returncode != 0:
         raise RuntimeError(f"{text}\n[exit {process.returncode}]")
     return f"{text}\n[exit 0]"
+
+
+def _checkpoint_then_cancel(checkpoint: Callable[[], None], cancel: Callable[[], object]) -> None:
+    """Write the deadline checkpoint, then cancel the run; the cancel happens even if the write fails.
+
+    The checkpoint comes first because the supervisor's TERM grace is short and the cancelled
+    agent's own cleanup may take longer than that; the final write refreshes it when the run
+    winds down in time.
+    """
+    try:
+        checkpoint()
+    except Exception as error:  # a failed checkpoint must not keep the worker running past the stop
+        print(
+            f"nooa_bench.gym_worker: checkpoint failed: {type(error).__name__}: {error}",
+            file=sys.stderr,
+        )
+    finally:
+        cancel()
 
 
 async def main(input_path: Path, output_path: Path) -> None:
@@ -90,24 +109,31 @@ async def main(input_path: Path, output_path: Path) -> None:
     run = asyncio.current_task()
     assert run is not None
 
-    def on_sigterm() -> None:
-        stop["signal"] = "SIGTERM"
-        # Checkpoint first, synchronously: the supervisor's TERM grace is short and the cancelled
-        # agent's own cleanup may take longer than that. The final write below refreshes it.
-        if render:
-            write(render[0]("timeout_exceeded"))
-        run.cancel()
-
     def write(episode) -> None:
-        episode.runtime = {
-            "python": sys.executable,
-            "version": sys.version.split()[0],
-            "hostname": socket.gethostname(),
+        if stop["signal"] and episode.stop_reason != "timeout_exceeded":
+            # The run wound down after the stop as something else (the agent swallowed the
+            # cancellation, or its teardown raised). The stop still classifies the episode; what
+            # the teardown reported is kept as a diagnostic.
+            episode.runtime["teardown"] = f"{episode.stop_reason}: {episode.error}"
+            episode.stop_reason, episode.error = (
+                "timeout_exceeded",
+                "the agent was stopped before it finished",
+            )
+        episode.runtime.update(
+            python=sys.executable,
+            version=sys.version.split()[0],
+            hostname=socket.gethostname(),
             **({"stop_signal": stop["signal"]} if stop["signal"] else {}),
-        }
+        )
         tmp = output_path.with_suffix(".tmp")
         tmp.write_text(episode.to_json())
         tmp.replace(output_path)
+
+    def on_sigterm() -> None:
+        stop["signal"] = "SIGTERM"
+        _checkpoint_then_cancel(
+            lambda: write(render[0]("timeout_exceeded")) if render else None, run.cancel
+        )
 
     loop = asyncio.get_running_loop()
     loop.add_signal_handler(signal.SIGTERM, on_sigterm)
