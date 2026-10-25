@@ -1686,15 +1686,17 @@ class ActorRuntime:
             # still wrap the cell on the parent. The worker owns the namespace,
             # stdout capture and wrapper, so we skip the in-process exec below.
             if sandbox_executor is not None:
-                sandbox_result = cast(
+                # Bind ``result``: the finally block below finalizes its stderr
+                # (never-awaited warning rewrite) for every backend.
+                result = cast(
                     ExecutionResult,
                     await sandbox_executor.run_cell(code, execution_count=execution_count),
                 )
                 from nooa.agentdoc._format_observation import record_truncation
 
-                for reason in sandbox_result.truncation_reasons:
+                for reason in result.truncation_reasons:
                     record_truncation(reason)
-                return sandbox_result
+                return result
 
             # Set up stdout/stderr capture BEFORE ast.parse/compile so that
             # SyntaxWarnings (e.g. invalid escape sequences in LLM-generated code)
