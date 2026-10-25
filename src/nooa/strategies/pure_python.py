@@ -170,10 +170,8 @@ class PurePythonStrategy(CompositeStrategy):
         return "PURE_PYTHON"
 
     def _get_truncation_config(self, runtime: RuntimeServices):
-        """Get truncation config from runtime's agent, same as CodeActStrategy."""
-        from nooa.config.truncation_config import DEFAULT_TRUNCATION_CONFIG
-
-        return getattr(runtime.agent, "_truncation", DEFAULT_TRUNCATION_CONFIG)
+        """Get the active runtime config, including method-level overrides."""
+        return runtime.truncation_config
 
     def get_block_overrides(self) -> dict[str, str | DynamicContext | None]:
         return {
@@ -545,9 +543,12 @@ class PurePythonStrategy(CompositeStrategy):
         prefill_builtins = {**builtins, "_call": call}
 
         # Execute through normal code path
-        result = await self._execute_code(
-            runtime, code, prefill_builtins, session, call.method_name
-        )
+        from nooa.strategies.prefill import warn_on_prefill_truncation
+
+        with warn_on_prefill_truncation(call):
+            result = await self._execute_code(
+                runtime, code, prefill_builtins, session, call.method_name
+            )
 
         # Merge captured locals into session
         if result.captured_locals:

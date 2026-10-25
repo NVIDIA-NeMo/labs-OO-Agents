@@ -7,7 +7,11 @@ import yaml
 from click.testing import CliRunner
 from nooa_cli.commands.connect import command
 
+from nooa.unifiedllm.connect import DISCOVERY_OUTPUT_TOKENS
 from tests.unifiedllm.connect.connect_http import mock_http, response_body
+
+# Each interface discovery probe reserves its reply cap plus 512 input tokens.
+PER_PROBE = DISCOVERY_OUTPUT_TOKENS + 512
 
 
 @pytest.fixture(autouse=True)
@@ -396,6 +400,9 @@ def test_recovery_edit_server_preserves_budget_and_saves_only_new_route(tmp_path
             "--probe",
             "minimal",
             "--max-tokens",
+            "200",
+            # Small discovery cap so reasoning checks never fit this budget.
+            "--output-tokens",
             "200",
             "--budget-tokens",
             "6000",
@@ -964,7 +971,7 @@ def test_authentication_recovery_keeps_budget_and_secrets(tmp_path, monkeypatch,
     context = details["run_context"]
     assert context["target_file"] == str(path.resolve())
     assert context["alias"] == "local"
-    assert context["remaining_budget_tokens"] == connect.DEFAULT_CHECK_BUDGET - 3 * 712
+    assert context["remaining_budget_tokens"] == connect.DEFAULT_CHECK_BUDGET - 3 * PER_PROBE
     assert context["interface_timeout_seconds"] == 30
     assert "--stage interfaces" in context["rerun_command"]
     assert "skills/nooa-model-configuration/SKILL.md" in handoff
@@ -1005,7 +1012,7 @@ def test_retry_stops_when_original_budget_is_exhausted(tmp_path, monkeypatch):
             "",
             "--no-catalogue",
             "--budget-tokens",
-            "2848",
+            str(4 * PER_PROBE),
             "--output",
             str(path),
         ],
@@ -1063,6 +1070,10 @@ def test_interface_and_later_checks_share_the_cli_budget(tmp_path, monkeypatch):
             "--api-key-env",
             "",
             "--no-catalogue",
+            # Small discovery cap so the three routing probes (3 x 712) spend
+            # the budget and no reasoning check fits.
+            "--output-tokens",
+            "200",
             "--budget-tokens",
             "2136",
             "--output",
@@ -1574,3 +1585,74 @@ def test_local_failure_diagnostics_are_explicit_and_retrievable(tmp_path, diagno
     else:
         assert "--show-diagnostics" in result.output
         assert len(result.output) < 500
+
+
+def test_connect_does_not_print_the_otel_tracing_line(tmp_path, monkeypatch, capsys):
+    """Tracing still auto-enables during checks, but its banner stays out of the wizard."""
+    import httpx
+
+    import nooa.agent
+    import nooa.tracing
+
+    class Exporter:
+        def describe(self):
+            return "journal:http://viewer.test:5001"
+
+    announced = []
+
+    def enable_tracing(*args, **kwargs):
+        # Stand-in for the auto-probe finding a viewer: print the real banner.
+        announced.append(True)
+        nooa.tracing._print_trace_target([Exporter()], None)
+
+    monkeypatch.setattr(nooa.tracing, "enable_tracing", enable_tracing)
+    monkeypatch.setattr(nooa.agent, "_auto_tracing_attempted", False)
+
+    def handle(request):
+        if request.url.path.endswith("chat/completions"):
+            body = json.loads(request.content)
+            text = '{"value":323}' if "response_format" in body else "323"
+            return httpx.Response(200, json=response_body("chat", text))
+        return httpx.Response(404)
+
+    mock_http(monkeypatch, handle)
+    path = tmp_path / "models.yaml"
+    result = CliRunner().invoke(
+        command,
+        [
+            "model",
+            "--as",
+            "local",
+            "--endpoint",
+            "https://api.test/v1",
+            "--api-style",
+            "chat",
+            "--api-key-env",
+            "",
+            "--no-catalogue",
+            "--max-tokens",
+            "2048",
+            "--output",
+            str(path),
+            "--yes",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert announced, "the checks should have reached the tracing auto-probe"
+    assert "OTel tracing enabled" not in result.output
+    # Outside connect the banner is unchanged.
+    capsys.readouterr()
+    nooa.tracing._print_trace_target([Exporter()], None)
+    assert "OTel tracing enabled: journal:http://viewer.test:5001" in capsys.readouterr().out
+
+
+def test_cli_and_diagnostic_defaults_match_the_discovery_constant():
+    """The CLI writes the value out (no nooa.unifiedllm import at load); keep it equal."""
+    import inspect
+
+    from nooa_cli.commands._connect_registry import diagnostic_context
+
+    option = next(p for p in command.params if p.name == "output_tokens")
+    assert option.default == DISCOVERY_OUTPUT_TOKENS
+    default = inspect.signature(diagnostic_context).parameters["output_tokens"].default
+    assert default == DISCOVERY_OUTPUT_TOKENS

@@ -485,17 +485,8 @@ class CodeActStrategy(CompositeStrategy):
         return "CODEACT"
 
     def _get_truncation_config(self, runtime: RuntimeServices) -> Any:
-        """Get truncation config from runtime's agent.
-
-        Args:
-            runtime: RuntimeServices instance with agent reference
-
-        Returns:
-            TruncationConfig from agent, or default if not available
-        """
-        from nooa.config.truncation_config import DEFAULT_TRUNCATION_CONFIG
-
-        return getattr(runtime.agent, "_truncation", DEFAULT_TRUNCATION_CONFIG)
+        """Get the active runtime config, including method-level overrides."""
+        return runtime.truncation_config
 
     def get_block_overrides(self) -> dict[str, "str | DynamicContext | None"]:
         overrides: dict[str, str | DynamicContext | None] = {
@@ -2997,14 +2988,17 @@ Standard Python builtins and agent instance (`self`) are available."""
             inspect_code = prefill.get_code(call, config=truncation_config)
 
             if inspect_code:
-                await self._execute_prefill_step(
-                    runtime,
-                    inspect_code,
-                    prefill_builtins,
-                    session,
-                    call.method_name,
-                    prefill_type="inspect_inputs",
-                )
+                from nooa.strategies.prefill import warn_on_prefill_truncation
+
+                with warn_on_prefill_truncation(call):
+                    await self._execute_prefill_step(
+                        runtime,
+                        inspect_code,
+                        prefill_builtins,
+                        session,
+                        call.method_name,
+                        prefill_type="inspect_inputs",
+                    )
 
         # 2. Pre-ellipsis code (user-defined setup before ...)
         # Runs as separate execution - LLM sees variables persist from step 1

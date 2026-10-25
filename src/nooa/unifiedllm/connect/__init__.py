@@ -51,6 +51,11 @@ CATALOGUE_URL = "https://openrouter.ai/api/v1/models"
 # encoding of a ConnectPlan unchanged.
 DEFAULT_CHECK_BUDGET = 10**15
 DEFAULT_REASONING_OUTPUT_TOKENS = 4096
+# Reply cap for the interface discovery probes (one short routing request per
+# API format). Reasoning models spend part of the cap thinking before the
+# visible reply, so a small cap (it was 200) makes them fail with "ran out of
+# reply tokens" before they answer. Must stay within plan()'s 1..4096 range.
+DISCOVERY_OUTPUT_TOKENS = 2048
 REASONING_CHECK_PROMPT = """Eight jobs—A, B, C, D, E, F, G and H—must run one at a time.
 Each job runs exactly once.
 
@@ -938,7 +943,7 @@ def plan(
     endpoint_model: dict | None = None,
     reasoning_levels: dict | None = None,
     budget_tokens: int = DEFAULT_CHECK_BUDGET,
-    output_tokens: int = 200,
+    output_tokens: int = DISCOVERY_OUTPUT_TOKENS,
     reasoning_output_tokens: int = DEFAULT_REASONING_OUTPUT_TOKENS,
     existing_entry: dict | None = None,
     session_checks: bool = False,
@@ -2296,7 +2301,7 @@ async def check_interfaces(
     api_key_env: str,
     *,
     budget_tokens: int = DEFAULT_CHECK_BUDGET,
-    output_tokens: int = 200,
+    output_tokens: int = DISCOVERY_OUTPUT_TOKENS,
     api_key: str | None = None,
     styles: tuple[str, ...] = ("chat", "responses", "anthropic"),
     timeout_seconds: float = 30,

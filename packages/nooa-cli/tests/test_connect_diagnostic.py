@@ -49,7 +49,9 @@ def test_target_and_effective_source_are_distinct(tmp_path, monkeypatch):
     assert str(skill_path) in prompt
     assert "nooa-agent-authoring" not in prompt
     assert context["target_in_registry_chain"] is False
-    assert shlex.split(context["rerun_command"])[-1] == "2136"
+    # The rerun reserves three default discovery probes (reply cap + 512 input each).
+    expected = 3 * (connect.DISCOVERY_OUTPUT_TOKENS + 512)
+    assert shlex.split(context["rerun_command"])[-1] == str(expected)
     assert "does not authorize additional paid calls" in prompt
 
 
