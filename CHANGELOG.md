@@ -6,6 +6,10 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- `nooa-atom`: AtomAgent drops the core `<events_api>` guidance block (added on
+  main for agents that expose `self.events`). `self.events` stays exposed, and
+  Atom's `context_usage` block already names `self.events.collapse(...)` and
+  `print(doc(self.events))`. Generic agents keep the block.
 - `nooa-atom`: the ACP server speaks Pool 2's `pool/*` extensions as well as
   Pool 1's `poolside/*` ones, picked per connection from `clientInfo`
   (`name: "pool"`; version major 1 or 2; both for an unversioned build until

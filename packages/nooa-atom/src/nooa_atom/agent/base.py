@@ -282,6 +282,10 @@ class AtomAgentBase(InteractiveAgent):
         )
         spec(self, "context", hidden=False)
         spec(self, "events", hidden=False)
+        # self.events stays exposed, but the core events_api block is redundant
+        # here: context_usage already says how to inspect and collapse events
+        # (``self.events.collapse(...)``, ``print(doc(self.events))``).
+        self.context_manager.remove_protected("events_api")
 
         self._summarization = summarization or SummarizationConfig()
         install_summarizer(self._summarization, self)

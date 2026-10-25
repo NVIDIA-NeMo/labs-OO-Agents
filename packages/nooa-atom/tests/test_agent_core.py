@@ -590,6 +590,46 @@ async def test_the_turn_prompt_has_cell_state_and_no_state_dump(tmp_path, method
     assert "<context_usage" in rendered
 
 
+@pytest.mark.parametrize("method", ["handle", "handle_batch", "handle_work", "handle_orchestrate"])
+async def test_atom_omits_the_core_events_block_but_keeps_events_usable(tmp_path, method):
+    """The core <events_api> block is redundant with context_usage, so Atom drops it.
+
+    self.events stays exposed (not hidden) and usable, and once usage stats
+    exist, context_usage points the model at collapse() and doc(self.events).
+    """
+    from atom_test_agents import python_cell
+
+    from nooa.agentdoc.visibility import is_hidden_field
+    from nooa.context_blocks.models import ContextWindowStats
+
+    code = (
+        "return_result(Done(explanation='x', result=TaskResult("
+        "solution_description='a', evidence='b', how_to_verify='c')))"
+    )
+    llm = FakeLLMClient([python_cell(code, "call_1")], strict_exhaustion=True)
+    agent = AtomAgentBase(llm=llm, cwd=tmp_path)
+    try:
+        assert "events_api" not in agent.context_manager
+        assert not is_hidden_field(agent, "events")
+        assert agent.events.query(limit=1) is not None  # still attached and callable
+        agent.runtime._last_context_stats = ContextWindowStats(
+            context_blocks_count=5,
+            events_count=12,
+            prompt_tokens=24000,
+            context_blocks_chars=10000,
+            events_chars=30000,
+            model_context_window=128000,
+        )
+        await getattr(agent, method)({"user_messages": ["hi"]})
+    finally:
+        await agent.aclose()
+    rendered = "\n".join(str(m.get("content", "")) for m in llm.calls[0].messages)
+    assert "<events_api" not in rendered
+    assert "You MUST call doc(self.events) before using it" not in rendered
+    assert "Compact history: self.events.collapse(" in rendered
+    assert "print(doc(self.events))" in rendered
+
+
 async def test_the_tool_docs_are_in_the_cached_prefix(tmp_path):
     """Stable tool docs sit in the leading system message, not the trailing context."""
     messages = await _first_call_messages(tmp_path, "handle")
