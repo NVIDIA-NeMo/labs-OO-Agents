@@ -436,7 +436,8 @@ async def test_first_call_offers_one_work_vocabulary(
     rendered = messages + "\n" + tools  # what the model reads: the messages and the tool
     prefix = str(call.messages[0].get("content", ""))
     assert "<workspace_state>" in prefix
-    assert "base for file paths and new shells." in prefix
+    assert "files/repo/new Shells." in prefix
+    assert "Python paths use cell cwd, not Shell cwd." in prefix
     assert "<workspace_state expr=" not in rendered
     assert "persistent vars" not in rendered
     assert prefix.count("class Todo(BaseModel):") == 1

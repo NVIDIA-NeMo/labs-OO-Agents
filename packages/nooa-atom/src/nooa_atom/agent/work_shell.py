@@ -554,6 +554,9 @@ class Shell:
     ) -> CommandResult:
         session = self._session
         assert session is not None
+        # A preceding queued command may have changed cwd. Report it only once
+        # this command owns the shell, not when its coroutine was submitted.
+        describe(f"$ {command} · cwd {session.cwd}")
         directory = kept = job_dir()  # output files are kept only in a job's directory
         if directory is None:
             if self._own_dir is None:

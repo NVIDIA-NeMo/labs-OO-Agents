@@ -421,9 +421,6 @@ class AtomAgent(AtomAgentBase):
     # Small records of the running jobs, saved with the snapshot so a resumed
     # session reports the ones that did not survive (``after_restore``).
     _work_records: Annotated[list, hidden]
-    # Set by after_restore until the child sessions from before it are reported.
-    _restore_pending: Annotated[bool, hidden, nosnapshot]
-    _restored_lost: Annotated[set, hidden, nosnapshot]
     # The Shells this session's cells and jobs started: closed with the session.
     _shells: Annotated[work_shell.ShellOwner, hidden, nosnapshot]
 
@@ -463,8 +460,6 @@ class AtomAgent(AtomAgentBase):
         # Commands run as Shell work; the legacy shell skill stays loaded for
         # self.files and self.repo but is not offered (``/skills`` can still).
         self.skills.registry.deactivate(["nemo.shell"])
-        self._restore_pending = False
-        self._restored_lost: set[str] = set()
         self._install_context()
 
     @hidden
@@ -548,7 +543,10 @@ class AtomAgent(AtomAgentBase):
         def shown(path: object) -> str:
             return escape(_bounded(str(path), 160), quote=False)
 
-        text = f"Workspace: {shown(self.cwd)} — base for file paths and new shells."
+        text = (
+            f"Workspace: {shown(self.cwd)} — files/repo/new Shells.\n"
+            "Python paths use cell cwd, not Shell cwd."
+        )
         if self.repo.root != self.cwd:
             text += f"\nRepository root: {shown(self.repo.root)} (search boundary)."
         return text
@@ -562,7 +560,6 @@ class AtomAgent(AtomAgentBase):
     @no_trace
     def _status(self) -> str:
         """Unread counts and senders, read hints, running and idle work, cancel hint."""
-        self._report_unadopted_children()
         now = time.monotonic()
         running: list[str] = []
         idle: list[str] = []
@@ -636,10 +633,9 @@ class AtomAgent(AtomAgentBase):
         ``python_cell_tools`` and ``queues`` blocks. Work does not survive a
         restart, so each job that was running (this agent's ``self.jobs``
         work, or an earlier Atom's ``self.jobs.run()``/``spawn()`` jobs) gets
-        one ``failed`` ``JobEvent`` saying it was lost. Child sessions from
-        before the restart are not adopted as jobs; once the session port is
-        installed, each one that is not closed also gets one notice
-        (``_report_unadopted_children``).
+        one ``failed`` ``JobEvent`` saying it was lost; nothing is relaunched.
+        Child sessions from before the restart are not adopted as jobs and
+        are not reported: only the saved running-job records are.
         """
         from nooa_atom.workspace.options import drop_stale_memory_context
 
@@ -651,7 +647,6 @@ class AtomAgent(AtomAgentBase):
         lost, self._work_records = list(self._work_records or []), []
         for record in lost:
             name = str(record.get("name", "?"))
-            self._restored_lost.add(name)
             self._jobs_in.put(
                 JobEvent(
                     name,
@@ -663,7 +658,6 @@ class AtomAgent(AtomAgentBase):
         # An earlier Atom's JobsApi records (name -> record of each running job).
         legacy, self._jobs_running = dict(self._jobs_running or {}), {}
         for name in legacy:
-            self._restored_lost.add(str(name))
             self._jobs_in.put(
                 JobEvent(
                     str(name),
@@ -673,47 +667,6 @@ class AtomAgent(AtomAgentBase):
                     "the session restarted; run it again as Shell or Subagent work if needed",
                 )
             )
-        self._restore_pending = True
-        self._report_unadopted_children()
-
-    @hidden
-    @no_trace
-    def _report_unadopted_children(self) -> None:
-        """After a restore: one notice for each child session from before it that is not closed.
-
-        Those children (an earlier Atom's ``delegate()``/``spawn()`` children,
-        or this agent's ``Subagent`` children) are not jobs of the restored
-        session and nothing of theirs is running for it. A child already
-        reported as a lost job is not reported again. Runs once, as soon as
-        the session port is installed (from ``prepare_tools`` or the
-        ``status`` block).
-        """
-        if not self._restore_pending or self.session is None:
-            return
-        self._restore_pending = False
-        try:
-            children = self.session.children()
-        except Exception:
-            return
-        for child in children:
-            if child.status == "closed" or child.name in self._restored_lost:
-                continue
-            self._jobs_in.put(
-                JobEvent(
-                    child.name,
-                    0,
-                    "failed",
-                    f"not adopted: the child session {child.name!r} ({child.status}) is from "
-                    "before the session restarted; it is not a job here and is not running. "
-                    "Start new work with Subagent if needed",
-                )
-            )
-
-    @hidden
-    async def prepare_tools(self) -> list[str]:
-        """Connect remembered MCP servers; report child sessions a restore did not adopt."""
-        self._report_unadopted_children()
-        return await super().prepare_tools()
 
     @hidden
     async def aclose(self) -> None:

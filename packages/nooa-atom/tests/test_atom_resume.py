@@ -132,34 +132,49 @@ async def test_an_earlier_atom_session_resumes_as_the_public_atom_agent(sessions
         await registry.close_all()
 
 
-async def test_child_sessions_from_before_a_restore_get_one_notice(sessions_dir, options):
-    """A child that is not closed is not adopted as a job: one notice, not a running job."""
-    models = EarlierAtom()
-    registry = SessionRegistry(SessionStore(sessions_dir), agent_factory=models)
+async def _restore_events(sessions_dir, session_id) -> list[JobEvent]:
+    """Load the session, return the JobEvents it queued, and save it again."""
+    registry = SessionRegistry(SessionStore(sessions_dir), agent_factory=AtomModels())
+    try:
+        loaded = await registry.load(session_id)
+        agent = loaded._agent
+        assert type(agent) is AtomAgent and agent.session is not None
+        agent._status()  # the status block once reported the child sessions
+        events = _jobs(agent)  # read before a woken turn takes them
+        assert [child.name for child in registry.children(session_id)] == ["review"]
+        loaded._checkpoint()
+        await loaded.wait_for_checkpoint()
+        return events
+    finally:
+        await registry.close_all()
+
+
+@pytest.mark.parametrize("earlier", [True, False], ids=["earlier_atom", "atom_agent"])
+async def test_restores_report_lost_jobs_but_not_child_sessions(sessions_dir, options, earlier):
+    """A child session from before a restore is not reported; recorded running jobs are, once."""
+    registry = SessionRegistry(
+        SessionStore(sessions_dir), agent_factory=EarlierAtom() if earlier else AtomModels()
+    )
     try:
         root = await registry.create(options)
         child_options = options.model_copy(update={"name": "review", "kept": True})
         await registry.create(child_options, parent_id=root.id)
+        agent = root._agent
+        if earlier:  # an earlier Atom's JobsApi record
+            agent._jobs_running = {"tests": {"id": "1", "name": "tests", "path": "/root/tests"}}
+        else:  # this agent's self.jobs record
+            agent._work_records = [{"id": 1, "name": "tests", "kind": "coroutine"}]
         root._checkpoint()
         await root.wait_for_checkpoint()
         session_id = root.id
     finally:
         await registry.close_all()
 
-    registry = SessionRegistry(SessionStore(sessions_dir), agent_factory=AtomModels())
-    try:
-        loaded = await registry.load(session_id)
-        agent = loaded._agent
-        assert agent.session is not None
-        agent._report_unadopted_children()  # the status block and prepare_tools call it
-        notices = [event for event in _jobs(agent) if event.name == "review"]
-        assert [child.status for child in registry.children(session_id)] == ["on_disk"]
-        [notice] = notices
-        assert notice.kind == "failed" and notice.value.startswith("not adopted:")
-        agent._status()
-        assert len([event for event in _jobs(agent) if event.name == "review"]) == len(notices)
-    finally:
-        await registry.close_all()
+    [lost] = await _restore_events(sessions_dir, session_id)
+    assert (lost.name, lost.kind) == ("tests", "failed") and lost.value.startswith("lost:")
+    # Restored again: the child is still saved, and nothing is reported.
+    assert await _restore_events(sessions_dir, session_id) == []
+    assert await _restore_events(sessions_dir, session_id) == []
 
 
 async def test_new_atom_sessions_and_their_subagents_use_the_public_atom_agent(
