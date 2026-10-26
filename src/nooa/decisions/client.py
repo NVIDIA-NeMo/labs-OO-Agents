@@ -1,6 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Unified decision-model contract and HTTP decision client."""
+"""Decision-model interface, request/answer types and the HTTP decision client.
+
+A *decision model* answers typed questions about a state (boolean, choice or
+score) and returns probabilities for the possible answers, instead of
+generating free text. ``DecideStrategy`` builds a ``DecisionRequest``, passes
+it to a ``UnifiedDecisionModel`` and turns the ``DecisionResponse`` back into
+the method's declared return type.
+
+``DecisionClient`` talks to decision endpoints over HTTP in one of two API
+styles: ``"systemone"`` (System One endpoints such as TypeSafe's Jev) and
+``"openai"`` (OpenAI's ``/v1/decisions``). In the System One format a boolean
+question has the type ``"noul"``.
+"""
 
 from __future__ import annotations
 
@@ -27,6 +39,8 @@ type DecisionState = str | dict[str, JsonValue] | list[JsonValue]
 
 @dataclass(frozen=True, slots=True)
 class BooleanQuestion:
+    """A yes/no question, with optional criteria for the ``"true"``/``"false"`` keys."""
+
     instructions: Criterion
     criteria: dict[str, Criterion] | None = None
     type: Literal["noul"] = "noul"
@@ -34,6 +48,8 @@ class BooleanQuestion:
 
 @dataclass(frozen=True, slots=True)
 class ChoiceQuestion:
+    """A question whose answer is one option; ``criteria`` maps option IDs to descriptions."""
+
     instructions: Criterion
     criteria: dict[str, Criterion]
     type: Literal["choice"] = "choice"
@@ -41,6 +57,8 @@ class ChoiceQuestion:
 
 @dataclass(frozen=True, slots=True)
 class ScoreQuestion:
+    """A question answered with a level; ``criteria`` describes levels 0, 1, ... in order."""
+
     instructions: Criterion
     criteria: list[Criterion]
     type: Literal["score"] = "score"
@@ -51,7 +69,12 @@ type DecisionQuestion = BooleanQuestion | ChoiceQuestion | ScoreQuestion
 
 @dataclass(frozen=True, slots=True)
 class DecisionRequest:
-    """Normalized internal request sent to a decision client."""
+    """Provider-independent request passed to a decision model.
+
+    ``state`` is the JSON state the questions are about, ``questions`` maps
+    each answer name to its question, and ``attachments`` holds the images
+    referenced from ``state["inputs"]`` by alias.
+    """
 
     state: DecisionState
     questions: dict[str, DecisionQuestion]
@@ -60,11 +83,15 @@ class DecisionRequest:
 
 @dataclass(frozen=True, slots=True)
 class BooleanAnswer:
+    """Answer to a ``BooleanQuestion``: the probability that the answer is true."""
+
     probability_true: float
 
 
 @dataclass(frozen=True, slots=True)
 class ChoiceAnswer:
+    """Answer to a ``ChoiceQuestion``: the selected option ID and per-option probabilities."""
+
     selected: str
     probabilities: dict[str, float]
     confidence: float
@@ -72,6 +99,8 @@ class ChoiceAnswer:
 
 @dataclass(frozen=True, slots=True)
 class ScoreAnswer:
+    """Answer to a ``ScoreQuestion``: expected score, per-level probabilities and level legend."""
+
     score: float
     probabilities: dict[int, float]
     legend: dict[int, Criterion]
@@ -83,6 +112,8 @@ type DecisionAnswer = BooleanAnswer | ChoiceAnswer | ScoreAnswer
 
 @dataclass(frozen=True, slots=True)
 class DecisionResponse:
+    """Provider-independent answers to a ``DecisionRequest``, keyed by question name."""
+
     answers: dict[str, DecisionAnswer]
     model: str
     id: str | None = None
@@ -230,17 +261,23 @@ class DecisionClient(DecisionModel):
             retry_config: Shared retry policy. Defaults to one transient retry.
             client: Optional caller-owned asynchronous HTTP client.
             api_style: Wire format of ``endpoint``: ``"systemone"`` or ``"openai"``.
-            media_inputs: Explicit route-local permission; only ``["image"]``
-                is verified for native decisions. Empty means text-only.
-            decision_image_transport: ``"json"`` keeps JSON proxies unchanged;
-                ``"typesafe_multipart"`` explicitly selects direct TypeSafe's
-                local PNG/JPEG binary transport, never inferred by hostname.
-            typesafe_danger_zone_images: Explicit experimental TypeSafe image
-                opt-in; required along with permission for multipart images.
+            media_inputs: Media kinds this model entry may receive. Only
+                ``["image"]`` is supported for decision models; empty means
+                text only.
+            decision_image_transport: How images are sent. ``"json"`` (the
+                default) sends the JSON body only; System One endpoints then
+                reject image requests before sending. ``"typesafe_multipart"``
+                sends a multipart request with the PNG/JPEG bytes, for a direct
+                TypeSafe connection. It must be set explicitly and is never
+                derived from the endpoint's hostname.
+            typesafe_danger_zone_images: Opt-in for TypeSafe's experimental
+                image support. Multipart images need this flag in addition to
+                ``media_inputs: [image]``.
 
         Raises:
-            ValueError: If ``model`` or ``endpoint`` is empty, or ``api_style``
-                is not supported.
+            ValueError: If ``model`` or ``endpoint`` is empty, ``api_style`` or
+                ``media_inputs`` is not supported, or the image transport
+                settings do not fit together.
         """
         if not model:
             raise ValueError("model must not be empty")
@@ -277,16 +314,24 @@ class DecisionClient(DecisionModel):
         self._client = client or httpx.AsyncClient(timeout=timeout, headers=headers)
 
     async def adecide(self, request: DecisionRequest) -> DecisionResponse:
-        """Evaluate a normalized decision request and validate the response.
+        """Send a decision request to the endpoint and validate the response.
+
+        Before any HTTP request, the attachments, the JSON state and the image
+        references in ``state["inputs"]`` are checked, so invalid requests
+        fail without a network call. Transient errors are retried according
+        to ``retry_config``.
 
         Raises:
+            ValueError: If the request or its images are invalid or not
+                allowed for this client.
             DecisionAuthenticationError: If the endpoint returns 401 or 403.
             DecisionTransportError: If transport or HTTP handling fails.
             DecisionRefusedError: If an OpenAI-style endpoint refuses a question.
             InvalidDecisionResponseError: If the response body is malformed.
         """
         decoded = validate_attachments(request.attachments, self.media_inputs)
-        # Validate state before retry/HTTP even for direct or middleware requests.
+        # Check the state here too: requests built by hand or changed by
+        # middleware have not gone through render_decision_state.
         from nooa.decisions.schema import _json_value
 
         _json_value(request.state)
@@ -402,9 +447,13 @@ class DecisionClient(DecisionModel):
         return response
 
     async def _post_multipart(self, files: list[tuple[str, Any]]) -> httpx.Response:
-        """Send repeatable byte parts; httpx owns boundary and Content-Type."""
-        # Generate the multipart headers independently of caller defaults (a
-        # caller-owned JSON proxy client may have Content-Type: application/json).
+        """Send one multipart HTTP attempt and raise for non-success status codes.
+
+        The body is encoded to bytes first so that a retry can send it again.
+        """
+        # Build the body with a standalone httpx.Request so that the multipart
+        # Content-Type (with its boundary) is set explicitly. A caller-supplied
+        # client may have a default Content-Type: application/json header.
         multipart = httpx.Request("POST", self.endpoint, files=files)
         content = multipart.read()
         response = await self._client.post(

@@ -1,9 +1,25 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Bounded, request-local image attachments for native decision transports.
+"""Collect and validate image attachments for native decision-model requests.
 
-Only direct named Image inputs are collected. Nothing fetches remote URLs or
-walks hidden object state. Permission is separate from the wire transport.
+A decision method may take ``nooa.media.Image`` arguments. This module turns
+those arguments into ``DecisionAttachment`` objects that a decision client can
+send next to the JSON state, and checks them before any HTTP request is made.
+
+Terms used here:
+
+- *Named input*: a top-level argument of the decision method, by parameter name.
+  Only Images passed directly as named inputs become attachments. Images nested
+  inside other values (models, dicts, lists, context blocks, events) are
+  rejected, not collected.
+- *Alias*: the placeholder text ``<decision-image-N>`` written into the JSON
+  state instead of the image, so the model can tell which input an image is.
+- *Media permission*: the model entry's ``media_inputs`` setting. Images are
+  allowed only when it lists ``"image"``. The permission is checked separately
+  from how the image is encoded on the wire (JSON or multipart).
+
+Remote image URLs are validated but never fetched here, and limits on image
+count and size are enforced per request.
 """
 
 from __future__ import annotations
@@ -31,11 +47,14 @@ _IMAGE_MIMES = {"image/png", "image/jpeg", "image/webp", "image/gif"}
 
 @dataclass(frozen=True, slots=True)
 class DecisionAttachment:
-    """One image, associated with all its direct named inputs.
+    """One image to send with a decision request.
 
-    ``alias`` is the token written in JSON state. Encoded bytes/URL are kept
-    out of repr, and never embedded in JSON state. Unknown vendor metadata is
-    not forwarded; only the documented image detail hint is supported.
+    ``alias`` is the placeholder written into the JSON state in place of the
+    image. ``input_names`` lists every named input that passed this same Image
+    object. ``image_url`` is a ``data:`` URL or an HTTP(S) URL; it is hidden
+    from ``repr`` and never copied into the JSON state. ``detail`` is the
+    optional image detail hint (``low``, ``high``, ``auto`` or ``original``);
+    other vendor metadata on the Image is not supported.
     """
 
     alias: str
@@ -45,9 +64,20 @@ class DecisionAttachment:
     detail: str | None = None
 
     def decoded_bytes(self) -> bytes | None:
-        """Validate URI and MIME, returning local bytes or None for HTTP(S).
+        """Validate the image URL and MIME type and return the image bytes.
 
-        Signature checks below are deliberately not a complete image decoder.
+        Returns:
+            The decoded bytes for a base64 ``data:`` URL, or ``None`` for an
+            HTTP(S) URL (remote images are checked but not downloaded).
+
+        Raises:
+            ValueError: If the MIME type is unsupported, the data URL is
+                malformed or larger than 20 MiB, or the HTTP(S) URL is too
+                long, contains credentials or a fragment, or is otherwise
+                invalid.
+
+        Only the URL and the base64 encoding are checked; the image content
+        itself is not decoded.
         """
         if self.media_type not in _IMAGE_MIMES:
             raise ValueError(
@@ -92,7 +122,12 @@ class DecisionAttachment:
 
 
 def decision_media_inputs(value: object) -> tuple[MediaInput, ...]:
-    """Validate permissions without claiming unsupported decision modalities."""
+    """Validate a ``media_inputs`` setting for a decision client.
+
+    Decision clients support images only, so any other media kind (audio,
+    video, pdf) raises ``ValueError`` instead of being silently accepted.
+    Returns the validated permissions.
+    """
     permissions = validate_media_inputs(value)
     if any(kind != "image" for kind in permissions):
         raise ValueError(
@@ -104,7 +139,21 @@ def decision_media_inputs(value: object) -> tuple[MediaInput, ...]:
 def validate_attachments(
     attachments: tuple[DecisionAttachment, ...], media_inputs: object
 ) -> tuple[bytes | None, ...]:
-    """Preflight even manually constructed requests before any HTTP attempt."""
+    """Check attachments against the media permission and the request limits.
+
+    This runs before any HTTP request, also for requests built by hand
+    rather than through ``collect_decision_attachments``. It checks that
+    images are permitted, that there are at most 16, that aliases and input
+    names are unique, that the detail hint is valid, and that the total size
+    stays within 50 MiB.
+
+    Returns:
+        The decoded bytes of each attachment, in order (``None`` for HTTP(S)
+        URLs).
+
+    Raises:
+        ValueError: If any check fails.
+    """
     permissions = decision_media_inputs(media_inputs)
     if attachments and "image" not in permissions:
         raise ValueError(
@@ -148,7 +197,13 @@ def validate_attachments(
 
 
 def reject_nested_media(value: Any, seen: set[int] | None = None) -> None:
-    """Prevent model serializers from hiding unsupported native Media."""
+    """Raise ``TypeError`` if ``value`` contains a Media object anywhere inside.
+
+    Pydantic models, dataclasses, mappings (keys and values) and sequences are
+    walked recursively. This runs before serialization because a custom
+    serializer could otherwise turn a nested Image into plain text that would
+    reach the model unnoticed. ``seen`` guards against reference cycles.
+    """
     if isinstance(value, Media):
         raise TypeError("Nested Media is unsupported; pass a permitted top-level named Image input")
     if seen is None:
@@ -178,10 +233,23 @@ def reject_nested_media(value: Any, seen: set[int] | None = None) -> None:
 def collect_decision_attachments(
     parameters: Mapping[str, object], media_inputs: object
 ) -> tuple[dict[str, str], tuple[DecisionAttachment, ...]]:
-    """Collect bound top-level Media; one repeated object has several names.
+    """Turn the Image arguments of a decision call into attachments.
 
-    As in Predict, binding happens first, avoiding positional/keyword overlap.
-    Distinct Image objects are not content-hash deduplicated.
+    ``parameters`` are the call's arguments after binding to the method
+    signature (as in Predict), so each value appears once under its parameter
+    name whether it was passed by position or by keyword. When the same
+    Image object is passed under several names, it becomes one attachment
+    that lists all of those names. Two different Image objects with equal
+    content stay two attachments.
+
+    Returns:
+        A mapping from input name to alias, for writing into the JSON state,
+        and the validated attachments.
+
+    Raises:
+        TypeError: If an argument is a Media object other than an Image.
+        ValueError: If an Image carries vendor metadata other than ``detail``,
+            or the attachments fail ``validate_attachments``.
     """
     references: dict[str, str] = {}
     attachments: list[DecisionAttachment] = []

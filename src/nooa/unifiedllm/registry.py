@@ -443,7 +443,9 @@ def client_from_config(
         params: dict[str, Any] = {"model": model, "endpoint": endpoint}
         if "api_style" in config and "api_style" not in overrides:
             params["api_style"] = config["api_style"]
-        # Permissions/encoding describe this exact route, not a replacement.
+        # media_inputs and the image transport settings describe this model
+        # entry's endpoint. When the overrides send the call to a different
+        # model, endpoint, API style, client or client type, they are dropped.
         route_changed = (
             overrides.get("model", model) != model
             or endpoint != config.get("endpoint")

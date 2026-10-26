@@ -1,6 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Translate normalized decision requests to and from OpenAI's Decisions API."""
+"""Convert decision requests and responses to and from OpenAI's Decisions API.
+
+Used by ``DecisionClient`` with ``api_style="openai"``. OpenAI calls a boolean
+question a *predicate*, and answers arrive as a list in question order rather
+than as a mapping by name.
+"""
 
 from __future__ import annotations
 
@@ -31,7 +36,9 @@ def openai_payload(model: str, request: DecisionRequest) -> dict[str, Any]:
 
     OpenAI accepts only text instructions and descriptions, so structured
     criteria are sent as JSON text. Predicates have no criteria field, so
-    boolean criteria are appended to the instructions.
+    boolean criteria are appended to the instructions. Without images,
+    ``input`` is the state as text; with images, it is one user message with
+    the state text followed by each image, preceded by its alias.
     """
     questions: list[dict[str, Any]] = []
     for name, question in request.questions.items():
@@ -88,10 +95,13 @@ def openai_payload(model: str, request: DecisionRequest) -> dict[str, Any]:
 def parse_openai_response(
     data: Any, request: DecisionRequest, *, request_id: str | None = None
 ) -> DecisionResponse:
-    """Normalize an OpenAI ``Decision`` object against the questions sent.
+    """Convert an OpenAI ``Decision`` object into a ``DecisionResponse``.
 
-    Answers arrive in question order. Score legends are rebuilt from the
-    request because OpenAI returns level labels rather than criteria.
+    Answers arrive in question order and are matched to the request's
+    questions by position. Score legends are rebuilt from the request because
+    OpenAI returns level labels rather than criteria. The ``x-request-id``
+    header value (``request_id``) is used as the response ID when the body
+    has none.
 
     Raises:
         DecisionRefusedError: If the model refused any question.
@@ -162,7 +172,7 @@ def _text(value: Criterion) -> str:
 
 
 def _described(item: dict[str, Any], criterion: Criterion) -> dict[str, Any]:
-    """Add a description when a criterion is present."""
+    """Add a ``description`` to ``item`` when ``criterion`` is set, and return ``item``."""
     if criterion is not None:
         item["description"] = _text(criterion)
     return item
