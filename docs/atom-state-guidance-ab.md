@@ -21,17 +21,17 @@ runtime. **It does not enable persistent Python locals.**
 
 ## Exact treatment text
 
-The addition is 191 whitespace-delimited words. Its canonical model-facing text
+The addition is 194 whitespace-delimited words. Its canonical model-facing text
 is the `State across turns:` paragraph through `Record durable facts, not handles.`,
 with common docstring indentation removed (`inspect.cleandoc`), UTF-8 encoded,
 LF line endings and **no trailing newline**.
 
 SHA-256 of that text:
-`56b930014e9c7b846aa642b06af921580c5cdc68179e167fb0abf14869c69224`
+`60e8e48da66cbaa324877c9345210689011230b8cc6968ec61ee631c00b10989`
 
 SHA-256 of the exact source insertion (four-space class-docstring indentation,
 empty blank lines, including the final two LF characters):
-`e2a0fef0c5db2d95789e2ef2071d28ee4745be6470cd9fc5d7f25571c3acf7de`
+`d37aba4912437caa4f9e06c894bb74c9ef40ae1e44a8d8898078af838561fb39`
 
 The block explains that locals end with `handle`, small serializable facts and
 stable IDs/names belong in `self.v`, and a named Shell must be re-looked up through

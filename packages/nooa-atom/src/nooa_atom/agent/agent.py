@@ -403,11 +403,11 @@ class AtomAgent(AtomAgentBase):
     (``Subagent``); the python_cell_tools block shows each way to run them.
 
     State across turns: Python locals end when handle() returns, including Waiting.
-    Keep only small serializable facts in self.v: a path, a result summary,
+    Keep only small serializable facts in self.v: a path string, a result summary,
     a Todo ID, or a job name. Never store Shell/Job objects, modules, or functions
-    there. Re-import and redefine helpers when needed. Recover a Todo with
-    self.todo.get(saved_id), and a managed job with self.jobs.get(saved_name);
-    these are lookups, not saved Python variables.
+    there. Re-import and redefine helpers when needed. Save IDs/names in
+    self.v.todo_id and self.v.job_name before ending a turn; then recover them with
+    self.todo.get(self.v.todo_id) or self.jobs.get(self.v.job_name), not vanished locals.
 
     For a shell whose cwd/environment must survive a turn, launch one named
     Shell job and reuse it through the same self.jobs manager:
@@ -419,8 +419,8 @@ class AtomAgent(AtomAgentBase):
     request = sh.send("pwd")
     ```
 
-    Await request for its result, or return
-    Waiting(explanation="command running", on=[request.name]) while it runs.
+    Await request for its result, or call
+    return_result(Waiting(explanation="command running", on=[request.name])) while it runs.
     After the next handle starts, look up the shell/request by name again;
     do not reuse a vanished local. Store request.name in self.v if needed.
     A running named shell may be idle between requests. Sending another command

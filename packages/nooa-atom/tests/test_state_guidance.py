@@ -27,7 +27,7 @@ from nooa.storage.json_snapshot import snapshot_to_json
 
 START = "State across turns: Python locals end when handle() returns, including Waiting."
 END = "A subagent sees only its brief:"
-GUIDANCE_SHA256 = "56b930014e9c7b846aa642b06af921580c5cdc68179e167fb0abf14869c69224"
+GUIDANCE_SHA256 = "60e8e48da66cbaa324877c9345210689011230b8cc6968ec61ee631c00b10989"
 PATTERN = (
     'sh = self.jobs.get("workspace_shell")\n'
     'if sh is None or sh.status != "running":\n'
@@ -110,7 +110,7 @@ async def exercise_named_shell(workspace):
             "assert (await request).returncode == 0\n"
             "todo = self.todo.add('keep state by stable identifiers')\n"
             "self.v.todo_id = todo.id\n"
-            "self.v.shell_name = 'workspace_shell'\n"
+            "self.v.job_name = 'workspace_shell'\n"
             "result = await sh.send('mkdir -p work; cd work; export GUIDANCE_MARKER=kept; echo $$')\n"
             "self.v.shell_pid = int(result.stdout)\n"
             'request = sh.send(\'sleep 0.05; printf "%s\\n" "$$" "$PWD" "$GUIDANCE_MARKER"\')\n'
@@ -120,7 +120,7 @@ async def exercise_named_shell(workspace):
         cell(
             "try:\n    sh\nexcept NameError:\n    pass\n"
             "else:\n    raise AssertionError('locals unexpectedly survived handle')\n"
-            "sh = self.jobs.get(self.v.shell_name)\n"
+            "sh = self.jobs.get(self.v.job_name)\n"
             "assert sh is not None and sh.status == 'running'\n"
             "request = self.jobs.get(self.v.request_name)\n"
             "assert request.status == 'done'\n"
@@ -152,7 +152,7 @@ async def exercise_named_shell(workspace):
         assert agent.todo.get(agent.v.todo_id).status == "done"
         assert agent.v.cwd == str(workspace / "work")
         facts = dict(agent.vars)
-        assert set(facts) == {"todo_id", "shell_name", "shell_pid", "request_name", "cwd"}
+        assert set(facts) == {"todo_id", "job_name", "shell_pid", "request_name", "cwd"}
         assert all(isinstance(value, (str, int)) for value in facts.values())
         json.dumps(facts)
         snapshot = snapshot_to_json(agent)
