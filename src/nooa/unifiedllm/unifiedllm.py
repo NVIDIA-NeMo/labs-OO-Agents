@@ -1506,8 +1506,9 @@ class UnifiedLLM(ABC):
         from nooa.unifiedllm.route_identity import same_context_route
 
         client_type = "responses" if isinstance(self, ResponsesClient) else "completion"
-        # Factories attach sanitized metadata and a snapshot of its actual route.
-        # Do not reverse-lookup another alias when this route has no declaration.
+        # Clients built by the registry carry their entry's settings. Use only
+        # that entry; if it declares no context_window, do not borrow one from
+        # another alias that happens to use the same model.
         if self._registry_config is not None:
             route = getattr(self, "_registry_context_route", None)
             if route is None or same_context_route(
@@ -1539,9 +1540,10 @@ class UnifiedLLM(ABC):
         with _registry_lock:
             models_snapshot = dict(MODELS)
 
-        # Neither a key collision nor a shared model string proves endpoint
-        # identity. All compatible aliases must agree; never depend on YAML
-        # order when two declarations for the same route have different caps.
+        # A directly built client has no entry of its own. Use a registry
+        # context_window only if every alias with the same route declares the
+        # same value; if they disagree, the result would depend on YAML order,
+        # so return None instead.
         windows = set()
         for key, cfg in models_snapshot.items():
             if same_context_route(
