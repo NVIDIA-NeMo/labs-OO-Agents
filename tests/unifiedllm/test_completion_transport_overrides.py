@@ -6,8 +6,28 @@ import httpx
 import pytest
 from litellm.llms.openai.openai import OpenAIChatCompletion
 
-from nooa.unifiedllm import CompletionClient
+from nooa.unifiedllm import CompletionClient, registry
 from nooa.unifiedllm.unifiedllm import _ClientHttp
+
+
+def _chat_response(request: httpx.Request) -> httpx.Response:
+    return httpx.Response(
+        200,
+        json={
+            "id": "chatcmpl-test",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "opaque-model",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "done"},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 1, "total_tokens": 11},
+        },
+    )
 
 
 @pytest.mark.asyncio
@@ -102,5 +122,62 @@ async def test_completion_uses_per_call_route_without_changing_defaults(
             "Bearer " + overrides.get("api_key", "original-key"),
             "Bearer original-key",
         ]
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("is_async", [False, True])
+@pytest.mark.parametrize("factory", ["direct", "registry"])
+async def test_base_url_provider_and_timeout_reach_owned_transport(monkeypatch, is_async, factory):
+    requests: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return _chat_response(request)
+
+    transport = httpx.MockTransport(respond)
+    monkeypatch.setattr(
+        _ClientHttp,
+        "_httpx_hardening",
+        staticmethod(lambda: {"transport": transport, "trust_env": False}),
+    )
+
+    def no_default_pool(**kwargs):
+        raise AssertionError("A declared base_url/custom_llm_provider must use the owned pool")
+
+    monkeypatch.setattr(
+        OpenAIChatCompletion, "_get_sync_http_client", staticmethod(no_default_pool)
+    )
+    monkeypatch.setattr(
+        OpenAIChatCompletion, "_get_async_http_client", staticmethod(no_default_pool)
+    )
+    route = {
+        "base_url": "https://gateway.example/v1",
+        "custom_llm_provider": "openai",
+        "timeout": 7.5,
+    }
+    if factory == "registry":
+        entry = {"model_name": "opaque-model", "retry_config": False, **route}
+        client = registry.client_from_config("gateway", entry, api_key="gateway-key")
+    else:
+        client = CompletionClient("opaque-model", api_key="gateway-key", **route)
+    try:
+        assert {key: client.config[key] for key in route} == route
+        assert client._http is not None
+        # The owned SDK client must target the declared gateway, not be skipped.
+        sdk_client = client._completion_http_client(client.config, is_async=is_async, max_retries=0)
+        assert sdk_client is not None
+        assert str(sdk_client.base_url) == "https://gateway.example/v1/"
+        owned_pool = client._http.httpx_async if is_async else client._http.httpx_sync
+        assert sdk_client._client is owned_pool
+        messages = [{"role": "user", "content": "Hello"}]
+        result = await client.acall(messages) if is_async else client.call(messages)
+        assert result.content == "done"
+        assert [str(request.url) for request in requests] == [
+            "https://gateway.example/v1/chat/completions"
+        ]
+        assert requests[0].headers["Authorization"] == "Bearer gateway-key"
+        assert requests[0].extensions["timeout"]["read"] == 7.5
     finally:
         await client.aclose()

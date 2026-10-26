@@ -214,7 +214,9 @@ def project_chat_turn(
     for part in turn.parts:
         native = json_containers(part.native) if compatible and part.native else {}
         if isinstance(part, AssistantText) and native:
-            guard_native_media(native, media_inputs)
+            guard_native_media(
+                native, media_inputs, interface="anthropic" if provider == "anthropic" else "chat"
+            )
         if isinstance(part, ToolCall):
             call_id = part.id
             if signature := native.pop("inline_thought_signature", None):
