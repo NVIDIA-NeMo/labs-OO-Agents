@@ -1,6 +1,21 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Bounded multi-turn onboarding checks; raw replay state stays in memory."""
+"""Multi-turn session test: three related calls to one model entry.
+
+The session test sends a conversation of three turns ("seed", "replay",
+"repeat"), each continuing the previous one, and reports three checks:
+
+- ``session``: whether the conversation worked at the configured reply limit.
+- ``cache``: whether the provider reused cached input across turns, and
+  whether the earlier turns were sent again byte-for-byte as history (needed
+  for prompt caching to work).
+- ``reasoning_retention``: whether the reasoning state returned on the first
+  turn was sent back in the next request ("replayed"), as multi-turn
+  reasoning models require.
+
+Model tools are never executed, nothing is retried, and the raw requests and
+reasoning stay in memory only; results contain counts and flags, not content.
+"""
 
 import asyncio
 import json
@@ -10,16 +25,24 @@ from copy import deepcopy
 from . import REASONING_CHECK_PROMPT
 
 REPLY_CAP = 2048
-# Includes padding, schema/instructions, and up to two prior reply-sized items.
+# Token allowance per call: the ~8k padding prompt plus instructions, plus up
+# to three reply-sized items (two earlier replies and the new reply).
 TOKEN_RESERVATION = 3 * (8192 + 3 * REPLY_CAP)
-# Module-level so tests can monkeypatch it to 0 -- these three calls land back
-# to back on the same endpoint in production; spurious 5xx/rate-limit
-# failures are common enough there to be worth a short, fixed pace-out.
+# Pause between the three calls, which would otherwise hit the same endpoint
+# back to back and often trigger spurious 5xx or rate-limit errors. A module
+# constant so tests can set it to 0.
 SESSION_CALL_PACING_SECONDS = 0.5
 
 
 def reply_budget(entry, budget_tokens):
-    """Reserve the configured request, never substitute a smaller check cap."""
+    """Return ``(configured_cap, tested_cap, token_reservation)`` for one session call.
+
+    The session test uses the entry's own configured reply limit, never a
+    smaller limit just for the test, so it tests the real configuration. The
+    reservation is the tokens set aside per call. Building the selected
+    reasoning level first makes an invalid level raise. ``budget_tokens`` is
+    currently unused.
+    """
     from nooa.unifiedllm.reasoning import ReasoningConfig
 
     from . import configured_reply_cap
@@ -34,6 +57,7 @@ def reply_budget(entry, budget_tokens):
 
 
 def _strings(value):
+    """Yield every string inside ``value``, searching dicts, lists and tuples."""
     if isinstance(value, str):
         yield value
     elif isinstance(value, dict):
@@ -45,6 +69,7 @@ def _strings(value):
 
 
 def _contains(expected, actual):
+    """Return True if ``actual`` contains ``expected``; dicts may have extra keys."""
     if isinstance(expected, dict):
         return isinstance(actual, dict) and all(
             key in actual and _contains(value, actual[key]) for key, value in expected.items()
@@ -53,7 +78,13 @@ def _contains(expected, actual):
 
 
 def settings_on_wire(settings, wire):
-    """Compare declared settings after the API's reply-limit field translation."""
+    """Return True if every value in ``settings`` appears in the sent request ``wire``.
+
+    Clients rename the reply limit to the field their API uses
+    (``max_tokens``, ``max_completion_tokens`` or ``max_output_tokens``). If the
+    request contains exactly one of these fields, the expected limit is
+    compared against that field.
+    """
     expected = deepcopy(settings)
     caps = {"max_tokens", "max_completion_tokens", "max_output_tokens"}
     for key in caps & expected.keys():
@@ -63,7 +94,14 @@ def settings_on_wire(settings, wire):
 
 
 def _wire_reasoning(value):
-    """Only replay fields count; portable text is not native reasoning replay."""
+    """Yield the reasoning values found in a request body sent to the provider.
+
+    Only the fields providers use to receive earlier reasoning back count
+    (``reasoning_content``, encrypted content, signatures, Anthropic thinking
+    blocks, Responses reasoning summaries, and thought signatures that LiteLLM
+    encodes into tool call IDs after ``__thought__``). Reasoning repeated as
+    plain message text does not count as reasoning replay.
+    """
     if isinstance(value, dict):
         for key, child in value.items():
             if key in {
@@ -90,6 +128,7 @@ def _wire_reasoning(value):
 
 
 def _cache_markers(value):
+    """Yield the name of every prompt-cache marker key found in a request body."""
     if isinstance(value, dict):
         for key, child in value.items():
             if key in {"cache_control", "prompt_cache_breakpoint"}:
@@ -102,11 +141,13 @@ def _cache_markers(value):
 
 
 def _strip_cache_markers(value):
-    """Compare underlying content stability independently of cache checkpoints.
+    """Return a copy of ``value`` with all prompt-cache marker keys removed.
 
-    Stripping marker keys isolates content drift, but does not prove cache
-    lookup eligibility. OpenAI explicit caching also needs a warmed checkpoint
-    present in the later request; a moving marker alone can lose prefix lookup.
+    This lets two requests be compared for content changes while ignoring
+    where the cache markers are. Equal content alone does not guarantee a
+    cache hit: with OpenAI explicit caching, the later request must also carry
+    a marker at a position that was already cached, and a marker that moved
+    can prevent the cached prefix from being found.
     """
     if isinstance(value, dict):
         return {
@@ -120,24 +161,21 @@ def _strip_cache_markers(value):
 
 
 def _history_prefix_stable(prior_body, later_body, key):
-    """Did every message an earlier turn sent survive, unchanged, as later history?
+    """Return True if the later request starts with the earlier request's messages, unchanged.
 
-    Explicit cache breakpoints only help the provider if the exact marked
-    message renders identically once it stops being "the newest eligible
-    block" and becomes ordinary history on a later turn. If the renderer
-    reconstructs that message with a different wire shape at that point (for
-    example a plain string that was list-wrapped only while carrying the
-    marker), the provider's literal-prefix cache match breaks there on every
-    later turn -- silently, since nothing else about the conversation looks
-    wrong. This compares ``prior_body``'s entire input list, markers aside,
-    against the same leading slice of ``later_body``'s input list, which is
-    exactly the byte-stability a growing explicit-breakpoint conversation
-    depends on.
+    Provider prompt caches match the exact start (prefix) of a request. A
+    message that carried a cache marker on one turn becomes ordinary history
+    on the next. If it is then sent in a different form (for example as a
+    plain string where it was a list of content parts while it carried the
+    marker), the cached prefix no longer matches on any later turn, and
+    nothing else in the conversation shows the problem.
 
-    Anthropic's cacheable prefix and marker can also live in a top-level
-    ``system`` field, separate from ``messages`` -- litellm renders a leading
-    system-role message that way. A regression confined to that field would
-    otherwise report as stable.
+    ``key`` names the message list ("messages" or "input"). The whole list
+    in ``prior_body`` must equal the first items of the list in
+    ``later_body``, ignoring cache markers. The top-level ``system`` field
+    must also be equal, because Anthropic requests (and LiteLLM, for a leading
+    system message) keep the system prompt and its marker there instead of
+    in the message list.
     """
     prior_list = [_strip_cache_markers(m) for m in prior_body.get(key, [])]
     later_list = [_strip_cache_markers(m) for m in later_body.get(key, [])]
@@ -151,7 +189,13 @@ def _history_prefix_stable(prior_body, later_body, key):
 
 
 def _reasoning_values(response):
-    """Compare meaningful reasoning payloads, never persist their contents."""
+    """Yield the reasoning values in ``response`` that should be sent back next turn.
+
+    These are the reasoning text (split into the original summary blocks for
+    the Responses API) and the encrypted/signature fields in each part's
+    provider-specific data. The values are only compared with the next
+    request, never stored.
+    """
     from nooa._immutable_json import json_containers
 
     def payloads(value):
@@ -175,8 +219,8 @@ def _reasoning_values(response):
     for part in response.parts:
         native = json_containers(part.native) if part.native else {}
         if part.kind == "reasoning" and part.text:
-            # Responses summaries are captured as one joined string but sent
-            # back as separate blocks; compare the blocks the wire carries.
+            # Responses API summaries are stored as one joined string but sent
+            # back as separate blocks, so yield each block's text separately.
             summary = native.get("summary") if isinstance(native, dict) else None
             if (
                 isinstance(summary, list)
@@ -198,11 +242,13 @@ LITELLM_ENVELOPE = "litellm_enc:"
 
 
 def _replayed(value, actual):
-    """True when ``value`` reached the follow-up request.
+    """Return True if reasoning ``value`` was sent in the follow-up request.
 
-    A LiteLLM proxy wraps encrypted reasoning as ``litellm_enc:<routing>;<state>``
-    and a LiteLLM client unwraps it before sending, so the request carries the
-    original state inside the envelope rather than the envelope itself.
+    ``actual`` lists the reasoning values found in that request. A LiteLLM
+    proxy wraps encrypted reasoning as ``litellm_enc:<routing>;<state>`` and a
+    LiteLLM client unwraps it again before sending, so the request may contain
+    only the inner state. Such a value therefore also matches if a sent value
+    of at least 32 characters appears inside it.
     """
     if value in actual:
         return True
@@ -212,7 +258,16 @@ def _replayed(value, actual):
 
 
 async def _session_steps(alias, entry, *, api_key, budget_tokens):
-    """Three configured-cap turns, without retries; never execute model tools."""
+    """Run the three session calls and yield a ``ProbeUpdate`` per step and check.
+
+    Each call uses the configured reply limit and reasoning level, no
+    retries and a 120 second timeout. The model may call ``probe_tool``; the
+    tool is never executed, and a fixed result is sent back instead. The test
+    is skipped (``not_probed``) if the token budget, the context window or
+    the reasoning level's own reply limit does not allow it, and stops early
+    if any call fails or is incomplete. Requests are captured through an HTTP
+    hook on the test's own client only.
+    """
     from nooa.context_blocks.formatter import OpenAIProviderFormatter
     from nooa.context_blocks.models import BlockMetadata, ResolvedBlock, Role
     from nooa.context_blocks.renderer import render_context
@@ -256,14 +311,15 @@ async def _session_steps(alias, entry, *, api_key, budget_tokens):
         return
 
     def probe_tool(value: str):
+        # Offered to the model, but Connect never runs tools during tests.
         raise RuntimeError("Setup checks never execute model tools")
 
     formatter = CachedBlockFormatter()
     provider = OpenAIProviderFormatter()
-    # Non-repetitive lines give a reusable prefix without any user's private data.
-    # Short hex ids in place of zero-padded decimal digit runs measurably lower
-    # (but do not eliminate) a stochastic provider content filter observed live
-    # on this check's arithmetic-verification turn; see CHANGELOG.
+    # Generated, varied filler text forms a long prefix that the provider can
+    # cache, without using any user data. Short hex IDs are used instead of
+    # zero-padded numbers because they make a provider content filter, seen
+    # in live tests on this check, trigger less often (not never); see CHANGELOG.
     train_ids = [uuid.uuid5(uuid.NAMESPACE_DNS, f"train-{i}").hex[:6] for i in range(360)]
     padding = "\n".join(
         f"Train {train_ids[i]} departs platform {1 + i % 12}; its trip takes "
@@ -286,19 +342,17 @@ async def _session_steps(alias, entry, *, api_key, budget_tokens):
             ),
             ResolvedBlock(
                 key="task",
-                # The cached formatter partitions SYSTEM context blocks and
-                # renders the dynamic half as a trailing USER message.
+                # The cached formatter splits SYSTEM blocks into static and
+                # dynamic parts and sends the dynamic part (this task) as the
+                # last USER message.
                 #
-                # Reuses the reasoning-level puzzle rather than a trivial
-                # arithmetic task: a model with adaptive/content-dependent
-                # reasoning effort can legitimately skip reasoning on
-                # something this easy even at a real reasoning level, which
-                # previously showed up as a false "reasoning not retained"
-                # result indistinguishable from an actual replay bug
-                # (observed live for gpt-6-astra). The puzzle is hard enough
-                # to force genuine reasoning at any configured level. As
-                # with level checks, a wrong answer here is not graded —
-                # only whether reasoning was observed at all.
+                # The task is the reasoning-level puzzle, not simple
+                # arithmetic: models that decide how much to reason based on
+                # the question may skip reasoning on an easy task, which
+                # looked exactly like a reasoning replay bug (seen live with
+                # gpt-6-astra). The puzzle makes the model reason at any
+                # level. As in the level checks, the answer is not graded;
+                # only whether reasoning was observed.
                 role=Role.SYSTEM,
                 content=(
                     f"{REASONING_CHECK_PROMPT}\n\nCall probe_tool with your eight-letter "
@@ -341,7 +395,8 @@ async def _session_steps(alias, entry, *, api_key, budget_tokens):
     except Exception as exc:
         yield ProbeUpdate("session", {"outcome": "not_confirmed", "error": type(exc).__name__})
         return
-    # Hook only this owned client. Never monkey-patch global HTTP or store headers.
+    # Capture request bodies through a hook on this client only; global HTTP
+    # settings are not patched, and headers (which hold the key) are not kept.
     hooks = client._http.httpx_async.event_hooks["request"]
     hooks.append(capture)
     spent = 0
@@ -371,13 +426,11 @@ async def _session_steps(alias, entry, *, api_key, budget_tokens):
                     CacheBoundary(),
                     {
                         "role": "user",
-                        # A plain "verify the answer" ask is itself trivial —
-                        # answerable from memory without reasoning again, so a
-                        # model with adaptive/content-dependent reasoning
-                        # effort can legitimately skip it on this turn even
-                        # though it reasoned on the original puzzle (observed
-                        # live for gpt-6-astra). Changing one rule forces a
-                        # genuine new reasoning pass rather than a recall.
+                        # Asking only to verify the earlier answer is easy to
+                        # answer from memory, so a model that adapts its
+                        # reasoning effort may skip reasoning on this turn
+                        # (seen live with gpt-6-astra). Changing one rule makes
+                        # it reason again instead of recalling the answer.
                         "content": (
                             f"Check {index}: one rule changed — H now runs first, not "
                             "last. Solve the puzzle again with this update. Call "
@@ -414,10 +467,10 @@ async def _session_steps(alias, entry, *, api_key, budget_tokens):
             usage = response.usage
             total = usage.input_tokens + usage.output_tokens if usage else 0
             spent += max(0, total - reservation)
-            # Billed usage.reasoning_tokens alone is not evidence -- confirmed
-            # live, Kimi/Qwen bill nonzero reasoning tokens on routes that
-            # never put a reasoning item on the wire, so there is nothing for
-            # capture_parts to attach and parts stays empty.
+            # Reasoning counts as observed only if the reply contains a
+            # reasoning part. usage.reasoning_tokens is not enough: in live
+            # tests Kimi/Qwen reported reasoning tokens on endpoints that never
+            # return reasoning content, so nothing could be replayed.
             observed = any(p.kind == "reasoning" for p in response.parts)
             record = {
                 "outcome": "accepted",
@@ -480,15 +533,12 @@ async def _session_steps(alias, entry, *, api_key, budget_tokens):
             settings_ok &= settings_on_wire(controls, wire)
             if index == 0:
                 first = response
-            # Extend after every turn, not just the seed, so the next call is a
-            # genuine continuation: whatever this turn just sent (including any
-            # message an explicit cache breakpoint marked) must reappear as
-            # ordinary history next time, the same way a real multi-turn
-            # session grows. Reusing a frozen base across turns (the previous
-            # behavior) never lets a marked message become history within this
-            # probe, so it could never catch a renderer that reconstructs that
-            # message differently once replayed -- see the cache stability
-            # check below, which depends on this actually growing.
+            # Grow the history after every turn, as a real conversation does:
+            # everything this turn sent (including a message that carried a
+            # cache marker) is sent again as plain history next turn. The
+            # cache stability check below relies on this; with a fixed history
+            # a marked message would never become history, and a renderer that
+            # sends it differently afterwards would go unnoticed.
             replay = [m for m in call_messages if not isinstance(m, CacheBoundary)] + [response]
             for call in response.tool_calls:
                 if call.name != "probe_tool":
@@ -509,14 +559,10 @@ async def _session_steps(alias, entry, *, api_key, budget_tokens):
                     }
                 )
 
-        # "repeat" (successful_bodies[2]) is now a genuine continuation of
-        # "replay" (successful_bodies[1]) -- see the extension above. Everything
-        # "replay" actually sent, including whichever message an explicit cache
-        # breakpoint marked, must reappear byte-identical (that transient marker
-        # key aside) as a leading slice of "repeat"'s input for the provider's
-        # cache to extend across turns. A frozen replay base across both calls
-        # (the previous check) could never catch this: it never let a marked
-        # message become history within the probe at all.
+        # The "repeat" request (successful_bodies[2]) continues the "replay"
+        # request (successful_bodies[1]). For the provider's cache to keep
+        # working across turns, everything "replay" sent must reappear,
+        # identical apart from cache markers, at the start of "repeat".
         key = "input" if entry["api_style"] == "responses" else "messages"
         stable = _history_prefix_stable(successful_bodies[1], successful_bodies[2], key)
         best = max(readings, key=lambda r: r["cached_input_tokens"] or 0)
@@ -585,7 +631,12 @@ async def _session_steps(alias, entry, *, api_key, budget_tokens):
 
 
 async def session_steps(alias, entry, *, api_key, budget_tokens):
-    """Stamp executed session evidence with its configured dependencies."""
+    """Run the session test (see ``_session_steps``) and yield its updates.
+
+    Each finished result is stamped with the configuration it was run with
+    (see ``stamp_verification``), using a copy of ``entry`` taken before the
+    test started, so later edits to the entry make the result out of date.
+    """
     from contextlib import aclosing
     from copy import deepcopy
 

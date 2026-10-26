@@ -1,6 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Native single-attempt attachment access self-reports, not accuracy scores."""
+"""Typed media test calls: ask the model whether it can read an attachment.
+
+Each agent below sends one generated attachment (image, audio, video or PDF)
+through the normal Predict path and asks for a strict boolean. The answer is
+the model's own report of whether it could read the attachment, not a measure
+of how accurately it understood it. Each test call is made once, with no
+retries. The ``access`` method docstrings are the prompts sent to the model.
+"""
 
 from typing import Annotated
 
@@ -49,7 +56,12 @@ class _DocumentAccess(Agent):
 
 
 async def typed_media(client, kind, *, observe_output_model=None):
-    """The standard Predict media collector attaches each original argument once."""
+    """Run the typed media test call for ``kind``; return ``(response, bool_result)``.
+
+    ``kind`` is "image", "audio", "video" or "pdf". The generated fixture is
+    passed as the method argument, so Predict attaches it exactly once, as it
+    would for a user's media.
+    """
     contracts = {
         "image": (_ImageAccess, Image, png_fixture, "image/png"),
         "audio": (_AudioAccess, Audio, wav_fixture, "audio/wav"),

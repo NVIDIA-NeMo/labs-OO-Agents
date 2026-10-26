@@ -1,9 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Tiny generated fixtures for attachment access checks, never user files.
+"""Media test calls: tiny generated attachments and how to read their results.
 
-These checks describe one request, not permanent model capability. No encoder,
-TTS, file upload, network fetch or additional dependency is required.
+Connect checks whether a model accepts an image, audio clip, video or PDF by
+sending a small attachment generated here; user files are never used. A
+passing check says that one request worked, not that the model will always
+handle that media. Generating the fixtures needs no encoder, text-to-speech,
+upload, network access or extra dependency.
+
+The module also turns failed media test calls into short, safe explanations
+(``exception_reason``, ``reply_failure_reason``, ``explicitly_rejected``) and
+checks that the attachment really reached the request that was sent
+(``media_on_wire``). "Wire" means the request body as actually sent to the
+provider, after the client adapter has translated it.
 """
 
 import base64
@@ -18,6 +27,7 @@ from ._video_fixture import video_fixture
 
 
 def _data_url(mime, data):
+    """Return ``data`` as a base64 ``data:`` URL with the given MIME type."""
     return f"data:{mime};base64," + base64.b64encode(data).decode("ascii")
 
 
@@ -80,7 +90,13 @@ def pdf_fixture():
 
 
 def media_content(kind, style):
-    """Return planned attachment content or an honest local skip reason."""
+    """Build the message content for a media test call of ``kind`` on ``style``.
+
+    Returns ``(content, None, None)`` where ``content`` is a text question plus
+    one attachment block in the format expected by that API style. If NOOA
+    cannot send this kind of media on ``style``, returns ``(None, None,
+    reason)`` with the reason the check is skipped, without sending anything.
+    """
     from nooa.media_policy import implemented_input_kinds, unsupported_input_reason
 
     if kind not in implemented_input_kinds(style):
@@ -124,7 +140,14 @@ def media_content(kind, style):
 
 
 def exception_reason(record, kind, exc):
-    """Use only status/type evidence, never credential-bearing exception text."""
+    """Explain why a media test call that raised ``exc`` did not confirm support.
+
+    Uses only the probe ``record`` (timeout, status code, finish reason), the
+    HTTP status seen by Connect's response hook, and exception class names.
+    Exception messages are never included, because they may contain URLs or
+    credentials. Returns a sentence ending in "<kind> support was not
+    confirmed".
+    """
     connection_error = False
     current = exc
     for _ in range(6):
@@ -137,11 +160,13 @@ def exception_reason(record, kind, exc):
     elif isinstance(observed_status := getattr(exc, "_connect_http_status", None), int) and not (
         200 <= observed_status < 300
     ):
-        # Response-hook evidence is authoritative even if SDK translation chains
-        # a connection error. status_code alone may be a synthetic transport 500.
+        # The status seen by Connect's response hook is trusted even if the SDK
+        # wrapped the error as a connection error. The exception's status_code
+        # alone is not, because some SDKs report transport failures as HTTP 500.
         cause = f"Service returned HTTP {observed_status}"
     elif connection_error:
-        # SDKs can assign synthetic HTTP 500 to transport failures.
+        # Checked before status_code because SDKs can report transport failures
+        # as HTTP 500.
         cause = "Could not connect to the service"
     elif record.get("request_accepted") is True:
         cause = {
@@ -160,14 +185,20 @@ def exception_reason(record, kind, exc):
             if error == "ReasoningReplayError"
             else "Request failed"
         )
-        # Exception class identifiers are safe; exception messages/URLs are not.
+        # Class names are safe to show; exception messages and URLs are not.
         if cause == "Request failed" and re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]{0,79}", error):
             cause += f" ({error})"
     return f"{cause}; {kind} support was not confirmed"
 
 
 def reply_failure_reason(kind, record):
-    """Explain missing evidence without retaining reply text or scoring content."""
+    """Explain why a completed media test call did not confirm support.
+
+    Based only on fields of the probe ``record`` (finish reason, whether a
+    final answer was seen, whether the typed result validated, whether the
+    attachment and settings were seen in the sent request). The reply text is
+    neither stored nor judged here.
+    """
     finish = record.get("finish_reason")
     if finish == "length":
         cause = "Reply reached the token limit"
@@ -189,7 +220,14 @@ def reply_failure_reason(kind, record):
 
 
 def explicitly_rejected(exc, kind):
-    """Only a media-specific provider rejection, not a generic HTTP 400."""
+    """Return True if ``exc`` is the provider refusing this kind of media.
+
+    Requires HTTP 400/415/422 and an error message that is specifically about
+    the media (or the content part used to send it), for example "image input
+    is not supported" or "Unsupported content part type: 'file'". A generic
+    400, or an error about another parameter (model, max_tokens, ...), does
+    not count.
+    """
     status = getattr(exc, "_connect_http_status", getattr(exc, "status_code", None))
     if status not in {400, 415, 422}:
         return False
@@ -208,8 +246,9 @@ def explicitly_rejected(exc, kind):
         "api_key",
     }:
         return False
-    # Match a statement about the media/input itself. A media-looking model
-    # name plus an unrelated 'invalid' parameter is not explicit rejection.
+    # Only match statements about the media input itself: a model name that
+    # contains e.g. "vision" next to an unrelated "invalid" parameter must not
+    # count as a rejection.
     names = {
         "image": r"images?|vision inputs?",
         "audio": r"audio|wav",
@@ -246,11 +285,15 @@ def explicitly_rejected(exc, kind):
 
 
 def media_on_wire(kind, probe_body, wire):
-    """Verify the generated attachment survived projection, not just its answer.
+    """Return True if the generated attachment is present in the request sent.
 
-    Inspect public message-content blocks only, never request text/tool arguments.
-    Adapters may translate wrappers (image_url -> source/input_image, file ->
-    document/input_file); the exact generated base64 payload must still be there.
+    ``probe_body`` is the request Connect built and ``wire`` the request body
+    actually sent. A correct answer is not enough: the attachment must have
+    reached the provider. Both bodies must contain exactly one attachment
+    block of ``kind`` in their message content, and both must carry the same
+    base64 data. Client adapters may rename the wrapper (``image_url`` ->
+    ``source``/``input_image``, ``file`` -> ``document``/``input_file``), so only
+    the data is compared. Message text and tool arguments are not searched.
     """
     from nooa.unifiedllm.media_inputs import attachment_kind
 
@@ -266,8 +309,8 @@ def media_on_wire(kind, probe_body, wire):
                         yield block
 
     def payloads(block):
-        # Only documented attachment slots; matching in a text notice is not
-        # proof that a provider received media.
+        # Only look in the documented attachment fields: the data appearing in
+        # some text would not prove the provider received it as media.
         nodes = [block]
         for key in ("image_url", "video_url", "input_audio", "source", "file"):
             if isinstance(block.get(key), dict):

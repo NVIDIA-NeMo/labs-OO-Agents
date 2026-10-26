@@ -1,6 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Small fresh native decision fixtures, not a model evaluation suite."""
+"""Decision test calls: small fixed questions sent through the decision client.
+
+Each fixture builds a fresh ``Agent`` with a ``DecideStrategy`` method and
+makes one real decision call, to check that the configured decision model
+answers in the expected structure. These are connection checks, not a model
+quality evaluation.
+
+The pydantic result models and fixture method docstrings below are part of
+the prompts sent to the model; ``case`` repeats the method docstrings.
+"""
 
 import io
 from contextlib import redirect_stderr, redirect_stdout
@@ -70,6 +79,10 @@ class _DecisionFixture(Agent):
 
 
 def case(name):
+    """Return ``(method_name, result_type, guidance, inputs)`` for fixture ``name``.
+
+    Raises ValueError for an unknown fixture name.
+    """
     if name == "routing":
         return (
             "routing",
@@ -102,7 +115,11 @@ def case(name):
 
 
 def planned_body(name):
-    """Synthetic preview with no encoded image, URL or credentials."""
+    """Preview the decision request a fixture would send, for display to the user.
+
+    Contains the request state and questions only: no encoded image, URL or
+    credentials.
+    """
     _, result_type, guidance, inputs = case(name)
     schema = compile_decision_schema(result_type, guidance)
     request = schema.request(inputs, media_inputs=["image"] if name == "media:image" else [])
@@ -113,10 +130,17 @@ def planned_body(name):
 
 
 async def typed_decision(client, name):
-    """Run an actual Agent/DecideStrategy call, capturing only this response."""
+    """Run decision fixture ``name`` against ``client``; return ``(response, facts)``.
+
+    Exactly one decision call is allowed (a second raises RuntimeError). The
+    returned facts say whether the typed result validated and whether the
+    answer was correct, plus the typed result and, for ``routing``, the
+    model's probability for ``True``.
+    """
     method, _, _, inputs = case(name)
-    # Agent construction may announce automatic tracing. This synchronous scope
-    # keeps the library silent and cannot swallow concurrent async task output.
+    # Agent construction may print tracing setup messages. The redirect only
+    # covers this synchronous code, so it cannot swallow output from other
+    # concurrently running async tasks.
     with hooks_scope(_NoHooks(), compose=False), use_span(INVALID_SPAN):
         with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
             agent = _DecisionFixture(decision_model=client)

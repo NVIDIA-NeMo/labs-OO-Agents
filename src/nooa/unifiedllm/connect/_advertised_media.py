@@ -1,15 +1,23 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Small, bounded mappings of published metadata, never runtime permissions.
+"""Read the media inputs a model listing says a model accepts.
 
-Only documented field paths are read. Names/descriptions, output modalities,
-model-family guesses and arbitrary nested flags are not input evidence.
+A provider's model listing (for example OpenRouter ``/models`` or the Anthropic
+Models API) may say which input kinds a model accepts (images, PDFs, ...).
+Connect uses this only to *suggest* media settings to the user; it never turns
+media permissions on by itself.
+
+Only a few documented fields are read, and each value is size-checked first.
+Model names, descriptions, output modalities, guesses from the model family and
+other nested flags are deliberately ignored, because they do not reliably say
+what input the model accepts.
 """
 
 from nooa.media_policy import ALL_INPUT_KINDS as FORMATS
 
 
 def _strings(value):
+    """Return ``value`` as a list if it is a short list of short printable strings, else None."""
     return (
         list(value)
         if isinstance(value, list)
@@ -22,7 +30,13 @@ def _strings(value):
 
 
 def media_metadata(metadata):
-    """Detach only known media fields from one selected model (no recursion)."""
+    """Copy only the known media fields out of one model listing entry.
+
+    ``metadata`` is the listing record of the selected model. The result holds at
+    most ``architecture.input_modalities``, ``input_modalities`` and the
+    ``capabilities.image_input``/``pdf_input`` support flags, each validated.
+    Other fields are dropped, and nested values are not searched.
+    """
     if not isinstance(metadata, dict):
         return {}
     result = {}
@@ -34,8 +48,8 @@ def media_metadata(metadata):
     modalities = _strings(metadata.get("input_modalities"))
     if modalities is not None:
         result["input_modalities"] = modalities
-    # Anthropic Models API / official SDK ModelCapabilities (0.109.2):
-    # image_input/pdf_input are CapabilitySupport objects, not bare booleans.
+    # In the Anthropic Models API (official SDK ModelCapabilities, 0.109.2),
+    # image_input/pdf_input are CapabilitySupport objects, not plain booleans.
     capabilities = metadata.get("capabilities")
     if isinstance(capabilities, dict):
         flags = {}
@@ -57,12 +71,27 @@ def advertised_media_suggestions(
     decision_image_transport="json",
     typesafe_danger_zone_images=False,
 ):
-    """Report advertised inputs and check limits; do not accept or enable them.
+    """Summarise which media inputs the listing advertises, without enabling any.
 
-    ``metadata`` is one selected model, ``source`` its listing URL/label. Both
-    inputs are bounded. ``suggested`` is constrained to implemented permissions;
-    ``checkable`` is narrower and is not authorization to run generated checks.
-    Generic ``file`` does not establish PDF support.
+    ``metadata`` is the listing record of the selected model and ``source`` is
+    the listing URL or a label for it; overly long or malformed values are
+    replaced by safe defaults. ``api_style``/``entry`` decide which client
+    interface would send the media, and the two image-transport arguments say
+    whether the TypeSafe decision client may send images.
+
+    Returns a dict with:
+
+    - ``advertised``: input kinds the listing claims.
+    - ``suggested``: advertised kinds that NOOA can actually send on this
+      interface.
+    - ``checkable``: suggested kinds that Connect can also verify with a test
+      call. Being listed here does not mean the test call may run without the
+      user's consent.
+    - ``unavailable_checks``: kind -> reason why it cannot be tested.
+    - ``evidence``: the listing fields that were used, and ``notes`` for the user.
+    - ``permissions_changed``: always False; this function only reports.
+
+    A generic ``file`` input modality does not count as PDF support.
     """
     facts = media_metadata(metadata)
     evidence = {}

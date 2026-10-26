@@ -1,6 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Bounded reasoning facts and known controls, never model-name inference."""
+"""Reasoning ("thinking") options read from the Anthropic Models API.
+
+The Anthropic Models API lists, per model, whether extended thinking and effort
+levels are supported (``capabilities.thinking``/``capabilities.effort``). This
+module copies those fields and turns them into reasoning levels the user can
+pick. Nothing is guessed from the model name.
+"""
 
 from copy import deepcopy
 
@@ -8,10 +14,13 @@ EFFORTS = ("low", "medium", "high", "xhigh", "max")
 
 
 def reasoning_metadata(model):
-    """Detach published Anthropic ModelCapabilities paths only.
+    """Copy the reasoning-related ``capabilities`` fields of one Anthropic model record.
 
-    Missing, empty and false remain distinct. No arbitrary request blocks are
-    accepted. Advertised facts are not evidence of successful inference.
+    Only the documented ``thinking``, ``effort`` and ``structured_outputs``
+    fields are kept, each reduced to its boolean ``supported`` flags. A missing
+    field, an empty field and ``supported: False`` stay distinguishable. Other
+    content of the record is never copied. These are claims from the listing,
+    not proof that a request using them will work.
     """
     caps = model.get("capabilities") if isinstance(model, dict) else None
     if not isinstance(caps, dict):
@@ -47,7 +56,12 @@ def reasoning_metadata(model):
 
 
 def metadata_fields(model):
-    """Field-level provenance for precisely the normalized capability paths."""
+    """Map each field kept by ``reasoning_metadata`` to its path in the listing response.
+
+    For example ``capabilities.thinking.supported`` maps to
+    ``data[].capabilities.thinking.supported``, so the UI can say where each
+    value came from.
+    """
     fields = {}
 
     def walk(value, path):
@@ -63,7 +77,12 @@ def metadata_fields(model):
 
 
 def native_metadata_matches(model, *, model_id, api_style, source, endpoint):
-    """Exact native ID and same Messages base, allowing its equivalent /v1 spelling."""
+    """Return True if ``model`` describes exactly this model on this endpoint.
+
+    Requires the Anthropic API style, ``model["id"] == model_id``, and that
+    ``source`` (the listing URL) is the ``/models`` URL of ``endpoint``, with or
+    without the ``/v1`` prefix.
+    """
     return (
         api_style == "anthropic"
         and isinstance(model, dict)
@@ -78,9 +97,18 @@ def native_metadata_matches(model, *, model_id, api_style, source, endpoint):
 
 
 def native_levels(model, *, model_id, api_style, source, endpoint):
-    """Compile exact selected, same-source native facts, not foreign catalogues.
+    """Build the reasoning levels offered for ``model`` from its Anthropic listing.
 
-    Manual-only thinking offers a minimal On patch, never invented effort levels.
+    Returns a dict of level name -> request settings to merge into requests,
+    ``{}`` if the listing says thinking is not supported, or ``None`` if there
+    is no usable information (wrong source or model, or no levels found).
+    Only the listing of the selected model from the same endpoint is used,
+    never a third-party catalogue.
+
+    Adaptive thinking with effort support yields one level per supported
+    effort. A model with only manual ("enabled") thinking gets a single "on"
+    level with a small fixed token budget; effort levels are not invented. An
+    "off" level is added when disabling thinking is supported.
     """
     if not native_metadata_matches(
         model, model_id=model_id, api_style=api_style, source=source, endpoint=endpoint

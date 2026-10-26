@@ -1,6 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Local installation references and bounded, non-secret failure observations."""
+"""Diagnostic helpers for Connect reports.
+
+- ``scrub_report`` removes API key values from a report before it is shown.
+- ``installation_context`` tells the user (or an assisting agent) where the
+  Connect documentation for this installation can be found.
+- ``timeout_details`` describes a timed-out test call using exception class
+  names only, never exception messages, which may contain secrets.
+"""
 
 import json
 import os
@@ -10,7 +17,12 @@ from pathlib import Path
 
 
 def scrub_report(value, *, api_key=None, api_key_env=None):
-    """Remove active credential values throughout a report, including mapping keys."""
+    """Return ``value`` with every occurrence of the API key replaced by ``[redacted]``.
+
+    The key is ``api_key`` and/or the current value of the environment variable
+    named ``api_key_env``. Strings are searched recursively through dicts
+    (keys and values), lists and tuples; tuples come back as lists.
+    """
     secrets = tuple(s for s in (api_key, os.environ.get(api_key_env or "")) if s)
 
     def scrub(item):
@@ -28,6 +40,15 @@ def scrub_report(value, *, api_key=None, api_key_env=None):
 
 
 def installation_context():
+    """Describe where to find the Connect skill and docs for this installation.
+
+    If the running package sits inside a source checkout that contains the
+    skill and docs files, their absolute paths are returned. Otherwise the
+    result names the exact source revision (the installed commit, or the
+    release tag for a release version) and a ``git`` command to fetch it, so
+    readers never fall back to documentation from ``main`` that may not match
+    the installed code.
+    """
     from nooa import _version
 
     package = Path(_version.__file__).resolve().parent
@@ -77,7 +98,14 @@ def installation_context():
 
 
 def timeout_details(exc, *, deadline_expired=False):
-    """Inspect exception types, not provider messages (which may contain secrets)."""
+    """Return timeout details for ``exc``, or ``{}`` if it was not a timeout.
+
+    A failure counts as a timeout if Connect's own deadline expired
+    (``deadline_expired``) or any exception class name in the cause/context
+    chain contains "timeout". Only class names are inspected, because provider
+    messages may contain secrets. The chain walk stops after 6 exceptions or
+    when a class name repeats.
+    """
     chain = []
     current = exc
     while current is not None and len(chain) < 6 and type(current).__name__ not in chain:

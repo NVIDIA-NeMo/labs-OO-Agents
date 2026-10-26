@@ -1,10 +1,23 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Current-configuration trust, separate from historical evidence and permissions.
+"""Decide whether a test result still applies to a model entry's current settings.
 
-Snapshots are versioned, detached, JSON-only descriptions of effective behavior.
-They contain credential *declarations*, never credential values or their hashes.
-No environment reads, client construction, discovery or other I/O happens here.
+When a test call runs, its record is "stamped" with a *configuration
+snapshot*: a JSON description of everything that affects how requests are
+sent (model, endpoint URL, client type, parameters after applying the
+reasoning level, retry policy, ...), plus a SHA-256 fingerprint of it. Later,
+the snapshot is rebuilt from the entry; if it differs, the result is out of
+date ("not current"): it is kept as history but no longer counts as passing.
+Whether media inputs are permitted is a separate setting and does not affect
+the snapshot.
+
+Snapshots name the environment variable holding the API key, never the key or
+a hash of it. This module reads no environment variables, builds no clients
+and does no I/O.
+
+The "route scope" (``effective_route_scope``) is a smaller snapshot that
+identifies just the endpoint and model; it decides whether stored model
+listing facts still apply.
 """
 
 import hashlib
@@ -15,8 +28,9 @@ from urllib.parse import urlsplit, urlunsplit
 from nooa.unifiedllm.reasoning import ReasoningConfig, apply_reasoning_level
 from nooa.unifiedllm.retry_config import RetryConfig
 
-# Match registry.client_from_config's forwarded behavior fields. Declarations,
-# dormant levels, catalogue provenance and media permission lists are not calls.
+# Entry fields that registry.client_from_config passes on to requests. Other
+# fields (key declarations, unselected reasoning levels, catalogue records,
+# media permissions) do not change requests and are not part of the snapshot.
 _PARAMS = (
     "temperature",
     "top_p",
@@ -47,6 +61,11 @@ _SECRETS = {
 
 
 def _safe(value):
+    """Return a JSON-only copy of ``value``; raise ValueError on secrets or objects.
+
+    Dicts with a credential-like key (``api_key``, ``authorization``, ...) and
+    values that are not plain JSON types are rejected.
+    """
     if isinstance(value, dict):
         if any(str(k).lower().replace("-", "_") in _SECRETS for k in value):
             raise ValueError("Verification snapshots cannot contain credentials")
@@ -59,10 +78,17 @@ def _safe(value):
 
 
 def _route(entry):
+    """Return the normalised request URL of ``entry``, or None if it has none.
+
+    Uses the field the entry's client type actually sends to. Scheme and host
+    are lower-cased and trailing slashes removed; for the Anthropic style a
+    trailing ``/v1`` is removed too, since both spellings reach the same API.
+    Raises ValueError if the URL contains user info, a query or a fragment.
+    """
     if entry.get("client_type") == "decision":
         value = entry.get("endpoint")
     elif entry.get("client_type") == "responses":
-        # Responses forwards base_url as api_base at dispatch.
+        # The Responses client sends base_url as api_base, so prefer it.
         value = entry.get("base_url") or entry.get("api_base")
     else:
         value = entry.get("api_base") or entry.get("base_url")
@@ -78,10 +104,15 @@ def _route(entry):
 
 
 def effective_route_scope(entry: dict) -> dict:
-    """Non-secret endpoint-fact identity, independent of behavioral parameters.
+    """Return the route scope of ``entry``: the endpoint and model it sends requests to.
 
-    Never derive an inference route from a catalogue/models URL. Scope is the
-    current model/client/normalized inference route and credential declaration.
+    Contains the model name, the normalised request URL, client type, API
+    style, custom provider and the name of the API key environment variable.
+    Request parameters (temperature, reasoning, ...) are not included, so
+    changing them keeps stored endpoint facts valid. The URL is always the
+    request URL, never a catalogue or model listing URL.
+
+    Raises ValueError if the entry holds an API key value or a client object.
     """
     if entry.get("api_key") is not None or entry.get("client") is not None:
         raise ValueError("Route scope requires a credential declaration and no client object")
@@ -98,14 +129,18 @@ def effective_route_scope(entry: dict) -> dict:
 
 
 def _retry_policy(entry):
-    # Mirror registry and client defaults, not the check's no-retry override.
+    """Return the entry's retry policy as JSON, resolved the way the registry does.
+
+    This is the policy normal use would apply, not the no-retry setting the
+    test calls themselves use. Raises ValueError if it has a callback.
+    """
     value = entry.get("retry_config")
     if "retry_config" in entry and (value is None or value is False):
         retry = RetryConfig(max_retries=0, rate_limit_extra_retries=0)
     elif isinstance(value, dict):
         retry = RetryConfig(**value)
     else:
-        retry = RetryConfig()  # Registry ignores invalid chat-policy declarations.
+        retry = RetryConfig()  # The registry also ignores invalid values here.
     if retry.on_retry is not None:
         raise ValueError("Verification requires JSON retry configuration, not callbacks")
     policy = retry.model_dump(
@@ -119,14 +154,24 @@ def _retry_policy(entry):
 
 
 def effective_config_snapshot(entry: dict, check: str = "routing") -> dict:
-    """Resolve a configured candidate exactly once, without resolving credentials.
+    """Return the configuration snapshot of ``entry`` for the test ``check``.
 
-    reasoning_default documents provider defaults; only reasoning_level selects.
-    A level check selects its own patch independently of the baseline selection.
-    Whole patch values replace constructor defaults (including shadowed extra_body).
-    Media checks force their own one-format permission at execution, so neither
-    baseline trust nor independent media evidence depends on media_inputs grants.
-    Call configure_entry first to resolve Connect's safe cap/context/retention defaults.
+    The snapshot describes how requests would be sent (see the module
+    docstring); the API key itself is never read. Notes:
+
+    - The reasoning level applied is ``entry["reasoning_level"]``, or for a
+      ``level:<name>`` check, that level. ``reasoning_default`` only records
+      what the provider does by default and selects nothing.
+    - A level's settings replace the matching parameters as whole values
+      (an ``extra_body`` from the level replaces the entry's ``extra_body``).
+    - Media checks enable just their own media kind when they run, so
+      ``media_inputs`` is not part of the snapshot.
+    - Decision entries keep only ``timeout`` and, for media checks, their
+      image transport settings.
+
+    Call ``configure_entry`` first so Connect's default reply limit, context
+    window and reasoning replay settings are filled in. Raises ValueError if
+    the entry holds an API key value, a client object or non-JSON values.
     """
     if entry.get("api_key") is not None or entry.get("client") is not None:
         raise ValueError("Verification requires a credential declaration and no client object")
@@ -146,11 +191,12 @@ def effective_config_snapshot(entry: dict, check: str = "routing") -> dict:
             {},
             level,
         )
-        # The registry constructs CompletionClient/ResponsesClient (LiteLLM),
-        # not DirectSDKClient. The declared transport label does not select that
-        # backend. Its OpenAI/Azure SDK dispatch and Responses HTTP adapter
-        # flatten extra_body last; native Anthropic keeps it nested. Preserve
-        # layers conservatively for other, unverified provider adapters.
+        # The registry builds CompletionClient/ResponsesClient (LiteLLM), not
+        # DirectSDKClient, whatever the entry's "transport" label says. For
+        # OpenAI/Azure and the Responses API, LiteLLM merges extra_body into
+        # the top level of the request last, so do the same here; Anthropic
+        # keeps it nested. Other providers have not been verified, so their
+        # extra_body is kept nested as written.
         provider = (
             entry.get("custom_llm_provider") or (entry.get("model_name") or "").split("/", 1)[0]
         )
@@ -182,11 +228,12 @@ def effective_config_snapshot(entry: dict, check: str = "routing") -> dict:
 
 
 def effective_config_fingerprint(entry: dict, check: str = "routing") -> str:
-    """SHA-256 of canonical non-secret effective configuration (not key material)."""
+    """Return the SHA-256 hex digest of the configuration snapshot (contains no keys)."""
     return _fingerprint(effective_config_snapshot(entry, check))
 
 
 def _fingerprint(snapshot):
+    """Return the SHA-256 hex digest of ``snapshot`` as canonical JSON."""
     return hashlib.sha256(
         json.dumps(snapshot, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
     ).hexdigest()
@@ -195,11 +242,16 @@ def _fingerprint(snapshot):
 def stamp_verification(
     record: dict, entry: dict, check: str, *, timeout_seconds: float | None = None
 ) -> None:
-    """Stamp configured dependencies at execution, never on import/reconfiguration.
+    """Mark ``record`` as a current result of ``check`` for ``entry`` (in place).
 
-    Timeout and retry policy are save-identity dependencies, not claims that the
-    configured policies were exercised: checks use bounded timeouts and zero
-    retries. Their execution policy is separate evidence.
+    Call this only when the test call has actually run, never when importing
+    or editing an entry. Stores the snapshot, its fingerprint and
+    ``verification_current = True``.
+
+    The snapshot includes the configured timeout and retry policy so that
+    changing them makes the result out of date; that does not mean they were
+    tested. Test calls run with their own timeout (``timeout_seconds``) and no
+    retries, which is recorded separately in ``verification_execution``.
     """
     snapshot = effective_config_snapshot(entry, check)
     record["verification_config"] = snapshot
@@ -214,10 +266,15 @@ def stamp_verification(
 
 
 def verification_is_current(record: dict, entry: dict, check: str = "routing") -> bool:
-    """Compare the tested dependencies to CURRENT candidate, not a saved boolean."""
+    """Return True if ``record`` was stamped with ``entry``'s current configuration.
+
+    The snapshot is rebuilt from the entry and compared; a stored
+    ``verification_current`` flag is not trusted. Returns False for
+    unstamped records or entries whose snapshot cannot be built.
+    """
     snapshot = record.get("verification_config")
     if not isinstance(snapshot, dict) or snapshot.get("version") != 1:
-        return False  # Unstamped legacy evidence is historical, even unchanged.
+        return False  # Older records without a snapshot never count as current.
     try:
         current = effective_config_snapshot(entry, check)
         return snapshot == current and record.get("verification_fingerprint") == _fingerprint(
@@ -228,10 +285,13 @@ def verification_is_current(record: dict, entry: dict, check: str = "routing") -
 
 
 def invalidate_verification(entry: dict) -> dict:
-    """Return a detached candidate with per-check current flags recomputed.
+    """Return a copy of ``entry`` with each test result's "current" flag recomputed.
 
-    Keep independent/historical facts, including false access evidence. Never
-    stamp old records or rewrite their outcomes to turn permission into proof.
+    Also recomputes the summary lists ``requests_accepted`` and
+    ``reasoning_observed`` from current results only. Outcomes and other
+    facts are kept as they are (including negative results such as a model
+    reporting it could not read an attachment); old records are never
+    re-stamped, so permitting a feature never turns into a passed test.
     """
     result = deepcopy(entry)
     provenance = result.get("provenance") or {}
@@ -256,9 +316,13 @@ def invalidate_verification(entry: dict) -> dict:
 
 
 def routing_allows_save(tested_entry: dict, candidate: dict) -> bool:
-    """Fresh genuine baseline (or decision routing) for the exact save candidate.
+    """Return True if ``tested_entry``'s routing test passed for exactly ``candidate``.
 
-    Manual/budget-untested saving remains a frontend policy, not fresh trust.
+    The routing result must be current for ``candidate``'s configuration. For
+    decision entries it must be an accepted decision call; otherwise the
+    typed text test call must pass (``text_baseline_passed``). Saving without
+    a passing test (manually, or when the budget did not allow testing) is
+    decided by the user interface, not here.
     """
     from ._records import text_baseline_passed
 
@@ -271,11 +335,20 @@ def routing_allows_save(tested_entry: dict, candidate: dict) -> bool:
 
 
 def save_verification(entry: dict) -> tuple[dict, dict]:
-    """Current save confidence, not command/write success or whole-model approval.
+    """Summarise how well the entry about to be saved has been tested.
 
-    verified means a genuine current typed baseline and all recorded optional
-    checks passed; partial retains a good baseline with optional gaps/failures.
-    Unstamped/stale evidence never becomes current merely by being imported.
+    Returns ``(summary, checks)``. ``summary["state"]`` is:
+
+    - "verified": the typed text test is current and passed, and every other
+      recorded or required check (selected media kinds and reasoning level)
+      passed;
+    - "partial": the text test passed but some other check is missing or failed;
+    - "failed": a current routing result exists but did not pass;
+    - "untested": there is no current routing result.
+
+    This describes the recorded checks only; it is not a statement about the
+    whole model, nor about whether the save itself succeeded. Results that
+    are out of date or have no snapshot never count, even after an import.
     """
     from ._records import check_status
 

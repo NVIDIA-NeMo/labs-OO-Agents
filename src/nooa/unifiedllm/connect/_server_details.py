@@ -1,6 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Bounded selected-model facts. No inference, SDK dispatch, or global/key cache."""
+"""Fetch the facts an endpoint publishes about one selected model ("server details").
+
+``server_details`` reads the endpoint's model listing (``GET /models``), the
+public OpenRouter catalogue, and optionally LiteLLM's model-group endpoint, and
+keeps a fixed set of fields (limits, modalities, reasoning options, ...) for
+the one model the user selected. It never sends a model request, does not go
+through a provider SDK, and keeps no cache between calls or across API keys.
+
+Each fact is recorded with its source URL and the path of the field it was
+read from (for example ``data[].context_length``), so the UI can show where a
+value came from. Every download is limited in size and time.
+"""
 
 from __future__ import annotations
 
@@ -15,10 +26,16 @@ import httpx
 
 @dataclass(frozen=True)
 class ModelDetails:
-    """Allowlisted facts and field-level evidence, separate from request settings.
+    """Facts about one model returned by ``server_details``.
 
-    ``requests`` counts attempted GETs in this call (not a reused listing).
-    Missing metadata is an ordinary result, never an inference-test failure.
+    ``model`` holds the accepted facts (always including ``id``); these are
+    descriptions, not request settings. ``records`` lists where each fact came
+    from (source URL, schema, field paths) and ``notices`` holds messages for
+    the user. ``requests`` counts the GET requests made by this call (a
+    listing passed in by the caller is not counted). ``catalogue_model`` is the
+    OpenRouter catalogue record chosen for extra metadata, if any.
+
+    Having no metadata is a normal result, not a failed model test.
     """
 
     model_id: str
@@ -33,7 +50,11 @@ _INHERIT_KEY = object()
 
 
 def token_limit(value):
-    """Published SDK schemas may encode token ceilings as integral floats."""
+    """Return ``value`` as a positive int token limit, or None if it is not one.
+
+    Whole-number floats (e.g. ``8192.0``) are accepted because some published
+    SDK schemas type token limits as numbers; booleans are rejected.
+    """
     import math
 
     if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -44,10 +65,12 @@ def token_limit(value):
 
 
 def positive_integer(value):
+    """Return True if ``value`` is a valid token limit (see ``token_limit``)."""
     return token_limit(value) is not None
 
 
 def safe_string(value, maximum=500):
+    """Return True for a non-blank string of up to ``maximum`` chars with no control chars."""
     return (
         isinstance(value, str)
         and bool(value.strip())
@@ -57,11 +80,17 @@ def safe_string(value, maximum=500):
 
 
 def string_list(value):
+    """Return True for a list of at most 100 safe strings of up to 200 chars each."""
     return isinstance(value, list) and len(value) <= 100 and all(safe_string(v, 200) for v in value)
 
 
 def listing_facts(item):
-    """Shape only published listing identity, limits and descriptive hints."""
+    """Copy the known, validated fields of one model listing record.
+
+    Keeps the ID, token limits, names/descriptions, modality and parameter
+    lists, media input fields and reasoning capabilities. Everything else in
+    the record is dropped.
+    """
     from ._advertised_media import media_metadata
 
     result = {"id": item["id"]}
@@ -102,7 +131,15 @@ def listing_facts(item):
 
 
 def openrouter_facts(item):
-    """Public catalogue facts only, not provider routing/configuration objects."""
+    """Copy the known, validated fields of one OpenRouter catalogue record.
+
+    Keeps the ID, name, description, context length, the top provider's
+    limits, supported parameters, media inputs, output modalities, reasoning
+    efforts, default ``max_tokens`` and prompt/completion prices. Provider
+    routing and configuration objects are not copied.
+
+    Raises ValueError if the record has no valid string ``id``.
+    """
     import math
 
     from ._advertised_media import media_metadata
@@ -168,7 +205,15 @@ def openrouter_facts(item):
 
 
 async def bounded_json(client, url, *, headers=None, params=None, byte_budget=None):
-    """One GET, at most 5 MiB; no redirects, retries or provider body errors."""
+    """Send one GET and return the JSON object in the response.
+
+    The body is limited to 5 MiB. ``byte_budget``, if given, is a one-item list
+    holding the bytes still allowed across several calls; it is decreased as
+    data arrives. Redirects and retries are up to ``client``'s settings (the
+    callers disable them). Raises ValueError with a fixed message on an HTTP
+    error, an oversized body, invalid JSON or a non-object result; the error
+    body sent by the provider is never included.
+    """
     async with client.stream("GET", url, headers=headers or {}, params=params or {}) as response:
         if not response.is_success:
             raise ValueError(f"Model details unavailable (HTTP {response.status_code}).")
@@ -190,10 +235,17 @@ async def bounded_json(client, url, *, headers=None, params=None, byte_budget=No
 
 
 def merge_group(model, group, source):
-    """Group ceilings only tighten listing limits; false flags remain descriptive.
+    """Merge one LiteLLM model-group record into ``model`` and return its record.
 
-    LiteLLM group limits/flags aggregate backends. They are not route permissions
-    or request parameter templates. ``evaluation`` is a class hint, not a URL.
+    A LiteLLM model group combines several backend deployments, so its limits
+    and ``supports_*`` flags describe the group as a whole. Its token limits
+    can only lower the limits already in ``model``, never raise them. The
+    flags and parameter lists are stored as information only; they do not
+    enable features or become request parameters. ``mode == "evaluation"``
+    marks the model as a decision model unless a type is already set.
+
+    ``model`` is updated in place. The returned record lists the facts taken
+    from the group, the field paths, and ``source`` (the group URL).
     """
     facts, fields = {}, {}
     for name in ("max_input_tokens", "max_output_tokens"):
@@ -207,7 +259,8 @@ def merge_group(model, group, source):
             )
             facts[name] = value
             fields[name] = "data[]." + name
-    # A listing total/input bound must never be raised by aggregate group data.
+    # The input limit may not exceed the model's total context limit, even
+    # if the group reports a larger one.
     contexts = [
         token_limit(model[k])
         for k in ("context_window", "context_length")
@@ -262,24 +315,43 @@ async def server_details(
     litellm=False,
     catalogue_id=None,
 ) -> ModelDetails:
-    """Fetch server facts for one exact model, optionally validate LiteLLM metadata.
+    """Collect the published facts about model ``model_id`` on ``endpoint``.
 
-    Reuse a ``Discovery`` from this exact API base and listing URL without another
-    models GET. Native OpenAI/Anthropic use the existing listing/header contracts;
-    OpenAI identity-only lists leave limits unknown. ``litellm=True`` authorizes
-    a public OpenAPI product check and, only if it advertises the GET contract,
-    one authenticated group GET. The configured base must be root or end in /v1;
-    remove only that suffix, preserving a deployment prefix. No arbitrary URL
-    guessing, schema-provided servers, admin endpoints or cross-origin keys.
-    Decisions need an explicit listing URL. False flags/efforts stay descriptive.
-    For the exact OpenRouter API base, public catalogue records are fetched with
-    no key; ``catalogue_id`` may explicitly select an additional metadata mapping
-    in that same GET, without changing the selected model facts or wire ID.
-    Each component is bounded to 30 seconds (60 seconds overall), 5 MiB,
-    and 5,000 records. Reused records must come from the caller's current key
-    scope; the adapter maintains no shared visibility/key cache.
-    ``metadata=False`` is a complete zero-GET bypass, including supplied records.
-    There is no persistent cache; callers can reuse this invocation's result.
+    Sources, in order:
+
+    - OpenRouter: if ``endpoint`` is the OpenRouter API, the public catalogue
+      is read without an API key. ``catalogue_id`` may name a different
+      catalogue record whose metadata is returned as ``catalogue_model``; it
+      does not change the selected model's facts or the model ID sent in
+      requests.
+    - Model listing: ``listing`` (a ``Discovery`` result from ``discover``) is
+      reused if it came from this API base and listing URL; otherwise the
+      listing is fetched, using ``models_url``/``listing_style`` if given.
+      OpenAI and Anthropic listings are read in their documented formats. An
+      OpenAI listing that only names models leaves the limits unknown.
+      Decision API styles are only listed when ``models_url`` is given.
+    - LiteLLM (``litellm=True``, not for decision styles): first the public
+      ``/openapi.json`` is read to confirm the server is LiteLLM and offers
+      ``GET /model_group/info``; only then is that endpoint called once with
+      the API key. The API base must be the server root or end in ``/v1``;
+      only that suffix is removed, so a deployment path prefix is kept. No
+      other URLs are guessed, server URLs from the schema and admin endpoints
+      are not used, and keys are not sent to another origin.
+
+    ``listing_api_key`` is the key for the listing request; by default the
+    ``api_key`` is used, which is refused if ``models_url`` is on a different
+    origin. Flags saying a feature is unsupported are kept as information
+    only. ``metadata=False`` makes no request at all and ignores ``listing``.
+
+    Limits: 30 seconds for the LiteLLM step (each request 15 seconds), 5 MiB
+    per download and 5,000 group records. The caller must only pass a
+    ``listing`` fetched with the current key; nothing is cached here, but the
+    caller may reuse the returned result. API keys are removed from all
+    returned text.
+
+    Raises ValueError for an invalid model or catalogue ID, a listing from a
+    different connection, or a cross-origin ``models_url`` without an explicit
+    listing key. Failed or unavailable metadata is reported in ``notices``.
     """
     from . import (
         CATALOGUE_URL,
@@ -292,8 +364,8 @@ async def server_details(
     )
 
     def details(*args, **kwargs):
-        # Protect both current credentials at the public library boundary, even
-        # when a metadata string reflects a differently scoped listing key.
+        # Remove both the API key and the listing key from everything
+        # returned, since listing data may echo either one.
         from dataclasses import asdict
 
         from ._diagnostics import scrub_report
@@ -332,7 +404,7 @@ async def server_details(
                 )
         listing_api_key = api_key
     if base + "/models" == CATALOGUE_URL and wanted_url in {None, CATALOGUE_URL}:
-        # Public data for this exact configured route; no inference credential.
+        # The OpenRouter catalogue is public: no API key is sent.
         if listing is None:
             try:
                 models = await catalogue()
@@ -442,7 +514,8 @@ async def server_details(
         except DiscoveryError as exc:
             requests += exc.request_count
             notices.append(str(exc))
-            # Auth failure never triggers a second request with the same key.
+            # Stop here: a failed listing (e.g. rejected key) is not retried
+            # with the same key.
             return details(model_id, selected, (), tuple(notices), requests)
         requests += listing.request_count
     if listing is not None:
@@ -462,7 +535,8 @@ async def server_details(
         if media_metadata(selected):
             selected["media_source"] = source
         fields = {k: "data[]." + k for k in selected if k not in {"id", "media_source"}}
-        # Accept only locally generated allowlisted paths, never arbitrary source URLs.
+        # The listing may say which field a value came from; accept only
+        # these known field paths, never arbitrary text from the record.
         for key, value in (
             raw.get("metadata_fields", {}).items()
             if isinstance(raw.get("metadata_fields"), dict)
@@ -514,7 +588,7 @@ async def server_details(
             requests += 1
             schema = await bounded_json(
                 client, schema_url, byte_budget=byte_budget
-            )  # Public identification: no key.
+            )  # Public schema used to identify the server: no API key.
             info, paths = schema.get("info"), schema.get("paths")
             route = paths.get("/model_group/info") if isinstance(paths, dict) else None
             operation = route.get("get") if isinstance(route, dict) else None

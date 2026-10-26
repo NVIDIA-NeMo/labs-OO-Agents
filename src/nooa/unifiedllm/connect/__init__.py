@@ -1,11 +1,32 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Model onboarding shared by the CLI and TUI; no prompts or terminal output.
+"""Connect: set up and test a model entry, shared by the CLI and TUI.
 
-``plan`` prepares data for approval. ``run`` sends only approved, capped requests
-without network-error retries. ``write`` updates one alias in a registry file. Catalogue limits
-are estimates with sources; acceptance does not prove a reasoning setting was
-obeyed. The runtime reads the result, never these onboarding templates.
+This module holds the logic only; it never prompts the user or prints.
+
+Terms used throughout:
+
+- *Model entry*: one alias in the model registry file (``models.yaml``), a
+  dict such as ``{"model_name": ..., "api_base": ..., "api_style": ...}``.
+- *API style* (or interface): the request format used to talk to the
+  endpoint: ``chat`` (Chat Completions), ``responses`` (OpenAI Responses),
+  ``anthropic`` (Anthropic Messages), or a decision style (``systemone``,
+  ``openai``) whose endpoint is a complete decisions URL.
+- *Model listing*: the endpoint's ``GET /models`` response. The *catalogue* is
+  the public OpenRouter model list, used for estimates.
+- *Probe* or *test call*: one small, capped request that checks part of the
+  configuration (``routing`` is the basic request; others test tools,
+  reasoning levels, media, ...).
+- *Provenance*: the ``entry["provenance"]`` dict that records where each
+  configured value came from and the results of the test calls.
+- *Reply cap*: the maximum number of reply tokens a request may use.
+
+Main steps: ``discover`` lists models; ``plan`` builds the test calls for the
+user to approve; ``run`` sends only the approved calls, each with a reply cap
+and without retries on network errors; ``write`` saves one alias into a
+registry file. Limits from catalogues are estimates and record their source.
+A request being accepted does not prove a reasoning setting was applied. At
+runtime NOOA reads only the saved entry, not the templates used here.
 """
 
 from __future__ import annotations
@@ -63,18 +84,19 @@ from ._verification import (
 )
 
 CATALOGUE_URL = "https://openrouter.ai/api/v1/models"
-# OpenRouter defaults to text output, excluding native decision models.
+# OpenRouter lists only text-output models by default; also ask for decision
+# models.
 OPENROUTER_MODEL_OUTPUTS = "text,decisions"
-# Effectively unlimited: no real check plan approaches this, so an unset
-# --budget-tokens never causes checks to be skipped. A finite sentinel (not
-# float("inf")) keeps every arithmetic site, type annotation, and JSON
-# encoding of a ConnectPlan unchanged.
+# Token budget used when --budget-tokens is not set. It is far above any real
+# test plan, so no test is skipped for budget reasons. A large int is used
+# instead of float("inf") so arithmetic, type hints and the JSON form of a
+# ConnectPlan keep working with ints.
 DEFAULT_CHECK_BUDGET = 10**15
 DEFAULT_REASONING_OUTPUT_TOKENS = 4096
-# Reply cap for the interface discovery probes (one short routing request per
-# API format). Reasoning models spend part of the cap thinking before the
-# visible reply, so a small cap (it was 200) makes them fail with "ran out of
-# reply tokens" before they answer. Must stay within plan()'s 1..4096 range.
+# Reply cap for the interface test calls (one short routing request per API
+# style). Reasoning models spend part of the cap on reasoning before the
+# visible reply, so a small cap (it was 200) made them run out of reply
+# tokens before answering. Must stay within plan()'s allowed range 1..4096.
 DISCOVERY_OUTPUT_TOKENS = 2048
 REASONING_CHECK_PROMPT = """Eight jobs—A, B, C, D, E, F, G and H—must run one at a time.
 Each job runs exactly once.
@@ -96,7 +118,15 @@ ENCRYPTED_REASONING_EXPLANATION = (
 
 
 def _include_rejected(exc: Exception) -> bool:
-    """Recognize a field rejection, never persist provider error text."""
+    """Return True if ``exc`` says the endpoint rejected the ``include`` field.
+
+    Used to detect servers that refuse ``include: ["reasoning.encrypted_content"]``
+    (encrypted reasoning) on the Responses API. Requires HTTP 400/422 and
+    either a structured ``param`` naming ``include``, or an error message that
+    mentions include/encrypted_content together with a word like
+    "unsupported". Only a True/False answer is returned; the provider's error
+    text is not kept.
+    """
     status = getattr(exc, "status_code", None)
     if status not in {400, 422}:
         return False
@@ -108,8 +138,9 @@ def _include_rejected(exc: Exception) -> bool:
     if param is None and wrapped_param:
         param = wrapped_param.group(1)
     if isinstance(param, str):
-        # A structured field rejection is sufficient even when the message is
-        # generic. Rejected history/model fields must never disable include.
+        # A structured param is enough even if the message is generic. A
+        # rejection of another field (e.g. the model or message history) must
+        # not turn off encrypted reasoning.
         return (
             param == "include"
             or param.startswith("include[")
@@ -129,7 +160,11 @@ CACHE_PARAMS = ("prompt_cache_options", "prompt_cache_breakpoint", "cache_contro
 
 
 def _cache_options_rejected(exc: Exception) -> bool:
-    """Recognize a server that refuses explicit prompt-cache fields."""
+    """Return True if ``exc`` says the endpoint rejected the prompt-cache fields.
+
+    Requires HTTP 400/422 and a ``param`` or message naming one of
+    ``CACHE_PARAMS``.
+    """
     if getattr(exc, "status_code", None) not in {400, 422}:
         return False
     body = getattr(exc, "body", None)
@@ -146,6 +181,7 @@ def _cache_options_rejected(exc: Exception) -> bool:
 
 
 def _disable_explicit_cache(entry: dict, status: int) -> dict:
+    """Turn off explicit prompt caching in ``entry`` and record why; return the record."""
     entry["cache_breakpoint"] = None
     record = {
         "source": "connect",
@@ -159,7 +195,9 @@ def _disable_explicit_cache(entry: dict, status: int) -> dict:
 
 
 def _disable_encrypted_reasoning(entry: dict, status: int) -> dict:
-    # Explicit empty include suppresses the runtime's native-endpoint default too.
+    """Stop requesting encrypted reasoning in ``entry`` and record why; return the record."""
+    # An explicit empty list also stops the runtime from adding its own
+    # default include for native OpenAI endpoints.
     entry["include"] = []
     record = {
         "source": "connect",
@@ -172,12 +210,20 @@ def _disable_encrypted_reasoning(entry: dict, status: int) -> dict:
     return record
 
 
-# Omission preserves a saved declaration; explicit None clears it.
+# Default for structured-output arguments: "not given" keeps the saved value,
+# while an explicit None clears it.
 STRUCTURED_OUTPUT_UNSET = object()
 
 
 def _validate_structured_output(entry: dict, override=STRUCTURED_OUTPUT_UNSET):
-    """Validate route-local declarations before credentials or request construction."""
+    """Check the entry's ``structured_output_mode`` setting (and ``override``).
+
+    Runs before any API key is read or request is built. Raises ValueError if
+    the mode is invalid, if it appears inside ``extra_body`` or
+    ``reasoning_levels`` (it is a connection setting, not a request field), or
+    if it is set for anything other than a Completion client with the chat or
+    anthropic API style.
+    """
     from nooa.unifiedllm.structured_output import validate_structured_output_mode
 
     def reject_payload(value):
@@ -231,13 +277,18 @@ _PATHS = {
     "systemone": "",
     "openai": "",
 }
-# Decision API styles: their endpoint is the complete decisions URL, used as given.
+# Decision API styles: their endpoint is the complete decisions URL, used as
+# given (no path is appended).
 DECISION_API_STYLES = ("systemone", "openai")
 
 
 @dataclass(frozen=True)
 class ProviderPreset:
-    """Public connection defaults shared by frontends; models are discovered live."""
+    """Default connection settings for a well-known provider.
+
+    Frontends offer these as starting points; the list of models is always
+    read from the provider, not stored here.
+    """
 
     label: str
     api_base: str
@@ -273,7 +324,13 @@ PROVIDERS = {
 
 @dataclass(frozen=True)
 class Probe:
-    """One proposed POST, with no credentials in its body."""
+    """One planned test call: a request body to POST, plus its limits.
+
+    ``body`` never contains credentials. ``token_estimate`` is the tokens
+    reserved from the budget, ``uses_configured_cap`` says whether the reply
+    cap comes from the entry, ``expected_answer`` is the answer checked for (if
+    any), and ``skip_reason`` is set when the call will not be sent.
+    """
 
     name: str
     body: dict[str, Any]
@@ -287,7 +344,11 @@ class Probe:
 
 @dataclass(frozen=True)
 class ConnectPlan:
-    """Reviewable input to run; token and price estimates are not billing caps."""
+    """The test calls planned for one model entry, shown to the user before ``run``.
+
+    The token and price estimates help the user decide; they do not limit
+    what the provider bills.
+    """
 
     alias: str
     entry: dict[str, Any]
@@ -300,19 +361,26 @@ class ConnectPlan:
 
 @dataclass(frozen=True)
 class ConnectResult:
+    """A model entry after its test calls, with results under ``entry["provenance"]``."""
+
     alias: str
     entry: dict[str, Any]
 
 
 @dataclass(frozen=True)
 class InterfaceResult:
-    """Observed interface results, not a permanent provider-support catalogue."""
+    """Results of trying several API styles against one model (``check_interfaces``).
+
+    These describe what happened in this run, not a lasting statement of
+    what the provider supports. ``results`` maps API style -> result.
+    """
 
     results: dict[str, ConnectResult]
     tokens_charged_to_budget: int
 
     @property
     def accepted(self) -> tuple[str, ...]:
+        """API styles whose routing test call was accepted, in test order."""
         return tuple(
             style
             for style, result in self.results.items()
@@ -321,17 +389,17 @@ class InterfaceResult:
 
     @property
     def accepted_client_types(self) -> tuple[str, ...]:
-        """Distinct accepted runtime client types, in accepted interface order."""
+        """Client types (completion, responses, decision) of the accepted styles, no repeats."""
         return tuple(
             dict.fromkeys(self.results[style].entry["client_type"] for style in self.accepted)
         )
 
     @property
     def reasoning_observed(self) -> dict[str, bool]:
-        """Which interfaces put a reasoning item on the wire, not merely accepted a call.
+        """For each API style, whether a reasoning-level test call returned reasoning.
 
-        Empty (all False) unless check_interfaces was given reasoning_levels;
-        an interface can be accepted and still never surface reasoning.
+        All False unless ``check_interfaces`` was given ``reasoning_levels``.
+        A style can accept requests and still never return reasoning.
         """
         observed: dict[str, bool] = {}
         for style, result in self.results.items():
@@ -345,10 +413,11 @@ class InterfaceResult:
 
     @property
     def recommended_style(self) -> str | None:
-        """Prefer accepted order when decision and chat-family clients both accept.
+        """The API style to suggest to the user, or None if none was accepted.
 
-        For chat-family-only comparisons, prefer observed reasoning, then order.
-        No interface is recommended if nothing was accepted.
+        If both a decision client and another client type were accepted, the
+        first accepted style wins. Otherwise the first accepted style that
+        returned reasoning wins, else the first accepted style.
         """
         accepted = self.accepted
         if "decision" in self.accepted_client_types and len(self.accepted_client_types) > 1:
@@ -362,7 +431,11 @@ class InterfaceResult:
 
 @dataclass(frozen=True)
 class ProbeUpdate:
-    """A request starting or finishing, for frontend progress display."""
+    """Progress event from a running test: test ``name`` started or finished.
+
+    ``outcome`` is the test's probe record (``{"outcome": "running"}`` while
+    it runs).
+    """
 
     name: str
     outcome: ProbeRecord
@@ -370,7 +443,12 @@ class ProbeUpdate:
 
 @dataclass(frozen=True)
 class Verdict:
-    """Shared result: unapproved checks are skipped; missing evidence needs attention."""
+    """Test results of a model entry grouped by verdict (see ``verdict``).
+
+    Tests the user did not approve are "skipped"; tests that ran but did not
+    show the expected result "need attention". ``unobserved_levels`` lists
+    reasoning levels whose test call returned no reasoning.
+    """
 
     passed: tuple[str, ...]
     needs_attention: tuple[str, ...]
@@ -379,11 +457,16 @@ class Verdict:
 
     @property
     def ok(self) -> bool:
+        """True if at least one test passed and none was skipped or needs attention."""
         return bool(self.passed) and not self.needs_attention and not self.skipped
 
 
 def verdict(entry: dict) -> Verdict:
-    """Classify saved check evidence without making calls or guessing support."""
+    """Group the test results stored in ``entry`` by verdict.
+
+    Uses only the stored records (``check_status``); makes no requests and
+    assumes nothing about tests that did not run.
+    """
     provenance = entry.get("provenance", {})
     missing = tuple(unobserved_reasoning_levels(entry))
     groups = {"passed": [], "attention": [], "skipped": []}
@@ -402,10 +485,13 @@ def verdict(entry: dict) -> Verdict:
 
 @dataclass(frozen=True)
 class Discovery:
-    """Advertised models, not verified interface support.
+    """Result of ``discover``: the models an endpoint lists.
 
-    ``api_base`` remains the inference base (legacy root discovery may resolve /v1).
-    ``models_url`` records the actual listing source, independent of inference.
+    Being listed does not mean a model works with a given API style.
+    ``api_base`` is the base URL that requests are sent to; when the user gave
+    a server root and only ``/v1/models`` answered, it ends in ``/v1``.
+    ``models_url`` is the URL the listing was actually read from, which may
+    differ from the request URL. ``request_count`` counts the GETs made.
     """
 
     api_base: str
@@ -415,7 +501,11 @@ class Discovery:
 
 
 class DiscoveryError(ValueError):
-    """Safe discovery failure; frontends can offer a new key on 401 or 403."""
+    """Model listing failed; the message contains no provider text or secrets.
+
+    ``status_code`` is the HTTP status if there was one (frontends can offer
+    to enter a new key on 401 or 403); ``request_count`` counts the GETs made.
+    """
 
     def __init__(self, message: str, *, status_code: int | None = None, request_count: int = 0):
         super().__init__(message)
@@ -424,7 +514,12 @@ class DiscoveryError(ValueError):
 
 
 def normalize_endpoint(endpoint: str) -> str:
-    """Accept an API base or /models URL without embedded credentials."""
+    """Return the API base URL for ``endpoint`` (an API base or its ``/models`` URL).
+
+    Trailing slashes and a trailing ``/models`` are removed. Raises ValueError
+    unless it is an HTTP(S) URL without user info, query or fragment; plain
+    HTTP is allowed only for localhost.
+    """
     address = urlsplit(endpoint.strip().rstrip("/"))
     if (
         address.scheme not in {"http", "https"}
@@ -442,13 +537,17 @@ def normalize_endpoint(endpoint: str) -> str:
 
 
 def _headers(style: str, key: str | None) -> dict[str, str]:
+    """Return the auth headers for a model listing request in API ``style``."""
     if style == "anthropic":
         return {"anthropic-version": "2023-06-01", **({"x-api-key": key} if key else {})}
     return {"Authorization": f"Bearer {key}"} if key else {}
 
 
 def validate_models_url(models_url: str) -> str:
-    """Validate an explicit full catalogue GET URL, without rewriting its path."""
+    """Check a user-given model listing URL and return it, with its path unchanged.
+
+    Applies the same rules as ``normalize_endpoint`` (raises ValueError).
+    """
     normalize_endpoint(models_url)  # Same HTTPS/credential/query restrictions.
     return models_url.strip()
 
@@ -461,15 +560,28 @@ async def discover(
     models_url: str | None = None,
     listing_style: str | None = None,
 ) -> Discovery:
-    """List endpoint models without saving credentials or making generation calls.
+    """Read the model listing of ``endpoint`` and return the models it lists.
 
-    ``models_url`` is an explicit full GET URL, required for decision routes.
-    It never changes the inference endpoint and gets no root-path fallback.
-    ``listing_style`` chooses listing authentication/pagination, not inference.
-    ``api_key`` authenticates listing only; callers must choose its source explicitly.
-    Root URLs try /models, then /v1/models only on 404. Anthropic pagination
-    uses the same fetcher. Limits apply to the whole discovery: 30 seconds,
-    5 MiB and 5,000 entries. Redirects and automatic retries are disabled.
+    Sends only GET requests (no model calls) and stores no credentials.
+
+    ``models_url`` is a full listing URL to use instead of
+    ``<endpoint>/models``; it is required for decision API styles, does not
+    change where requests are sent, and is not retried under ``/v1``.
+    ``listing_style`` selects how the listing is authenticated and paged
+    (chat, responses or anthropic); it does not affect requests. ``api_key``
+    is used for the listing only; the caller decides which key that is.
+
+    For a server root URL, ``/models`` is tried first and ``/v1/models`` only
+    if that returns 404. Anthropic listings are read page by page (at most 50
+    pages). Limits apply to the whole call: 30 seconds, 5 MiB and 5,000
+    entries; redirects and automatic retries are disabled.
+
+    Each model keeps only known, validated fields (ID, token limits, names,
+    modality lists, media and reasoning capabilities, and for the OpenRouter
+    catalogue a ``public_model`` record). Models are sorted by ID.
+
+    Raises ValueError for invalid arguments and ``DiscoveryError`` for any
+    listing failure, duplicate IDs, or an empty listing.
     """
     if api_style in DECISION_API_STYLES and models_url is None:
         raise ValueError(
@@ -568,7 +680,8 @@ async def discover(
                                         "data[]." + candidate
                                     )
                                 break
-                    # Advertised hints only: do not enable interfaces or media from these.
+                    # Kept as information only; these never enable an API
+                    # style or media input.
                     for field in (
                         "name",
                         "display_name",
@@ -618,7 +731,8 @@ async def discover(
                         }
                         if hints:
                             model["architecture"] = hints
-                    # Published OpenRouter route ceilings can only tighten a listing.
+                    # OpenRouter's top_provider limits can only lower the
+                    # listed limits, never raise them.
                     top = item.get("top_provider")
                     if isinstance(top, dict):
                         for raw, field in (
@@ -690,7 +804,11 @@ async def discover(
 
 
 async def catalogue() -> list[dict]:
-    """Fetch public metadata without sending the endpoint's credentials."""
+    """Fetch the public OpenRouter catalogue (no API key is sent).
+
+    Returns the validated catalogue records (see ``openrouter_facts``). Raises
+    ValueError or an httpx error if the catalogue cannot be read.
+    """
     async with asyncio.timeout(30), httpx.AsyncClient(timeout=15, follow_redirects=False) as client:
         payload = await bounded_json(
             client, CATALOGUE_URL, params={"output_modalities": OPENROUTER_MODEL_OUTPUTS}
@@ -710,16 +828,21 @@ async def catalogue() -> list[dict]:
 
 
 def _normalized_model_id(value: str) -> str:
-    """Shared normalization rule for match_models() and fuzzy_match_models().
+    """Lower-case a model ID and remove ``-``, ``_`` and ``.`` for comparison.
 
-    Kept in one place so the two matchers cannot silently disagree on what
-    counts as "the same" model id.
+    Shared by ``match_models`` and ``fuzzy_match_models`` so both agree on
+    which IDs count as the same.
     """
     return re.sub(r"[-_.]", "", value.lower())
 
 
 def match_models(model: str, models: list[dict]) -> list[dict]:
-    """Suggest up to three matches. The frontend must confirm a candidate."""
+    """Return up to three listed models whose IDs match ``model``, best first.
+
+    A match is an equal normalised ID, an ID that ``model`` ends with after a
+    ``/`` (``model`` has an extra prefix), or an equal last path segment. These
+    are suggestions; the frontend must have the user confirm one.
+    """
     normalized = _normalized_model_id
     target = normalized(model)
     matches = []
@@ -739,13 +862,14 @@ _FUZZY_MATCH_CUTOFF = 0.6
 
 
 def fuzzy_match_models(model: str, models: list[dict]) -> list[dict]:
-    """Best-effort "did you mean" suggestions once match_models finds nothing.
+    """Return up to three similar model IDs ("did you mean"), most similar first.
 
-    A gateway-routed model ID (e.g. ``aws/anthropic/bedrock-claude-opus-5``)
-    carries routing segments the catalogue never records, so exact/suffix
-    matching in match_models() can find nothing even though the model is
-    listed under its own name. This never auto-selects a candidate; the
-    frontend must still confirm one.
+    Used when ``match_models`` finds nothing. A model ID routed through a
+    gateway (e.g. ``aws/anthropic/bedrock-claude-opus-5``) contains path parts
+    the catalogue does not use, so exact matching can fail even though the
+    model is listed under its own name. Similarity is measured on the whole ID
+    and on its last path segment, with a cutoff of 0.6. The result is never
+    selected automatically; the frontend must have the user confirm one.
     """
     normalized = _normalized_model_id
     target = normalized(model)
@@ -768,16 +892,24 @@ def fuzzy_match_models(model: str, models: list[dict]) -> list[dict]:
 
 
 def reasoning_settings(template: str, style: str, level: str, *, budget: int = 4096) -> dict:
-    """Build an onboarding candidate, not a claim about a model's support.
+    """Return the request settings for reasoning ``level`` in a given ``template``.
 
-    Responses always asks for ``reasoning.summary`` alongside effort. Some
-    routes (OpenAI/Azure/DeepSeek observed) return summary text without being
-    asked, but others (Kimi, Qwen observed on the Hub) omit the entire
-    "reasoning" output item -- not just its text -- unless summary is
-    explicitly requested, even though usage still reports billed reasoning
-    tokens. Asking unconditionally is harmless where it's already the
-    default and is required to observe reasoning at all on routes where it
-    isn't.
+    ``template`` names a known way providers control reasoning: ``effort``
+    (``reasoning_effort``, or ``reasoning.effort`` for the Responses API),
+    ``adaptive`` (Anthropic adaptive thinking with an effort), ``budget``
+    (thinking with a token budget of ``budget``), ``toggle``
+    (``chat_template_kwargs.enable_thinking``) or ``thinking`` (on/off).
+    Levels "none", "off" and "disabled" turn reasoning off. The result is a
+    setting to test, not a claim that the model supports it. Raises
+    ValueError for an unknown template.
+
+    For the Responses API, ``reasoning.summary`` is always requested with the
+    effort. Some endpoints (seen with OpenAI, Azure and DeepSeek) return a
+    summary anyway, but others (seen with Kimi and Qwen on the NVIDIA
+    Inference Hub) leave out the whole reasoning item unless a summary is
+    requested, even though they still report reasoning tokens. Requesting it
+    is harmless where it is the default and needed to see reasoning at all
+    elsewhere.
     """
     if template == "effort":
         return (
@@ -806,12 +938,15 @@ def reasoning_settings(template: str, style: str, level: str, *, budget: int = 4
 
 
 def unobserved_reasoning_levels(entry: dict) -> list[str]:
-    """List accepted reasoning-on checks that returned no reasoning information.
+    """Return the reasoning levels that should reason but returned no reasoning.
 
-    Read the request settings, not label or provider names. This recognizes the
-    onboarding templates; arbitrary custom settings with unknown meaning are
-    left alone. Absence of evidence is not evidence that reasoning was disabled.
-    Frontends can show one warning without changing the saved probe outcomes.
+    A level is listed if its test call was accepted, no reasoning was seen in
+    the reply, and its settings turn reasoning on. Whether reasoning is "on"
+    is read from the settings (as produced by ``reasoning_settings``), not
+    from the level's name or the provider; custom settings with unknown
+    meaning are not listed. Seeing no reasoning does not prove reasoning was
+    off. Frontends use this to show one warning; the stored test results are
+    not changed.
     """
     missing = []
     records = entry.get("provenance", {}).get("probes", {})
@@ -845,16 +980,31 @@ def configure_entry(
     cache_enabled: bool | None = None,
     structured_output_mode=STRUCTURED_OUTPUT_UNSET,
 ) -> dict:
-    """Apply safe persisted defaults to a detached entry, without doing any I/O.
+    """Validate ``entry`` and return a copy with Connect's defaults filled in.
 
-    ``max_tokens`` is the runtime cap on every interface. Published ceilings
-    remain provenance, not request allocations. ``include: []`` is an explicit
-    opt-out from carrying encrypted reasoning on stateless Responses calls.
-    ``structured_output_mode`` is a Completion-only declaration: omission
-    preserves it, explicit None clears native mode, and 'auto' keeps the legacy
-    carrier. Only explicit 'anthropic' selects output_config.format.
-    ``cache_enabled=False`` disables explicit cache options/markers, not provider
-    automatic caching. None preserves the entry; True selects the runtime auto policy.
+    Does no I/O. Raises ValueError for invalid or conflicting settings,
+    including literal credentials anywhere in the entry (use ``api_key_env``).
+
+    - ``max_tokens`` is the reply cap sent on every request. ``reply_tokens``
+      sets it; otherwise the saved value is kept, or a default is chosen (at
+      most 32768 and at most half the context window). Limits published by
+      the endpoint or catalogue are recorded in ``provenance`` and only bound
+      the cap; they are never used as the cap themselves.
+    - For the Responses API with ``store: false``, encrypted reasoning is
+      requested (``include: ["reasoning.encrypted_content"]``) so reasoning can
+      be sent back on later turns; ``include: []`` explicitly opts out.
+    - ``structured_output_mode`` applies only to Completion clients. Not
+      passing it keeps the saved value, None clears it, "auto" keeps the
+      older way of requesting JSON output, and only "anthropic" uses
+      Anthropic's ``output_config.format``.
+    - ``cache_enabled=False`` turns off explicit prompt-cache options and
+      markers (the provider's automatic caching is unaffected); True selects
+      the runtime's automatic policy; None keeps the entry's setting.
+
+    Also records the active reasoning settings and warnings in
+    ``provenance`` and recomputes which test results are still current.
+    Decision entries are only validated, since they have no reply cap,
+    reasoning or cache settings.
     """
 
     def reject_credentials(value):
@@ -989,7 +1139,7 @@ def configure_entry(
                 for child in value:
                     reject_cache_options(child)
 
-        # Custom bodies/level patches are preserved, not silently rewritten.
+        # Raise instead of silently removing the user's own settings.
         reject_cache_options({k: v for k, v in result.items() if k != "provenance"})
     if cache_enabled is not None:
         cache_breakpoint = "auto" if cache_enabled else None
@@ -1025,8 +1175,9 @@ def configure_entry(
         result["context_window"] = context_evidence["effective"]
         previous = provenance.get("context_window") or {}
         if previous and provenance.get("endpoint_limits") and not endpoint_limits:
-            # Keep the CURRENT literal declaration, not an old endpoint ceiling
-            # or its larger historical declaration after a route/scope edit.
+            # The endpoint changed, so the stored endpoint limit no longer
+            # applies: keep the value declared now, not the old limit or an
+            # older, larger declaration.
             provenance["context_window"] = context_evidence
             previous = context_evidence
         if previous.get("effective", window) != window:
@@ -1037,8 +1188,9 @@ def configure_entry(
                 "effective_source": context_evidence["effective_source"],
             }
         if previous or endpoint_limits.get("id") == model:
-            # Reconfiguration/import may lower the bound, never resurrect a
-            # larger declaration after an intentional edit to the effective value.
+            # Reconfiguring or importing may lower the effective value, but
+            # must not bring back an older, larger declaration after the user
+            # deliberately changed the value.
             provenance["context_window"] = {
                 **context_evidence,
                 "source": provenance.get("limit_sources", {}).get("context_length", "entry"),
@@ -1064,8 +1216,8 @@ def configure_entry(
         )
         and not scoped_endpoint_limits(result)
     ):
-        # An endpoint-derived output ceiling is historical on another route too.
-        # A newly supplied literal ceiling still applies during initial planning.
+        # An output limit read from a different endpoint no longer applies.
+        # A limit passed in this call (initial planning) still does.
         ceiling = None
     known_limits = [
         v
@@ -1174,10 +1326,17 @@ def configure_entry(
 def model_metadata(
     model: str, catalogue: dict | None = None, endpoint_model: dict | None = None
 ) -> dict:
-    """Merge reported limits, preferring this endpoint; never infer context by addition.
+    """Combine catalogue and endpoint limits for ``model`` into one metadata dict.
 
-    An input-only limit is a conservative context-management bound, not evidence
-    of the model's total context size. Raw limits and their meanings stay visible.
+    ``catalogue`` is the model's catalogue record and ``endpoint_model`` its
+    record from the endpoint's listing. Endpoint values win, but only when
+    the endpoint record has the same ID (records without an ID are accepted
+    for older callers). ``limit_sources`` records where each limit came from.
+
+    The context length is never computed by adding input and output limits.
+    An input-only limit is used as a cautious context bound, not as the
+    model's total context size. The endpoint's raw limits are kept in
+    ``endpoint_limits``, and its media fields replace the catalogue's.
     """
     result = deepcopy(catalogue or {"id": model})
     sources = result.setdefault("limit_sources", {})
@@ -1196,7 +1355,7 @@ def model_metadata(
         if isinstance(value, int) and not isinstance(value, bool) and value > 0:
             sources.setdefault(field, "catalogue")
     endpoint_model = endpoint_model or {}
-    # Legacy callers may omit the ID; an explicit neighbour is never evidence.
+    # Older callers may omit the ID; a record for a different model is ignored.
     if "id" in endpoint_model and endpoint_model["id"] != model:
         endpoint_model = {}
     reported = {}
@@ -1221,8 +1380,9 @@ def model_metadata(
         sources["max_completion_tokens"] = "endpoint"
     if reported:
         result["endpoint_limits"] = reported
-    # Keep input advertisements separate from limits/settings; endpoint facts win
-    # only for the exact selected model, never a neighbour on a shared hub.
+    # Media fields are stored apart from limits and settings. The endpoint's
+    # fields replace the catalogue's only when its record has the same ID,
+    # never for another model listed on the same hub.
     media = media_metadata(endpoint_model) if endpoint_model.get("id") == model else {}
     if media:
         for key in ("architecture", "input_modalities", "capabilities"):
@@ -1236,11 +1396,14 @@ def model_metadata(
 def decision_metadata(
     model: str, catalogue: dict | None = None, endpoint_model: dict | None = None
 ) -> dict:
-    """Bounded descriptive/media facts only; a supplied catalogue is an explicit mapping.
+    """Return the description and media fields for a decision model.
 
-    Never interpret descriptions as capabilities or copy chat settings. Attribution
-    is constructed here, not accepted from provider records. Exact endpoint media
-    facts take priority over the mapped OpenRouter route's advertisements.
+    ``catalogue`` is an OpenRouter catalogue record the user explicitly chose
+    for this decision model; ``endpoint_model`` is used only if its ID equals
+    ``model``. Descriptions are never read as capabilities, and no chat
+    settings are copied. The source labels (``media_source``) are set here,
+    not taken from the records. Endpoint media fields replace the
+    catalogue's. Raises ValueError for a missing or invalid record ID.
     """
     result = {}
     for record, source in (
@@ -1282,7 +1445,12 @@ def decision_metadata(
 
 
 def entry_warnings(entry: dict) -> list[str]:
-    """Configuration warnings shared by the wizard, library and stage reports."""
+    """Return the warnings to show for ``entry`` (wizard, library and stage reports).
+
+    For decision entries: images enabled where they cannot be sent. For
+    other entries: no known context window, or a reply cap that no accepted
+    test call has used with the saved settings.
+    """
     if entry.get("client_type") == "decision":
         if (
             "image" in entry.get("media_inputs", [])
@@ -1325,7 +1493,12 @@ def entry_warnings(entry: dict) -> list[str]:
 
 
 def same_media_route(previous: dict, entry: dict) -> bool:
-    """Permissions belong to the normalized model/endpoint/interface, not credentials."""
+    """Return True if two entries send media to the same model, endpoint and interface.
+
+    Media permissions are tied to that combination (plus the decision image
+    transport settings), not to the API key, so they may be kept when only
+    the key or other settings change.
+    """
 
     def route(value):
         style = value.get("api_style") or (
@@ -1355,7 +1528,10 @@ def same_media_route(previous: dict, entry: dict) -> bool:
 
 
 def configured_reply_cap(entry: dict, level: str | None = None) -> int:
-    """The saved request cap, optionally replaced by a selected reasoning level."""
+    """Return the reply cap requests use: the level's own cap if it sets one, else ``max_tokens``.
+
+    ``level`` defaults to the entry's selected reasoning level.
+    """
     if level is None:
         level = entry.get("reasoning_level")
     settings = (entry.get("reasoning_levels") or {}).get(level, {})
@@ -1363,10 +1539,12 @@ def configured_reply_cap(entry: dict, level: str | None = None) -> int:
 
 
 def refresh_plan(proposal: ConnectPlan) -> ConnectPlan:
-    """Rebuild detached requests and reservations after a configuration edit.
+    """Return ``proposal`` with its test calls rebuilt for the edited entry.
 
-    Interface discovery alone uses a small cap before model settings are chosen.
-    Every configured probe sends the saved cap (or the selected level's cap).
+    Re-runs ``configure_entry`` and rebuilds every request body and token
+    reservation from the current settings. Every test call uses the saved
+    reply cap (or the reasoning level's cap); only the interface test calls,
+    made before settings are chosen, use the small ``DISCOVERY_OUTPUT_TOKENS``.
     """
     entry = configure_entry(proposal.entry)
     if entry.get("client_type") == "decision":
@@ -1386,9 +1564,10 @@ def refresh_plan(proposal: ConnectPlan) -> ConnectPlan:
                 probe.name[6:] if probe.name.startswith("level:") else entry.get("reasoning_level")
             )
             settings = (entry.get("reasoning_levels") or {}).get(level, {})
-            # refresh can start from a previously selected patch. Remove owned
-            # fields before applying the new selection (e.g. adaptive -> Off
-            # must not retain the old effort block or manual thinking budget).
+            # The body may still hold settings of a previously selected level.
+            # Remove every field any level (or the old selection) sets before
+            # applying the new one; e.g. switching from adaptive to Off must
+            # not keep the old effort block or thinking budget.
             controlled = {
                 key for patch in (entry.get("reasoning_levels") or {}).values() for key in patch
             }
@@ -1413,8 +1592,9 @@ def refresh_plan(proposal: ConnectPlan) -> ConnectPlan:
                 probe, body=body, token_estimate=probe.input_reservation + cap, timeout_seconds=120
             )
         probes.append(probe)
-    # Skips stay reviewable with full per-probe reservations/caps so removing a
-    # skip later cannot bypass execution budget or approved-cap checks.
+    # Skipped test calls keep their full reservations and caps in the plan, so
+    # if a skip is later removed the call still goes through the budget and
+    # approved-cap checks.
     estimate = sum(p.token_estimate for p in probes if not p.skip_reason)
     if proposal.session_checks:
         from ._session import reply_budget
@@ -1461,39 +1641,56 @@ def plan(
     decision_checks: bool = True,
     checked_levels: list[str] | tuple[str, ...] | None = None,
 ) -> ConnectPlan:
-    """Prepare requests without reading credentials, files or network resources.
+    """Build the model entry and the test calls for the user to approve.
 
-    ``checked_levels`` limits reasoning-level checks to those labels (for
-    example only the level the user chose); None checks every level.
+    Reads no API key, file or network resource; ``run`` sends the calls.
+    Returns a ``ConnectPlan``. Raises ValueError for invalid arguments.
 
-    ``structured_output_mode='anthropic'`` explicitly selects the native carrier
-    for Completion chat/anthropic routes. Omission preserves a same-route saved
-    declaration (including credential identity); explicit None clears it. None
-    and 'auto' retain the existing carrier, never infer or discover native support.
-    ``cache_enabled=False`` saves ``cache_breakpoint: null`` (no explicit cache
-    options/markers). None preserves the default or same-route existing policy;
-    True explicitly selects auto. This does not disable provider automatic caching
-    or establish live compatibility.
+    Model and endpoint:
 
-    ``reasoning_level`` is the active saved selection, not ``reasoning_default``.
-    Omission preserves a compatible same-route selection; None clears it.
+    - ``model`` is the model ID exactly as the endpoint knows it, without a
+      LiteLLM provider prefix; the returned entry adds the prefix the runtime
+      currently needs (``openai/`` or ``anthropic/``).
+    - ``endpoint_model`` is the model's record from the endpoint's listing and
+      ``endpoint_models_url`` the URL it was read from (default
+      ``<api_base>/models``). Only a record whose ID equals ``model`` counts.
+    - ``catalogue`` is the model's catalogue record. A record from the
+      OpenRouter catalogue only supplies reasoning levels, default reply
+      cap, prices and OpenRouter-specific limits when the entry actually
+      points at OpenRouter for the same model ID. ``catalogue_settings=True``
+      marks a catalogue dict written by the user (e.g. in a settings editor),
+      which is used as given. For decision styles, ``catalogue`` is an
+      OpenRouter record the user mapped to the decision model; only its
+      description and media fields are kept, never chat settings.
+    - ``context_window`` is the user's declared context window, lowered to
+      the endpoint's limit if smaller (see ``apply_context_window``). It does
+      not set the reply cap.
 
-    ``model`` is the exact endpoint model ID, without a LiteLLM prefix. The
-    returned entry adds the prefix needed by today's runtime. Each request reserves
-    its output cap plus 512 estimated input tokens (4,096 for selected generated
-    media samples). ``endpoint_models_url`` is the verified listing source,
-    independent of record media hints; omitted sources use the legacy /models URL.
-    ``context_window`` is an explicit declaration clamped to positive literal
-    context/input limits on the exact ID-bearing ``endpoint_model`` only. It
-    never allocates a reply cap; declared/effective/source remain in provenance.
-    Reported usage can increase that charge. Servers can ignore
-    caps, so this is not a billing limit. Media facts never change declarations.
-    Non-Chat video and audio remain transparently not tested. For decisions, a
-    ``catalogue_settings=True`` is reserved for explicitly user-authored settings
-    (e.g. a settings editor), not automatic provider metadata. Published foreign
-    route/model profiles never supply reasoning defaults, allocations or prices.
-    For decisions, supplied ``catalogue`` is an explicit OpenRouter ID mapping: only bounded
-    descriptions, media facts and provenance are retained, never chat settings.
+    Settings (for each, "not given" keeps the value of ``existing_entry`` when
+    it points at the same model, endpoint and interface):
+
+    - ``reasoning_level``: the reasoning level selected for use (not
+      ``reasoning_default``, which only records the provider's default); None
+      clears it. ``checked_levels`` limits the level test calls to these
+      labels (for example only the chosen level); None tests every level.
+    - ``structured_output_mode``: "anthropic" uses Anthropic's
+      ``output_config.format`` for typed output on Completion chat/anthropic
+      entries; None and "auto" keep the older JSON output method. Native
+      support is never guessed, except that a listing record from the same
+      Anthropic endpoint reporting structured output support makes
+      "anthropic" the recommended default. The saved value is also kept only
+      when the API key variable is the same.
+    - ``cache_enabled``: False saves ``cache_breakpoint: null`` (no explicit
+      cache options or markers; the provider's automatic caching still
+      applies); True selects "auto". This does not test whether caching works.
+    - ``media_inputs`` are the media kinds to permit; ``test_media_inputs``
+      the kinds to test with generated attachments. Media fields from
+      listings only produce suggestions and never change these settings.
+      Media kinds an interface cannot send are planned as skipped.
+
+    Budget: each test call reserves its reply cap plus an input estimate of
+    512 tokens (4,096 for media test calls). Usage reported by the server can
+    add to that. Servers may ignore caps, so the budget is not a billing limit.
     """
     if cache_enabled is not None and not isinstance(cache_enabled, bool):
         raise ValueError("cache_enabled must be a boolean or None")
@@ -1514,13 +1711,14 @@ def plan(
         and (api_base + "/models" != CATALOGUE_URL or catalogue["id"] != model)
         and api_style not in DECISION_API_STYLES
     ):
-        # Published OpenRouter records fill facts, not unrelated route profiles.
-        # ID-less dictionaries remain explicit hand-authored legacy settings.
+        # An OpenRouter record describing a different endpoint or model may
+        # supply general facts, but not its routing-specific settings. Dicts
+        # without an ID are older hand-written settings and are used as given.
         catalogue = deepcopy(catalogue)
         for field in ("reasoning", "default_parameters", "pricing", "top_provider"):
             catalogue.pop(field, None)
-        # General model context remains a fallback; OpenRouter deployment
-        # input/output ceilings belong to the OpenRouter route only.
+        # The general context length is still used as a fallback, but the
+        # output limit of OpenRouter's provider applies only via OpenRouter.
         if isinstance(catalogue.get("limit_sources"), dict):
             catalogue["limit_sources"].pop("max_completion_tokens", None)
     if endpoint_models_url is not None:
@@ -1563,7 +1761,8 @@ def plan(
         and bool(media_metadata(endpoint_model))
     )
     if endpoint_media_selected:
-        # Internal attribution keys in a record are never a listing contract.
+        # Set the source labels here; labels already in the record are not
+        # trusted as coming from the listing.
         selected_media_model = {
             **selected_media_model,
             "media_model_id": model,
@@ -1630,7 +1829,8 @@ def plan(
             entry["provenance"]["catalogue_metadata"] = decision_metadata(model, catalogue)
         if decision_facts and "description" in decision_facts:
             entry["provenance"]["model_description"] = decision_facts["description"]
-        # Inherit permissions and controls only for the identical normalized route.
+        # Keep the old permissions and settings only if the existing entry
+        # uses the same model, endpoint and interface.
         if existing_entry:
             candidate = {**entry}
             if decision_image_transport is None:
@@ -1666,7 +1866,8 @@ def plan(
                 "Image testing isn't available with System One JSON. Use --decision-image-transport typesafe_multipart and --typesafe-danger-zone-images for an approved direct TypeSafe connection, or leave images off"
             )
         if endpoint_model is not None and endpoint_model.get("id") == model:
-            # Preserve catalogue facts as advertised evidence, never chat configuration.
+            # Keep the listing record for reference only; it never becomes
+            # chat settings.
             entry["provenance"]["advertised_model"] = deepcopy(endpoint_model)
         from ._decision import planned_body
 
@@ -1720,7 +1921,8 @@ def plan(
         "media_inputs": list(validate_media_inputs(media_inputs)),
         "client_type": "responses" if api_style == "responses" else "completion",
         "api_style": api_style,
-        # The Messages runtime adds /v1/messages; Chat/Responses expect an API base.
+        # The Anthropic client appends /v1/messages itself, so store the root;
+        # Chat and Responses clients expect the API base including /v1.
         "api_base": api_base.removesuffix("/v1") if api_style == "anthropic" else api_base,
         "api_key_env": api_key_env,
     }
@@ -1806,9 +2008,9 @@ def plan(
             )
     if reasoning_levels is not None:
         entry["reasoning_levels"] = levels
-        # These are explicitly requested fields, not inferred model capabilities.
-        # Legacy parameter filtering must not silently remove them for an alias
-        # that is absent from its model catalogue.
+        # The user asked for these fields; they are not guessed capabilities.
+        # Allow them explicitly so LiteLLM's parameter filtering does not drop
+        # them for a model missing from its own model list.
         entry["allowed_openai_params"] = sorted({key for patch in levels.values() for key in patch})
     if (default := reasoning.get("default_effort")) in levels:
         entry["reasoning_default"] = default
@@ -1825,8 +2027,8 @@ def plan(
             entry["allowed_openai_params"] = sorted(
                 set(entry.get("allowed_openai_params", [])) | set(retained)
             )
-    # Inherited declarations need the same filtering permissions as newly
-    # authored ones; retaining an active selector alone must not drop controls.
+    # Levels kept from the existing entry need the same allowed parameters as
+    # new ones; otherwise their settings could be filtered out.
     if levels:
         entry["allowed_openai_params"] = sorted(
             set(entry.get("allowed_openai_params", []))
@@ -1846,7 +2048,8 @@ def plan(
             and same_media_route(existing_entry, entry)
             and existing_entry.get("api_key_env") == entry.get("api_key_env")
         ):
-            # Declarations survive supported saves, which strip provenance.
+            # Keep the user's store/include values; saves drop provenance, so
+            # the values themselves must be carried over.
             for field in ("store", "include"):
                 if field in existing_entry:
                     entry[field] = deepcopy(existing_entry[field])
@@ -1934,8 +2137,9 @@ def plan(
                 "source": "catalogue_recommendation",
                 "value": entry["max_tokens"],
             }
-    # Exact native Messages metadata can recommend its implemented carrier.
-    # Unknown gateways and explicit declarations (including None/auto) stay untouched.
+    # If the Anthropic endpoint's own listing says this model supports
+    # structured output, recommend Anthropic's native format. Other gateways
+    # and explicitly given values (including None/"auto") are left alone.
     from ._reasoning import native_metadata_matches
 
     native_format = (
@@ -1971,8 +2175,9 @@ def plan(
         if probe.name.startswith("level:"):
             probe.body.update(entry["reasoning_levels"][probe.name.removeprefix("level:")])
     if existing_entry:
-        # Each probe is also compared to its exact request in run_steps. Adding
-        # a level must not invalidate an unchanged routing or tool check.
+        # Reuse earlier results when the connection is unchanged; run_steps
+        # also compares each result with its exact request. Adding a level
+        # should not discard unchanged routing or tool results.
         keys = (
             "model_name",
             "api_base",
@@ -2011,31 +2216,35 @@ def plan(
                     * rates[1]
                 )
         except (ValueError, TypeError, KeyError):
-            pass  # Missing catalogue prices are unknown, never zero.
+            pass  # Invalid prices mean "unknown", never zero.
     if session_checks:
         from nooa.unifiedllm.connect._session import reply_budget
 
         estimate += 3 * reply_budget(entry, max(0, budget_tokens - estimate))[2]
-        price = None  # The longer replay depends on the actual seed response.
+        price = None  # Session cost depends on the first reply's length.
     return ConnectPlan(alias, entry, tuple(probes), budget_tokens, estimate, price, session_checks)
 
 
 async def _run_probe(alias: str, entry: dict, probe: Probe, api_key: str | None):
-    """Check the unsaved entry through the same client factory agents use.
+    """Send one test call for the unsaved ``entry``; return its probe record.
 
-    Configured probes retain the saved cap; timeouts and retries are bounded.
-    Discovery and planning stay lightweight: runtime imports happen here only.
-    Tool replies are inspected as data; Connect never executes model calls.
+    The client is built by ``client_from_config``, the same factory agents use,
+    so the test exercises the real request path. Retries are off and the
+    probe's timeout applies; probes that use the configured cap send the
+    saved reply cap. Runtime modules are imported only here so that
+    ``discover`` and ``plan`` stay lightweight. Tool calls in the reply are
+    inspected as data; Connect never executes them.
     """
     from nooa.unifiedllm import RetryConfig, Tool
     from nooa.unifiedllm.http_config import HttpConfig
     from nooa.unifiedllm.registry import client_from_config
 
     def probe_tool(value: str):
+        # Offered to the model, but Connect never runs tools during tests.
         raise RuntimeError("Setup checks never execute tools")
 
     params = deepcopy(probe.body)
-    params.pop("model")  # The saved entry, not a second route, selects the model.
+    params.pop("model")  # The entry selects the model, not the planned body.
     messages = params.pop("input" if entry["api_style"] == "responses" else "messages")
     if params.pop("tools", None):
         params["tools"] = [Tool(name="probe_tool", description="Echo a value", callable=probe_tool)]
@@ -2053,7 +2262,8 @@ async def _run_probe(alias: str, entry: dict, probe: Probe, api_key: str | None)
         if {"max_tokens", "max_completion_tokens", "max_output_tokens"} & settings.keys():
             for key in ("max_tokens", "max_completion_tokens", "max_output_tokens"):
                 params.pop(key, None)
-        # A level can set the cap itself; do not pass a conflicting override.
+        # The client applies the level's settings (which may set the cap), so
+        # no conflicting value is passed here.
         params["reasoning_level"] = label
     elif selected := entry.get("reasoning_level"):
         settings = (entry.get("reasoning_levels") or {}).get(selected, {})
@@ -2095,17 +2305,19 @@ async def _run_probe(alias: str, entry: dict, probe: Probe, api_key: str | None)
         nonlocal expected_format
         from nooa.unifiedllm.structured_output import anthropic_output_format
 
-        # The actual Predict-generated contract, including strict fields/titles.
+        # The JSON schema format Predict actually generated, including strict
+        # fields and titles, to compare with what was sent.
         expected_format = anthropic_output_format(output_model)
 
     async def capture_status(response):
         nonlocal schema_completed, schema_value
         response_status.append(response.status_code)
         if (typed_media_check or native) and response.is_success:
-            # Keep envelope facts even when native schema validation fails.
-            # Do not score access or retain reply text. Only correlate a schema
-            # carrier with the exact requested output contract; native Predict
-            # still has to validate and return that same boolean.
+            # Read usage and finish facts from the raw response here, so they
+            # are kept even if the typed result fails validation later. The
+            # reply text is neither stored nor judged. The schema used is only
+            # compared with the exact requested output format; Predict still
+            # has to validate and return the typed result itself.
             await response.aread()
             try:
                 body = response.json()
@@ -2183,9 +2395,10 @@ async def _run_probe(alias: str, entry: dict, probe: Probe, api_key: str | None)
             raise RuntimeError("Configured typed check permits only one outbound send")
         send_started = True
 
-        # Typed calls use the constructor defaults; ordinary probes also carry
-        # their planned overrides. Resolve controls exactly as runtime dispatch
-        # does, including selected levels and flattened SDK extra_body values.
+        # Work out the settings this request should carry, the same way the
+        # runtime does when sending (including the selected level and
+        # extra_body merged into the top level). Typed calls use only the
+        # client's defaults; other test calls add their planned parameters.
         resolved = client._prepare_call_config({} if typed else params)
         selected_level = params.get(
             "reasoning_level", entry.get("reasoning_level", client.reasoning_level)
@@ -2206,8 +2419,8 @@ async def _run_probe(alias: str, entry: dict, probe: Probe, api_key: str | None)
         expected = {
             **{key: entry[key] for key in control_keys - REPLY_CAP_KEYS if key in entry},
             **{key: resolved[key] for key in control_keys if key in resolved},
-            # A faulty adapter dropping a selected control from resolution must
-            # not erase the obligation to observe that declaration on the wire.
+            # If a buggy adapter drops a selected level setting while
+            # resolving, it must still be expected in the sent request.
             **{
                 key: resolved.get(key, value)
                 for key, value in selected_settings.items()
@@ -2230,8 +2443,8 @@ async def _run_probe(alias: str, entry: dict, probe: Probe, api_key: str | None)
                     and schema["properties"]["value"].get("type") == "boolean"
                 ):
                     schema_carrier = tool["name"]
-        # Responses SDKs omit an explicit empty include list. Absence is the
-        # same opt-out, but a nonempty include must still fail observation.
+        # Responses SDKs leave out an empty include list. A missing include
+        # then means the same as [], but a non-empty include still fails.
         controls_wire = (
             {**wire, "include": []}
             if expected.get("include") == [] and "include" not in wire
@@ -2245,9 +2458,10 @@ async def _run_probe(alias: str, entry: dict, probe: Probe, api_key: str | None)
                 and isinstance(output, dict)
                 and output.get("format") == expected_format
             )
-            # Typed Predict does not request tools: any tools/tool_choice here
-            # would be a schema surrogate. Explicit no-output_model tool probes
-            # remain untouched. A wrapped extra_body is not the native wire shape.
+            # Typed Predict calls send no tools, so tools/tool_choice here would
+            # mean the schema was sent as a tool instead of natively. (The tools
+            # test call has no output model and is not checked here.) Format
+            # fields left inside extra_body are not the native request shape.
             conflicts = any(
                 k in wire
                 for k in ("response_format", "text.format", "output_format", "tools", "tool_choice")
@@ -2308,7 +2522,7 @@ async def _run_probe(alias: str, entry: dict, probe: Probe, api_key: str | None)
                 response, result = await typed_baseline(
                     client, **({"observe_output_model": capture_output_model} if native else {})
                 )
-            response.parsed = result  # Transient native method result, never persisted.
+            response.parsed = result  # Typed result, used here only; never saved.
         else:
             response = await client.acall(messages=messages, **params)
         if (
@@ -2319,8 +2533,9 @@ async def _run_probe(alias: str, entry: dict, probe: Probe, api_key: str | None)
             and not response.tool_calls
             and response.finish_reason == "stop"
         ):
-            # Exact requested schema output is a completed typed answer, not an
-            # actionable tool call. Baseline/legacy normalization is unchanged.
+            # A tool call carrying exactly the requested schema output is the
+            # typed answer, not a tool request, so count it as a final answer.
+            # Other test calls are not affected.
             reply_evidence.update(finish_reason="stop", final_answer_observed=True)
         transport = getattr(client, "transport", "litellm")
         observed = (len(settings_sent) == 1 and all(settings_sent)) if settings_sent else None
@@ -2346,8 +2561,8 @@ async def _run_probe(alias: str, entry: dict, probe: Probe, api_key: str | None)
             and all(output_settings_sent),
         }
         if response_status:
-            # LiteLLM can label a malformed HTTP-200 response as a 422 error.
-            # Keep the observed status distinct from that local translation.
+            # LiteLLM can report a malformed HTTP 200 response as a 422 error,
+            # so also record the status the server actually returned.
             exc._connect_http_status = response_status[-1]  # type: ignore[attr-defined]
         raise
     finally:
@@ -2357,7 +2572,15 @@ async def _run_probe(alias: str, entry: dict, probe: Probe, api_key: str | None)
 
 
 async def _run_decision_probe(alias: str, entry: dict, probe: Probe, api_key: str | None):
-    """One native typed call; only sanitized facts leave this function."""
+    """Send one decision test call; return ``(response, http_status, facts)``.
+
+    Uses an own httpx client whose hooks allow only one request, read token
+    usage from the raw response, and, for the image test, check that the
+    generated PNG really was in the request (as an ``input_image`` data URL
+    for OpenAI Decisions, or a multipart part with the experimental-image
+    header for TypeSafe). On failure the status, usage and attachment facts
+    are attached to the exception for the caller; nothing else is kept.
+    """
     import json
     from email import policy
     from email.parser import BytesParser
@@ -2407,7 +2630,7 @@ async def _run_decision_probe(alias: str, entry: dict, probe: Probe, api_key: st
 
     async def capture_status(response):
         statuses.append(response.status_code)
-        # Usage is independent of schema validity. Read locally, retain only counts.
+        # Read usage even if the reply later fails validation; keep only the counts.
         await response.aread()
         try:
             usage = response.json().get("usage", {})
@@ -2461,7 +2684,7 @@ async def run(
     approved: Literal["all", "minimal", "none"],
     api_key: str | None = None,
 ) -> ConnectResult:
-    """Run an approved plan to completion without displaying progress."""
+    """Run ``run_steps`` to the end and return its final ``ConnectResult``."""
     async for event in run_steps(proposal, approved=approved, api_key=api_key):
         if isinstance(event, ConnectResult):
             return event
@@ -2471,11 +2694,16 @@ async def run(
 async def check_stage(
     proposal: ConnectPlan, stage: str, *, api_key: str | None = None
 ) -> ConnectResult:
-    """Run one selected check afresh, without prompts or registry writes.
+    """Run the test calls of one stage again and return the updated entry.
 
-    Stages are routing, decision, tools, reasoning, media, session, or all. Calling this function
-    explicitly approves that stage within the plan's existing limits. Results
-    retain other stages' provenance, but selected checks never reuse old evidence.
+    ``stage`` is routing, decision, tools, reasoning, media, session or all.
+    Calling this counts as the user's approval for that stage, within the
+    plan's existing limits. It does not prompt or write the registry. Results
+    of other stages are kept; the selected stage's old results are discarded
+    and never reused. The API key is read from ``api_key_env`` if not given.
+
+    Raises ValueError for an unknown stage, a stage the plan has no test calls
+    for, or a missing API key.
     """
     if stage not in {"routing", "tools", "reasoning", "media", "decision", "session", "all"}:
         raise ValueError("Unknown check stage")
@@ -2488,9 +2716,9 @@ async def check_stage(
         raise ValueError("Decision models support routing, decision, media and all checks")
     if stage == "decision" and proposal.entry.get("client_type") != "decision":
         raise ValueError("Decision stage requires a native decision model")
-    # A selected level already present in the approved plan can supply the
-    # routing/media cap. Never reapprove an edited cap merely by running a stage;
-    # callers must explicitly refresh/review such edits first.
+    # If the selected reasoning level is in the approved plan with the same
+    # cap, the routing/media calls may use that cap. Running a stage must not
+    # approve a changed cap; such edits need refresh_plan and a new review.
     level = proposal.entry.get("reasoning_level")
     planned_level = next((p for p in proposal.probes if p.name == f"level:{level}"), None)
     if planned_level and configured_reply_cap(proposal.entry) == (
@@ -2499,7 +2727,7 @@ async def check_stage(
         refreshed = refresh_plan(proposal)
         proposal = replace(
             refreshed,
-            # Existing level probes keep their independently approved caps.
+            # Level test calls keep the caps they were approved with.
             probes=tuple(
                 old if old.name.startswith("level:") else new
                 for old, new in zip(proposal.probes, refreshed.probes, strict=True)
@@ -2552,7 +2780,13 @@ def diagnostic_prompt(
     run_context: dict | None = None,
     api_key: str | None = None,
 ) -> str:
-    """Safe, copyable handoff for a person or agent; no credentials or raw bodies."""
+    """Return a text a user can copy to a person or agent to diagnose a failed stage.
+
+    Contains instructions, the connection settings, the public test results
+    and installation details (see ``installation_context``), plus allowed
+    ``run_context`` keys. API keys are removed, and no raw request or reply
+    bodies are included.
+    """
     from nooa.unifiedllm.connect._diagnostics import installation_context, scrub_report
 
     installation = installation_context()
@@ -2574,7 +2808,8 @@ def diagnostic_prompt(
         )
         if key in entry
     }
-    # Endpoints from arbitrary caller input may contain credentials or query data.
+    # The endpoint may come from user input and contain credentials or a query;
+    # normalising rejects those, and an invalid value is left out.
     endpoint_key = "endpoint" if "endpoint" in context else "api_base"
     if endpoint_key in context:
         try:
@@ -2645,15 +2880,23 @@ async def run_steps(
     approved: Literal["all", "minimal", "none"],
     api_key: str | None = None,
 ) -> AsyncIterator[ProbeUpdate | ConnectResult]:
-    """Execute approved probes without network retries or provider fallback.
+    """Send the approved test calls of ``proposal`` and yield progress and the result.
 
-    Minimal approval sends only the routing probe. Its failure stops all probes.
-    HTTP 400 means rejected, not unsupported; auth and transient failures stay
-    untested. Errors record status codes, not server bodies or credentials.
-    Each probe yields progress before and after sending; the final event is
-    the result to save. Frontends display these events; the library never prints.
-    Consume the iterator completely, or close it with contextlib.aclosing when
-    stopping early, so the HTTP client closes too.
+    ``approved`` is "all", "minimal" (only the routing call) or "none" (no
+    calls; every test is recorded as not approved). Calls are not retried
+    and there is no fallback to another provider. If the routing call fails,
+    the remaining calls are skipped. An earlier result is reused when it is
+    current and was made with exactly the same request.
+
+    An HTTP 400 is recorded as a rejection, not as proof the feature is
+    unsupported; authentication and temporary failures leave the feature
+    untested. Errors record status codes, never server bodies or keys.
+
+    Yields a ``ProbeUpdate`` before and after each call, and finally the
+    ``ConnectResult`` to save. The library never prints. Consume the iterator
+    fully, or close it with ``contextlib.aclosing`` when stopping early, so
+    HTTP clients are closed. Raises ValueError if the API key is needed but
+    its environment variable is unset.
     """
     if approved not in {"all", "minimal", "none"}:
         raise ValueError("approved must be all, minimal or none")
@@ -2776,36 +3019,31 @@ async def run_steps(
                     proposal.alias, entry, probe, key
                 )
             usage = response.usage
-            # response.reasoning joins only non-empty AssistantReasoning parts,
-            # so a provider that returns a reasoning part with a signature but
-            # deliberately empty/opaque text (Claude Sonnet 5/Opus 5 via Azure
-            # or Bedrock) reads as no reasoning at all through that property.
-            # Check for the part's presence directly, matching how session
-            # checks in _session.py already detect it.
+            # Look for reasoning parts directly instead of using
+            # response.reasoning, which joins only non-empty reasoning text.
+            # Some providers return a signed reasoning part with empty text
+            # (Claude Sonnet 5/Opus 5 via Azure or Bedrock), which would
+            # otherwise look like no reasoning. _session.py does the same.
             reasoning_parts = [part for part in response.parts if part.kind == "reasoning"]
-            # Confirmed live: Kimi/Qwen bill nonzero usage.reasoning_tokens on
-            # routes that never put a reasoning item on the wire at all --
-            # capture_parts has nothing to attach, so parts stays empty. Billed
-            # tokens alone are not evidence; only a captured part is (visible
-            # text or not, per the empty-text Claude case above).
+            # usage.reasoning_tokens alone does not count: in live tests
+            # Kimi/Qwen reported reasoning tokens on endpoints that return no
+            # reasoning content at all. Only a reasoning part in the reply
+            # counts, with or without visible text.
             reasoning = bool(reasoning_parts)
-            # Anthropic withholds the visible thinking text in (at least) two
-            # distinct wire shapes, both preserved on .native by chat_parts.py:
-            # a genuine redacted_thinking block (opaque "data" blob, no text
-            # field at all), and a normal *signed* "thinking" block whose
-            # "thinking" text happens to be empty (observed live for Claude
-            # Sonnet 5/Opus 5 via this Bedrock/Azure route) — chat_parts.py
-            # accepts empty text there as long as a real signature is present.
-            # Either way there's no visible text left for litellm to estimate
-            # a token count from — surface that instead of a bare, misleading 0.
+            # Detect reasoning whose readable text was withheld ("encrypted").
+            # Anthropic does this in two forms, both kept in part.native by
+            # chat_parts.py: a redacted_thinking block (an opaque "data"
+            # string, no text), and a signed "thinking" block with empty text
+            # (seen live with Claude Sonnet 5/Opus 5 via Bedrock/Azure). With
+            # no text, litellm cannot estimate reasoning tokens, so report
+            # "withheld" rather than a misleading 0.
             reasoning_encrypted = False
             reasoning_encrypted_bytes = None
 
             def _encrypted_blob_size(data: str) -> int:
-                # The decoded byte count of an opaque encrypted blob is a
-                # rough size signal only — a proxy for how much reasoning
-                # state it carries, not a token count. Providers give no way
-                # to convert this into an actual reasoning-token figure.
+                # Decoded size of an encrypted reasoning string: a rough
+                # indication of how much reasoning it holds, not a token
+                # count (providers give no way to convert it).
                 try:
                     return len(base64.b64decode(data, validate=False))
                 except ValueError:  # binascii.Error is a ValueError subclass
@@ -2828,26 +3066,20 @@ async def run_steps(
                         and isinstance(block.get("signature"), str)
                         and not part.text
                     ):
-                        # chat_parts.py already popped "thinking" text out of
-                        # this dict, so part.text (not the dict) is the only
-                        # place left to check whether it was actually empty.
-                        # A signature's length is fixed by the signing
-                        # scheme, not by how much was thought — there is no
-                        # size signal to report here, only that the text was
-                        # withheld.
+                        # chat_parts.py moved the "thinking" text out of this
+                        # dict into part.text, so check part.text for empty.
+                        # A signature has a fixed length regardless of how
+                        # much was reasoned, so no size is reported.
                         reasoning_encrypted = True
                     continue
-                # openai/azure Chat Completions routes (chat_parts.py) store
-                # their reasoning item under "reasoning_items", a third
-                # shape distinct from both "thinking_blocks" above and the
-                # unwrapped Responses-style native below — same
-                # encrypted_content field, different wrapper key.
+                # OpenAI/Azure Chat Completions endpoints (chat_parts.py) keep
+                # their reasoning item under "reasoning_items", with the same
+                # encrypted_content field as the Responses form below.
                 #
-                # An OpenAI-style reasoning item can carry a visible summary
-                # (part.text) alongside encrypted_content at the same time —
-                # the encrypted blob is opaque replay state, not proof the
-                # readable text was withheld. Only flag "withheld" when there
-                # is no visible text, matching the "thinking" branch above.
+                # Such an item can have a visible summary (part.text) and
+                # encrypted_content at the same time; the encrypted part is
+                # state to send back, not proof the text was withheld. So only
+                # mark it withheld when there is no visible text.
                 block = part.native.get("reasoning_items")
                 if isinstance(block, Mapping):
                     encrypted_content = block.get("encrypted_content")
@@ -2857,29 +3089,21 @@ async def run_steps(
                             _encrypted_blob_size(encrypted_content)
                         )
                     continue
-                # Responses-style routes (response_parts.py) store the raw
-                # output item on .native directly, not wrapped under
-                # "thinking_blocks" or "reasoning_items" — e.g. {"type":
-                # "reasoning", "encrypted_content": "..."}. Detect that shape
-                # too, or Responses/OpenAI-style encrypted reasoning always
-                # reads as "not encrypted" here regardless of what the
-                # provider sent. Same visible-summary-plus-encrypted-blob
-                # caveat as the reasoning_items branch above.
+                # Responses API endpoints (response_parts.py) keep the raw
+                # output item directly in part.native, e.g. {"type":
+                # "reasoning", "encrypted_content": "..."}. Same rule about
+                # visible summaries as above.
                 encrypted_content = part.native.get("encrypted_content")
                 if isinstance(encrypted_content, str) and encrypted_content and not part.text:
                     reasoning_encrypted = True
                     reasoning_encrypted_bytes = (reasoning_encrypted_bytes or 0) + (
                         _encrypted_blob_size(encrypted_content)
                     )
-            # litellm's text-length reasoning_tokens estimate (see the
-            # redacted_thinking/signed-empty-thinking comment above) only
-            # exists in its Anthropic/Bedrock transformation code — for every
-            # other provider it makes no estimate at all, even when real,
-            # non-empty reasoning text came back (observed live for Qwen and
-            # DeepSeek routes on this gateway). We already have that text
-            # in hand; report its length ourselves rather than nothing. Never
-            # the text itself — only its size, same privacy stance as the
-            # encrypted-blob byte count above.
+            # litellm estimates reasoning tokens from text length only for
+            # Anthropic/Bedrock; for other providers it reports nothing even
+            # when reasoning text came back (seen live with Qwen and DeepSeek).
+            # Record the length of that text instead; the text itself is never
+            # stored.
             reasoning_text_chars = (
                 sum(len(part.text) for part in reasoning_parts if part.text) or None
             )
@@ -2905,8 +3129,9 @@ async def run_steps(
                 )
             if probe.name == "routing" and probe.uses_configured_cap:
                 if entry.get("structured_output_mode") == "anthropic":
-                    # Keep observed carrier/settings/envelope facts even when
-                    # original-model validation or final-stop enforcement fails.
+                    # Keep what was observed about the request and raw response
+                    # (schema field used, settings sent, finish) even though the
+                    # typed result failed validation or did not finish with stop.
                     record.update(public_record(getattr(exc, "_connect_evidence", {})))
                 record.update(
                     baseline_kind=TYPED_TEXT_BASELINE,
@@ -2940,7 +3165,8 @@ async def run_steps(
             ):
                 rejection = _disable_encrypted_reasoning(entry, status)
                 yield ProbeUpdate("encrypted_reasoning", deepcopy(rejection))
-                # A different candidate, once, charged as another capped request.
+                # Retry once without encrypted reasoning (the entry has changed);
+                # the retry is charged as another capped request.
                 pending.appendleft(probe)
                 yield ProbeUpdate(probe.name, deepcopy(record))
                 continue
@@ -2951,8 +3177,8 @@ async def run_steps(
                 and _cache_options_rejected(exc)
             ):
                 rejection = _disable_explicit_cache(entry, status)
-                # Retry once without cache fields; the saved entry keeps caching off.
-                # The rejected attempt is not shown as a failed connection.
+                # Retry once without cache fields; the saved entry keeps explicit
+                # caching off. The rejected attempt is not reported as a failure.
                 yield ProbeUpdate("explicit_cache", deepcopy(rejection))
                 pending.appendleft(probe)
                 continue
@@ -3036,8 +3262,9 @@ async def run_steps(
                 record["outcome"] = "inconclusive"
                 record["reason"] = reply_failure_reason(probe.name[6:], record)
         if probe.name.startswith("level:"):
-            # Score only the public final answer, never retain reasoning/reply text.
-            # Correctness is separate from evidence that a setting was obeyed.
+            # Check only the final answer; reasoning and reply text are not
+            # stored. A correct answer does not prove the setting was applied,
+            # and a wrong one does not fail the check.
             record["answer_correct"] = (
                 re.sub(r"[\s,]+", "", response.content or "").upper() == "BGDACEFH"
             )
@@ -3097,7 +3324,14 @@ async def run_steps(
 async def _run_decision_steps(
     proposal: ConnectPlan, *, approved: Literal["all", "minimal", "none"], api_key: str | None
 ) -> AsyncIterator[ProbeUpdate | ConnectResult]:
-    """Share reservations across bounded stateless cases, with no retries."""
+    """``run_steps`` for decision entries: send each approved decision test call once.
+
+    All calls share the plan's token budget and are not retried. Only an
+    earlier accepted routing result may be reused; the typed decision and
+    image tests always run again. Later calls are skipped after an
+    authentication failure, if routing was not accepted, or (for the image
+    test) if a typed decision test did not answer correctly.
+    """
     from ._diagnostics import timeout_details
 
     entry = configure_entry(proposal.entry)
@@ -3108,7 +3342,7 @@ async def _run_decision_steps(
     auth_failed = False
     for probe in proposal.probes:
         previous = records.get(probe.name, {})
-        # Only routing acceptance may be reused; all accuracy/media cases are fresh.
+        # Only an accepted routing result is reused; answer and media tests rerun.
         if (
             probe.name == "routing"
             and verification_is_current(previous, entry, probe.name)
@@ -3130,7 +3364,7 @@ async def _run_decision_steps(
         elif probe.skip_reason:
             reason = probe.skip_reason
         elif auth_failed:
-            # A rejected key is never sent again in the same run.
+            # Do not send a rejected key again in the same run.
             reason = "Authentication failed; later checks not sent"
         elif charged + probe.token_estimate > proposal.budget_tokens:
             reason = "budget exhausted"
@@ -3257,41 +3491,42 @@ async def check_interfaces(
     reasoning_level: str = "medium",
     reasoning_output_tokens: int = DEFAULT_REASONING_OUTPUT_TOKENS,
 ) -> AsyncIterator[ProbeUpdate | InterfaceResult]:
-    """Try one routing request per interface, sharing one budget and no retries.
+    """Send one routing test call per API style in ``styles`` to see which ones work.
 
-    The frontend warns before calling this paid operation. It can display each
-    progress event and offer only the accepted interfaces. A timeout, auth error
-    or rejection is recorded, never relabelled as unsupported. Different styles
-    have different authentication conventions, so failure on one does not stop
-    the other bounded attempts. Close the iterator when cancelling. The selected
-    result can be passed as plan(existing_entry=...) to reuse its routing check.
+    These are paid calls: the frontend warns the user before calling this.
+    All styles share one token budget and nothing is retried. Yields a
+    ``ProbeUpdate`` per progress event (named after the style) and finally an
+    ``InterfaceResult``; close the iterator when cancelling. A timeout,
+    authentication error or rejection is recorded as such, never as "not
+    supported". A failure on one style does not stop the others, since styles
+    authenticate differently. The chosen style's entry can be passed to
+    ``plan(existing_entry=...)`` to reuse its routing result.
 
-    ``reasoning_template``, when given, also runs one reasoning-eliciting probe
-    per interface (the same puzzle prompt ``plan`` uses for its own
-    reasoning-level checks), built per style via ``reasoning_settings`` so each
-    interface gets its own correct wire shape rather than one shape reused
-    everywhere. This makes ``InterfaceResult.reasoning_observed`` and
-    ``.recommended_style`` reflect which interfaces actually surface reasoning
-    for this model, not just which accept an ordinary call. A route can accept
-    calls on every interface while only one of them ever puts a "reasoning"
-    item on the wire -- e.g. Responses needs ``reasoning.summary`` requested
-    (see ``reasoning_settings``) for some Hub routes that Chat's plain
-    ``reasoning_content`` surfaces without any extra parameter. Only the
-    "effort" template is meaningful across chat and responses together; an
-    anthropic-only comparison needs a matching template (adaptive/budget/
-    thinking) passed explicitly.
+    ``reasoning_template``, if given, also sends one reasoning test call per
+    style (the same puzzle ``plan`` uses for its level checks), with settings
+    built for each style by ``reasoning_settings``. Then
+    ``InterfaceResult.reasoning_observed`` and ``recommended_style`` show
+    which styles actually return reasoning for this model, not only which
+    accept a call. An endpoint may accept every style while only one returns
+    reasoning; for example, some NVIDIA Inference Hub models return
+    ``reasoning_content`` on Chat without extra parameters, but on Responses
+    only when ``reasoning.summary`` is requested. Only the "effort" template
+    works for chat and responses alike; an anthropic-only comparison needs a
+    matching template (adaptive, budget or thinking). Templates are ignored
+    for decision styles.
 
-    ``endpoints`` overrides ``api_base`` per style. Decision endpoints are full
-    URLs, never inferred from a chat base or by appending a suffix. Mixed styles
-    require an explicit mapping entry for every decision style; a single decision
-    style can still use ``api_base``. All supplied endpoints are validated before
-    any request. With a nonempty ``api_key`` or configured ``api_key_env``,
-    mapped endpoints on a different origin (scheme, host, effective port) require
-    explicit ``allow_cross_origin_credentials=True``. CLI callers opt in with
-    ``--share-interface-key``. No credential is shared across origins by default;
-    unauthenticated comparisons and same-origin path differences are permitted.
-    Reasoning templates apply only to chat-family interfaces and
-    are ignored in a decision-only comparison.
+    ``endpoints`` maps a style to its own endpoint instead of ``api_base``.
+    Decision endpoints are full URLs and are never derived from a chat URL.
+    When several styles are compared, every decision style needs an entry in
+    ``endpoints``; a single decision style may use ``api_base``. All
+    endpoints are validated before any request. If an API key is given or
+    ``api_key_env`` is set, an endpoint on a different origin (scheme, host
+    or port) than ``api_base`` requires ``allow_cross_origin_credentials=True``
+    (``--share-interface-key`` in the CLI), so keys are never sent to another
+    origin by default. Calls without a key, and different paths on the same
+    origin, are always allowed.
+
+    Raises ValueError for invalid styles, timeouts or endpoints.
     """
     if (
         not styles
@@ -3351,7 +3586,7 @@ async def check_interfaces(
             decision_checks=False,
         )
         if style in DECISION_API_STYLES:
-            # The decision probe has no reply-token field to cap.
+            # Decision requests have no reply token field to cap.
             probes: tuple[Probe, ...] = (
                 replace(proposal.probes[0], timeout_seconds=timeout_seconds),
             )
@@ -3369,8 +3604,8 @@ async def check_interfaces(
             level_probes = tuple(
                 replace(
                     p,
-                    # Thinking takes longer than a plain reply; a short wait would
-                    # hide reasoning on slower models.
+                    # Reasoning takes longer than a plain reply; a short
+                    # timeout would hide reasoning on slower models.
                     timeout_seconds=max(timeout_seconds, REASONING_DISCOVERY_TIMEOUT),
                     body={
                         **p.body,
@@ -3408,9 +3643,12 @@ ALIAS_UNCONDITIONAL = object()
 
 
 def alias_target(models: dict, alias: str):
-    """Detached local consent target; missing differs from a null/tombstoned alias.
+    """Return a copy of ``models[alias]`` as the value the user agreed to replace.
 
-    Do not serialize this value or hash it: legacy entries may contain secrets.
+    Pass it to ``write(expected_alias=...)`` so the save fails if the file
+    changed since. Returns ``ALIAS_MISSING`` if the alias does not exist,
+    which is different from an alias set to null. Do not serialize or hash
+    the value: older entries may contain secrets.
     """
     from copy import deepcopy
 
@@ -3419,31 +3657,41 @@ def alias_target(models: dict, alias: str):
 
 @contextmanager
 def registry_write_lock(path: Path):
-    """Hold the existing stable model sidecar for write or rollback inspection.
+    """Hold the exclusive write lock of the registry file ``path``; yield the resolved path.
 
-    Lock order for two-file save/recovery is secret then model. Do not call
-    write() while holding this lock: it acquires its own descriptor. Recovery
-    holds it through credential-dependency inspection and secret rollback.
+    The lock is a separate ``.<name>.lock`` file next to the registry file.
+    When a save changes both the secrets file and the model file, take the
+    secrets lock first, then this one. Do not call ``write()`` while holding
+    this lock: it takes the lock itself through its own file descriptor.
+    Recovery code holds it while checking which aliases use a credential and
+    while restoring the secrets file.
     """
     import fcntl
 
     path = Path(path).resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
-    # Keep the stable sidecar inode: unlinking it lets writers bypass waiters.
+    # Never delete the lock file: a new file would let a writer skip processes
+    # still waiting on the old one.
     with path.with_name(f".{path.name}.lock").open("a") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
         yield path
 
 
 def write(entry: dict, path: Path, *, alias: str, expected_alias=ALIAS_UNCONDITIONAL) -> None:
-    """Replace one model with optional compare-and-set consent under the sidecar lock.
+    """Save ``entry`` as ``alias`` in the registry file ``path``, under its write lock.
 
-    Library callers may deliberately omit expected_alias for an unconditional
-    update (backward compatibility). ALL frontends must pass alias_target from
-    their consent snapshot; ALIAS_MISSING means create only. Conflicts require
-    reloading and fresh consent, never automatic retry. No target is reported.
-    Splice the selected YAML entry instead of reformatting the whole file, so
-    unrelated entries and comments remain intact. The final replace is atomic.
+    ``expected_alias`` is the value from ``alias_target`` that the user saw
+    when agreeing to the change; the save fails if the file's current value
+    differs (``ALIAS_MISSING`` means the alias must not exist yet). Every
+    frontend must pass it. Library callers may leave it out for an
+    unconditional update (kept for backward compatibility). After a
+    conflict, reload and ask the user again; never retry automatically. The
+    error does not reveal the file's current value.
+
+    Only the YAML text of this alias is replaced, so other entries and
+    comments are kept as they are, and the file is replaced atomically.
+    Raises ValueError if the entry is invalid or if normalising it for the
+    save would change the settings that were tested.
     """
     candidate = configure_entry(entry)
     from ._verification import effective_config_snapshot
@@ -3456,10 +3704,10 @@ def write(entry: dict, path: Path, *, alias: str, expected_alias=ALIAS_UNCONDITI
             "Save normalization changed active settings; review and retest the candidate"
         )
     entry = candidate
-    # Persist discovered settings only. Probe evidence, request bodies, catalogue
-    # data and warnings belong to the connect session (surfaces via
-    # ``nooa connect check --json``); embedding them here would write the whole
-    # history of the connect call into the registry.
+    # Save the settings only. Test results, request bodies, catalogue data and
+    # warnings belong to the Connect session (shown by
+    # ``nooa connect check --json``); saving them would write the whole history
+    # of the Connect run into the registry.
     entry.pop("provenance", None)
     with registry_write_lock(path) as path:
         _write_entry(entry, path, alias=alias, expected_alias=expected_alias)
@@ -3468,7 +3716,15 @@ def write(entry: dict, path: Path, *, alias: str, expected_alias=ALIAS_UNCONDITI
 def _write_entry(
     entry: dict, path: Path, *, alias: str, expected_alias=ALIAS_UNCONDITIONAL
 ) -> None:
-    """Perform one locked read/modify/replace, retaining a concurrent-edit check."""
+    """Replace ``alias`` in the registry file; the caller must hold the write lock.
+
+    Reads the file, checks ``expected_alias`` (see ``write``), edits only the
+    alias's YAML text, verifies that the result parses to the expected data
+    and that the alias loads back exactly as ``entry``, then atomically
+    replaces the file, keeping its permissions and line endings. Raises
+    ValueError if the file is not a valid registry, uses YAML anchors, or
+    was changed by someone else meanwhile.
+    """
     original = path.read_bytes() if path.exists() else None
     mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o600
     newline = "\r\n" if original and b"\r\n" in original else "\n"
@@ -3504,8 +3760,9 @@ def _write_entry(
     indented = "\n".join(" " * alias_indent + line for line in dumped.splitlines()) + "\n"
 
     def content_end(node):
-        # Block mapping end marks include following comments. Descend to the
-        # last value so comments preceding a neighbor stay with that neighbor.
+        # A block mapping's end position includes the comments after it.
+        # Use the end of its last value instead, so comments placed before
+        # the next entry stay with that entry.
         if isinstance(node, yaml.MappingNode) and node.value and not node.flow_style:
             return content_end(node.value[-1][1])
         if isinstance(node, yaml.SequenceNode) and node.value and not node.flow_style:
@@ -3513,7 +3770,7 @@ def _write_entry(
         return node.end_mark
 
     if models_node is not None and isinstance(models_node, yaml.ScalarNode):
-        # YAML's null mapping ("models:") is a valid empty registry.
+        # "models:" with no value is null in YAML; treat it as empty.
         text = (
             source[: models_node.start_mark.index]
             + "\n"
@@ -3525,7 +3782,7 @@ def _write_entry(
         text = source + separator + "models:\n" + indented
     elif models_node.flow_style:
         models = {**data["models"], alias: entry}
-        # An inline mapping must be replaced as a unit, not patched by lines.
+        # An inline ({...}) mapping cannot be edited line by line; replace it whole.
         replacement = yaml.safe_dump(models, default_flow_style=True, sort_keys=False).strip()
         text = (
             source[: models_node.start_mark.index]
