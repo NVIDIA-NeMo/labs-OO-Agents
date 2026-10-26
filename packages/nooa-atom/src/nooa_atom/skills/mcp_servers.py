@@ -39,6 +39,9 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any, Literal
 
+import httpx
+from mcp.shared.exceptions import McpError
+
 from nooa.agentdoc import spec
 from nooa.mcp import MCPManager
 from nooa_atom.skills.mcp_auth import (
@@ -46,6 +49,7 @@ from nooa_atom.skills.mcp_auth import (
     AuthorizedHTTPClient,
     FileTokenStorage,
     PastedSignIn,
+    SignInTimeoutError,
     oauth_provider,
 )
 from nooa_atom.workspace.mcp_approval import (
@@ -97,6 +101,32 @@ class MCPSignInRequired(RuntimeError):
             f"address the browser ends on (the page may fail to load) and run:\n"
             f"  /mcp auth {name} <address>\n\nSign-in link:\n{url}"
         )
+
+
+def _connection_error(
+    request: MCPApprovalRequest, error: BaseException, environment: dict[str, str]
+) -> str:
+    """Show transport/auth leaf types/codes, never their potentially secret messages."""
+    if not isinstance(error, BaseExceptionGroup | httpx.HTTPError | McpError | SignInTimeoutError):
+        return redact_approved_environment(request, error, environment)
+    leaves: list[str] = []
+
+    def visit(exc: BaseException) -> None:
+        if isinstance(exc, BaseExceptionGroup):
+            for child in exc.exceptions:
+                visit(child)
+            return
+        name = type(exc).__name__
+        code = getattr(getattr(exc, "error", None), "code", None)
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        if isinstance(code, int):
+            name += f" (MCP code {code})"
+        if isinstance(status, int):
+            name += f" (HTTP status {status})"
+        leaves.append(name)
+
+    visit(error)
+    return "Connection failed: " + ", ".join(dict.fromkeys(leaves))
 
 
 class _PendingSignIn:
@@ -449,7 +479,9 @@ class MCPServers:
         try:
             await asyncio.wait({opening, waiting}, return_when=asyncio.FIRST_COMPLETED)
         except asyncio.CancelledError:
+            signin.cancel()
             opening.cancel()
+            await asyncio.gather(opening, return_exceptions=True)
             raise
         finally:
             waiting.cancel()
@@ -462,7 +494,7 @@ class MCPServers:
         try:
             return opening.result()
         except Exception as exc:
-            message = redact_approved_environment(request, exc, environment)
+            message = _connection_error(request, exc, environment)
             self._errors[name] = message
             raise RuntimeError(f"MCP server {name!r} connection failed: {message}") from None
 
@@ -494,6 +526,7 @@ class MCPServers:
         client = AuthorizedHTTPClient(
             url,
             provider=oauth_provider(signin, storage, scope=config.get("oauth_scope")),
+            signin=signin,
             headers=headers,
             transport=transport,
             tool_call_timeout=tool_call_timeout,
@@ -519,8 +552,16 @@ class MCPServers:
         task: asyncio.Task[Any],
     ) -> None:
         """A connection that waited for a sign-in ended: attach it or record why not."""
-        pending = self._signins.pop(name, None)
+        pending = self._signins.get(name)
+        # A disconnect/reconnect may already own a new sign-in for this name.
+        if pending is None or pending.task is not task:
+            if not task.cancelled():
+                task.exception()
+            return
+        self._signins.pop(name)
         if task.cancelled():
+            pending.signin.cancel()
+            self._errors[name] = "Connection cancelled before the sign-in completed."
             return
         error = task.exception()
         if error is None:
@@ -535,7 +576,7 @@ class MCPServers:
                     f"methods of self.{attr_name(name)}: {tools}."
                 )
                 return
-        message = redact_approved_environment(request, error, environment)
+        message = _connection_error(request, error, environment)
         self._errors[name] = message
         self._tell(f"MCP server {name!r} did not connect after the sign-in: {message}")
 
@@ -585,11 +626,15 @@ class MCPServers:
         """Detach connected servers matching ``patterns``; stop waiting sign-ins."""
         names = set(self._connected) | set(self._signins)
         matched = sorted(self._match(patterns, names))
+        tasks = []
         for name in matched:
             pending = self._signins.pop(name, None)
             if pending is not None:
+                pending.signin.cancel()
                 pending.task.cancel()
+                tasks.append(pending.task)
             self._detach(name)
+        await asyncio.gather(*tasks, return_exceptions=True)
         return matched
 
     def activate(self, patterns: list[str]) -> list[str]:
@@ -606,11 +651,7 @@ class MCPServers:
 
     async def aclose(self) -> None:
         """Stop waiting sign-ins and detach every server."""
-        for pending in self._signins.values():
-            pending.task.cancel()
-        self._signins.clear()
-        for name in list(self._connected):
-            self._detach(name)
+        await self.disconnect(["*"])
 
     # ------------------------------------------------------------------
     # Host display

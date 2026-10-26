@@ -36,9 +36,22 @@ from urllib.parse import parse_qs, urlsplit
 import httpx
 from mcp import ClientSession
 from mcp.client.auth import OAuthClientProvider
+from mcp.client.auth import utils as oauth_utils
+from mcp.client.auth.exceptions import OAuthFlowError
+from mcp.client.auth.utils import (
+    build_oauth_authorization_server_metadata_discovery_urls,
+    build_protected_resource_metadata_discovery_urls,
+    create_oauth_metadata_request,
+    extract_resource_metadata_from_www_auth,
+    handle_auth_metadata_response,
+    handle_protected_resource_response,
+)
 from mcp.client.sse import sse_client
 from mcp.client.streamable_http import streamable_http_client
 from mcp.shared.auth import OAuthClientInformationFull, OAuthClientMetadata, OAuthToken
+from mcp.shared.exceptions import McpError
+from mcp.types import ErrorData
+from pydantic import AnyHttpUrl
 
 from nooa.mcp import MCPBaseClient
 from nooa.paths import get_user_dir
@@ -50,6 +63,18 @@ DEFAULT_REDIRECT_URI = "http://localhost/callback"
 SIGN_IN_TIMEOUT_SECONDS = 600.0
 # Establishing the connection keeps the short budget core's clients use.
 _CONNECT_TIMEOUT_SECONDS = 5.0
+
+
+def _issuers_match(left: str, right: str) -> bool:
+    """Use SDK 1.30 issuer matching, with the same root-slash rule on 1.28."""
+    match = getattr(oauth_utils, "issuers_match", None)
+    if match is not None:
+        return match(left, right)
+    if left == right:
+        return True
+    shorter, longer = sorted((left, right), key=len)
+    parsed = urlsplit(shorter)
+    return longer == f"{shorter}/" and shorter == f"{parsed.scheme}://{parsed.netloc}"
 
 
 def token_file() -> Path:
@@ -121,6 +146,22 @@ class FileTokenStorage:
             return tokens.model_copy(update={"access_token": ""})
         return tokens
 
+    def get_token_expiry(self) -> float | None:
+        """The persisted absolute deadline, not a restarted ``expires_in`` clock."""
+        expires_at = self._entry().get("expires_at")
+        return expires_at if isinstance(expires_at, int | float) else None
+
+    def get_issuer(self) -> str | None:
+        """Issuer binding for credentials saved by Atom; older caches have none."""
+        issuer = self._entry().get("issuer")
+        return issuer if isinstance(issuer, str) else None
+
+    def get_client_issuer(self) -> str | None:
+        """Preserve SDK-native binding even when loading through an older model."""
+        client_info = self._entry().get("client_info")
+        issuer = client_info.get("issuer") if isinstance(client_info, dict) else None
+        return issuer if isinstance(issuer, str) else None
+
     async def set_tokens(self, tokens: OAuthToken) -> None:
         expires_at = time.time() + tokens.expires_in if tokens.expires_in else None
         self._update(tokens=tokens.model_dump(mode="json"), expires_at=expires_at)
@@ -139,7 +180,20 @@ class FileTokenStorage:
         )
 
     async def set_client_info(self, client_info: OAuthClientInformationFull) -> None:
-        self._update(client_info=client_info.model_dump(mode="json"))
+        fields: dict[str, Any] = {"client_info": client_info.model_dump(mode="json")}
+        tokens = self._entry().get("tokens")
+        if isinstance(tokens, dict) and tokens.get("refresh_token") and not self.get_issuer():
+            # SDK step-up can persist a new registration before authorization
+            # completes, without replacing old tokens. Preserve their known AS
+            # independently before the old native registration binding is lost.
+            previous_issuer = self.get_client_issuer()
+            if previous_issuer:
+                fields["issuer"] = previous_issuer
+        self._update(**fields)
+
+
+class SignInTimeoutError(TimeoutError):
+    """The human callback deadline expired (distinct from a network timeout)."""
 
 
 class PastedSignIn:
@@ -155,6 +209,8 @@ class PastedSignIn:
         self.url: str | None = None
         self.url_ready = asyncio.Event()
         self._timeout = timeout
+        self._waiting = False
+        self._budgets: dict[asyncio.Timeout, float] = {}
         self._pasted: asyncio.Future[tuple[str, str | None]] = (
             asyncio.get_running_loop().create_future()
         )
@@ -164,16 +220,55 @@ class PastedSignIn:
         self.url_ready.set()
 
     async def callback(self) -> tuple[str, str | None]:
+        self._waiting = True
+        loop = asyncio.get_running_loop()
+        for budget in self._budgets:
+            if budget.expired():
+                continue
+            deadline = budget.when()
+            if deadline is not None:
+                self._budgets[budget] = max(0.0, deadline - loop.time())
+                budget.reschedule(None)
         try:
             return await asyncio.wait_for(asyncio.shield(self._pasted), self._timeout)
         except TimeoutError:
-            raise TimeoutError(
+            self.cancel()
+            raise SignInTimeoutError(
                 f"The sign-in was not completed within {self._timeout:g} seconds; "
                 "connect again to start a new one."
             ) from None
+        except asyncio.CancelledError:
+            self.cancel()
+            raise
+        finally:
+            self._waiting = False
+            for budget, remaining in self._budgets.items():
+                if not budget.expired():
+                    budget.reschedule(loop.time() + remaining)
+
+    @asynccontextmanager
+    async def response_budget(self, seconds: float) -> AsyncGenerator[asyncio.Timeout, None]:
+        """An MCP response deadline, paused only while awaiting human input.
+
+        HTTPX still enforces network I/O deadlines. The SDK's own response
+        deadline cannot be paused, so the authorized session uses this one.
+        """
+        async with asyncio.timeout(None if self._waiting else seconds) as budget:
+            self._budgets[budget] = seconds
+            try:
+                yield budget
+            finally:
+                self._budgets.pop(budget, None)
+
+    def cancel(self) -> None:
+        """Invalidate a callback belonging to a stopped or expired connection."""
+        self._pasted.cancel()
+        self.url = None
 
     def complete(self, pasted: str) -> None:
         """Take the pasted redirect address; ``ValueError`` if it holds no code."""
+        if self._pasted.done():
+            raise ValueError("This sign-in is no longer waiting; connect again to start a new one.")
         value = pasted.strip()
         quoted = re.search(r"curl\s+['\"]([^'\"]+)['\"]", value)
         if quoted:
@@ -194,6 +289,199 @@ class PastedSignIn:
             self._pasted.set_result((code, query.get("state", [None])[0]))
 
 
+class DiscoveringOAuthClientProvider(OAuthClientProvider):
+    """SDK OAuth with discovery before refresh (SDK 1.28-1.30).
+
+    Drive the SDK generator rather than copying its OAuth flow: its lock,
+    PKCE, scope handling, client authentication and token parsing stay intact.
+    Only refresh requests and the first resource 401 are intercepted. Discovery
+    uses SDK parsers/resource validation and never sends credentials. A refresh
+    requires discovered metadata, never the SDK's resource-origin /token guess.
+    """
+
+    async def _initialize(self) -> None:
+        await super()._initialize()
+        storage = self.context.storage
+        if isinstance(storage, FileTokenStorage) and self.context.current_tokens:
+            self.context.token_expiry_time = storage.get_token_expiry()
+
+    def _is_cimd_client(self) -> bool:
+        # URL-shaped registered IDs are not CIMD: only exact configured identity.
+        return bool(
+            self.context.client_info
+            and self.context.client_metadata_url is not None
+            and self.context.client_info.client_id == self.context.client_metadata_url
+        )
+
+    def _validate_cached_issuer(self, expected: str, *, refresh: bool) -> None:
+        storage = self.context.storage
+        native_issuer = getattr(self.context.client_info, "issuer", None)
+        if native_issuer is None and isinstance(storage, FileTokenStorage):
+            native_issuer = storage.get_client_issuer()
+        match = getattr(oauth_utils, "credentials_match_issuer", None)
+        if (
+            self.context.client_info is not None
+            and match is not None
+            and not match(self.context.client_info, expected, self.context.client_metadata_url)
+        ):
+            raise OAuthFlowError("Cached client credentials belong to another issuer")
+        # CIMD client identity is portable, but a known refresh-token issuer is not.
+        if native_issuer and (refresh or not self._is_cimd_client()):
+            if not _issuers_match(native_issuer, expected):
+                raise OAuthFlowError("Cached credentials belong to another issuer")
+        token_issuer = storage.get_issuer() if isinstance(storage, FileTokenStorage) else None
+        if token_issuer and (refresh or not self._is_cimd_client()):
+            if not _issuers_match(token_issuer, expected):
+                raise OAuthFlowError(
+                    "Authorization server changed; cached credentials cannot be reused"
+                )
+
+    def _validate_issuer(self) -> None:
+        metadata = self.context.oauth_metadata
+        expected = self.context.auth_server_url or self.context.get_authorization_base_url(
+            self.context.server_url
+        )
+        if metadata is None or metadata.issuer != AnyHttpUrl(expected):
+            raise OAuthFlowError("Authorization metadata issuer does not match discovery")
+        self._validate_cached_issuer(expected, refresh=False)
+
+    async def _perform_authorization(self) -> httpx.Request:
+        # The SDK 1.28 resource check is retained; also bind AS metadata to PRM.
+        storage = self.context.storage
+        bound_issuer = (
+            storage.get_issuer() or storage.get_client_issuer()
+            if isinstance(storage, FileTokenStorage)
+            else None
+        )
+        if self.context.oauth_metadata is not None or bound_issuer:
+            self._validate_issuer()
+        return await super()._perform_authorization()
+
+    async def _handle_refresh_response(self, response: httpx.Response) -> bool:
+        refreshed = await super()._handle_refresh_response(response)
+        storage = self.context.storage
+        if refreshed and isinstance(storage, FileTokenStorage) and self.context.oauth_metadata:
+            storage._update(issuer=str(self.context.oauth_metadata.issuer))
+        return refreshed
+
+    async def _handle_token_response(self, response: httpx.Response) -> None:
+        await super()._handle_token_response(response)
+        storage = self.context.storage
+        if isinstance(storage, FileTokenStorage) and self.context.oauth_metadata:
+            storage._update(issuer=str(self.context.oauth_metadata.issuer))
+
+    async def _discover_for_refresh(
+        self, challenge: httpx.Response | None
+    ) -> AsyncGenerator[httpx.Request, httpx.Response]:
+        hint = extract_resource_metadata_from_www_auth(challenge) if challenge else None
+        # Rediscover rather than trusting an endpoint from a previous 401.
+        self.context.protected_resource_metadata = None
+        self.context.oauth_metadata = None
+        self.context.auth_server_url = None
+        for attempt in range(2 if challenge is None else 1):
+            for url in build_protected_resource_metadata_discovery_urls(
+                hint, self.context.server_url
+            ):
+                response = yield create_oauth_metadata_request(url)
+                prm = await handle_protected_resource_response(response)
+                if prm:
+                    await self._validate_resource_match(prm)
+                    self.context.protected_resource_metadata = prm
+                    self.context.auth_server_url = str(prm.authorization_servers[0])
+                    break
+            if self.context.protected_resource_metadata is not None:
+                break
+            if attempt == 0 and challenge is None:
+                # Some servers publish PRM only at the challenge's custom URL.
+                # Probe without bearer tokens, client secrets or request payload.
+                challenge = yield httpx.Request("GET", self.context.server_url)
+                hint = extract_resource_metadata_from_www_auth(challenge)
+        if self.context.protected_resource_metadata is None:
+            raise OAuthFlowError("Cannot refresh without protected-resource metadata")
+
+        # Check both SDK-native client registration and Atom token bindings before
+        # constructing or yielding any request that contains cached credentials.
+        self._validate_cached_issuer(self.context.auth_server_url, refresh=True)
+
+        for url in build_oauth_authorization_server_metadata_discovery_urls(
+            self.context.auth_server_url, self.context.server_url
+        ):
+            response = yield create_oauth_metadata_request(url)
+            ok, metadata = await handle_auth_metadata_response(response)
+            if not ok:
+                break
+            if metadata:
+                self.context.oauth_metadata = metadata
+                self._validate_issuer()
+                break
+        if self.context.oauth_metadata is None:
+            raise OAuthFlowError("Cannot refresh without authorization-server metadata")
+
+    def async_auth_flow(
+        self, request: httpx.Request
+    ) -> AsyncGenerator[httpx.Request, httpx.Response]:
+        if hasattr(OAuthClientProvider, "_auth_flow"):
+            # SDK 1.30 wraps _auth_flow with its redirect-origin guard. Keep it.
+            return super().async_auth_flow(request)
+        return self._drive_sdk_flow(request, super().async_auth_flow(request))
+
+    def _auth_flow(self, request: httpx.Request) -> AsyncGenerator[httpx.Request, httpx.Response]:
+        return self._drive_sdk_flow(request, super()._auth_flow(request))
+
+    async def _drive_sdk_flow(
+        self, request: httpx.Request, flow: AsyncGenerator[httpx.Request, httpx.Response]
+    ) -> AsyncGenerator[httpx.Request, httpx.Response]:
+        refresh_attempted = False
+        try:
+            pending = await anext(flow)  # SDK initialization and lock acquisition.
+            # The SDK's first non-resource request is a proactive refresh.
+            if pending is not request:
+                discovery = self._discover_for_refresh(None)
+                try:
+                    discovery_request = await anext(discovery)
+                    while True:
+                        discovery_response = yield discovery_request
+                        discovery_request = await discovery.asend(discovery_response)
+                except StopAsyncIteration:
+                    pass
+                finally:
+                    await discovery.aclose()
+                pending = await self._refresh_token()
+                refresh_attempted = True
+
+            while True:
+                response = yield pending
+                if (
+                    pending is request
+                    and response.status_code == 401
+                    and not refresh_attempted
+                    and self.context.can_refresh_token()
+                ):
+                    refresh_attempted = True
+                    discovery = self._discover_for_refresh(response)
+                    try:
+                        discovery_request = await anext(discovery)
+                        while True:
+                            discovery_response = yield discovery_request
+                            discovery_request = await discovery.asend(discovery_response)
+                    except StopAsyncIteration:
+                        pass
+                    finally:
+                        await discovery.aclose()
+                    refresh_response = yield await self._refresh_token()
+                    if await self._handle_refresh_response(refresh_response):
+                        self._add_auth_header(request)
+                        response = yield request
+                    else:
+                        request.headers.pop("Authorization", None)
+                # Failed refresh or a repeated 401 goes to the SDK's manual flow.
+                pending = await flow.asend(response)
+        except StopAsyncIteration:
+            return
+        finally:
+            await flow.aclose()  # Release SDK lock on cancellation/error as well.
+
+
 def oauth_provider(
     signin: PastedSignIn, storage: FileTokenStorage, *, scope: str | None = None
 ) -> OAuthClientProvider:
@@ -206,13 +494,53 @@ def oauth_provider(
         token_endpoint_auth_method="none",
         scope=scope,
     )
-    return OAuthClientProvider(
+    return DiscoveringOAuthClientProvider(
         server_url=storage.server_url,
         client_metadata=metadata,
         storage=storage,
         redirect_handler=signin.redirect,
         callback_handler=signin.callback,
     )
+
+
+class _AuthorizedSession(ClientSession):
+    """SDK session whose response timeout excludes the provider's human wait."""
+
+    def __init__(self, read: Any, write: Any, signin: PastedSignIn, seconds: float) -> None:
+        super().__init__(read, write)
+        self._signin = signin
+        self._response_seconds = seconds
+
+    async def send_request(
+        self,
+        request: Any,
+        result_type: Any,
+        request_read_timeout_seconds: Any = None,
+        metadata: Any = None,
+        progress_callback: Any = None,
+    ) -> Any:
+        timeout = request_read_timeout_seconds
+        seconds = (
+            self._response_seconds
+            if timeout is None
+            else (timeout.total_seconds() if isinstance(timeout, timedelta) else float(timeout))
+        )
+        try:
+            async with self._signin.response_budget(seconds) as budget:
+                return await super().send_request(
+                    request, result_type, metadata=metadata, progress_callback=progress_callback
+                )
+        except TimeoutError:
+            if not budget.expired():
+                raise
+            # Preserve the SDK's response-timeout error contract.
+            raise McpError(
+                ErrorData(
+                    code=408,
+                    message=f"Timed out waiting for an MCP response after {seconds:g} seconds "
+                    "(excluding the human sign-in wait).",
+                )
+            ) from None
 
 
 class AuthorizedHTTPClient(MCPBaseClient):
@@ -223,6 +551,7 @@ class AuthorizedHTTPClient(MCPBaseClient):
         url: str,
         *,
         provider: OAuthClientProvider,
+        signin: PastedSignIn,
         headers: dict[str, str] | None = None,
         transport: Literal["sse", "streamable-http"] = "streamable-http",
         tool_call_timeout: timedelta = timedelta(seconds=60),
@@ -232,6 +561,7 @@ class AuthorizedHTTPClient(MCPBaseClient):
         self._headers = dict(headers or {})
         self._transport = transport
         self._provider = provider
+        self._signin = signin
 
     @property
     def transport(self) -> Literal["sse", "stdio", "streamable-http"]:
@@ -252,7 +582,7 @@ class AuthorizedHTTPClient(MCPBaseClient):
                     sse_read_timeout=seconds,
                     auth=self._provider,
                 ) as (read, write),
-                ClientSession(read, write, read_timeout_seconds=self.tool_call_timeout) as session,
+                _AuthorizedSession(read, write, self._signin, seconds) as session,
             ):
                 await session.initialize()
                 yield session
@@ -265,9 +595,7 @@ class AuthorizedHTTPClient(MCPBaseClient):
         async with (
             http_client,
             streamable_http_client(self._url, http_client=http_client) as streams,
-            ClientSession(
-                streams[0], streams[1], read_timeout_seconds=self.tool_call_timeout
-            ) as session,
+            _AuthorizedSession(streams[0], streams[1], self._signin, seconds) as session,
         ):
             await session.initialize()
             yield session
