@@ -1,6 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Terminal approval and display for the shared nooa.unifiedllm.connect library."""
+"""The ``nooa connect`` command: set up, test and save a model entry from the terminal.
+
+This module only declares the Click command and checks that its options fit
+together. The work happens elsewhere: ``--stage`` runs one non-interactive step
+that prints JSON (``_connect_stages``), and without ``--stage`` the guided
+interactive setup runs (``_connect_wizard``). Both use the shared library
+``nooa.unifiedllm.connect``, whose module docstring defines the terms used here
+(model entry, API style, model listing, test call).
+"""
 
 import click
 
@@ -8,9 +16,18 @@ from ._connect_stages import STAGES
 
 
 class ConnectCommand(click.Command):
-    """Keep Click's command contract; present help in the Connect design language."""
+    """Click command whose ``--help`` output uses the same look as the connect screens.
+
+    Parsing and behaviour are those of ``click.Command``; only the help text is
+    re-wrapped to the terminal width, indented, and has its headings coloured.
+    """
 
     def get_help(self, ctx):
+        """Return Click's help text re-wrapped and styled for the connect screens.
+
+        Lines that start a section (``Usage:`` or a line ending in ``:``) are
+        bold cyan unless ``NO_COLOR`` is set in the environment.
+        """
         from . import _connect_view as view
 
         rendered = []
@@ -218,10 +235,10 @@ class ConnectCommand(click.Command):
 @click.option(
     "--working-dir",
     "-w",
-    # No exists=True here: click validates the raw argument before this
-    # command ever runs, so a literal "~" would fail as "does not exist"
-    # even though it's a real directory — expand it ourselves below, then
-    # check existence on the expanded path.
+    # No exists=True here: Click checks the raw argument before the command
+    # runs, so a literal "~" would be reported as "does not exist" although it
+    # names a real directory. The command expands the path itself and then
+    # checks that it exists.
     type=click.Path(file_okay=False, dir_okay=True, path_type=str),
     help=(
         "Save to this project's registry (<working-dir>/.nooa/llm_config.yaml) "
@@ -306,7 +323,8 @@ def command(
         )
     if no_metadata and stage in {"discover", "catalogue", "model-info"}:
         raise click.UsageError("--no-metadata disables metadata stages")
-    # Historical --no-catalogue + exact MODEL bypass remains supported.
+    # Older usage passed --no-catalogue with an exact MODEL to skip all metadata
+    # requests; --no-metadata keeps that behaviour by also turning off the catalogue.
     no_catalogue = no_catalogue or no_metadata
 
     try:
@@ -336,11 +354,10 @@ def command(
         from nooa import paths
 
         resolved_dir = Path(working_dir).expanduser().resolve()
-        # click's own file_okay/dir_okay checks only run when its (raw,
-        # unexpanded) argument happens to already exist, so a "~"-relative
-        # path skips them entirely — check both cases explicitly here,
-        # after expansion, rather than reporting "does not exist" for a
-        # real path that just isn't a directory.
+        # Click runs its file_okay/dir_okay checks only when the raw, unexpanded
+        # argument already exists, so a "~"-relative path skips them. Check the
+        # expanded path here so a real file is reported as "not a directory"
+        # instead of "does not exist".
         if not resolved_dir.exists():
             raise click.UsageError(f"--working-dir directory {str(resolved_dir)!r} does not exist.")
         if not resolved_dir.is_dir():
@@ -348,8 +365,9 @@ def command(
         output = str(resolved_dir / paths.DIR_NAME / "llm_config.yaml")
     from nooa.tracing import quiet_trace_target
 
-    # Checks create model clients, which may auto-enable tracing; its
-    # "OTel tracing enabled" line would land mid-way through the wizard output.
+    # Test calls create model clients, which may turn on tracing automatically.
+    # Silence the tracing setup so its "OTel tracing enabled" line does not
+    # appear in the middle of the connect output.
     with quiet_trace_target():
         if stage:
             from ._connect_stages import run_stage

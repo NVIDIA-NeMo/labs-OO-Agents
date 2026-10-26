@@ -1,15 +1,29 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Explicit repair and picker ceilings using the core request-input contract."""
+"""Which media inputs the wizard may offer for the chosen API style.
+
+Each API style can send only some media kinds (for example, the Anthropic
+Messages and OpenAI Responses clients send images and PDFs, Chat Completions
+also sends audio and video, decision clients send images). The rules live in
+``nooa.media_policy``; this module applies them to the wizard state. It limits
+the media picker to the kinds the API style can send, and asks the user to fix
+an entry whose saved media inputs include kinds the API style cannot send.
+"""
 
 import click
 
 
 def media_route(state):
-    """A no-I/O preview of the selected Connect route, not model capability."""
+    """Return a model entry describing the endpoint and API style chosen so far.
+
+    The entry is built from the wizard state without any network request. It
+    is only used to look up which media kinds that API style can send; it says
+    nothing about what the model itself accepts.
+    """
     if state.editing is not None:
-        # The editor preserves this route's client/provider controls verbatim;
-        # its api_style label need not describe the actual runtime dispatch.
+        # When editing, the existing entry's client and provider settings are
+        # kept unchanged, and they decide how requests are sent at runtime.
+        # The wizard's api_style label may not match them, so use the entry.
         return state.editing
     style = state.api_style or "chat"
     prefix = "anthropic/" if style == "anthropic" else "openai/"
@@ -25,6 +39,7 @@ def media_route(state):
 
 
 def available_media(state, *, entry=None):
+    """Return the media kinds the API style of ``entry`` (or the wizard state) can send."""
     from nooa.media_policy import entry_input_interface, implemented_input_kinds
 
     return implemented_input_kinds(
@@ -33,17 +48,27 @@ def available_media(state, *, entry=None):
 
 
 def picker_options(state, *, entry=None):
+    """Return keyword arguments that limit the media picker to the kinds that can be sent."""
     available = available_media(state, entry=entry)
-    # Preserve existing generic Chat picker invocation and its API contract.
+    # When all four kinds can be sent (Chat Completions), return no arguments so
+    # the picker is called exactly as before, with its default list of kinds.
     return {"available": available} if len(available) != 4 else {}
 
 
 def repair_native_media(state, current, *, entry=None, explicit=False):
-    """Return an explicit valid selection, or None for cancellation; never erase.
+    """Make sure the enabled media inputs ``current`` can be sent with this API style.
 
-    Old raw profile permissions/evidence stay on the source entry. Only a user
-    choice repairs a detached candidate. --yes and invalid explicit flags fail.
-    Requested tests are separate: Test All may report unsupported skipped rows.
+    Only the Anthropic Messages and OpenAI Responses styles are checked here.
+    If every enabled kind can be sent, the list is returned unchanged. If not,
+    the user chooses: drop the kinds that cannot be sent, turn media off, or
+    cancel. The chosen list is stored on ``state`` and returned; cancel returns
+    None. Nothing is removed without the user's choice, and the saved entry
+    being edited is not modified here (only the new entry being built is).
+
+    With ``explicit`` (the list came from ``--media-inputs``) or ``--yes``,
+    there is no one to ask, so a ``click.UsageError`` is raised instead.
+    This only concerns enabled inputs; media tests chosen with "Test all" are
+    handled separately and may report kinds that were skipped.
     """
     from nooa.media_inputs import validate_media_inputs
     from nooa.media_policy import (
@@ -88,7 +113,10 @@ def repair_native_media(state, current, *, entry=None, explicit=False):
 
 
 def validate_native_declaration(state, *, entry=None):
-    """Reject explicit unsupported declarations before provider execution."""
+    """Raise ``click.UsageError`` if ``--media-inputs`` names a kind this API style cannot send.
+
+    Runs before any request is sent, so an invalid option fails early.
+    """
     if state.media_inputs is None:
         return
     from ._connect_prompts import parse_media_inputs

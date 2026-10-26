@@ -1,10 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Editable terminal prompts; the onboarding library has no terminal dependencies.
+"""Terminal prompts for the connect wizard.
 
-Only suggested names enter completion, never environment values. Each prompt
-has disposable history, and secrets have neither history nor completion. Pipes
-use Click's line input so scripted answers continue to work without a terminal.
+The shared library ``nooa.unifiedllm.connect`` never reads the terminal; all
+questions to the user live here. In an interactive terminal the prompts use
+prompt_toolkit (menus, completion, checkboxes). When standard input is not a
+terminal (a pipe or script), they fall back to Click's plain line input and
+accept the same typed answers as before, so scripted runs keep working.
+
+Completion offers only names (such as environment variable names), never
+environment variable values. Prompts keep no history between questions, and
+prompts for secrets have neither history nor completion.
 """
 
 import os
@@ -16,7 +22,12 @@ from . import _connect_view as view
 
 
 def choose_structured_output_mode(current=None):
-    """Explicit connection profile, never provider catalogue metadata."""
+    """Ask how NOOA should request structured (typed JSON) answers from this endpoint.
+
+    The answer is always the user's choice; it is never taken from catalogue
+    information. Returns None for the standard request format, else
+    ``"auto"`` or ``"anthropic"`` (Anthropic's native JSON output format).
+    """
     view.note(
         "Choose how NOOA requests typed JSON answers. Native JSON uses Anthropic’s format; unknown servers must be tested. Standard uses the usual request format."
     )
@@ -33,7 +44,7 @@ def choose_structured_output_mode(current=None):
 
 
 def environment_names(defaults=()):
-    """Suggest variable names, including conventional names not yet exported."""
+    """Return sorted environment variable names to offer, plus ``defaults`` even if unset."""
     return sorted(set(os.environ).union(defaults))
 
 
@@ -50,9 +61,18 @@ def prompt(
     existing=(),
     searchable=False,
 ):
-    """Use labelled menus for finite TTY choices, completion for searchable/editable input.
+    """Ask one question and return the answer as a string.
 
-    Line input retains its original defaults, token answers and validation.
+    In a terminal, a fixed list of ``choices`` is shown as a menu (unless
+    ``searchable`` or ``hide_input`` is set); other questions use an editable
+    text field with completion from ``choices`` or ``suggestions``. Enter
+    accepts ``default``; Right Arrow copies the default into the field for
+    editing; F1 shows help. ``existing`` lists names that are already taken,
+    for which a warning is shown. ``hide_input`` masks the answer (for keys).
+
+    Without a terminal, Click's line input is used with the same defaults,
+    accepted answers and validation as before. Ctrl-C or end of input raises
+    ``click.Abort``.
     """
     choices = tuple(choices)
     if choices and not searchable and not hide_input and sys.stdin.isatty():
@@ -74,7 +94,8 @@ def prompt(
             )
             if not choices or value in choices:
                 return value
-            # Click.Choice includes every model ID in its prompt and error.
+            # Checked here instead of with click.Choice, which would print every
+            # model ID in its prompt and error message.
             view.note(
                 "Choose an available value; check the spelling of the model or provider name.",
                 err=True,
@@ -207,7 +228,11 @@ def prompt(
 
 
 def confirm(text, *, default):
-    """Keep approval explicit; completion never submits an answer."""
+    """Ask a yes/no question and return the answer as a bool.
+
+    Empty input returns ``default``. Completion only fills in text; the user
+    must still press Enter, so an answer is never submitted automatically.
+    """
     if not sys.stdin.isatty():
         return click.confirm(
             view.prompt_text(text + (" [Y/n]" if default else " [y/N]")),
@@ -224,7 +249,13 @@ def confirm(text, *, default):
 
 
 def manual_model_limits(context=None, input_limit=None, *, edit=False):
-    """Require literal positive integer declarations; collect atomically before applying."""
+    """Ask for the context window and input token limit; return ``(context, input_limit)``.
+
+    Each value must be a whole number of at least 2 tokens. A known value
+    (greater than 1) is kept without asking unless ``edit`` is set. Both values
+    are collected before either is returned, so cancelling half-way applies
+    nothing.
+    """
     view.note("Enter your server limits. Ctrl-C cancels setup.")
 
     def count(label, current):
@@ -252,7 +283,14 @@ def manual_model_limits(context=None, input_limit=None, *, edit=False):
 
 
 def edit_model_details(model, *, reasoning=True):
-    """Edit a detached copy of published settings; no request or file writes."""
+    """Let the user correct the published details of a model; return an edited copy.
+
+    ``model`` is a catalogue-style dict (``context_length``,
+    ``top_provider.max_completion_tokens``, ``reasoning``). It is copied, so the
+    original is not changed. ``-`` marks a value as unknown. Reasoning levels
+    are only asked for when ``reasoning`` is true. No requests are sent and no
+    files are written.
+    """
     from copy import deepcopy
 
     edited = deepcopy(model)
@@ -301,13 +339,17 @@ def edit_model_details(model, *, reasoning=True):
 
 
 def choose_reply_limit(suggested, ceiling=None, *, output_ceiling=None, source="connect_default"):
-    """Choose a real request budget, independent of the capability ceiling.
+    """Ask for the reply cap to save (maximum reply tokens per request) and return it.
 
-    ``ceiling`` is the strict upper bound every choice must respect (the
-    tighter of context window and known max output, when both are known).
-    ``output_ceiling`` is specifically the model's own declared max output —
-    never inferred from context window — offered as an explicit "Model
-    maximum" choice so picking exactly that value never requires --custom.
+    The reply cap is what each request asks for; it may be lower than what
+    the model allows. ``suggested`` is the recommended value and ``source``
+    says where it came from (shown in its label).
+
+    ``ceiling`` is the upper bound every choice must stay within: the smaller
+    of the context window and the model's maximum reply length, when known.
+    ``output_ceiling`` is the model's own published maximum reply length (never
+    derived from the context window). It is offered as a "Model maximum" menu
+    item so the user can pick exactly that value without typing a custom one.
     """
     view.note("\n  Room for each reply, including thinking and the final answer.")
     view.note("  Choose a smaller limit for short replies, or leave more room for thinking.\n")
@@ -361,7 +403,12 @@ def choose_reply_limit(suggested, ceiling=None, *, output_ceiling=None, source="
 
 
 def parse_media_inputs(value):
-    """Parse an explicit CLI declaration, never a catalogue capability."""
+    """Parse a ``--media-inputs`` value into a list of media kinds, or None if not given.
+
+    Accepts a comma-separated string or a list. An empty string or ``-``
+    means no media. Raises ``ValueError`` for unknown kinds. This only parses
+    what the user typed; it does not consult catalogue information.
+    """
     from nooa.unifiedllm.media_inputs import validate_media_inputs
 
     if value is None:
@@ -378,7 +425,12 @@ def parse_media_inputs(value):
 
 
 def choose_media_inputs(current=(), *, available=("image", "audio", "video", "pdf")):
-    """User-declared formats; checkboxes on TTY, comma-separated values in pipes."""
+    """Let the user pick media inputs to enable without testing; return the chosen kinds.
+
+    ``current`` is pre-selected and ``available`` limits the choice. A terminal
+    shows checkboxes; without a terminal a comma-separated answer is read
+    (``-`` turns all media off). Ctrl-C raises ``click.Abort``.
+    """
     if not sys.stdin.isatty():
         while True:
             value = prompt(
@@ -427,7 +479,7 @@ def choose_media_inputs(current=(), *, available=("image", "audio", "video", "pd
     @bindings.add("enter", eager=True)
     def accept(event):
         selected = checks.current_values
-        # Retain the order of existing permissions, then append newly checked rows.
+        # Keep previously enabled kinds in their order, then add newly checked ones.
         event.app.exit(
             result=[kind for kind in current if kind in selected]
             + [kind for kind in available if kind in selected and kind not in current]
@@ -472,7 +524,7 @@ def choose_media_inputs(current=(), *, available=("image", "audio", "video", "pd
 
 
 def choice_label(value):
-    """Human labels for finite choices; custom reasoning names remain verbatim."""
+    """Return the menu label for a choice value; unknown values (e.g. reasoning levels) as is."""
     return {
         "discover": "Find what works (sends a few small test requests)",
         "systemone": "System One Decisions",
@@ -486,8 +538,13 @@ def choice_label(value):
 
 
 def key_source(default, names):
-    """Where the API key comes from. Terminals get a plain menu; pipes keep the
-    original free-text answer ("new" to paste a key, "-" for no key)."""
+    """Ask where the API key comes from and return the answer.
+
+    Returns an environment variable name, ``"new"`` (paste a key now) or
+    ``"-"`` (no key). In a terminal, a menu offers the variables in ``names``
+    and ``default`` that are set, plus the other options. Without a terminal
+    the answer is typed in, as before.
+    """
     if not sys.stdin.isatty():
         return prompt(
             "Key environment variable (new to enter a key; - for no authentication)",
@@ -508,7 +565,13 @@ def key_source(default, names):
 
 
 def labelled_choice(message, options, *, default):
-    """Show every action immediately; retain numeric and token answers for pipes."""
+    """Show a menu of ``(value, label)`` options and return the chosen value.
+
+    In a terminal all options are visible at once and Enter picks
+    ``default``; if ``default`` is None the user must choose one. Without a
+    terminal the options are printed with numbers, and the answer may be the
+    number or the value. Ctrl-C raises ``click.Abort``.
+    """
     if not sys.stdin.isatty():
         view.section(message)
         answers = {}
@@ -540,6 +603,8 @@ def labelled_choice(message, options, *, default):
     from prompt_toolkit.styles import Style
 
     class ConnectChoiceInput(ChoiceInput):
+        """prompt_toolkit choice menu that also honours ``NO_COLOR``."""
+
         def _create_application(self):
             app = super()._create_application()
             if "NO_COLOR" in os.environ:
@@ -597,7 +662,10 @@ def labelled_choice(message, options, *, default):
 
 
 def review_media_inputs(current=()):
-    """Offer labelled actions, not editable internal tokens, after media checks."""
+    """After media tests, ask whether to keep the result or choose by hand.
+
+    Returns ``"keep"`` or ``"manual"``.
+    """
     return labelled_choice(
         "How would you like to continue?",
         (
@@ -609,7 +677,11 @@ def review_media_inputs(current=()):
 
 
 def choose_media_mode(*, editing=False):
-    """Offer generated tests or manual declarations with a visible Enter default."""
+    """Ask whether to test all media inputs or choose them by hand.
+
+    Returns ``"test"`` or ``"manual"``. The default is ``"manual"`` when editing
+    an existing entry and ``"test"`` otherwise.
+    """
     return labelled_choice(
         "How would you like to configure media inputs?",
         (
@@ -621,7 +693,11 @@ def choose_media_mode(*, editing=False):
 
 
 def choose_decision_images(current=()):
-    """Human actions with unchanged image setup tokens and Enter defaults."""
+    """Ask whether a decision model should receive images.
+
+    Returns ``"keep"`` (only offered when images are already set up),
+    ``"text"`` (no images), ``"manual"`` (enable without testing) or ``"test"``.
+    """
     view.note("Image tests use a generated sample.")
     options = (("keep", "Keep current image settings"),) if current else ()
     return labelled_choice(

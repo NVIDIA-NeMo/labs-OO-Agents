@@ -1,6 +1,22 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Non-interactive JSON frontend for the public Connect library."""
+"""``nooa connect --stage``: run one step of connect without prompts and print JSON.
+
+Each stage calls one part of ``nooa.unifiedllm.connect`` and prints a single
+JSON report on standard output (``version``, ``stage``, ``ok``, ``data``,
+``error``, ``checks``, ``run_context``, ...). This lets scripts and agents run
+the setup step by step: ``discover`` (model listing), ``model-info`` (server
+details for one model), ``catalogue`` (OpenRouter catalogue lookup),
+``interfaces`` (find which API styles the endpoint accepts), ``plan`` (build
+the test calls without sending them), the test-call stages (``routing``,
+``decision``, ``tools``, ``reasoning``, ``media``, ``session``, ``all``), and
+``save`` (write a planned or tested model entry to a registry file).
+
+The only prompt is the masked API key prompt enabled by ``--prompt-key``.
+Saved files from earlier stages (``--discovery-file``, ``--catalogue-file``,
+``--input``) can be read back instead of repeating requests; they are size
+limited and checked to belong to the same endpoint and model.
+"""
 
 STAGES = (
     "discover",
@@ -20,14 +36,30 @@ STAGES = (
 
 
 def read_discovery(path, endpoint, *, models_url=None, api_style=None):
-    """Compatibility list view of a validated discovery listing."""
+    """Return the model records of a saved model listing as a list.
+
+    Kept for older callers; see ``read_discovery_listing`` for the checks.
+    """
     return list(
         read_discovery_listing(path, endpoint, models_url=models_url, api_style=api_style).models
     )
 
 
 def read_discovery_listing(path, endpoint, *, models_url=None, api_style=None):
-    """Read bounded metadata with listing source separate from model records."""
+    """Read a saved ``--stage discover`` result and return it as a ``connect.Discovery``.
+
+    ``path`` is the JSON file (at most 5 MiB, either the full stage report or
+    just its ``data``). The listing must belong to ``endpoint``: the same API
+    base, or the same base plus ``/v1``. For decision API styles with an
+    explicit ``models_url``, any listing from the same origin (scheme, host,
+    port) is accepted. If ``models_url`` is given it must match the URL the
+    listing was read from.
+
+    Only known, size-limited fields are kept from each model record. The URL
+    the listing came from is returned separately from the records.
+    Raises ``ValueError`` when the file is too large, malformed, or belongs
+    to another endpoint.
+    """
     import json
     from pathlib import Path
     from urllib.parse import urlsplit
@@ -59,8 +91,10 @@ def read_discovery_listing(path, endpoint, *, models_url=None, api_style=None):
                 address.port or (443 if address.scheme == "https" else 80),
             )
 
-        # An explicitly selected same-origin decision route may reuse its shared
-        # catalogue, but unrelated server/key scopes can never reuse it.
+        # A decision endpoint has no model listing of its own and uses a shared
+        # one on the same server, so accept a listing from the same origin. A
+        # listing from a different server (which may need a different key) is
+        # still rejected.
         same_base = same_base or origin(listed_base) == origin(requested_base)
     if not same_base or (
         models_url is not None and data.get("models_url") != connect.validate_models_url(models_url)
@@ -121,7 +155,15 @@ def read_discovery_listing(path, endpoint, *, models_url=None, api_style=None):
 
 
 def read_catalogue(path, model, *, catalogue_model=None):
-    """Read explicitly sourced OpenRouter facts; never guess a native model match."""
+    """Read a saved OpenRouter catalogue file and return the details of one model.
+
+    The file (at most 5 MiB) is either a successful ``--stage catalogue``
+    report or its ``data``, and must name the OpenRouter catalogue as its
+    source. The model is looked up by exact ID: ``catalogue_model`` if given,
+    else ``model``. Exactly one record must match; no similar names are tried,
+    because the endpoint's model ID may not equal the OpenRouter ID. Raises
+    ``ValueError`` otherwise.
+    """
     import json
     from pathlib import Path
 
@@ -182,7 +224,15 @@ def read_catalogue(path, model, *, catalogue_model=None):
 
 
 def listing_key(models_url, endpoint, key, key_env=None):
-    """Do not forward an inference credential to a different catalogue origin."""
+    """Return the API key to send with the model listing request (or None).
+
+    ``key`` is the key for model requests. ``key_env`` is the value of
+    ``--discovery-api-key-env``: ``-`` or empty means no key, otherwise the
+    named variable is read and must be set. Without ``key_env``, ``key`` is
+    used only if the listing URL has the same origin as ``endpoint``; a
+    listing on another server raises ``ValueError``, so the model request key
+    is never sent to a different server by accident.
+    """
     import os
     import re
     from urllib.parse import urlsplit
@@ -256,7 +306,17 @@ def run_stage(
     no_metadata=False,
     server_metadata="listing",
 ):
-    """Return JSON; only an explicit --prompt-key enables a masked stdin prompt."""
+    """Run one ``--stage`` step, print its JSON report and return the exit code.
+
+    The arguments are the command-line options of ``nooa connect``. Option
+    combinations that do not fit the stage raise ``click.UsageError`` inside
+    the stage and are reported in the JSON like other errors.
+
+    Returns 0 when the stage succeeded, 2 for a usage error and 1 for any
+    other failure. The report never contains the API key: key values are
+    replaced before printing. The terminal is only read when ``--prompt-key``
+    is given (a masked key prompt).
+    """
     import asyncio
     import json
     import os
@@ -434,8 +494,9 @@ def run_stage(
                     verification["state"] = "partial"
                     verification["unverified_scopes"].append("input_report")
                 verification["verified"] = False
-            # Command success is WRITE success only. No imported report boolean
-            # stamps old evidence or authorizes saving a known failure.
+            # The command reports success when the file is written, nothing more.
+            # The "ok" value in the input report does not mark the entry as tested
+            # and does not allow saving a failed result without --allow-unverified.
             if not connect.routing_allows_save(data["entry"], entry):
                 view.warning(
                     "Warning: saving a configuration whose current settings have not passed checks.",
@@ -504,11 +565,10 @@ def run_stage(
             matches = connect.match_models(model, models) if model else models
             data = {"source": connect.CATALOGUE_URL, "models": matches}
             if model and not matches:
-                # An exact/suffix match found nothing — likely a gateway
-                # prefix (aws/..., bedrock-..., vertex/...) the catalogue
-                # never records. Surface fuzzy suggestions for the caller to
-                # confirm; never auto-select one, matching the wizard's own
-                # "did you mean" behavior for the same situation.
+                # No exact or suffix match. The model ID probably has a gateway
+                # prefix (aws/..., bedrock-..., vertex/...) that the catalogue
+                # does not use. Report similar IDs for the caller to confirm,
+                # but never pick one, as the wizard's "did you mean" does.
                 fuzzy = connect.fuzzy_match_models(model, models)
                 if fuzzy:
                     data["fuzzy_models"] = fuzzy
@@ -581,7 +641,8 @@ def run_stage(
                 if "advertised_model" in entry.get("provenance", {}) and models_url:
                     entry["provenance"]["models_url"] = connect.validate_models_url(models_url)
             except ValueError as exc:
-                # Local plan/configuration validation, not request execution.
+                # These come from checking the options locally, before any request,
+                # so they are reported as usage errors.
                 raise click.UsageError(str(exc)) from None
             key = (
                 click.prompt("API key (used only for this check)", hide_input=True, err=True)
@@ -729,8 +790,9 @@ def run_stage(
     from nooa.unifiedllm.connect._diagnostics import scrub_report
     from nooa.unifiedllm.connect._records import public_record
 
-    # Public results retain safe media facts, not inline generated payloads.
-    # Plan previews intentionally include their proposed synthetic request bodies.
+    # Remove the request bodies of media test calls from the report: they hold
+    # the generated sample files. The plan stage keeps them on purpose, since
+    # it shows the requests that would be sent.
     if stage != "plan" and isinstance(data, dict):
 
         def hide_media_requests(value):
@@ -774,7 +836,8 @@ def run_stage(
             else {}
         ),
     }
-    # Both credentials can be reflected by catalogue metadata or local error paths.
+    # Either key (model requests or model listing) may appear in listing data or
+    # error messages, so remove both from the report.
     report = scrub_report(report, api_key=key, api_key_env=api_key_env)
     report = scrub_report(report, api_key=discovery_key, api_key_env=discovery_api_key_env)
     click.echo(json.dumps(report, ensure_ascii=False))

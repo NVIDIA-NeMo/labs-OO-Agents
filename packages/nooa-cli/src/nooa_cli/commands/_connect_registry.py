@@ -1,10 +1,24 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Read the registry's actual layers for editing and credential suggestions."""
+"""Read the model registry files as NOOA loads them, without creating any clients.
+
+The registry is a chain of YAML files (bundled defaults, the user file, the
+project file, files named in ``NEMO_OO_LLM_CONFIG``); a later file overrides
+an alias defined in an earlier one. The wizard uses this module to list
+existing aliases for editing, to suggest API key variable names already used
+for the same server, to warn when a saved alias would be overridden by another
+file, and to describe the run in troubleshooting output.
+"""
 
 
 def entries(extra_path=None):
-    """Return resolved entries and their defining files, without registering clients."""
+    """Return ``{alias: (entry, file)}`` for every alias in the registry chain.
+
+    Each alias maps to the entry that wins (the one in the last file defining
+    it) and the file it came from. ``extra_path``, if it exists, is read last,
+    so it overrides all other files. Raises ``ValueError`` if a file's
+    ``models`` value is not a mapping. Model clients are not created.
+    """
     from pathlib import Path
 
     import yaml
@@ -31,7 +45,12 @@ def entries(extra_path=None):
 
 
 def credential_names(registry, endpoint):
-    """Match a server, allowing its root and terminal /v1 forms; never return values."""
+    """Return the API key variable names used by saved entries for the same server.
+
+    Endpoints are compared after normalisation and with a trailing ``/v1``
+    removed, so ``https://host`` and ``https://host/v1`` count as the same
+    server. Only variable names are returned, never key values.
+    """
     from nooa.unifiedllm.connect import normalize_endpoint
 
     def normalized(value):
@@ -53,16 +72,17 @@ def credential_names(registry, endpoint):
 
 
 def shadowing_source(alias, path, *, extra_priority=False):
-    """Name a currently effective file that would override this destination.
+    """Return the file that would override ``alias`` if it were saved to ``path``, or None.
 
-    ``extra_priority`` is for a ``--working-dir``/``-w`` save target
-    specifically: ``entries()``'s ``extra_path`` is always appended last
-    (highest priority, matching what a future ``nooa tui -w`` read of the
-    same directory would do), so that target is never actually shadowed by
-    anything as long as the caller keeps pairing ``-w`` with the same
-    directory. An arbitrary ``--output`` path has no such guaranteed future
-    re-inclusion, so it keeps the original, stricter behavior: absent from
-    priority means always shadowed by an existing definition elsewhere.
+    Another file "shadows" the save when it already defines ``alias`` and NOOA
+    reads it after ``path``, so its definition would win. Returns that file's
+    path as a string, or None if the saved alias would be the one in effect.
+
+    Set ``extra_priority`` when ``path`` is a ``--working-dir``/``-w`` target.
+    Such a file is read last (highest priority) by ``entries()`` and by a later
+    ``nooa tui -w`` on the same directory, so nothing overrides it. Any other
+    ``--output`` path that NOOA does not load by default is treated as
+    overridden by any existing definition elsewhere.
     """
     import os
     from pathlib import Path
@@ -73,8 +93,9 @@ def shadowing_source(alias, path, *, extra_priority=False):
     found = entries().get(alias)
     if not found or found[1].resolve() == path.resolve():
         return None
-    # Include missing conventional files so a newly created user/project file
-    # receives its real priority. Unknown --output paths are not auto-loaded.
+    # List the standard user and project files even if they do not exist yet,
+    # so a file about to be created gets its real place in the order. Other
+    # --output paths are not loaded automatically and so have no place here.
     paths = [
         *bundled_config_paths(),
         get_user_dir("llm_config.yaml"),
@@ -111,7 +132,14 @@ def diagnostic_context(
     discovery_succeeded=None,
     interface_timeout_seconds=30,
 ):
-    """Describe the run without credentials, registry contents, or raw arguments."""
+    """Return a dict describing this run, for troubleshooting output.
+
+    Includes the installation, target file, alias, model, token budgets, where
+    the API key came from (but not the key), proxy variables that are set, the
+    registry files, and, for a failed ``interfaces`` stage, a command to rerun
+    it. Key values, registry contents and the raw command line are left out;
+    any occurrence of the key in the values is replaced with ``[redacted]``.
+    """
     import os
     import shlex
     from pathlib import Path
@@ -173,7 +201,7 @@ def diagnostic_context(
         found = entries().get(alias) if alias else None
         context["effective_alias_source"] = str(found[1]) if found else None
     except (OSError, ValueError, yaml.YAMLError):
-        pass  # Never hide the original failure with config-discovery errors.
+        pass  # A broken registry file must not hide the error being reported.
     if stage == "interfaces" and model and endpoint and remaining and remaining > 0:
         try:
             address = normalize_endpoint(endpoint)
@@ -214,7 +242,7 @@ def diagnostic_context(
             "if that variable contains the intended key in the rerun environment."
         )
 
-    # Even filenames/model IDs must not echo an accidentally pasted active key.
+    # A key pasted by mistake into a file name or model ID must not be shown either.
     def scrub(value):
         if isinstance(value, str):
             for secret in (api_key, os.environ.get(api_key_env) if api_key_env else None):

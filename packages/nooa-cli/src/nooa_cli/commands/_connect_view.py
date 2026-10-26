@@ -1,6 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Small, responsive terminal presentation helpers for the Connect wizard."""
+"""Terminal output for ``nooa connect``: headings, aligned fields, test call results.
+
+Everything printed by the wizard goes through these helpers. Output is wrapped
+to the terminal width, and colour is turned off when ``NO_COLOR`` is set. The
+module also turns the records of test calls (from ``nooa.unifiedllm.connect``)
+into short, plain messages. Raw provider error bodies and API keys are never
+printed; errors are described from their type and HTTP status.
+"""
 
 import os
 import shutil
@@ -14,7 +21,13 @@ import click
 
 @contextmanager
 def quiet_provider_messages():
-    """Hide legacy-library help banners while this CLI displays safe outcomes."""
+    """Context manager that stops LiteLLM from printing its own debug/help banners.
+
+    While test calls run, the CLI prints its own short summary of each
+    result; LiteLLM's banners would add noise and could show raw provider
+    details. The previous setting is restored on exit. Does nothing if
+    LiteLLM is not imported.
+    """
     legacy = sys.modules.get("litellm")
     previous = getattr(legacy, "suppress_debug_info", False)
     if legacy is not None:
@@ -27,44 +40,37 @@ def quiet_provider_messages():
 
 
 def format_budget(tokens):
-    """Render a check-token budget, spelling out the unset-flag sentinel as unlimited."""
+    """Format a test call token budget, showing the "no budget given" value as "unlimited"."""
     from nooa.unifiedllm.connect import DEFAULT_CHECK_BUDGET
 
-    # DEFAULT_CHECK_BUDGET is a large finite sentinel, not float("inf"), so it
-    # survives JSON encoding and every existing int arithmetic site unchanged
-    # (see its definition). "Budget remaining" values are the sentinel minus
-    # whatever a run has spent so far (observed up to ~1.2M tokens for a full
-    # run; see TOKEN_RESERVATION), never exactly equal to it — so this stays
-    # a threshold, not an exact-equality check, but one anchored to the
-    # actual sentinel with a generous fixed buffer for spend, rather than a
-    # fraction of it. --budget-tokens has no declared upper bound, so a
-    # threshold that scaled down with the sentinel (e.g. a fraction of it)
-    # would mislabel a genuine, very large, explicitly-chosen budget as
-    # unlimited; a fixed buffer close to the sentinel does not.
+    # Without --budget-tokens the budget is DEFAULT_CHECK_BUDGET: a very large
+    # integer (not float("inf"), so it stays valid in JSON and integer maths).
+    # The remaining budget is that value minus the tokens used so far (up to
+    # about 1.2M for a full run; see TOKEN_RESERVATION), so it is never exactly
+    # equal. Treat anything within a fixed 10**9 tokens of it as unlimited. A
+    # fixed margin, rather than a fraction of the value, keeps a very large
+    # budget chosen with --budget-tokens from being shown as unlimited.
     return "unlimited" if tokens >= DEFAULT_CHECK_BUDGET - 10**9 else f"{tokens:,}"
 
 
 def _reasoning_tokens_label(record):
-    """Describe what's actually known about a level check's reasoning cost.
+    """Describe how many reasoning tokens a reasoning-level test call used, as far as known.
 
-    A real, positive count from the endpoint/litellm is shown as-is. Anthropic
-    can withhold the visible thinking text in more than one wire shape — a
-    genuine redacted_thinking block (an opaque encrypted blob, no text field
-    at all), or a normal *signed* "thinking" block whose text simply comes
-    back empty (observed live for Claude Sonnet 5/Opus 5 via Azure/Bedrock) —
-    but either way litellm's reasoning_tokens estimate is a text-length count
-    that reads 0 when there is no visible text, regardless of how much
-    thinking actually happened. Showing that 0 as though it were measured
-    would be misleading. output_tokens is shown instead where available,
-    since Anthropic bills thinking tokens as ordinary output tokens without
-    splitting them out.
+    ``record`` is the result of one ``level:<name>`` test call. Returns ""
+    when nothing is known.
 
-    litellm's text-length estimate only exists for Anthropic/Bedrock at all —
-    for every other provider (observed live for Qwen and DeepSeek), it never
-    attempts one, even when real, non-empty reasoning text came back. When we
-    have that text in hand, its character count is shown as a size signal
-    instead of just "not reported separately" with nothing further. Returns
-    "" when nothing is known.
+    - A positive ``reasoning_tokens`` count is shown as is.
+    - If the provider withheld the reasoning text, the reasoning count cannot
+      be trusted. Anthropic does this in two ways: a ``redacted_thinking``
+      block (encrypted, no text), or a signed ``thinking`` block whose text is
+      empty (seen with Claude Sonnet 5 / Opus 5 on Azure and Bedrock).
+      LiteLLM estimates reasoning tokens from the length of the visible text,
+      so it reports 0 however much thinking happened. The total output tokens
+      are shown instead; Anthropic counts thinking as ordinary output tokens.
+    - LiteLLM only makes that estimate for Anthropic and Bedrock. For other
+      providers (seen with Qwen and DeepSeek) no count is reported even when
+      reasoning text came back, so the length of that text in characters is
+      shown as a rough size.
     """
     tokens = record.get("reasoning_tokens")
     if isinstance(tokens, int) and tokens > 0:
@@ -87,13 +93,12 @@ def _reasoning_tokens_label(record):
 
 
 def _reasoning_tokens_summary(record):
-    """Compact form of _reasoning_tokens_label for the end-of-run summary line.
+    """Short form of ``_reasoning_tokens_label`` for the summary line at the end of a run.
 
-    Mirrors _reasoning_tokens_label's gating exactly: the final "N output
-    (chars)" fallback only applies when reasoning was actually observed.
-    Without that gate, a level where the model reported real output tokens
-    but never reasoned at all would print as though a reasoning cost was
-    measured for it.
+    Uses the same rules as ``_reasoning_tokens_label``. In particular the
+    "N output" form is only used when reasoning was actually seen in the
+    reply; otherwise a level where the model returned output but did not
+    reason would look as if its reasoning cost had been measured.
     """
     tokens = record.get("reasoning_tokens")
     if isinstance(tokens, int) and tokens > 0:
@@ -113,7 +118,11 @@ def _reasoning_tokens_summary(record):
 
 
 def check_failure(outcome):
-    """Translate sanitized error classes, never show a provider error body."""
+    """Return a short message for a failed test call, or None if no rule matches.
+
+    The message is chosen from the error type name and HTTP status in
+    ``outcome``; the provider's error body is never shown.
+    """
     error = outcome.get("error", "")
     status = outcome.get("status_code")
     if status in {401, 403} or error in {"AuthenticationError", "PermissionDeniedError"}:
@@ -136,7 +145,13 @@ def check_failure(outcome):
 
 
 def connection_detail(record):
-    """Explain the configured answer check without exposing its internal contract."""
+    """Return the result text for the basic test call (``routing``) of a model entry.
+
+    That call asks a question with a known typed answer. The text says
+    whether it passed, was not run, or why it failed (rejected request, reply
+    cut off, no final answer, wrong format, wrong answer), in plain words
+    rather than the record's field names.
+    """
     from nooa.unifiedllm.connect._records import TYPED_TEXT_BASELINE, text_baseline_passed
 
     if text_baseline_passed(record):
@@ -170,7 +185,11 @@ def connection_detail(record):
 
 
 def check_reason(reason):
-    """Short terminal wording; library records and diagnostic detail stay intact."""
+    """Return terminal wording for a reason string from a test call record.
+
+    Only the printed text changes; the record and the troubleshooting output
+    keep the library's original wording. Unknown reasons are returned as is.
+    """
     reason = reason or ""
     replacements = {
         "budget exhausted": "check budget used up",
@@ -214,7 +233,13 @@ def check_reason(reason):
 
 
 def media_test_detail(kind, record, *, media_inputs=None):
-    """Display effective permissions separately from unchanged test evidence."""
+    """Return the result text for one media test call (``media:<kind>``).
+
+    The text has two parts: what the test call showed (passed, not
+    available, rejected, failed and why), and whether ``kind`` is enabled in
+    ``media_inputs``. The two are separate because a kind can be enabled
+    without a passing test, and a test result does not change the setting.
+    """
     outcome = record.get("outcome")
     if record.get("implementation_supported") is False or record.get("reason", "").startswith(
         "Unsupported media input for "
@@ -256,7 +281,7 @@ def media_test_detail(kind, record, *, media_inputs=None):
     elif record.get("timeout_kind") or reason.startswith("Timed out"):
         detail = "Request timed out; completion is unknown"
     elif reason.startswith("Service returned HTTP"):
-        # Keep the concise HTTP wording explicitly requested for media failures.
+        # Show the library's short "Service returned HTTP ..." message unchanged.
         detail = reason
     elif reason == "Could not read the answer":
         detail = reason
@@ -280,7 +305,13 @@ def media_test_detail(kind, record, *, media_inputs=None):
 
 
 def local_failure(exc, *, api_key=None, api_key_env=None):
-    """Explain local setup errors without YAML excerpts or provider error bodies."""
+    """Return a short message (at most 1,000 characters) for an error during setup.
+
+    YAML errors give only the file, line and column (not the file contents).
+    ``OSError`` and ``ValueError`` use their message. Other errors, which may
+    carry provider error bodies, get a generic hint. Any occurrence of the
+    API key is replaced with ``[redacted]``.
+    """
     import yaml
 
     if isinstance(exc, yaml.YAMLError):
@@ -301,6 +332,7 @@ def local_failure(exc, *, api_key=None, api_key_env=None):
 
 
 def line(text, *, fg=None, bold=False, dim=False, err=False):
+    """Print ``text`` wrapped to the terminal width (at most 84 columns), indented and styled."""
     width = max(8, min(84, shutil.get_terminal_size((80, 24)).columns - 2))
     for part in textwrap.wrap(text, width=width, break_on_hyphens=False) or [""]:
         if "NO_COLOR" not in os.environ:
@@ -309,23 +341,34 @@ def line(text, *, fg=None, bold=False, dim=False, err=False):
 
 
 def note(text, *, err=False):
+    """Print a dim note, or a yellow one on standard error when ``err`` is set."""
     line(text.strip(), dim=not err, fg="yellow" if err else None, err=err)
 
 
 def warning(text, *, err=False):
+    """Print a yellow warning, dropping a leading ``"Warning: "``."""
     line(text.removeprefix("Warning: "), fg="yellow", err=err)
 
 
 def prompt_text(text, *, suffix=": "):
-    """Responsive pipe prompt label; input widgets own editing on a real TTY."""
+    """Return a prompt label wrapped to the terminal width, for Click's line input.
+
+    Used when standard input is not a terminal; the prompt_toolkit widgets
+    format their own labels.
+    """
     width = max(8, shutil.get_terminal_size((80, 24)).columns - 2 - len(suffix))
     parts = textwrap.wrap(text, width=width, break_on_hyphens=False) or [""]
     label = "\n".join("  " + part for part in parts)
-    return label  # Click prompt writes directly; pipe labels must not leak ANSI.
+    return label  # No colour codes: Click prints this as is, also into pipes.
 
 
 def fields(rows):
-    """Aligned values; stacked labels on narrow terminals. Never wrap ANSI codes."""
+    """Print ``(label, value)`` rows with the values aligned in one column.
+
+    On narrow terminals each label is printed on its own line above its
+    value. Text is wrapped before colour is added, so wrapping never splits a
+    colour code.
+    """
     rows = [(label + ":", str(value)) for label, value in rows]
     if not rows:
         return
@@ -352,6 +395,7 @@ def fields(rows):
 
 
 def section(title):
+    """Print a blank line and then ``title`` as a bold cyan heading."""
     click.echo()
     width = max(10, min(100, shutil.get_terminal_size((80, 24)).columns - 2))
     for part in textwrap.wrap(title, width=width, break_on_hyphens=False):
@@ -361,7 +405,12 @@ def section(title):
 
 
 def progress_result(icon, label, detail, *, elapsed="", headline=None, fg=None):
-    """Keep outcome and duration on the header; explanations always follow below."""
+    """Print one test call result: a header line, then any explanation below it.
+
+    The header is ``<icon> <label>: <headline><elapsed>``. The rest of
+    ``detail`` (after the headline) goes on the following lines, so the
+    result and time stay on the first line however long the explanation is.
+    """
     width = max(8, shutil.get_terminal_size((80, 24)).columns - 2)
     headline = headline or detail
     body = detail.removeprefix(headline).removeprefix(" · ").removeprefix(": ")
@@ -387,11 +436,15 @@ def progress_result(icon, label, detail, *, elapsed="", headline=None, fg=None):
         click.echo("  " + part)
 
 
+# Test call names that are API styles: results of the "interfaces" discovery.
 INTERFACE_NAMES = {"chat", "responses", "anthropic", "systemone", "openai"}
 
 
 def check_label(name):
-    """One human vocabulary for checks and review rows."""
+    """Return the display name of a test call (e.g. ``"tools"`` -> ``"Tool use"``).
+
+    Used for both progress lines and review rows so they use the same names.
+    """
     if name.startswith("level:"):
         return "Reasoning (" + name[6:] + ")"
     if name.startswith("media:"):
@@ -420,14 +473,20 @@ def check_label(name):
 
 
 def check_outcome(name, record, status):
-    """Presentation only: never upgrade the evidence policy's failed/skipped checks."""
+    """Return the headline for a test call result: Passed, Failed, Skipped or Not available.
+
+    ``status`` is the library's verdict (``check_status``). This function
+    only chooses the wording; it may show a failure as "Not available" (the
+    model does not offer a feature), but never shows a failed or skipped
+    call as passed.
+    """
     outcome = record.get("outcome")
     if status == "skipped":
         return "Skipped"
     if outcome == "unavailable" or outcome == "warning" and not record.get("error"):
         return "Not available"
     if name.startswith("media:") and outcome == "rejected":
-        return "Not available"  # The model refused this format; it simply stays off.
+        return "Not available"  # The model does not accept this media kind; it stays off.
     if (
         name == "reasoning_retention"
         and outcome == "not_confirmed"
@@ -438,6 +497,7 @@ def check_outcome(name, record, status):
 
 
 def intro(*, checks, output_tokens, budget_tokens, reasoning_output_tokens=4096):
+    """Print the wizard's title and short help lines."""
     click.echo()
     line("NOOA  /  CONNECT", fg="bright_cyan", bold=True)
     line("Add a model to your workspace.", dim=True)
@@ -451,13 +511,20 @@ def intro(*, checks, output_tokens, budget_tokens, reasoning_output_tokens=4096)
 
 
 def step(number, title, *, total=5):
+    """Print a step heading such as ``2 / 5  ·  Model``."""
     click.echo()
     line(f"{number} / {total}  ·  {title}", fg="bright_cyan", bold=True)
     click.echo()
 
 
 class CheckProgress:
-    """Compact human progress; replace only the active line on a real terminal."""
+    """Prints the progress and result of test calls, one line per call.
+
+    Call ``update`` with each record as it changes and ``finish`` at the end.
+    On a terminal the "checking" line of the running call is overwritten by
+    its result; elsewhere every line is kept. ``results`` maps each call name
+    to its headline, for the summary counts.
+    """
 
     def __init__(self, *, diagnostics=False):
         self.diagnostics = diagnostics
@@ -469,12 +536,18 @@ class CheckProgress:
         self.interface_seen = set()
 
     def _clear(self):
+        """Erase the "checking" line of the running call, if one is shown."""
         if self.active:
             click.echo("\r\033[2K", nl=False, color=True)
             self.active = False
 
     def _interface_update(self, name, label, record):
-        """Discovery rows: an interface that doesn't answer is not available, not a failure."""
+        """Print a result of API style discovery (the ``interfaces`` stage).
+
+        An API style the endpoint does not accept is shown as "Not
+        available", not as a failure. The second result for the same style is
+        its reasoning test and is labelled as such.
+        """
         elapsed = (
             f" · {time.monotonic() - self.started.pop(name):.1f}s" if name in self.started else ""
         )
@@ -503,6 +576,13 @@ class CheckProgress:
     def update(
         self, name, record, *, missing_reasoning=False, ignored_off=False, media_inputs=None
     ):
+        """Show the state of test call ``name`` from its ``record``.
+
+        A ``running`` record prints a "checking" line; a final record prints
+        the result. ``missing_reasoning`` means a reasoning level returned no
+        reasoning; ``ignored_off`` means reasoning came back although the
+        level turns it off; ``media_inputs`` are the enabled media kinds.
+        """
         label = check_label(name)
         outcome = record.get("outcome")
         self._clear()
@@ -517,7 +597,7 @@ class CheckProgress:
                 line(text.strip(), dim=True)
             return
         if name == "session" and outcome == "completed":
-            return  # Cache and reasoning rows already describe the result.
+            return  # The cache and reasoning lines already show the session result.
         if name in INTERFACE_NAMES:
             self._interface_update(name, label, record)
             return
@@ -587,10 +667,11 @@ class CheckProgress:
         )
         headline = check_outcome(name, record, status)
         if ignored_off:
-            # An "Off" setting that still returned reasoning didn't take effect.
+            # The "off" level still returned reasoning, so the setting had no effect.
             headline = "Not available"
             detail = "Reasoning was still returned; this model may ignore this setting."
-        # Accepted requests and finished replies are evidence, not additional outcomes.
+        # For a passed call, the "accepted" or "finished" details add nothing,
+        # so show no detail except for the few cases below.
         if (
             headline == "Passed"
             and name not in {"cache", "encrypted_reasoning"}
@@ -636,6 +717,7 @@ class CheckProgress:
         self.results[name] = headline
 
     def finish(self, *, summary=True):
+        """Clear the progress line and, if ``summary``, print the result counts."""
         self._clear()
         if self.reasoning_levels and summary and self.diagnostics:
             parts = [
@@ -659,13 +741,18 @@ class CheckProgress:
 
 
 def media_label(kind):
+    """Return the display name of a media kind (``"pdf"`` -> ``"PDFs"``)."""
     return {"image": "Images", "audio": "Audio", "video": "Video", "pdf": "PDFs"}.get(
         kind, kind.capitalize()
     )
 
 
 def media_settings(entry):
-    """Show saved permissions separately from the evidence, without raw enum values."""
+    """Print each media kind with its setting in ``entry`` and its test result.
+
+    For example "enabled (test passed)" or "enabled (not tested)", so the
+    user sees whether an enabled kind was actually tested.
+    """
     enabled = entry.get("media_inputs", [])
     facts = entry.get("provenance", {}).get("probes", {})
     kinds = (
@@ -690,7 +777,15 @@ def media_settings(entry):
 def model_details(
     model, *, output_tokens, edited=False, heading=True, attribution=True, render=True
 ):
-    """Show available facts only; unknown fields remain editable and unknown internally."""
+    """Print the known limits and reasoning settings of ``model``, with their sources.
+
+    ``model`` is a catalogue-style dict. Only values that are known are
+    shown; unknown values stay unknown (they are not filled with defaults)
+    and can be entered later. ``edited`` marks values the user typed in.
+    With ``render=False`` nothing is printed and the rows are returned
+    instead (an empty list if there are none). Also warns when the model's
+    maximum reply length leaves little room for input in the context window.
+    """
 
     def tokens(value):
         return (

@@ -1,6 +1,30 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Wizard steps; loaded lazily by the Connect command."""
+"""The interactive ``nooa connect`` wizard: guided setup of one model entry.
+
+``run_wizard`` asks its questions in five numbered steps and then saves:
+
+1. Connection: provider preset or endpoint, API key, and API style.
+2. Model: pick the model from the model listing (or type its ID) and show
+   its published details (server details, OpenRouter catalogue).
+3. Settings: reply cap, reasoning levels, media inputs, context window.
+4. Test: approve and run the test calls planned by
+   ``nooa.unifiedllm.connect.plan``.
+5. Save model: review the entry and write it to the registry file.
+
+Before testing, the user reviews a summary of the planned entry and can change
+settings; after a failed test the user can start over. Options given on the
+command line prefill the answers. With ``--yes`` the same steps run in a fixed
+order without questions (missing required options are errors). The module is
+imported only when the wizard runs, so ``nooa --help`` does not load it.
+
+Terms (see also ``nooa.unifiedllm.connect``):
+
+- *Route*: the endpoint, model and API style that requests are sent to.
+  Settings and test results that depend on these are reset when they change.
+- *Candidate*: the model entry being built, before it is saved.
+- *Evidence*: the test call results stored in the entry's provenance.
+"""
 
 import asyncio
 import os
@@ -24,7 +48,14 @@ from ._connect_registry import credential_names, diagnostic_context, entries, sh
 
 @dataclass
 class WizardState:
-    """Explicit configuration and evidence carried between wizard steps."""
+    """Everything the wizard has learned so far, passed from step to step.
+
+    Holds the user's answers and command-line options (alias, endpoint, API
+    style, key variable, reply cap, media inputs, ...), the data fetched along
+    the way (model listing, server details, catalogue information), and the
+    plan and results of the test calls. Most fields start as None, meaning
+    "not chosen yet".
+    """
 
     alias: Any = None
     last_step: int = 0  # highest step header shown in this attempt
@@ -126,6 +157,8 @@ class WizardState:
     yes: Any = None
 
     def __post_init__(self):
+        # Remember the settings given on the command line, so they can be
+        # restored when the user changes the model or the route.
         self.settings_prefill = {
             key: getattr(self, key)
             for key in ("context_window", "levels_file", "levels", "reasoning_template")
@@ -146,7 +179,11 @@ class WizardState:
 
 
 def scrub_setup(state: WizardState, value):
-    """Protect both active credentials in previews and troubleshooting output."""
+    """Replace both API keys (model requests and model listing) in ``value`` with a marker.
+
+    Used on any text or data shown to the user, such as previews and
+    troubleshooting output.
+    """
     from nooa.unifiedllm.connect._diagnostics import scrub_report
 
     value = scrub_report(value, api_key=state.api_key, api_key_env=state.api_key_env)
@@ -156,11 +193,16 @@ def scrub_setup(state: WizardState, value):
 
 
 def setup_diagnostic(state: WizardState, *args, **kwargs):
+    """Return ``connect.diagnostic_prompt(...)`` with both API keys removed."""
     return scrub_setup(state, connect.diagnostic_prompt(*args, **kwargs))
 
 
 def reasoning_disabled(params) -> bool:
-    """True when a level's settings ask the model not to reason."""
+    """Return True when a reasoning level's request settings ask the model not to reason.
+
+    Recognises ``thinking.type: disabled``, ``enable_thinking: false`` in
+    ``chat_template_kwargs``, and an effort of ``none`` or ``off``.
+    """
     thinking = params.get("thinking")
     template = params.get("chat_template_kwargs")
     reasoning = params.get("reasoning")
@@ -178,6 +220,10 @@ def reasoning_disabled(params) -> bool:
 async def show_checks(
     events, *, reasoning_levels=None, summary=True, media_inputs=None, diagnostics=False
 ):
+    """Show test call progress for ``events`` with LiteLLM's banners turned off.
+
+    See ``display_checks`` for the arguments and return value.
+    """
     with view.quiet_provider_messages():
         return await display_checks(
             events,
@@ -191,6 +237,15 @@ async def show_checks(
 async def display_checks(
     events, *, reasoning_levels=None, summary=True, media_inputs=None, diagnostics=False
 ):
+    """Print each test call result from ``events`` and return the final result.
+
+    ``events`` is the async iterator from a ``connect`` check (per-call
+    events, then a ``ConnectResult`` or ``InterfaceResult``).
+    ``reasoning_levels`` maps level names to their request settings; they are
+    used to tell when a level returned no reasoning, or returned reasoning
+    although it turns reasoning off. Raises ``click.ClickException`` if the
+    events end without a final result.
+    """
     progress = view.CheckProgress()
     progress.diagnostics = diagnostics
     try:
@@ -226,14 +281,22 @@ STEP_TITLES = {1: "Connection", 2: "Model", 3: "Settings", 4: "Test", 5: "Save m
 
 
 def show_step(state: WizardState, number: int) -> None:
-    """Print each step header once per attempt, in order; skipped steps keep the total."""
+    """Print the heading of step ``number`` unless it or a later step was already shown.
+
+    Each heading is shown once per attempt. When steps are skipped, the
+    headings still show the total number of steps.
+    """
     if number > state.last_step:
         state.last_step = number
         view.step(number, STEP_TITLES[number], total=len(STEP_TITLES))
 
 
 def select_connection(state: WizardState) -> bool:
-    """Select connection; return False when the user cancels."""
+    """Step 1: choose the endpoint, API key and API style, or the alias to edit.
+
+    With ``--edit-model``, loads the saved entry and fills the state from
+    it instead of asking. Returns False when the user cancels.
+    """
     from ._connect_input_policy import validate_native_declaration
 
     if state.api_style:
@@ -280,7 +343,8 @@ def select_connection(state: WizardState) -> bool:
         )
         if repaired is None:
             return False
-        # Validate a detached candidate; preserve the raw source profile/evidence.
+        # Check the entry with the repaired media inputs, using a copy so the
+        # saved entry and its test results are not changed.
         connect.configure_entry({**state.editing, "media_inputs": repaired})
         if not state.output:
             from nooa.llm_config import bundled_config_paths
@@ -324,13 +388,11 @@ def select_connection(state: WizardState) -> bool:
                 f"Editing {state.edit_model} from {source_path}. No model discovery is needed.",
             )
         )
-        # --working-dir only redirects entries() to the target's own file
-        # when that file already exists (it cannot read a file that isn't
-        # there yet) — otherwise this alias was found via the general
-        # chain (cwd/global), not target's own copy. Silently saving that
-        # into target without saying so looks like an in-place edit of
-        # target's own prior settings when it's actually a copy from
-        # elsewhere into a project that never had this alias.
+        # With --working-dir, entries() reads the project file only if it
+        # already exists. Otherwise the alias was found in another registry
+        # file (user or current directory), and saving it to the project file
+        # copies it there. Say so, so that it does not look like an in-place
+        # edit of settings the project already had.
         if state.working_dir and source_path.resolve() != state.path.resolve():
             view.line(
                 scrub_setup(
@@ -360,7 +422,7 @@ def select_connection(state: WizardState) -> bool:
             try:
                 state.server_urls.append(connect.normalize_endpoint(address))
             except ValueError:
-                pass  # Do not offer malformed URLs or embedded credentials.
+                pass  # Skip malformed URLs and URLs that contain credentials.
     state.server_urls = list(dict.fromkeys(state.server_urls))
     state.default_style = "chat"
     state.approval = "none" if state.no_probe else state.probe
@@ -401,8 +463,9 @@ def select_connection(state: WizardState) -> bool:
             },
             open_menu=True,
         )
-    # Model listing/auth follows provider or an independent listing style.
-    # Choose the inference interface only after selecting the model.
+    # How the model listing is requested and authenticated depends on the
+    # provider (or --listing-style). The API style for model requests is only
+    # chosen after the model is selected.
     explicit_endpoint = state.endpoint
     state.connection_endpoint_explicit = explicit_endpoint is not None
     state.interface_endpoints = {}
@@ -467,10 +530,9 @@ def select_connection(state: WizardState) -> bool:
                     )
                 )
             else:
-                # credential_names only remembers which variable NAME this
-                # endpoint used last time, not whether a value is still set —
-                # saying "using" here when we're about to prompt for the same
-                # key again reads as broken, not reassuring.
+                # credential_names only knows which variable name this endpoint
+                # used before, not whether it is set now. Do not say "using"
+                # when the key is about to be asked for anyway.
                 view.line(
                     scrub_setup(
                         state,
@@ -493,15 +555,17 @@ def select_connection(state: WizardState) -> bool:
                 state.api_key_env = ""
     if state.endpoint == connect.PROVIDERS["anthropic"].api_base:
         state.default_style = "anthropic"
-    # Listing/authentication conventions do not choose the selected model's
-    # generation interface. A mixed server can list all models via /models.
+    # The listing style only decides how the model listing is requested. It
+    # does not choose the API style for model requests: a server that offers
+    # several API styles may list all its models at /models.
     state.discovery_style = state.listing_style or (
         state.api_style
         if state.api_style in {"chat", "responses", "anthropic"}
         else state.default_style
     )
     if state.provider in {"hub", "openrouter"}:
-        # Shared provider catalogues are independent of the full decision POST URL.
+        # These providers list all models (including decision models) at one
+        # shared URL, independent of the decision request URL.
         state.models_url = (
             state.models_url or connect.PROVIDERS[state.provider].api_base + "/models"
         )
@@ -531,7 +595,8 @@ def select_connection(state: WizardState) -> bool:
             suggestions=prompts.environment_names(),
         )
         state.prompt_key = True
-    # Validate before using an endpoint or collecting a credential.
+    # Check the options (raises on invalid ones) before contacting the
+    # endpoint or asking for a key.
     connect.plan(
         state.alias or "candidate",
         state.model or "candidate",
@@ -567,14 +632,20 @@ def select_connection(state: WizardState) -> bool:
         else None
     )
     if state.api_key and not asked and not announced:
-        # A preset's variable is used silently otherwise; a stale key there
-        # then looks like a broken provider.
+        # Otherwise a preset's key variable is used without notice, and an
+        # outdated key there would look like a provider problem.
         view.line(scrub_setup(state, f"Using the key in {state.api_key_env}."))
     return True
 
 
 def select_model(state: WizardState) -> bool:
-    """Select model; return False when the user cancels."""
+    """Step 2: choose the model, from the model listing when one is available.
+
+    Uses ``--discovery-file`` if given, otherwise requests the model
+    listing. If listing fails, or the endpoint has no listing (decision
+    endpoints without ``--models-url``), the exact model ID is asked for.
+    Returns False when the user cancels.
+    """
     if state.editing is None:
         show_step(state, 2)
     state.discovery_succeeded = None
@@ -602,7 +673,8 @@ def select_model(state: WizardState) -> bool:
         and state.api_style in connect.DECISION_API_STYLES
         and not (state.models_url or state.discovery_file)
     ):
-        # Unknown catalogue contract: never append /models to a decision POST URL.
+        # The listing URL is unknown: a decision request URL is a complete
+        # URL, so appending /models to it would not find a model listing.
         state.model = prompts.prompt("Exact decision model ID (Ctrl-C to cancel)")
     if not state.model and state.endpoint_models:
         state.model = prompts.prompt(
@@ -683,7 +755,14 @@ def select_model(state: WizardState) -> bool:
 
 
 def known_decision_model(state: WizardState) -> bool:
-    """Only explicit selected-model type facts can bypass provisional chat limits."""
+    """Return True when the published details say the selected model is a decision model.
+
+    Only explicit type information counts: output modalities of
+    ``decisions`` without ``text``, a ``model_type``/``client_type`` of
+    ``decision``, or ``mode: evaluation``. The model name is not used. When
+    this is True, the chat-only limits collected so far (context window,
+    reply cap) can be dropped.
+    """
     metadata = state.selected_endpoint_model or state.candidate or {}
 
     def declared_outputs(record):
@@ -691,7 +770,8 @@ def known_decision_model(state: WizardState) -> bool:
             "output_modalities"
         )
 
-    # A listing declaration stays authoritative; an exact catalogue record fills the gap.
+    # Prefer the model listing's information; use the catalogue record only
+    # when the listing does not say.
     outputs = declared_outputs(metadata)
     if outputs is None and state.candidate:
         outputs = declared_outputs(state.candidate)
@@ -704,14 +784,21 @@ def known_decision_model(state: WizardState) -> bool:
 
 
 def discard_chat_limits(state: WizardState):
-    """A later native Decision selection drops provisional completion declarations."""
-    # Even an explicit context prefill is a chat bound, not Decision state.
+    """Forget the chat limits collected so far once a decision API style is chosen.
+
+    Context window and reply cap limits only apply to chat-style requests;
+    a decision model entry does not use them. The candidate is rebuilt from
+    the decision model's details.
+    """
+    # This also drops a --context-window given on the command line: it is a
+    # chat limit and has no meaning for a decision model.
     state.context_window = None
     state.manual_limits = None
     state.manual_limits_required = False
     state.manual_limits_deferred = False
-    # A record merged with this server's facts is not an OpenRouter mapping;
-    # passing it as the catalogue would credit OpenRouter with server facts.
+    # A candidate that already includes this server's limits is not a plain
+    # OpenRouter record; passing it as the catalogue would attribute the
+    # server's values to OpenRouter.
     mapping = state.candidate
     if isinstance(mapping, dict) and mapping.get("endpoint_limits"):
         mapping = None
@@ -722,17 +809,26 @@ def discard_chat_limits(state: WizardState):
 
 
 def select_request_interface(state: WizardState) -> bool:
-    """Choose after the selected model/metadata, before any inference consent."""
+    """Ask which API style to use for model requests, or ``discover`` to test them all.
+
+    Runs after the model and its details are shown and before the user
+    approves any test calls. Skipped when the API style is already known
+    (option, ``--yes``, editing, or the Anthropic API). For a decision API
+    style, also picks the decision request URL; using the same key on a
+    different server requires ``--share-interface-key``. Returns True to
+    continue (choosing ``discover`` leaves ``state.api_style`` unset).
+    """
     if not state.metadata_displayed:
         show_model_metadata(state)
     if state.api_style or state.yes or state.editing is not None:
         return True
-    # The native provider/endpoint contract is known, unlike a Claude model on a gateway.
+    # The Anthropic API itself only accepts Anthropic Messages. (A Claude model
+    # behind another gateway may not, so this is not decided by model name.)
     if state.provider == "anthropic" or state.endpoint == connect.PROVIDERS["anthropic"].api_base:
         state.api_style = "anthropic"
         return True
     choices = ("discover", "chat", "responses", "anthropic", "systemone", "openai")
-    # Use declared output/type facts, not the model name, to suggest an interface.
+    # Suggest an API style from the published model type, not the model name.
     decision_hint = known_decision_model(state)
     suggested = (
         "systemone" if decision_hint and "systemone" in state.interface_endpoints else "discover"
@@ -786,10 +882,11 @@ def select_request_interface(state: WizardState) -> bool:
                     "or supply the target directly with --endpoint and --api-style."
                 )
         state.endpoint = selected_endpoint
-        # The explicit shared catalogue retains descriptive selected-model facts.
-        # Decision plans do not apply chat budgets/profiles from the listing.
+        # The model's published details from the shared listing are kept, but
+        # chat limits and settings from it do not apply to a decision model.
         discard_chat_limits(state)
-    # An explicit Completion override of a native type still needs chat bounds.
+    # A chat-style API style chosen for a model published as a decision model
+    # still needs chat limits, which the user must then enter.
     if choice not in connect.DECISION_API_STYLES:
         require_manual_limits(state)
     reject_decision_media(state)
@@ -797,7 +894,11 @@ def select_request_interface(state: WizardState) -> bool:
 
 
 def keep_untested_media(state: WizardState) -> None:
-    """Saving without testing keeps formats that were waiting for a test, as not tested."""
+    """Move media kinds waiting to be tested into the enabled list, as untested.
+
+    Used when the user saves without running the tests, so the choice of
+    those kinds is not lost.
+    """
     if state.test_media_inputs:
         current = list(state.media_inputs or [])
         state.media_inputs = current + [k for k in state.test_media_inputs if k not in current]
@@ -810,7 +911,11 @@ class RestartSetup(Exception):
 
 
 def offer_restart(state: WizardState) -> bool:
-    """After a failure, the only choice is to start over; return False to stop."""
+    """After a failure, ask whether to start over.
+
+    Raises ``RestartSetup`` if the user says yes; returns False (stop
+    without saving) otherwise, and always with ``--yes``.
+    """
     if state.yes:
         return False
     if prompts.confirm("Start over?", default=True):
@@ -820,7 +925,15 @@ def offer_restart(state: WizardState) -> bool:
 
 
 def check_interfaces(state: WizardState) -> bool:
-    """Check interfaces; return False when the user cancels."""
+    """Step 3 start: settle the API style, testing all of them if it is not chosen.
+
+    Without an API style (and with test calls allowed), sends one basic test
+    call and one reasoning test call per API style (``connect.check_interfaces``)
+    and shows which work. If only one works it is used; otherwise the user
+    picks one. If none works, offers to start over. Also asks the user to
+    review media choices that a decision API style cannot send. Returns
+    False to stop without saving.
+    """
     if state.structured_output_mode_set and not state.api_style:
         raise click.UsageError(
             "--structured-output-mode requires an explicit Completion interface, not interface discovery"
@@ -840,13 +953,11 @@ def check_interfaces(state: WizardState) -> bool:
             retry_styles = available
             interface_timeout = 30
             while True:
-                # Always test reasoning per interface, not just connectivity --
-                # "nooa connect" with no arguments should run the best check we
-                # have by default, not require the caller to already know to
-                # ask for it. If the user gave us their own --reasoning-template
-                # (e.g. for an Anthropic-only setup), that shape wins; "effort"
-                # is a reasonable default elsewhere, understood by chat and
-                # responses (and harmless if a style ignores/rejects it).
+                # Test reasoning for each API style as well as the basic request,
+                # so a plain "nooa connect" runs the most useful tests without
+                # extra options. A --reasoning-template from the user is used
+                # as given; otherwise "effort", which Chat and Responses
+                # understand and which other styles can ignore or reject.
                 reasoning_level = state.reasoning_level or (
                     state.levels.split(",")[0].strip() if state.levels else "medium"
                 )
@@ -956,7 +1067,7 @@ def check_interfaces(state: WizardState) -> bool:
                         )
                     )
                     return False
-                # No working interface: show the result and offer a fresh start.
+                # No API style works: the results are shown; offer to start over.
                 return offer_restart(state)
             if state.interfaces is None:
                 view.note("Replacement API formats have not been tested; choose one explicitly.")
@@ -982,9 +1093,10 @@ def check_interfaces(state: WizardState) -> bool:
                 )
         same_kind = len({style in connect.DECISION_API_STYLES for style in available}) == 1
         if state.interfaces and (len(available) == 1 or (state.guided and same_kind)):
-            # Discovery already found what works: use the recommended format
-            # instead of asking a second interface question. Only a real
-            # choice between answering and decision models is still asked.
+            # The tests already show what works, so use the recommended API
+            # style without asking again. The user is still asked when both
+            # chat-style and decision API styles work, because that is a real
+            # choice between two kinds of model use.
             state.api_style = (
                 state.default_style if state.default_style in available else available[0]
             )
@@ -1011,15 +1123,17 @@ def check_interfaces(state: WizardState) -> bool:
                 and state.endpoint == state.discovery_endpoint
                 and selected_endpoint == state.endpoint.removesuffix("/v1")
             ):
-                # Messages adds /v1/messages at runtime: this is the same route,
-                # not a new server. Keep its listing limits associated with it.
-                # A shared models_url alone never authorizes unrelated routes.
+                # Anthropic Messages adds /v1/messages to the base URL at
+                # runtime, so the base without /v1 is the same server. Keep the
+                # model listing's limits for it. (A shared models_url on its
+                # own does not make two endpoints the same.)
                 state.discovery_endpoint = selected_endpoint
             state.endpoint = selected_endpoint
         elif state.api_style in state.interface_endpoints:
             state.endpoint = state.interface_endpoints[state.api_style]
-    # A default all-media choice made against a provisional chat route must be
-    # reviewed explicitly when discovery selects an image-only decision route.
+    # Media kinds chosen earlier assumed a chat-style API style. If the tests
+    # picked a decision API style, which can only send images, the user must
+    # review that choice.
     if (
         state.guided
         and state.api_style in connect.DECISION_API_STYLES
@@ -1055,13 +1169,18 @@ def check_interfaces(state: WizardState) -> bool:
         )
         state.inherit_media_inputs = False
         state.guided_media_revised = True
-    # Corrections above are explicit; headless and known-style validation is unchanged.
+    # The user's corrections are applied above; this check still rejects
+    # invalid media options in --yes runs and when the API style was given.
     reject_decision_media(state)
     return True
 
 
 def public_models_for_setup(state: WizardState):
-    """Use a fetched public route record rather than repeating its GET."""
+    """Return OpenRouter catalogue records already fetched for this endpoint, if any.
+
+    When the endpoint's model listing is the OpenRouter catalogue itself,
+    its records are reused instead of fetching the catalogue again.
+    """
     public_listing = (
         state.endpoint_models_url == connect.CATALOGUE_URL
         or state.models_url == connect.CATALOGUE_URL
@@ -1072,8 +1191,8 @@ def public_models_for_setup(state: WizardState):
         return []
     if (
         public_listing
-        # Only a real fetched or file listing is the public catalogue; one
-        # selected record from server details is not.
+        # Only a full listing (fetched or read from a file) counts as the
+        # catalogue; a single record from server details does not.
         and state.listing_api_base is not None
         and state.endpoint_models is not None
         and state.discovery_endpoint == state.endpoint
@@ -1095,7 +1214,14 @@ def public_models_for_setup(state: WizardState):
 
 
 def usable_server_metadata(state: WizardState) -> bool:
-    """Exact allowlisted route facts, not an ID, empty containers or neighbours."""
+    """Return True when the server itself published useful details for the selected model.
+
+    Counts only details from a known set of fields for exactly this model ID
+    (from the model listing or server details): limits, media types, model
+    type, reasoning or feature flags. A bare ID, empty values or records for
+    other models do not count. When this is True, the user is not asked to
+    pick an OpenRouter catalogue match.
+    """
     from nooa.unifiedllm.connect._server_details import listing_facts, positive_integer
 
     selected = state.selected_endpoint_model or {}
@@ -1149,7 +1275,16 @@ def usable_server_metadata(state: WizardState) -> bool:
 
 
 def prepare_metadata(state: WizardState) -> bool:
-    """Fetch allowed metadata and collect missing manual limits before the first summary."""
+    """Collect the published details of the selected model and show them.
+
+    Requests server details for the model (unless metadata is turned off or
+    an entry is being edited), then looks the model up in the OpenRouter
+    catalogue by exact ID. If there is no exact match, the user may pick a
+    similar ID or continue without catalogue details; nothing is chosen
+    automatically. When no limits are known, the user is asked to enter them
+    (``require_manual_limits``). Stores the results on ``state`` and returns
+    True.
+    """
     state.metadata_prepared = True
     state.selected_endpoint_model = (
         next(
@@ -1158,8 +1293,9 @@ def prepare_metadata(state: WizardState) -> bool:
         if state.endpoint == state.discovery_endpoint
         else None
     )
-    # An explicit --as can reuse its previous evidence. Otherwise checks use
-    # a temporary label; the user names the entry only when ready to save.
+    # With --as, the existing entry of that alias (and its test results) can be
+    # reused. Otherwise test calls use a temporary name, and the user names
+    # the entry only when saving.
     state.existing = state.editing or (
         state.data.get("models", {}).get(state.alias) if state.alias else None
     )
@@ -1211,7 +1347,8 @@ def prepare_metadata(state: WizardState) -> bool:
         if not state.no_catalogue and state.editing is None:
             from ._connect_stages import listing_key
 
-            # Validate explicit credential configuration before any public lookup.
+            # Check the listing key options (raises if invalid) before any
+            # catalogue request.
             listing_key(
                 state.models_url, state.endpoint, state.api_key, state.discovery_api_key_env
             )
@@ -1245,7 +1382,8 @@ def prepare_metadata(state: WizardState) -> bool:
                         if len(matches) != 1:
                             raise click.ClickException("Choose one explicit OpenRouter model ID.")
                         state.candidate = matches[0]
-            # Keep the same bounded facts for the suggestion UI and library plan.
+            # Keep only the decision-relevant, size-limited details, so the
+            # suggestions shown and the plan use the same information.
             if state.candidate is not None:
                 state.candidate = connect.decision_metadata(state.model, state.candidate)
                 state.candidate.setdefault("id", selected_id)
@@ -1274,7 +1412,8 @@ def prepare_metadata(state: WizardState) -> bool:
         raise click.UsageError("--catalogue-model cannot be used with --no-catalogue")
     if not state.no_catalogue:
         if state.editing is None and not state.endpoint_models:
-            # Validate explicit catalogue credential configuration before any lookup.
+            # Check the listing key options (raises if invalid) before any
+            # catalogue request.
             from ._connect_stages import listing_key
 
             state.discovery_api_key = listing_key(
@@ -1290,8 +1429,8 @@ def prepare_metadata(state: WizardState) -> bool:
             if state.catalogue_model
             else [item for item in models if item.get("id") == state.model]
         )
-        # A native OpenAI raw ID has one exact provider-qualified catalogue ID.
-        # This is supplementary public metadata, never a fuzzy model-name guess.
+        # On the OpenAI API, model "gpt-x" is "openai/gpt-x" in the catalogue.
+        # This is an exact mapping, not a guess from a similar name.
         if (
             not matches
             and not state.catalogue_model
@@ -1325,9 +1464,10 @@ def prepare_metadata(state: WizardState) -> bool:
                 if state.candidate is None:
                     raise click.ClickException("Choose one of the displayed model IDs.")
         else:
-            # An exact/suffix match found nothing — likely a gateway prefix
-            # (aws/..., bedrock-..., vertex/...) the catalogue never records.
-            # Never auto-select a fuzzy guess; only offer it for confirmation.
+            # No exact or suffix match. The model ID probably has a gateway
+            # prefix (aws/..., bedrock-..., vertex/...) that the catalogue
+            # does not use. Offer similar IDs for the user to confirm, but
+            # never pick one automatically.
             fuzzy = (
                 []
                 if state.yes or state.catalogue_model or usable_server_metadata(state)
@@ -1361,8 +1501,11 @@ def prepare_metadata(state: WizardState) -> bool:
         )
         and state.editing is None
     ):
-        # OpenRouter limits/media fill gaps, but its route-specific reasoning
-        # profiles/default request settings do not configure a different server.
+        # The catalogue describes OpenRouter's own endpoint. Its limits and media
+        # types may fill in what this server does not publish, but its reasoning
+        # settings, default request parameters, prices and reply maximum do not
+        # apply to a different server, so remove them. The full record is kept
+        # in the server details for display.
         public_facts = deepcopy(state.candidate)
         state.candidate = deepcopy(state.candidate)
         state.candidate.pop("reasoning", None)
@@ -1404,12 +1547,14 @@ def prepare_metadata(state: WizardState) -> bool:
 
 
 def model_media_hints(state):
-    """Detached advertisement for display and suggestions, never permissions.
+    """Return the media types published for the selected model, as a new dict.
 
-    Exact selected listing media (including empty/false declarations) wins.
-    Only when that listing has no media facts may a selected LiteLLM group
-    supports_vision flag describes image advertisement. It never implies PDF,
-    audio/video, native profiles or a tested result.
+    The result is used to show and suggest media inputs; it never enables
+    any. Media types in the model listing entry for exactly this model win,
+    even when they are empty or false. Only when the listing says nothing
+    about media is a LiteLLM model group's ``supports_vision`` flag used, and
+    only for images: it says nothing about PDFs, audio or video, and it is
+    not a test result.
     """
     hints = deepcopy(state.media_hints or state.candidate or state.selected_endpoint_model or {})
     endpoint = state.selected_endpoint_model or {}
@@ -1421,8 +1566,9 @@ def model_media_hints(state):
             continue
         flag = (record.get("facts") or {}).get("supports_vision")
         if isinstance(flag, bool):
-            # An explicit false overrides lower-priority public image hints but
-            # says nothing about the other independently advertised formats.
+            # The flag (also when false) replaces image information from less
+            # trusted sources. Other media types are listed separately and are
+            # left as they are.
             original_source = hints.get("media_source", "published model information")
             other_types = [
                 kind
@@ -1443,7 +1589,13 @@ def model_media_hints(state):
 
 
 def show_model_metadata(state: WizardState):
-    """One selected-model summary, before interface/media choices and model calls."""
+    """Print the "Model details" summary for the selected model.
+
+    Shown once, before the API style and media questions and before any
+    model request. Lists where the details came from (this server,
+    OpenRouter, or the user's own settings), name, type, published media
+    types, limits, and notices from the server details.
+    """
     state.metadata_displayed = True
     model = model_media_hints(state)
     report = connect.advertised_media_suggestions(model)
@@ -1572,10 +1724,17 @@ def show_model_metadata(state: WizardState):
 
 
 def require_manual_limits(state: WizardState, *, edit=False):
-    """Bound only explicit human manual continuations; never synthesize catalogue facts.
+    """Ask the user for the context window and input token limit when no limits are known.
 
-    Raw declarations live in wizard/proposal provenance. The registry supports only
-    a conservative effective context_window, not separate literal input metadata.
+    Only asked when the user continued without published details (or
+    ``edit`` is set); limits are never made up from catalogue information.
+    Skipped with ``--yes``, for decision API styles, and when the server's
+    model listing already gives a context limit.
+
+    Both values the user typed are kept in ``state.manual_limits`` (and end
+    up in the entry's provenance). The registry entry can store only one
+    ``context_window``, so the smaller of the two values (and of any limit
+    from the server) is used as ``state.context_window``.
     """
     if (
         state.yes
@@ -1595,8 +1754,8 @@ def require_manual_limits(state: WizardState, *, edit=False):
         connect.model_metadata(state.model, None, server) if server.get("id") == state.model else {}
     )
     if known.get("context_length") and not edit:
-        # A reported context or input bound is already conservative and exact.
-        # Preserve it, including its separate raw endpoint_limits provenance.
+        # The server already reports a context or input limit for this model.
+        # Keep it (with its record of where it came from) instead of asking.
         return
     previous = state.manual_limits or {}
     raw_context = previous.get("context_window", state.context_window)
@@ -1618,7 +1777,12 @@ def require_manual_limits(state: WizardState, *, edit=False):
 
 
 def discard_catalogue_settings(state: WizardState):
-    """Explicit continuation discards public guesses, not exact selected-server facts."""
+    """Drop the published catalogue settings after the user chose to continue without them.
+
+    Details the server itself listed for exactly this model are kept.
+    Settings from the command line are restored, and the user will be asked
+    to enter the limits.
+    """
     server = state.selected_endpoint_model
     state.candidate = (
         connect.model_metadata(state.model, None, server)
@@ -1634,7 +1798,13 @@ def discard_catalogue_settings(state: WizardState):
 
 
 def configure_metadata(state: WizardState) -> bool:
-    """Review settings after media choice, retaining the existing prompt order."""
+    """Show the model's published settings and let the user use, edit or skip them.
+
+    Runs after the media question; the order of questions is kept as it
+    was. When editing an existing entry, its settings are offered for
+    editing first. Returns False if the user cancels (or, when editing,
+    discards the edits); True otherwise.
+    """
     if not state.metadata_prepared:
         if not prepare_metadata(state):
             return False
@@ -1686,7 +1856,8 @@ def configure_metadata(state: WizardState) -> bool:
             state.candidate = prompts.edit_model_details(state.candidate)
             state.edited_settings = True
         if state.edited_settings and state.editing is None:
-            # Apply edits only after confirmation, not if the user skips them.
+            # The user accepted edited settings: they replace the settings from
+            # the command line. (This is not done when the edits were skipped.)
             state.context_window = None
             state.levels_file = state.levels = state.reasoning_template = None
     require_manual_limits(state)
@@ -1694,7 +1865,12 @@ def configure_metadata(state: WizardState) -> bool:
 
 
 def reject_decision_media(state: WizardState) -> None:
-    """Validate route-local controls once the request style is known."""
+    """Raise ``click.UsageError`` for options that do not fit the chosen API style.
+
+    Checks ``--structured-output-mode`` (chat and anthropic only) and, for a
+    decision API style, ``--no-cache`` and the media options (decision models
+    accept images only). Does nothing for options that were not given.
+    """
     if state.structured_output_mode_set and state.api_style not in {None, "chat", "anthropic"}:
         raise click.UsageError("--structured-output-mode requires Completion (chat or anthropic)")
     if state.api_style in connect.DECISION_API_STYLES:
@@ -1712,7 +1888,14 @@ def reject_decision_media(state: WizardState) -> None:
 
 
 def select_manual_media(state: WizardState, previous, *, available=None):
-    """Plan explicitly selected tests; selection alone never grants new permissions."""
+    """Let the user pick media inputs by hand, then offer to test them.
+
+    ``previous`` are the media inputs enabled before. If the user chooses to
+    test, the picked kinds become ``state.test_media_inputs`` and the
+    enabled list stays ``previous`` until the tests pass. Otherwise the
+    picked kinds are enabled without testing. Raises ``click.Abort`` if the
+    user cancels fixing unsupported saved inputs.
+    """
     from ._connect_input_policy import picker_options, repair_native_media
 
     repaired = repair_native_media(state, previous)
@@ -1754,7 +1937,14 @@ def select_manual_media(state: WizardState, previous, *, available=None):
 
 
 def configure_media_inputs(state: WizardState) -> bool:
-    """Declaration belongs to this connection, not optional published metadata."""
+    """Step 3: decide which media inputs this model entry enables or tests.
+
+    The choice is part of this entry's settings and is made by the user (or
+    the command line); published media types are only shown as suggestions.
+    For decision API styles, only images are possible, and System One needs
+    the TypeSafe multipart image transport with an explicit opt-in. Returns
+    True to continue.
+    """
     from nooa.unifiedllm.media_inputs import validate_media_inputs
 
     from ._connect_advertised_media import offer_suggestions
@@ -1828,7 +2018,7 @@ def configure_media_inputs(state: WizardState) -> bool:
         try:
             previous = validate_media_inputs((state.editing or {}).get("media_inputs"))
         except ValueError:
-            pass  # An explicit choice can repair an invalid legacy declaration.
+            pass  # An invalid old saved value is replaced by --media-inputs anyway.
         from ._connect_input_policy import validate_native_declaration
 
         validate_native_declaration(state)
@@ -1849,7 +2039,7 @@ def configure_media_inputs(state: WizardState) -> bool:
             state.endpoint,
             state.api_key_env or "",
             existing_entry=previous_entry,
-            media_inputs=[],  # route preview only; no mutation or permission revocation
+            media_inputs=[],  # preview only, to compare routes; nothing is changed
         ).entry
         saved_inputs = validate_media_inputs(previous_entry.get("media_inputs"))
         from ._connect_input_policy import available_media
@@ -1859,8 +2049,9 @@ def configure_media_inputs(state: WizardState) -> bool:
         elif len(available_media(state, entry=route)) == 2 and {"audio", "video"}.intersection(
             saved_inputs
         ):
-            # A GUI route change cannot silently erase an invalid previous
-            # selection. Obtain an explicit repair for the replacement route.
+            # The route changed to one that cannot send audio or video. Keep the
+            # saved inputs so that repair_native_media asks the user to fix
+            # them, instead of dropping them without notice.
             previous = saved_inputs
         else:
             previous = ()
@@ -1873,7 +2064,7 @@ def configure_media_inputs(state: WizardState) -> bool:
         return False
     previous = tuple(repaired)
     if state.media_inputs is not None:
-        return True  # explicit repair; do not restore inherited unsupported permissions
+        return True  # The user just fixed the inputs; do not restore the old ones.
     if offer_suggestions(state, previous):
         return True
     if state.test_media_inputs is not None:
@@ -1886,9 +2077,9 @@ def configure_media_inputs(state: WizardState) -> bool:
             select_manual_media(state, previous)
             return True
     if state.test_media_inputs:
-        # Retesting is evidence collection, not permission revocation.
-        # Resolve again after model/interface selection; this list is the menu
-        # preview, not permission to forward to a subsequently changed route.
+        # Testing does not turn off inputs that are already enabled, so keep
+        # them. This list is only what the menu showed; it is worked out
+        # again if the model or API style changes later.
         state.inherit_media_inputs = True
         state.media_inputs = list(previous)
         if not state.guided:
@@ -1903,9 +2094,11 @@ def configure_media_inputs(state: WizardState) -> bool:
 
 
 def server_effort_levels(state: WizardState):
-    """Effort levels the selected model's own server lists, as request settings.
+    """Return reasoning levels built from the effort names the server lists for this model.
 
-    Listing is a hint; the chosen level is still tested before it is trusted.
+    Returns ``{level: request settings}``, ``{}`` when the server says the
+    model does not reason, or None when the server lists nothing. The list
+    is only a suggestion; the chosen level is tested before it is saved.
     """
     efforts, supported = None, None
     for record in state.server_details.records if state.server_details else ():
@@ -1929,11 +2122,12 @@ def server_effort_levels(state: WizardState):
 
 
 def discovered_effort_levels(state: WizardState):
-    """Standard effort choices when interface discovery saw reasoning respond to effort.
+    """Return low/medium/high effort levels if the API style tests showed effort works.
 
-    Discovery sends one effort request per interface. If the chosen interface
-    returned reasoning for it, low/medium/high are offered; the chosen one is
-    tested before saving.
+    API style discovery sends one reasoning test call with an effort setting
+    per API style. If the chosen API style returned reasoning for it, these
+    three levels are offered (the chosen one is tested before saving).
+    Returns None otherwise.
     """
     result = (state.interfaces.results or {}).get(state.api_style) if state.interfaces else None
     if result is None:
@@ -1953,12 +2147,13 @@ def discovered_effort_levels(state: WizardState):
 
 
 def discovered_toggle_levels(state: WizardState):
-    """On/Off thinking for chat models that reason by default but ignore effort.
+    """Return "on"/"off" thinking levels for chat models that reason but ignore effort.
 
-    Many open models served by vLLM/SGLang (Qwen, for example) switch thinking
-    with ``chat_template_kwargs.enable_thinking``. Offered only when discovery
-    saw reasoning on this Chat interface and no effort request changed it; the
-    chosen setting is tested before saving.
+    Many open models served by vLLM or SGLang (Qwen, for example) turn
+    thinking on and off with ``chat_template_kwargs.enable_thinking``. These
+    levels are offered only for Chat Completions, when API style discovery
+    saw reasoning but no effort test call returned it. The chosen setting is
+    tested before saving. Returns None otherwise.
     """
     if state.api_style != "chat" or state.reasoning_template:
         return None
@@ -1982,7 +2177,17 @@ def discovered_toggle_levels(state: WizardState):
 
 
 def choose_reasoning(state: WizardState, *, deferred=False, edit=False) -> bool:
-    """Plain route-specific selection. Nothing is activated by merely listing levels."""
+    """Ask which reasoning level to request for this route, if any.
+
+    The levels offered come from, in order: ``--levels-file``, ``--levels``
+    with ``--reasoning-template``, the saved entry, levels known for the
+    model, the server's listed efforts, the API style tests, and exact
+    OpenRouter information. Listing levels does not turn any on; the user
+    picks one, keeps the current settings, or uses the model default. For
+    a manual "on" thinking level, the thinking token allowance is also
+    asked. Does nothing for decision API styles, or when ``deferred`` (the
+    API style is not known yet). Returns False if the user cancels.
+    """
     if state.api_style in connect.DECISION_API_STYLES:
         state.guided_reasoning_choice = state.guided_reasoning_levels = None
         state.guided_reasoning_route = state.guided_reasoning_active = None
@@ -2041,15 +2246,16 @@ def choose_reasoning(state: WizardState, *, deferred=False, edit=False) -> bool:
         native_manual = bool(levels and "on" in levels)
         state.manual_reasoning_origin = native_manual
         if native_manual and previous_on is not None:
-            levels["on"] = previous_on  # retain the wizard's reviewed allowance across edits
+            levels["on"] = previous_on  # keep the allowance the user already set
     if levels is None:
         levels = server_effort_levels(state)
     if not levels:
-        # What this interface actually did in discovery wins over a server
-        # listing that says the model doesn't reason.
+        # The API style tests are more reliable than a server listing saying
+        # the model does not reason, so they are used when they saw reasoning.
         levels = discovered_effort_levels(state) or discovered_toggle_levels(state) or levels
     if levels is None:
-        # Only exact OpenRouter metadata retains known effort templates here.
+        # Use the catalogue's effort levels only when this endpoint is
+        # OpenRouter itself and the record is for exactly this model.
         candidate = state.candidate or {}
         if (
             state.endpoint + "/models" == connect.CATALOGUE_URL
@@ -2145,7 +2351,7 @@ def choose_reasoning(state: WizardState, *, deferred=False, edit=False) -> bool:
     elif choice != "keep":
         state.manual_reasoning_owned = False
         if native_manual:
-            levels.pop("on", None)  # materialize a manual budget only after selecting On
+            levels.pop("on", None)  # the "on" level is only kept when the user chooses it
     state.guided_reasoning_choice = choice
     state.guided_reasoning_levels = levels
     state.guided_reasoning_route = route
@@ -2153,11 +2359,17 @@ def choose_reasoning(state: WizardState, *, deferred=False, edit=False) -> bool:
 
 
 def bound_simple_reasoning(state: WizardState, levels) -> bool:
-    """Only wizard-owned manual On uses this UI; advanced profiles stay untouched."""
+    """Make sure the thinking token allowance of a manual "on" level fits the reply cap.
+
+    Only applies to the simple "on" level set up by this wizard; levels from
+    files or templates are left alone. Thinking and the answer share the
+    reply cap, so the allowance must be smaller. If it is not, the user can
+    change the reply cap or the allowance, or cancel (returns False).
+    """
     if not state.manual_reasoning_owned or state.guided_reasoning_active != "on":
         return True
     budget = levels["on"]["thinking"]["budget_tokens"]
-    # Resolve the ordinary reply recommendation without thinking patches first.
+    # Work out the reply cap the plan would choose without any thinking settings.
     base = connect.plan(
         state.alias or "candidate",
         state.model,
@@ -2220,7 +2432,16 @@ def bound_simple_reasoning(state: WizardState, levels) -> bool:
 
 
 def configure_checks(state: WizardState) -> bool:
-    """Configure checks; return False when the user cancels."""
+    """Build the plan of test calls and the candidate model entry from all answers so far.
+
+    Combines the route, media inputs, reasoning levels, limits and the
+    model's published details into a ``connect.plan`` proposal, records in
+    the entry's provenance where each value came from, and asks for the
+    reply cap when it is not known yet. When editing, the saved entry's own
+    settings are kept and only the edited fields are replaced; earlier test
+    results are dropped. Stores ``state.proposal`` and ``state.configured``.
+    Returns False if the user cancels.
+    """
     reject_decision_media(state)
     from ._connect_input_policy import repair_native_media
 
@@ -2306,8 +2527,8 @@ def configure_checks(state: WizardState) -> bool:
         return False
     planning_candidate = state.candidate
     if state.manual_limits and planning_candidate is not None:
-        # User edits must use the current manual bound, not a stale provisional
-        # candidate context. Exact endpoint limits are still merged by plan().
+        # Use the context limit the user just entered, not the older value in
+        # the candidate. plan() still applies the server's own limits.
         planning_candidate = deepcopy(planning_candidate)
         planning_candidate["context_length"] = state.context_window
         planning_candidate.setdefault("limit_sources", {})["context_length"] = "user"
@@ -2354,8 +2575,8 @@ def configure_checks(state: WizardState) -> bool:
         and state.guided_reasoning_choice is None
         and not (state.levels or state.levels_file or state.reasoning_template)
     ):
-        # No reasoning choice was offered; the single discovery probe level is
-        # not a saved choice.
+        # The user was not asked about reasoning. The one level used by the API
+        # style tests was only for testing, so do not save it.
         state.proposal.entry.pop("reasoning_levels", None)
         state.proposal.entry.pop("reasoning_default", None)
     if state.server_details is not None:
@@ -2371,7 +2592,9 @@ def configure_checks(state: WizardState) -> bool:
     if "advertised_model" in state.proposal.entry.get("provenance", {}) and state.models_url:
         state.proposal.entry["provenance"]["models_url"] = state.models_url
     if state.editing is not None:
-        # Preserve transport controls, custom parameters and exact level blocks.
+        # Start from the saved entry, so its client settings, custom request
+        # parameters and reasoning level settings are kept as they are. Only
+        # the fields listed below are taken from the new plan.
         merged = deepcopy(state.editing)
         for field in (
             "structured_output_mode",
@@ -2386,9 +2609,10 @@ def configure_checks(state: WizardState) -> bool:
             merged.pop(field, None)
             if field in state.proposal.entry:
                 merged[field] = deepcopy(state.proposal.entry[field])
-        # The temporary proposal did not claim permissions for its synthetic
-        # route. Restore the explicit selection on the preserved actual route;
-        # refresh_plan below validates it before any check or save.
+        # The plan was built with no media inputs, because its route is only
+        # an approximation of the saved entry. Put the user's media choice on
+        # the saved entry; refresh_plan below checks it before any test call
+        # or save.
         merged["media_inputs"] = list(state.media_inputs or [])
         merged["api_key_env"] = state.api_key_env
         merged.setdefault("api_style", state.api_style)
@@ -2403,7 +2627,7 @@ def configure_checks(state: WizardState) -> bool:
             **deepcopy(state.editing.get("provenance", {})),
             **state.proposal.entry["provenance"],
         }
-        merged["provenance"]["probes"] = {}  # Edits must not reuse stale evidence.
+        merged["provenance"]["probes"] = {}  # Old test results do not apply to edits.
         if state.editing.get("structured_output_mode") != merged.get("structured_output_mode"):
             for field in ("session_checks", "requests_accepted", "reasoning_observed"):
                 merged["provenance"].pop(field, None)
@@ -2480,7 +2704,8 @@ def configure_checks(state: WizardState) -> bool:
             declared=state.manual_limits["context_window"],
             effective=state.proposal.entry["context_window"],
         )
-        # User declarations are not a public catalogue mapping or tested evidence.
+        # Limits typed by the user are neither catalogue values nor test
+        # results, so drop those records.
         provenance["limit_sources"] = {"context_length": "user"}
         provenance.pop("catalogue", None)
         provenance["probes"] = {}
@@ -2560,13 +2785,20 @@ def configure_checks(state: WizardState) -> bool:
 
 
 def baseline_allows_save(state: WizardState) -> bool:
-    """Fail closed for approved checks; manual setup is explicitly unverified."""
+    """Return True if the entry may be saved after the test calls.
+
+    Without test calls (``--no-probe`` or approval ``none``) the entry is
+    saved as untested. Otherwise the basic test call must have passed for
+    both the tested entry and the entry about to be saved; if not, the
+    reason is shown and False is returned.
+    """
     if state.no_probe or state.approval == "none":
         return True
     entry = state.result.entry if state.result is not None else {}
     record = entry.get("provenance", {}).get("probes", {}).get("routing", {})
     candidate = connect.configure_entry(entry)
-    # A separately edited configured candidate must not borrow the result's proof.
+    # If the entry to save was changed after the tests, it must pass the
+    # check on its own; the tested entry's result does not cover it.
     configured = state.configured if state.configured is not None else candidate
     if connect.routing_allows_save(entry, candidate) and connect.routing_allows_save(
         entry, configured
@@ -2574,7 +2806,8 @@ def baseline_allows_save(state: WizardState) -> bool:
         return True
     state.test_failed = True
     reason = view.connection_detail(record)
-    # Only sanitized display facts: never echo raw provider errors or replies.
+    # Show only the summary from connection_detail, never the provider's
+    # raw error or reply.
     view.note(
         scrub_setup(
             state,
@@ -2590,7 +2823,14 @@ def baseline_allows_save(state: WizardState) -> bool:
 
 
 def run_checks(state: WizardState) -> bool:
-    """Run checks; return False when the user cancels."""
+    """Step 4: send the approved test calls and show their results.
+
+    Runs ``connect.run_steps`` on the plan within the remaining token budget,
+    then enables media kinds whose tests passed, warns about calls skipped
+    for lack of budget and about reasoning levels that returned no
+    reasoning, and prints troubleshooting output when needed. Returns
+    whether the entry may be saved (see ``baseline_allows_save``).
+    """
     if not state.no_probe and state.approval != "none":
         show_step(state, 4)
     if state.api_style in connect.DECISION_API_STYLES:
@@ -2632,8 +2872,8 @@ def run_checks(state: WizardState) -> bool:
     )
     state.tokens_spent += state.result.entry["provenance"].get("tokens_charged_to_budget", 0)
     state.result.entry["provenance"]["tokens_charged_to_budget"] = state.tokens_spent
-    # Settings the server refused during the checks (and were turned off) are
-    # part of what was tested, so the save candidate must carry them too.
+    # Settings the server rejected during the tests were turned off in the
+    # tested entry. The entry to save must have the same settings.
     for name, record_key in (
         ("cache_breakpoint", "explicit_cache"),
         ("include", "encrypted_reasoning"),
@@ -2688,7 +2928,8 @@ def run_checks(state: WizardState) -> bool:
             for name in decision.skipped
         )
     ):
-        # A failed baseline always gets the agent prompt; optional gaps keep the hint.
+        # Print the troubleshooting prompt when the basic test call failed (or
+        # --show-diagnostics is set); for other gaps only print a hint.
         if state.show_diagnostics or not baseline_ok:
             click.echo(
                 "Agent diagnostic prompt:\n"
@@ -2734,7 +2975,11 @@ def run_checks(state: WizardState) -> bool:
 
 
 def media_cannot_apply(record: dict) -> bool:
-    """True for a media check this request interface can never send (nothing to fix)."""
+    """Return True for a media test call the API style can never send.
+
+    Such a result is not something the user can fix, so it does not trigger
+    troubleshooting output.
+    """
     reason = str(record.get("reason", ""))
     return (
         record.get("implementation_supported") is False
@@ -2744,7 +2989,15 @@ def media_cannot_apply(record: dict) -> bool:
 
 
 def save_model(state: WizardState) -> bool:
-    """Save model; return False when canceled or the baseline is unverified."""
+    """Step 5: review the entry, ask for the alias, and write it to the registry file.
+
+    Shows the media settings and test results, lets the user change media
+    inputs that were not confirmed, asks for the alias (and whether to
+    replace an existing one), shows a summary, and writes the entry after
+    confirmation. A key typed in during setup can be saved to the user's
+    secrets file. Returns False when the user cancels or the basic test call
+    did not pass.
+    """
     if not baseline_allows_save(state):
         return False
     show_step(state, 5)
@@ -2799,7 +3052,7 @@ def save_model(state: WizardState) -> bool:
     if repaired is None:
         return False
     state.result.entry["media_inputs"] = repaired
-    connect.configure_entry(state.result.entry)  # local policy gate before any save side effect
+    connect.configure_entry(state.result.entry)  # raises on an invalid entry before saving
     tested_media_inputs = list(state.result.entry.get("media_inputs", []))
     media_facts = state.result.entry.get("provenance", {}).get("probes", {})
     enabled_now = state.result.entry.get("media_inputs", [])
@@ -2811,9 +3064,9 @@ def save_model(state: WizardState) -> bool:
         )
         for kind in state.test_media_inputs
     )
-    # Nothing to decide when every tested format either passed (and is on) or
-    # was refused by the server (and is off). If the model only said it couldn't
-    # see a sample, the user may still choose to enable that format.
+    # Nothing to ask when every tested kind either passed (and is on) or was
+    # rejected by the server (and is off). If the model only said it could not
+    # see a sample, the user may still choose to enable that kind.
     if not state.yes and state.test_media_inputs and not all_passed:
         action = prompts.review_media_inputs(state.result.entry["media_inputs"])
         if action == "manual":
@@ -2849,9 +3102,9 @@ def save_model(state: WizardState) -> bool:
                 )
     if not baseline_allows_save(state):
         return False
-    # The effective declarations above are reviewed before the final save decision.
-    # Checks may take a while: refresh names before offering completion or
-    # asking to replace an entry added since setup started.
+    # The media settings above have been reviewed before deciding to save.
+    # The tests may have taken a while, so read the registry file again: an
+    # alias may have been added since setup started.
     state.data = {}
     if state.path.exists():
         with state.path.open() as source:
@@ -2959,8 +3212,9 @@ def save_model(state: WizardState) -> bool:
             from nooa.secrets import new_secret_env
 
             def model_may_be_saved():
-                # The normal registry loader deliberately swallows read/parse
-                # errors. Rollback needs a STRICT read: unknown is not absent.
+                # The usual registry reader ignores read and parse errors. Here an
+                # unreadable file must not count as "model not saved", so read
+                # it directly and let errors other than a missing file propagate.
                 try:
                     saved_document = yaml.safe_load(state.path.read_text())
                 except FileNotFoundError:
@@ -2969,8 +3223,9 @@ def save_model(state: WizardState) -> bool:
                     saved_document.get("models", {}), dict
                 ):
                     raise ValueError("Cannot determine whether the model was committed")
-                # A concurrent edit may change parameters/alias yet still
-                # depend on the new variable. Do not remove its credential.
+                # Another process may have changed the entry or its alias in the
+                # meantime but still use the new key variable. If any entry uses
+                # it, keep the saved key.
                 return any(
                     isinstance(profile, dict) and profile.get("api_key_env") == state.api_key_env
                     for profile in saved_document.get("models", {}).values()
@@ -3048,7 +3303,12 @@ def save_model(state: WizardState) -> bool:
 
 
 def structured_output_rows(entry):
-    """Declaration and observed wire facts are different, bounded review fields."""
+    """Return review rows describing the entry's structured output (typed JSON) setting.
+
+    The chosen mode and whether native JSON was actually seen in the test
+    requests are shown as separate rows. Returns no rows if the entry has
+    no ``structured_output_mode``.
+    """
     if "structured_output_mode" not in entry:
         return []
     mode = entry["structured_output_mode"]
@@ -3077,7 +3337,13 @@ def structured_output_rows(entry):
 
 
 def show_guided_proposal(state: WizardState, *, deferred_style=False, updated=False):
-    """One concise summary for each current proposal, not stale initial settings."""
+    """Print the summary of the current plan: route, limits, reasoning, media and tests.
+
+    Shown before the user decides to test, save or change settings, and
+    again (``updated``) after each change, always from the current plan
+    rather than the first one. ``deferred_style`` means the API style will
+    only be found by testing.
+    """
     entry = state.proposal.entry
     maximum = entry.get("provenance", {}).get("catalogue_limits", {}).get("max_completion_tokens")
     if not isinstance(maximum, int) or isinstance(maximum, bool) or maximum <= 0:
@@ -3219,7 +3485,8 @@ def show_guided_proposal(state: WizardState, *, deferred_style=False, updated=Fa
             value = "Enabled; test unavailable" if kind in enabled else "Off; test unavailable"
         media_rows.append((view.media_label(kind), value))
     view.fields(scrub_setup(state, media_rows))
-    # Rows above already say when the interface doesn't support a format.
+    # The rows above already say when the API style cannot send a kind, so
+    # only explain unavailable tests for kinds it can send.
     for kind, reason in unavailable.items():
         if kind in available_media(state, entry=entry):
             view.fields(scrub_setup(state, [(view.media_label(kind) + " test", reason)]))
@@ -3238,7 +3505,12 @@ def show_guided_proposal(state: WizardState, *, deferred_style=False, updated=Fa
 
 
 def edit_guided_limits(state: WizardState) -> None:
-    """Change settings → Reply limit and context; reasoning is a separate choice."""
+    """Handle "Change settings" → "Reply limit and context": edit limits and reply cap.
+
+    With limits typed by the user (or no published details), asks for them
+    again; otherwise lets the user edit the published values. Then asks for
+    the reply cap within the new limits. Reasoning is changed separately.
+    """
     if not state.manual_limits_deferred and (state.manual_limits or state.candidate is None):
         require_manual_limits(state, edit=True)
         maximum = (
@@ -3296,7 +3568,10 @@ def edit_guided_limits(state: WizardState) -> None:
 
 
 def edit_guided_decision_media(state: WizardState) -> bool:
-    """Change settings → Media for decision interfaces (images only)."""
+    """Handle "Change settings" → "Media" for decision API styles (images only).
+
+    Returns False if the user cancels.
+    """
     mode = prompts.choose_decision_images(state.media_inputs)
     if mode == "text":
         state.media_inputs, state.test_media_inputs = [], None
@@ -3312,7 +3587,10 @@ def edit_guided_decision_media(state: WizardState) -> bool:
 
 
 def edit_guided_media(state: WizardState) -> bool:
-    """Change settings → Media: pick formats, then test or enable them as usual."""
+    """Handle "Change settings" → "Media": pick media kinds, then test or enable them.
+
+    Returns False if the user cancels.
+    """
     if state.api_style in connect.DECISION_API_STYLES:
         return edit_guided_decision_media(state)
     current = (state.proposal.entry.get("media_inputs") if state.proposal else None) or []
@@ -3321,7 +3599,7 @@ def edit_guided_media(state: WizardState) -> bool:
 
 
 def change_settings_options(state: WizardState):
-    """The plain Change settings submenu, in order, with only options that apply."""
+    """Return the "Change settings" menu options that apply, and the default option."""
     decision = state.api_style in connect.DECISION_API_STYLES
     options = []
     if not decision:
@@ -3342,10 +3620,16 @@ def change_settings_options(state: WizardState):
 
 
 def review_guided_proposal(state: WizardState, *, deferred_style=False):
-    """Consent or edit; edits are re-summarized before the next decision."""
+    """Ask whether to test, save without testing, or change settings; loop until decided.
+
+    After each change, the plan is rebuilt and its summary shown again
+    before asking once more. Saving after a failed test needs an extra
+    confirmation (asked again whenever the settings change). Returns the
+    chosen action, or None if the user cancels.
+    """
     while True:
         options = (("test", "Test now"),) if not state.no_probe and state.probe != "none" else ()
-        # Keep the main decision short; every edit lives under Change settings.
+        # Keep this menu short; all changes are under "Change settings".
         # Ctrl-C cancels without saving.
         action = prompts.labelled_choice(
             "Would you like to test these settings?",
@@ -3390,7 +3674,7 @@ def review_guided_proposal(state: WizardState, *, deferred_style=False):
                 return None
         else:
             edit_guided_limits(state)
-            # Profile/media declarations and explicit test selections remain unchanged.
+            # Changing limits leaves the other settings and the chosen tests as they are.
         if not configure_checks(state):
             return None
         show_guided_proposal(state, deferred_style=deferred_style, updated=True)
@@ -3398,11 +3682,19 @@ def review_guided_proposal(state: WizardState, *, deferred_style=False):
 
 
 def guided_setup(state: WizardState) -> bool:
-    """Prepare a proposal using GETs only; the action below is model-call consent."""
+    """Run the guided (interactive) setup from the first question to the save.
+
+    Until the user approves testing, only GET requests are sent (model
+    listing, server details, catalogue); no model is called. The user's
+    answer to "Would you like to test these settings?" is the approval for
+    model calls. If the API style was left to discovery, the API style tests
+    run first, and the plan is rebuilt and shown again if it changed.
+    Returns False when setup stops without saving.
+    """
     if not select_connection(state) or not select_model(state) or not prepare_metadata(state):
         return False
     if not state.metadata_displayed:
-        show_model_metadata(state)  # model details close the Model step
+        show_model_metadata(state)  # the model details end the Model step
     show_step(state, 3)
     if not select_request_interface(state):
         return False
@@ -3413,8 +3705,9 @@ def guided_setup(state: WizardState) -> bool:
         )
     explicit_reply_tokens = state.reply_tokens
     if deferred_style and not state.no_probe and state.probe != "none":
-        # Choosing Discover approves these small interface checks. Run them now
-        # so media and reasoning are set up for the interface actually chosen.
+        # Choosing "Find what works" approves these small API style tests. Run
+        # them now, so media and reasoning are set up for the API style that
+        # is actually used.
         state.approval = state.probe
         if not check_interfaces(state):
             return False
@@ -3422,9 +3715,12 @@ def guided_setup(state: WizardState) -> bool:
             state.reply_tokens = explicit_reply_tokens
             discard_chat_limits(state)
         deferred_style = False
-    # A provider preset is a proposal, never evidence of supported interfaces.
+    # The provider preset's API style is only a default for the plan; it does
+    # not show that the endpoint accepts that API style.
     state.api_style = state.api_style or state.default_style
-    # Unknown interfaces already have their provisional literal limits upfront.
+    # While the API style is unknown, limits entered by the user apply. For a
+    # model published as a decision model, ask for limits only later, once
+    # the API style is known (decision styles do not use them).
     state.manual_limits_deferred = deferred_style and known_decision_model(state)
     if (
         not configure_media_inputs(state)
@@ -3432,8 +3728,8 @@ def guided_setup(state: WizardState) -> bool:
         or not configure_checks(state)
     ):
         return False
-    # Revisions made before this first proposal are already shown in it; only
-    # later revisions need a second review.
+    # Changes made before this first summary are already shown in it; only
+    # later changes need a second review.
     state.route_revised = state.guided_media_revised = False
     show_guided_proposal(state, deferred_style=deferred_style)
     action = review_guided_proposal(state, deferred_style=deferred_style)
@@ -3444,7 +3740,7 @@ def guided_setup(state: WizardState) -> bool:
     if action == "save":
         keep_untested_media(state)
     elif not state.no_probe and state.approval != "none":
-        show_step(state, 4)  # approved discovery checks are part of the test
+        show_step(state, 4)  # the approved API style tests are part of step 4
     if deferred_style:
         state.manual_limits_deferred = False
         state.api_style = None
@@ -3455,10 +3751,11 @@ def guided_setup(state: WizardState) -> bool:
             discard_chat_limits(state)
             if not configure_media_inputs(state):
                 return False
-        # No provisional native control can carry to another discovered interface.
+        # Reasoning settings chosen for a provisional API style may not fit the
+        # one found by the tests, so ask again.
         if not choose_reasoning(state):
             return False
-        # Re-plan for the selected route using the already reviewed limits.
+        # Rebuild the plan for the chosen route with the limits already reviewed.
         if not configure_checks(state):
             return False
     elif action == "save":
@@ -3480,12 +3777,13 @@ def guided_setup(state: WizardState) -> bool:
         if not configure_checks(state):
             return False
     if not run_checks(state):
-        # The failure and an agent prompt are already shown.
+        # The failure and the troubleshooting prompt were already shown.
         return offer_restart(state)
     return save_model(state)
 
 
 def new_state(options) -> WizardState:
+    """Create the wizard state from the command options, with the default registry path."""
     state = WizardState(**options)
     state.path = Path(state.output) if state.output else paths.get_user_dir("llm_config.yaml")
     state.api_key = None
@@ -3495,7 +3793,17 @@ def new_state(options) -> WizardState:
 
 
 def run_wizard(**options):
-    """Run ordered steps with one shared budget and an explicit save decision."""
+    """Run the connect wizard with the ``nooa connect`` options as keyword arguments.
+
+    Without ``--yes`` the guided setup runs and can be restarted after a
+    failure (a new state, same options). With ``--yes`` the steps run in a
+    fixed order without questions. All test calls share one token budget,
+    and nothing is saved without the user's (or ``--yes``) approval.
+
+    Raises ``click.ClickException`` when an approved test fails or on errors
+    such as invalid YAML, file errors or network errors; the message never
+    contains the API key.
+    """
     state = new_state(options)
     try:
         if not state.yes:

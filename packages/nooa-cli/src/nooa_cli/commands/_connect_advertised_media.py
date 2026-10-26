@@ -1,10 +1,27 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Explicit wizard review of advertisements, not automatic media permissions."""
+"""Wizard step that shows which media inputs the model is said to accept.
+
+Published model information (the model listing, server details or the
+OpenRouter catalogue) may list input types such as images or audio. This step
+shows those as suggestions and lets the user decide: test them, enable them
+without testing, pick them by hand, or turn media off. Listed media is never
+enabled automatically.
+"""
 
 
 def offer_suggestions(state, previous):
-    """Render selected-model hints; return whether the user chose permissions."""
+    """Show the media inputs listed for the selected model and ask how to use them.
+
+    ``state`` is the wizard state; ``previous`` is the list of media inputs the
+    entry had before (shown as "Current inputs"). Depending on the answer this
+    sets ``state.test_media_inputs`` (inputs to test) or ``state.media_inputs``
+    (inputs to enable without testing).
+
+    Returns True if the user made a choice here, and False if no question was
+    asked: the choice already came from command-line options, ``--yes`` was
+    given, or nothing was suggested.
+    """
     from nooa.unifiedllm import connect
 
     from . import _connect_prompts as prompts
