@@ -585,9 +585,11 @@ def client_from_config(
                 name,
             )
 
-    # Context is endpoint-local too. Switching from an env-var declaration
-    # to an explicit key changes credential scope, even if key values happen
-    # to coincide. Explicit context redeclarations remain authoritative.
+    # A context_window belongs to one route. If an override changes the model,
+    # endpoint, client type, provider, client object or credentials, drop the
+    # entry's window: it may not hold for the new route. Passing api_key where
+    # the entry used api_key_env counts as a credential change even if the
+    # values match. A context_window passed in the overrides is always kept.
     from nooa.unifiedllm.route_identity import same_context_route
 
     original_route = {
@@ -626,6 +628,8 @@ def client_from_config(
         if selected_client_type == "responses"
         else CompletionClient(**params)
     )
-    client._registry_config = config  # Sanitized endpoint-local context metadata
+    # Keep the entry's settings on the client so later context-window lookups
+    # can check they still describe the client's actual route.
+    client._registry_config = config
     client._registry_context_route = (client.model, dict(client.config), selected_client_type)
     return client

@@ -28,10 +28,17 @@ def removed_media_notice(kind: str) -> str:
 
 
 def filter_media_messages(messages, enabled: tuple[MediaInput, ...]):
-    """Filter public attachment slots on a new request view, keeping turn objects.
+    """Return a copy of ``messages`` with media that is not ``enabled`` replaced.
 
-    Does not visit tool arguments, reasoning, vendor extensions or arbitrary
-    nested dictionaries. Projection still owns native LLMResponse containers.
+    Each disabled attachment is replaced by a short text notice (see
+    ``removed_media_notice``) so the model knows something was removed. Three
+    places are checked: a message that is itself an attachment item (Responses
+    input allows these at the top level), an assistant ``audio`` field, and the
+    blocks of a ``content`` list (``output`` for ``function_call_output`` items).
+    Tool arguments, reasoning and vendor extensions are not inspected.
+    ``LLMResponse`` and ``CacheBoundary`` objects are passed through unchanged;
+    their native content is checked later by ``guard_native_media``. The input
+    list and its messages are not modified.
     """
     result = []
     for message in messages:
@@ -40,7 +47,9 @@ def filter_media_messages(messages, enabled: tuple[MediaInput, ...]):
             continue
         item = dict(message)
         kind = attachment_kind(item)
-        if kind in {"audio", "video"} and kind not in enabled:
+        if kind is not None and kind not in enabled:
+            # The whole message is an attachment item, so there is no content
+            # list to filter: replace the item with a user notice.
             result.append({"role": "user", "content": removed_media_notice(kind)})
             continue
         slot = "output" if item.get("type") == "function_call_output" else "content"
@@ -82,11 +91,20 @@ def filter_media_messages(messages, enabled: tuple[MediaInput, ...]):
 def guard_native_media(
     native: Mapping[str, Any], enabled: tuple[MediaInput, ...] | None, *, interface: str = "chat"
 ) -> None:
-    """Adapter-owned compatible envelopes are indivisible; never recurse.
+    """Check the native content of a replayed assistant turn before it is sent.
 
-    Preserve the disabled-opaque-state guard FIRST, then reject unimplemented
-    native input before reconstructing any vendor text/state. None retains
-    direct projection helpers' permission contract, not an unsupported mapping.
+    ``native`` is the provider's own message for an earlier assistant turn. It is
+    replayed as one unit and cannot be partly edited, so media cannot be removed
+    from it the way ``filter_media_messages`` removes it from ordinary messages.
+
+    Two checks run in order:
+
+    1. If ``enabled`` is not None and ``native`` contains a media kind that is not
+       enabled, raise ``ReasoningReplayError``. The caller must replay a portable
+       version of the turn instead. ``enabled=None`` skips this check; direct
+       projection helpers use it when they do not apply media permissions.
+    2. Raise ``ValueError`` if ``native`` contains media that ``interface`` cannot
+       send (see ``nooa.media_policy``).
     """
     if enabled is not None:
         content = native.get("content")

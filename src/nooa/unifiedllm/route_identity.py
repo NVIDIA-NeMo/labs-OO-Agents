@@ -1,9 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Conservative identity checks for endpoint-local context metadata.
+"""Decide whether two client configurations send requests to the same route.
 
-No discovery, environment reads, credential resolution or provider-prefix guessing.
-An env-var credential declaration is a scope, not equivalent to an explicit key.
+A ``context_window`` is only valid for the route it was declared for. These
+checks compare configuration values only: they make no network calls, read no
+environment variables and do not guess providers from model prefixes.
 """
 
 from collections.abc import Mapping
@@ -12,6 +13,12 @@ from urllib.parse import urlsplit, urlunsplit
 
 
 def _endpoint(config: Mapping[str, Any]) -> tuple[str, ...]:
+    """Return the normalized endpoint URLs set in ``config``, sorted.
+
+    ``api_base``, ``base_url`` and ``endpoint`` are collected; scheme and host are
+    lowercased and a trailing slash is dropped. A non-string or unparsable value
+    gives an ``("<invalid>", key)`` marker so it never matches a real endpoint.
+    """
     endpoints = set()
     for key in ("api_base", "base_url", "endpoint"):
         value = config.get(key)
@@ -41,12 +48,14 @@ def same_context_route(
     other: Mapping[str, Any],
     other_client_type: str,
 ) -> bool:
-    """Require the same exact routing model, endpoint, API client and credentials.
+    """Return True if both configurations send requests to the same route.
 
-    api_base/base_url are spelling aliases only when unambiguous; conflicting
-    URLs fail closed. Paths and queries remain significant. Caller-owned API
-    client objects compare by identity, never by equality. Credential values
-    are compared only locally and are never returned, hashed or logged.
+    The model strings, client types, ``custom_llm_provider``, ``api_key_env`` and
+    ``api_key`` must be equal, and the endpoints must match after normalization.
+    ``api_base`` and ``base_url`` may spell the same endpoint, but a configuration
+    that sets two different URLs never matches. URL paths and queries are
+    significant. Client objects (``client``) must be the same object. Key values
+    are only compared here; they are never returned, hashed or logged.
     """
     endpoint, other_endpoint = _endpoint(config), _endpoint(other)
     return (

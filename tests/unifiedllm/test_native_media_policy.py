@@ -453,3 +453,39 @@ async def test_disabled_agent_media_is_notice_not_unsupported_error(
             assert registry.MODELS["legacy"]["media_inputs"] == [kind]
     finally:
         await c.aclose()
+
+
+@pytest.mark.parametrize(
+    "item",
+    [
+        {"type": "input_image", "image_url": "data:image/png;base64,AAAA"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+        {
+            "type": "input_file",
+            "file_data": "data:application/pdf;base64,AAAA",
+            "filename": "a.pdf",
+        },
+        {"type": "input_audio", "input_audio": {"data": "AAAA", "format": "wav"}},
+        {"type": "video_url", "video_url": {"url": "https://media.test/v.mp4"}},
+    ],
+)
+def test_disabled_top_level_attachment_items_become_notices(item):
+    """A message that is itself a disabled attachment is replaced, whatever its kind."""
+    from nooa.media_inputs import attachment_kind
+    from nooa.unifiedllm.media_inputs import filter_media_messages, removed_media_notice
+
+    kind = attachment_kind(item)
+    assert filter_media_messages([item], ()) == [
+        {"role": "user", "content": removed_media_notice(kind)}
+    ]
+    assert filter_media_messages([item], (kind,)) == [item]
+
+
+@pytest.mark.parametrize(
+    ("provider", "interface"),
+    [("anthropic", "anthropic"), ("openai", "chat"), ("bedrock", "chat"), (None, "chat")],
+)
+def test_completion_interface_follows_litellm_provider(provider, interface):
+    from nooa.media_policy import interface_for_provider
+
+    assert interface_for_provider(provider) == interface
