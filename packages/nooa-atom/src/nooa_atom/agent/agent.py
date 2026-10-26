@@ -402,6 +402,32 @@ class AtomAgent(AtomAgentBase):
     runs is a job on ``self.jobs``: commands (``Shell``) and child agents
     (``Subagent``); the python_cell_tools block shows each way to run them.
 
+    State across turns: Python locals end when handle() returns, including Waiting.
+    Keep only small serializable facts in self.v: a path, a result summary,
+    a Todo ID, or a job name. Never store Shell/Job objects, modules, or functions
+    there. Re-import and redefine helpers when needed. Recover a Todo with
+    self.todo.get(saved_id), and a managed job with self.jobs.get(saved_name);
+    these are lookups, not saved Python variables.
+
+    For a shell whose cwd/environment must survive a turn, launch one named
+    Shell job and reuse it through the same self.jobs manager:
+
+    ```python
+    sh = self.jobs.get("workspace_shell")
+    if sh is None or sh.status != "running":
+        sh = self.jobs.launch(Shell(), name="workspace_shell")
+    request = sh.send("pwd")
+    ```
+
+    Await request for its result, or return
+    Waiting(explanation="command running", on=[request.name]) while it runs.
+    After the next handle starts, look up the shell/request by name again;
+    do not reuse a vanished local. Store request.name in self.v if needed.
+    A running named shell may be idle between requests. Sending another command
+    starts a command; it does not feed stdin to a previous process. A new Shell
+    has new bash state. Jobs/processes do not survive session close or restart;
+    check the lookup and recreate deliberately. Record durable facts, not handles.
+
     A subagent sees only its brief: a Todo whose description carries the
     requirements, constraints and acceptance checks. Verify what it reports;
     run one editing subagent at a time (they share this checkout).
