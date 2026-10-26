@@ -6,6 +6,11 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- Prompt inspection (`print_prompt()` and `build_prompt_data()`) now applies
+  method-level truncation overrides for CodeAct and PurePython, matching runtime
+  prefill rendering. Both strategies now use the resolved runtime settings for
+  live prefill, and emit `PrefillTruncationWarning` when formatting or stdout
+  capture actually omits input, with advice for adjusting the relevant limits.
 - `RetryConfig` is the only endpoint retry budget for `CompletionClient` on
   OpenAI-compatible routes. LiteLLM let the OpenAI SDK retry each attempt twice
   more, so `RetryConfig(max_retries=2)` sent 9 requests for a persistent server

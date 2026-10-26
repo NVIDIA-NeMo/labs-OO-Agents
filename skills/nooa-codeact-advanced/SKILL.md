@@ -32,6 +32,7 @@ class Notifier(Agent, llm=llm):
 
 - **Disable** the plugin: `CodeActConfig(prefill=None)` (pre-ellipsis code still runs). The `CodeActStrategy.__init__` docstring claiming "prefill is always enabled" is outdated — the config is honored.
 - **Custom prefill**: any object implementing `get_code(self, call: CurrentCall, config=None) -> str | None` (return `None` to skip; `config` is the agent's `TruncationConfig`). Pass it via `CodeActConfig(prefill=MyPrefill())`.
+- CodeAct and PurePython use the active runtime truncation config, including method overrides, for prefill. `print_prompt()` previews the same settings.
 - Inside prefill cells only, the builtin `_call` (the `CurrentCall`) is available — that's how `InspectInputsPrefill` prints `doc(_call.return_type)`.
 - Pre-ellipsis code runs through the full validator/restriction pipeline; `await` is allowed (cells are wrapped in an async function), and async `self.method()` calls must be awaited or the whole cell is rejected.
 
@@ -128,6 +129,38 @@ Two independent mechanisms — set them separately:
 
 1. **Capture time** (`capture: CaptureConfig`) — per-cell stream caps with head/tail truncation: `max_stdout=50_000`, `max_stderr=2_000`, `max_error=10_000` chars; `tail=None` (half the budget); `file_backed=True` (default `False`) streams the *full* output to a temp file and puts its path in the truncation notice so the LLM can grep it.
 2. **Render time** (`FormatConfig` triplet = `pformat` bounds `max_string/max_length/max_depth`): `event_format` (event fields, every turn; defaults 10_000/200/5), `prefill_format` (parameter inspection; 2_000/25/4), `context_block_format` (non-string context values; unlimited — overflow handled by block eviction).
+
+When input inspection actually omits values, NOOA emits a developer-facing
+`PrefillTruncationWarning` naming the method and the limits responsible. It is
+not injected into the model's stderr. Full arguments remain live REPL variables;
+the initial printed inspection can omit their middle or nested values.
+
+For a parameter the model must read completely, override only the relevant
+formatting limits; `None` disables that limit:
+
+```python
+from typing import Annotated
+
+from nooa import spec
+
+async def analyze(self, document: Annotated[str, spec(max_string=None)]) -> str:
+    """Analyze the complete document."""
+    ...
+```
+
+Precedence is defaults → agent class → instance → method
+`@strategy(..., truncation=...)` → per-parameter `spec()` metadata. For lists or
+nested data, adjust `max_length` or `max_depth` as needed. Use
+`TruncationConfig(prefill_format=FormatConfig(max_string=90_000))` to raise a
+method's default, or chunk inputs and let the agent inspect the relevant slices.
+Disabling formatting limits does **not** disable the separate
+`capture.max_stdout` cap (50,000 characters by default): raise it explicitly if
+the complete printed input can exceed that budget. A warning naming
+`capture.max_stdout` points to this second limit. `print_prompt()` displays
+generated prefill code; use an execution trace to verify captured output and
+the actual LLM request. Applications that deliberately accept truncated
+previews can filter `nooa.strategies.prefill.PrefillTruncationWarning` through
+Python's standard warnings filters.
 
 Context budget: `max_context_tokens` — or, when unset and the model exposes a context window, half the *usable* window (`(context_window - reserved_output) // 2`, where `reserved_output` is the call's `max_tokens`, else `TruncationConfig.response_reserve_tokens`, default 4096; setting `response_reserve_tokens=0` disables the auto-derived budget). Over-budget triggers **whole-block eviction** of SYSTEM context blocks — newest non-`static` user blocks first, marked `EVICTED: over context budget` in place. Static framework blocks (`system_prompt`, `self`) are never evicted. No token counter is required: eviction sizes blocks as `chars × ratio`, where the ratio is calibrated from each provider response's reported prompt tokens (cold-start ~4 chars/token before the first response). Inspect usage via `agent.context_stats` — token figures are provider-reported (`prompt_tokens`); the context-vs-events breakdown is attributed by character share and `ctx N%` is measured against the usable window.
 

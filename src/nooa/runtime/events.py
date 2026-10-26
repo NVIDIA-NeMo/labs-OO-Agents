@@ -61,13 +61,12 @@ class EventsApi(Skill):
         tasks = events.query(type="Task", query="summarise")
 
     Context compaction:
-        When context grows too large, use events to summarize or collapse
-        old history. The summarizer does this automatically at token budget
-        thresholds, but you can also compact manually:
+        Keep context small by collapsing completed work into concise summaries.
+        Preserve key findings, decisions, unresolved issues, and references:
 
         events.query(limit=20)       # inspect what's taking space
-        # Summarization happens at the runtime level — old events get
-        # replaced by summary events with range tags like "1..22".
+        events.collapse("1", "22", "Key findings and remaining work...")
+        # Old events are replaced by summary events with range tags like "1..22".
         # After compaction, access originals via summary.children_tags.
 
     Load this library:

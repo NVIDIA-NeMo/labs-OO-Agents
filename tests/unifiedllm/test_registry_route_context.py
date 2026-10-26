@@ -11,6 +11,20 @@ from nooa.unifiedllm import CompletionClient, ResponsesClient, registry
 
 MODEL = "openai/offline-route-context"
 BASE = "https://gateway.test/v1"
+CHAT_RESPONSE = {
+    "id": "test-response",
+    "object": "chat.completion",
+    "created": 1,
+    "model": "model",
+    "choices": [
+        {
+            "index": 0,
+            "message": {"role": "assistant", "content": "done"},
+            "finish_reason": "stop",
+        }
+    ],
+    "usage": {"prompt_tokens": 20, "completion_tokens": 2, "total_tokens": 22},
+}
 
 
 @pytest.fixture(autouse=True)
@@ -93,22 +107,22 @@ def test_typed_factory_options_and_explicit_overrides(client_type):
     raw = entry(
         client_type=client_type,
         timeout=12.5,
-        chat_template_kwargs={"enable_thinking": False},
-        reasoning_levels={"on": {"chat_template_kwargs": {"enable_thinking": True}}},
+        base_url=BASE,
+        custom_llm_provider="openai",
     )
     before = deepcopy(raw)
     typed = ModelConfig.from_registry("local", raw)
     c = registry.client_from_config("local", typed.model_dump(exclude_unset=True))
     assert c.config["timeout"] == 12.5
-    assert c._prepare_call_config({})["chat_template_kwargs"] == {"enable_thinking": False}
-    assert c._prepare_call_config({"reasoning_level": "on"})["chat_template_kwargs"] == {
-        "enable_thinking": True
-    }
+    assert c.config["base_url"] == BASE
+    assert c.config["custom_llm_provider"] == "openai"
+    assert c.context_window == 8192  # Equivalent spelling of the same route.
     override = registry.client_from_config(
-        "local", raw, timeout=3, chat_template_kwargs={"caller": True}
+        "local", raw, timeout=3, base_url="https://other.test/v1", custom_llm_provider="other"
     )
     assert override.config["timeout"] == 3
-    assert override._prepare_call_config({})["chat_template_kwargs"] == {"caller": True}
+    assert override.config["base_url"] == "https://other.test/v1"
+    assert override.config["custom_llm_provider"] == "other"
     assert raw == before
 
 
@@ -175,7 +189,7 @@ def test_direct_lookup_still_lazily_loads(monkeypatch):
 
 
 @pytest.mark.parametrize("is_async", [False, True])
-async def test_template_defaults_levels_and_caller_overrides_on_mock_wire(monkeypatch, is_async):
+async def test_timeout_defaults_and_caller_overrides_on_mock_wire(monkeypatch, is_async):
     # Actual CompletionClient -> LiteLLM -> OpenAI SDK -> httpx.MockTransport.
     # This is NOT the separate Direct SDK transport.
     import json
@@ -183,7 +197,6 @@ async def test_template_defaults_levels_and_caller_overrides_on_mock_wire(monkey
     import httpx
 
     from nooa.unifiedllm.unifiedllm import _ClientHttp
-    from tests.unifiedllm.connect.connect_http import response_body
 
     bodies, paths, timeouts = [], [], []
 
@@ -191,7 +204,7 @@ async def test_template_defaults_levels_and_caller_overrides_on_mock_wire(monkey
         bodies.append(json.loads(request.content))
         paths.append(request.url.path)
         timeouts.append(request.extensions.get("timeout"))
-        return httpx.Response(200, json=response_body("chat"))
+        return httpx.Response(200, json=CHAT_RESPONSE)
 
     transport = httpx.MockTransport(respond)
     monkeypatch.setattr(
@@ -199,13 +212,7 @@ async def test_template_defaults_levels_and_caller_overrides_on_mock_wire(monkey
         "_httpx_hardening",
         staticmethod(lambda: {"transport": transport, "trust_env": False}),
     )
-    raw = entry(
-        timeout=12.5,
-        chat_template_kwargs={"enable_thinking": False},
-        allowed_openai_params=["chat_template_kwargs"],
-        cache_breakpoint=None,
-        reasoning_levels={"on": {"chat_template_kwargs": {"enable_thinking": True}}},
-    )
+    raw = entry(timeout=12.5, cache_breakpoint=None)
     typed = ModelConfig.from_registry("local", raw)
     registry.MODELS["local"] = typed.model_dump(exclude_unset=True)
     c = registry.get_llm_client("local", api_key="fake")
@@ -217,18 +224,13 @@ async def test_template_defaults_levels_and_caller_overrides_on_mock_wire(monkey
             return await c.acall(messages, **kwargs) if is_async else c.call(messages, **kwargs)
 
         await invoke()
-        await invoke(reasoning_level="on")
-        overrides = {"chat_template_kwargs": {"caller": True}, "timeout": 3}
+        overrides = {"timeout": 3}
         await invoke(**overrides)
-        assert [b["chat_template_kwargs"] for b in bodies] == [
-            {"enable_thinking": False},
-            {"enable_thinking": True},
-            {"caller": True},
-        ]
-        assert paths == ["/v1/chat/completions"] * 3
-        assert [t["read"] for t in timeouts] == [12.5, 12.5, 3]
+        assert [b["messages"][-1]["content"] for b in bodies] == ["hello", "hello"]
+        assert paths == ["/v1/chat/completions"] * 2
+        assert [t["read"] for t in timeouts] == [12.5, 3]
         assert c.config == original
-        assert overrides == {"chat_template_kwargs": {"caller": True}, "timeout": 3}
+        assert overrides == {"timeout": 3}
     finally:
         await c.aclose()
 

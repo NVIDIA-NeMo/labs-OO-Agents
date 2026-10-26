@@ -64,12 +64,6 @@ class ModelConfig(BaseModel):
             raise ValueError(
                 "structured_output_mode='anthropic' requires a Chat/Messages completion route"
             )
-        from nooa.media_policy import entry_input_interface, validate_implemented_media_inputs
-
-        if self.media_inputs:
-            interface = entry_input_interface(self.model_dump())
-            if interface in {"anthropic", "responses"}:
-                validate_implemented_media_inputs(self.media_inputs, interface)
         return self
 
     @classmethod

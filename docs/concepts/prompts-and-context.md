@@ -46,6 +46,30 @@ CodeAct can also use `show()` while generated code runs. Set the model's
 The `text` parameter is already rendered by the strategy. Do not repeat it as
 `{text}` in the docstring.
 
+## Input inspection limits
+
+CodeAct and PurePython initially print bounded argument previews: by default,
+2,000 characters per string, 25 items per container, and depth 4. The full
+objects remain live REPL variables. `print_prompt()` shows the generated
+inspection code, while an execution trace shows the captured output actually
+sent to the model.
+
+Set `Annotated[str, spec(max_string=None)]` to print a complete string (import
+`Annotated` from `typing` and `spec` from `nooa`). Per-parameter `max_length`
+and `max_depth` overrides work the same way. Defaults resolve through agent
+class, instance, and method-level `@strategy(..., truncation=...)` settings;
+per-parameter `spec()` overrides have final precedence.
+
+Actual formatting or capture omissions emit a developer-facing
+`PrefillTruncationWarning` identifying the method and the limits involved.
+Raise the relevant `TruncationConfig.prefill_format` limits or set parameter
+overrides when complete input matters. Formatting and stdout capture are
+independent: even `spec(max_string=None)` can produce a clipped preview if
+printed output exceeds `capture.max_stdout` (50,000 characters by default).
+Raise that capture budget explicitly, or arrange to inspect the input in
+smaller pieces. Warnings do not include parameter contents or enter the model's
+captured stderr, and can be filtered with Python's standard warnings filters.
+
 ## Context blocks are deliberate prompt input
 
 Context blocks are named sections added to the system prompt:

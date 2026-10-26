@@ -144,6 +144,17 @@ If the default argument rendering is unsuitable, customize or disable the
 prefill deliberately; do not silently fall back to raw argument interpolation.
 For advanced prefill and truncation control, see `nooa-codeact-advanced`.
 
+CodeAct and PurePython initially print bounded input previews (by default,
+2,000 characters per string, 25 items per container, depth 4). The complete
+objects remain available in the REPL, but the model may need to inspect more
+data. For a complete text input use `Annotated[str, spec(max_string=None)]`
+with imports `from typing import Annotated` and `from nooa import spec`.
+Method-level `@strategy(..., truncation=...)` settings also apply. A
+`PrefillTruncationWarning` reports actual omissions and suggests the relevant
+setting; stdout capture has its own 50,000-character budget, so removing a
+formatting limit alone does not guarantee the full printed input reaches the
+model. Check an execution trace when full inclusion matters.
+
 Template expansion is primarily for values the signature *can't* show: `{self.attr}` instance state and computed expressions like `{len(items)}`. Escape literal braces as `{{ }}`.
 
 Long trusted instructions may remain in a versioned prompt file. Read the file

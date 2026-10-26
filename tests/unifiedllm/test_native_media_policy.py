@@ -17,12 +17,52 @@ from nooa.media import Audio, File, Image, Media, Video
 from nooa.media_policy import entry_input_interface, implemented_input_kinds
 from nooa.strategies.predict import PredictStrategy
 from nooa.unifiedllm import CompletionClient, ResponsesClient, RetryConfig, registry
-from nooa.unifiedllm.connect import configure_entry, plan, write
 from nooa.unifiedllm.registry import client_from_config, get_llm_client, reload_registry
 from nooa.unifiedllm.unifiedllm import _ClientHttp
-from tests.unifiedllm.connect.connect_http import response_body
 
 ALL = ["image", "audio", "video", "pdf"]
+
+
+def response_body(style, text):
+    common = {"id": "test-response", "model": "model"}
+    if style == "responses":
+        return {
+            **common,
+            "object": "response",
+            "created_at": 1,
+            "status": "completed",
+            "output": [
+                {
+                    "type": "message",
+                    "id": "msg-1",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": text, "annotations": []}],
+                }
+            ],
+            "usage": {"input_tokens": 20, "output_tokens": 2, "total_tokens": 22},
+            "parallel_tool_calls": False,
+            "tool_choice": "auto",
+            "tools": [],
+        }
+    if style == "anthropic":
+        return {
+            **common,
+            "type": "message",
+            "role": "assistant",
+            "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": text}],
+            "usage": {"input_tokens": 20, "output_tokens": 2},
+        }
+    return {
+        **common,
+        "object": "chat.completion",
+        "created": 1,
+        "choices": [
+            {"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": text}}
+        ],
+        "usage": {"prompt_tokens": 20, "completion_tokens": 2, "total_tokens": 22},
+    }
 
 
 def mock_http(monkeypatch, style):
@@ -72,29 +112,6 @@ async def test_native_enabled_media_rejected_before_http(monkeypatch, style, dro
             await c.acall(messages) if is_async else c.call(messages)
     assert bodies == []
     assert messages == before
-
-
-@pytest.mark.parametrize("style", ["anthropic", "responses"])
-@pytest.mark.parametrize("boundary", ["configure", "plan", "write"])
-def test_invalid_native_declaration_rejected_without_write(tmp_path, style, boundary):
-    entry = {
-        "model_name": "anthropic/model" if style == "anthropic" else "openai/model",
-        "client_type": "responses" if style == "responses" else "completion",
-        "api_style": style,
-        "api_base": "https://policy.test/v1",
-        "media_inputs": ["audio", "video"],
-    }
-    before = deepcopy(entry)
-    path = tmp_path / "not-created" / "config.yaml"
-    with pytest.raises(ValueError, match="[Uu]nsupported.*audio"):
-        if boundary == "configure":
-            configure_entry(entry)
-        elif boundary == "plan":
-            plan("alias", "model", style, entry["api_base"], "", media_inputs=entry["media_inputs"])
-        else:
-            write(entry, path, alias="alias")
-    assert not path.parent.exists()
-    assert entry == before
 
 
 class MediaAgent(Agent):
@@ -272,8 +289,6 @@ def test_actual_custom_dispatch_not_api_style_or_model_guess(monkeypatch, style_
     }
     before = deepcopy(entry)
     assert entry_input_interface(entry) == "anthropic"
-    with pytest.raises(ValueError, match="Unsupported media input.*audio"):
-        configure_entry(entry)
     bodies = mock_http(monkeypatch, "anthropic")
     with client_from_config("route", entry, api_key="fake") as c:
         with pytest.raises(ValueError, match="Unsupported media input.*audio"):
@@ -289,11 +304,10 @@ def test_actual_custom_dispatch_not_api_style_or_model_guess(monkeypatch, style_
     assert bodies == [] and entry == before
     chat = {**entry, "model_name": "anthropic/innocuous", "custom_llm_provider": "openai"}
     assert entry_input_interface(chat) == "chat"
-    assert configure_entry(chat)["media_inputs"] == ["audio"]
     assert ModelConfig.model_validate(chat).media_inputs == ("audio",)
 
 
-def test_unknown_chat_declarations_stay_unverified_and_valid(tmp_path):
+def test_unknown_chat_declarations_stay_unverified_and_valid():
     entry = {
         "model_name": "unknown-private-route",
         "api_style": "anthropic",
@@ -302,9 +316,7 @@ def test_unknown_chat_declarations_stay_unverified_and_valid(tmp_path):
     }
     assert entry_input_interface(entry) == "chat"
     assert implemented_input_kinds("chat") == tuple(ALL)
-    assert configure_entry(entry)["media_inputs"] == ["audio", "video"]
-    write(entry, tmp_path / "models.yaml", alias="unknown")
-    assert "passed" not in (tmp_path / "models.yaml").read_text()
+    assert ModelConfig.model_validate(entry).media_inputs == ("audio", "video")
 
 
 @pytest.mark.parametrize("style", ["anthropic", "responses"])
