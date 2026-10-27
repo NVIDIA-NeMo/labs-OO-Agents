@@ -467,7 +467,11 @@ def client_from_config(
         "drop_params": config.get("drop_params", True),
     }
 
-    if "api_base" not in overrides and (api_base := config.get("api_base")):
+    # api_base and base_url are two spellings of the same endpoint. If the caller
+    # overrides either one, neither configured value may be kept: the owned SDK
+    # client would otherwise bind the old endpoint and send requests there.
+    endpoint_override = any(key in overrides for key in ("api_base", "base_url"))
+    if not endpoint_override and (api_base := config.get("api_base")):
         params["api_base"] = api_base
 
     # Only resolve the registry's api_key_env when the caller hasn't
@@ -503,6 +507,8 @@ def client_from_config(
         "cache_breakpoint",
         "media_inputs",
     ):
+        if key == "base_url" and endpoint_override:
+            continue
         if key in config and key not in overrides:
             params[key] = config[key]
 
@@ -551,8 +557,12 @@ def client_from_config(
     # values match. A context_window passed in the overrides is always kept.
     from nooa.unifiedllm.route_identity import same_context_route
 
+    # Compare only settings that reach the client. A completion or responses
+    # entry may carry an ``endpoint`` key (the decision-route spelling) that
+    # client_from_config does not forward; including it would make every such
+    # entry look like a changed route and drop its context_window.
     original_route = {
-        **config,
+        **{key: value for key, value in config.items() if key != "endpoint"},
         "api_key": params.get("api_key"),
     }
     effective_route = {
