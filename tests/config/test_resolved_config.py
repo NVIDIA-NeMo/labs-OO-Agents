@@ -116,3 +116,31 @@ class TestGetModelConfig:
 
         reload_registry()  # empty (bundled stubbed, no files)
         assert get_model_config("does-not-exist") is None
+
+
+@pytest.mark.parametrize("upper", [{"model_name": "openai/new"}, {"media_inputs": []}, None])
+def test_model_layers_replace_whole_alias_without_stale_media(
+    _isolate, tmp_path, monkeypatch, upper
+):
+    import yaml
+
+    from nooa.llm_config import llm_config_chain
+    from nooa.unifiedllm import get_llm_client, reload_registry
+
+    (_isolate / "llm_config.yaml").write_text(
+        yaml.safe_dump(
+            {"models": {"shared": {"model_name": "openai/old", "media_inputs": ["image"]}}}
+        )
+    )
+    override = tmp_path / "override.yaml"
+    override.write_text(yaml.safe_dump({"models": {"shared": upper}}))
+    monkeypatch.setenv("NEMO_OO_LLM_CONFIG", str(override))
+    reload_registry(*llm_config_chain())
+    resolved = resolved_config()
+    if upper is None:
+        assert "shared" not in resolved.models
+        assert get_model_config("shared") is None
+    else:
+        assert resolved.models["shared"].media_inputs == ()
+        with get_llm_client("shared") as client:
+            assert client.media_inputs == ()

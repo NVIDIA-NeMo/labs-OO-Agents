@@ -12,7 +12,7 @@ uv run python examples/quickstart/16_custom_context.py
 
 import re
 
-from nooa import Agent, Block, CacheBoundary, context_text, is_model_visible
+from nooa import Agent, Block, CacheBoundary, context_text, is_model_visible, strategy
 from nooa.context_blocks import Role
 from nooa.util.quickstart import BaseModel, autorun, llm
 
@@ -84,12 +84,12 @@ class ResearchAnswer(BaseModel):
 class ResearchAgent(
     Agent,
     llm=llm,
-    context_view=ResearchContextView(),
 ):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.research_context = ResearchContext()
 
+    @strategy(context_view=ResearchContextView())
     async def investigate(self, question: str) -> ResearchAnswer:
         """Research and answer the question using the ResearchContext API."""
         ...

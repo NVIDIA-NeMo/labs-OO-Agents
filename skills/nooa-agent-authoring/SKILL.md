@@ -20,7 +20,7 @@ from typing import Annotated
 from nooa import Agent
 from nooa.unifiedllm import get_llm_client
 
-llm = get_llm_client("gpt-4o-mini")    # any litellm model name, or a registry alias
+llm = get_llm_client("my-model")    # alias saved by nooa connect; configure it first
 
 class Summarizer(Agent, llm=llm):
     """Produce concise, faithful summaries."""          # class docstring → static prefix
@@ -43,10 +43,16 @@ Use `Annotated[type, "description"]` on parameters and return types to give the 
 
 ## LLM clients and cascading
 
-Use an already configured registry alias with `get_llm_client("my-model")`.
+Start model onboarding with `uv add "nooa[cli]"` and `uv run nooa connect`,
+with the user's permission for billable checks, or use the configuration skill
+for offline setup. Use an already configured registry alias with
+`get_llm_client("my-model")`.
 For endpoint setup, credentials, registry edits, reply budgets, reasoning-level
 configuration, caching or Connect diagnostics, use
 [nooa-model-configuration](../nooa-model-configuration/SKILL.md).
+For images, audio, video, PDFs, and CodeAct `show()`, use
+[nooa-media](../nooa-media/SKILL.md). Configure each model's `media_inputs`
+with the formats your provider accepts.
 The rest of this section covers how an agent selects and inherits its client.
 
 **Resolution cascade** for which LLM a method uses — first match wins:
@@ -138,6 +144,17 @@ async def summarize(self, text: str) -> str:
 If the default argument rendering is unsuitable, customize or disable the
 prefill deliberately; do not silently fall back to raw argument interpolation.
 For advanced prefill and truncation control, see `nooa-codeact-advanced`.
+
+CodeAct and PurePython initially print bounded input previews (by default,
+2,000 characters per string, 25 items per container, depth 4). The complete
+objects remain available in the REPL, but the model may need to inspect more
+data. For a complete text input use `Annotated[str, spec(max_string=None)]`
+with imports `from typing import Annotated` and `from nooa import spec`.
+Method-level `@strategy(..., truncation=...)` settings also apply. A
+`PrefillTruncationWarning` reports actual omissions and suggests the relevant
+setting; stdout capture has its own 50,000-character budget, so removing a
+formatting limit alone does not guarantee the full printed input reaches the
+model. Check an execution trace when full inclusion matters.
 
 Template expansion is primarily for values the signature *can't* show: `{self.attr}` instance state and computed expressions like `{len(items)}`. Escape literal braces as `{{ }}`.
 

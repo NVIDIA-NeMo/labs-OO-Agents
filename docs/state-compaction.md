@@ -21,7 +21,7 @@ diagnostics and tool-call group integrity. Oversized, unfinished and image-beari
 groups remain active. Events created during the request are outside this snapshot. Summary input
 contains public event content; persistence metadata and opaque provider state stay private.
 
-With the unmodified default view, a summary request reuses the completed parent
+With the built-in CodeAct, CodeActV2, Predict, and PurePython views, a summary request reuses the completed parent
 request and appends a summary instruction, preserving its cache prefix, tools,
 schema and settings. Tools are never executed by the summary request. Custom
 views use a dedicated Predict request built from stored events with the parent's

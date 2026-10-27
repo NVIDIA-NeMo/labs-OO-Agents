@@ -39,8 +39,8 @@ async def test_external_view_completes_predict_and_codeact_calls(monkeypatch):
     monkeypatch.setattr(method_wrapper, "_flush_litellm_journal", no_flush)
     predict_llm = FakeLLMClient(scripted_responses=[_predict_response("predicted")])
 
-    class PredictAgent(Agent, llm=predict_llm, context_view=ExternalContextView()):
-        @strategy(PredictStrategy())
+    class PredictAgent(Agent, llm=predict_llm):
+        @strategy(PredictStrategy(), context_view=ExternalContextView())
         async def run(self) -> str: ...
 
     predict_agent = PredictAgent()
@@ -50,7 +50,8 @@ async def test_external_view_completes_predict_and_codeact_calls(monkeypatch):
 
     code_llm = FakeLLMClient.with_tool_call("return_result", {"result": "executed"})
 
-    class CodeAgent(Agent, llm=code_llm, context_view=ExternalContextView()):
+    class CodeAgent(Agent, llm=code_llm):
+        @strategy(context_view=ExternalContextView())
         async def run(self) -> str: ...
 
     code_agent = CodeAgent()

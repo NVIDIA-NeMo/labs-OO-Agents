@@ -47,7 +47,12 @@ def answer(monkeypatch, keys, **kwargs):
 
 def test_model_completion_matches_inside_long_ids(monkeypatch):
     assert (
-        answer(monkeypatch, "qwen\t\r", choices=["vendor/model-one", "vendor/qwen-model"])
+        answer(
+            monkeypatch,
+            "qwen\t\r",
+            choices=["vendor/model-one", "vendor/qwen-model"],
+            searchable=True,
+        )
         == "vendor/qwen-model"
     )
 
@@ -145,7 +150,7 @@ def test_cancel_uses_click_abort(monkeypatch):
 
 
 @pytest.mark.parametrize("urls", [False, True])
-def test_menu_opens_and_arrow_enter_selects_without_typing(monkeypatch, urls):
+def test_search_menu_opens_and_arrow_enter_selects_without_typing(monkeypatch, urls):
     import prompt_toolkit
     from prompt_toolkit.application import get_app
 
@@ -182,6 +187,7 @@ def test_menu_opens_and_arrow_enter_selects_without_typing(monkeypatch, urls):
             "Model server URL" if urls else "Provider",
             **options,
             open_menu=True,
+            searchable=True,
         )
     assert value == ("https://first.example/v1" if urls else "nvidia")
 

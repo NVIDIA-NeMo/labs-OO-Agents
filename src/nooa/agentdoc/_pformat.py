@@ -22,6 +22,7 @@ import io
 import re
 from typing import Any
 
+from nooa.agentdoc._format_observation import record_truncation
 from nooa.agentdoc._info import REQUIRED, CallableInfo, ModuleInfo, TypeInfo
 from nooa.agentdoc._metadata import is_expand_false
 from nooa.agentdoc._structured import _ClassRef, _InstanceRef
@@ -1039,6 +1040,7 @@ def _format_instance_repr(
         values = []
         for i, (field_name, value) in enumerate(zip(fields, obj, strict=True)):
             if max_length and i >= max_length:
+                record_truncation("max_length")
                 values.append("...")
                 break
             value_str = _format_value_to_str(
@@ -1098,6 +1100,7 @@ def _format_instance_repr(
     eligible_fields = [f for f in type_info.fields if f.repr and f.name not in _repr_excluded]
     for field in eligible_fields:
         if max_length and field_count >= max_length:
+            record_truncation("max_length")
             # Truncation 3.0: bare ``...`` matches the inner-marker convention
             # used everywhere else (dict items, set items, expanded multi-line).
             # The legacy ``... +N`` form was the last holdout of the old shape.
@@ -1159,6 +1162,7 @@ def _format_instance_repr(
             if _is_hidden_field(obj_type, name):
                 continue
             if max_length and field_count >= max_length:
+                record_truncation("max_length")
                 break
 
             field_max_string = _field_spec_override(obj_type, name, "max_string")
@@ -1189,6 +1193,7 @@ def _format_instance_repr(
                 except Exception:
                     break
                 if max_string is not None and len(r) > max_string:
+                    record_truncation("max_string")
                     n = len(r)
                     n_head = (max_string + 1) // 2
                     n_tail = max_string - n_head
@@ -1380,6 +1385,7 @@ def _format_nested_instance(
     # Truncate fields if needed
     truncated_count = 0
     if nested_max_length is not None and len(field_names) > nested_max_length:
+        record_truncation("max_length")
         truncated_count = len(field_names) - nested_max_length
         field_names = field_names[:nested_max_length]
 
@@ -1521,6 +1527,7 @@ def _format_value(
         _stream.write(f"<{type(_object).__name__}>")
         return
     if max_string is not None and len(result) > max_string:
+        record_truncation("max_string")
         n = len(result)
         n_head = (max_string + 1) // 2
         n_tail = max_string - n_head
@@ -1562,7 +1569,7 @@ def _format_value_to_str(
     return tmp.getvalue()
 
 
-def _format_string(s: str, max_string: int | None) -> str:
+def _format_string(s: str, max_string: int | None, *, reason: str = "max_string") -> str:
     """Format a string, potentially truncating.
 
     Untruncated strings render with the usual repr (or triple-quote multiline
@@ -1584,6 +1591,7 @@ def _format_string(s: str, max_string: int | None) -> str:
 
     # Truncated → slice-keys marker. Split max_string evenly: ceiling head,
     # floor tail. Falls back to head-only when max_string < 2.
+    record_truncation(reason)
     n = len(s)
     n_head = (max_string + 1) // 2
     n_tail = max_string - n_head
@@ -1626,11 +1634,13 @@ def _format_shallow(_object: Any, max_string: int | None) -> str:
     if isinstance(_object, dict):
         if not _object:  # Empty dict - just show {}
             return "{}"
+        record_truncation("max_depth")
         return f"{{{type_name}: {len(_object)} items}}"
     if isinstance(_object, (list, tuple, set, frozenset)):
         brackets = _get_brackets(type(_object))
         if not _object:  # Empty container - just show [], (), etc.
             return brackets[0] + brackets[1]
+        record_truncation("max_depth")
         return f"{brackets[0]}{type_name}: {len(_object)} items{brackets[1]}"
     if isinstance(_object, str):
         return _format_string(_object, max_string)
@@ -1717,6 +1727,7 @@ def _format_dict_body(
 
     if truncated:
         assert max_length is not None  # narrowed by `truncated`; pyright can't see it
+        record_truncation("max_length")
         n_head = (max_length + 1) // 2
         n_tail = max_length - n_head
         head_items = all_items[:n_head]
@@ -1726,7 +1737,9 @@ def _format_dict_body(
         tail_items = []
 
     def _fmt_item_to_str(k: object, v: object, current_indent: int) -> tuple[str, str]:
-        k_str = _format_string(str(k), 50) if isinstance(k, str) else repr(k)
+        k_str = (
+            _format_string(str(k), 50, reason="dictionary_key") if isinstance(k, str) else repr(k)
+        )
         tmp = io.StringIO()
         _format_value(
             v,
@@ -1756,7 +1769,11 @@ def _format_dict_body(
         inner_indent = "    " * (indent + 1)
         _stream.write("{\n")
         for k, v in head_items:
-            k_str = _format_string(str(k), 50) if isinstance(k, str) else repr(k)
+            k_str = (
+                _format_string(str(k), 50, reason="dictionary_key")
+                if isinstance(k, str)
+                else repr(k)
+            )
             _stream.write(f"{inner_indent}{k_str}: ")
             _format_value(
                 v,
@@ -1793,7 +1810,9 @@ def _format_dict_body(
     inner_indent = "    " * (indent + 1)
     _stream.write(f"{type_name}(len={n_total}, items={{\n")
     for k, v in head_items:
-        k_str = _format_string(str(k), 50) if isinstance(k, str) else repr(k)
+        k_str = (
+            _format_string(str(k), 50, reason="dictionary_key") if isinstance(k, str) else repr(k)
+        )
         _stream.write(f"{inner_indent}{k_str}: ")
         _format_value(
             v,
@@ -1810,7 +1829,11 @@ def _format_dict_body(
     if tail_items:
         _stream.write(f"{inner_indent}...\n")
         for k, v in tail_items:
-            k_str = _format_string(str(k), 50) if isinstance(k, str) else repr(k)
+            k_str = (
+                _format_string(str(k), 50, reason="dictionary_key")
+                if isinstance(k, str)
+                else repr(k)
+            )
             _stream.write(f"{inner_indent}{k_str}: ")
             _format_value(
                 v,
@@ -1923,6 +1946,7 @@ def _format_sequence_body(
     if truncated:
         # narrowed by `truncated`; pyright can't see it
         assert max_length is not None
+        record_truncation("max_length")
         # Compute head/tail split. Ordered → balanced head + tail; unordered
         # → all visible items go in the head (no positional anchor).
         if is_ordered:

@@ -5,12 +5,12 @@
 import contextvars
 from typing import Any
 
-from nooa.context_blocks.models import DynamicContext
+from nooa.context_blocks.models import Context, DynamicContext
 
 # The default view reads the snapshot supplied through CurrentCall.
-_scoped_blocks_var: contextvars.ContextVar[dict[str, str | DynamicContext | None] | None] = (
-    contextvars.ContextVar("scoped_blocks", default=None)
-)
+_scoped_blocks_var: contextvars.ContextVar[
+    dict[str, str | Context | DynamicContext | None] | None
+] = contextvars.ContextVar("scoped_blocks", default=None)
 
 
 class ScopedContext:
@@ -24,7 +24,7 @@ class ScopedContext:
             result = await agent.analyze(data)
     """
 
-    def __init__(self, context: dict[str, str | DynamicContext | None] | None = None):
+    def __init__(self, context: dict[str, str | Context | DynamicContext | None] | None = None):
         self.context = context
         self._ctx_token: contextvars.Token[Any] | None = None
 

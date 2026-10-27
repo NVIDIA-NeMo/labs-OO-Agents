@@ -14,7 +14,7 @@ from nooa.agents.summarization import summary_fork_active
 from nooa.config.summarizer_config import TokenBudgetConfig
 from nooa.context_blocks import ScopedContext
 from nooa.context_blocks.events import ToolCallEvent, ToolResult
-from nooa.default_context_view import DefaultAgentView
+from nooa.default_context_view import PredictView
 from nooa.events import Message
 from nooa.runtime.middleware import LLMCallContext
 from nooa.strategies import PredictStrategy
@@ -71,17 +71,20 @@ async def test_real_parent_uses_cache_only_with_default_view(custom_view):
 
     client = RecordingClient()
 
-    class CustomView(DefaultAgentView):
+    class CustomView(PredictView):
         pass
 
-    agent = Parent(llm=client, context_view=CustomView() if custom_view else DefaultAgentView())
+    agent = Parent(llm=client)
     agent.event_manager.add(Message(content="STORED_SOURCE_FACT"))
     summarizer = TokenBudgetSummarizer.install(
         agent, config=TokenBudgetConfig(max_tokens=1, preserve_recent=1)
     )
     try:
         with ScopedContext(context={"system_prompt": "PARENT_SCOPED_MARKER"}):
-            assert await agent.run() == "parent"
+            assert (
+                await agent.run(context_view=CustomView() if custom_view else PredictView())
+                == "parent"
+            )
             await summarizer._pending_task
         assert summarizer._pending_summary == ("summary" if custom_view else '{"value":"summary"}')
         assert len(client.requests) == 2
@@ -541,8 +544,8 @@ async def test_custom_view_cannot_hide_compactor_source():
         ]
     )
 
-    class Parent(Agent, llm=client, context_view=View()):
-        @strategy(PredictStrategy())
+    class Parent(Agent, llm=client):
+        @strategy(PredictStrategy(), context_view=View())
         async def run(self) -> str: ...
 
     agent = Parent()

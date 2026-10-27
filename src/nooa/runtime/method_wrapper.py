@@ -161,10 +161,10 @@ def create_agent_method_wrapper(
                     _user_params = inspect.signature(original_func).parameters
                 except (TypeError, ValueError):
                     _user_params = {}
-                if "llm" not in _user_params and "llm" in kwargs:
-                    _fw_kwargs["llm"] = kwargs.pop("llm")
-                if "context_view" not in _user_params and "context_view" in kwargs:
-                    _fw_kwargs["context_view"] = kwargs.pop("context_view")
+                # Call-site model overrides, unless the method declares the name.
+                for _name in ("llm", "decision_model", "context_view"):
+                    if _name not in _user_params and _name in kwargs:
+                        _fw_kwargs[_name] = kwargs.pop(_name)
             try:
                 ArgumentValidator().validate(original_func, args, kwargs, _tc)
             finally:

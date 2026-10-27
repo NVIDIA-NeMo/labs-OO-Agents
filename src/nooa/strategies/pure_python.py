@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Any, get_type_hints
 
 from pydantic import ValidationError as PydanticValidationError
 
-from nooa.context_blocks import DynamicContext, ResultStatus
+from nooa.context_blocks import ResultStatus
 from nooa.decorators import strategy
 from nooa.errors import GenerationError, XMLFormatError
 from nooa.events import (
@@ -170,15 +170,14 @@ class PurePythonStrategy(CompositeStrategy):
         return "PURE_PYTHON"
 
     def _get_truncation_config(self, runtime: RuntimeServices):
-        """Get truncation config from runtime's agent, same as CodeActStrategy."""
-        from nooa.config.truncation_config import DEFAULT_TRUNCATION_CONFIG
+        """Get the active runtime config, including method-level overrides."""
+        return runtime.truncation_config
 
-        return getattr(runtime.agent, "_truncation", DEFAULT_TRUNCATION_CONFIG)
+    @property
+    def default_context_view(self):
+        from nooa.default_context_view import PurePythonView
 
-    def get_block_overrides(self) -> dict[str, str | DynamicContext | None]:
-        return {
-            "strategy_prompt": DynamicContext("strategy.strategy_instructions(runtime)"),
-        }
+        return PurePythonView()
 
     @strategy(TemplateStrategy())
     async def strategy_instructions(self, runtime: RuntimeServices) -> str:
@@ -545,9 +544,12 @@ class PurePythonStrategy(CompositeStrategy):
         prefill_builtins = {**builtins, "_call": call}
 
         # Execute through normal code path
-        result = await self._execute_code(
-            runtime, code, prefill_builtins, session, call.method_name
-        )
+        from nooa.strategies.prefill import warn_on_prefill_truncation
+
+        with warn_on_prefill_truncation(call):
+            result = await self._execute_code(
+                runtime, code, prefill_builtins, session, call.method_name
+            )
 
         # Merge captured locals into session
         if result.captured_locals:

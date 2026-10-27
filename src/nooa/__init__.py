@@ -37,10 +37,25 @@ from nooa.context_view import (  # noqa: E402
     context_text,
     evaluate_context_expression,
     is_model_visible,
-    resolve_context_view,
 )
+from nooa.decisions import (  # noqa: E402
+    BooleanDecision,
+    ChoiceDecision,
+    Criteria,
+    Decision,
+    DecisionClient,
+    DecisionModel,
+    DecisionModelRequiredError,
+    DecisionRequest,
+    DecisionResponse,
+    Instructions,
+    ScoreDecision,
+    Threshold,
+    UnifiedDecisionModel,
+)
+from nooa.decisions.context_view import DecisionContextView  # noqa: E402
 from nooa.decorators import strategy  # noqa: E402
-from nooa.default_context_view import DefaultAgentView, DefaultSkillView  # noqa: E402
+from nooa.default_context_view import CodeActView, PredictView  # noqa: E402
 
 # Export errors
 from nooa.errors import (  # noqa: E402
@@ -92,6 +107,7 @@ if _typing.TYPE_CHECKING:  # the same names, for type checkers and IDEs
     from nooa.strategies import (
         CodeActStrategy,
         CodeActV2,
+        DecideStrategy,
         GenerationStrategy,
         InspectInputsPrefill,
         PredictStrategy,
@@ -107,6 +123,7 @@ if _typing.TYPE_CHECKING:  # the same names, for type checkers and IDEs
 _LAZY = {
     "CodeActStrategy": "nooa.strategies",
     "CodeActV2": "nooa.strategies",
+    "DecideStrategy": "nooa.strategies",
     "GenerationStrategy": "nooa.strategies",
     "InspectInputsPrefill": "nooa.strategies",
     "PredictStrategy": "nooa.strategies",
@@ -151,13 +168,13 @@ __all__ = [
     "CacheBoundary",
     "ContextItem",
     "ContextView",
-    "DefaultAgentView",
-    "DefaultSkillView",
+    "CodeActView",
+    "PredictView",
+    "DecisionContextView",
     "apply_context_budget",
     "collect_context_items",
     "context_text",
     "evaluate_context_expression",
-    "resolve_context_view",
     "is_model_visible",
     "ContextApi",  # LLM-facing context API wrapper (Skill)
     "ContextManager",  # Context block state backend
@@ -177,6 +194,7 @@ __all__ = [
     "return_text_as_result",
     "ReflexionStrategy",
     "PredictStrategy",
+    "DecideStrategy",
     "get_default_strategy",
     "set_default_strategy",
     # Method validators
@@ -206,6 +224,20 @@ __all__ = [
     "strategy",
     "no_trace",
     "AgentMeta",
+    # Decisions
+    "BooleanDecision",
+    "ChoiceDecision",
+    "Criteria",
+    "Decision",
+    "DecisionClient",
+    "DecisionModel",
+    "DecisionModelRequiredError",
+    "DecisionRequest",
+    "DecisionResponse",
+    "Instructions",
+    "ScoreDecision",
+    "Threshold",
+    "UnifiedDecisionModel",
     # Logging
     "enable_logging",
     # Visibility

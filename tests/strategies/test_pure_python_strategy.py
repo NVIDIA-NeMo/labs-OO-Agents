@@ -37,12 +37,12 @@ class TestPurePythonStrategyProperties:
         strategy = PurePythonStrategy()
         assert strategy.name == "PURE_PYTHON"
 
-    def test_block_overrides_provides_strategy_prompt(self):
-        """PurePythonStrategy.get_block_overrides() should provide strategy_prompt block."""
+    def test_default_view_provides_strategy_prompt(self):
+        """The PurePython view owns the strategy instruction block."""
         from nooa.strategies.pure_python import PurePythonStrategy
 
         strategy = PurePythonStrategy()
-        blocks = strategy.get_block_overrides()
+        blocks = strategy.default_context_view.instruction_blocks(None)
         assert "strategy_prompt" in blocks
         assert blocks["strategy_prompt"] is not None
 

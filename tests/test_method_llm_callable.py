@@ -498,7 +498,7 @@ class TestAliasEndToEnd:
 
     @pytest.mark.asyncio
     async def test_call_site_override_beats_alias(self, monkeypatch) -> None:
-        """Precedence is unchanged: call-site llm= wins over the decorator."""
+        """Precedence is unchanged: the call argument wins over the decorator."""
         aliased = _fake("aliased-answer")
         override = _fake("override-answer")
         default = _fake("default-answer")
@@ -737,4 +737,4 @@ class TestAliasReviewHardening:
 
     def test_call_site_empty_string_rejected_with_targeted_message(self) -> None:
         with pytest.raises(TypeError, match="empty string"):
-            resolve_method_llm("", object(), "method", origin="call-site llm=")
+            resolve_method_llm("", object(), "method", origin="call argument llm=")

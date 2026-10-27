@@ -33,7 +33,6 @@ from nooa.strategies.template import TemplateStrategy
 if TYPE_CHECKING:
     from nooa.config.strategy_config import ReflexionConfig
     from nooa.config.truncation_config import TruncationConfig
-    from nooa.context_blocks import DynamicContext
     from nooa.strategies.current_call import CurrentCall
 
 logger = logging.getLogger(__name__)
@@ -117,9 +116,12 @@ class ReflexionStrategy(GenerationStrategy):
         """Strategy name."""
         return f"REFLEXION[{self.base.name}]"
 
-    def get_block_overrides(self) -> dict[str, "str | DynamicContext | None"]:
-        """Delegate to base strategy's block overrides."""
-        return self.base.get_block_overrides()
+    @property
+    def default_context_view(self):
+        """Use the wrapped strategy's assembly policy."""
+        from nooa.default_context_view import ReflexionView
+
+        return ReflexionView(self.base)
 
     @property
     def requires_lock(self) -> bool:

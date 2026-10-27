@@ -20,6 +20,7 @@ from nooa.strategies.codeact import (
 from nooa.strategies.codeact_v2 import CodeActV2
 from nooa.strategies.composite import CompositeStrategy
 from nooa.strategies.current_call import CurrentCall
+from nooa.strategies.decide import DecideStrategy
 from nooa.strategies.predict import PredictStrategy
 from nooa.strategies.prefill import InspectInputsPrefill, Prefill
 from nooa.strategies.reflexion import ReflexionStrategy
@@ -106,6 +107,7 @@ __all__ = [
     "CodeActV2",
     "ReflexionStrategy",
     "PredictStrategy",
+    "DecideStrategy",
     # Prefill plugins
     "Prefill",
     "InspectInputsPrefill",

@@ -12,7 +12,6 @@ import yaml
 from pydantic import BaseModel
 
 from nooa.agentdoc import hidden
-from nooa.metaclass import ContextViewOwnerMeta
 
 # ---------------------------------------------------------------------------
 # @slash_command decorator
@@ -253,7 +252,7 @@ def _build_script_command(
     return cmd.strip()
 
 
-class Skill(metaclass=ContextViewOwnerMeta):
+class Skill:
     """Base class for agent skills.
 
     Wraps a Python object or inline content so the LLM can discover it via
@@ -281,19 +280,11 @@ class Skill(metaclass=ContextViewOwnerMeta):
     # transitively when activate() is called.
     requires: Annotated[tuple[str, ...], hidden] = ()
 
-    # Legacy shorthand materialized by DefaultSkillView when the skill is active.
+    # Context declaration evaluated by the selected strategy view.
     context_block: Annotated[tuple[str, str] | None, hidden] = None
-
-    _context_view: Annotated[Any, hidden] = None
-    _consume_context_view_argument: Annotated[bool, hidden] = True
 
     _agent: Any = None
     _source_dir: Path
-
-    def __init_subclass__(cls, context_view: Any = None, **kwargs: Any):
-        super().__init_subclass__(**kwargs)
-        if context_view is not None:
-            cls._context_view = context_view
 
     def __init__(self, obj: Any = None, *, content: str | None = None, name: str | None = None):
         n_given = sum(x is not None for x in (obj, content))
@@ -309,14 +300,6 @@ class Skill(metaclass=ContextViewOwnerMeta):
         elif content is not None:
             cls_name = name or "Skill"
             self.__class__ = type(cls_name, (type(self),), {"__doc__": content})  # pyright: ignore[reportAttributeAccessIssue]
-
-    @hidden
-    def __context_view__(self) -> Any:
-        """Return the instance or class context view registered for this skill."""
-        instance_view = vars(self).get("_context_view")
-        if instance_view is not None:
-            return instance_view
-        return getattr(type(self), "_context_view", None)
 
     @hidden
     def attach(self, agent: Any) -> None:

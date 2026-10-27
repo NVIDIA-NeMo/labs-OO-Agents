@@ -85,6 +85,7 @@ def render_context(
     provider_formatter: ProviderFormatter,
     context_limit: int | None = None,
     count_tokens: Callable[[str], int] | None = None,
+    context_format: "FormatConfig | None" = None,
     event_format: "FormatConfig | None" = None,
     event_format_resolver: Callable[[Any], "FormatConfig | None"] | None = None,
     model_context_window: int | None = None,
@@ -119,9 +120,17 @@ def render_context(
         if isinstance(item, ResolvedBlock):
             block = item
         elif isinstance(item, Block):
+            from nooa.agentdoc import pformat
+
             block = ResolvedBlock(
                 key=item.key,
-                content=item.content,
+                content=item.content
+                if isinstance(item.content, str)
+                else pformat(
+                    item.content,
+                    unquote_strings=True,
+                    **(context_format.model_dump() if context_format is not None else {}),
+                ),
                 role=item.role,
                 metadata=item.metadata or BlockMetadata(),
             )

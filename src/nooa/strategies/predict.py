@@ -25,7 +25,7 @@ from pydantic import ValidationError as PydanticValidationError
 
 from nooa.agentdoc import pformat
 from nooa.agentdoc.visibility import is_hidden_field
-from nooa.context_blocks import DynamicContext, ResultStatus, ToolCallEvent, ToolResult
+from nooa.context_blocks import ResultStatus, ToolCallEvent, ToolResult
 from nooa.decorators import strategy
 from nooa.errors import GenerationError
 from nooa.events import AfterTurn, BeforeTurn, Error, Task
@@ -86,10 +86,11 @@ class PredictStrategy(GenerationStrategy):
         """Strategy name."""
         return "PREDICT"
 
-    def get_block_overrides(self) -> dict[str, str | DynamicContext | None]:
-        return {
-            "strategy_prompt": DynamicContext("strategy.strategy_instructions(runtime)"),
-        }
+    @property
+    def default_context_view(self):
+        from nooa.default_context_view import PredictView
+
+        return PredictView()
 
     @strategy(TemplateStrategy())
     async def strategy_instructions(self, runtime: RuntimeServices) -> str:

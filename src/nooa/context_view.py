@@ -4,7 +4,7 @@
 
 from collections.abc import AsyncIterator, Sequence
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict
 
@@ -23,7 +23,7 @@ class Block(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     key: str
-    content: str
+    content: object
     role: Role = Role.SYSTEM
     metadata: BlockMetadata | None = None
 
@@ -40,15 +40,6 @@ class ContextView[Owner](Protocol):
         owner: Owner,
         call: "CurrentCall",
     ) -> AsyncIterator[ContextItem]: ...
-
-
-def resolve_context_view(owner: Any, *, default: ContextView[Any]) -> ContextView[Any]:
-    """Resolve through ``owner.__context_view__()``, otherwise use ``default``."""
-    resolver = getattr(owner, "__context_view__", None)
-    if resolver is None:
-        return default
-    view = resolver()
-    return cast(ContextView[Any], view if view is not None else default)
 
 
 def is_model_visible(event: EventBase) -> bool:
@@ -127,7 +118,9 @@ def apply_context_budget(
         counter = char_approximate_token_counter
 
     result = list(items)
-    total = sum(counter(item.content) for item in result if isinstance(item, Block))
+    total = sum(
+        counter(context_text(item.content, call=call)) for item in result if isinstance(item, Block)
+    )
     if total <= limit:
         return tuple(result)
 
@@ -141,7 +134,7 @@ def apply_context_budget(
         block = result[index]
         if not isinstance(block, Block):
             continue
-        size = counter(block.content)
+        size = counter(context_text(block.content, call=call))
         replacement = f"EVICTED: over context budget (block_tokens={size:,})"
         update: dict[str, Any] = {"content": replacement}
         if block.metadata is not None:
@@ -160,6 +153,5 @@ __all__ = [
     "collect_context_items",
     "context_text",
     "evaluate_context_expression",
-    "resolve_context_view",
     "is_model_visible",
 ]

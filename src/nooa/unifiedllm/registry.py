@@ -43,6 +43,13 @@ YAML schema::
           - reasoning.encrypted_content
         cache_breakpoint: openai             # optional: openai or anthropic wire mapping
 
+      decisions:
+        model_name: typesafe/jev-1.13         # exact decision model ID
+        client_type: decision
+        api_style: systemone                 # or openai for OpenAI's /v1/decisions
+        endpoint: https://openrouter.ai/api/alpha/decisions
+        api_key_env: OPENROUTER_API_KEY
+
 Set a model to ``null`` in a later layer to remove it.
 """
 
@@ -54,14 +61,17 @@ import re
 import threading
 from collections.abc import Collection, Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import yaml
 
 if TYPE_CHECKING:
+    from nooa.decisions import UnifiedDecisionModel
     from nooa.unifiedllm import UnifiedLLM
 
 logger = logging.getLogger(__name__)
+# Aliases already warned about a missing media_inputs setting (warn once each).
+_warned_text_only: set[str] = set()
 
 # Serializes the (_loaded, MODELS) check-and-mutate so concurrent
 # ensure_loaded() / reload_registry() calls — possible when async agent
@@ -194,6 +204,28 @@ MODELS: dict[str, dict[str, Any]] = {}
 _loaded = False
 
 
+def load_model_entries(*paths: Path) -> dict[str, dict[str, Any]]:
+    """Read whole-alias layers without mutating the global registry."""
+    fresh: dict[str, dict[str, Any]] = {}
+    for path in paths:
+        logger.debug("Loading LLM registry config from: %s", path)
+        for name, cfg in _load_models_from_yaml(path).items():
+            if cfg is None:
+                fresh.pop(name, None)
+            elif isinstance(cfg, dict):
+                fresh[name] = cfg
+            else:
+                logger.warning(
+                    "Ignoring model %r in %s: expected mapping or null, got %s",
+                    name,
+                    path,
+                    type(cfg).__name__,
+                )
+                fresh.pop(name, None)
+
+    return fresh
+
+
 def reload_registry(*paths: Path) -> dict[str, dict[str, Any]]:
     """Reload ``MODELS`` from YAML files, last-wins.
 
@@ -226,22 +258,7 @@ def reload_registry(*paths: Path) -> dict[str, dict[str, Any]]:
 
         paths = tuple(llm_config_chain())
 
-    fresh: dict[str, dict[str, Any]] = {}
-    for path in paths:
-        logger.debug("Loading LLM registry config from: %s", path)
-        for name, cfg in _load_models_from_yaml(path).items():
-            if cfg is None:
-                fresh.pop(name, None)
-            elif isinstance(cfg, dict):
-                fresh[name] = cfg
-            else:
-                logger.warning(
-                    "Ignoring model %r in %s: expected mapping or null, got %s",
-                    name,
-                    path,
-                    type(cfg).__name__,
-                )
-                fresh.pop(name, None)
+    fresh = load_model_entries(*paths)
 
     with _registry_lock:
         MODELS.clear()
@@ -348,12 +365,49 @@ def get_llm_client(name: str, *, client_type: str | None = None, **overrides) ->
     with _registry_lock:
         config = dict(MODELS.get(name, {}))
 
-    return client_from_config(name, config, client_type=client_type, **overrides)
+    selected_client_type = client_type or config.get("client_type", "completion")
+    if selected_client_type == "decision":
+        raise TypeError(
+            f"Model alias {name!r} has client_type='decision' and cannot be used as an LLM. "
+            "Pass it through decision_model= or call get_decision_model()."
+        )
+    client = client_from_config(name, config, client_type=client_type, **overrides)
+    if not callable(getattr(client, "acall", None)):
+        raise TypeError(
+            f"Model alias {name!r} has client_type='decision' and cannot be used as an LLM. "
+            "Pass it through decision_model= or call get_decision_model()."
+        )
+    return cast("UnifiedLLM", client)
+
+
+def get_decision_model(name: str, **overrides) -> UnifiedDecisionModel:
+    """Create a decision model from a configured registry alias.
+
+    Decision aliases must be declared explicitly with ``client_type: decision``;
+    unlike chat model names they are not passed through to LiteLLM when absent.
+    """
+    ensure_loaded()
+    with _registry_lock:
+        config = dict(MODELS.get(name, {}))
+    if not config:
+        raise KeyError(f"No decision model alias {name!r} is configured")
+    if config.get("client_type", "completion") != "decision":
+        raise TypeError(
+            f"Model alias {name!r} has client_type={config.get('client_type', 'completion')!r}, "
+            "not 'decision'."
+        )
+    client = client_from_config(name, config, **overrides)
+    if not callable(getattr(client, "adecide", None)):
+        raise TypeError(
+            f"Model alias {name!r} has client_type={config.get('client_type', 'completion')!r}, "
+            "not 'decision'."
+        )
+    return cast("UnifiedDecisionModel", client)
 
 
 def client_from_config(
     name: str, config: dict[str, Any], *, client_type: str | None = None, **overrides
-) -> UnifiedLLM:
+) -> UnifiedLLM | UnifiedDecisionModel:
     """Build a client from a registry entry without registering or saving it.
 
     Model lookup and onboarding share this construction path so a checked
@@ -372,7 +426,43 @@ def client_from_config(
         model = name
         logger.debug("LLM registry miss for %r — passing through to litellm", name)
 
-    params: dict[str, Any] = {
+    selected_client_type = client_type or config.get("client_type", "completion")
+    if selected_client_type == "decision":
+        from nooa.decisions import DecisionClient
+
+        endpoint = overrides.pop("endpoint", config.get("endpoint"))
+        if not endpoint:
+            raise ValueError(f"Decision model alias {name!r} requires an endpoint")
+        params: dict[str, Any] = {"model": model, "endpoint": endpoint}
+        if "api_style" in config and "api_style" not in overrides:
+            params["api_style"] = config["api_style"]
+        if "api_key" not in overrides:
+            api_key = resolve_api_key_from_config(name, config)
+            if api_key is not None:
+                params["api_key"] = api_key
+        if "timeout" in config and "timeout" not in overrides:
+            params["timeout"] = config["timeout"]
+        if "retry_config" in config and "retry_config" not in overrides:
+            retry_config = config["retry_config"]
+            if retry_config is False or retry_config is None:
+                params["retry_config"] = RetryConfig(max_retries=0, rate_limit_extra_retries=0)
+            elif isinstance(retry_config, dict):
+                params["retry_config"] = RetryConfig(**retry_config)
+            else:
+                raise TypeError(
+                    f"Decision model alias {name!r} retry_config must be a mapping, false, or null"
+                )
+        params.update(overrides)
+        client = DecisionClient(**params)
+        client._registry_config = config  # type: ignore[attr-defined]
+        return client
+
+    if selected_client_type not in {"completion", "responses"}:
+        raise ValueError(
+            f"Model alias {name!r} has unsupported client_type {selected_client_type!r}"
+        )
+
+    params = {
         "model": model,
         "drop_params": config.get("drop_params", True),
     }
@@ -408,6 +498,7 @@ def client_from_config(
         "store",
         "include",
         "cache_breakpoint",
+        "media_inputs",
     ):
         if key in config and key not in overrides:
             params[key] = config[key]
@@ -441,7 +532,7 @@ def client_from_config(
         or (client_type is not None and client_type != config.get("client_type", "completion"))
         or overrides.get("client") is not None
     ):
-        for key in ("reasoning_levels", "reasoning_default", "reasoning_level"):
+        for key in ("reasoning_levels", "reasoning_default", "reasoning_level", "media_inputs"):
             params.pop(key, None)
         if "reasoning_levels" in config:
             logger.warning(
@@ -451,9 +542,20 @@ def client_from_config(
             )
 
     params.update(overrides)
+    if config and "media_inputs" not in params and name not in _warned_text_only:
+        _warned_text_only.add(name)
+        logger.warning(
+            "Model %r has no media_inputs setting, so it is text-only: images, audio, "
+            "video and PDFs are not sent to it. Add media_inputs: [...] to its "
+            "llm_config.yaml entry (or media_inputs: [] to silence this warning).",
+            name,
+        )
 
     # Select client class: explicit param > YAML config > default
-    client_type = client_type or config.get("client_type", "completion")
-    client = ResponsesClient(**params) if client_type == "responses" else CompletionClient(**params)
+    client = (
+        ResponsesClient(**params)
+        if selected_client_type == "responses"
+        else CompletionClient(**params)
+    )
     client._registry_config = config  # For context_window lookup
     return client

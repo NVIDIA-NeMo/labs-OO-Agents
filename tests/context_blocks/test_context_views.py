@@ -10,9 +10,8 @@ from nooa import (
     Agent,
     Block,
     CacheBoundary,
+    CodeActView,
     ContextView,
-    DefaultAgentView,
-    DefaultSkillView,
     DynamicContext,
     Skill,
     apply_context_budget,
@@ -20,7 +19,6 @@ from nooa import (
     context_text,
     evaluate_context_expression,
     is_model_visible,
-    resolve_context_view,
     spec,
     strategy,
 )
@@ -32,7 +30,9 @@ from nooa.context_blocks import (
     render_context,
 )
 from nooa.context_blocks.events import UserEvent
+from nooa.default_context_view import ManagedContextView, PredictView, collect_skill_blocks
 from nooa.events import DebugTrace, LLMResponse, Task
+from nooa.strategies import CodeActStrategy, PredictStrategy
 from nooa.strategies.current_call import CurrentCall
 
 
@@ -99,21 +99,22 @@ async def test_expression_helper_binds_the_requested_owner():
     assert await evaluate_context_expression("self.value", owner=Owner(), call=call) == "owner"
 
 
-def test_agent_resolution_call_method_instance_class():
-    class Example(Agent, llm=object(), context_view=NamedView("class")):
-        @strategy(context_view=NamedView("method"))
+def test_resolution_call_method_strategy_default():
+    class Example(Agent, llm=object()):
+        @strategy(PredictStrategy(), context_view=NamedView("method"))
         async def run(self) -> str: ...
 
-    agent = Example(context_view=NamedView("instance"))
+        @strategy(PredictStrategy())
+        async def predict(self) -> str: ...
+
+    agent = Example()
     assert agent.runtime._select_context_view(agent.run, NamedView("call")).name == "call"
     assert agent.runtime._select_context_view(agent.run).name == "method"
-
-    class Undecorated(Agent, llm=object(), context_view=NamedView("class")):
-        async def run(self) -> str: ...
-
-    instance = Undecorated(context_view=NamedView("instance"))
-    assert instance.runtime._select_context_view(instance.run).name == "instance"
-    assert Undecorated().runtime._select_context_view(Undecorated.run).name == "class"
+    assert isinstance(agent.runtime._select_context_view(agent.predict), PredictView)
+    assert isinstance(
+        agent.runtime._select_context_view(agent.predict, strategy=CodeActStrategy()),
+        CodeActView,
+    )
 
 
 async def test_context_view_named_method_parameter_is_not_consumed():
@@ -138,8 +139,8 @@ async def test_call_context_view_override_survives_argument_validation():
 
     client = FakeLLMClient.simple_message('"ok"')
 
-    class Example(Agent, llm=client, context_view=NamedView("class")):
-        @strategy(PredictStrategy())
+    class Example(Agent, llm=client):
+        @strategy(PredictStrategy(), context_view=NamedView("method"))
         async def run(self) -> str:
             """Return ok."""
             ...
@@ -147,69 +148,29 @@ async def test_call_context_view_override_survives_argument_validation():
     assert await Example().run(context_view=NamedView("call")) == "ok"
     rendered = str(client.last_messages)
     assert "<call>" in rendered
-    assert "<class>" not in rendered
+    assert "<method>" not in rendered
 
 
-def test_agent_instance_replaces_class_view():
-    class Example(Agent, llm=object(), context_view=NamedView("class")):
-        pass
+def test_agents_and_skills_do_not_register_views():
+    assert not hasattr(Agent, "__context_view__")
+    assert not hasattr(Skill, "__context_view__")
+    with pytest.raises(TypeError):
+        Agent(llm=object(), context_view=NamedView("unsupported"))
+    with pytest.raises(TypeError):
+        Skill(content="instructions", context_view=NamedView("unsupported"))
+    with pytest.raises(TypeError):
 
-    class_view = resolve_context_view(Example(), default=DefaultAgentView())
-    instance_view = resolve_context_view(
-        Example(context_view=NamedView("instance")), default=DefaultAgentView()
-    )
-    assert class_view.name == "class"
-    assert instance_view.name == "instance"
-
-
-def test_resolution_uses_explicit_owner_hook():
-    expected = NamedView("hook")
-
-    class Owner:
-        __slots__ = ()
-
-        def __context_view__(self):
-            return expected
-
-    assert resolve_context_view(Owner(), default=NamedView("default")) is expected
+        class InvalidSkill(Skill, context_view=NamedView("unsupported")):
+            pass
 
 
-def test_resolution_without_owner_hook_uses_default_without_private_reflection():
-    default = NamedView("default")
+def test_skill_constructor_argument_is_not_intercepted():
+    class CustomSkill(Skill):
+        def __init__(self, context_view):
+            self.received = context_view
 
-    class Owner:
-        _context_view = NamedView("private")
-
-    assert resolve_context_view(object(), default=default) is default
-    assert resolve_context_view(Owner(), default=default) is default
-
-
-def test_agent_and_skill_expose_view_resolution_hook():
-    class ExampleAgent(Agent, llm=object(), context_view=NamedView("agent_class")):
-        pass
-
-    class ExampleSkill(Skill, context_view=NamedView("skill_class")):
-        pass
-
-    agent = ExampleAgent(context_view=NamedView("agent_instance"))
-    skill = ExampleSkill(context_view=NamedView("skill_instance"))
-    assert agent.__context_view__().name == "agent_instance"
-    assert skill.__context_view__().name == "skill_instance"
-
-
-def test_agent_and_skill_multiple_inheritance_has_compatible_metaclass():
-    class AgentSkill(Agent, Skill, llm=object()):
-        pass
-
-    instance = AgentSkill(context_view=NamedView("instance"))
-    assert instance.__context_view__().name == "instance"
-
-
-def test_wrapped_skill_preserves_registered_class_view():
-    class ConfiguredSkill(Skill, context_view=NamedView("configured")):
-        pass
-
-    assert ConfiguredSkill(content="instructions").__context_view__().name == "configured"
+    value = object()
+    assert CustomSkill(context_view=value).received is value
 
 
 async def test_custom_agent_view_bypasses_managers_and_skills():
@@ -219,79 +180,39 @@ async def test_custom_agent_view_bypasses_managers_and_skills():
     class Example(Agent, llm=object()):
         skill = DeclaredSkill()
 
+        @strategy(context_view=NamedView("only"))
         async def run(self): ...
 
-    agent = Example(context={"manager": "manager"}, context_view=NamedView("only"))
+    agent = Example(context={"manager": "manager"})
     items = await agent.runtime._prepare_context(Example.run)
     assert [item.key for item in items] == ["only"]
 
 
-async def test_skill_class_and_instance_view_resolution():
-    class ClassSkill(Skill, context_view=NamedView("skill_class")):
-        pass
-
-    class Example(Agent, llm=object()):
-        class_skill = ClassSkill()
-        instance_skill = ClassSkill(context_view=NamedView("skill_instance"))
-
-        async def run(self): ...
-
-    agent = Example()
-    event = UserEvent(content="event")
-    agent.event_manager.add(event)
-    items = await agent.runtime._prepare_context(Example.run)
-    keys = [getattr(item, "key", None) for item in items]
-    assert keys.index("skill_class") < keys.index("skill_instance") < items.index(event)
-
-
-async def test_default_view_preserves_one_skill_boundary_end_to_end():
-    from nooa.strategies import PredictStrategy
+async def test_method_view_composes_explicit_boundary_contribution():
     from nooa.unifiedllm import FakeLLMClient
 
     class BoundaryView:
         async def assemble(self, owner, call):
-            yield Block(key="skill_policy", content="skill policy")
+            yield Block(key="policy", content="policy")
             yield CacheBoundary()
 
-    class BoundarySkill(Skill, context_view=BoundaryView()):
-        pass
+    class ComposedView:
+        async def assemble(self, owner, call):
+            async for item in BoundaryView().assemble(owner, call):
+                yield item
+            yield Block(key="request", content="Return ok.", role=Role.USER)
 
     client = FakeLLMClient.simple_message('"ok"')
 
     class Example(Agent, llm=client):
-        skill = BoundarySkill()
-
-        @strategy(PredictStrategy())
-        async def run(self) -> str:
-            """Return ok."""
-            ...
+        @strategy(PredictStrategy(), context_view=ComposedView())
+        async def run(self) -> str: ...
 
     agent = Example()
     items = await agent.runtime._prepare_context(Example.run)
+    assert items[1] == CacheBoundary()
     assert sum(isinstance(item, CacheBoundary) for item in items) == 1
-    assert items.index(CacheBoundary()) > next(
-        i for i, item in enumerate(items) if getattr(item, "key", None) == "skill_policy"
-    )
     assert await agent.run() == "ok"
-
-
-async def test_default_view_rejects_multiple_skill_boundaries_during_assembly():
-    class BoundaryView:
-        async def assemble(self, owner, call):
-            yield Block(key="skill_policy", content="skill policy")
-            yield CacheBoundary()
-            yield CacheBoundary()
-
-    class BoundarySkill(Skill, context_view=BoundaryView()):
-        pass
-
-    class Example(Agent, llm=object()):
-        skill = BoundarySkill()
-
-        async def run(self): ...
-
-    with pytest.raises(ValueError, match="more than one cache boundary from skill views"):
-        await Example().runtime._prepare_context(Example.run)
 
 
 async def test_hidden_skill_contributes_nothing():
@@ -365,7 +286,7 @@ async def test_hidden_active_registry_skill_contributes_nothing():
     assert "registered" not in [getattr(item, "key", None) for item in items]
 
 
-async def test_legacy_skill_block_is_materialized_by_default_skill_view():
+async def test_skill_declaration_is_materialized_by_strategy_view():
     class DeclaredSkill(Skill):
         context_block = ("skill_state", "self.value")
 
@@ -472,7 +393,7 @@ async def test_default_view_partitions_and_evicts_manager_blocks():
         context_budget=0,
         _context_token_counter=len,
     )
-    items = await collect_context_items(DefaultAgentView(), agent, call)
+    items = await collect_context_items(ManagedContextView(), agent, call)
     tail = next(block for block in items if getattr(block, "key", None) == "tail")
     assert tail.role == Role.USER
     assert tail.metadata is not None
@@ -603,7 +524,8 @@ async def test_default_view_boundary_with_empty_history_and_no_trailing_context(
 
 
 async def test_custom_view_without_boundary_gets_no_implicit_boundary():
-    class Example(Agent, llm=object(), context_view=NamedView("only")):
+    class Example(Agent, llm=object()):
+        @strategy(context_view=NamedView("only"))
         async def run(self): ...
 
     items = await Example().runtime._prepare_context(Example.run)
@@ -617,15 +539,16 @@ async def test_agent_view_controls_exact_skill_placement():
     class PlacementView:
         async def assemble(self, agent, call):
             yield Block(key="before", content="before")
-            for skill in agent.active_skills():
-                view = resolve_context_view(skill, default=DefaultSkillView())
-                async for item in view.assemble(skill, call):
-                    yield item
+            for item in await collect_skill_blocks(
+                agent, call, disabled=set(), declaration_keys=frozenset()
+            ):
+                yield item
             yield Block(key="after", content="after")
 
-    class Example(Agent, llm=object(), context_view=PlacementView()):
+    class Example(Agent, llm=object()):
         skill = DeclaredSkill()
 
+        @strategy(context_view=PlacementView())
         async def run(self): ...
 
     items = await Example().runtime._prepare_context(Example.run)
@@ -663,7 +586,7 @@ def test_provider_formatter_preserves_layout_for_unifiedllm():
 
 
 def test_default_agent_view_satisfies_protocol():
-    assert isinstance(DefaultAgentView(), ContextView)
+    assert isinstance(CodeActView(), ContextView)
 
 
 def test_budget_helper_allows_adaptation_before_budgeting():
@@ -788,6 +711,6 @@ def test_default_view_has_no_runtime_assembly_dependency():
 
     from nooa.runtime.actor import ActorRuntime
 
-    source = inspect.getsource(DefaultAgentView)
+    source = inspect.getsource(CodeActView)
     assert "owner.runtime" not in source
     assert "_assemble_default_context" not in vars(ActorRuntime)

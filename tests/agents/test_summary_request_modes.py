@@ -8,7 +8,7 @@ from nooa import Agent
 from nooa.agents import TokenBudgetSummarizer
 from nooa.agents.summarization import copy_request_structure, summary_fork_active
 from nooa.config.summarizer_config import TokenBudgetConfig
-from nooa.default_context_view import DefaultAgentView
+from nooa.default_context_view import CodeActView
 from nooa.events import Message
 from nooa.runtime.middleware import LLMCallContext
 from nooa.unifiedllm import CacheBoundary, FakeLLMClient, LLMResponse, LLMUsage, ToolCall
@@ -58,7 +58,7 @@ async def test_summary_middleware_edits_reach_dispatch_without_changing_parent(p
         messages=[{"role": "user", "content": "facts"}],
         params={"extra_body": {"nested": "parent"}},
         client=agent.llm,
-        context_view=DefaultAgentView(),
+        context_view=CodeActView(),
     )
 
     async def dispatch(request):
@@ -83,7 +83,7 @@ async def test_summary_middleware_edits_reach_dispatch_without_changing_parent(p
 
 @pytest.mark.parametrize("mode", ["default", "custom", "rewritten"])
 async def test_summary_request_mode_preserves_prefix_or_uses_state(mode):
-    class CustomView(DefaultAgentView):
+    class CustomView(CodeActView):
         pass
 
     agent = Agent(llm=FakeLLMClient())
@@ -100,7 +100,7 @@ async def test_summary_request_mode_preserves_prefix_or_uses_state(mode):
         messages=prefix,
         params=params,
         client=agent.llm,
-        context_view=CustomView() if mode == "custom" else DefaultAgentView(),
+        context_view=CustomView() if mode == "custom" else CodeActView(),
     )
 
     async def dispatch(request):
@@ -143,7 +143,7 @@ async def test_cached_summary_never_executes_tools_or_collapses_on_tool_reply():
             ]
         )
     )
-    ctx = LLMCallContext(messages=[], client=agent.llm, context_view=DefaultAgentView())
+    ctx = LLMCallContext(messages=[], client=agent.llm, context_view=CodeActView())
 
     async def dispatch(request):
         request.response = LLMResponse(content="parent", usage=LLMUsage(input_tokens=100))

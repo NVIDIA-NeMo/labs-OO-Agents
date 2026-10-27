@@ -14,21 +14,18 @@ from nooa.context_view import (
     ContextItem,
     ContextView,
     apply_context_budget,
-    collect_context_items,
     context_text,
     evaluate_context_expression,
     is_model_visible,
-    resolve_context_view,
 )
 
 if TYPE_CHECKING:
     from nooa.agent import Agent
-    from nooa.skill import Skill
     from nooa.strategies.current_call import CurrentCall
 
 logger = logging.getLogger(__name__)
 
-_FRAMEWORK_KEYS = frozenset({"system_prompt", "self", "state"})
+_FRAMEWORK_KEYS = frozenset({"system_prompt", "self", "state", "events_api"})
 
 
 def _block(
@@ -180,6 +177,18 @@ async def agent_interface_block(agent: "Agent", call: "CurrentCall") -> Block | 
     )
 
 
+async def events_api_block(agent: "Agent", call: "CurrentCall") -> Block | None:
+    """Describe the events API only when it is exposed to the model."""
+    content = agent._events_api_prompt()
+    if not content:
+        return None
+    return _block(
+        "events_api",
+        content,
+        BlockMetadata(expr="self._events_api_prompt()", static=True, source_dynamic=True),
+    )
+
+
 async def agent_state_block(agent: "Agent", call: "CurrentCall") -> Block | None:
     """Build the default visible agent state directly from the agent."""
     from nooa.agentdoc import pformat
@@ -317,8 +326,38 @@ def visible_events(agent: "Agent") -> tuple[EventBase, ...]:
     return tuple(projected)
 
 
-class DefaultAgentView(ContextView["Agent"]):
-    """Readable reference implementation of NOOA's default context policy."""
+async def collect_skill_blocks(
+    agent: "Agent",
+    call: "CurrentCall",
+    *,
+    disabled: set[str],
+    declaration_keys: frozenset[str],
+) -> tuple[Block, ...]:
+    """Evaluate active skill declarations without selecting their global placement."""
+    blocks: tuple[Block, ...] = ()
+    for skill in agent.active_skills():
+        if skill.context_block is None:
+            continue
+        key, expression = skill.context_block
+        if key in disabled or key in declaration_keys or agent.context_manager.is_protected(key):
+            continue
+        value = await _resolve_value(key, DynamicContext(expression), agent=agent, call=call)
+        block = _block(
+            key, value, BlockMetadata(expr=expression, user_block=True, source_dynamic=True)
+        )
+        blocks = replace_blocks_by_key(blocks, [block])
+    return blocks
+
+
+class ManagedContextView(ContextView["Agent"]):
+    """Reusable assembly for the built-in manager-backed context policies."""
+
+    block_order: tuple[str, ...] | None = None
+    static_keys: frozenset[str] = frozenset()
+
+    def instruction_blocks(self, call: "CurrentCall") -> Mapping[str, Any]:
+        """Return this view's instruction declarations."""
+        return {}
 
     async def _materialize_agent_blocks(
         self,
@@ -332,6 +371,7 @@ class DefaultAgentView(ContextView["Agent"]):
         default_builders = (
             ("system_prompt", system_prompt_block),
             ("self", agent_interface_block),
+            ("events_api", events_api_block),
             ("state", agent_state_block),
         )
         blocks_list: list[Block] = []
@@ -356,41 +396,6 @@ class DefaultAgentView(ContextView["Agent"]):
         blocks += await materialize_manager_blocks(manager, owner, call, exclude=_FRAMEWORK_KEYS)
         return blocks
 
-    async def _compose_skill_views(
-        self,
-        owner: "Agent",
-        call: "CurrentCall",
-        blocks: tuple[Block, ...],
-        *,
-        disabled: set[str],
-        declaration_keys: frozenset[str],
-    ) -> tuple[tuple[Block, ...], tuple[ContextItem, ...]]:
-        manager = owner.context_manager
-        custom_skill_items: list[ContextItem] = []
-        for skill in owner.active_skills():
-            default_skill_view = DefaultSkillView()
-            view = resolve_context_view(skill, default=default_skill_view)
-            if view is default_skill_view:
-                declaration = skill.context_block
-                if declaration is None:
-                    continue
-                key, _ = declaration
-                if key in disabled or manager.is_protected(key) or key in declaration_keys:
-                    continue
-            contribution = await collect_context_items(view, skill, call)
-            if view is default_skill_view:
-                default_blocks = tuple(
-                    item
-                    for item in contribution
-                    if isinstance(item, Block)
-                    and item.key not in disabled
-                    and not manager.is_protected(item.key)
-                )
-                blocks = replace_blocks_by_key(blocks, default_blocks)
-            else:
-                custom_skill_items.extend(contribution)
-        return blocks, tuple(custom_skill_items)
-
     async def _apply_override_layers(
         self,
         owner: "Agent",
@@ -399,18 +404,15 @@ class DefaultAgentView(ContextView["Agent"]):
         *,
         disabled: set[str],
     ) -> tuple[Block, ...]:
-        strategy = call.strategy
-        if strategy is not None:
-            get_overrides = getattr(strategy, "get_block_overrides", None)
-            blocks = await apply_block_overrides(
-                blocks,
-                get_overrides() if get_overrides is not None else None,
-                agent=owner,
-                call=call,
-                static_expr=lambda key: f"strategy.{key}",
-                static_keys=getattr(strategy, "get_static_block_keys", lambda: set())(),
-                disabled=disabled,
-            )
+        blocks = await apply_block_overrides(
+            blocks,
+            self.instruction_blocks(call),
+            agent=owner,
+            call=call,
+            static_expr=lambda key: f"strategy.{key}",
+            static_keys=set(self.static_keys),
+            disabled=disabled,
+        )
 
         blocks = await apply_block_overrides(
             blocks,
@@ -433,6 +435,10 @@ class DefaultAgentView(ContextView["Agent"]):
     async def assemble(self, owner: "Agent", call: "CurrentCall") -> AsyncIterator[ContextItem]:
         manager = owner.context_manager
         disabled = manager.disabled()
+        from nooa.agentdoc.visibility import is_hidden_field
+
+        if is_hidden_field(owner, "events"):
+            disabled = disabled | {"events_api"}
         declaration_keys = frozenset(key for key, _ in manager.declarations())
 
         blocks = await self._materialize_agent_blocks(
@@ -441,13 +447,13 @@ class DefaultAgentView(ContextView["Agent"]):
             disabled=disabled,
             declaration_keys=declaration_keys,
         )
-        blocks, custom_skill_items = await self._compose_skill_views(
+        skill_blocks = await collect_skill_blocks(
             owner,
             call,
-            blocks,
             disabled=disabled,
             declaration_keys=declaration_keys,
         )
+        blocks = replace_blocks_by_key(blocks, skill_blocks)
         blocks = await self._apply_override_layers(
             owner,
             call,
@@ -455,19 +461,12 @@ class DefaultAgentView(ContextView["Agent"]):
             disabled=disabled,
         )
 
-        strategy = call.strategy
-        get_order = getattr(strategy, "get_block_order", None) if strategy is not None else None
-        blocks = order_blocks(blocks, get_order() if get_order is not None else None)
+        blocks = order_blocks(blocks, self.block_order)
         prefix, trailing = partition_blocks(blocks)
 
-        items: list[ContextItem] = [*prefix, *custom_skill_items]
+        items: list[ContextItem] = [*prefix]
         items.extend(visible_events(owner))
-        boundary_count = sum(isinstance(item, CacheBoundary) for item in items)
-        if boundary_count > 1:
-            raise ValueError(
-                "DefaultAgentView composed more than one cache boundary from skill views"
-            )
-        if items and boundary_count == 0:
+        if items:
             items.append(CacheBoundary())
         items.extend(trailing)
 
@@ -481,30 +480,78 @@ class DefaultAgentView(ContextView["Agent"]):
             yield item
 
 
-class DefaultSkillView(ContextView["Skill"]):
-    """Materialize the legacy ``Skill.context_block`` shorthand."""
+class CodeActView(ManagedContextView):
+    """Execution protocol, environment, agent context, and active history."""
 
-    async def assemble(self, owner: "Skill", call: "CurrentCall") -> AsyncIterator[ContextItem]:
-        declaration = owner.context_block
-        if declaration is None:
-            return
-        agent = call.agent
-        if agent is None:
-            raise RuntimeError("DefaultSkillView requires an agent-bound CurrentCall")
-        key, expression = declaration
-        value = await _resolve_value(key, DynamicContext(expression), agent=agent, call=call)
-        yield _block(
-            key,
-            value,
-            BlockMetadata(expr=expression, user_block=True, source_dynamic=True),
-        )
+    block_order = ("system_prompt", "strategy_prompt", "sandbox", "execution_context", "self")
+    static_keys = frozenset({"execution_context", "strategy_prompt", "sandbox"})
+
+    def instruction_blocks(self, call: "CurrentCall") -> Mapping[str, Any]:
+        assert call.strategy is not None
+        blocks: dict[str, Any] = {
+            "strategy_prompt": DynamicContext("strategy.strategy_instructions(runtime)"),
+            "execution_context": DynamicContext("strategy.execution_context(runtime)"),
+        }
+        config = call.strategy.config
+        if config.execution_backend == "sandbox" and config.sandbox.context_block:
+            blocks["sandbox"] = DynamicContext("strategy.sandbox_context(runtime)")
+        return blocks
+
+
+class PredictView(ManagedContextView):
+    """Structured-answer instructions, agent context, and active history."""
+
+    def instruction_blocks(self, call: "CurrentCall") -> Mapping[str, Any]:
+        return {"strategy_prompt": DynamicContext("strategy.strategy_instructions(runtime)")}
+
+
+class PurePythonView(ManagedContextView):
+    """Python-only execution instructions, agent context, and active history."""
+
+    def instruction_blocks(self, call: "CurrentCall") -> Mapping[str, Any]:
+        return {"strategy_prompt": DynamicContext("strategy.strategy_instructions(runtime)")}
+
+
+class CodeActV2View(CodeActView):
+    """Single-tool execution context; protocol instructions live on the tool."""
+
+    block_order = ("system_prompt", "sandbox", "python_cell_context", "python_cell_state", "self")
+    static_keys = frozenset({"sandbox", "python_cell_context"})
+
+    def instruction_blocks(self, call: "CurrentCall") -> Mapping[str, Any]:
+        blocks = dict(super().instruction_blocks(call))
+        blocks["strategy_prompt"] = None
+        blocks["execution_context"] = None
+        blocks["python_cell_context"] = DynamicContext("strategy.python_cell_context(runtime)")
+        blocks["python_cell_state"] = DynamicContext("strategy.python_cell_state_context(runtime)")
+        return blocks
+
+
+class ReflexionView(ContextView["Agent"]):
+    """Delegate context assembly to a wrapped strategy using its call environment."""
+
+    def __init__(self, base_strategy: Any):
+        self.base_strategy = base_strategy
+
+    async def assemble(self, owner: "Agent", call: "CurrentCall") -> AsyncIterator[ContextItem]:
+        from dataclasses import replace
+
+        base_call = replace(call, strategy=self.base_strategy)
+        async for item in self.base_strategy.default_context_view.assemble(owner, base_call):
+            yield item
 
 
 __all__ = [
-    "DefaultAgentView",
-    "DefaultSkillView",
+    "ManagedContextView",
+    "CodeActView",
+    "PredictView",
+    "PurePythonView",
+    "CodeActV2View",
+    "ReflexionView",
+    "collect_skill_blocks",
     "agent_interface_block",
     "agent_state_block",
+    "events_api_block",
     "apply_block_overrides",
     "order_blocks",
     "partition_blocks",

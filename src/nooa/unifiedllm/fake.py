@@ -91,6 +91,7 @@ class FakeLLMClient(UnifiedLLM):
         scripted_responses: list[LLMResponse] | None = None,
         *,
         strict_exhaustion: bool = False,
+        media_inputs: list[str] | tuple[str, ...] | None = None,
     ):
         """
         Initialize fake client.
@@ -100,7 +101,7 @@ class FakeLLMClient(UnifiedLLM):
             strict_exhaustion: Raise when a call has no scripted response instead
                 of returning the compatibility empty response.
         """
-        super().__init__(model="fake-model")
+        super().__init__(model="fake-model", media_inputs=media_inputs)
         # Each provider call owns one canonical response/event. Tests often use
         # ``[response] * n`` as shorthand; materialize those aliases as distinct
         # event objects while preserving the first response by identity.
@@ -181,9 +182,12 @@ class FakeLLMClient(UnifiedLLM):
     ) -> LLMResponse:
         """Consume one scripted response and record the normalized call."""
         call_config = self._prepare_call_config(kwargs)
+        self._validate_request_config("messages", call_config)
         self.call_count += 1
         self.last_messages, _, _ = apply_cache_policy(
-            prepare_chat_messages(messages, None), None, responses=False
+            prepare_chat_messages(self._prepare_media_messages(messages, call_config), None),
+            None,
+            responses=False,
         )
         self.last_tools = tools
 
