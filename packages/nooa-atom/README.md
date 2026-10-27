@@ -243,6 +243,28 @@ Tokens are kept in `~/.config/nooa/mcp_oauth.json`, readable only by the
 user, so later connections need no sign-in. The `oauth_open_browser` and
 `oauth_manual` server settings are accepted but no longer used.
 
+Issuer changes remain fail-closed. To intentionally start over, run
+`/mcp forget-auth NAME` (one exact configured name, not a glob), or call
+`await self.skills.mcp.forget_auth("NAME")`. This cancels and drains live
+connections and pending sign-ins for every alias sharing that URL, then
+atomically forgets only that URL's local tokens, expiry, registration and
+issuer bindings. Other servers' caches, permissions, settings and approvals
+are preserved. This is **local forgetting, not remote token revocation**;
+reconnect explicitly and complete a fresh manual sign-in. A configured
+`oauth_client_id` is retained: intentionally reconfigure it if the new
+issuer requires a different client. Unknown names and stdio servers are
+rejected; HTTP servers without cached OAuth simply disconnect, retaining
+configured headers. URLs with environment placeholders require existing
+approval to resolve them.
+
+For legacy same-origin servers, genuinely absent protected-resource metadata
+(404/410 candidates) plus valid authorization-server metadata can recover
+from an unusable refresh token through normal manual sign-in. Only tokens
+and expiry are invalidated, persistently, before waiting for the person;
+registration and issuer bindings remain. Malformed metadata, discovery
+outages and different issuer bindings do not trigger this recovery. An
+alternate issuer with absent metadata still requires explicit forgetting.
+
 A session saved before the skill manager loads normally; the old `<mcp>`
 block is dropped and the agent is told what was not restored.
 

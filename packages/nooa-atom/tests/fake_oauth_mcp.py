@@ -37,11 +37,20 @@ def _free_port() -> int:
 class FakeOAuthServer:
     """MCP server plus authorisation server on one loopback origin."""
 
-    def __init__(self, *, expires_in: int = 3600) -> None:
+    def __init__(
+        self, *, expires_in: int = 3600, authorization_server: FakeOAuthServer | None = None
+    ) -> None:
         self.port = _free_port()
         self.base = f"http://127.0.0.1:{self.port}"
         self.url = f"{self.base}/mcp"
         self.expires_in = expires_in
+        self.authorization_server = authorization_server
+        self.requests: list[tuple[str, str]] = []
+        self.grant_attempts: list[str] = []
+        self.refresh_resources: list[str | None] = []
+        self.custom_resource_metadata = False
+        self.missing_resource_metadata = False
+        self.reject_refreshed_tokens = False
         self.grants: list[str] = []
         self.registrations = 0
         self.valid_tokens: set[str] = set()
@@ -73,6 +82,7 @@ class FakeOAuthServer:
             [
                 Route("/.well-known/oauth-protected-resource/mcp", self._resource_metadata),
                 Route("/.well-known/oauth-protected-resource", self._resource_metadata),
+                Route("/oauth/resource", self._resource_metadata),
                 Route("/.well-known/oauth-authorization-server", self._server_metadata),
                 Route("/register", self._register, methods=["POST"]),
                 Route("/authorize", self._authorize),
@@ -82,11 +92,18 @@ class FakeOAuthServer:
         server = self
 
         async def guarded(scope, receive, send):
+            if scope["type"] == "http":
+                server.requests.append((scope["method"], scope["path"]))
             if scope["type"] == "http" and scope["path"].startswith("/mcp"):
                 headers = dict(scope["headers"])
                 token = headers.get(b"authorization", b"").decode().removeprefix("Bearer ")
                 if token not in server.valid_tokens:
-                    metadata = f"{server.base}/.well-known/oauth-protected-resource/mcp"
+                    path = (
+                        "/oauth/resource"
+                        if server.custom_resource_metadata
+                        else "/.well-known/oauth-protected-resource/mcp"
+                    )
+                    metadata = f"{server.base}{path}"
                     response = Response(
                         status_code=401,
                         headers={"WWW-Authenticate": f'Bearer resource_metadata="{metadata}"'},
@@ -98,7 +115,12 @@ class FakeOAuthServer:
         return guarded
 
     async def _resource_metadata(self, request: Request) -> Response:
-        return JSONResponse({"resource": self.url, "authorization_servers": [self.base]})
+        if self.missing_resource_metadata:
+            return Response(status_code=404)
+        if self.custom_resource_metadata and request.url.path.startswith("/.well-known"):
+            return Response(status_code=404)
+        issuer = self.authorization_server.base if self.authorization_server else self.base
+        return JSONResponse({"resource": self.url, "authorization_servers": [issuer]})
 
     async def _server_metadata(self, request: Request) -> Response:
         return JSONResponse(
@@ -138,6 +160,9 @@ class FakeOAuthServer:
     async def _token(self, request: Request) -> Response:
         form = parse_qs((await request.body()).decode())
         grant = form["grant_type"][0]
+        self.grant_attempts.append(grant)
+        if grant == "refresh_token":
+            self.refresh_resources.append(form.get("resource", [None])[0])
         if grant == "authorization_code":
             issued = self._codes.pop(form["code"][0], None)
             verifier = form.get("code_verifier", [""])[0]
@@ -152,7 +177,8 @@ class FakeOAuthServer:
             return JSONResponse({"error": "unsupported_grant_type"}, status_code=400)
         self.grants.append(grant)
         access, refresh = secrets.token_urlsafe(8), secrets.token_urlsafe(8)
-        self.valid_tokens.add(access)
+        if grant != "refresh_token" or not self.reject_refreshed_tokens:
+            self.valid_tokens.add(access)
         self._refresh_tokens.add(refresh)
         return JSONResponse(
             {
@@ -168,6 +194,10 @@ class FakeOAuthServer:
     def expire_all_tokens(self) -> None:
         """Make every issued access token invalid, as if they had expired."""
         self.valid_tokens.clear()
+
+    def revoke_refresh_tokens(self) -> None:
+        """Revoke refresh credentials so a fresh manual sign-in is required."""
+        self._refresh_tokens.clear()
 
     def start(self) -> FakeOAuthServer:
         config = uvicorn.Config(
