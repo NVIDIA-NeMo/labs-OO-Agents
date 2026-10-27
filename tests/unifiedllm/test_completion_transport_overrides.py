@@ -195,3 +195,37 @@ async def test_base_url_provider_and_timeout_reach_owned_transport(monkeypatch, 
         assert requests[0].extensions["timeout"]["read"] == 7.5
     finally:
         await client.aclose()
+
+
+@pytest.mark.parametrize(
+    ("configured", "override"),
+    [("api_base", "base_url"), ("base_url", "api_base")],
+)
+def test_endpoint_override_replaces_both_configured_aliases(configured, override):
+    """Overriding either endpoint spelling must not leave the other configured one."""
+    raw = {
+        "model_name": "opaque-model",
+        "retry_config": False,
+        configured: "https://old.example/v1",
+    }
+    client = registry.client_from_config(
+        "gateway", raw, api_key="key", **{override: "https://new.example/v1"}
+    )
+    assert configured not in client.config or configured == override
+    assert client.config[override] == "https://new.example/v1"
+    sdk_client = client._completion_http_client(client.config, is_async=False, max_retries=0)
+    if sdk_client is not None:
+        assert str(sdk_client.base_url) == "https://new.example/v1/"
+
+
+def test_unforwarded_endpoint_key_keeps_context_window():
+    """A completion entry's ``endpoint`` key is not sent, so it must not count as a route change."""
+    raw = {
+        "model_name": "openai/opaque-model",
+        "api_base": "https://gateway.example/v1",
+        "endpoint": "https://gateway.example/v1/decisions",
+        "context_window": 8192,
+        "retry_config": False,
+    }
+    client = registry.client_from_config("gateway", raw)
+    assert client.context_window == 8192
