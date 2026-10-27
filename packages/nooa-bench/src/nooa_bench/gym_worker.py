@@ -18,7 +18,8 @@ Payload keys (all but ``task``, ``agent`` and ``model_url`` optional):
   ``tool_binding`` names a ``module:callable(agent, tools)`` that replaces the default
   translation (:func:`nooa_bench.gym.bind_gym_tools`).
 * ``artifacts_dir`` with ``atif`` / ``trace_jsonl`` flags: NOOA's own trajectory export and
-  span files are written there for Gym to collect after the episode.
+  OTLP span files are written there for Gym to collect after the episode. ``otlp_endpoint``
+  additionally ships the same spans live to a collector (NOOA's native OTLP tracing).
 * ``model_url``, ``model_name``, ``max_policy_calls``, ``headers``, ``cookies``,
   ``context_window``, ``replay_reasoning``, ``media_inputs``: the model seam.
 
@@ -101,24 +102,48 @@ def _checkpoint_then_cancel(checkpoint: Callable[[], None], cancel: Callable[[],
         cancel()
 
 
-def _enable_artifacts(payload: dict[str, Any]) -> dict[str, str]:
-    """Turn on NOOA's own exports into the artifacts directory; return what was enabled."""
-    directory = payload.get("artifacts_dir")
-    if not directory:
-        return {}
-    root = Path(directory)
-    root.mkdir(parents=True, exist_ok=True)
-    enabled: dict[str, str] = {"artifacts_dir": str(root)}
-    if payload.get("atif"):
-        from nooa.atif import enable_atif
+def _trace_exporters(
+    payload: dict[str, Any], root: Path | None
+) -> tuple[list[Any], dict[str, str]]:
+    """NOOA's native OTLP span exporters for this episode: a live collector, a JSONL spool, or both.
 
-        enable_atif(output_dir=root / "atif")
-        enabled["atif"] = str(root / "atif")
-    if payload.get("trace_jsonl"):
-        from nooa.tracing import enable_tracing, exporters
+    ``otlp_endpoint`` ships spans as they happen to the job's collector (Gym runs one beside
+    each job and the trace viewer reads it). ``trace_jsonl`` keeps the same spans as OTLP JSONL
+    files under the artifacts directory, for collection after the episode when the pod cannot
+    reach a collector or when the run must keep its own copy.
+    """
+    from nooa.tracing import exporters
 
-        enable_tracing(exporters=[exporters.jsonl(root / "traces")])
+    selected: list[Any] = []
+    enabled: dict[str, str] = {}
+    if payload.get("otlp_endpoint"):
+        selected.append(exporters.otlp(payload["otlp_endpoint"]))
+        enabled["otlp_endpoint"] = str(payload["otlp_endpoint"])
+    if payload.get("trace_jsonl") and root is not None:
+        selected.append(exporters.jsonl(root / "traces"))
         enabled["trace_jsonl"] = str(root / "traces")
+    return selected, enabled
+
+
+def _enable_artifacts(payload: dict[str, Any]) -> dict[str, str]:
+    """Turn on NOOA's own exports (ATIF, OTLP tracing); return what was enabled and where."""
+    directory = payload.get("artifacts_dir")
+    root = Path(directory) if directory else None
+    enabled: dict[str, str] = {}
+    if root is not None:
+        root.mkdir(parents=True, exist_ok=True)
+        enabled["artifacts_dir"] = str(root)
+        if payload.get("atif"):
+            from nooa.atif import enable_atif
+
+            enable_atif(output_dir=root / "atif")
+            enabled["atif"] = str(root / "atif")
+    selected, tracing = _trace_exporters(payload, root)
+    if selected:
+        from nooa.tracing import enable_tracing
+
+        enable_tracing(exporters=selected)
+        enabled.update(tracing)
     return enabled
 
 

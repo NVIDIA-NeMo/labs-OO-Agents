@@ -1152,3 +1152,21 @@ def test_constructor_kwargs_passes_only_what_the_class_names():
     }
     assert _constructor_kwargs(Shelling, rc, "/w", {}) == {"run_command": rc}
     assert _constructor_kwargs(Agent, rc, "/w", {}) == {}
+
+
+def test_trace_exporters_select_live_otlp_and_jsonl_spool(tmp_path):
+    from nooa_bench.gym_worker import _trace_exporters
+
+    both, enabled = _trace_exporters(
+        {"otlp_endpoint": "http://collector:4318/v1/traces", "trace_jsonl": True}, tmp_path
+    )
+    assert [type(e).__name__ for e in both] == ["OTLPSpanExporter", "OtlpJsonFileExporter"]
+    assert enabled == {
+        "otlp_endpoint": "http://collector:4318/v1/traces",
+        "trace_jsonl": str(tmp_path / "traces"),
+    }
+    live_only, enabled = _trace_exporters(
+        {"otlp_endpoint": "http://collector:4318/v1/traces"}, None
+    )
+    assert len(live_only) == 1 and set(enabled) == {"otlp_endpoint"}
+    assert _trace_exporters({"trace_jsonl": True}, None) == ([], {})  # a spool needs a directory
