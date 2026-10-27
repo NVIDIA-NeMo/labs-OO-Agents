@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import fcntl
+import inspect
 import json
 import os
 import re
@@ -35,6 +36,7 @@ from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import parse_qs, urlsplit
 
+import anyio
 import httpx
 from mcp import ClientSession
 from mcp.client.auth import OAuthClientProvider
@@ -623,7 +625,33 @@ class DiscoveringOAuthClientProvider(OAuthClientProvider):
             self._validate_issuer()
         return await super()._perform_authorization()
 
+    async def _refresh_token(self) -> httpx.Request:
+        request = await super()._refresh_token()
+        self._refresh_pending = True
+        return request
+
+    @staticmethod
+    async def _refresh_rejects_credentials(response: httpx.Response) -> bool:
+        """Recognize an auth rejection, not an outage or a broken token response.
+
+        Retain HTTPX's buffered response for the SDK driver to read again.
+        Only inspect a small OAuth error document; never include its body or
+        credentials in diagnostics.
+        """
+        if response.status_code not in (400, 401, 403):
+            return False
+        body = await response.aread()
+        if len(body) > 8192:
+            return False
+        try:
+            payload = json.loads(body)
+        except ValueError:
+            return False
+        error = payload.get("error") if isinstance(payload, dict) else None
+        return error in ("invalid_grant", "invalid_client", "unauthorized_client", "access_denied")
+
     async def _handle_refresh_response(self, response: httpx.Response) -> bool:
+        self._refresh_pending = False
         storage = self.context.storage
         if isinstance(storage, FileTokenStorage):
             issuer = (
@@ -633,8 +661,13 @@ class DiscoveringOAuthClientProvider(OAuthClientProvider):
                 refreshed = await super()._handle_refresh_response(response)
             if refreshed:
                 self._credentials_entry = saved["entry"]
-            else:
+            elif await self._refresh_rejects_credentials(response):
                 return await self._clear_tokens(reuse_winner=True)
+            else:
+                # The SDK clears its in-memory token on a failed response.
+                # Retain the exact persisted deadline/scope/refresh token for
+                # a later connection, without an automatic refresh retry here.
+                self.context.clear_tokens()
             return refreshed
         return await super()._handle_refresh_response(response)
 
@@ -857,6 +890,13 @@ class DiscoveringOAuthClientProvider(OAuthClientProvider):
         except StopAsyncIteration:
             return
         finally:
+            if getattr(self, "_refresh_pending", False):
+                # Transport failure/cancellation can close the generator before
+                # any refresh response arrives. Never invalidate disk on that.
+                self._refresh_pending = False
+                self.context.clear_tokens()
+                self._initialized = False  # Reload the unchanged cache on a later call.
+                request.headers.pop("Authorization", None)
             await flow.aclose()  # Release SDK lock on cancellation/error as well.
 
 
@@ -921,6 +961,129 @@ class _AuthorizedSession(ClientSession):
             ) from None
 
 
+class _SessionConnection:
+    """One transport owner and its RPC tasks, never the external caller task.
+
+    The owner enters/exits every transport/session/AnyIO task-group context.
+    Calls run in its task group so close interrupts only session-owned work;
+    caller futures receive an ordinary connection error instead of cancellation.
+    """
+
+    def __init__(self, client: AuthorizedHTTPClient) -> None:
+        self.client = client
+        self.ready: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
+        self.ready.add_done_callback(self._observe_ready)
+        self.queue: asyncio.Queue[Any] = asyncio.Queue()
+        self.pending: set[asyncio.Future[Any]] = set()
+        self.operations: set[asyncio.Task[Any]] = set()
+        self.closing = False
+        self.error: BaseException | None = None
+        self.session: Any = None
+        self.task = asyncio.create_task(self._run(), name="nooa-mcp-session-owner")
+        self.task.add_done_callback(self._finished)
+
+    @staticmethod
+    def _observe_ready(future: asyncio.Future[Any]) -> None:
+        if not future.cancelled():
+            future.exception()  # Also observed by openers; avoid abandoned-future warnings.
+
+    def _finished(self, task: asyncio.Task[Any]) -> None:
+        self.closing = True
+        self.client._sessions.discard(self)
+        if not self.ready.done():
+            self.ready.set_exception(RuntimeError("MCP session closed while opening"))
+
+    async def _run(self) -> None:
+        try:
+            async with self.client._connect_transport() as session:
+                self.session = session
+                async with anyio.create_task_group() as group:
+                    self.ready.set_result(self)
+                    while True:
+                        item = await self.queue.get()
+                        if item is None:
+                            group.cancel_scope.cancel()
+                            break  # Normal exit preserves the transport's usual __aexit__ path.
+                        method, args, kwargs, result = item
+                        group.start_soon(self._invoke, method, args, kwargs, result)
+        except BaseException as exc:
+            if not isinstance(exc, asyncio.CancelledError):
+                self.error = exc
+            if not self.ready.done():
+                self.ready.set_exception(
+                    self.error or RuntimeError("MCP session closed while opening")
+                )
+        finally:
+            self.closing = True
+            for result in tuple(self.pending):
+                if not result.done():
+                    result.set_exception(RuntimeError("MCP session was closed"))
+
+    async def _invoke(
+        self, method: Any, args: Any, kwargs: Any, result: asyncio.Future[Any]
+    ) -> None:
+        task = asyncio.current_task()
+        assert task is not None
+        self.operations.add(task)
+        try:
+            if result.cancelled():
+                return
+            with anyio.CancelScope() as scope:
+
+                def cancelled(future: asyncio.Future[Any]) -> None:
+                    if future.cancelled():
+                        scope.cancel()
+
+                result.add_done_callback(cancelled)
+                try:
+                    value = await method(*args, **kwargs)
+                    if not result.done():
+                        result.set_result(value)
+                except BaseException as exc:
+                    if not result.done():
+                        result.set_exception(
+                            RuntimeError("MCP session was closed")
+                            if isinstance(exc, asyncio.CancelledError)
+                            else exc
+                        )
+                finally:
+                    result.remove_done_callback(cancelled)
+        finally:
+            self.operations.discard(task)
+
+    def __getattr__(self, name: str) -> Any:
+        method = getattr(self.session, name)
+        if not inspect.iscoroutinefunction(method):
+            return method
+
+        async def call(*args: Any, **kwargs: Any) -> Any:
+            if self.closing:
+                raise RuntimeError("MCP session was closed")
+            result = asyncio.get_running_loop().create_future()
+            self.pending.add(result)
+            self.queue.put_nowait((method, args, kwargs, result))
+            try:
+                return await result
+            finally:
+                self.pending.discard(result)
+
+        return call
+
+    def stop(self, *, cancel: bool = True) -> None:
+        if not self.closing:
+            self.closing = True
+            if cancel:
+                self.task.cancel()  # Exactly once: repeated closes must not interrupt cleanup.
+            else:
+                self.queue.put_nowait(None)
+
+    async def drain(self) -> None:
+        # A canceled *owner* is a normal close outcome. Cancellation of this
+        # waiter is still external cancellation and must propagate, while the
+        # shield lets the already-stopped owner finish its context cleanup.
+        await asyncio.shield(asyncio.gather(self.task, return_exceptions=True))
+
+
 class AuthorizedHTTPClient(MCPBaseClient):
     """A streamable-HTTP or SSE MCP client whose requests carry the provider's tokens."""
 
@@ -941,19 +1104,23 @@ class AuthorizedHTTPClient(MCPBaseClient):
         self._provider = provider
         self._signin = signin
         self._closed = False
-        self._sessions: set[asyncio.Task[Any]] = set()
+        self._sessions: set[_SessionConnection] = set()
 
     async def aclose(self) -> None:
         """Disable this provider and cancel/drain sessions before forgetting its cache."""
-        current = asyncio.current_task()
-        if current in self._sessions:
-            raise RuntimeError("Cannot forget authentication from inside its live MCP session")
         self._closed = True
         self._signin.cancel()
-        tasks = list(self._sessions)
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+        connections = list(self._sessions)
+        for connection in connections:
+            connection.stop()
+        current = asyncio.current_task()
+        await asyncio.gather(
+            *(
+                connection.drain()
+                for connection in connections
+                if current is not connection.task and current not in connection.operations
+            )
+        )
 
     @property
     def transport(self) -> Literal["sse", "stdio", "streamable-http"]:
@@ -965,19 +1132,29 @@ class AuthorizedHTTPClient(MCPBaseClient):
 
     @asynccontextmanager
     async def connect_to_server(self) -> AsyncGenerator[ClientSession, None]:
-        """Track every live OAuth session so a local forget can drain credential use."""
+        """Yield a session facade whose async calls run in a dedicated owner group.
+
+        Transport/SDK contexts enter and exit on the owner task. External
+        callers receive connection errors on close, never task cancellation.
+        """
         if self._closed:
             raise RuntimeError(
                 "MCP authentication was forgotten; connect again for a fresh sign-in"
             )
-        task = asyncio.current_task()
-        assert task is not None
-        self._sessions.add(task)
+        connection = _SessionConnection(self)
+        self._sessions.add(connection)
+        failed = False
         try:
-            async with self._connect_transport() as session:
-                yield session
+            session = await asyncio.shield(connection.ready)
+            yield session
+        except BaseException:
+            failed = True
+            raise
         finally:
-            self._sessions.discard(task)
+            connection.stop(cancel=failed)
+            await connection.drain()
+            if not failed and connection.error is not None:
+                raise connection.error
 
     @asynccontextmanager
     async def _connect_transport(self) -> AsyncGenerator[ClientSession, None]:

@@ -396,7 +396,10 @@ async def test_forget_auth_drains_live_alias_and_disables_old_provider(
         assert servers.tool("alias")._client is new_client and not new_client._closed
     else:
         assert servers.connected() == []
-    assert calling.cancelled() and not provider.context.lock.locked()
+    assert calling.done() and not calling.cancelled() and calling.cancelling() == 0
+    with pytest.raises(RuntimeError, match="closed while opening"):
+        await calling
+    assert not client._sessions and not provider.context.lock.locked()
     assert signin._pasted.cancelled() and storage._entry() == {}
     with pytest.raises(RuntimeError, match="fresh sign-in"):
         async with client.connect_to_server():
