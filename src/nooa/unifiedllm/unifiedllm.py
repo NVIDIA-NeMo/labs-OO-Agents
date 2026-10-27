@@ -49,6 +49,11 @@ from .limits import REPLY_CAP_KEYS, ContextLimits
 from .reasoning import ReasoningConfig, apply_reasoning_level
 from .retry import sync_retry, with_retry
 from .retry_config import RetryConfig
+from .structured_output import (
+    StructuredOutputMode,
+    anthropic_output_format,
+    validate_structured_output_mode,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1254,12 +1259,18 @@ class UnifiedLLM(ABC):
         self,
         model: str,
         *,
+        structured_output_mode: StructuredOutputMode = None,
         reasoning_levels: dict[str, dict[str, Any]] | None = None,
         reasoning_default: str | None = None,
         reasoning_level: str | None = None,
         media_inputs: list[MediaInput] | tuple[MediaInput, ...] | None = None,
         **config,
     ):
+        self.structured_output_mode = validate_structured_output_mode(structured_output_mode)
+        if self.structured_output_mode == "anthropic" and not isinstance(self, CompletionClient):
+            raise ValueError(
+                "structured_output_mode='anthropic' requires CompletionClient, not Responses"
+            )
         reject_legacy_cache_config(config)
         # Freeze prevents field assignment, not mutations inside nested Any
         # settings. Detach this small configuration once, never the history.
@@ -1413,6 +1424,11 @@ class UnifiedLLM(ABC):
     def _validate_request_config(name: str, call_config: dict[str, Any]) -> None:
         """Keep provider payloads and routing on their validated top-level paths."""
         reject_legacy_cache_config(call_config)
+        if "structured_output_mode" in call_config or (
+            isinstance(call_config.get("extra_body"), Mapping)
+            and "structured_output_mode" in call_config["extra_body"]
+        ):
+            raise ValueError("structured_output_mode is a framework-only profile setting")
         if "media_inputs" in call_config or (
             isinstance(call_config.get("extra_body"), Mapping)
             and "media_inputs" in call_config["extra_body"]
@@ -1962,8 +1978,275 @@ _apply_cache_control_preserve_patch()
 
 
 class CompletionClient(UnifiedLLM):
+    def _prepare_call_config(self, overrides: dict[str, Any]) -> dict[str, Any]:
+        """Validate and remove a per-call ``structured_output_mode`` before the base logic.
+
+        The mode is NOOA's own setting, so it must not reach the provider
+        parameters; ``_native_output_for_call`` reads it from the overrides.
+        """
+        overrides = dict(overrides)
+        if "structured_output_mode" in overrides:
+            validate_structured_output_mode(overrides.pop("structured_output_mode"))
+        return super()._prepare_call_config(overrides)
+
+    def _with_reduced_reply_limit(self, overrides: dict[str, Any], limit: int) -> dict[str, Any]:
+        params = super()._with_reduced_reply_limit(overrides, limit)
+        # _prepare_call_config removed structured_output_mode because it is a
+        # NOOA setting, not a provider parameter. Put an explicit per-call value
+        # (including None) back so the retry with a smaller reply limit uses it.
+        if "structured_output_mode" in overrides:
+            params["structured_output_mode"] = validate_structured_output_mode(
+                overrides["structured_output_mode"]
+            )
+        return params
+
+    def _native_output_for_call(self, overrides, call_config) -> bool:
+        """Return whether this call sends its output schema as ``output_config.format``.
+
+        The per-call ``structured_output_mode`` wins over the client's. The
+        client's ``"anthropic"`` mode is not applied when the call overrides the
+        model, base URL, provider or client: the endpoint is then different,
+        and the call must set ``structured_output_mode`` itself (else
+        ``ValueError``).
+        """
+        mode = validate_structured_output_mode(
+            overrides.get("structured_output_mode", self.structured_output_mode)
+        )
+        route_changed = self._effective_model(call_config) != self.model or any(
+            call_config.get(key) != self.config.get(key)
+            for key in ("api_base", "base_url", "custom_llm_provider", "client")
+        )
+        if mode == "anthropic" and route_changed and "structured_output_mode" not in overrides:
+            raise ValueError(
+                "Route override cannot inherit structured_output_mode='anthropic'; "
+                "declare the replacement route's profile explicitly"
+            )
+        return mode == "anthropic"
+
     @staticmethod
-    def _response_from_chat(raw_response, scope, tools, output_model):
+    def _normalize_chat_extensions(api_params, effective_model):
+        """Move ``thinking`` and ``output_config`` into ``extra_body`` for OpenAI-SDK requests.
+
+        LiteLLM sends OpenAI and OpenAI-compatible providers through the OpenAI
+        Python SDK, which does not accept these fields as keyword arguments but
+        copies ``extra_body`` into the request JSON. Providers that LiteLLM
+        handles with its own HTTP code (such as Anthropic's Messages API) read
+        these fields as top-level parameters, so they are left unchanged.
+
+        This applies to any model and does not depend on ``output_model``. The
+        provider is resolved the same way LiteLLM resolves it, because a call
+        that overrides the endpoint may not use the SDK client NOOA created.
+
+        Raises:
+            ValueError: If a field is set both top-level and in ``extra_body``
+                with different values.
+        """
+        fields = ("thinking", "output_config")
+        if not any(key in api_params for key in fields):
+            return
+        _, provider, _, _ = litellm.get_llm_provider(
+            model=effective_model,
+            custom_llm_provider=api_params.get("custom_llm_provider"),
+            api_base=api_params.get("api_base") or api_params.get("base_url"),
+        )
+        if provider != "openai" and provider not in getattr(
+            litellm, "openai_compatible_providers", []
+        ):
+            return
+        # These OpenAI-compatible providers have their own LiteLLM HTTP
+        # handlers and do not go through the OpenAI SDK, so leave them alone.
+        if (
+            provider
+            in {
+                "deepseek",
+                "azure_ai",
+                "fireworks_ai",
+                "ragflow",
+                "xai",
+                "groq",
+                "cometapi",
+                "hosted_vllm",
+            }
+            or api_params.get("text_completion") is True
+        ):
+            return
+        from litellm.secret_managers.main import get_secret_bool
+
+        # With this LiteLLM setting, OpenAI requests use LiteLLM's own HTTP
+        # handler instead of the SDK; check it the same way LiteLLM does.
+        if get_secret_bool("EXPERIMENTAL_OPENAI_BASE_LLM_HTTP_HANDLER"):
+            return
+        extra = copy.deepcopy(dict(api_params.get("extra_body") or {}))
+        # Check every field for conflicts before moving any of them. Each
+        # field is moved as a whole; a conflicting extra_body value is an
+        # error rather than being merged or overwritten.
+        for key in fields:
+            if key in api_params and key in extra and api_params[key] != extra[key]:
+                raise ValueError(f"Conflicting {key} settings in extra_body")
+        for key in fields:
+            if key in api_params:
+                extra[key] = copy.deepcopy(api_params.pop(key))
+        api_params["extra_body"] = extra
+
+    @staticmethod
+    def _set_output_format(api_params, output_model, effective_model, native_output):
+        """Add the output schema of ``output_model`` to the request parameters.
+
+        Without native output this sets ``response_format``. With native
+        output (``structured_output_mode="anthropic"``) it sets
+        ``output_config.format``, merged with any other ``output_config``
+        settings, either as a top-level parameter (Anthropic provider) or in
+        ``extra_body`` (OpenAI-compatible gateways).
+
+        Raises:
+            ValueError: If native output is combined with another output
+                format, tools or a conflicting ``output_config``, or the
+                provider is neither Anthropic nor OpenAI-compatible.
+        """
+        if output_model is None:
+            return
+        if not native_output:
+            api_params["response_format"] = _maybe_sanitize_response_format(
+                effective_model, output_model
+            )
+            return
+        extra = dict(api_params.get("extra_body") or {})
+        for settings in (api_params, extra):
+            if any(
+                key in settings
+                for key in (
+                    "response_format",
+                    "text_format",
+                    "text",
+                    "output_format",
+                    "tools",
+                    "tool_choice",
+                )
+            ):
+                raise ValueError(
+                    "Native output_model conflicts with explicit structured format settings"
+                )
+            output_config = settings.get("output_config")
+            if output_config is not None and not isinstance(output_config, Mapping):
+                raise ValueError("output_config must be a mapping")
+            if isinstance(output_config, Mapping) and "format" in output_config:
+                raise ValueError("output_model conflicts with explicit output_config.format")
+        output_config = dict(api_params.pop("output_config", {}) or {})
+        for key, value in (extra.get("output_config") or {}).items():
+            if key in output_config and output_config[key] != value:
+                raise ValueError("Conflicting output_config settings")
+            output_config[key] = value
+        output_config["format"] = anthropic_output_format(output_model)
+        # The mode decides that output_config.format is sent; the provider
+        # only decides where it goes. The OpenAI SDK copies extra_body into
+        # the request JSON, while LiteLLM's Anthropic Messages handler expects
+        # a top-level parameter (it would nest an extra_body value).
+        _, provider, _, _ = litellm.get_llm_provider(
+            model=effective_model,
+            custom_llm_provider=api_params.get("custom_llm_provider"),
+            api_base=api_params.get("api_base") or api_params.get("base_url"),
+        )
+        if provider == "anthropic":
+            extra.pop("output_config", None)
+            api_params["output_config"] = output_config
+            if extra:
+                api_params["extra_body"] = extra
+            else:
+                api_params.pop("extra_body", None)
+        elif provider in {"openai", "azure"} or provider in getattr(
+            litellm, "openai_compatible_providers", []
+        ):
+            extra["output_config"] = output_config
+            api_params["extra_body"] = extra
+        else:
+            raise ValueError(
+                "Native Anthropic carrier requires Anthropic Messages or a Chat-compatible gateway"
+            )
+
+    def _check_native_output_request(self, request):
+        """httpx request hook: verify the outgoing body still has the expected schema.
+
+        Raises ``ValueError`` (which stops the request) if
+        ``output_config.format`` is missing or differs from the schema built
+        for this call, or if another output format or tools were added.
+        Requests outside a native-output call are not checked.
+        """
+        expected = self._native_output_contract.get()
+        if expected is None:
+            return
+        wire = json.loads(request.content)
+        output = wire.get("output_config")
+        if (
+            not isinstance(output, dict)
+            or output.get("format") != expected
+            or any(
+                key in wire
+                for key in (
+                    "response_format",
+                    "output_format",
+                    "text_format",
+                    "text.format",
+                    "tools",
+                    "tool_choice",
+                )
+            )
+            or isinstance(wire.get("text"), dict)
+            and "format" in wire["text"]
+        ):
+            raise ValueError(
+                "Native output_config.format schema was changed or dropped before send; "
+                "generic structured-output carriers are not permitted"
+            )
+
+    async def _acheck_native_output_request(self, request):
+        """Async version of ``_check_native_output_request`` for ``httpx.AsyncClient``."""
+        self._check_native_output_request(request)
+
+    @contextmanager
+    def _native_output_request_scope(self, api_params, output_model, native_output, *, is_async):
+        """Check the HTTP request LiteLLM sends during a native-output call.
+
+        Installs the request hook on the httpx client of this call's SDK client
+        and records the expected schema for the duration of the ``with``
+        block. Does nothing when the call does not use native output.
+
+        Raises:
+            ValueError: If the call has no per-client httpx client to hook.
+        """
+        if not native_output or output_model is None:
+            yield
+            return
+        import httpx
+
+        # Check the request body that is actually sent, not only the
+        # parameters given to LiteLLM, which could still drop or rewrite the
+        # schema. The hook is added to this client's own httpx client, never to
+        # a shared global one; concurrent calls each see their own expected
+        # schema through the ContextVar.
+        client = api_params.get("client")
+        http = getattr(client, "_client", None)
+        if http is None:
+            http = getattr(client, "client", None)
+        expected_type = httpx.AsyncClient if is_async else httpx.Client
+        if not isinstance(http, expected_type):
+            raise ValueError(
+                "Native structured output requires a verifiable per-client HTTP transport; "
+                "construct a separate CompletionClient for a replacement route"
+            )
+        hook = self._acheck_native_output_request if is_async else self._check_native_output_request
+        hooks = http.event_hooks.setdefault("request", [])
+        if hook not in hooks:
+            hooks.append(hook)
+        # Build the expected schema again from output_model instead of reusing
+        # the dict in api_params, which LiteLLM could modify in place.
+        token = self._native_output_contract.set(anthropic_output_format(output_model))
+        try:
+            yield
+        finally:
+            self._native_output_contract.reset(token)
+
+    @staticmethod
+    def _response_from_chat(raw_response, scope, tools, output_model, *, native_output=False):
         from .chat_parts import capture_chat_parts
 
         reasoning, usage = _extract_reasoning_and_usage(raw_response)
@@ -1974,6 +2257,16 @@ class CompletionClient(UnifiedLLM):
             finish_reason=_map_completion_finish_reason(raw_response),
             usage=usage,
         )
+        if native_output and output_model is not None:
+            if turn.finish_reason != "stop" or turn.tool_calls or not turn.content.strip():
+                raise ValueError(
+                    "Native structured output requires a complete final stop with JSON text, not tools or reasoning alone"
+                )
+            # Parse the whole reply as JSON for output_model; unlike the default
+            # path, there is no fallback that extracts JSON from fenced or
+            # surrounding text.
+            turn.parsed = output_model.model_validate_json(turn.content)
+            return turn
         if turn.tool_calls:
             turn.finish_reason = _finish_reason_for_tool_calls(turn.finish_reason)
             return turn
@@ -2008,6 +2301,7 @@ class CompletionClient(UnifiedLLM):
         http_config: HttpConfig | None = None,
         cache_breakpoint: Literal["auto", "anthropic"] | None = "auto",
         *,
+        structured_output_mode: StructuredOutputMode = None,
         media_inputs: list[MediaInput] | tuple[MediaInput, ...] | None = None,
         **config,
     ):
@@ -2037,6 +2331,11 @@ class CompletionClient(UnifiedLLM):
                 other routes use provider-default caching. ``None`` disables
                 NOOA markers. Without a boundary, only leading instructions
                 are marked.
+            structured_output_mode: Request field that carries the output
+                schema of ``output_model`` calls. ``'anthropic'`` sends
+                ``output_config.format``; ``None`` and ``'auto'`` send the
+                default ``response_format``. Applies only to this client's own
+                model and endpoint and is never chosen from the model name.
             media_inputs: Explicit allowed inputs: image, audio, video, pdf.
                 Absent/empty is text-only. PDF means application/pdf only.
             **config: Additional configuration passed to litellm (api_key, api_base, etc.)
@@ -2045,7 +2344,15 @@ class CompletionClient(UnifiedLLM):
             raise ValueError(
                 "CompletionClient cache_breakpoint must be 'auto', 'anthropic', or None"
             )
-        super().__init__(model, media_inputs=media_inputs, **config)
+        super().__init__(
+            model,
+            structured_output_mode=structured_output_mode,
+            media_inputs=media_inputs,
+            **config,
+        )
+        self._native_output_contract: ContextVar[dict[str, Any] | None] = ContextVar(
+            "native_output_contract", default=None
+        )
         self.retry_config = retry_config or RetryConfig()
         self.cache_breakpoint = cache_breakpoint
         self._http_config = http_config or HttpConfig()
@@ -2094,6 +2401,7 @@ class CompletionClient(UnifiedLLM):
         """
         call_config = self._prepare_call_config(kwargs)
         self._validate_request_config("messages", call_config)
+        native_output = self._native_output_for_call(kwargs, call_config)
         effective_model = self._effective_model(call_config)
         self._validate_cache_breakpoint_model(effective_model)
         state_scope = replay_state.replay_scope(effective_model, "chat", call_config)
@@ -2125,14 +2433,13 @@ class CompletionClient(UnifiedLLM):
             api_params["tools"] = [self._convert_tool_to_schema(tool) for tool in tools]
             api_params["parallel_tool_calls"] = False
 
-        if output_model is not None:
-            api_params["response_format"] = _maybe_sanitize_response_format(
-                effective_model, output_model
-            )
+        self._normalize_chat_extensions(api_params, effective_model)
+        self._set_output_format(api_params, output_model, effective_model, native_output)
 
         # Bedrock/Anthropic reject messages with tool_call blocks when tools= is absent.
         if (
             "tools" not in api_params
+            and not (native_output and output_model is not None)
             and _needs_dummy_tool(effective_model)
             and _messages_have_tool_calls(prepared_messages)
         ):
@@ -2168,7 +2475,10 @@ class CompletionClient(UnifiedLLM):
                 api_params["client"] = http_client
 
         def _make_call():
-            raw_response = _collect_sync(litellm.completion(**api_params))
+            with self._native_output_request_scope(
+                api_params, output_model, native_output, is_async=False
+            ):
+                raw_response = _collect_sync(litellm.completion(**api_params))
             reasoning, _ = _extract_reasoning_and_usage(raw_response)
             text_content = raw_response.choices[0].message.content or ""  # type: ignore[union-attr]
 
@@ -2192,7 +2502,9 @@ class CompletionClient(UnifiedLLM):
             _update_token_calibration(
                 effective_model, prepared_messages, usage, tools=api_params.get("tools")
             )
-        return self._response_from_chat(raw_response, state_scope, tools, output_model)
+        return self._response_from_chat(
+            raw_response, state_scope, tools, output_model, native_output=native_output
+        )
 
     async def acall(
         self,
@@ -2210,6 +2522,7 @@ class CompletionClient(UnifiedLLM):
         """
         call_config = self._prepare_call_config(kwargs)
         self._validate_request_config("messages", call_config)
+        native_output = self._native_output_for_call(kwargs, call_config)
         effective_model = self._effective_model(call_config)
         self._validate_cache_breakpoint_model(effective_model)
         state_scope = replay_state.replay_scope(effective_model, "chat", call_config)
@@ -2241,14 +2554,13 @@ class CompletionClient(UnifiedLLM):
             api_params["tools"] = [self._convert_tool_to_schema(tool) for tool in tools]
             api_params["parallel_tool_calls"] = False
 
-        if output_model is not None:
-            api_params["response_format"] = _maybe_sanitize_response_format(
-                effective_model, output_model
-            )
+        self._normalize_chat_extensions(api_params, effective_model)
+        self._set_output_format(api_params, output_model, effective_model, native_output)
 
         # Bedrock/Anthropic reject messages with tool_call blocks when tools= is absent.
         if (
             "tools" not in api_params
+            and not (native_output and output_model is not None)
             and _needs_dummy_tool(effective_model)
             and _messages_have_tool_calls(prepared_messages)
         ):
@@ -2285,7 +2597,10 @@ class CompletionClient(UnifiedLLM):
 
         async def _make_call():
             async def provider_call():
-                return await _collect_async(await litellm.acompletion(**api_params))
+                with self._native_output_request_scope(
+                    api_params, output_model, native_output, is_async=True
+                ):
+                    return await _collect_async(await litellm.acompletion(**api_params))
 
             raw_response = await _run_async_provider_call(
                 provider_call,
@@ -2314,7 +2629,9 @@ class CompletionClient(UnifiedLLM):
             _update_token_calibration(
                 effective_model, prepared_messages, usage, tools=api_params.get("tools")
             )
-        return self._response_from_chat(raw_response, state_scope, tools, output_model)
+        return self._response_from_chat(
+            raw_response, state_scope, tools, output_model, native_output=native_output
+        )
 
 
 class ReasoningCompletionClient(CompletionClient):

@@ -165,29 +165,36 @@ def test_factory_replacement_clears_inherited_but_explicit_wins(overrides):
         assert client.media_inputs == ("audio",)
 
 
-def test_yaml_constructor_connect_and_explicit_empty_parity(tmp_path):
+@pytest.mark.parametrize(
+    "style,client_type,declared",
+    [
+        ("chat", CompletionClient, ALL),
+        ("responses", ResponsesClient, ["image", "pdf"]),
+    ],
+)
+def test_yaml_constructor_connect_and_explicit_empty_parity(tmp_path, style, client_type, declared):
     proposal = plan(
         "local",
         "test",
-        "responses",
+        style,
         "https://example.test/v1",
         "",
-        media_inputs=ALL,
+        media_inputs=declared,
         catalogue={"id": "x", "architecture": {"input_modalities": ["image"]}},
     )
     proposal = refresh_plan(proposal)
     path = tmp_path / "models.yaml"
     write(proposal.entry, path, alias="local")
-    assert yaml.safe_load(path.read_text())["models"]["local"]["media_inputs"] == ALL
+    assert yaml.safe_load(path.read_text())["models"]["local"]["media_inputs"] == declared
     reload_registry(path)
-    declaration = ALL.copy()
+    declaration = declared.copy()
     with (
         get_llm_client("local") as registry,
-        ResponsesClient("openai/test", media_inputs=declaration) as direct,
+        client_type("openai/test", media_inputs=declaration) as direct,
     ):
         declaration.clear()
-        assert registry.media_inputs == direct.media_inputs == tuple(ALL)
-        assert ModelConfig.from_registry("local", proposal.entry).media_inputs == tuple(ALL)
+        assert registry.media_inputs == direct.media_inputs == tuple(declared)
+        assert ModelConfig.from_registry("local", proposal.entry).media_inputs == tuple(declared)
     with get_llm_client("local", media_inputs=[]) as empty:
         assert empty.media_inputs == ()
     assert (

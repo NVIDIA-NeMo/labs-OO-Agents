@@ -313,9 +313,14 @@ Events are included only when an effective `EventQuery` is configured. Runtime,
 active scoped, decorator, and agent queries use the normal precedence rules.
 Selected events retain chronological order. Stored metadata such as
 `DecisionRecord` and runtime lifecycle events are never sent back to the model.
-All inputs, resolved context values, and event data must be JSON-compatible;
-unsupported values fail with the offending parameter, context-block name, or
-event index instead of being stringified or truncated silently.
+Resolved context values and visible event data must be JSON-compatible.
+Arguments must also be JSON-compatible, except for explicitly permitted,
+top-level named `Image` inputs (see [Native image inputs](#native-image-inputs)).
+Unsupported JSON-state values fail with the offending parameter, context-block
+name, or event field/index instead of being stringified or truncated silently.
+This naming guarantee does not cover every native image preflight error. Native
+media in context or event data is not collected; hidden `repr=False` event
+attachment slots remain excluded.
 
 ### Ask several questions in one call
 
@@ -537,7 +542,7 @@ async def is_urgent(message: str) -> bool:
 ```
 
 `nooa connect` can validate and save this entry with
-`--api-style systemone`. It sends one small boolean decision probe and skips
+`--api-style systemone`. Minimal setup sends one small typed boolean routing probe and skips
 chat-only tool, reasoning, session, and reply-limit checks.
 
 ### Use OpenAI's Decisions API
@@ -571,7 +576,9 @@ Declarations, detailed results, thresholds, raw responses, and
 `DecisionRecord` provenance work the same way with either format. The client
 adapts the request to OpenAI's shapes:
 
-- The decision state is sent as JSON text in `input`.
+- With no attachments, the decision state is sent as JSON text in `input`,
+  preserving the original text-only contract. With permitted images, `input`
+  is a user-message list with native image blocks (see below).
 - Questions are sent as a named array, in order. Boolean outputs become
   `predicate` questions; their true/false criteria are appended to the
   instructions, because predicates have no criteria field.
@@ -587,8 +594,165 @@ OpenAI can refuse an individual question. The client then raises
 The call's `DecisionRecord` is stored as a failure.
 
 `nooa connect` validates and saves these entries with `--api-style openai`,
-sending one predicate probe.
+sending one predicate routing probe for minimal setup, plus fresh typed smoke cases for full setup.
 
 This uses OpenAI's native decision endpoint. `DecisionModel.from_llm(...)` with
 an OpenAI chat model is different: it uses the chat API and provides no
 probabilities.
+
+
+### Native image inputs
+
+Image permission is **explicit and local to the decision route**. It is not
+inferred from the model name, endpoint hostname, chat LLM, or a catalogue.
+The default `media_inputs=()` is text-only: passing an `Image` raises before
+HTTP. Only `media_inputs=["image"]` is supported for native decisions; audio,
+video and PDF/file decision contracts are unverified and rejected.
+
+For an OpenAI/Hub Decisions endpoint implementing the documented OpenAI
+Decisions input contract:
+
+```python
+from nooa.media import Image
+
+vision_decisions = DecisionClient(
+    "YOUR_DECISION_MODEL",
+    endpoint="https://YOUR_VERIFIED_HOST/v1/decisions",
+    api_style="openai",
+    media_inputs=["image"],
+    api_key=os.environ["DECISION_API_KEY"],
+)
+
+class Inspector(Agent, decision_model=vision_decisions):
+    @strategy(DecideStrategy())
+    async def damaged(self, photo: Image, claim: str) -> bool:
+        """Does the photo show the claimed damage?"""
+        ...
+
+await Inspector().damaged(Image.from_file("return.png"), "chipped rim")
+```
+
+Binding uses the same `CurrentCall.bound_parameters()` source as Predict.
+Only direct named `Image` arguments are collected. Lists/dicts/models holding
+native Media are rejected, including before custom Pydantic serializers can
+turn them into text. No PIL conversion, recursive promotion, arbitrary/private
+slot traversal, question-media interpolation, or context/event media collection is
+performed. No attachments are harvested from hidden slots. Media already
+deliberately converted to plain strings/dicts is
+ordinary JSON data, **not** an attachment or proof of visual inspection.
+
+The normalized `DecisionRequest(state, questions, attachments=())` remains
+compatible with existing two-argument construction. `DecisionAttachment`
+(importable from `nooa.decisions`) retains the encoded image URL/bytes, MIME,
+optional vendor `detail`, alias, and all associated input names. JSON state
+contains token strings instead of image payloads:
+
+```python
+{"inputs": {"photo": "<decision-image-0>", "claim": "chipped rim"}}
+```
+
+Passing the same Image object to several named inputs sends one attachment
+with several associations; distinct objects are not content-hash deduplicated.
+For direct or middleware-rewritten requests, each declared input name must map
+to its exact alias in `state.inputs`; unrelated substrings, string/list states,
+and undeclared named uses of an attachment alias are rejected.
+
+The OpenAI wire body uses `input=[{"role": "user", "content": [...]}]`:
+first `{"type": "input_text", "text": JSON_STATE}`, then an alias text block
+and `{"type": "input_image", "image_url": FLAT_STRING}` for each image.
+`detail` may be `low`, `high`, `auto`, or `original`; other vendor metadata is
+rejected instead of overriding trusted fields. PNG/JPEG/WebP/GIF MIME values
+are allowed by this bounded normalization (actual model support may be
+narrower). Image URLs may be locally encoded base64 data URLs or
+credential-free HTTP(S) URLs. NOOA never downloads remote images; the OpenAI
+provider may fetch a permitted URL. Supply public URLs only.
+
+#### Direct TypeSafe experimental multipart transport
+
+System One JSON proxies keep the old JSON request shape. Even with image
+permission enabled, attachments on that transport raise a clear **unverified
+transport** error; image data is never disguised as JSON text. Direct TypeSafe
+multipart is selected **only by explicit configuration**, not by hostname:
+
+```yaml
+models:
+  direct-typesafe-vision:
+    client_type: decision
+    model_name: jev-preview
+    api_style: systemone
+    endpoint: https://YOUR_VERIFIED_TYPESAFE_HOST/YOUR_SYSTEM_ONE_PATH
+    api_key_env: TYPESAFE_API_KEY
+    media_inputs: [image]
+    decision_image_transport: typesafe_multipart
+    typesafe_danger_zone_images: true
+```
+
+These same three settings are accepted by `DecisionClient(...)`. Both image
+permission and the experimental boolean opt-in are required for an image
+request. `decision_image_transport` defaults to `json`; `typesafe_multipart`
+is incompatible with `api_style="openai"`.
+
+The multipart body's **first** part is named `request`, with Content-Type
+`application/json`, containing `model`, unchanged `state` and `questions`, and
+`assets={ALIAS: {"type": "image", "part": "asset-0"}, ...}`. Subsequent binary
+parts are named and have filenames `asset-0`, `asset-1`, etc., with PNG/JPEG
+Content-Type and their original bytes. State references the aliases as plain
+strings. Requests with images include `TypeSafe-Danger-Zone-Images: true`.
+Text-only calls still send ordinary JSON and do not add this header.
+
+Multipart accepts **local base64 data URL bytes only**, with matching PNG/JPEG
+MIME and file signatures; remote URLs are rejected without fetching (no SSRF
+fetch path). There is no verified TypeSafe `detail` hint contract, so a supplied
+hint is rejected rather than lost. Signature checks are not full image decoding.
+
+Preflight is bounded to 16 images, 20 MiB decoded bytes per image, 50 MiB total
+local image bytes, and 8,192 characters per HTTP(S) URL. Malformed base64,
+conflicting/unsupported MIME, empty/oversized images, bad URIs, unsupported
+media, permission denial and incompatible transports fail **before retries or
+HTTP sends**. The limits apply to local bytes, not provider-fetched remote
+content. Retries replay repeatable bytes, and caller-owned HTTP clients retain
+their ownership and authentication. Multipart overrides an inherited JSON
+Content-Type for that request only.
+
+Registry endpoint/model/API-style/caller-client replacement clears inherited
+image permissions, encoding and experimental opt-in; redeclare them explicitly
+for the replacement route. `DecisionModel.from_llm(...)` remains JSON-only and
+explicitly rejects decision attachments; chat media permission does not change
+this, and text-only calls on multimodal chat routes remain supported.
+
+`nooa connect` supports native decision onboarding and image checks; see
+[Check native decisions with Connect](#check-native-decisions-with-connect).
+Offline tests verify the wire contract, not live endpoint acceptance or visual accuracy. Decision
+records currently retain state aliases, not image bytes/URLs or an attachment
+content digest; applications needing reproducible visual audits must retain
+assets separately.
+
+Contract references:
+[TypeSafe SDK v0.7.0 assets](https://raw.githubusercontent.com/typesafe-ai/typesafe-sdk-js/v0.7.0/src/assets.ts),
+[TypeSafe SDK image opt-in](https://github.com/typesafe-ai/typesafe-sdk-js/blob/v0.7.0/README.md#images),
+[OpenAI SDK v3.35.1 decision input image](https://raw.githubusercontent.com/openai/openai-python/v3.35.1/src/openai/types/decision_input_image_param.py).
+
+### Check native decisions with Connect
+
+Use `nooa connect MODEL --stage decision --endpoint FULL_URL --api-style openai`
+(or `systemone`) to run fresh bounded fixtures through an actual Agent
+`DecideStrategy`. One composite result checks boolean, literal choice and
+ordinal score reconstruction; positive and negative boolean fixtures check
+simple semantics. Review answer correctness alongside request acceptance. Schema
+validation includes finite normalized distributions and weighted score
+consistency. There are no retries, and each request has a deadline and shares
+the approved reservation budget.
+
+`--stage media --test-media-inputs image` runs that baseline before inspecting a
+generated red PNG through a named `Image` parameter. Passing requires actual
+wire attachment evidence, typed access, and the correct known color. OpenAI
+Decisions uses `input_image`. Direct TypeSafe requires explicit
+`--decision-image-transport typesafe_multipart --typesafe-danger-zone-images`;
+System One JSON blocks image requests before sending. Use OpenAI Decisions or
+an approved direct TypeSafe multipart connection, or leave images off. Decision
+audio, video and PDF inputs are unavailable.
+
+`--media-inputs image` enables images without testing. Connect
+saves permission, image transport and explicit TypeSafe opt-in in runtime YAML,
+separately from sanitized case outcomes and usage. It never saves encoded
+images, raw responses or test questions there. See [Connect](../model-connect.md).

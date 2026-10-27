@@ -1,6 +1,6 @@
 ---
 name: nooa-model-configuration
-description: Configure and troubleshoot NOOA model registry entries with Connect or the library, including endpoints, credentials, reply budgets, reasoning levels, cache reuse and reasoning replay. Use for model onboarding, editing aliases, or Connect diagnostic handoffs, not Agent class authoring.
+description: Understand and troubleshoot NOOA registry settings, aliases, credentials, reply budgets, reasoning levels, caching and reasoning replay. For permission and running Connect headlessly to onboard or edit models, use the nooa-connect skill.
 ---
 
 # Configure NOOA models
@@ -12,11 +12,11 @@ verified. Keep model configuration separate from agent prompts and strategies.
 
 - For a diagnostic handoff, inspect its running package/version, target file,
   effective alias source, registry chain, credential source and remaining budget.
-  A suggested rerun is not permission for additional paid calls.
+  Confirm permission and the remaining allowance before any suggested rerun.
 - Use `nooa.llm_config.llm_config_chain()` to inspect active sources and
   `nooa.unifiedllm.registry.reload_registry(Path(...))` to load a specific file.
-  An explicit output file is not necessarily in the runtime's discovery chain;
-  a higher-priority alias can shadow the saved entry.
+  If the saved alias has no effect, register the explicit output path and check
+  for a higher-priority entry shadowing it.
 - Confirm the target alias/file and preserve other aliases and unknown fields.
   Prefer Connect's edit/write path over rebuilding a registry from selected entries.
 - Keep keys in environment variables or NOOA's layered `secrets.yaml`, never in
@@ -24,74 +24,43 @@ verified. Keep model configuration separate from agent prompts and strategies.
   masked input. Persisting a pasted key requires separate consent; check whether
   a project secrets file shadows the user file.
 
-Read [Connect](../../docs/model-connect.md) for CLI stages, editing, budgets and
-library contracts, or [manual configuration](../../docs/model-configuration.md)
-for offline setup. These paths are relative to the source checkout. If the skill
-was copied elsewhere, use the absolute installation references in the handoff;
-a wheel without docs needs the matching source version/commit, not arbitrary main.
+## Run Connect through the headless skill
 
-## Choose the least expensive relevant workflow
+Before running Connect to configure a model, get the user's permission for the
+alias/file, checks and writes unless the request already authorizes them.
+Agents use stage mode, not the interactive wizard.
 
-**Offline:** build an unsaved entry with `connect.plan` or `--stage plan`.
-Validate the resulting YAML with `reload_registry(Path(...))`; that proves only
-local loading, not credentials or endpoint support. Unknown capabilities stay
-unknown. `--no-probe` prevents generation but may still fetch discovery/catalogue
-metadata; use an explicit model/interface/endpoint plus `--no-catalogue` when
-using the wizard without any network access.
+Load [nooa-connect](../nooa-connect/SKILL.md) for the complete headless workflow:
+model/interface discovery, offline proposals, bounded checks, JSON results,
+media and decision stages, saving/replacing aliases, and diagnostic handoffs.
+Keep that skill as the single source for Connect commands; do not duplicate its
+workflow here. Install it alongside this skill when copying skill bundles.
 
-**Interactive:** `uv run nooa connect` offers the wizard; `--edit-model ALIAS`
-edits an existing entry, and `--edit-model` alone opens the registry selector.
-Saving/replacing an alias and storing credentials are separate decisions from
-permission to make model calls.
-
-**Agent CLI:** stage mode produces JSON and never saves implicitly.
-`plan` and `save` are offline; `discover` and `catalogue` fetch metadata;
-`interfaces`, `routing`, `tools`, `reasoning`, `media`, `session`, and `all` can
-incur inference charges. Stage mode does not ask for spending approval: obtain
-the user's allowance before invoking a paid stage, set explicit token caps and
-budget, inspect the planned timeouts, and stop on exhaustion. Failed calls consume
-allowance too. Do not run all
-stages to investigate a single known failure.
-
-```sh
-# Offline proposal, not a saved alias or a verified connection:
-uv run nooa connect your-model --stage plan --as work \
-  --endpoint https://gateway.example/v1 --api-style chat \
-  --api-key-env MODEL_KEY --max-tokens 32768 > model-plan.json
-
-# Only when the user has approved this write:
-uv run nooa connect --stage save --input model-plan.json --output llm_config.yaml
-# Make this explicit output discoverable to the application:
-export NEMO_OO_LLM_CONFIG="$PWD/llm_config.yaml"
-```
-
-Use `--yes` only when replacement is authorized; it is not a substitute for
-spending approval. Read `checks`, `warnings` and `run_context`, not just exit
-status: 0 means that stage met its criterion, 1 means failure or missing evidence,
-and 2 means invalid options. Saving an untested plan is not successful validation.
-
-**Library:** import `from nooa.unifiedllm import connect`. Use `plan` to propose,
-`check_stage` or `run_steps` for approved checks, and `write` for explicit
-persistence. The library never prompts or grants consent. Run through the same
-registry client and formatter as the application; do not substitute raw SDK
-probes and call that validation of a NOOA entry.
+This skill covers registry semantics and manual configuration. See
+[manual configuration](../../docs/model-configuration.md) for the reference.
+For library automation, `nooa.unifiedllm.connect` exposes proposal/check/write
+operations; obtain permission for configuration, checks and writes using the
+same scope and evidence rules as the headless skill.
 
 ## Keep settings truthful
 
 - Use the endpoint's exact model ID and supported interface, not guesses from
   its name. Chat uses `client_type: completion`; Responses uses
   `client_type: responses`; Anthropic Messages uses the completion client and
-  its Anthropic route prefix. Connect normalizes provider prefixes and base URLs.
+  its Anthropic route prefix. Native decisions use `client_type: decision`, the
+  exact model ID, and a full POST `endpoint` with `api_style: systemone` or
+  `openai` (not Chat). Connect normalizes provider prefixes and base URLs.
 - New Connect entries carry `transport: direct`. Runtimes with direct SDK support
   use it to bypass LiteLLM; older runtimes ignore it. Preserve explicit transport
   choices when editing. Check the installed runtime before describing probes as
-  direct-transport validation: the saved field alone is not evidence.
+  direct-transport validation: inspect the actual request path used by the checks.
 - Explicit user choices win; endpoint-reported limits take precedence over
   public catalogue suggestions. Do not add input/output limits to invent a total
   context window. Record unknown context capacity as unverified.
-- The saved reply cap is `max_tokens` for all three interfaces; Responses maps
-  it to `max_output_tokens` on the wire. Catalogue output ceilings are metadata,
-  not recommendations. Keep the selected cap below the known context window.
+- The saved reply cap is `max_tokens` for the three chat-family interfaces; Responses maps
+  it to `max_output_tokens` in the request. Choose a reply limit below the known
+  context window to leave room for input; check server limits if they differ
+  from the published model reply maximum.
   Configured checks send this cap, including a selected level’s override; only
   initial interface discovery uses a smaller cap. Insufficient approved budget
   skips checks rather than lowering their caps. If no check sent the saved cap, report it
@@ -102,6 +71,22 @@ probes and call that validation of a NOOA entry.
   `include: []` is the persisted opt-out for a route that rejects the field;
   unrelated errors are not evidence of rejection. Do not hide these fields or
   reply caps inside `extra_body`.
+- `structured_output_mode` is an explicit Completion profile for `chat` or
+  `anthropic`: `anthropic` sends top-level `output_config.format` with
+  `type: json_schema` and the compiled object-root output-model schema, preserving
+  `output_config.effort`. It excludes generic formats and schema-surrogate tools;
+  ordinary tool calls without an output model are unchanged. `auto` and Python
+  `None` / YAML `null` keep the usual request format. Connect's CLI spelling is
+  `--structured-output-mode none|auto|anthropic`; omission preserves a saved
+  same-route declaration, explicit `none` clears native mode. Do not infer this
+  field from a model name or catalogue. Do not put it in `extra_body` or levels.
+  Connect rejects explicit controls on Responses/Decision and discovery stages;
+  profile edits invalidate all previous probe/session evidence. Route/model/
+  interface/client/credential changes must not inherit native mode.
+  This is independent of cache opt-out. The official Anthropic SDK 0.109.2 source
+  defines this shape; gateway acceptance and schema-subset support are unknown
+  until checked. A declaration/HTTP 200 is not a typed baseline pass. See
+  [the carrier scope and evidence contract](../../docs/model-connect.md#explicit-native-structured-output-profile).
 - Caching defaults to `auto`: use the default cached renderer's stable boundary,
   not a test-only cache override. Other Chat routes may cache implicitly;
   Responses and recognized Anthropic routes have explicit marker mappings.
@@ -113,35 +98,47 @@ Set each model's `media_inputs` to the formats its provider accepts: `image`,
 `audio`, `video`, `pdf`. `File` supports PDFs with MIME type `application/pdf`.
 Use [nooa-media](../nooa-media/SKILL.md) for examples.
 
-- `--media-inputs image,pdf` saves your chosen formats without testing them.
-  An empty list means text-only. Formats left out become text notices in requests.
-- For offline wizard setup, supply the exact model, endpoint and API style,
-  plus `--no-probe --no-catalogue`.
-- With spending approval, `--stage media --test-media-inputs image,pdf` runs
-  the text check and generated samples. Audio/video checks run only for Chat.
-  Read passed, failed and skipped results before saving.
+Headless configuration, manual declarations and generated checks follow the
+permission and evidence rules in [nooa-connect](../nooa-connect/SKILL.md).
+An empty media list means text-only; omitted formats become text notices.
 
 Keep the existing formats when editing the same model. Check the provider's
 supported formats when configuring a different model or endpoint.
 
+## Native decision settings
+
+Use `client_type: decision` and the exact model ID with a full decision endpoint.
+Chat reply caps and reasoning levels do not apply. Only named image inputs have
+implemented native media transports: OpenAI/Hub Decisions image parts, or direct
+TypeSafe multipart with explicit experimental opt-in. Route changes clear
+inherited image permissions. See [nooa-connect](../nooa-connect/SKILL.md#media-and-native-decisions)
+for headless checks, permission/transport options, evidence and save behavior.
+System One JSON blocks image requests before sending, even with manual image
+permission. Use OpenAI Decisions or an approved direct TypeSafe multipart
+connection, or turn images off. Review Images off/enabled separately from the
+check outcome; failed or skipped retests retain previously enabled inputs.
+
 ## Interpret failures and evidence separately
 
-Model listing may be public: it does not validate inference credentials.
-A timeout or server error does not prove an unsupported API. A truncated reply
-is inconclusive. To test a larger limit, explicitly change the configuration,
+Test the inference key with a connection check, even when model listing works.
+For a timeout or server error, review the endpoint and server status before an
+approved retry. For a truncated reply, check the reply limit and finish reason.
+To test a larger limit, explicitly change the configuration,
 rebuild the plan, and rerun within the approved allowance and known ceiling.
 Connect does not silently retry with a different cap than the saved configuration.
 
 For reasoning, distinguish request acceptance, settings reaching the wire,
 reasoning observed in the reply, and state replayed in the next request. An
-accepted effort field may be ignored; a correct puzzle answer alone does not
-prove reasoning support. A route that exposes no reasoning is unconfirmed, not
-necessarily non-reasoning. Session checks must retain both settings and available
+accepted effort field may be ignored; inspect the returned reasoning evidence
+as well as the answer. If reasoning is hidden, check server settings or another
+API format and keep support unconfirmed until evidence is available. Session
+checks must retain both settings and available
 state. Never print reasoning text, signatures, encrypted state or raw error bodies.
 
 For caching, compare a stable prefix and continuation cache-read usage. A later
-miss does not erase a successful continuation hit; implicit provider cache misses
-are warnings, not proof that an otherwise working entry is broken. Report missing
+miss leaves a successful continuation hit in the evidence. For implicit cache
+misses, inspect provider caching settings and usage before changing a working
+entry. Report missing
 markers separately from markers sent with no reported reuse.
 
 After a fix, rerun only affected checks within the existing allowance. Hand off
@@ -206,7 +203,7 @@ finally:
   Construct a new client when changing routes rather than reusing its level map.
 - Use provider documentation or catalogues as candidates, then check the actual
   route's outgoing HTTP fields: SDKs and gateways may reject or silently drop
-  settings. HTTP acceptance alone does not prove a level was honored. Leave
+  settings. Inspect fields sent and reasoning returned for each level. Leave
   unverified choices unknown rather than inventing mappings.
 - This controls effort, not retention of stored reasoning. Changing effort may
   invalidate the cached prefix; labels are not comparable across providers.

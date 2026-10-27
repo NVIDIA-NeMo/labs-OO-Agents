@@ -2,6 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Exercise request routing through LiteLLM and the OpenAI SDK, without network I/O."""
 
+import json
+from copy import deepcopy
+
 import httpx
 import pytest
 from litellm.llms.openai.openai import OpenAIChatCompletion
@@ -73,7 +76,12 @@ async def test_completion_uses_per_call_route_without_changing_defaults(
         "openai/gpt-4o-mini",
         api_base="https://original.example/v1",
         api_key="original-key",
+        thinking={"type": "adaptive"},
+        output_config={"effort": "high"},
+        allowed_openai_params=["thinking", "output_config"],
     )
+    original_config = deepcopy(client.config)
+    original_overrides = deepcopy(overrides)
     client_http = client._http
     assert client_http is not None
     # Only overridden routes may use LiteLLM's default pool. An unchanged route
@@ -112,6 +120,12 @@ async def test_completion_uses_per_call_route_without_changing_defaults(
             )
             assert result.content == "done"
 
+        for request in requests:
+            body = json.loads(request.content)
+            assert body["thinking"] == {"type": "adaptive"}
+            assert body["output_config"] == {"effort": "high"}
+            assert "extra_body" not in body and "response_format" not in body
+        assert client.config == original_config and overrides == original_overrides
         assert [str(request.url) for request in requests] == [
             "https://original.example/v1/chat/completions",
             overrides.get("api_base", "https://original.example/v1") + "/chat/completions",

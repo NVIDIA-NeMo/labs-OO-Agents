@@ -209,15 +209,17 @@ Stored history keeps the original attachments. Using that history with a model
 configured for those formats can send them again. See the
 [media guide](media.md#text-only-requests-and-replay).
 
-To let a model receive it, add the kind to its entry, for example
-`media_inputs: [video]`, and keep any kinds already listed. Only add kinds the
-request interface implements: native Anthropic Messages and Responses send
-image and PDF inputs, not audio or video. Chat sends `input_audio` and
-`video_url` extensions, but the selected backend may still reject them.
-Clients make text-only calls as before, but an enabled audio or video
-attachment on Anthropic Messages or Responses is rejected locally before any
-HTTP request; disabled attachments are filtered out first. Original history is
-not rewritten.
+To let a model receive an implemented input, add the kind to its entry and
+keep any valid kinds already listed. Native Anthropic Messages and Responses
+implement image/PDF inputs, not audio/video. Chat implements `input_audio` and
+`video_url` extensions, but a selected backend may reject them; untested Chat
+permissions remain unverified. Native audio/video flags must be explicitly
+repaired (choose supported formats, text-only, or another interface), not saved
+as untested. Connect never silently removes legacy flags to repair a profile.
+Direct clients and legacy aliases can still make text-only calls, but reject
+actual enabled unsupported native attachments locally before HTTP; disabled
+attachments are filtered first. Original history and raw test evidence are not
+rewritten.
 
 Connect can test media for you with generated samples. See
 [Connect media setup](model-connect.md#choose-media-inputs-during-setup).

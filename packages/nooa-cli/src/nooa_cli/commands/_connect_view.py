@@ -1,6 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Small, responsive terminal presentation helpers for the Connect wizard."""
+"""Terminal output for ``nooa connect``: headings, aligned fields, test call results.
+
+Everything printed by the wizard goes through these helpers. Output is wrapped
+to the terminal width, and colour is turned off when ``NO_COLOR`` is set. The
+module also turns the records of test calls (from ``nooa.unifiedllm.connect``)
+into short, plain messages. Raw provider error bodies and API keys are never
+printed; errors are described from their type and HTTP status.
+"""
 
 import os
 import shutil
@@ -14,7 +21,13 @@ import click
 
 @contextmanager
 def quiet_provider_messages():
-    """Hide legacy-library help banners while this CLI displays safe outcomes."""
+    """Context manager that stops LiteLLM from printing its own debug/help banners.
+
+    While test calls run, the CLI prints its own short summary of each
+    result; LiteLLM's banners would add noise and could show raw provider
+    details. The previous setting is restored on exit. Does nothing if
+    LiteLLM is not imported.
+    """
     legacy = sys.modules.get("litellm")
     previous = getattr(legacy, "suppress_debug_info", False)
     if legacy is not None:
@@ -27,44 +40,37 @@ def quiet_provider_messages():
 
 
 def format_budget(tokens):
-    """Render a check-token budget, spelling out the unset-flag sentinel as unlimited."""
+    """Format a test call token budget, showing the "no budget given" value as "unlimited"."""
     from nooa.unifiedllm.connect import DEFAULT_CHECK_BUDGET
 
-    # DEFAULT_CHECK_BUDGET is a large finite sentinel, not float("inf"), so it
-    # survives JSON encoding and every existing int arithmetic site unchanged
-    # (see its definition). "Budget remaining" values are the sentinel minus
-    # whatever a run has spent so far (observed up to ~1.2M tokens for a full
-    # run; see TOKEN_RESERVATION), never exactly equal to it — so this stays
-    # a threshold, not an exact-equality check, but one anchored to the
-    # actual sentinel with a generous fixed buffer for spend, rather than a
-    # fraction of it. --budget-tokens has no declared upper bound, so a
-    # threshold that scaled down with the sentinel (e.g. a fraction of it)
-    # would mislabel a genuine, very large, explicitly-chosen budget as
-    # unlimited; a fixed buffer close to the sentinel does not.
+    # Without --budget-tokens the budget is DEFAULT_CHECK_BUDGET: a very large
+    # integer (not float("inf"), so it stays valid in JSON and integer maths).
+    # The remaining budget is that value minus the tokens used so far (up to
+    # about 1.2M for a full run; see TOKEN_RESERVATION), so it is never exactly
+    # equal. Treat anything within a fixed 10**9 tokens of it as unlimited. A
+    # fixed margin, rather than a fraction of the value, keeps a very large
+    # budget chosen with --budget-tokens from being shown as unlimited.
     return "unlimited" if tokens >= DEFAULT_CHECK_BUDGET - 10**9 else f"{tokens:,}"
 
 
 def _reasoning_tokens_label(record):
-    """Describe what's actually known about a level check's reasoning cost.
+    """Describe how many reasoning tokens a reasoning-level test call used, as far as known.
 
-    A real, positive count from the endpoint/litellm is shown as-is. Anthropic
-    can withhold the visible thinking text in more than one wire shape — a
-    genuine redacted_thinking block (an opaque encrypted blob, no text field
-    at all), or a normal *signed* "thinking" block whose text simply comes
-    back empty (observed live for Claude Sonnet 5/Opus 5 via Azure/Bedrock) —
-    but either way litellm's reasoning_tokens estimate is a text-length count
-    that reads 0 when there is no visible text, regardless of how much
-    thinking actually happened. Showing that 0 as though it were measured
-    would be misleading. output_tokens is shown instead where available,
-    since Anthropic bills thinking tokens as ordinary output tokens without
-    splitting them out.
+    ``record`` is the result of one ``level:<name>`` test call. Returns ""
+    when nothing is known.
 
-    litellm's text-length estimate only exists for Anthropic/Bedrock at all —
-    for every other provider (observed live for Qwen and DeepSeek), it never
-    attempts one, even when real, non-empty reasoning text came back. When we
-    have that text in hand, its character count is shown as a size signal
-    instead of just "not reported separately" with nothing further. Returns
-    "" when nothing is known.
+    - A positive ``reasoning_tokens`` count is shown as is.
+    - If the provider withheld the reasoning text, the reasoning count cannot
+      be trusted. Anthropic does this in two ways: a ``redacted_thinking``
+      block (encrypted, no text), or a signed ``thinking`` block whose text is
+      empty (seen with Claude Sonnet 5 / Opus 5 on Azure and Bedrock).
+      LiteLLM estimates reasoning tokens from the length of the visible text,
+      so it reports 0 however much thinking happened. The total output tokens
+      are shown instead; Anthropic counts thinking as ordinary output tokens.
+    - LiteLLM only makes that estimate for Anthropic and Bedrock. For other
+      providers (seen with Qwen and DeepSeek) no count is reported even when
+      reasoning text came back, so the length of that text in characters is
+      shown as a rough size.
     """
     tokens = record.get("reasoning_tokens")
     if isinstance(tokens, int) and tokens > 0:
@@ -87,13 +93,12 @@ def _reasoning_tokens_label(record):
 
 
 def _reasoning_tokens_summary(record):
-    """Compact form of _reasoning_tokens_label for the end-of-run summary line.
+    """Short form of ``_reasoning_tokens_label`` for the summary line at the end of a run.
 
-    Mirrors _reasoning_tokens_label's gating exactly: the final "N output
-    (chars)" fallback only applies when reasoning was actually observed.
-    Without that gate, a level where the model reported real output tokens
-    but never reasoned at all would print as though a reasoning cost was
-    measured for it.
+    Uses the same rules as ``_reasoning_tokens_label``. In particular the
+    "N output" form is only used when reasoning was actually seen in the
+    reply; otherwise a level where the model returned output but did not
+    reason would look as if its reasoning cost had been measured.
     """
     tokens = record.get("reasoning_tokens")
     if isinstance(tokens, int) and tokens > 0:
@@ -113,7 +118,11 @@ def _reasoning_tokens_summary(record):
 
 
 def check_failure(outcome):
-    """Translate sanitized error classes, never show a provider error body."""
+    """Return a short message for a failed test call, or None if no rule matches.
+
+    The message is chosen from the error type name and HTTP status in
+    ``outcome``; the provider's error body is never shown.
+    """
     error = outcome.get("error", "")
     status = outcome.get("status_code")
     if status in {401, 403} or error in {"AuthenticationError", "PermissionDeniedError"}:
@@ -136,14 +145,20 @@ def check_failure(outcome):
 
 
 def connection_detail(record):
-    """Explain the configured answer check without exposing its internal contract."""
+    """Return the result text for the basic test call (``routing``) of a model entry.
+
+    That call asks a question with a known typed answer. The text says
+    whether it passed, was not run, or why it failed (rejected request, reply
+    cut off, no final answer, wrong format, wrong answer), in plain words
+    rather than the record's field names.
+    """
     from nooa.unifiedllm.connect._records import TYPED_TEXT_BASELINE, text_baseline_passed
 
     if text_baseline_passed(record):
         return "Passed"
     if record.get("outcome") == "not_probed":
         return (
-            "Not tested: token budget exhausted"
+            "Not tested: check budget used up"
             if record.get("reason") == "budget exhausted"
             else "Not tested"
         )
@@ -170,12 +185,20 @@ def connection_detail(record):
 
 
 def check_reason(reason):
-    """Short terminal wording; library records and diagnostic detail stay intact."""
+    """Return terminal wording for a reason string from a test call record.
+
+    Only the printed text changes; the record and the troubleshooting output
+    keep the library's original wording. Unknown reasons are returned as is.
+    """
     reason = reason or ""
     replacements = {
-        "budget exhausted": "token budget exhausted",
-        "This interface has no native video input mapping here; select video manually as unverified.": "Video samples cannot be tested with this API format. Manual selection is unverified.",
-        "This interface has no portable inline WAV input shape here; select audio manually as unverified.": "Audio samples cannot be tested with this API format. Manual selection is unverified.",
+        "budget exhausted": "check budget used up",
+        "Decision baseline not accepted; fresh checks not tested": "Decision connection check did not pass; later checks skipped",
+        "Typed decision baseline did not pass; image not tested": "Decision answer checks did not pass; image check skipped",
+        "Native typed response accepted but fixture answer incorrect": "Answer format accepted, but the sample answer was incorrect. Try another model.",
+        "Image access, known color accuracy and actual wire attachment must all be confirmed": "Could not confirm image delivery and the sample answer. Review image settings or try another connection.",
+        "This interface has no native video input mapping here; select video manually as unverified.": "Native video input is not supported by this API format.",
+        "This interface has no portable inline WAV input shape here; select audio manually as unverified.": "Native audio input is not supported by this API format.",
         "Configured reply cap changed after planning; make a new plan": "Reply limit changed after planning; restart setup",
         "probe timeout must be between 1 and 120 seconds": "Check timeout must be 1–120 seconds",
         "selected reasoning level changes the approved reply cap": "Selected reasoning level needs a different reply limit; restart setup",
@@ -194,38 +217,71 @@ def check_reason(reason):
         "probes require one non-streaming generation": "Checks require one complete reply without streaming",
         "Reasoning state was replayed, but the selected reasoning settings did not reach every request; check parameter filtering in the client": "Reasoning was carried forward, but some selected settings were not sent. Review the client settings.",
         "Reasoning was returned but not preserved in the follow-up request; check replay settings or try another interface": "Reasoning was not carried forward. Review the settings or try another API format.",
-        "No replayable reasoning returned; check reasoning/replay settings or try another interface. This does not mean reasoning is off": "Could not confirm reasoning carried forward. Try another API format; reasoning may still be active.",
+        "No replayable reasoning returned; check reasoning/replay settings or try another interface. This does not mean reasoning is off": "No replayable reasoning was returned in this check.",
         "No cache reuse reported on these continuations; provider caching can vary. The model connection still works": "No cache reuse reported. Caching can vary; the connection still works.",
         "Cache markers were sent, but the server reported no reuse; retry later or check server support": "Caching was requested, but no reuse was reported. Check the server's caching settings.",
         "No cache markers or cache reads observed; check the runtime's cache defaults and server support": "Caching was not requested and no reuse was reported. Review the client and server caching settings.",
         "A message from an earlier turn rendered differently once replayed as history; explicit cache breakpoints will not accumulate hits across turns until the renderer keeps that message's wire shape stable": "Earlier messages changed when sent again, preventing cache reuse. Review the client settings.",
     }
+    if reason.startswith("Video testing not implemented"):
+        return "Native video input is not supported by this API format."
+    if reason.startswith("Audio testing not implemented"):
+        return "Native audio input is not supported by this API format."
     if reason.startswith("Text baseline") or "; media not tested" in reason:
         return "Connection check did not pass; media not tested"
     return replacements.get(reason, reason)
 
 
 def media_test_detail(kind, record, *, media_inputs=None):
-    """Display effective permissions separately from unchanged test evidence."""
+    """Return the result text for one media test call (``media:<kind>``).
+
+    The text has two parts: what the test call showed (passed, not
+    available, rejected, failed and why), and whether ``kind`` is enabled in
+    ``media_inputs``. The two are separate because a kind can be enabled
+    without a passing test, and a test result does not change the setting.
+    """
     outcome = record.get("outcome")
+    if record.get("implementation_supported") is False or record.get("reason", "").startswith(
+        "Unsupported media input for "
+    ):
+        return "Unsupported by this request interface · cannot be enabled."
     if outcome == "passed":
+        if record.get("client") == "decision":
+            return "Passed · Image sent; access and sample color confirmed"
         return "Passed · Model reported access to this input"
     if outcome == "unavailable":
         setting = (
-            f"{kind} input remains enabled (manual choice)"
+            f"{media_label(kind)}: enabled (not tested)"
             if media_inputs is not None and kind in media_inputs
-            else f"{kind} input disabled"
+            else f"{media_label(kind)}: off"
         )
-        return f"Not available · Model cannot access this input; {setting}."
+        return f"Not available · The model reported no access to this sample; {setting}."
     if outcome == "not_probed":
-        return "Skipped" + (" · " + check_reason(record["reason"]) if record.get("reason") else "")
+        return f"{media_label(kind).removesuffix('s')} check skipped" + (
+            ": " + check_reason(record["reason"]) if record.get("reason") else ""
+        )
+    if outcome == "rejected" and record.get("client") != "decision":
+        return (
+            f"Not available · This model doesn't accept {media_label(kind).lower()}; it stays off."
+        )
     reason = record.get("reason", "").removesuffix(f"; {kind} support was not confirmed")
+    if record.get("client") == "decision" and not record.get("error"):
+        if record.get("attachment_observed") is False:
+            reason = "Image was not sent as planned. Review image request settings"
+        elif record.get("access_reported") is False:
+            reason = "The model reported no access to the sample. Try another connection or leave images off"
+        elif record.get("answer_correct") is False:
+            reason = (
+                "The model did not identify the sample color. Try another model or leave images off"
+            )
+        else:
+            reason = check_reason(reason)
     if outcome == "rejected":
         detail = "Server rejected the media request"
     elif record.get("timeout_kind") or reason.startswith("Timed out"):
         detail = "Request timed out; completion is unknown"
     elif reason.startswith("Service returned HTTP"):
-        # Keep the concise HTTP wording explicitly requested for media failures.
+        # Show the library's short "Service returned HTTP ..." message unchanged.
         detail = reason
     elif reason == "Could not read the answer":
         detail = reason
@@ -239,17 +295,23 @@ def media_test_detail(kind, record, *, media_inputs=None):
             "Reply not understood by the runtime": "Could not read the reply",
         }.get(reason, reason or f"Could not confirm {kind} from the sample")
     setting = (
-        f"{kind} input remains enabled (not confirmed by this test)"
+        f"{media_label(kind)}: enabled (not confirmed by this test)"
         if media_inputs is not None and kind in media_inputs
-        else f"{kind} support disabled"
+        else f"{media_label(kind)}: off"
         if media_inputs is not None
-        else f"{kind} support not confirmed"
+        else f"{media_label(kind)}: not confirmed"
     )
     return f"Failed · {detail.rstrip('.')}; {setting}."
 
 
 def local_failure(exc, *, api_key=None, api_key_env=None):
-    """Explain local setup errors without YAML excerpts or provider error bodies."""
+    """Return a short message (at most 1,000 characters) for an error during setup.
+
+    YAML errors give only the file, line and column (not the file contents).
+    ``OSError`` and ``ValueError`` use their message. Other errors, which may
+    carry provider error bodies, get a generic hint. Any occurrence of the
+    API key is replaced with ``[redacted]``.
+    """
     import yaml
 
     if isinstance(exc, yaml.YAMLError):
@@ -269,16 +331,86 @@ def local_failure(exc, *, api_key=None, api_key_env=None):
     return detail[:1000]
 
 
-def line(text, *, fg=None, bold=False, dim=False):
-    width = max(24, min(84, shutil.get_terminal_size((80, 24)).columns - 4))
+def line(text, *, fg=None, bold=False, dim=False, err=False):
+    """Print ``text`` wrapped to the terminal width (at most 84 columns), indented and styled."""
+    width = max(8, min(84, shutil.get_terminal_size((80, 24)).columns - 2))
     for part in textwrap.wrap(text, width=width, break_on_hyphens=False) or [""]:
         if "NO_COLOR" not in os.environ:
-            part = click.style(part, fg=fg, bold=bold, dim=dim)
+            part = click.style(part, fg=fg, bold=bold or None, dim=dim or None)
+        click.echo("  " + part, err=err)
+
+
+def note(text, *, err=False):
+    """Print a dim note, or a yellow one on standard error when ``err`` is set."""
+    line(text.strip(), dim=not err, fg="yellow" if err else None, err=err)
+
+
+def warning(text, *, err=False):
+    """Print a yellow warning, dropping a leading ``"Warning: "``."""
+    line(text.removeprefix("Warning: "), fg="yellow", err=err)
+
+
+def prompt_text(text, *, suffix=": "):
+    """Return a prompt label wrapped to the terminal width, for Click's line input.
+
+    Used when standard input is not a terminal; the prompt_toolkit widgets
+    format their own labels.
+    """
+    width = max(8, shutil.get_terminal_size((80, 24)).columns - 2 - len(suffix))
+    parts = textwrap.wrap(text, width=width, break_on_hyphens=False) or [""]
+    label = "\n".join("  " + part for part in parts)
+    return label  # No colour codes: Click prints this as is, also into pipes.
+
+
+def fields(rows):
+    """Print ``(label, value)`` rows with the values aligned in one column.
+
+    On narrow terminals each label is printed on its own line above its
+    value. Text is wrapped before colour is added, so wrapping never splits a
+    colour code.
+    """
+    rows = [(label + ":", str(value)) for label, value in rows]
+    if not rows:
+        return
+    columns = max(12, shutil.get_terminal_size((80, 24)).columns)
+    width = min(100, columns - 4)
+    label_width = max(len(label) for label, _ in rows)
+    value_width = width - label_width - 1
+    stacked = value_width < 16
+    for label, value in rows:
+        if stacked:
+            for part in textwrap.wrap(label, width=width, break_on_hyphens=False):
+                if "NO_COLOR" not in os.environ:
+                    part = click.style(part, bold=True)
+                click.echo("    " + part)
+            for part in textwrap.wrap(value, width=width, break_on_hyphens=False) or [""]:
+                click.echo("    " + part)
+        else:
+            parts = textwrap.wrap(value, width=value_width, break_on_hyphens=False) or [""]
+            for index, part in enumerate(parts):
+                key = label.ljust(label_width) if index == 0 else " " * label_width
+                if "NO_COLOR" not in os.environ and index == 0:
+                    key = click.style(key, bold=True)
+                click.echo("    " + key + " " + part)
+
+
+def section(title):
+    """Print a blank line and then ``title`` as a bold cyan heading."""
+    click.echo()
+    width = max(10, min(100, shutil.get_terminal_size((80, 24)).columns - 2))
+    for part in textwrap.wrap(title, width=width, break_on_hyphens=False):
+        if "NO_COLOR" not in os.environ:
+            part = click.style(part, bold=True, fg="bright_cyan")
         click.echo("  " + part)
 
 
 def progress_result(icon, label, detail, *, elapsed="", headline=None, fg=None):
-    """Keep outcome and duration on the header; explanations always follow below."""
+    """Print one test call result: a header line, then any explanation below it.
+
+    The header is ``<icon> <label>: <headline><elapsed>``. The rest of
+    ``detail`` (after the headline) goes on the following lines, so the
+    result and time stay on the first line however long the explanation is.
+    """
     width = max(8, shutil.get_terminal_size((80, 24)).columns - 2)
     headline = headline or detail
     body = detail.removeprefix(headline).removeprefix(" · ").removeprefix(": ")
@@ -304,8 +436,15 @@ def progress_result(icon, label, detail, *, elapsed="", headline=None, fg=None):
         click.echo("  " + part)
 
 
+# Test call names that are API styles: results of the "interfaces" discovery.
+INTERFACE_NAMES = {"chat", "responses", "anthropic", "systemone", "openai"}
+
+
 def check_label(name):
-    """One human vocabulary for checks and review rows."""
+    """Return the display name of a test call (e.g. ``"tools"`` -> ``"Tool use"``).
+
+    Used for both progress lines and review rows so they use the same names.
+    """
     if name.startswith("level:"):
         return "Reasoning (" + name[6:] + ")"
     if name.startswith("media:"):
@@ -315,7 +454,12 @@ def check_label(name):
         "chat": "OpenAI-compatible Chat",
         "responses": "OpenAI Responses",
         "anthropic": "Anthropic Messages",
+        "systemone": "System One Decisions",
+        "openai": "OpenAI Decisions",
         "routing": "Connection",
+        "decision:typed": "Typed decisions (boolean, choice, score)",
+        "decision:positive": "Decision positive case",
+        "decision:negative": "Decision negative case",
         "tools": "Tool use",
         "session:seed": "Conversation (1/3)",
         "session:replay": "Conversation (2/3)",
@@ -323,17 +467,26 @@ def check_label(name):
         "cache": "Cache reuse",
         "reasoning_retention": "Reasoning retention",
         "encrypted_reasoning": "Encrypted reasoning",
+        "explicit_cache": "Prompt caching",
         "session": "Conversation",
     }.get(name, name)
 
 
 def check_outcome(name, record, status):
-    """Presentation only: never upgrade the evidence policy's failed/skipped checks."""
+    """Return the headline for a test call result: Passed, Failed, Skipped or Not available.
+
+    ``status`` is the library's verdict (``check_status``). This function
+    only chooses the wording; it may show a failure as "Not available" (the
+    model does not offer a feature), but never shows a failed or skipped
+    call as passed.
+    """
     outcome = record.get("outcome")
     if status == "skipped":
         return "Skipped"
     if outcome == "unavailable" or outcome == "warning" and not record.get("error"):
         return "Not available"
+    if name.startswith("media:") and outcome == "rejected":
+        return "Not available"  # The model does not accept this media kind; it stays off.
     if (
         name == "reasoning_retention"
         and outcome == "not_confirmed"
@@ -344,59 +497,34 @@ def check_outcome(name, record, status):
 
 
 def intro(*, checks, output_tokens, budget_tokens, reasoning_output_tokens=4096):
+    """Print the wizard's title and short help lines."""
     click.echo()
     line("NOOA  /  CONNECT", fg="bright_cyan", bold=True)
     line("Add a model to your workspace.", dim=True)
     click.echo()
-    if checks:
-        line(
-            "Checks may incur charges. The token budget is an estimate, not a spending cap.",
-            fg="yellow",
-        )
-        line(
-            f"Shared token budget: {format_budget(budget_tokens)}"
-            if budget_tokens is not None
-            else "Shared token budget: unlimited",
-            dim=True,
-        )
-        line(
-            f"API format checks: up to 3 calls, {output_tokens:,} output tokens per call.", dim=True
-        )
-        line(
-            f"Each API format may also get a reasoning check: {reasoning_output_tokens:,} output tokens per call.",
-            dim=True,
-        )
-        line(
-            "After setup: connection, tools, reasoning levels and up to 3 conversation replies, using your saved reply limits. Checks that exceed the token budget are skipped.",
-            dim=True,
-        )
-        line(
-            "Optional media tests: one generated sample per selected format (up to 4), after the connection check passes. No user files are used.",
-            dim=True,
-        )
-        line(
-            "Conversation checks include a longer prompt to test caching. If encrypted reasoning is rejected, one check without it may follow within the same token budget.",
-            dim=True,
-        )
-    else:
-        line(
-            "Connection unverified: model checks are off. Model lists and public details may still be fetched.",
-            dim=True,
-        )
-    line("Skip paid checks: --no-probe    Help: F1", dim=True)
+    if not checks:
+        line("Tests are off.", dim=True)
+    line("Skip tests: --no-probe    Help: F1", dim=True)
     if not sys.stdin.isatty():
         line("Manual setup: docs/model-configuration.md", dim=True)
-        line("Agent skill: nooa-model-configuration", dim=True)
+        line("Agent workflow: nooa-connect", dim=True)
 
 
-def step(number, title):
+def step(number, title, *, total=5):
+    """Print a step heading such as ``2 / 5  ·  Model``."""
     click.echo()
-    line(f"{number} / 4  ·  {title}", fg="bright_cyan", bold=True)
+    line(f"{number} / {total}  ·  {title}", fg="bright_cyan", bold=True)
     click.echo()
 
 
 class CheckProgress:
-    """Compact human progress; replace only the active line on a real terminal."""
+    """Prints the progress and result of test calls, one line per call.
+
+    Call ``update`` with each record as it changes and ``finish`` at the end.
+    On a terminal the "checking" line of the running call is overwritten by
+    its result; elsewhere every line is kept. ``results`` maps each call name
+    to its headline, for the summary counts.
+    """
 
     def __init__(self, *, diagnostics=False):
         self.diagnostics = diagnostics
@@ -405,13 +533,56 @@ class CheckProgress:
         self.started = {}
         self.results = {}
         self.reasoning_levels = {}
+        self.interface_seen = set()
 
     def _clear(self):
+        """Erase the "checking" line of the running call, if one is shown."""
         if self.active:
             click.echo("\r\033[2K", nl=False, color=True)
             self.active = False
 
-    def update(self, name, record, *, missing_reasoning=False, media_inputs=None):
+    def _interface_update(self, name, label, record):
+        """Print a result of API style discovery (the ``interfaces`` stage).
+
+        An API style the endpoint does not accept is shown as "Not
+        available", not as a failure. The second result for the same style is
+        its reasoning test and is labelled as such.
+        """
+        elapsed = (
+            f" · {time.monotonic() - self.started.pop(name):.1f}s" if name in self.started else ""
+        )
+        accepted = record.get("outcome") == "accepted"
+        reasoning_row = name in self.interface_seen
+        self.interface_seen.add(name)
+        if reasoning_row:
+            label += " reasoning"
+            if accepted and record.get("reasoning_observed"):
+                icon, headline, detail, color = "✓", "Returned", "", "green"
+            elif accepted:
+                icon, headline, detail, color = "–", "Not returned", "", None
+            else:
+                icon, headline, color = "–", "Not available", None
+                detail = check_failure(record) or check_reason(record.get("reason")) or ""
+        elif accepted:
+            icon, headline, detail, color = "✓", "Works", "", "green"
+        else:
+            icon, headline, color = "–", "Not available", None
+            detail = check_failure(record) or check_reason(record.get("reason")) or ""
+        progress_result(
+            icon, label, detail or headline, elapsed=elapsed, headline=headline, fg=color
+        )
+        self.results[name] = headline
+
+    def update(
+        self, name, record, *, missing_reasoning=False, ignored_off=False, media_inputs=None
+    ):
+        """Show the state of test call ``name`` from its ``record``.
+
+        A ``running`` record prints a "checking" line; a final record prints
+        the result. ``missing_reasoning`` means a reasoning level returned no
+        reasoning; ``ignored_off`` means reasoning came back although the
+        level turns it off; ``media_inputs`` are the enabled media kinds.
+        """
         label = check_label(name)
         outcome = record.get("outcome")
         self._clear()
@@ -426,7 +597,10 @@ class CheckProgress:
                 line(text.strip(), dim=True)
             return
         if name == "session" and outcome == "completed":
-            return  # Cache and reasoning rows already describe the result.
+            return  # The cache and reasoning lines already show the session result.
+        if name in INTERFACE_NAMES:
+            self._interface_update(name, label, record)
+            return
         if outcome == "retrying":
             line(
                 f"↻ {label}: Reached the test limit; retrying with {record['tested_reply_tokens']:,} tokens (saved setting unchanged).",
@@ -468,10 +642,20 @@ class CheckProgress:
             )
         elif name == "reasoning_retention" and outcome == "confirmed":
             detail = "Preserved in the next request"
+        elif name == "explicit_cache":
+            detail = "Not supported by this server; turned off for this model."
         from nooa.unifiedllm.connect._records import check_status
 
-        status = check_status(name, record, missing_reasoning=missing_reasoning)
-        if name == "routing" and record.get("baseline_kind") != "interface_acceptance":
+        status = (
+            "skipped"
+            if name == "explicit_cache"
+            else check_status(name, record, missing_reasoning=missing_reasoning)
+        )
+        if (
+            name == "routing"
+            and record.get("client") != "decision"
+            and record.get("baseline_kind") != "interface_acceptance"
+        ):
             detail = connection_detail(record)
         icon, color = {
             "passed": ("✓", "green"),
@@ -482,8 +666,17 @@ class CheckProgress:
             f" · {time.monotonic() - self.started.pop(name):.1f}s" if name in self.started else ""
         )
         headline = check_outcome(name, record, status)
-        # Accepted requests and finished replies are evidence, not additional outcomes.
-        if headline == "Passed" and name not in {"cache", "encrypted_reasoning"}:
+        if ignored_off:
+            # The "off" level still returned reasoning, so the setting had no effect.
+            headline = "Not available"
+            detail = "Reasoning was still returned; this model may ignore this setting."
+        # For a passed call, the "accepted" or "finished" details add nothing,
+        # so show no detail except for the few cases below.
+        if (
+            headline == "Passed"
+            and name not in {"cache", "encrypted_reasoning"}
+            and not (name == "media:image" and record.get("client") == "decision")
+        ):
             detail = ""
             if record.get("reason") == "previous result reused":
                 detail = "Already checked with these settings"
@@ -499,7 +692,7 @@ class CheckProgress:
                     else ""
                 )
                 detail = " · ".join(filter(None, (_reasoning_tokens_label(record), correctness)))
-        if name == "routing" and status != "passed":
+        if name == "routing" and record.get("client") != "decision" and status != "passed":
             detail = connection_detail(record)
         if detail:
             for prefix in (
@@ -524,6 +717,7 @@ class CheckProgress:
         self.results[name] = headline
 
     def finish(self, *, summary=True):
+        """Clear the progress line and, if ``summary``, print the result counts."""
         self._clear()
         if self.reasoning_levels and summary and self.diagnostics:
             parts = [
@@ -546,68 +740,130 @@ class CheckProgress:
             click.echo()
 
 
-def model_details(model, *, output_tokens, edited=False):
-    """Show published model information without changing any request settings."""
+def media_label(kind):
+    """Return the display name of a media kind (``"pdf"`` -> ``"PDFs"``)."""
+    return {"image": "Images", "audio": "Audio", "video": "Video", "pdf": "PDFs"}.get(
+        kind, kind.capitalize()
+    )
+
+
+def media_settings(entry):
+    """Print each media kind with its setting in ``entry`` and its test result.
+
+    For example "enabled (test passed)" or "enabled (not tested)", so the
+    user sees whether an enabled kind was actually tested.
+    """
+    enabled = entry.get("media_inputs", [])
+    facts = entry.get("provenance", {}).get("probes", {})
+    kinds = (
+        ("image",) if entry.get("client_type") == "decision" else ("image", "audio", "video", "pdf")
+    )
+    rows = []
+    for kind in kinds:
+        record = facts.get("media:" + kind, {})
+        state = (
+            "off"
+            if kind not in enabled
+            else "enabled (test passed)"
+            if record.get("outcome") == "passed"
+            else "enabled (not confirmed by this test)"
+            if record.get("outcome") in {"inconclusive", "rejected", "unavailable", "not_confirmed"}
+            else "enabled (not tested)"
+        )
+        rows.append((media_label(kind), state))
+    fields(rows)
+
+
+def model_details(
+    model, *, output_tokens, edited=False, heading=True, attribution=True, render=True
+):
+    """Print the known limits and reasoning settings of ``model``, with their sources.
+
+    ``model`` is a catalogue-style dict. Only values that are known are
+    shown; unknown values stay unknown (they are not filled with defaults)
+    and can be entered later. ``edited`` marks values the user typed in.
+    With ``render=False`` nothing is printed and the rows are returned
+    instead (an empty list if there are none). Also warns when the model's
+    maximum reply length leaves little room for input in the context window.
+    """
 
     def tokens(value):
         return (
             f"{value:,} tokens"
             if isinstance(value, int) and not isinstance(value, bool) and value > 0
-            else "Not listed"
+            else None
         )
 
     reasoning = model.get("reasoning") or {}
     levels = reasoning.get("supported_efforts") or []
-    level_text = ", ".join(levels) if levels else "Not listed"
-    default_text = reasoning.get("default_effort") or "Not listed"
+    level_text = ", ".join(levels) if levels else None
+    default_text = reasoning.get("default_effort")
     if not levels and isinstance(reasoning.get("default_enabled"), bool):
         level_text = (
             "Always on"
             if reasoning.get("mandatory") is True
-            else "Thinking on/off; no named levels listed"
+            else "Thinking on/off"
             if reasoning.get("mandatory") is False
-            else "Thinking available; named levels not listed"
+            else "Thinking available"
         )
         default_text = "Thinking on" if reasoning["default_enabled"] else "Thinking off"
-    click.echo()
-    line(f"Model details · {model['id']}", fg="bright_cyan", bold=True)
-    for label, value in (
-        ("Context window", tokens(model.get("context_length"))),
-        (
-            "Reported reply ceiling",
-            tokens((model.get("top_provider") or {}).get("max_completion_tokens")),
-        ),
-        ("Reasoning levels", level_text),
-        ("Default reasoning", default_text),
-        (
-            "Interface discovery limit",
-            f"{output_tokens:,} tokens per reply (not reasoning checks)",
-        ),
-    ):
+    rows = [
+        (label, value)
+        for label, value in (
+            ("Context window", tokens(model.get("context_length"))),
+            (
+                "Model reply maximum",
+                tokens((model.get("top_provider") or {}).get("max_completion_tokens")),
+            ),
+            ("Reasoning levels", level_text),
+            ("Default reasoning", default_text),
+        )
+        if value
+    ]
+    if not rows:
+        if not render:
+            return []
+        line(
+            "No model settings listed. Enter known limits or continue with NOOA defaults.", dim=True
+        )
+        return
+    if heading and render:
+        section("Model details")
+        fields([("Model", model["id"])])
+    displayed = []
+    for label, value in rows:
         source_key = {
             "Context window": "context_length",
-            "Reported reply ceiling": "max_completion_tokens",
+            "Model reply maximum": "max_completion_tokens",
         }.get(label)
         source = (model.get("limit_sources") or {}).get(source_key)
         source_label = {
-            "catalogue": "catalogue",
-            "endpoint": "endpoint",
-            "endpoint_input_limit": "endpoint input limit; conservative bound",
+            "catalogue": "OpenRouter",
+            "endpoint": "your server",
+            "endpoint_input_limit": "server input limit",
         }.get(source, source)
-        line(f"{label:<25} {value}" + (f" · {source_label}" if source_label else ""))
-    line(
-        "Your edited settings."
-        if edited
-        else "Sources: endpoint limits take priority; catalogue information fills gaps."
-        if model.get("endpoint_limits")
-        else "Source: OpenRouter model listing. Your server may use different limits.",
-        dim=True,
-    )
-    line("Setup checks do not measure maximum limits.", dim=True)
-    line(
-        "The reply ceiling is metadata, not your per-reply budget. Input, reasoning and the answer share the context window.",
-        dim=True,
-    )
+        displayed.append(
+            (
+                "Input limit (context bound)" if source == "endpoint_input_limit" else label,
+                value + (f" · {source_label}" if source_label and not edited else ""),
+            )
+        )
+    if attribution:
+        displayed.append(
+            (
+                "Source",
+                "Your settings"
+                if edited
+                else "This server"
+                if model.get("endpoint_limits")
+                else "OpenRouter",
+            )
+        )
+    displayed.append(("API discovery reply limit", f"{output_tokens:,} tokens"))
+    if not render:
+        return displayed
+    fields(displayed)
+    note("Choose your reply limit next. Input, thinking and the answer share the context window.")
     context = model.get("context_length")
     ceiling = (model.get("top_provider") or {}).get("max_completion_tokens")
     if (
@@ -617,9 +873,9 @@ def model_details(model, *, output_tokens, edited=False):
         and ceiling >= context * 0.8
     ):
         line(
-            f"A reply using this whole ceiling would leave only {max(0, context - ceiling):,} tokens for input. Do not use it as an everyday reply budget."
+            f"A reply using the model maximum would leave only {max(0, context - ceiling):,} tokens for input. Choose a smaller reply limit."
             if ceiling < context
-            else "This ceiling meets or exceeds the context window. Verify the server limits before using it as a reply budget.",
+            else "The model reply maximum reaches the context window. Check your server limits and choose a smaller reply limit to leave room for input.",
             fg="yellow",
         )
     click.echo()

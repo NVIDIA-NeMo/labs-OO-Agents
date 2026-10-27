@@ -121,6 +121,10 @@ the resulting URL, header, argument, or environment value directly to
 
 ## Multimodal media
 
+To configure a route or test its media permissions, get the user's permission
+and follow [nooa-connect](../nooa-connect/SKILL.md). It is the complete headless
+Connect guide for agents; use an existing configured route for the code below.
+
 ```python
 from nooa.media import Image, Audio, Video, File
 

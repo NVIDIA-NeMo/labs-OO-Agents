@@ -61,7 +61,7 @@ def test_wizard_saves_endpoint_limits_not_catalogue(tmp_path, monkeypatch):
     entry = yaml.safe_load(target.read_text())["models"]["local"]
     assert entry["context_window"] == 100000
     assert entry["max_tokens"] == 16000
-    assert "endpoint input limit" in result.output
+    assert "server input limit" in result.output
     assert "provenance" not in entry
 
 
@@ -99,7 +99,7 @@ def test_stage_cache_miss_does_not_fail_working_entry(monkeypatch, cached):
     report = json.loads(result.stdout)
     assert report["checks"]["cache"]["outcome"] == ("confirmed" if cached[0] else "warning")
     assert report["diagnostic_prompt"] is None
-    assert "Context window unknown" in report["warnings"][0]
+    assert "Context window not listed" in report["warnings"][0]
 
 
 def test_stage_plan_reuses_discovery_without_http(tmp_path, monkeypatch):
@@ -135,7 +135,9 @@ def test_stage_plan_reuses_discovery_without_http(tmp_path, monkeypatch):
     entry = json.loads(result.stdout)["data"]["entry"]
     assert entry["context_window"] == 100000
     assert entry["max_tokens"] == 16000
-    assert "unverified" in json.loads(result.stdout)["warnings"][0]
+    assert (
+        "Reply limit not tested with the saved settings" in json.loads(result.stdout)["warnings"][0]
+    )
     result = CliRunner().invoke(
         command,
         [
@@ -154,18 +156,15 @@ def test_stage_plan_reuses_discovery_without_http(tmp_path, monkeypatch):
     assert "different endpoint" in result.output
 
 
-def test_wizard_retries_only_selected_interface_at_120_seconds(tmp_path, monkeypatch):
+def test_wizard_slow_discovery_reports_slow_route_then_offers_restart(tmp_path, monkeypatch):
+    """Timeouts after a working model listing are reported as slow; no 120-second retry menu."""
     posts = []
 
     def handle(request):
         if request.method == "GET":
             return httpx.Response(200, json={"data": [{"id": "model"}]})
         posts.append(request)
-        if len(posts) <= 3:
-            raise httpx.ReadTimeout("private server detail", request=request)
-        assert request.url.path == "/v1/chat/completions"
-        assert request.extensions["timeout"]["read"] == 120
-        return httpx.Response(200, json=response_body("chat"))
+        raise httpx.ReadTimeout("private server detail", request=request)
 
     mock_http(monkeypatch, handle)
     monkeypatch.setenv("REVIEW_KEY", "test-key")
@@ -187,18 +186,18 @@ def test_wizard_retries_only_selected_interface_at_120_seconds(tmp_path, monkeyp
             "--output",
             str(target),
         ],
-        input="y\n-\nmodel\nlonger\nchat\ny\n",
+        input="model\n262144\n262144\ndiscover\nn\n",
     )
-    assert result.exit_code == 0, result.output
-    # Configured-cap routing is distinct from interface discovery;
-    # check_interfaces now also probes reasoning by default for chat.
-    assert len(posts) == 6
-    assert result.output.count("Approve setup and optional media checks") == 1
-    assert result.output.count("Results ·") == 1
+    assert result.exit_code != 0, result.output
+    assert len(posts) == 3  # One discovery probe per interface; no extra retry.
+    assert all(request.extensions["timeout"]["read"] != 120 for request in posts)
     assert "route may be slow" in result.output
+    assert "Start over? [Y/n]: n" in result.output
+    assert "120-second" not in result.output and "Next step" not in result.output
+    assert "Nothing was saved" in result.output
+    assert "Approve setup" not in result.output
     assert "private server detail" not in result.output
-    entry = yaml.safe_load(target.read_text())["models"]["local"]
-    assert "provenance" not in entry
+    assert not target.exists()
 
 
 @pytest.mark.parametrize("correct", [True, False])
@@ -206,15 +205,22 @@ def test_progress_reports_puzzle_result_and_parse_failure(correct):
     @click.command()
     def display():
         progress = view.CheckProgress(diagnostics=True)
-        progress.update(
-            "level:high",
+        record = {
+            "outcome": "accepted",
+            "reasoning_observed": True,
+            "answer_correct": correct,
+            "reasoning_tokens": 4096,
+        }
+        entry = connect.configure_entry(
             {
-                "outcome": "accepted",
-                "reasoning_observed": True,
-                "answer_correct": correct,
-                "reasoning_tokens": 4096,
-            },
+                "model_name": "openai/model",
+                "reasoning_levels": {
+                    "high": {"reasoning_effort": "high"},
+                },
+            }
         )
+        connect.stamp_verification(record, entry, "level:high")
+        progress.update("level:high", record)
         progress.update("anthropic", {"outcome": "not_confirmed", "error": "ReasoningReplayError"})
 
     result = CliRunner().invoke(display)

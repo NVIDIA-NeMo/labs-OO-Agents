@@ -351,7 +351,8 @@ def test_interfaces_stage_reports_reasoning_recommendation(monkeypatch):
     result = CliRunner().invoke(
         command,
         [
-            *BASE,
+            *BASE[:3],
+            *BASE[5:],  # Omit --api-style to compare interfaces.
             "--stage",
             "interfaces",
             "--reasoning-template",

@@ -25,11 +25,26 @@ def sdk_credentials(monkeypatch):
     monkeypatch.setattr(
         _connect_prompts, "choose_reply_limit", lambda suggested, ceiling, **kw: suggested
     )
-    monkeypatch.setattr(_connect_prompts, "choose_media_inputs", lambda current=(): list(current))
+    monkeypatch.setattr(
+        _connect_prompts, "choose_media_inputs", lambda current=(), **kw: list(current)
+    )
     # Media choice has focused UI tests; these legacy scenarios select manual.
     monkeypatch.setattr(_connect_prompts, "choose_media_mode", lambda **kw: "manual")
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+
+
+@pytest.fixture
+def unavailable_endpoint_limits(monkeypatch):
+    """These catalogue UI scenarios deliberately have no endpoint metadata."""
+    import httpx
+
+    def handle(request):
+        assert request.method == "GET"
+        assert str(request.url) == "https://api.test/v1/models"
+        return httpx.Response(404)
+
+    mock_http(monkeypatch, handle)
 
 
 def args(path):
@@ -339,7 +354,9 @@ def test_enabled_reasoning_without_evidence_warns_once_before_save(
             str(path),
             *(["--no-probe"] if mode == "unprobed" else []),
         ],
-        input="y\ny\n",
+        input="262144\n262144\n"
+        + ("default\n" if mode == "rejected" else "high\n")
+        + ("save\ny\n" if mode == "unprobed" else "test\ny\n"),
     )
     assert result.exit_code == 0, result.output
     warning = "Warning: no reasoning information was returned for: high."
@@ -349,7 +366,7 @@ def test_enabled_reasoning_without_evidence_warns_once_before_save(
     assert result.output.count(warning) == (1 if mode in {"missing", "usage"} else 0)
     assert "returned for: none" not in result.output
     assert "private reasoning" not in result.output
-    assert len(sent) == (0 if mode == "unprobed" else 5 if mode == "rejected" else 7)
+    assert len(sent) == (0 if mode == "unprobed" else 7)
     if mode == "missing":
         assert result.output.index(warning) < result.output.index("Write model entry")
         assert "Try another API format or review the server settings" in result.output
@@ -367,7 +384,8 @@ def test_offline_cli_needs_no_key_and_writes_generated_registry(tmp_path, monkey
     assert "not approved" in result.output
 
 
-def test_recovery_edit_server_preserves_budget_and_saves_only_new_route(tmp_path, monkeypatch):
+def test_discovery_failure_restart_saves_only_the_new_route(tmp_path, monkeypatch):
+    """No working interface: 'Start over' runs a fresh flow; only the new route is saved."""
     import httpx
 
     sent = []
@@ -389,11 +407,8 @@ def test_recovery_edit_server_preserves_budget_and_saves_only_new_route(tmp_path
     result = CliRunner().invoke(
         command,
         [
-            "old-model",
             "--as",
             "local",
-            "--endpoint",
-            "https://old.example/v1",
             "--api-key-env",
             "",
             "--no-catalogue",
@@ -401,23 +416,34 @@ def test_recovery_edit_server_preserves_budget_and_saves_only_new_route(tmp_path
             "minimal",
             "--max-tokens",
             "200",
-            # Small discovery cap so reasoning checks never fit this budget.
             "--output-tokens",
             "200",
+            # Each fresh flow gets its own allowance; enough for discovery plus the test.
             "--budget-tokens",
-            "6000",
+            "12000",
             "--output",
             str(path),
         ],
-        input="y\nserver\nhttps://new.example/v1\nnew-model\ny\n",
+        # First flow fails discovery; "y" starts over from the provider step.
+        input="custom\nhttps://old.example/v1\nold-model\n262144\n262144\ndiscover\ny\n"
+        "custom\nhttps://new.example/v1\nnew-model\n65536\n32768\ndiscover\ntest\ny\n",
     )
     assert result.exit_code == 0, result.output
-    assert [r.url.host for r in sent] == ["old.example"] * 3 + ["new.example"] * 4
-    assert "response_format" not in json.loads(sent[3].content)  # Plain discovery acceptance.
+    output = " ".join(result.output.split())
+    assert "Start over? [Y/n]: y" in output and "Starting again." in output
+    restarted = output.split("Starting again.", 1)[1]
+    assert "Choose a provider" in restarted and "Model server URL" in restarted
+    assert "Next step" not in output and "Try again with different settings?" not in output
+    # One model listing plus three failed interface checks on the old route,
+    # then listing, discovery and the configured baseline on the new one.
+    hosts = [r.url.host for r in sent]
+    assert hosts == ["old.example"] * 4 + ["new.example"] * (len(hosts) - 4)
+    assert "response_format" not in json.loads(sent[5].content)  # Plain discovery acceptance.
     assert "response_format" in json.loads(sent[-1].content)  # Fresh configured baseline.
     entry = yaml.safe_load(path.read_text())["models"]["local"]
     assert entry["api_base"] == "https://new.example/v1"
     assert entry["model_name"] == "openai/new-model"
+    assert "old.example" not in path.read_text()
     assert "provenance" not in entry  # budget accounting stays in the session
 
 
@@ -451,7 +477,9 @@ def test_multiple_saved_key_variables_require_an_explicit_choice(tmp_path, monke
         "--output",
         str(path),
     ]
-    result = CliRunner().invoke(command, options + (["--yes"] if yes else []), input="KEY_TWO\ny\n")
+    result = CliRunner().invoke(
+        command, options + (["--yes"] if yes else []), input="KEY_TWO\n262144\n262144\nsave\ny\n"
+    )
     assert result.exit_code == (2 if yes else 0), result.output
     if yes:
         assert "supply --api-key-env" in result.output
@@ -497,7 +525,9 @@ def test_saved_key_message_says_using_only_when_a_value_is_actually_set(tmp_path
     path = tmp_path / "models.yaml"
     _write_single_saved_key_entry(path)
     monkeypatch.setenv("CONNECT_SAVED_KEY", "sk-already-set")
-    result = CliRunner().invoke(command, _single_saved_key_options(path), input="y\n")
+    result = CliRunner().invoke(
+        command, _single_saved_key_options(path), input="262144\n262144\nsave\ny\n"
+    )
     assert result.exit_code == 0, result.output
     normalized_output = " ".join(result.output.split())
     assert "Using saved key variable CONNECT_SAVED_KEY for this endpoint." in normalized_output
@@ -512,7 +542,7 @@ def test_saved_key_message_is_honest_and_still_prompts_when_no_value_is_set(tmp_
     result = CliRunner().invoke(
         command,
         [*_single_saved_key_options(path), "--prompt-key"],
-        input="sk-freshly-entered\ny\nn\n",
+        input="sk-freshly-entered\n262144\n262144\nsave\ny\nn\n",
     )
     assert result.exit_code == 0, result.output
     normalized_output = " ".join(result.output.split())
@@ -535,7 +565,7 @@ def test_new_key_path_persists_only_after_separate_confirmation(tmp_path, monkey
     result = CliRunner().invoke(
         command,
         [*args(path), "--api-key-env", "new"],
-        input="\nnew-private-test-key\ny\n" + ("y\n" if save_key else "n\n"),
+        input="\nnew-private-test-key\n262144\n262144\nsave\ny\n" + ("y\n" if save_key else "n\n"),
     )
     assert result.exit_code == 0, result.output
     assert (
@@ -551,8 +581,8 @@ def test_new_key_path_persists_only_after_separate_confirmation(tmp_path, monkey
         )
 
 
-def test_a_rejected_key_is_asked_for_again_and_the_listing_retried(tmp_path, monkeypatch):
-    """A stale key in the preset's variable must not end the wizard: it says so and asks."""
+def test_a_rejected_listing_key_continues_manually_without_retry(tmp_path, monkeypatch):
+    """Metadata failure does not reauthenticate or prevent a manual untested save."""
     import httpx
 
     sent = []
@@ -575,17 +605,18 @@ def test_a_rejected_key_is_asked_for_again_and_the_listing_retried(tmp_path, mon
             "CONNECT_TEST_KEY",
             "--no-catalogue",
             "--no-probe",
+            "--media-inputs",
+            "",
             "--output",
             str(path),
         ],
-        # The new key; then input ends at the model choice, which cancels.
-        input="fresh-private-key\n",
+        input="wire/model\n262144\n262144\ndiscover\nsave\nchat\nlocal\ny\n",
     )
-    assert "The server rejected the key in CONNECT_TEST_KEY" in result.output
-    assert "Found 1 models" in result.output
-    assert [auth for _, auth in sent] == ["Bearer stale-private-key", "Bearer fresh-private-key"]
+    assert result.exit_code == 0, result.output
+    assert "Continue with an exact model ID" in result.output
+    assert [auth for _, auth in sent] == ["Bearer stale-private-key"]
     assert "private-key" not in result.output
-    assert not path.exists()
+    assert path.exists()
 
 
 def test_a_rejected_key_still_stops_a_yes_run(tmp_path, monkeypatch):
@@ -603,7 +634,7 @@ def test_a_rejected_key_still_stops_a_yes_run(tmp_path, monkeypatch):
 def test_the_wizard_names_the_variable_its_key_comes_from(tmp_path, monkeypatch):
     monkeypatch.setenv("CONNECT_TEST_KEY", "private-test-key")
     path = tmp_path / "models.yaml"
-    result = CliRunner().invoke(command, args(path), input="n\n")
+    result = CliRunner().invoke(command, args(path), input="save\nn\n")
     assert "Using the key in CONNECT_TEST_KEY." in result.output
     assert "private-test-key" not in result.output
 
@@ -621,7 +652,9 @@ def test_full_yaml_preview_is_explicit_and_does_not_change_saved_entry(
     monkeypatch.delenv("CONNECT_TEST_KEY", raising=False)
     path = tmp_path / "models.yaml"
     result = CliRunner().invoke(
-        command, [*args(path), *(["--show-config"] if show_config else [])], input="y\n"
+        command,
+        [*args(path), *(["--show-config"] if show_config else [])],
+        input="262144\n262144\nsave\ny\n",
     )
     assert result.exit_code == 0, result.output
     assert ("provenance:" in result.output) is show_config
@@ -636,7 +669,7 @@ def test_full_yaml_preview_is_explicit_and_does_not_change_saved_entry(
 
 def test_declining_final_write_leaves_no_file(tmp_path):
     path = tmp_path / "connected.yaml"
-    result = CliRunner().invoke(command, args(path), input="n\n")
+    result = CliRunner().invoke(command, args(path), input="262144\n262144\nsave\nn\n")
     assert result.exit_code == 0, result.output
     assert not path.exists()
 
@@ -646,7 +679,7 @@ def test_yaml_failure_names_file_and_line_without_echoing_contents(tmp_path):
     path.write_text("models: [\n  secret-value: }\n")
     result = CliRunner().invoke(command, [*args(path), "--yes"])
     assert result.exit_code == 1
-    assert str(path) in result.output
+    assert str(path) in result.output.replace("\n", "").replace("  ", "")
     assert "line 2" in result.output
     assert "secret-value" not in result.output
     assert "--show-diagnostics" in result.output
@@ -664,7 +697,7 @@ def test_write_failure_keeps_path_and_actionable_reason(tmp_path, monkeypatch):
     monkeypatch.setattr(connect, "write", denied)
     result = CliRunner().invoke(command, [*args(path), "--yes"])
     assert result.exit_code == 1
-    assert str(path) in result.output
+    assert str(path) in result.output.replace("\n", "").replace("  ", "")
     assert "Permission denied" in result.output
     assert "--show-diagnostics" in result.output
     assert "Agent diagnostic prompt" not in result.output
@@ -691,7 +724,7 @@ def test_existing_hand_written_alias_is_replaced_with_warning(tmp_path):
     assert result.exit_code == 0, result.output
     assert "Warning:" in result.output
     assert "local" in result.output
-    assert str(path) in result.output
+    assert str(path) in result.output.replace("\n", "").replace("  ", "")
     assert yaml.safe_load(path.read_text())["models"]["local"]["model_name"] == "openai/wire/model"
     assert path.read_text().startswith("# My models\n")
 
@@ -708,7 +741,9 @@ def test_endpoint_first_flow_uses_shared_discovery(tmp_path, monkeypatch):
     monkeypatch.setattr(connect, "discover", discover)
     monkeypatch.setenv("CONNECT_TEST_KEY", "discovery-key")
     path = tmp_path / "models.yaml"
-    result = CliRunner().invoke(command, args(path)[1:], input="wire/model\ny\n")
+    result = CliRunner().invoke(
+        command, args(path)[1:], input="wire/model\n262144\n262144\nsave\ny\n"
+    )
     assert result.exit_code == 0, result.output
     assert calls == [("https://api.test/v1", {"api_style": "chat", "api_key": "discovery-key"})]
     assert yaml.safe_load(path.read_text())["models"]["local"]["model_name"] == "openai/wire/model"
@@ -749,7 +784,7 @@ def test_declining_replace_after_checks_keeps_original_entry(tmp_path, monkeypat
     path = tmp_path / "models.yaml"
     original = "models: {local: {model_name: openai/old}}\n"
     path.write_text(original)
-    result = CliRunner().invoke(command, args(path), input="n\n")
+    result = CliRunner().invoke(command, args(path), input="262144\n262144\nsave\nn\n")
     assert result.exit_code == 0, result.output
     assert result.output.index("Results ·") < result.output.index("Replace this model?")
     assert path.read_text() == original
@@ -801,7 +836,12 @@ def test_bare_command_walks_through_setup_and_checks_inline(tmp_path, monkeypatc
             return httpx.Response(200, json={"data": [{"id": "example-model"}]})
         # Feedback appears before the HTTP operation, not only at the end.
         assert any("— checking" in line for line in output)
-        assert any("may incur charges" in line for line in output)
+        # Discover approves interface checks; everything later follows Test now.
+        proposed = any("Proposed configuration" in line for line in output)
+        assert not proposed or any(
+            "Would you like to test these settings?" in line for line in output
+        )
+        assert not any("may incur charges" in line for line in output)
         if request.url.path != "/v1/chat/completions":
             return httpx.Response(404)
         return httpx.Response(
@@ -831,8 +871,10 @@ def test_bare_command_walks_through_setup_and_checks_inline(tmp_path, monkeypatc
         command,
         [],
         input=(
-            "y\ncustom\nhttps://api.test/v1\nCONNECT_WIZARD_KEY\ntemporary-secret\n"
-            "example-model\nmy-model\ny\nn\n"
+            "custom\nhttps://api.test/v1\nCONNECT_WIZARD_KEY\ntemporary-secret\n"
+            # Discovery saw reasoning respond to effort, so a reasoning menu is
+            # offered; Enter keeps the model default.
+            "example-model\ndiscover\n\ntest\nmy-model\ny\nn\n"
         ),
     )
     assert result.exit_code == 0, result.output
@@ -840,6 +882,7 @@ def test_bare_command_walks_through_setup_and_checks_inline(tmp_path, monkeypatc
     # previously have been skipped by the old 131072-token default budget
     # now actually runs (3 more than before). check_interfaces now also
     # probes reasoning by default for the one accepted (chat) interface.
+    # Keeping the model-default reasoning choice adds no separate level check.
     assert [r.method for r in requests] == ["GET"] + ["POST"] * 9
     entry = yaml.safe_load((tmp_path / "llm_config.yaml").read_text())["models"]["my-model"]
     assert entry["model_name"] == "openai/example-model"
@@ -848,9 +891,9 @@ def test_bare_command_walks_through_setup_and_checks_inline(tmp_path, monkeypatc
     assert "acceptance alone" not in result.output
     assert "private test reasoning" not in result.output
     assert result.output.index("OpenAI-compatible Chat — checking") < result.output.index(
-        "OpenAI-compatible Chat: Passed"
+        "OpenAI-compatible Chat: Works"
     )
-    assert result.output.index("OpenAI-compatible Chat: Passed") < result.output.index(
+    assert result.output.index("OpenAI-compatible Chat: Works") < result.output.index(
         "Tool use — checking"
     )
     assert result.output.index("Tool use — checking") < result.output.index("Save this model as")
@@ -904,29 +947,37 @@ def test_interface_menu_only_offers_successes_or_explicit_manual_escape(
             "--output",
             str(path),
         ],
-        input="y\nresponses\ny\n" if responses_ok else "y\ncancel\n",
+        input="262144\n262144\ndiscover\ntest\ntest\ny\n"
+        if responses_ok
+        # No working interface: decline "Start over?".
+        else "262144\n262144\ndiscover\nn\n",
     )
     if responses_ok:
         assert result.exit_code == 0, result.output
-        assert choices == [("chat", "responses")]
-        assert yaml.safe_load(path.read_text())["models"]["local"]["api_style"] == "responses"
+        # Guided discovery uses the recommended working format; no second question.
+        assert choices == []
+        assert yaml.safe_load(path.read_text())["models"]["local"]["api_style"] == "chat"
     else:
-        assert result.exit_code == 0
+        assert result.exit_code != 0
         assert not choices
         assert not path.exists()
         assert "Nothing was saved" in result.output
-        assert "could not confirm" in result.output.lower()
+        assert "connection check failed" in result.output.lower()
+        assert "Start over? [Y/n]: n" in result.output
+        assert "Next step" not in result.output and "Starting again." not in result.output
 
 
 @pytest.mark.parametrize("recover", [True, False])
-def test_authentication_recovery_keeps_budget_and_secrets(tmp_path, monkeypatch, recover):
+def test_authentication_failure_restart_keeps_secrets_out(tmp_path, monkeypatch, recover):
+    """A rejected key fails discovery; starting over with a new key can succeed."""
     import httpx
     import litellm
 
     from nooa.unifiedllm import connect
 
-    monkeypatch.setenv("CONNECT_BAD", "wrong-test-secret")
-    monkeypatch.setenv("CONNECT_GOOD", "right-test-secret")
+    monkeypatch.delenv("CONNECT_GOOD", raising=False)
+    monkeypatch.setenv("NEMO_OO_USER_DIR", str(tmp_path / "user"))
+    secrets_file = tmp_path / "user" / "secrets.yaml"
     monkeypatch.setattr(litellm, "suppress_debug_info", False)
     sent = []
 
@@ -949,7 +1000,8 @@ def test_authentication_recovery_keeps_budget_and_secrets(tmp_path, monkeypatch,
             "--endpoint",
             "https://api.test/v1",
             "--api-key-env",
-            "CONNECT_BAD",
+            "CONNECT_GOOD",
+            "--prompt-key",
             "--no-catalogue",
             "--show-diagnostics",
             "--probe",
@@ -957,16 +1009,23 @@ def test_authentication_recovery_keeps_budget_and_secrets(tmp_path, monkeypatch,
             "--output",
             str(path),
         ],
-        input="y\nkey\nCONNECT_GOOD\ny\n" if recover else "y\ncancel\n",
+        # Discover runs interface checks at once; the rejected key fails before any proposal.
+        input="wrong-test-secret\n262144\n262144\ndiscover\n"
+        + ("y\nright-test-secret\n262144\n262144\ndiscover\ntest\ny\ny\n" if recover else "n\n"),
     )
-    assert result.exit_code == 0, result.output
-    assert result.output.count("Approve setup and optional media checks") == 1
-    assert "Key rejected by this server" in result.output
+    assert result.exit_code == (0 if recover else 1), result.output
+    first = result.output.split("Starting again.", 1)[0]
+    assert "Approve setup" not in result.output
+    assert "Key rejected by this server" in first
+    assert "Start over? [Y/n]: " + ("y" if recover else "n") in first
+    assert "Next step" not in result.output
+    assert result.output.count("Starting again.") == (1 if recover else 0)
+    assert result.output.count("Would you like to test these settings?") == (1 if recover else 0)
     assert "Give Feedback" not in result.output
     assert "Provider List" not in result.output
     assert "wrong-test-secret" not in result.output
     assert "right-test-secret" not in result.output
-    handoff = result.output.split("Agent diagnostic prompt:\n", 1)[1]
+    handoff = first.split("Agent diagnostic prompt:\n", 1)[1]
     details, _ = json.JSONDecoder().raw_decode(handoff[handoff.index("{") :])
     context = details["run_context"]
     assert context["target_file"] == str(path.resolve())
@@ -977,19 +1036,24 @@ def test_authentication_recovery_keeps_budget_and_secrets(tmp_path, monkeypatch,
     assert "skills/nooa-model-configuration/SKILL.md" in handoff
     assert "git clone" not in handoff
     assert litellm.suppress_debug_info is False
-    # check_interfaces now also probes reasoning by default for the one
-    # accepted (chat) interface once recovery succeeds.
+    # Three rejected discovery probes; after starting over, discovery and the
+    # reasoning probe for the accepted chat interface, then the approved test.
     assert len(sent) == (8 if recover else 3)
     if recover:
         entry = yaml.safe_load(path.read_text())["models"]["local"]
         assert entry["api_key_env"] == "CONNECT_GOOD"
         assert "provenance" not in entry
         assert "test-secret" not in path.read_text()
+        # Only the corrected key is stored, after the explicit save prompt.
+        assert "right-test-secret" in secrets_file.read_text()
+        assert "wrong-test-secret" not in secrets_file.read_text()
     else:
         assert not path.exists()
+        assert not secrets_file.exists()
+        assert "Nothing was saved" in result.output
 
 
-def test_retry_stops_when_original_budget_is_exhausted(tmp_path, monkeypatch):
+def test_exhausted_budget_after_failed_discovery_stops_without_restart_offer(tmp_path, monkeypatch):
     import httpx
 
     sent = []
@@ -1012,32 +1076,34 @@ def test_retry_stops_when_original_budget_is_exhausted(tmp_path, monkeypatch):
             "",
             "--no-catalogue",
             "--budget-tokens",
-            str(4 * PER_PROBE),
+            str(3 * PER_PROBE),
             "--output",
             str(path),
         ],
-        input="y\nretry\n",
+        # Extra default answers must not start another (budgeted) attempt.
+        input="262144\n262144\ndiscover\n" + "\n" * 6,
     )
-    assert result.exit_code == 0, result.output
-    assert len(sent) == 4
-    assert "budget is exhausted" in result.output
-    assert result.output.count("Approve setup and optional media checks") == 1
+    assert result.exit_code != 0, result.output
+    assert len(sent) == 3  # The three discovery probes spend the whole budget.
+    assert "Check budget used up" in result.output
+    assert "Start over?" not in result.output and "Starting again." not in result.output
+    # Discover approves the interface checks; their failure precedes any proposal.
+    assert result.output.count("Would you like to test these settings?") == 0
+    assert "Approve setup" not in result.output
     assert not path.exists()
 
 
 def test_no_probe_points_to_manual_skill_and_does_no_http(tmp_path, monkeypatch):
-    import httpx
-
-    def forbidden(*args, **kwargs):
+    def forbidden(request):
         raise AssertionError("Manual setup must not use HTTP")
 
-    monkeypatch.setattr(httpx.AsyncClient, "post", forbidden)
-    monkeypatch.setattr(httpx.AsyncClient, "get", forbidden)
+    # Covers stream/send as well as post/get, without weakening the no-I/O claim.
+    mock_http(monkeypatch, forbidden)
     path = tmp_path / "models.yaml"
     result = CliRunner().invoke(command, [*args(path), "--yes"])
     assert result.exit_code == 0, result.output
     assert "model-configuration.md" in result.output
-    assert "nooa-model-configuration" in result.output
+    assert "nooa-connect" in result.output
 
 
 def test_interface_and_later_checks_share_the_cli_budget(tmp_path, monkeypatch):
@@ -1079,18 +1145,20 @@ def test_interface_and_later_checks_share_the_cli_budget(tmp_path, monkeypatch):
             "--output",
             str(path),
         ],
-        input="y\ny\n",
+        input="262144\n262144\ndiscover\ndefault\ntest\nn\n",
     )
-    assert result.exit_code == 0, result.output
+    assert result.exit_code != 0, result.output
     assert len(sent) == 3  # All of the budget was spent testing interfaces.
     assert not path.exists()  # Discovery consumed approval; no typed baseline ran.
     assert "Nothing was saved" in result.output
-    assert "--no-probe" in result.output
+    assert "Agent diagnostic prompt:" in result.output
+    assert "Start over? [Y/n]: n" in result.output
+    assert "Try again with different settings?" not in result.output
     assert "Write model entry" not in result.output
-    assert "approved budget is too small" in result.output
-    assert "setup is incomplete; budget exhausted before routing" in result.output
-    assert result.output.index("approved budget is too small") < result.output.index(
-        "Connection: Not tested: token budget exhausted"
+    assert "Some tests will be skipped" in result.output
+    assert "setup is incomplete; check budget used up before Connection" in result.output
+    assert result.output.index("Some tests will be skipped") < result.output.index(
+        "Connection: Not tested: check budget used up"
     )
 
 
@@ -1101,7 +1169,9 @@ def test_script_mode_requires_missing_options_without_prompting():
 
 
 @pytest.mark.parametrize("ambiguous", [False, True])
-def test_model_details_appear_before_accepting_published_settings(tmp_path, monkeypatch, ambiguous):
+def test_model_details_appear_before_accepting_published_settings(
+    tmp_path, monkeypatch, ambiguous, unavailable_endpoint_limits
+):
     from nooa.unifiedllm import connect
 
     model_info = {
@@ -1118,19 +1188,25 @@ def test_model_details_appear_before_accepting_published_settings(tmp_path, monk
     path = tmp_path / "models.yaml"
     options = [arg for arg in args(path) if arg != "--no-catalogue"]
     result = CliRunner().invoke(
-        command, options, input=("wire/model\n" if ambiguous else "") + "use\ny\n"
+        command, options, input=("wire/model\n" if ambiguous else "") + "save\ny\n"
     )
     assert result.exit_code == 0, result.output
-    for text in ("128,000", "8,192", "low, high", "Source: OpenRouter"):
-        assert result.output.index(text) < result.output.index("Model settings")
+    assert "8,192" not in result.output  # This is another provider's reply ceiling.
+    proposal = " ".join(result.output.split()).split("Would you like to test these settings?")[0]
+    assert "128,000" in proposal and "Model details: OpenRouter" in proposal
     assert "not proof" not in result.output
     entry = yaml.safe_load(path.read_text())["models"]["local"]
     assert entry["context_window"] == 128000
-    assert entry["reasoning_default"] == "low"
+    assert not entry.get("reasoning_levels")
+    assert (
+        "reasoning_default" not in entry
+    )  # Foreign OpenRouter route profiles are descriptive only.
 
 
 @pytest.mark.parametrize("select", [True, False])
-def test_no_exact_catalogue_match_offers_a_fuzzy_suggestion(tmp_path, monkeypatch, select):
+def test_no_exact_catalogue_match_offers_a_fuzzy_suggestion(
+    tmp_path, monkeypatch, select, unavailable_endpoint_limits
+):
     from nooa.unifiedllm import connect
 
     # "gateway/wired-model" is close to "wire/model" but not an exact or
@@ -1151,7 +1227,7 @@ def test_no_exact_catalogue_match_offers_a_fuzzy_suggestion(tmp_path, monkeypatc
     result = CliRunner().invoke(
         command,
         options,
-        input=("gateway/wired-model\n" if select else "\n") + "use\ny\n",
+        input=("gateway/wired-model\n" if select else "\n262144\n262144\n") + "save\ny\n",
     )
     assert result.exit_code == 0, result.output
     assert "Model not found; did you mean one of these?" in result.output
@@ -1161,13 +1237,13 @@ def test_no_exact_catalogue_match_offers_a_fuzzy_suggestion(tmp_path, monkeypatc
         assert entry["context_window"] == 50000
         assert "No catalogue match" not in result.output
     else:
-        assert "context_window" not in entry
-        assert "No catalogue match; model limits and reasoning levels remain unknown." in (
-            result.output
-        )
+        assert entry["context_window"] == 262144  # Explicit manual declaration, not a fallback.
+        assert "Source: Your settings" in " ".join(result.output.split())
 
 
-def test_no_exact_catalogue_match_is_not_guessed_under_yes(tmp_path, monkeypatch):
+def test_no_exact_catalogue_match_is_not_guessed_under_yes(
+    tmp_path, monkeypatch, unavailable_endpoint_limits
+):
     from nooa.unifiedllm import connect
 
     async def catalogue():
@@ -1179,11 +1255,13 @@ def test_no_exact_catalogue_match_is_not_guessed_under_yes(tmp_path, monkeypatch
     result = CliRunner().invoke(command, options)
     assert result.exit_code == 0, result.output
     assert "Model not found; did you mean" not in result.output
-    assert "No catalogue match; model limits and reasoning levels remain unknown." in result.output
+    assert "No details listed" in result.output
 
 
 @pytest.mark.parametrize("action", ["edit", "keep_context", "skip", "cancel"])
-def test_model_settings_can_be_edited_skipped_or_cancelled(tmp_path, monkeypatch, action):
+def test_model_settings_can_be_edited_skipped_or_cancelled(
+    tmp_path, monkeypatch, action, unavailable_endpoint_limits
+):
     from nooa.unifiedllm import connect
 
     published = {
@@ -1200,13 +1278,13 @@ def test_model_settings_can_be_edited_skipped_or_cancelled(tmp_path, monkeypatch
     path = tmp_path / "models.yaml"
     options = [arg for arg in args(path) if arg != "--no-catalogue"]
     answers = {
-        "edit": "edit\n0\n64000\n2048\nlow,medium\nmedium\nuse\ny\n",
-        "keep_context": "edit\n\n2048\nlow,medium\nmedium\nuse\ny\n",
-        "skip": "skip\ny\n",
-        "cancel": "cancel\n",
+        "edit": "change\nlimits\n0\n64000\n2048\nrecommended\nsave\ny\n",
+        "keep_context": "change\nlimits\n\n2048\nrecommended\nsave\ny\n",
+        "skip": "change\nlimits\n-\n-\n-\nsave\ny\n",
+        "cancel": "",
     }
     result = CliRunner().invoke(command, options, input=answers[action])
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == (1 if action == "cancel" else 0), result.output
     assert published["context_length"] == 128000
     if action == "cancel":
         assert not path.exists()
@@ -1216,16 +1294,13 @@ def test_model_settings_can_be_edited_skipped_or_cancelled(tmp_path, monkeypatch
     if action == "skip":
         assert "context_window" not in entry
         assert "reasoning_levels" not in entry
-        assert "Continuing without the published model settings" in result.output
+        assert "Change settings" in result.output
     else:
         if action == "edit":
             assert "Enter a positive whole number" in result.output
         assert entry["context_window"] == (128000 if action == "keep_context" else 64000)
-        assert entry["reasoning_levels"] == {
-            "low": {"reasoning_effort": "low"},
-            "medium": {"reasoning_effort": "medium"},
-        }
-        assert entry["reasoning_default"] == "medium"
+        assert not entry.get("reasoning_levels")
+        assert "reasoning_level" not in entry and "reasoning_default" not in entry
         assert "provenance" not in entry  # edit sources and probe plans stay in the session
 
 
@@ -1273,7 +1348,7 @@ def test_default_budget_covers_explicit_small_cap_and_every_level(tmp_path, monk
             "--output",
             str(path),
         ],
-        input="y\ny\n",
+        input="262144\n262144\ndiscover\ntest\ndefault\ntest\ny\n",
     )
     assert result.exit_code == 0, result.output
     assert [body["reasoning_effort"] for body in bodies if "reasoning_effort" in body] == [
@@ -1284,8 +1359,8 @@ def test_default_budget_covers_explicit_small_cap_and_every_level(tmp_path, monk
     # check_interfaces also probes the first level (max) per interface, cheaply,
     # to recommend which interface actually surfaces reasoning. Routing is then
     # rechecked at the configured cap; tools and all six levels run for real.
-    # The session seed returns no tools, so its follow-on replies do not run.
-    assert len(bodies) == 12
+    # Model default does not select max for the session; all three base-setting turns run.
+    assert len(bodies) == 14
     entry = yaml.safe_load(path.read_text())["models"]["local"]
     assert "provenance" not in entry  # outcomes were checked on the wire; see bodies
 
@@ -1320,10 +1395,10 @@ def test_unset_budget_tokens_is_unlimited_and_never_warns(tmp_path, monkeypatch)
             "--output",
             str(path),
         ],
-        input="y\ny\n",
+        input="262144\n262144\ndiscover\ntest\ndefault\ntest\ny\n",
     )
     assert result.exit_code == 0, result.output
-    assert "Shared token budget: unlimited" in result.output
+    assert "Check budget: unlimited" not in result.output
     assert "budget remaining:" not in result.output
     assert "Estimated tokens:" not in result.output
     assert "too small for all checks" not in result.output
@@ -1344,10 +1419,16 @@ def test_declining_initial_approval_makes_no_calls_or_writes(tmp_path, monkeypat
         raise AssertionError("Approval was declined")
 
     mock_http(monkeypatch, forbidden)
+    monkeypatch.setenv("CONNECT_TEST_KEY", "test-key")
     path = tmp_path / "models.yaml"
-    result = CliRunner().invoke(command, ["--output", str(path)], input="n\n")
+    flags = [value for value in args(path) if value != "--no-probe"]
+    result = CliRunner().invoke(
+        command, [*flags, "--media-inputs", ""], input="262144\n262144\nsave\nn\n"
+    )
     assert result.exit_code == 0, result.output
-    assert "Approve setup and optional media checks" in result.output
+    assert "Would you like to test these settings?" in result.output
+    assert "1 (test): Test now" in " ".join(result.output.split())
+    assert "Approve setup" not in result.output
     assert not path.exists()
 
 
@@ -1380,10 +1461,11 @@ def test_initial_approval_defaults_to_yes(tmp_path, monkeypatch):
             "--output",
             str(path),
         ],
-        input="\nn\n",
+        input="262144\n262144\n\nn\n",
     )
     assert result.exit_code == 0, result.output
-    assert "Approve setup and optional media checks with this token budget? [Y/n]" in result.output
+    assert "Choice [1]:" in result.output
+    assert "Test now" in result.output and "Approve setup" not in result.output
     assert len(requests) == 1
     assert not path.exists()  # Saving remains a separate choice.
 
@@ -1419,10 +1501,19 @@ def test_provider_menu_fills_connection_defaults(
     monkeypatch.setattr(connect, "discover", discover)
     monkeypatch.setenv(key_env, "preset-test-key")
     result = CliRunner().invoke(
-        command, ["--no-catalogue", "--no-probe"], input=f"{provider}\ntest-model\n\nmy-model\ny\n"
+        command,
+        ["--no-catalogue", "--no-probe"],
+        input=(
+            f"{provider}\ntest-model\n262144\n262144\n-\nsave\nmy-model\ny\n"
+            if provider == "anthropic"
+            else f"{provider}\ntest-model\n262144\n262144\ndiscover\n-\nsave\n{style}\nmy-model\ny\n"
+        ),
     )
     assert result.exit_code == 0, result.output
-    assert seen == [(base, {"api_style": style, "api_key": "preset-test-key"})]
+    expected_listing = {"api_style": style, "api_key": "preset-test-key"}
+    if provider == "openrouter":
+        expected_listing.update(api_key=None, models_url=base + "/models", listing_style=style)
+    assert seen == [(base, expected_listing)]
     entry = yaml.safe_load((tmp_path / "llm_config.yaml").read_text())["models"]["my-model"]
     saved_base = base.removesuffix("/v1") if style == "anthropic" else base
     assert (entry["api_base"], entry["api_style"], entry["api_key_env"]) == (
@@ -1433,7 +1524,16 @@ def test_provider_menu_fills_connection_defaults(
     assert "preset-test-key" not in result.output
     assert "Model server URL:" not in result.output
     assert "Key environment variable" not in result.output
-    assert result.output.index("Search advertised model IDs") < result.output.index("API format [")
+    if provider == "anthropic":
+        assert "Request interface" not in result.output and "API format [" not in result.output
+        assert result.output.index("Search available models") < result.output.index("Model details")
+    else:
+        assert (
+            result.output.index("Search available models")
+            < result.output.index("Request interface")
+            < result.output.index("Would you like to test these settings?")
+            < result.output.index("API format [")
+        )
 
 
 @pytest.mark.parametrize("style", ["chat", "responses", "anthropic"])
@@ -1464,11 +1564,18 @@ def test_mixed_endpoint_selects_model_before_request_interface(tmp_path, monkeyp
             "--output",
             str(path),
         ],
-        input=f"vendor-b/model\n{style}\nselected\ny\n",
+        input=f"vendor-b/model\n262144\n262144\ndiscover\nsave\n{style}\n"
+        + ("save\n" if style != "chat" else "")
+        + "selected\ny\n",
     )
     assert result.exit_code == 0, result.output
     assert len(seen) == 1
-    assert result.output.index("Search advertised model IDs") < result.output.index("API format [")
+    assert (
+        result.output.index("Search available models")
+        < result.output.index("Request interface")
+        < result.output.index("Would you like to test these settings?")
+        < result.output.index("API format [")
+    )
     entry = yaml.safe_load(path.read_text())["models"]["selected"]
     assert entry["api_style"] == style
     assert entry["model_name"].endswith("/vendor-b/model")
@@ -1505,7 +1612,9 @@ def test_large_model_list_and_invalid_choice_do_not_flood_terminal(tmp_path, mon
 
     monkeypatch.setattr(connect, "discover", discover)
     result = CliRunner().invoke(
-        command, args(tmp_path / "models.yaml")[1:], input="wrong\nvendor/model-42\ny\n"
+        command,
+        args(tmp_path / "models.yaml")[1:],
+        input="wrong\nvendor/model-42\n262144\n262144\nsave\ny\n",
     )
     assert result.exit_code == 0, result.output
     assert "Found 1000 models" in result.output
@@ -1581,7 +1690,7 @@ def test_local_failure_diagnostics_are_explicit_and_retrievable(tmp_path, diagno
     assert ("Agent diagnostic prompt" in result.output) is diagnostics
     if diagnostics:
         assert '"run_context"' in result.output
-        assert "nooa-model-configuration" in result.output
+        assert "nooa-connect" in result.output
     else:
         assert "--show-diagnostics" in result.output
         assert len(result.output) < 500

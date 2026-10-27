@@ -94,13 +94,13 @@ def test_null_secrets_env_is_populated(tmp_path):
 def _write_from_process(path, alias, first_inside, release_first, second_started, second_inside):
     original_write = connect._write_entry
 
-    def held_write(entry, path, *, alias):
+    def held_write(entry, path, *, alias, **kwargs):
         if alias == "first":
             first_inside.set()
             assert release_first.wait(15)
         else:
             second_inside.set()
-        original_write(entry, path, alias=alias)
+        original_write(entry, path, alias=alias, **kwargs)
 
     connect._write_entry = held_write
     if alias == "second":
@@ -170,3 +170,36 @@ async def test_unobserved_unauthenticated_request_is_not_called_dropped_settings
     assert record["outcome"] == "not_confirmed"
     assert record["settings_sent"] is None
     assert "not observed" in record["reason"]
+
+
+async def test_routing_retries_once_without_rejected_prompt_cache_options(monkeypatch):
+    """Azure o-series models refuse prompt_cache_options; caching is turned off, not fatal."""
+    sent = []
+
+    def handle(request):
+        import json
+
+        body = json.loads(request.content)
+        sent.append(body)
+        if "prompt_cache_options" in request.content.decode():
+            return httpx.Response(
+                400,
+                json={
+                    "error": {
+                        "message": "prompt_cache_options is not supported on this model",
+                        "type": "invalid_request_error",
+                        "param": "prompt_cache_options",
+                    }
+                },
+            )
+        return httpx.Response(200, json=response_body("responses"))
+
+    mock_http(monkeypatch, handle)
+    plan = connect.plan("model", "azure/openai/o4-mini", "responses", "https://hub.test/v1", "")
+    result = await connect.check_stage(plan, "routing", api_key="test-key")
+    assert result.entry["provenance"]["probes"]["routing"]["outcome"] == "accepted"
+    assert result.entry["cache_breakpoint"] is None
+    assert result.entry["provenance"]["explicit_cache"]["outcome"] == "rejected"
+    assert "not supported" not in str(result.entry["provenance"]["explicit_cache"])
+    assert any("prompt_cache_options" in str(body) for body in sent)
+    assert "prompt_cache_options" not in str(sent[-1])

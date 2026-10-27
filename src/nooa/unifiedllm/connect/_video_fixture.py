@@ -1,11 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Bundled synthetic video, created locally; no downloaded media.
+"""A tiny MP4 video used by the video test call, stored as base64.
 
-Apache-2.0, like this source. FFmpeg 8.0.1 / libx264 encoded four 64x64
-RGB solid-color frames at 4 fps: two red, then two blue. H.264/yuv420p,
-MP4 with faststart, duration 1 s, no audio. No runtime encoder dependency.
-See docs/model-connect.md for provenance and independent decoding checks.
+The video was generated locally (not downloaded) and is licensed Apache-2.0
+like this source file. FFmpeg 8.0.1 with libx264 encoded four 64x64 solid-colour
+frames at 4 fps: two red, then two blue. Format: H.264, yuv420p, MP4 with
+faststart, 1 second, no audio. Storing the bytes avoids needing a video
+encoder at runtime. See docs/model-connect.md for how it was made and how it
+was checked by independent decoders.
 """
 
 import base64
@@ -41,5 +43,5 @@ _VIDEO_BASE64 = (
 
 
 def video_fixture():
-    """Return the original, independently decoded MP4 bytes."""
+    """Return the MP4 bytes of the bundled test video."""
     return base64.b64decode(_VIDEO_BASE64)

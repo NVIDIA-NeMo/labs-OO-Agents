@@ -1,6 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Resolve explicitly selected context and events for decision-model state."""
+"""Gather the context blocks and events that go into a decision request's state.
+
+A decision model only sees what the decision method opts in to. These helpers
+resolve the context blocks selected for a call and serialize the events chosen
+by an event query, so ``render_decision_state`` can add them to the JSON state.
+"""
 
 from __future__ import annotations
 
@@ -8,6 +13,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 from nooa.context_blocks import Context, DynamicContext, Role
+from nooa.decisions.media import reject_nested_media
 
 if TYPE_CHECKING:
     from nooa.context_blocks import EventBase
@@ -23,7 +29,16 @@ async def resolve_decision_context(
     disabled_keys: set[str],
     resolve_dynamic: DynamicResolver,
 ) -> dict[str, Any]:
-    """Merge and resolve context blocks explicitly selected for a decision."""
+    """Merge and resolve the context blocks selected for a decision call.
+
+    Blocks declared on the method's decorator are merged with blocks from an
+    active ``ScopedContext``; a scoped block replaces a decorator block with the same
+    key. Keys in ``disabled_keys`` and ``None`` values are skipped. Dynamic
+    blocks are evaluated through ``resolve_dynamic``.
+
+    Returns:
+        A mapping from block key to its resolved value.
+    """
     selected = {**(decorator_context or {}), **(scoped_context or {})}
     resolved: dict[str, Any] = {}
     for key, raw_value in selected.items():
@@ -47,7 +62,15 @@ def select_decision_events(
     agent_query: EventQuery | None,
     current_call_id: str | None,
 ) -> list[dict[str, Any]] | None:
-    """Select and serialize events when an effective event query opts in."""
+    """Select and serialize the events to include in a decision's state.
+
+    The first query that is set wins, in this order: the runtime query, the
+    scoped query, the decorator query, then the agent's default query.
+
+    Returns:
+        ``None`` when no query is set (events are left out of the state),
+        otherwise the serialized events selected by the query.
+    """
     query = runtime_query or scoped_query or decorator_query or agent_query
     if query is None:
         return None
@@ -59,12 +82,28 @@ def select_decision_events(
 
 
 def _decision_event_payload(event: EventBase) -> dict[str, Any] | None:
-    """Return stable model-visible event data without persistence metadata."""
+    """Serialize one event's model-visible fields, or return ``None`` to skip it.
+
+    Runtime and metadata events, and empty events, are skipped. Only fields
+    shown in ``repr`` are included; fields with ``repr=False`` hold internal
+    or storage data and are left out.
+
+    Raises:
+        TypeError: If a model-visible field contains a Media object.
+    """
     role = getattr(event, "_role", Role.USER)
     if role in {Role.RUNTIME_EVENT, Role.METADATA} or event.is_empty:
         return None
 
     public_fields = {name for name, field in type(event).model_fields.items() if field.repr}
+    # Check for Media before calling model_dump: a custom serializer could
+    # turn a nested Image into text. Fields with repr=False are not checked
+    # because they are not sent to the model.
+    for name in public_fields:
+        try:
+            reject_nested_media(getattr(event, name))
+        except TypeError as exc:
+            raise TypeError(f"Decision event {event.event_type!r} field {name!r}: {exc}") from exc
     data = event.model_dump(
         mode="python",
         include=public_fields,

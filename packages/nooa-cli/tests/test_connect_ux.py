@@ -96,10 +96,10 @@ def test_normal_wizard_transcript(monkeypatch, tmp_path, columns, save):
     path = tmp_path / "models.yaml"
     result = CliRunner().invoke(
         command,
-        ["--output", str(path)],
+        ["--output", str(path), "--reasoning-template", "effort", "--levels", "low,high"],
         input=(
-            "y\ncustom\nhttps://api.test/v1\nnew\nUX_KEY\ntemporary-secret\n"
-            "test\nmodel\nuse\nrecommended\nkeep\nlocal\n" + ("y\nn\n" if save else "n\n")
+            "custom\nhttps://api.test/v1\nnew\nUX_KEY\ntemporary-secret\n"
+            "model\ndiscover\ntest\ndefault\ntest\nkeep\nlocal\n" + ("y\nn\n" if save else "n\n")
         ),
     )
     assert result.exit_code == 0, result.output
@@ -111,17 +111,16 @@ def test_normal_wizard_transcript(monkeypatch, tmp_path, columns, save):
     (tmp_path / "transcript-normalized.txt").write_text(plain + "\n")
     checkpoints = [
         "NOOA / CONNECT",
-        "Approve setup",
         "Choose a provider",
         "Model server URL",
         "Key environment variable",
         "API key",
+        "Search available models",
+        "Request interface",
+        "OpenAI-compatible Chat: Works",
         "configure media inputs",
-        "Search advertised model IDs",
-        "OpenAI-compatible Chat: Passed",
-        "Model details",
-        "Model settings",
-        "Reply limit",
+        "Proposed configuration",
+        "Would you like to test these settings?",
         "Connection: Passed",
         "Tool use: Passed",
         "Reasoning (low): Passed",
@@ -137,7 +136,7 @@ def test_normal_wizard_transcript(monkeypatch, tmp_path, columns, save):
         "Reasoning retention: Passed",
         "Results",
         "Save model",
-        "Enabled media inputs",
+        "Images: enabled (test passed)",
         "How would you like to continue?",
         "Save this model as",
         "Save summary",
@@ -148,10 +147,15 @@ def test_normal_wizard_transcript(monkeypatch, tmp_path, columns, save):
     assert "No tool call returned" not in plain
     assert "temporary-secret" not in output and "private-reasoning" not in output
     assert "reasoning chars" not in output and "Reasoning tokens ·" not in output
-    assert plain.count("Checks may incur charges.") == 1
+    assert "Checks may incur charges." not in plain
+    assert "Uses the approved token budget" not in plain
+    assert "Test now approves" not in plain
     rows = [row for row in output.splitlines() if re.match(r"  [✓!–] ", row)]
     assert rows and all(
-        re.search(r": (Passed|Not available|Failed|Skipped)( · 0.0s)?$", row) for row in rows
+        re.search(
+            r": (Passed|Not available|Failed|Skipped|Works|Returned|Not returned)( · 0.0s)?$", row
+        )
+        for row in rows
     )
     assert all(len(row) <= columns for row in rows)
     assert path.exists() is save
@@ -184,7 +188,10 @@ def test_normal_wizard_transcript(monkeypatch, tmp_path, columns, save):
 def test_choices_reach_actual_renderer(monkeypatch, columns, case):
     monkeypatch.setenv("TERM", "xterm-256color")
     monkeypatch.setattr(prompts.sys.stdin, "isatty", lambda: True)
+    from prompt_toolkit.application import Application
+
     original = ChoiceInput._create_application
+    original_run = Application.run
     screens = []
     options = {
         "provider": (
@@ -219,7 +226,7 @@ def test_choices_reach_actual_renderer(monkeypatch, columns, case):
                 "cancel": "Cancel setup",
             },
         ),
-        "catalogue": ("Catalogue model", ("", "vendor/model"), "", None),
+        "catalogue": ("Which of these is your model?", ("", "vendor/model"), "", None),
         "reasoning": ("Default reasoning level", ("low", "high", "-"), "low", None),
     }
 
@@ -245,12 +252,38 @@ def test_choices_reach_actual_renderer(monkeypatch, columns, case):
                     )
                 if not sent:
                     sent = True
-                    pipe.send_text("\x1b[B\r")
+                    pipe.send_text(" \r" if case == "manual" else "\x1b[B\r")
+
+            app.after_render += rendered
+            return app
+
+        def checkbox_run(app, *args, **kwargs):
+            app = create_checkbox(app)
+            return original_run(app, *args, **kwargs)
+
+        def create_checkbox(app):
+            sent = False
+
+            def rendered(_):
+                nonlocal sent
+                screen = app.renderer.last_rendered_screen
+                if screen is not None:
+                    screens.append(
+                        "\n".join(
+                            "".join(row[x].char for x in sorted(row))
+                            for _, row in sorted(screen.data_buffer.items())
+                        )
+                    )
+                if not sent:
+                    sent = True
+                    pipe.send_text(" \r")
 
             app.after_render += rendered
             return app
 
         monkeypatch.setattr(ChoiceInput, "_create_application", create)
+        if case == "manual":
+            monkeypatch.setattr(Application, "run", checkbox_run)
         if case in options:
             text, values, default, labels = options[case]
             selected = prompts.prompt(text, choices=values, default=default, labels=labels)
@@ -263,7 +296,7 @@ def test_choices_reach_actual_renderer(monkeypatch, columns, case):
             assert prompts.review_media_inputs(["image"]) == "manual"
         else:
             assert prompts.choose_media_inputs() == ["image"]
-    assert screens and "Enter Continue" in screens[0]
+    assert screens and ("Enter Confirm" if case == "manual" else "Enter Continue") in screens[0]
     assert "→ to edit" not in screens[0] and "Enter to use" not in screens[0]
     assert all(len(line) <= columns for screen in screens for line in screen.splitlines())
     for token in ("recommended:", "highflag", "keep:", "test:"):
@@ -277,29 +310,41 @@ def test_choices_reach_actual_renderer(monkeypatch, columns, case):
     elif case == "reply":
         for label in (
             "Recommended — 32,768 tokens",
-            "High reasoning budget — 65,536 tokens",
+            "High reply limit — 65,536 tokens",
             "Custom…",
         ):
             assert label in " ".join(screens[0].split())
     elif case == "manual":
-        assert "Text only" in screens[0] and "Image, Audio, Video, PDF" in screens[0]
+        assert "text only" in screens[0]
+        assert all(
+            label in screens[0] for label in ("Images", "Audio", "Video", "PDFs", "Space Toggle")
+        )
 
 
 def test_normal_mode_keeps_technical_reasoning_details_optional():
     @click.command()
     def display():
         progress = view.CheckProgress()
-        progress.update(
-            "level:high",
+        from nooa.unifiedllm import connect
+
+        record = {
+            "outcome": "accepted",
+            "reasoning_observed": True,
+            "answer_correct": True,
+            "reasoning_encrypted": True,
+            "reasoning_encrypted_bytes": 400,
+            "output_tokens": 500,
+        }
+        entry = connect.configure_entry(
             {
-                "outcome": "accepted",
-                "reasoning_observed": True,
-                "answer_correct": True,
-                "reasoning_encrypted": True,
-                "reasoning_encrypted_bytes": 400,
-                "output_tokens": 500,
-            },
+                "model_name": "openai/model",
+                "reasoning_levels": {
+                    "high": {"reasoning_effort": "high"},
+                },
+            }
         )
+        connect.stamp_verification(record, entry, "level:high")
+        progress.update("level:high", record)
         progress.finish()
 
     result = CliRunner().invoke(display)
@@ -387,6 +432,12 @@ def test_no_default_requires_selection_and_custom_budget_is_editable(monkeypatch
 def test_display_outcomes_do_not_upgrade_unconfirmed_evidence(name, record, expected):
     from nooa.unifiedllm.connect._records import check_status
 
+    if expected == "Passed":
+        from nooa.unifiedllm import connect
+
+        connect.stamp_verification(
+            record, connect.configure_entry({"model_name": "openai/model"}), name
+        )
     original = record.copy()
     assert view.check_outcome(name, record, check_status(name, record)) == expected
     assert record == original

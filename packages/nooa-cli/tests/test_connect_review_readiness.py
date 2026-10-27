@@ -56,9 +56,9 @@ async def test_catalogue_normalizes_before_frontend_use(monkeypatch, efforts):
     (record,) = await connect.catalogue()
     assert record["context_length"] == 10000
     assert record["top_provider"] == {}
-    assert record["reasoning"]["supported_efforts"] == (
-        ["high", "low"] if isinstance(efforts, list) else []
-    )
+    assert (
+        record["reasoning"]["supported_efforts"] == []
+    )  # Malformed effort arrays are not profiles.
     assert "default_effort" not in record["reasoning"]
 
 
@@ -89,7 +89,7 @@ def test_no_probe_can_authenticate_model_discovery(monkeypatch, tmp_path):
         if label.startswith("API key"):
             assert kwargs["hide_input"]
             return "discovery-secret"
-        assert label == "Model"
+        assert label == "Search available models (type to search; Tab to select)"
         raise click.Abort()
 
     mock_http(monkeypatch, handle)

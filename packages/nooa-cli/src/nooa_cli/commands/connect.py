@@ -1,13 +1,50 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Terminal approval and display for the shared nooa.unifiedllm.connect library."""
+"""The ``nooa connect`` command: set up, test and save a model entry from the terminal.
+
+This module only declares the Click command and checks that its options fit
+together. The work happens elsewhere: ``--stage`` runs one non-interactive step
+that prints JSON (``_connect_stages``), and without ``--stage`` the guided
+interactive setup runs (``_connect_wizard``). Both use the shared library
+``nooa.unifiedllm.connect``, whose module docstring defines the terms used here
+(model entry, API style, model listing, test call).
+"""
 
 import click
 
 from ._connect_stages import STAGES
 
 
-@click.command()
+class ConnectCommand(click.Command):
+    """Click command whose ``--help`` output uses the same look as the connect screens.
+
+    Parsing and behaviour are those of ``click.Command``; only the help text is
+    re-wrapped to the terminal width, indented, and has its headings coloured.
+    """
+
+    def get_help(self, ctx):
+        """Return Click's help text re-wrapped and styled for the connect screens.
+
+        Lines that start a section (``Usage:`` or a line ending in ``:``) are
+        bold cyan unless ``NO_COLOR`` is set in the environment.
+        """
+        from . import _connect_view as view
+
+        rendered = []
+        width = max(8, view.shutil.get_terminal_size((80, 24)).columns - 2)
+        for row in super().get_help(ctx).splitlines():
+            if not row:
+                rendered.append("")
+                continue
+            heading = not row.startswith(" ") and (row.startswith("Usage:") or row.endswith(":"))
+            for part in view.textwrap.wrap(row.strip(), width=width, break_on_hyphens=False):
+                if "NO_COLOR" not in view.os.environ:
+                    part = click.style(part, bold=heading, fg="bright_cyan" if heading else None)
+                rendered.append("  " + part)
+        return "\n".join(rendered)
+
+
+@click.command(cls=ConnectCommand)
 @click.argument("model", required=False)
 @click.option(
     "--edit-model",
@@ -30,7 +67,16 @@ from ._connect_stages import STAGES
     help="Connection preset: nvidia, hub (NVIDIA Inference Hub), openai, anthropic, google, openrouter, or custom.",
 )
 @click.option("--as", "alias", help="Local model alias to save (otherwise prompted).")
-@click.option("--endpoint", help="API base URL (otherwise prompted).")
+@click.option("--endpoint", help="API base URL, or full decision request URL (otherwise prompted).")
+@click.option(
+    "--systemone-endpoint",
+    help="Full System One request URL to include in API discovery for a custom server.",
+)
+@click.option(
+    "--share-interface-key",
+    is_flag=True,
+    help="Explicitly allow mixed interface checks to share the inference key across origins.",
+)
 @click.option(
     "--api-style",
     type=click.Choice(["chat", "responses", "anthropic", "systemone", "openai"]),
@@ -41,15 +87,45 @@ from ._connect_stages import STAGES
 )
 @click.option(
     "--api-key-env",
-    help="Environment variable name, never the key itself (otherwise prompted).",
+    help="Name of the environment variable holding your key (otherwise prompted).",
 )
-@click.option("--catalogue-model", help="Explicit OpenRouter model ID to use as metadata.")
+@click.option(
+    "--catalogue-model", help="Explicit OpenRouter metadata ID; stages require --catalogue-file."
+)
+@click.option(
+    "--catalogue-file",
+    type=click.Path(exists=True, dir_okay=False),
+    help="Read a saved OpenRouter catalogue offline for plan/check stages; exact mapping only.",
+)
 @click.option(
     "--discovery-file",
     type=click.Path(exists=True, dir_okay=False),
     help="JSON output from --stage discover; reuse endpoint limits without another request.",
 )
+@click.option(
+    "--models-url", help="Full shared catalogue GET URL; required for custom decision listing."
+)
+@click.option(
+    "--listing-style",
+    type=click.Choice(["chat", "responses", "anthropic"]),
+    help="How the model list authenticates and pages results; choose separately from --api-style.",
+)
+@click.option(
+    "--discovery-api-key-env",
+    help="Catalogue key variable; - for no authentication. Required for a different origin.",
+)
 @click.option("--prompt-key", is_flag=True, help="Read a masked key; offer to save it at the end.")
+@click.option(
+    "--no-metadata",
+    is_flag=True,
+    help="Bypass all metadata GETs; supply the exact model and known interface. Testing remains optional.",
+)
+@click.option(
+    "--server-metadata",
+    type=click.Choice(["listing", "litellm"]),
+    default="listing",
+    help="Reuse model listing, or validate public LiteLLM OpenAPI then fetch one selected model group. Hub preset validates LiteLLM automatically.",
+)
 @click.option("--no-catalogue", is_flag=True, help="Do not fetch public model metadata.")
 @click.option(
     "--reasoning-template",
@@ -65,7 +141,7 @@ from ._connect_stages import STAGES
 @click.option(
     "--context-window",
     type=click.IntRange(min=1),
-    help="User-supplied context limit, not a request allocation.",
+    help="Known context window size to save (tokens).",
 )
 @click.option(
     "--probe",
@@ -76,9 +152,14 @@ from ._connect_stages import STAGES
 )
 @click.option("--no-probe", is_flag=True, help="Save an untested entry without model calls.")
 @click.option(
+    "--no-cache",
+    is_flag=True,
+    help="Disable explicit chat cache options/markers for this profile; provider automatic caching is unchanged.",
+)
+@click.option(
     "--budget-tokens",
     type=click.IntRange(min=1),
-    help="Estimated token budget for checks (default: unlimited); not a spending cap.",
+    help="Token budget for tests (default: unlimited).",
 )
 @click.option(
     "--output-tokens",
@@ -87,14 +168,14 @@ from ._connect_stages import STAGES
     # the CLI need not import nooa.unifiedllm at load; a test keeps them equal.
     default=2048,
     show_default=True,
-    help="Cap for interface discovery only, before the saved reply budget is chosen.",
+    help="Reply limit for chat API discovery, before choosing the saved reply limit. Decision calls have no reply limit.",
 )
 @click.option(
     "--reasoning-output-tokens",
     type=click.IntRange(1, 32768),
     default=4096,
     show_default=True,
-    help="Deprecated compatibility option; reasoning checks now use the configured reply cap.",
+    help="Deprecated compatibility option; reasoning checks use the saved reply limit.",
 )
 @click.option(
     "--reasoning-level",
@@ -109,15 +190,36 @@ from ._connect_stages import STAGES
     "--reply-tokens",
     "reply_tokens",
     type=click.IntRange(min=1),
-    help="Reply token limit to save and use for checks.",
+    help="Chat reply limit to save and use for checks. Decision calls have no reply limit.",
+)
+@click.option(
+    "--structured-output-mode",
+    type=click.Choice(["none", "auto", "anthropic"]),
+    default=None,
+    help="Completion-only structured output profile. anthropic uses native output_config.format; none/auto retain the legacy carrier. Omission preserves a same-route saved declaration.",
 )
 @click.option(
     "--media-inputs",
-    help="Manually declare comma-separated image,audio,video,pdf inputs (unverified). Empty or - means text-only.",
+    help="Enable implemented inputs without testing (comma-separated): native Messages/Responses image,pdf; Chat image,audio,video,pdf; The NOOA decision client currently supports image attachments only. Empty or - turns media off.",
 )
 @click.option(
     "--test-media-inputs",
-    help="Test selected image,audio,video,pdf formats with generated samples in the approved budget.",
+    help="Test image,audio,video,pdf inputs with generated samples. Decision models can test images only.",
+)
+@click.option(
+    "--decision-image-transport",
+    type=click.Choice(["json", "typesafe_multipart"]),
+    help="Choose how to send decision images: json or typesafe_multipart. System One image testing requires direct TypeSafe multipart and experimental opt-in.",
+)
+@click.option(
+    "--typesafe-danger-zone-images/--no-typesafe-danger-zone-images",
+    default=None,
+    help="Approve experimental TypeSafe multipart image requests.",
+)
+@click.option(
+    "--allow-unverified",
+    is_flag=True,
+    help="Stage save only: acknowledge a failed input report; writing does not verify it.",
 )
 @click.option("--show-config", is_flag=True, help="Show full YAML details before saving.")
 @click.option(
@@ -133,10 +235,10 @@ from ._connect_stages import STAGES
 @click.option(
     "--working-dir",
     "-w",
-    # No exists=True here: click validates the raw argument before this
-    # command ever runs, so a literal "~" would fail as "does not exist"
-    # even though it's a real directory — expand it ourselves below, then
-    # check existence on the expanded path.
+    # No exists=True here: Click checks the raw argument before the command
+    # runs, so a literal "~" would be reported as "does not exist" although it
+    # names a real directory. The command expands the path itself and then
+    # checks that it exists.
     type=click.Path(file_okay=False, dir_okay=True, path_type=str),
     help=(
         "Save to this project's registry (<working-dir>/.nooa/llm_config.yaml) "
@@ -157,25 +259,38 @@ def command(
     provider,
     alias,
     endpoint,
+    systemone_endpoint,
+    share_interface_key,
     api_style,
     api_key_env,
     prompt_key,
     catalogue_model,
+    catalogue_file,
     discovery_file,
+    models_url,
+    listing_style,
+    discovery_api_key_env,
     no_catalogue,
+    no_metadata,
+    server_metadata,
     reasoning_template,
     levels,
     levels_file,
     context_window,
     probe,
     no_probe,
+    no_cache,
     budget_tokens,
     output_tokens,
     reasoning_output_tokens,
     reasoning_level,
     reply_tokens,
+    structured_output_mode,
     media_inputs,
     test_media_inputs,
+    decision_image_transport,
+    typesafe_danger_zone_images,
+    allow_unverified,
     show_config,
     show_diagnostics,
     output,
@@ -190,6 +305,27 @@ def command(
     MODEL is the exact endpoint model ID, without a LiteLLM routing prefix.
     """
     from ._connect_prompts import parse_media_inputs
+
+    mode_set = structured_output_mode is not None
+    if mode_set and stage in {"discover", "catalogue", "model-info", "interfaces", "decision"}:
+        raise click.UsageError(
+            "--structured-output-mode is a Completion profile control; use a plan/check/save stage"
+        )
+    if mode_set and api_style in {"responses", "systemone", "openai"}:
+        raise click.UsageError("--structured-output-mode requires Completion (chat or anthropic)")
+    mode = None if structured_output_mode == "none" else structured_output_mode
+
+    if no_metadata and (catalogue_model or models_url or discovery_file or catalogue_file):
+        raise click.UsageError("--no-metadata cannot be combined with metadata mappings/files/URLs")
+    if no_catalogue and stage in {"catalogue", "model-info"}:
+        raise click.UsageError(
+            "--no-catalogue disables automatic server metadata; omit it for model-info"
+        )
+    if no_metadata and stage in {"discover", "catalogue", "model-info"}:
+        raise click.UsageError("--no-metadata disables metadata stages")
+    # Older usage passed --no-catalogue with an exact MODEL to skip all metadata
+    # requests; --no-metadata keeps that behaviour by also turning off the catalogue.
+    no_catalogue = no_catalogue or no_metadata
 
     try:
         parse_media_inputs(media_inputs)
@@ -218,11 +354,10 @@ def command(
         from nooa import paths
 
         resolved_dir = Path(working_dir).expanduser().resolve()
-        # click's own file_okay/dir_okay checks only run when its (raw,
-        # unexpanded) argument happens to already exist, so a "~"-relative
-        # path skips them entirely — check both cases explicitly here,
-        # after expansion, rather than reporting "does not exist" for a
-        # real path that just isn't a directory.
+        # Click runs its file_okay/dir_okay checks only when the raw, unexpanded
+        # argument already exists, so a "~"-relative path skips them. Check the
+        # expanded path here so a real file is reported as "not a directory"
+        # instead of "does not exist".
         if not resolved_dir.exists():
             raise click.UsageError(f"--working-dir directory {str(resolved_dir)!r} does not exist.")
         if not resolved_dir.is_dir():
@@ -230,17 +365,22 @@ def command(
         output = str(resolved_dir / paths.DIR_NAME / "llm_config.yaml")
     from nooa.tracing import quiet_trace_target
 
-    # Checks create model clients, which may auto-enable tracing; its
-    # "OTel tracing enabled" line would land mid-way through the wizard output.
+    # Test calls create model clients, which may turn on tracing automatically.
+    # Silence the tracing setup so its "OTel tracing enabled" line does not
+    # appear in the middle of the connect output.
     with quiet_trace_target():
         if stage:
             from ._connect_stages import run_stage
 
             code = run_stage(
                 stage,
+                server_metadata=server_metadata,
+                no_metadata=no_metadata,
                 model=model,
                 alias=alias,
                 endpoint=endpoint,
+                systemone_endpoint=systemone_endpoint,
+                share_interface_key=share_interface_key,
                 api_style=api_style,
                 api_key_env=api_key_env,
                 budget_tokens=budget_tokens,
@@ -249,22 +389,33 @@ def command(
                 reasoning_template=reasoning_template if stage == "interfaces" else None,
                 reasoning_level=reasoning_level,
                 reply_tokens=reply_tokens,
+                cache_enabled=False if no_cache else None,
+                structured_output_mode=mode,
+                structured_output_mode_set=mode_set,
                 media_inputs=media_inputs,
                 test_media_inputs=test_media_inputs,
+                decision_image_transport=decision_image_transport,
+                typesafe_danger_zone_images=typesafe_danger_zone_images,
                 levels_file=levels_file,
                 context_window=context_window,
                 input_file=input_file,
                 output=output,
                 yes=yes,
+                allow_unverified=allow_unverified,
                 prompt_key=prompt_key,
+                catalogue_file=catalogue_file,
+                catalogue_model=catalogue_model,
                 discovery_file=discovery_file,
+                models_url=models_url,
+                listing_style=listing_style,
+                discovery_api_key_env=discovery_api_key_env,
                 invalid_options=[
                     name
                     for name, used in {
                         "--no-probe": no_probe,
                         "--probe": probe != "all",
                         "--provider": provider,
-                        "--catalogue-model": catalogue_model,
+                        "--catalogue-model": catalogue_model and not catalogue_file,
                         "--reasoning-template": reasoning_template and stage != "interfaces",
                         "--reasoning-level": reasoning_level and stage != "interfaces",
                         "--levels": levels,
@@ -276,8 +427,12 @@ def command(
                 working_dir=bool(working_dir),
             )
             raise click.exceptions.Exit(code)
+        if allow_unverified:
+            raise click.UsageError("--allow-unverified requires --stage save")
         if input_file:
             raise click.UsageError("--input requires --stage save")
+        if catalogue_file:
+            raise click.UsageError("--catalogue-file requires a plan/check --stage")
         from ._connect_wizard import run_wizard
 
         run_wizard(
@@ -286,12 +441,19 @@ def command(
             provider=provider,
             alias=alias,
             endpoint=endpoint,
+            systemone_endpoint=systemone_endpoint,
+            share_interface_key=share_interface_key,
             api_style=api_style,
             api_key_env=api_key_env,
             prompt_key=prompt_key,
             catalogue_model=catalogue_model,
             discovery_file=discovery_file,
+            models_url=models_url,
+            listing_style=listing_style,
+            discovery_api_key_env=discovery_api_key_env,
             no_catalogue=no_catalogue,
+            no_metadata=no_metadata,
+            server_metadata=server_metadata,
             reasoning_template=reasoning_template,
             reasoning_level=reasoning_level,
             levels=levels,
@@ -303,8 +465,13 @@ def command(
             output_tokens=output_tokens,
             reasoning_output_tokens=reasoning_output_tokens,
             reply_tokens=reply_tokens,
+            cache_enabled=False if no_cache else None,
+            structured_output_mode=mode,
+            structured_output_mode_set=mode_set,
             media_inputs=media_inputs,
             test_media_inputs=test_media_inputs,
+            decision_image_transport=decision_image_transport,
+            typesafe_danger_zone_images=typesafe_danger_zone_images,
             show_config=show_config,
             show_diagnostics=show_diagnostics,
             output=output,

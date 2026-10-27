@@ -430,12 +430,45 @@ def client_from_config(
     if selected_client_type == "decision":
         from nooa.decisions import DecisionClient
 
+        if (
+            overrides.get("structured_output_mode", config.get("structured_output_mode"))
+            is not None
+        ):
+            raise ValueError("Decision routes do not support structured_output_mode")
+        overrides.pop("structured_output_mode", None)
+
         endpoint = overrides.pop("endpoint", config.get("endpoint"))
         if not endpoint:
             raise ValueError(f"Decision model alias {name!r} requires an endpoint")
         params: dict[str, Any] = {"model": model, "endpoint": endpoint}
         if "api_style" in config and "api_style" not in overrides:
             params["api_style"] = config["api_style"]
+        # media_inputs and the image transport settings describe this model
+        # entry's endpoint. When the overrides send the call to a different
+        # model, endpoint, API style, client or client type, they are dropped.
+        route_changed = (
+            overrides.get("model", model) != model
+            or endpoint != config.get("endpoint")
+            or (
+                "api_style" in overrides
+                and overrides["api_style"] != config.get("api_style", "systemone")
+            )
+            or overrides.get("client") is not None
+            or (
+                "decision_image_transport" in overrides
+                and overrides["decision_image_transport"]
+                != config.get("decision_image_transport", "json")
+            )
+            or (
+                "typesafe_danger_zone_images" in overrides
+                and overrides["typesafe_danger_zone_images"]
+                != config.get("typesafe_danger_zone_images", False)
+            )
+            or (client_type is not None and client_type != config.get("client_type", "completion"))
+        )
+        for key in ("media_inputs", "decision_image_transport", "typesafe_danger_zone_images"):
+            if not route_changed and key in config and key not in overrides:
+                params[key] = config[key]
         if "api_key" not in overrides:
             api_key = resolve_api_key_from_config(name, config)
             if api_key is not None:
@@ -500,10 +533,12 @@ def client_from_config(
         "temperature",
         "top_p",
         "timeout",
+        "chat_template_kwargs",
         "base_url",
         "custom_llm_provider",
         "max_tokens",
         "reasoning",
+        "thinking",
         "reasoning_effort",
         "reasoning_levels",
         "reasoning_default",
@@ -514,6 +549,8 @@ def client_from_config(
         "store",
         "include",
         "cache_breakpoint",
+        "structured_output_mode",
+        "output_config",
         "media_inputs",
     ):
         if key == "base_url" and endpoint_override is not None:
@@ -554,7 +591,13 @@ def client_from_config(
         or (client_type is not None and client_type != config.get("client_type", "completion"))
         or overrides.get("client") is not None
     ):
-        for key in ("reasoning_levels", "reasoning_default", "reasoning_level", "media_inputs"):
+        for key in (
+            "reasoning_levels",
+            "reasoning_default",
+            "reasoning_level",
+            "media_inputs",
+            "structured_output_mode",
+        ):
             params.pop(key, None)
         if "reasoning_levels" in config:
             logger.warning(
