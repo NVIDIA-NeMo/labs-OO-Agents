@@ -630,6 +630,27 @@ async def test_atom_omits_the_core_events_block_but_keeps_events_usable(tmp_path
     assert "print(doc(self.events))" in rendered
 
 
+async def test_first_turn_has_the_events_guidance(tmp_path):
+    """No usage stats exist before the first model response; the guidance is still there."""
+    from atom_test_agents import python_cell
+
+    code = (
+        "return_result(Done(explanation='x', result=TaskResult("
+        "solution_description='a', evidence='b', how_to_verify='c')))"
+    )
+    llm = FakeLLMClient([python_cell(code, "call_1")], strict_exhaustion=True)
+    agent = AtomAgentBase(llm=llm, cwd=tmp_path)
+    try:
+        assert agent.context_stats is None
+        await agent.handle({"user_messages": ["hi"]})
+    finally:
+        await agent.aclose()
+    rendered = "\n".join(str(m.get("content", "")) for m in llm.calls[0].messages)
+    assert "Context: awaiting first model response" in rendered
+    assert "Compact history: self.events.collapse(" in rendered
+    assert "print(doc(self.events))" in rendered
+
+
 async def test_the_tool_docs_are_in_the_cached_prefix(tmp_path):
     """Stable tool docs sit in the leading system message, not the trailing context."""
     messages = await _first_call_messages(tmp_path, "handle")

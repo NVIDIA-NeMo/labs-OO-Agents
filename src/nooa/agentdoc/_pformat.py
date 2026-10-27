@@ -1116,14 +1116,6 @@ def _format_instance_repr(
         }
     eligible_fields = [f for f in type_info.fields if f.repr and f.name not in _repr_excluded]
     for field in eligible_fields:
-        if max_length and field_count >= max_length:
-            record_truncation("max_length")
-            # Truncation 3.0: bare ``...`` matches the inner-marker convention
-            # used everywhere else (dict items, set items, expanded multi-line).
-            # The legacy ``... +N`` form was the last holdout of the old shape.
-            parts.append("...")
-            break
-
         # If __instance_values__ is implemented, only show fields it returned
         # (the protocol allows hiding fields by omitting them)
         if uses_instance_values_protocol and field.name not in values:
@@ -1153,6 +1145,15 @@ def _format_instance_repr(
             continue
         if _is_empty(value) and _hides_empty(obj_type, field.name):
             continue
+        # The limit applies to fields that would be shown: a skipped field
+        # (hidden, callable, or empty with hide_empty) omits nothing.
+        if max_length and field_count >= max_length:
+            record_truncation("max_length")
+            # Truncation 3.0: bare ``...`` matches the inner-marker convention
+            # used everywhere else (dict items, set items, expanded multi-line).
+            # The legacy ``... +N`` form was the last holdout of the old shape.
+            parts.append("...")
+            break
         # Per-field spec(max_string=..., max_length=...) overrides the caller's default.
         field_max_string = _field_spec_override(obj_type, field.name, "max_string")
         if field_max_string is _MISSING:
@@ -1183,12 +1184,11 @@ def _format_instance_repr(
                 continue
             if _is_hidden_field(obj_type, name):
                 continue
+            if _is_empty(value) and _hides_empty(obj_type, name):
+                continue
             if max_length and field_count >= max_length:
                 record_truncation("max_length")
                 break
-
-            if _is_empty(value) and _hides_empty(obj_type, name):
-                continue
             field_max_string = _field_spec_override(obj_type, name, "max_string")
             if field_max_string is _MISSING:
                 field_max_string = max_string
