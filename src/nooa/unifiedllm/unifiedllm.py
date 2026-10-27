@@ -2427,6 +2427,12 @@ class ResponsesClient(UnifiedLLM):
         """
         if cache_breakpoint not in {None, "auto", "openai"}:
             raise ValueError("ResponsesClient cache_breakpoint must be 'auto', 'openai', or None")
+        # The registry forwards structured_output for any alias; JSON mode is a
+        # CompletionClient feature, so consume the key rather than send it to litellm.
+        if config.pop("structured_output", "json_schema") != "json_schema":
+            raise ValueError(
+                "structured_output='json_object' is supported by CompletionClient only"
+            )
         super().__init__(model, media_inputs=media_inputs, **config)
         self.retry_config = retry_config or RetryConfig()
         self.cache_breakpoint = cache_breakpoint

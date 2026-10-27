@@ -14,7 +14,8 @@ import json
 import pytest
 from pydantic import BaseModel
 
-from nooa.unifiedllm.unifiedllm import CompletionClient, _json_object_request
+from nooa.unifiedllm.registry import client_from_config
+from nooa.unifiedllm.unifiedllm import CompletionClient, ResponsesClient, _json_object_request
 
 
 class _Verdict(BaseModel):
@@ -54,3 +55,19 @@ def test_client_defaults_to_json_schema():
 def test_client_rejects_unknown_structured_output():
     with pytest.raises(ValueError, match="structured_output"):
         CompletionClient("openai/fast", api_base="http://x", structured_output="xml")
+
+
+def test_registry_forwards_structured_output_to_completion_client():
+    client = client_from_config(
+        "ds", {"model_name": "deepseek/deepseek-chat", "structured_output": "json_object"}
+    )
+    assert isinstance(client, CompletionClient)
+    assert client.structured_output == "json_object"
+    assert "structured_output" not in client.config
+
+
+def test_responses_client_never_forwards_structured_output():
+    client = ResponsesClient("openai/gpt-5-mini", structured_output="json_schema")
+    assert "structured_output" not in client.config
+    with pytest.raises(ValueError, match="CompletionClient only"):
+        ResponsesClient("openai/gpt-5-mini", structured_output="json_object")
