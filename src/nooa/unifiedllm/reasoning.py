@@ -102,6 +102,20 @@ def _promote_reply_cap(params: dict[str, Any]) -> dict[str, Any]:
     return params
 
 
+def _endpoint_changed(defaults: Mapping[str, Any], overrides: Mapping[str, Any]) -> bool:
+    """Whether a call overrides the endpoint with a different URL.
+
+    ``api_base`` and ``base_url`` are two spellings of one endpoint, so passing the
+    configured URL under the other spelling is not a route change. A ``None``
+    override is no override.
+    """
+    configured = {defaults.get(key) for key in ("api_base", "base_url")} - {None}
+    return any(
+        overrides.get(key) is not None and overrides[key] not in configured
+        for key in ("api_base", "base_url")
+    )
+
+
 def apply_reasoning_level(
     declaration: ReasoningConfig,
     model: str,
@@ -129,9 +143,10 @@ def apply_reasoning_level(
         return _promote_reply_cap(params)
     patch = declaration.settings(level)
     if (
-        any(
-            key in overrides and overrides[key] != defaults.get(key)
-            for key in ("api_base", "base_url", "custom_llm_provider")
+        _endpoint_changed(defaults, overrides)
+        or (
+            "custom_llm_provider" in overrides
+            and overrides["custom_llm_provider"] != defaults.get("custom_llm_provider")
         )
         or overrides.get("model", model) != model
         or overrides.get("client") is not None
