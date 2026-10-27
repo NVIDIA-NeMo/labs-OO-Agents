@@ -509,9 +509,9 @@ class AtomAgent(AtomAgentBase):
         )
         self.context["todo_status"] = Context(expr="self.todo.status()")
         self.context["workspace_state"] = Context(self._workspace_state_context(), prefix=True)
-        self.context["context_usage"] = Context(
-            expr="self.context_stats.format() if self.context_stats else ''"
-        )
+        # Same fallback as AtomAgentBase: the first prompt has no stats yet but
+        # still needs the events guidance that replaces the events_api block.
+        self.context["context_usage"] = Context(expr="self._context_usage()")
         # Skills are documented in python_cell_tools (SkillManager); the
         # registry's dynamic inventory block is not shown. self.skills.status()
         # gives it on demand.

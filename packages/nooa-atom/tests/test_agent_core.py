@@ -651,6 +651,22 @@ async def test_first_turn_has_the_events_guidance(tmp_path):
     assert "print(doc(self.events))" in rendered
 
 
+async def test_atom_agent_first_turn_has_the_events_guidance(tmp_path):
+    """AtomAgent re-registers context_usage; it must keep the first-turn fallback too."""
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    try:
+        assert "events_api" not in agent.context_manager
+        assert dict(agent.context_manager._raw_items())["context_usage"].expr == (
+            "self._context_usage()"
+        )
+        assert agent.context_stats is None
+        text = agent._context_usage()
+        assert "Compact history: self.events.collapse(" in text
+        assert "print(doc(self.events))" in text
+    finally:
+        await agent.aclose()
+
+
 async def test_the_tool_docs_are_in_the_cached_prefix(tmp_path):
     """Stable tool docs sit in the leading system message, not the trailing context."""
     messages = await _first_call_messages(tmp_path, "handle")
