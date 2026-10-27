@@ -651,7 +651,6 @@ class DiscoveringOAuthClientProvider(OAuthClientProvider):
         return error in ("invalid_grant", "invalid_client", "unauthorized_client", "access_denied")
 
     async def _handle_refresh_response(self, response: httpx.Response) -> bool:
-        self._refresh_pending = False
         storage = self.context.storage
         if isinstance(storage, FileTokenStorage):
             issuer = (
@@ -662,14 +661,18 @@ class DiscoveringOAuthClientProvider(OAuthClientProvider):
             if refreshed:
                 self._credentials_entry = saved["entry"]
             elif await self._refresh_rejects_credentials(response):
-                return await self._clear_tokens(reuse_winner=True)
+                refreshed = await self._clear_tokens(reuse_winner=True)
             else:
                 # The SDK clears its in-memory token on a failed response.
                 # Retain the exact persisted deadline/scope/refresh token for
                 # a later connection, without an automatic refresh retry here.
                 self.context.clear_tokens()
-            return refreshed
-        return await super()._handle_refresh_response(response)
+        else:
+            refreshed = await super()._handle_refresh_response(response)
+        # Reading/parsing/saving the response is part of the owning refresh.
+        # On failure/cancellation, leave the flag for that flow's cleanup.
+        self._refresh_pending = False
+        return refreshed
 
     async def _handle_token_response(self, response: httpx.Response) -> None:
         storage = self.context.storage
@@ -796,10 +799,12 @@ class DiscoveringOAuthClientProvider(OAuthClientProvider):
     ) -> AsyncGenerator[httpx.Request, httpx.Response]:
         """Drive each SDK yield in its original slot; never transport guessed refreshes."""
         refresh_attempted = False
+        started = False
         prm_urls: list[str] = []
         asm_urls: list[str] = []
         try:
             pending = await anext(flow)  # SDK initialization and lock acquisition.
+            started = True  # Only this flow may clean up state while owning the SDK lock.
             # The SDK's first non-resource request is a proactive refresh. Its
             # generator is suspended at the refresh-response yield, not resource.
             if pending is not request:
@@ -890,7 +895,8 @@ class DiscoveringOAuthClientProvider(OAuthClientProvider):
         except StopAsyncIteration:
             return
         finally:
-            if getattr(self, "_refresh_pending", False):
+            if started and getattr(self, "_refresh_pending", False):
+                # A canceled SDK-lock waiter never owned this refresh state.
                 # Transport failure/cancellation can close the generator before
                 # any refresh response arrives. Never invalidate disk on that.
                 self._refresh_pending = False
@@ -1017,7 +1023,7 @@ class _SessionConnection:
             self.closing = True
             for result in tuple(self.pending):
                 if not result.done():
-                    result.set_exception(RuntimeError("MCP session was closed"))
+                    result.set_exception(self.error or RuntimeError("MCP session was closed"))
 
     async def _invoke(
         self, method: Any, args: Any, kwargs: Any, result: asyncio.Future[Any]
@@ -1041,11 +1047,16 @@ class _SessionConnection:
                         result.set_result(value)
                 except BaseException as exc:
                     if not result.done():
-                        result.set_exception(
-                            RuntimeError("MCP session was closed")
-                            if isinstance(exc, asyncio.CancelledError)
-                            else exc
-                        )
+                        if not isinstance(exc, asyncio.CancelledError):
+                            result.set_exception(exc)
+                        elif not self.closing and anyio.current_effective_deadline() != float(
+                            "-inf"
+                        ):
+                            # Independent RPC cancellation has no owner failure
+                            # to await. Ancestor-scope/close cancellation instead
+                            # leaves completion to _run after SDK groups drain,
+                            # so their original HTTP/protocol error is retained.
+                            result.set_exception(RuntimeError("MCP request was cancelled"))
                 finally:
                     result.remove_done_callback(cancelled)
         finally:
@@ -1082,6 +1093,9 @@ class _SessionConnection:
         # waiter is still external cancellation and must propagate, while the
         # shield lets the already-stopped owner finish its context cleanup.
         await asyncio.shield(asyncio.gather(self.task, return_exceptions=True))
+        # A completed task's done callback may still be queued after an RPC
+        # waiter woke up. A successful drain must remove its owner synchronously.
+        self.client._sessions.discard(self)
 
 
 class AuthorizedHTTPClient(MCPBaseClient):

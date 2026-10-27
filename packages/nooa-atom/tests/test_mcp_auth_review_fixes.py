@@ -3,6 +3,7 @@
 """Offline review regressions: transient refreshes and session-owned cancellation."""
 
 import asyncio
+import json
 import os
 import threading
 from contextlib import asynccontextmanager
@@ -618,3 +619,250 @@ async def test_cancelling_close_waiter_does_not_recancel_owner_cleanup(tmp_path,
         calling.cancel()
         await asyncio.gather(calling, return_exceptions=True)
         await client.aclose()
+
+
+@pytest.mark.parametrize("status", [401, 503])
+@pytest.mark.parametrize("invoke", ["_invoke", "_call_tool"])
+async def test_owner_http_failure_survives_cancelled_pending_rpc(monkeypatch, status, invoke):
+    # Exercise the production SDK streamable transport and ClientSession, with
+    # a deterministic HTTP failure only after initialize has yielded a session.
+    secret = "synthetic-query-must-not-appear"
+    url = f"https://resource.example/mcp?state={secret}"
+    client = AuthorizedHTTPClient(url, provider=httpx.Auth(), signin=PastedSignIn())
+    original_client = httpx.AsyncClient
+    calls = 0
+    refreshes = 0
+
+    def respond(request):
+        nonlocal calls
+        if request.method == "GET":
+            return httpx.Response(405)
+        payload = json.loads(request.content)
+        if payload["method"] == "initialize":
+            return httpx.Response(
+                200,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": payload["id"],
+                    "result": {
+                        "protocolVersion": payload["params"]["protocolVersion"],
+                        "capabilities": {"tools": {}},
+                        "serverInfo": {"name": "synthetic", "version": "1"},
+                    },
+                },
+            )
+        if payload["method"] == "tools/call":
+            calls += 1
+            return httpx.Response(status, json={"error": "synthetic"})
+        return httpx.Response(202)
+
+    def mock_client(*args, **kwargs):
+        return original_client(
+            *args, **kwargs, transport=httpx.MockTransport(respond), trust_env=False
+        )
+
+    monkeypatch.setattr(mcp_auth.httpx, "AsyncClient", mock_client)
+    tool = MCPTool(client, "synthetic", refresh_ctx={"synthetic": True})
+
+    async def refresh():
+        nonlocal refreshes
+        refreshes += 1
+        return False  # Recognition only: never attempt real or synthetic OAuth here.
+
+    monkeypatch.setattr(tool, "_refresh_access_token", refresh)
+    try:
+        if invoke == "_invoke":
+            with pytest.raises(ExceptionGroup) as caught:
+                await asyncio.wait_for(tool._invoke("echo", {}), 2)
+            leaves = _flatten_exceptions(caught.value)
+            assert any(
+                isinstance(leaf, httpx.HTTPStatusError) and leaf.response.status_code == status
+                for leaf in leaves
+            )
+        else:
+            with pytest.raises(RuntimeError) as caught:
+                await asyncio.wait_for(tool._call_tool("echo", {}), 2)
+            assert f"HTTP {status}" in str(caught.value)
+            assert secret not in str(caught.value)
+            assert refreshes == (1 if status == 401 else 0)
+        assert calls == 1
+        assert asyncio.current_task().cancelling() == 0
+        assert not client._sessions
+        await asyncio.sleep(0)  # Host continuation, not a canceled turn task.
+    finally:
+        await asyncio.wait_for(client.aclose(), 2)
+
+
+@pytest.mark.parametrize("cancel", ["raise", "self_cancel"])
+async def test_independently_cancelled_rpc_completes_without_owner_failure(
+    tmp_path, monkeypatch, cancel
+):
+    storage, provider = await seeded_provider(tmp_path)
+    client = AuthorizedHTTPClient(storage.server_url, provider=provider, signin=PastedSignIn())
+
+    class Session:
+        async def call_tool(self, name, args):
+            if name == "cancel":
+                if cancel == "self_cancel":
+                    asyncio.current_task().cancel()
+                    await asyncio.sleep(0)
+                raise asyncio.CancelledError
+            return "still usable"
+
+    @asynccontextmanager
+    async def transport():
+        async with anyio.create_task_group():
+            yield Session()
+
+    monkeypatch.setattr(client, "_connect_transport", transport)
+    async with client.connect_to_server() as session:
+        with pytest.raises(RuntimeError, match="request was cancelled"):
+            await asyncio.wait_for(session.call_tool("cancel", {}), 2)
+        assert await asyncio.wait_for(session.call_tool("normal", {}), 2) == "still usable"
+        assert asyncio.current_task().cancelling() == 0
+    assert not client._sessions
+
+
+@pytest.mark.parametrize("expired", [False, True])
+async def test_cancelled_refresh_lock_waiter_cannot_mutate_holder(tmp_path, expired):
+    storage, provider = await seeded_provider(tmp_path)
+    if expired:
+        provider.context.token_expiry_time = (
+            1  # Positive, past deadline; zero means unknown to SDK.
+        )
+    entered, release = asyncio.Event(), asyncio.Event()
+    posts = 0
+    fresh_requests = 0
+
+    async def respond(request):
+        nonlocal posts, fresh_requests
+        if str(request.url) == storage.server_url:
+            if request.headers.get("authorization") == "Bearer synthetic-new":
+                fresh_requests += 1
+                return httpx.Response(200)
+            return httpx.Response(401)
+        if "oauth-protected-resource" in request.url.path:
+            return httpx.Response(
+                200,
+                json={
+                    "resource": storage.server_url,
+                    "authorization_servers": ["https://issuer.example/"],
+                },
+            )
+        if request.method == "POST":
+            posts += 1
+            entered.set()
+            await release.wait()
+            return httpx.Response(
+                200,
+                json={
+                    "access_token": "synthetic-new",
+                    "refresh_token": "synthetic-rotated",
+                    "token_type": "Bearer",
+                    "scope": "read write",
+                    "expires_in": 900,
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "issuer": "https://issuer.example/",
+                "authorization_endpoint": "https://issuer.example/authorize",
+                "token_endpoint": "https://issuer.example/token",
+            },
+        )
+
+    async with httpx.AsyncClient(auth=provider, transport=httpx.MockTransport(respond)) as http:
+        holder = asyncio.create_task(http.get(storage.server_url))
+        waiter = None
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            before = storage.path.read_bytes()
+            tokens = provider.context.current_tokens
+            expiry = provider.context.token_expiry_time
+            client_info = provider.context.client_info
+            snapshot = provider._credentials_entry
+            initialized = provider._initialized
+            assert provider._refresh_pending and provider.context.lock.locked()
+            waiter = asyncio.create_task(http.get(storage.server_url))
+            await asyncio.sleep(0)  # It enters anext(SDK flow), waiting on the held lock.
+            assert not waiter.done()
+            waiter.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await waiter
+            assert provider._refresh_pending
+            assert provider.context.current_tokens is tokens
+            assert provider.context.token_expiry_time == expiry
+            assert provider.context.client_info is client_info
+            assert provider._credentials_entry is snapshot
+            assert provider._initialized == initialized
+            assert provider.context.lock.locked()
+            assert storage.path.read_bytes() == before
+            release.set()
+            assert (await asyncio.wait_for(holder, 2)).status_code == 200
+            assert not provider._refresh_pending and not provider.context.lock.locked()
+            saved = storage._entry()
+            assert provider._credentials_entry == saved
+            assert provider.context.current_tokens.access_token == "synthetic-new"
+            assert abs(provider.context.token_expiry_time - saved["expires_at"]) < 0.1
+            assert (await asyncio.wait_for(http.get(storage.server_url), 2)).status_code == 200
+            assert posts == 1 and fresh_requests == 2
+        finally:
+            release.set()
+            for task in (holder, waiter):
+                if task is not None:
+                    task.cancel()
+            await asyncio.gather(
+                *(task for task in (holder, waiter) if task is not None), return_exceptions=True
+            )
+    assert not provider.context.lock.locked()
+
+
+async def test_refresh_owner_cancel_during_response_body_clears_memory_only(tmp_path):
+    storage, provider = await seeded_provider(tmp_path)
+    provider.context.token_expiry_time = 1
+    before = storage.path.read_bytes()
+    entered = asyncio.Event()
+
+    class PendingBody(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            entered.set()
+            await asyncio.Event().wait()
+            yield b"{}"
+
+    def respond(request):
+        if "oauth-protected-resource" in request.url.path:
+            return httpx.Response(
+                200,
+                json={
+                    "resource": storage.server_url,
+                    "authorization_servers": ["https://issuer.example/"],
+                },
+            )
+        if request.method == "POST":
+            return httpx.Response(200, stream=PendingBody())
+        return httpx.Response(
+            200,
+            json={
+                "issuer": "https://issuer.example/",
+                "authorization_endpoint": "https://issuer.example/authorize",
+                "token_endpoint": "https://issuer.example/token",
+            },
+        )
+
+    async with httpx.AsyncClient(auth=provider, transport=httpx.MockTransport(respond)) as http:
+        holder = asyncio.create_task(http.get(storage.server_url))
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            holder.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await holder
+            cleared = provider.context.current_tokens is None
+            assert cleared
+            assert provider.context.token_expiry_time is None
+            assert not provider._initialized and not provider._refresh_pending
+            assert storage.path.read_bytes() == before
+            assert not provider.context.lock.locked()
+        finally:
+            holder.cancel()
+            await asyncio.gather(holder, return_exceptions=True)
