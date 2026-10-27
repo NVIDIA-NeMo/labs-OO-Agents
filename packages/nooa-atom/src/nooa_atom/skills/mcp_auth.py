@@ -21,13 +21,15 @@ answers 401. This module supplies the three pieces it asks for:
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import json
 import os
 import re
 import tempfile
 import time
 from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
+from contextvars import ContextVar
 from datetime import timedelta
 from pathlib import Path
 from typing import Any, Literal
@@ -92,6 +94,10 @@ class FileTokenStorage:
 
     ``client_id`` is a client registered in advance (``oauth_client_id`` in
     the server's settings); it is used when no registration is stored.
+
+    Cooperating POSIX writers serialize whole-file read/derive/replace with
+    an advisory flock on a stable 0600 sidecar (which must not be removed
+    while writers are active). Readers see atomically published snapshots.
     """
 
     def __init__(
@@ -106,6 +112,9 @@ class FileTokenStorage:
         self.path = path or token_file()
         self._client_id = client_id
         self.redirect_uri = redirect_uri
+        self._token_write: ContextVar[tuple[str | None, dict[str, Any]] | None] = ContextVar(
+            "mcp_token_write", default=None
+        )
 
     def _read(self) -> dict[str, Any]:
         try:
@@ -118,14 +127,74 @@ class FileTokenStorage:
         entry = self._read().get(self.server_url)
         return entry if isinstance(entry, dict) else {}
 
-    def _update(self, **fields: Any) -> None:
+    def _open_lock(self) -> int:
+        # Lock a stable sidecar, not the replaced JSON inode. Separate opens
+        # also serialize threads/providers in one process (Linux flock).
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(self.path) + ".lock", os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            os.fchmod(fd, 0o600)
+        except BaseException:
+            os.close(fd)
+            raise
+        return fd
+
+    @contextmanager
+    def _transaction(self):
+        fd = self._open_lock()
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(fd)
+
+    @asynccontextmanager
+    async def _async_transaction(self):
+        # No blocking executor waiter survives cancellation. Locks cover only
+        # local read/derive/replace, never network I/O or the human callback.
+        fd = self._open_lock()
+        try:
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    await asyncio.sleep(0.01)
+            yield
+        finally:
+            os.close(fd)
+
+    def _update_locked(self, **fields: Any) -> dict[str, Any]:
         data = self._read()
         entry = data.get(self.server_url)
         data[self.server_url] = {**(entry if isinstance(entry, dict) else {}), **fields}
         self._write(data)
+        return data[self.server_url]
+
+    def _update(self, **fields: Any) -> None:
+        with self._transaction():
+            self._update_locked(**fields)
+
+    async def update(self, **fields: Any) -> dict[str, Any]:
+        async with self._async_transaction():
+            return self._update_locked(**fields)
+
+    @contextmanager
+    def bind_token_writes(self, issuer: str | None):
+        """Bind an SDK token save and capture its exact published snapshot.
+
+        This context holds no file lock. ContextVar isolates providers sharing
+        storage, and set_tokens takes the short transaction only when saving.
+        """
+        saved: dict[str, Any] = {}
+        token = self._token_write.set((issuer, saved))
+        try:
+            yield saved
+        finally:
+            self._token_write.reset(token)
 
     def _write(self, data: dict[str, Any]) -> None:
-        """Atomically replace the cache, preserving sibling URL entries and mode 0600."""
+        """Replace a transaction's snapshot; callers must hold the sidecar lock."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
         fd, temporary = tempfile.mkstemp(dir=self.path.parent, prefix=".mcp_oauth.")
         try:
@@ -139,6 +208,10 @@ class FileTokenStorage:
 
     def clear_tokens(self) -> None:
         """Forget only tokens/expiry; retain client registration and both issuer bindings."""
+        with self._transaction():
+            self._clear_tokens_locked()
+
+    def _clear_tokens_locked(self) -> None:
         data = self._read()
         entry = data.get(self.server_url)
         if isinstance(entry, dict):
@@ -147,19 +220,40 @@ class FileTokenStorage:
             }
             self._write(data)
 
+    async def invalidate(self, expected: dict[str, Any]) -> dict[str, Any] | None:
+        """Clear only the credential snapshot used by this provider.
+
+        Return a concurrent winner without changing it. Comparing the entire
+        entry includes token value, absolute expiry and registration/bindings;
+        unrelated URL writes do not cause a spurious conflict.
+        """
+        async with self._async_transaction():
+            current = self._entry()
+            if current != expected:
+                return current
+            self._clear_tokens_locked()
+            return None
+
     def forget_auth(self) -> None:
         """Forget this URL's local credentials and binding, not remotely revoke tokens.
 
         Callers must first drain all providers using this URL. Configuration,
         including a configured client ID, is deliberately not changed.
         """
-        data = self._read()
-        if self.server_url in data:
-            del data[self.server_url]
-            self._write(data)
+        # An active same-URL provider in another process can still subsequently
+        # publish *its own* credentials. The registry only drains local owners;
+        # this transaction prevents unrelated URL writes resurrecting this one.
+        with self._transaction():
+            data = self._read()
+            if self.server_url in data:
+                del data[self.server_url]
+                self._write(data)
 
     async def get_tokens(self) -> OAuthToken | None:
-        entry = self._entry()
+        return self._tokens_from_entry(self._entry())
+
+    @staticmethod
+    def _tokens_from_entry(entry: dict[str, Any]) -> OAuthToken | None:
         try:
             tokens = OAuthToken.model_validate(entry["tokens"])
         except (KeyError, ValueError):
@@ -189,11 +283,20 @@ class FileTokenStorage:
 
     async def set_tokens(self, tokens: OAuthToken) -> None:
         expires_at = time.time() + tokens.expires_in if tokens.expires_in else None
-        self._update(tokens=tokens.model_dump(mode="json"), expires_at=expires_at)
+        fields = {"tokens": tokens.model_dump(mode="json"), "expires_at": expires_at}
+        binding = self._token_write.get()
+        if binding and binding[0] is not None:
+            fields["issuer"] = binding[0]
+        entry = await self.update(**fields)
+        if binding:
+            binding[1]["entry"] = entry
 
     async def get_client_info(self) -> OAuthClientInformationFull | None:
+        return self._client_from_entry(self._entry())
+
+    def _client_from_entry(self, entry: dict[str, Any]) -> OAuthClientInformationFull | None:
         try:
-            return OAuthClientInformationFull.model_validate(self._entry()["client_info"])
+            return OAuthClientInformationFull.model_validate(entry["client_info"])
         except (KeyError, ValueError):
             pass
         if self._client_id is None:
@@ -205,16 +308,26 @@ class FileTokenStorage:
         )
 
     async def set_client_info(self, client_info: OAuthClientInformationFull) -> None:
-        fields: dict[str, Any] = {"client_info": client_info.model_dump(mode="json")}
-        tokens = self._entry().get("tokens")
-        if isinstance(tokens, dict) and tokens.get("refresh_token") and not self.get_issuer():
-            # SDK step-up can persist a new registration before authorization
-            # completes, without replacing old tokens. Preserve their known AS
-            # independently before the old native registration binding is lost.
-            previous_issuer = self.get_client_issuer()
-            if previous_issuer:
-                fields["issuer"] = previous_issuer
-        self._update(**fields)
+        async with self._async_transaction():
+            entry = self._entry()
+            fields: dict[str, Any] = {"client_info": client_info.model_dump(mode="json")}
+            tokens = entry.get("tokens")
+            previous = entry.get("client_info")
+            previous_issuer = previous.get("issuer") if isinstance(previous, dict) else None
+            if (
+                previous_issuer
+                and previous.get("client_id") == client_info.client_id
+                and not fields["client_info"].get("issuer")
+            ):
+                # An older SDK model must not erase the native issuer when
+                # round-tripping the very same registration.
+                fields["client_info"]["issuer"] = previous_issuer
+            if isinstance(tokens, dict) and tokens.get("refresh_token") and not entry.get("issuer"):
+                # SDK step-up may persist a registration before new tokens.
+                # Derive this binding from the same locked snapshot we update.
+                if previous_issuer:
+                    fields["issuer"] = previous_issuer
+            self._update_locked(**fields)
 
 
 class SignInTimeoutError(TimeoutError):
@@ -333,10 +446,19 @@ class DiscoveringOAuthClientProvider(OAuthClientProvider):
     """
 
     async def _initialize(self) -> None:
-        await super()._initialize()
         storage = self.context.storage
-        if isinstance(storage, FileTokenStorage) and self.context.current_tokens:
-            self.context.token_expiry_time = storage.get_token_expiry()
+        if not isinstance(storage, FileTokenStorage):
+            await super()._initialize()
+            return
+        # All credential components must come from one atomically published
+        # snapshot, not tokens from A and registration/expiry from B.
+        entry = storage._entry()
+        self._credentials_entry = entry
+        self.context.current_tokens = storage._tokens_from_entry(entry)
+        self.context.client_info = storage._client_from_entry(entry)
+        expiry = entry.get("expires_at")
+        self.context.token_expiry_time = expiry if isinstance(expiry, int | float) else None
+        self._initialized = True
 
     def _is_cimd_client(self) -> bool:
         # URL-shaped registered IDs are not CIMD: only exact configured identity.
@@ -380,12 +502,57 @@ class DiscoveringOAuthClientProvider(OAuthClientProvider):
         self._validate_cached_issuer(expected, refresh=False)
         return expected
 
-    def _clear_tokens(self) -> None:
-        """Persist invalidation before a manual wait, including cancellation/restart."""
+    async def _clear_tokens(self, *, reuse_winner: bool = False) -> bool:
+        """Invalidate only this provider's snapshot, never a concurrent winner."""
         storage = self.context.storage
+        winner = None
         if isinstance(storage, FileTokenStorage):
-            storage.clear_tokens()
+            winner = await storage.invalidate(self._credentials_entry)
         self.context.clear_tokens()
+        if reuse_winner and winner and self._accept_winner(winner):
+            return True
+        return False
+
+    def _accept_winner(self, entry: dict[str, Any]) -> bool:
+        """Reuse only unexpired, scope-sufficient tokens with the same client/AS.
+
+        Resource and AS metadata were validated by refresh discovery. Unknown
+        bindings, changed registrations and portable CIMD IDs do not justify
+        trusting another issuer's token. A rejected winner is left on disk.
+        """
+        storage = self.context.storage
+        if not isinstance(storage, FileTokenStorage) or self.context.oauth_metadata is None:
+            return False
+        if entry.get("client_info") != self._credentials_entry.get("client_info"):
+            return False
+        expected = str(self.context.oauth_metadata.issuer)
+        client = entry.get("client_info")
+        native = client.get("issuer") if isinstance(client, dict) else None
+        bindings = [value for value in (entry.get("issuer"), native) if value is not None]
+        if not bindings or any(
+            not isinstance(value, str) or not _issuers_match(value, expected) for value in bindings
+        ):
+            return False
+        tokens = storage._tokens_from_entry(entry)
+        expiry = entry.get("expires_at")
+        if (
+            tokens is None
+            or not tokens.access_token
+            or not isinstance(expiry, int | float)
+            or not time.time() < expiry
+        ):
+            return False
+        required = set((self.context.client_metadata.scope or "").split())
+        previous_tokens = self._credentials_entry.get("tokens")
+        previous_scope = previous_tokens.get("scope") if isinstance(previous_tokens, dict) else None
+        if isinstance(previous_scope, str):
+            required.update(previous_scope.split())
+        if not required.issubset(set((tokens.scope or "").split())):
+            return False
+        self.context.current_tokens = tokens
+        self.context.token_expiry_time = expiry
+        self._credentials_entry = entry
+        return True
 
     @staticmethod
     async def _parse_prm(response: httpx.Response) -> Any:
@@ -437,19 +604,31 @@ class DiscoveringOAuthClientProvider(OAuthClientProvider):
         return await super()._perform_authorization()
 
     async def _handle_refresh_response(self, response: httpx.Response) -> bool:
-        refreshed = await super()._handle_refresh_response(response)
         storage = self.context.storage
-        if refreshed and isinstance(storage, FileTokenStorage) and self.context.oauth_metadata:
-            storage._update(issuer=str(self.context.oauth_metadata.issuer))
-        elif not refreshed:
-            self._clear_tokens()
-        return refreshed
+        if isinstance(storage, FileTokenStorage):
+            issuer = (
+                str(self.context.oauth_metadata.issuer) if self.context.oauth_metadata else None
+            )
+            with storage.bind_token_writes(issuer) as saved:
+                refreshed = await super()._handle_refresh_response(response)
+            if refreshed:
+                self._credentials_entry = saved["entry"]
+            else:
+                return await self._clear_tokens(reuse_winner=True)
+            return refreshed
+        return await super()._handle_refresh_response(response)
 
     async def _handle_token_response(self, response: httpx.Response) -> None:
-        await super()._handle_token_response(response)
         storage = self.context.storage
-        if isinstance(storage, FileTokenStorage) and self.context.oauth_metadata:
-            storage._update(issuer=str(self.context.oauth_metadata.issuer))
+        if isinstance(storage, FileTokenStorage):
+            issuer = (
+                str(self.context.oauth_metadata.issuer) if self.context.oauth_metadata else None
+            )
+            with storage.bind_token_writes(issuer) as saved:
+                await super()._handle_token_response(response)
+            self._credentials_entry = saved["entry"]
+        else:
+            await super()._handle_token_response(response)
 
     async def _discover_for_refresh(
         self, challenge: httpx.Response | None
@@ -589,7 +768,7 @@ class DiscoveringOAuthClientProvider(OAuthClientProvider):
                     await discovery.aclose()
                 refresh_attempted = True
                 if absent:
-                    self._clear_tokens()
+                    await self._clear_tokens()
                     request.headers.pop("Authorization", None)
                     # This refresh request was NEVER sent. Resume the SDK with
                     # a failed refresh, then send its actual unauthenticated
@@ -621,7 +800,7 @@ class DiscoveringOAuthClientProvider(OAuthClientProvider):
                     finally:
                         await discovery.aclose()
                     if absent:
-                        self._clear_tokens()
+                        await self._clear_tokens()
                         request.headers.pop("Authorization", None)
                     else:
                         refresh_response = yield await self._refresh_token()
