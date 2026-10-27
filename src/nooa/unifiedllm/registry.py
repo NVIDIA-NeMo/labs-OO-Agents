@@ -467,11 +467,20 @@ def client_from_config(
         "drop_params": config.get("drop_params", True),
     }
 
-    # api_base and base_url are two spellings of the same endpoint. If the caller
-    # overrides either one, neither configured value may be kept: the owned SDK
-    # client would otherwise bind the old endpoint and send requests there.
-    endpoint_override = any(key in overrides for key in ("api_base", "base_url"))
-    if not endpoint_override and (api_base := config.get("api_base")):
+    # api_base and base_url are two spellings of the same endpoint. An override
+    # of None counts as no override: clearing the configured endpoint would send
+    # requests and credentials to the provider's default endpoint. A non-None
+    # override of either spelling replaces every spelling the entry configures
+    # (set below), so the owned SDK client never binds the old endpoint.
+    overrides = {
+        key: value
+        for key, value in overrides.items()
+        if not (key in ("api_base", "base_url") and value is None)
+    }
+    endpoint_override = next(
+        (overrides[key] for key in ("api_base", "base_url") if key in overrides), None
+    )
+    if endpoint_override is None and (api_base := config.get("api_base")):
         params["api_base"] = api_base
 
     # Only resolve the registry's api_key_env when the caller hasn't
@@ -507,10 +516,14 @@ def client_from_config(
         "cache_breakpoint",
         "media_inputs",
     ):
-        if key == "base_url" and endpoint_override:
+        if key == "base_url" and endpoint_override is not None:
             continue
         if key in config and key not in overrides:
             params[key] = config[key]
+    if endpoint_override is not None:
+        for alias in ("api_base", "base_url"):
+            if alias in config:
+                params[alias] = endpoint_override
 
     # Registry aliases can centrally tune or disable the clients' default endpoint
     # retry behavior. ``retry_config: false`` means a single attempt for every
