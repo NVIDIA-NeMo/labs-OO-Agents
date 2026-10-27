@@ -9,7 +9,7 @@ import httpx
 import pytest
 from litellm.llms.openai.openai import OpenAIChatCompletion
 
-from nooa.unifiedllm import CompletionClient, registry
+from nooa.unifiedllm import CompletionClient, ResponsesClient, registry
 from nooa.unifiedllm.unifiedllm import _ClientHttp
 
 
@@ -229,3 +229,19 @@ def test_unforwarded_endpoint_key_keeps_context_window():
     }
     client = registry.client_from_config("gateway", raw)
     assert client.context_window == 8192
+
+
+@pytest.mark.parametrize("client_class", [CompletionClient, ResponsesClient])
+@pytest.mark.parametrize(
+    ("configured", "override"), [("base_url", "api_base"), ("api_base", "base_url")]
+)
+def test_per_call_endpoint_override_replaces_the_other_spelling(client_class, configured, override):
+    """A per-call api_base or base_url must replace the client's endpoint, whichever spelling."""
+    client = client_class(
+        "openai/opaque-model", api_key="key", **{configured: "https://old.example/v1"}
+    )
+    params = client._prepare_call_config({override: "https://new.example/v1"})
+    assert params[override] == "https://new.example/v1"
+    assert configured not in params
+    # Without an override the configured endpoint is kept.
+    assert client._prepare_call_config({})[configured] == "https://old.example/v1"

@@ -1301,9 +1301,21 @@ class UnifiedLLM(ABC):
         return self._reasoning_config.default
 
     def _prepare_call_config(self, overrides: dict[str, Any]) -> dict[str, Any]:
-        return apply_reasoning_level(
+        """Merge the client configuration with per-call ``overrides`` for one request.
+
+        ``api_base`` and ``base_url`` are two spellings of the same endpoint. If a
+        call overrides one of them, the other one inherited from the client
+        configuration is dropped. Otherwise both would reach the request: LiteLLM
+        would receive two endpoints, and Responses requests copy ``base_url`` over
+        ``api_base``, so the configured endpoint would replace the override.
+        """
+        params = apply_reasoning_level(
             self._reasoning_config, self.model, self.config, overrides, self.reasoning_level
         )
+        for alias, other in (("api_base", "base_url"), ("base_url", "api_base")):
+            if alias in overrides and other not in overrides:
+                params.pop(other, None)
+        return params
 
     def _request_media_inputs(self, call_config: dict[str, Any]) -> tuple[MediaInput, ...]:
         """A replacement route never inherits permissions from this connection."""
