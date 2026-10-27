@@ -1303,18 +1303,30 @@ class UnifiedLLM(ABC):
     def _prepare_call_config(self, overrides: dict[str, Any]) -> dict[str, Any]:
         """Merge the client configuration with per-call ``overrides`` for one request.
 
-        ``api_base`` and ``base_url`` are two spellings of the same endpoint. If a
-        call overrides one of them, the other one inherited from the client
-        configuration is dropped. Otherwise both would reach the request: LiteLLM
-        would receive two endpoints, and Responses requests copy ``base_url`` over
-        ``api_base``, so the configured endpoint would replace the override.
+        ``api_base`` and ``base_url`` are two spellings of the same endpoint:
+
+        - An endpoint override of ``None`` counts as no override. Clearing the
+          configured endpoint would send the request, with its credentials, to
+          the provider's default endpoint instead of the configured gateway.
+        - A non-None override of one spelling also replaces the other spelling if
+          the client configuration sets it. Leaving the old value would give
+          LiteLLM two different endpoints, and Responses requests copy
+          ``base_url`` over ``api_base``. Both spellings are kept (rather than
+          dropping one) because LiteLLM's async provider detection reads
+          ``base_url``, and because an override equal to the configured URL must
+          leave the route, and therefore the media permissions, unchanged.
         """
+        overrides = {
+            key: value
+            for key, value in overrides.items()
+            if not (key in ("api_base", "base_url") and value is None)
+        }
         params = apply_reasoning_level(
             self._reasoning_config, self.model, self.config, overrides, self.reasoning_level
         )
         for alias, other in (("api_base", "base_url"), ("base_url", "api_base")):
-            if alias in overrides and other not in overrides:
-                params.pop(other, None)
+            if alias in overrides and other not in overrides and other in params:
+                params[other] = overrides[alias]
         return params
 
     def _request_media_inputs(self, call_config: dict[str, Any]) -> tuple[MediaInput, ...]:

@@ -211,7 +211,7 @@ def test_endpoint_override_replaces_both_configured_aliases(configured, override
     client = registry.client_from_config(
         "gateway", raw, api_key="key", **{override: "https://new.example/v1"}
     )
-    assert configured not in client.config or configured == override
+    assert client.config[configured] == "https://new.example/v1"
     assert client.config[override] == "https://new.example/v1"
     sdk_client = client._completion_http_client(client.config, is_async=False, max_retries=0)
     if sdk_client is not None:
@@ -242,6 +242,43 @@ def test_per_call_endpoint_override_replaces_the_other_spelling(client_class, co
     )
     params = client._prepare_call_config({override: "https://new.example/v1"})
     assert params[override] == "https://new.example/v1"
-    assert configured not in params
+    # The configured spelling is replaced too, never left pointing at the old URL.
+    assert params[configured] == "https://new.example/v1"
     # Without an override the configured endpoint is kept.
     assert client._prepare_call_config({})[configured] == "https://old.example/v1"
+
+
+@pytest.mark.parametrize("client_class", [CompletionClient, ResponsesClient])
+@pytest.mark.parametrize("configured", ["api_base", "base_url"])
+@pytest.mark.parametrize("override", ["api_base", "base_url"])
+def test_none_endpoint_override_keeps_the_configured_endpoint(client_class, configured, override):
+    """``api_base=None`` must not clear the endpoint and fall back to the provider default."""
+    client = client_class(
+        "openai/opaque-model", api_key="key", **{configured: "https://gateway.example/v1"}
+    )
+    params = client._prepare_call_config({override: None})
+    assert params[configured] == "https://gateway.example/v1"
+    assert params.get("api_base") or params.get("base_url")
+
+
+@pytest.mark.parametrize("configured", ["api_base", "base_url"])
+@pytest.mark.parametrize("override", ["api_base", "base_url"])
+def test_registry_none_endpoint_override_keeps_the_configured_endpoint(configured, override):
+    raw = {
+        "model_name": "opaque-model",
+        "retry_config": False,
+        configured: "https://gateway.example/v1",
+    }
+    client = registry.client_from_config("gateway", raw, api_key="key", **{override: None})
+    assert client.config[configured] == "https://gateway.example/v1"
+
+
+def test_same_endpoint_override_keeps_media_permissions():
+    """Overriding with the configured URL is not a route change, so media stays enabled."""
+    url = "https://gateway.example/v1"
+    client = CompletionClient(
+        "openai/opaque-model", api_key="key", api_base=url, base_url=url, media_inputs=["image"]
+    )
+    params = client._prepare_call_config({"api_base": url})
+    assert params["base_url"] == url
+    assert client._request_media_inputs(params) == ("image",)
