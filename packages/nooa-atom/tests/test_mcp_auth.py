@@ -295,7 +295,7 @@ async def test_legacy_cache_gets_issuer_binding_after_refresh(alternate_server, 
     assert saved_issuer == f"{issuer.base}/"
 
 
-@pytest.mark.parametrize("failure", ["resource", "issuer", "bound_issuer", "missing_metadata"])
+@pytest.mark.parametrize("failure", ["resource", "issuer", "bound_issuer"])
 async def test_discovery_rejects_unsafe_refresh_without_sending_credentials(tmp_path, failure):
     url = "https://resource.example/mcp"
     issuer = "https://issuer.example/tenant"
@@ -325,8 +325,6 @@ async def test_discovery_rejects_unsafe_refresh_without_sending_credentials(tmp_
         requests.append((request.method, str(request.url)))
         assert "authorization" not in request.headers
         assert request.method == "GET"  # No token/client credentials may be posted.
-        if failure == "missing_metadata":
-            return httpx.Response(404)
         if "oauth-protected-resource" in request.url.path:
             return httpx.Response(
                 200,
@@ -761,17 +759,20 @@ async def test_cancelled_native_sdk_step_up_preserves_refresh_binding_on_restart
             },
         )
 
+    original = storage.path.read_text()
     provider = oauth_provider(PastedSignIn(timeout=0.05), storage)
     async with httpx.AsyncClient(auth=provider, transport=httpx.MockTransport(respond)) as client:
-        # Either decline before manual auth or abandon its callback. In neither
-        # case did tokens get replaced, so their original issuer must survive DCR.
-        with pytest.raises((OAuthFlowError, TimeoutError)):
+        # Fail before the SDK can discard native binding or register at a new
+        # issuer. A scope step-up is not permission for automatic migration.
+        with pytest.raises(OAuthFlowError):
             await client.get(url)
-    assert posts == [f"{issuer}/register"]
+    assert posts == []
+    assert storage.path.read_text() == original
+    assert provider.context.client_info.client_id == "old-client"
     step_up = False
     storage._update(expires_at=0)
     restarted = oauth_provider(PastedSignIn(timeout=0.05), storage)
     async with httpx.AsyncClient(auth=restarted, transport=httpx.MockTransport(respond)) as client:
         with pytest.raises(OAuthFlowError):
             await client.get(url)
-    assert posts == [f"{issuer}/register"]
+    assert posts == []

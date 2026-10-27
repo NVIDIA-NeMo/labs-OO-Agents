@@ -122,6 +122,10 @@ class FileTokenStorage:
         data = self._read()
         entry = data.get(self.server_url)
         data[self.server_url] = {**(entry if isinstance(entry, dict) else {}), **fields}
+        self._write(data)
+
+    def _write(self, data: dict[str, Any]) -> None:
+        """Atomically replace the cache, preserving sibling URL entries and mode 0600."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
         fd, temporary = tempfile.mkstemp(dir=self.path.parent, prefix=".mcp_oauth.")
         try:
@@ -132,6 +136,27 @@ class FileTokenStorage:
         except BaseException:
             Path(temporary).unlink(missing_ok=True)
             raise
+
+    def clear_tokens(self) -> None:
+        """Forget only tokens/expiry; retain client registration and both issuer bindings."""
+        data = self._read()
+        entry = data.get(self.server_url)
+        if isinstance(entry, dict):
+            data[self.server_url] = {
+                key: value for key, value in entry.items() if key not in {"tokens", "expires_at"}
+            }
+            self._write(data)
+
+    def forget_auth(self) -> None:
+        """Forget this URL's local credentials and binding, not remotely revoke tokens.
+
+        Callers must first drain all providers using this URL. Configuration,
+        including a configured client ID, is deliberately not changed.
+        """
+        data = self._read()
+        if self.server_url in data:
+            del data[self.server_url]
+            self._write(data)
 
     async def get_tokens(self) -> OAuthToken | None:
         entry = self._entry()
@@ -289,6 +314,14 @@ class PastedSignIn:
             self._pasted.set_result((code, query.get("state", [None])[0]))
 
 
+class RefreshMetadataAbsent(OAuthFlowError):
+    """PRM candidates are genuinely absent; validated same-origin manual auth is safe.
+
+    This is not a parser failure or a transient discovery error, and must not
+    be used to authorize migration to another issuer.
+    """
+
+
 class DiscoveringOAuthClientProvider(OAuthClientProvider):
     """SDK OAuth with discovery before refresh (SDK 1.28-1.30).
 
@@ -336,6 +369,52 @@ class DiscoveringOAuthClientProvider(OAuthClientProvider):
                     "Authorization server changed; cached credentials cannot be reused"
                 )
 
+    async def _validate_resource_match(self, metadata: Any) -> None:
+        """Guard full SDK rediscovery before 1.30 can drop a bound registration."""
+        await super()._validate_resource_match(metadata)
+        self._validate_cached_issuer(str(metadata.authorization_servers[0]), refresh=False)
+
+    def _expected_issuer(self) -> str:
+        """Validate before SDK 1.30's automatic issuer-clearing/registration step."""
+        expected = super()._expected_issuer()
+        self._validate_cached_issuer(expected, refresh=False)
+        return expected
+
+    def _clear_tokens(self) -> None:
+        """Persist invalidation before a manual wait, including cancellation/restart."""
+        storage = self.context.storage
+        if isinstance(storage, FileTokenStorage):
+            storage.clear_tokens()
+        self.context.clear_tokens()
+
+    @staticmethod
+    async def _parse_prm(response: httpx.Response) -> Any:
+        """SDK-parse PRM, distinguishing genuine 404/410 absence from all failures."""
+        if response.status_code in (404, 410):
+            return None
+        if response.status_code != 200:
+            raise OAuthFlowError(
+                f"Protected-resource discovery failed: HTTP {response.status_code}"
+            )
+        metadata = await handle_protected_resource_response(response)
+        if metadata is None:
+            raise OAuthFlowError("Invalid protected-resource metadata")
+        return metadata
+
+    @staticmethod
+    async def _parse_asm(response: httpx.Response) -> Any:
+        """SDK-parse AS metadata without treating malformed JSON or outages as absence."""
+        if response.status_code in (404, 410):
+            return None
+        if response.status_code != 200:
+            raise OAuthFlowError(
+                f"Authorization-server discovery failed: HTTP {response.status_code}"
+            )
+        _, metadata = await handle_auth_metadata_response(response)
+        if metadata is None:
+            raise OAuthFlowError("Invalid authorization-server metadata")
+        return metadata
+
     def _validate_issuer(self) -> None:
         metadata = self.context.oauth_metadata
         expected = self.context.auth_server_url or self.context.get_authorization_base_url(
@@ -362,6 +441,8 @@ class DiscoveringOAuthClientProvider(OAuthClientProvider):
         storage = self.context.storage
         if refreshed and isinstance(storage, FileTokenStorage) and self.context.oauth_metadata:
             storage._update(issuer=str(self.context.oauth_metadata.issuer))
+        elif not refreshed:
+            self._clear_tokens()
         return refreshed
 
     async def _handle_token_response(self, response: httpx.Response) -> None:
@@ -383,7 +464,7 @@ class DiscoveringOAuthClientProvider(OAuthClientProvider):
                 hint, self.context.server_url
             ):
                 response = yield create_oauth_metadata_request(url)
-                prm = await handle_protected_resource_response(response)
+                prm = await self._parse_prm(response)
                 if prm:
                     await self._validate_resource_match(prm)
                     self.context.protected_resource_metadata = prm
@@ -396,26 +477,29 @@ class DiscoveringOAuthClientProvider(OAuthClientProvider):
                 # Probe without bearer tokens, client secrets or request payload.
                 challenge = yield httpx.Request("GET", self.context.server_url)
                 hint = extract_resource_metadata_from_www_auth(challenge)
-        if self.context.protected_resource_metadata is None:
-            raise OAuthFlowError("Cannot refresh without protected-resource metadata")
-
-        # Check both SDK-native client registration and Atom token bindings before
-        # constructing or yielding any request that contains cached credentials.
-        self._validate_cached_issuer(self.context.auth_server_url, refresh=True)
+        absent_prm = self.context.protected_resource_metadata is None
+        expected = self.context.auth_server_url or self.context.get_authorization_base_url(
+            self.context.server_url
+        )
+        # No PRM is not evidence that an alternate cached issuer moved to the
+        # resource origin. Both bindings must match even for portable CIMD IDs.
+        self._validate_cached_issuer(expected, refresh=True)
 
         for url in build_oauth_authorization_server_metadata_discovery_urls(
             self.context.auth_server_url, self.context.server_url
         ):
             response = yield create_oauth_metadata_request(url)
-            ok, metadata = await handle_auth_metadata_response(response)
-            if not ok:
-                break
+            metadata = await self._parse_asm(response)
             if metadata:
                 self.context.oauth_metadata = metadata
                 self._validate_issuer()
                 break
         if self.context.oauth_metadata is None:
             raise OAuthFlowError("Cannot refresh without authorization-server metadata")
+        if absent_prm:
+            # Validate the legacy AS too before invalidating cached tokens. The
+            # SDK will rediscover it during its normal PKCE/state/manual flow.
+            raise RefreshMetadataAbsent("Protected-resource metadata is absent")
 
     def async_auth_flow(
         self, request: httpx.Request
@@ -428,15 +512,70 @@ class DiscoveringOAuthClientProvider(OAuthClientProvider):
     def _auth_flow(self, request: httpx.Request) -> AsyncGenerator[httpx.Request, httpx.Response]:
         return self._drive_sdk_flow(request, super()._auth_flow(request))
 
+    async def _guard_full_discovery(
+        self,
+        pending: httpx.Request,
+        response: httpx.Response,
+        prm_urls: list[str],
+        asm_urls: list[str],
+    ) -> None:
+        """Validate SDK rediscovery responses before resuming its generator.
+
+        In particular the final absent PRM response must be guarded *before*
+        SDK 1.30 clears an issuer-mismatched client in its origin fallback.
+        SDK parsers and resource validation remain authoritative.
+        """
+        if prm_urls and str(pending.url) == prm_urls[0]:
+            prm_urls.pop(0)
+            metadata = await self._parse_prm(response)
+            if metadata is not None:
+                await self._validate_resource_match(metadata)
+                prm_urls.clear()
+                issuer = str(metadata.authorization_servers[0])
+            elif prm_urls:
+                return
+            else:
+                issuer = None
+                origin = self.context.get_authorization_base_url(self.context.server_url)
+                self._validate_cached_issuer(origin, refresh=True)
+            asm_urls[:] = [
+                str(httpx.URL(url))
+                for url in build_oauth_authorization_server_metadata_discovery_urls(
+                    issuer, self.context.server_url
+                )
+            ]
+        elif asm_urls and str(pending.url) == asm_urls[0]:
+            asm_urls.pop(0)
+            metadata = await self._parse_asm(response)
+            if metadata is not None:
+                expected = self.context.auth_server_url or self.context.get_authorization_base_url(
+                    self.context.server_url
+                )
+                if metadata.issuer != AnyHttpUrl(expected):
+                    raise OAuthFlowError("Authorization metadata issuer does not match discovery")
+                self._validate_cached_issuer(expected, refresh=False)
+                asm_urls.clear()
+            elif not asm_urls:
+                storage = self.context.storage
+                if isinstance(storage, FileTokenStorage) and (
+                    storage.get_issuer() or storage.get_client_issuer()
+                ):
+                    raise OAuthFlowError("Cannot authorize bound credentials without AS metadata")
+
     async def _drive_sdk_flow(
         self, request: httpx.Request, flow: AsyncGenerator[httpx.Request, httpx.Response]
     ) -> AsyncGenerator[httpx.Request, httpx.Response]:
+        """Drive each SDK yield in its original slot; never transport guessed refreshes."""
         refresh_attempted = False
+        prm_urls: list[str] = []
+        asm_urls: list[str] = []
         try:
             pending = await anext(flow)  # SDK initialization and lock acquisition.
-            # The SDK's first non-resource request is a proactive refresh.
+            # The SDK's first non-resource request is a proactive refresh. Its
+            # generator is suspended at the refresh-response yield, not resource.
             if pending is not request:
                 discovery = self._discover_for_refresh(None)
+                absent = False
                 try:
                     discovery_request = await anext(discovery)
                     while True:
@@ -444,10 +583,20 @@ class DiscoveringOAuthClientProvider(OAuthClientProvider):
                         discovery_request = await discovery.asend(discovery_response)
                 except StopAsyncIteration:
                     pass
+                except RefreshMetadataAbsent:
+                    absent = True
                 finally:
                     await discovery.aclose()
-                pending = await self._refresh_token()
                 refresh_attempted = True
+                if absent:
+                    self._clear_tokens()
+                    request.headers.pop("Authorization", None)
+                    # This refresh request was NEVER sent. Resume the SDK with
+                    # a failed refresh, then send its actual unauthenticated
+                    # resource yield and feed back that resource's real response.
+                    pending = await flow.asend(httpx.Response(400, request=pending))
+                else:
+                    pending = await self._refresh_token()
 
             while True:
                 response = yield pending
@@ -459,6 +608,7 @@ class DiscoveringOAuthClientProvider(OAuthClientProvider):
                 ):
                     refresh_attempted = True
                     discovery = self._discover_for_refresh(response)
+                    absent = False
                     try:
                         discovery_request = await anext(discovery)
                         while True:
@@ -466,16 +616,48 @@ class DiscoveringOAuthClientProvider(OAuthClientProvider):
                             discovery_request = await discovery.asend(discovery_response)
                     except StopAsyncIteration:
                         pass
+                    except RefreshMetadataAbsent:
+                        absent = True
                     finally:
                         await discovery.aclose()
-                    refresh_response = yield await self._refresh_token()
-                    if await self._handle_refresh_response(refresh_response):
-                        self._add_auth_header(request)
-                        response = yield request
-                    else:
+                    if absent:
+                        self._clear_tokens()
                         request.headers.pop("Authorization", None)
+                    else:
+                        refresh_response = yield await self._refresh_token()
+                        if await self._handle_refresh_response(refresh_response):
+                            self._add_auth_header(request)
+                            response = yield request
+                        else:
+                            request.headers.pop("Authorization", None)
+                    # Here the SDK is still suspended at its RESOURCE yield:
+                    # pass the original (or retried) 401, not a refresh response.
+                step_up_discovery = (
+                    hasattr(OAuthClientProvider, "_auth_flow")
+                    and response.status_code == 403
+                    and oauth_utils.extract_field_from_www_auth(response, "error")
+                    == "insufficient_scope"
+                    and self.context.oauth_metadata is None
+                )
+                if pending is request and (response.status_code == 401 or step_up_discovery):
+                    # Full discovery must not reuse stale endpoint metadata.
+                    self.context.protected_resource_metadata = None
+                    self.context.oauth_metadata = None
+                    self.context.auth_server_url = None
+                    prm_urls[:] = [
+                        str(httpx.URL(url))
+                        for url in build_protected_resource_metadata_discovery_urls(
+                            extract_resource_metadata_from_www_auth(response),
+                            self.context.server_url,
+                        )
+                    ]
+                    asm_urls.clear()
+                else:
+                    await self._guard_full_discovery(pending, response, prm_urls, asm_urls)
                 # Failed refresh or a repeated 401 goes to the SDK's manual flow.
                 pending = await flow.asend(response)
+                if pending is request and not self.context.current_tokens:
+                    request.headers.pop("Authorization", None)
         except StopAsyncIteration:
             return
         finally:
@@ -562,6 +744,20 @@ class AuthorizedHTTPClient(MCPBaseClient):
         self._transport = transport
         self._provider = provider
         self._signin = signin
+        self._closed = False
+        self._sessions: set[asyncio.Task[Any]] = set()
+
+    async def aclose(self) -> None:
+        """Disable this provider and cancel/drain sessions before forgetting its cache."""
+        current = asyncio.current_task()
+        if current in self._sessions:
+            raise RuntimeError("Cannot forget authentication from inside its live MCP session")
+        self._closed = True
+        self._signin.cancel()
+        tasks = list(self._sessions)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     @property
     def transport(self) -> Literal["sse", "stdio", "streamable-http"]:
@@ -573,6 +769,22 @@ class AuthorizedHTTPClient(MCPBaseClient):
 
     @asynccontextmanager
     async def connect_to_server(self) -> AsyncGenerator[ClientSession, None]:
+        """Track every live OAuth session so a local forget can drain credential use."""
+        if self._closed:
+            raise RuntimeError(
+                "MCP authentication was forgotten; connect again for a fresh sign-in"
+            )
+        task = asyncio.current_task()
+        assert task is not None
+        self._sessions.add(task)
+        try:
+            async with self._connect_transport() as session:
+                yield session
+        finally:
+            self._sessions.discard(task)
+
+    @asynccontextmanager
+    async def _connect_transport(self) -> AsyncGenerator[ClientSession, None]:
         seconds = self.tool_call_timeout.total_seconds()
         if self._transport == "sse":
             async with (

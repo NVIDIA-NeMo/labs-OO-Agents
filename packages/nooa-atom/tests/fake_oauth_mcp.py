@@ -49,6 +49,7 @@ class FakeOAuthServer:
         self.grant_attempts: list[str] = []
         self.refresh_resources: list[str | None] = []
         self.custom_resource_metadata = False
+        self.missing_resource_metadata = False
         self.reject_refreshed_tokens = False
         self.grants: list[str] = []
         self.registrations = 0
@@ -114,6 +115,8 @@ class FakeOAuthServer:
         return guarded
 
     async def _resource_metadata(self, request: Request) -> Response:
+        if self.missing_resource_metadata:
+            return Response(status_code=404)
         if self.custom_resource_metadata and request.url.path.startswith("/.well-known"):
             return Response(status_code=404)
         issuer = self.authorization_server.base if self.authorization_server else self.base

@@ -325,7 +325,7 @@ class SkillsControl(BehaviorControl):
 class MCPControl(BehaviorControl):
     """Review MCP server configurations, approve access, sign in, or revoke approval."""
 
-    usage = "[status|approve NAME [CODE]|auth NAME ADDRESS|revoke NAME]"
+    usage = "[status|approve NAME [CODE]|auth NAME ADDRESS|forget-auth NAME|revoke NAME]"
 
     @property
     def name(self) -> str:
@@ -340,7 +340,7 @@ class MCPControl(BehaviorControl):
             return True, None
         if args[0] == "approve" and len(args) in (2, 3):
             return True, None
-        if args[0] in ("revoke",) and len(args) == 2:
+        if args[0] in ("revoke", "forget-auth") and len(args) == 2:
             return True, None
         if args[0] == "auth" and len(args) == 3:
             return True, None
@@ -374,6 +374,18 @@ class MCPControl(BehaviorControl):
         name = args[1]
         # Connection APIs accept globs; these commands name one exact definition.
         pattern = "".join({"[": "[[]", "*": "[*]", "?": "[?]"}.get(c, c) for c in name)
+        if args[0] == "forget-auth":
+            aliases = await servers.forget_auth(name)
+            return ControlResult.ok(
+                ControlMessage(
+                    f"Forgot local OAuth credentials for {_safe_display(name)} "
+                    f"(URL shared by: {', '.join(_safe_display(alias) for alias in aliases)}). "
+                    "This is not remote token revocation. Settings, approval and configured "
+                    "client ID are unchanged. Reconnect and complete a fresh manual sign-in; "
+                    "reconfigure the client ID explicitly if the issuer changed.",
+                    "success",
+                )
+            )
         if args[0] == "revoke":
             # Revoke before disconnect so a transport failure cannot retain permission.
             servers.revoke(name)
