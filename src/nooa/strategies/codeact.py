@@ -45,7 +45,12 @@ from nooa.context_blocks import DynamicContext, EventBase, ResultStatus, ToolCal
 from nooa.context_blocks.events import CODEACT_INLINE_RETURN
 from nooa.context_blocks.exceptions import BlockSyntaxError
 from nooa.decorators import strategy
-from nooa.errors import GenerationError, LoopDetectedError
+from nooa.errors import (
+    GenerationError,
+    IterationLimitExceeded,
+    LoopDetectedError,
+    RetryLimitExceeded,
+)
 from nooa.events import (
     AfterTurn,
     BeforeTurn,
@@ -327,11 +332,11 @@ class CodeActSession:
 
     def build_failure_error(self) -> GenerationError:
         if self.error_count >= self.max_retries:
-            return GenerationError(
+            return RetryLimitExceeded(
                 f"Generation failed after {self.error_count} errors (max_retries={self.max_retries}). "
                 f"Unable to generate valid code for `{self.target_method_name}`."
             )
-        return GenerationError(
+        return IterationLimitExceeded(
             MAX_ITERATIONS_MESSAGE.format(
                 iterations=self.iteration,
                 max_iterations=self.max_iterations,
