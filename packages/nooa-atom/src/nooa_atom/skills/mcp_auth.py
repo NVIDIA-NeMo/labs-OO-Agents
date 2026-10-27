@@ -468,11 +468,25 @@ class DiscoveringOAuthClientProvider(OAuthClientProvider):
             and self.context.client_info.client_id == self.context.client_metadata_url
         )
 
-    def _validate_cached_issuer(self, expected: str, *, refresh: bool) -> None:
+    def _cached_issuer_bindings(self) -> tuple[str | None, str | None]:
+        """Bindings of the loaded credentials, never a concurrent disk winner."""
         storage = self.context.storage
+        if not isinstance(storage, FileTokenStorage):
+            return None, None
+        entry = getattr(self, "_credentials_entry", None)
+        if entry is None:
+            entry = storage._entry()
+        client = entry.get("client_info")
+        native = client.get("issuer") if isinstance(client, dict) else None
+        issuer = entry.get("issuer")
+        return (
+            issuer if isinstance(issuer, str) else None,
+            native if isinstance(native, str) else None,
+        )
+
+    def _validate_cached_issuer(self, expected: str, *, refresh: bool) -> None:
+        token_issuer, cached_native_issuer = self._cached_issuer_bindings()
         native_issuer = getattr(self.context.client_info, "issuer", None)
-        if native_issuer is None and isinstance(storage, FileTokenStorage):
-            native_issuer = storage.get_client_issuer()
         match = getattr(oauth_utils, "credentials_match_issuer", None)
         if (
             self.context.client_info is not None
@@ -481,10 +495,10 @@ class DiscoveringOAuthClientProvider(OAuthClientProvider):
         ):
             raise OAuthFlowError("Cached client credentials belong to another issuer")
         # CIMD client identity is portable, but a known refresh-token issuer is not.
-        if native_issuer and (refresh or not self._is_cimd_client()):
-            if not _issuers_match(native_issuer, expected):
-                raise OAuthFlowError("Cached credentials belong to another issuer")
-        token_issuer = storage.get_issuer() if isinstance(storage, FileTokenStorage) else None
+        for binding in (native_issuer, cached_native_issuer):
+            if binding and (refresh or not self._is_cimd_client()):
+                if not _issuers_match(binding, expected):
+                    raise OAuthFlowError("Cached credentials belong to another issuer")
         if token_issuer and (refresh or not self._is_cimd_client()):
             if not _issuers_match(token_issuer, expected):
                 raise OAuthFlowError(
@@ -527,6 +541,18 @@ class DiscoveringOAuthClientProvider(OAuthClientProvider):
             return False
         expected = str(self.context.oauth_metadata.issuer)
         client = entry.get("client_info")
+        # Raw None == None (or equal malformed entries) cannot prove who the
+        # winner's token was issued to. Do not use configured-client fallback.
+        try:
+            persisted_client = OAuthClientInformationFull.model_validate(client)
+        except ValueError:
+            return False
+        if (
+            not persisted_client.client_id
+            or self.context.client_info is None
+            or persisted_client.client_id != self.context.client_info.client_id
+        ):
+            return False
         native = client.get("issuer") if isinstance(client, dict) else None
         bindings = [value for value in (entry.get("issuer"), native) if value is not None]
         if not bindings or any(
@@ -593,13 +619,7 @@ class DiscoveringOAuthClientProvider(OAuthClientProvider):
 
     async def _perform_authorization(self) -> httpx.Request:
         # The SDK 1.28 resource check is retained; also bind AS metadata to PRM.
-        storage = self.context.storage
-        bound_issuer = (
-            storage.get_issuer() or storage.get_client_issuer()
-            if isinstance(storage, FileTokenStorage)
-            else None
-        )
-        if self.context.oauth_metadata is not None or bound_issuer:
+        if self.context.oauth_metadata is not None or any(self._cached_issuer_bindings()):
             self._validate_issuer()
         return await super()._perform_authorization()
 
@@ -735,10 +755,7 @@ class DiscoveringOAuthClientProvider(OAuthClientProvider):
                 self._validate_cached_issuer(expected, refresh=False)
                 asm_urls.clear()
             elif not asm_urls:
-                storage = self.context.storage
-                if isinstance(storage, FileTokenStorage) and (
-                    storage.get_issuer() or storage.get_client_issuer()
-                ):
+                if any(self._cached_issuer_bindings()):
                     raise OAuthFlowError("Cannot authorize bound credentials without AS metadata")
 
     async def _drive_sdk_flow(

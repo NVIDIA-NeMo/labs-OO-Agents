@@ -14,7 +14,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 import httpx
 import pytest
-from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
+from mcp.client.auth.exceptions import OAuthFlowError
+from mcp.shared.auth import OAuthClientInformationFull, OAuthMetadata, OAuthToken
 from nooa_atom.skills.mcp_auth import FileTokenStorage, PastedSignIn, oauth_provider
 
 
@@ -381,3 +382,206 @@ async def test_pending_human_signin_holds_no_cache_transaction_lock(tmp_path):
                 await task
     assert not provider.context.lock.locked()
     await asyncio.wait_for(storage.update(after="cancelled"), 1)
+
+
+@pytest.mark.parametrize(
+    ("registration", "actual_client", "accepted"),
+    [
+        ("unknown", "synthetic-client-A", False),
+        ("unknown", "synthetic-client-B", False),
+        ("unknown", None, False),
+        ("malformed", "synthetic-client-A", False),
+        ("malformed", "synthetic-client-B", False),
+        ("bound", "synthetic-client-A", True),
+        ("bound", "synthetic-client-B", False),
+        ("bound", None, False),
+    ],
+)
+async def test_refresh_winner_requires_valid_persisted_actual_client_binding(
+    tmp_path, registration, actual_client, accepted
+):
+    url = "https://resource.example/mcp"
+    issuer = "https://issuer.example/"
+    path = tmp_path / "tokens.json"
+    a = FileTokenStorage(url, path, client_id="synthetic-client-A")
+    b = FileTokenStorage(url, path, client_id=actual_client)
+    if registration == "bound":
+        await a.set_client_info(
+            OAuthClientInformationFull(
+                client_id="synthetic-client-A",
+                redirect_uris=["http://localhost/callback"],
+                token_endpoint_auth_method="none",
+            )
+        )
+    elif registration == "malformed":
+        a._update(client_info={"client_id": "synthetic-client-A", "redirect_uris": "invalid"})
+    with a.bind_token_writes(issuer):
+        await a.set_tokens(
+            OAuthToken(
+                access_token="synthetic-old",
+                refresh_token="synthetic-refresh",
+                token_type="Bearer",
+                expires_in=3600,
+                scope="read",
+            )
+        )
+    providers = [oauth_provider(PastedSignIn(), storage, scope="read") for storage in (a, b)]
+    for provider in providers:
+        await provider._initialize()
+        provider.context.oauth_metadata = OAuthMetadata(
+            issuer=issuer,
+            authorization_endpoint=f"{issuer}authorize",
+            token_endpoint=f"{issuer}token",
+            response_types_supported=["code"],
+        )
+    if registration == "bound":
+        # Model the actual initialized provider's client identity, independently
+        # of the raw snapshot equality checked by winner adoption.
+        providers[1].context.client_info = (
+            OAuthClientInformationFull(
+                client_id=actual_client,
+                redirect_uris=["http://localhost/callback"],
+                token_endpoint_auth_method="none",
+            )
+            if actual_client is not None
+            else None
+        )
+    if actual_client is not None:
+        assert providers[1].context.client_info.client_id == actual_client
+    else:
+        assert providers[1].context.client_info is None
+    with a.bind_token_writes(issuer):
+        await a.set_tokens(
+            OAuthToken(
+                access_token="synthetic-winner-A",
+                refresh_token="synthetic-rotated-A",
+                token_type="Bearer",
+                expires_in=900,
+                scope="read",
+            )
+        )
+    winner = a._entry()
+    result = await providers[1]._handle_refresh_response(
+        httpx.Response(400, json={"error": "invalid_grant"})
+    )
+    assert result is accepted
+    assert a._entry() == winner
+    if accepted:
+        assert providers[1].context.current_tokens.access_token == "synthetic-winner-A"
+        assert providers[1].context.token_expiry_time == winner["expires_at"]
+    else:
+        assert providers[1].context.current_tokens is None
+
+
+@pytest.mark.parametrize("binding", ["atom", "native"])
+@pytest.mark.parametrize("cimd", [False, True])
+@pytest.mark.parametrize("expired", [False, True])
+async def test_refresh_checks_actual_snapshot_not_concurrent_issuer_cache(
+    tmp_path, binding, cimd, expired
+):
+    url = "https://resource.example/mcp"
+    old_issuer, new_issuer = "https://old.example/", "https://new.example/"
+    path = tmp_path / "tokens.json"
+    storage = FileTokenStorage(url, path)
+    client_id = "https://client.example/metadata" if cimd else "synthetic-old-client"
+    await storage.set_client_info(
+        OAuthClientInformationFull(
+            client_id=client_id,
+            client_secret="synthetic-old-secret",
+            redirect_uris=["http://localhost/callback"],
+            token_endpoint_auth_method="client_secret_post",
+        )
+    )
+    await storage.set_tokens(
+        OAuthToken(
+            access_token="synthetic-old-access",
+            refresh_token="synthetic-old-refresh",
+            token_type="Bearer",
+            expires_in=3600,
+        )
+    )
+    if binding == "atom":
+        storage._update(issuer=old_issuer)
+    else:
+        storage._update(client_info={**storage._entry()["client_info"], "issuer": old_issuer})
+    signin = PastedSignIn()
+    provider = oauth_provider(signin, storage)
+    if cimd:
+        provider.context.client_metadata_url = client_id
+    await provider._initialize()
+    if expired:
+        provider.context.token_expiry_time = time.time() - 1
+    # Another provider publishes a different issuer after this provider loaded
+    # its old credentials. Validation must never bless those old credentials
+    # by reading the new on-disk binding.
+    if binding == "atom":
+        storage._update(issuer=new_issuer)
+    else:
+        storage._update(client_info={**storage._entry()["client_info"], "issuer": new_issuer})
+    winner = path.read_bytes()
+    foreign_token_posts = 0
+
+    def respond(request):
+        nonlocal foreign_token_posts
+        if str(request.url) == url:
+            return httpx.Response(401)
+        if "oauth-protected-resource" in request.url.path:
+            return httpx.Response(
+                200, json={"resource": url, "authorization_servers": [new_issuer]}
+            )
+        if request.method == "POST":
+            foreign_token_posts += 1
+            return httpx.Response(400, json={"error": "invalid_grant"})
+        return httpx.Response(
+            200,
+            json={
+                "issuer": new_issuer,
+                "authorization_endpoint": f"{new_issuer}authorize",
+                "token_endpoint": f"{new_issuer}token",
+            },
+        )
+
+    async with httpx.AsyncClient(auth=provider, transport=httpx.MockTransport(respond)) as client:
+        # Bound the vulnerable implementation's human wait while reporting
+        # only counts/types, never a request containing synthetic credentials.
+        with pytest.raises((OAuthFlowError, TimeoutError)) as error:
+            await asyncio.wait_for(client.get(url), 0.2)
+    assert foreign_token_posts == 0
+    assert isinstance(error.value, OAuthFlowError)
+    assert path.read_bytes() == winner
+    assert signin.url is None
+    assert not provider.context.lock.locked()
+
+
+@pytest.mark.parametrize("binding", ["atom", "native"])
+@pytest.mark.parametrize("cimd", [False, True])
+async def test_manual_issuer_validation_uses_loaded_snapshot(tmp_path, binding, cimd):
+    url = "https://resource.example/mcp"
+    old_issuer, new_issuer = "https://old.example/", "https://new.example/"
+    storage = FileTokenStorage(url, tmp_path / "tokens.json")
+    client_id = "https://client.example/metadata" if cimd else "synthetic-client"
+    await storage.set_client_info(
+        OAuthClientInformationFull(
+            client_id=client_id,
+            redirect_uris=["http://localhost/callback"],
+            token_endpoint_auth_method="none",
+        )
+    )
+    if binding == "atom":
+        storage._update(issuer=old_issuer)
+    else:
+        storage._update(client_info={**storage._entry()["client_info"], "issuer": old_issuer})
+    provider = oauth_provider(PastedSignIn(), storage)
+    if cimd:
+        provider.context.client_metadata_url = client_id
+    await provider._initialize()
+    if binding == "atom":
+        storage._update(issuer=new_issuer)
+    else:
+        storage._update(client_info={**storage._entry()["client_info"], "issuer": new_issuer})
+    if cimd:
+        # Portable identity permits a *new* authorization, not refresh reuse.
+        provider._validate_cached_issuer(new_issuer, refresh=False)
+    else:
+        with pytest.raises(OAuthFlowError):
+            provider._validate_cached_issuer(new_issuer, refresh=False)
