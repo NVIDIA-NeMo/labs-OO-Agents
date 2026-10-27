@@ -499,6 +499,7 @@ def client_from_config(
         "include",
         "cache_breakpoint",
         "media_inputs",
+        "structured_output",
     ):
         if key in config and key not in overrides:
             params[key] = config[key]

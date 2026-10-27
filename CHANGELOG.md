@@ -6,6 +6,12 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- `CompletionClient` accepts `structured_output: json_object` (per model in
+  `llm_config.yaml`, or as a client argument) for endpoints that reject a
+  `json_schema` response_format, such as DeepSeek chat and reasoner ("This
+  response_format type is unavailable now"). PredictStrategy then sends JSON
+  mode with the return type's schema as a final system message, and still
+  validates and retries client-side. The default stays `json_schema`.
 - Prompt inspection (`print_prompt()` and `build_prompt_data()`) now applies
   method-level truncation overrides for CodeAct and PurePython, matching runtime
   prefill rendering. Both strategies now use the resolved runtime settings for
