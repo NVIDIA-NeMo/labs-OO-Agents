@@ -109,4 +109,4 @@ def test_harness_is_an_agent_without_model_facing_methods():
 
     text = doc(AtomHarness)
     assert "def solve" not in text and "python_cell" not in text
-    assert json.dumps(TURN_METHODS) == '["handle_orchestrate", "handle_batch"]'
+    assert json.dumps(TURN_METHODS) == '["handle_batch", "handle_orchestrate"]'

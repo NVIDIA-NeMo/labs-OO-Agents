@@ -5,8 +5,9 @@
 Gym constructs one ``AtomHarness`` per rollout with the rollout's model client as ``llm`` and
 awaits :meth:`AtomHarness.solve` with the task text. The harness runs one Atom session the way
 the TUI does: a ``SessionRegistry`` creates the root session with the configured turn method
-(``handle_orchestrate`` by default, so the root may delegate to child agents), the task is the
-first prompt, and the session's ``Done`` outcome carries the :class:`TaskResult`.
+(``handle_batch`` by default: one agent works the task unattended; ``handle_orchestrate`` lets the
+root delegate to child agents), the task is the first prompt, and the session's ``Done`` outcome
+carries the :class:`TaskResult`.
 
 Every model call, the root's and the children's, goes through the injected client, so Gym's
 model server records all of them; alias lookups are refused so no other model can be reached.
@@ -32,7 +33,7 @@ from nooa_atom.session.store import SessionStore, sessions_root
 
 __all__ = ["TURN_METHODS", "AtomHarness"]
 
-TURN_METHODS = ("handle_orchestrate", "handle_batch")
+TURN_METHODS = ("handle_batch", "handle_orchestrate")
 
 
 class AtomHarness(Agent):
@@ -46,7 +47,7 @@ class AtomHarness(Agent):
         self,
         llm: Any,
         *,
-        turn_method: str = "handle_orchestrate",
+        turn_method: str = "handle_batch",
         workdir: str | Path | None = None,
         sessions_dir: str | Path | None = None,
         **_: Any,  # run_command and other harness-supplied arguments Atom does not need
