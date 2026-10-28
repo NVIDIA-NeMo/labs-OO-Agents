@@ -133,6 +133,11 @@ class AtomHarness(Agent):
             for session in list(registry.sessions.values())
             if session is not root and not registry.is_idle(session)
         ]
+        # Fence every unfinished child before the first await: cancelling one child yields, and a
+        # sibling whose prompt is still queued would otherwise start a turn (and change the
+        # workspace) in that gap. Pausing dispatch keeps queued input queued until close.
+        for session in unfinished:
+            session.pause_dispatch()
         for session in unfinished:
             await session.cancel(by="harness")
         if unfinished:

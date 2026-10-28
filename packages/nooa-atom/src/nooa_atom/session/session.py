@@ -417,6 +417,14 @@ class Session:
         self.handle.events.add(ItemRequeued(item_id=item_id))
         return self._admit(item, channel=channel, source=source, item_id=item_id, record=False)
 
+    def pause_dispatch(self) -> None:
+        """Gate new turns; a committed turn keeps running and queued input stays queued.
+
+        Synchronous, so a caller can fence several sessions before its first await;
+        ``resume_dispatch`` lifts the gate, ``close`` makes it permanent.
+        """
+        self._agent.turns.pause()
+
     def resume_dispatch(self) -> None:
         """Explicit retry after fixing a preparation/ledger failure; inputs stayed queued.
 

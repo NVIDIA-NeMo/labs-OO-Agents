@@ -170,13 +170,22 @@ async def test_solve_cancels_and_rejects_children_with_unfinished_work_when_the_
     from types import SimpleNamespace
 
     cancelled: list[str] = []
+    paused: list[str] = []
 
     def session(session_id: str, *, idle: bool):
+        def pause_dispatch() -> None:
+            paused.append(session_id)
+
         async def cancel(*, by: str) -> bool:
+            # Every unfinished sibling is fenced before the first cancel yields: a queued child
+            # must not start a turn while another child's cancellation is awaited.
+            assert set(paused) == {"child-1", "child-2"}
             cancelled.append(f"{session_id}:{by}")
             return True
 
-        return SimpleNamespace(id=session_id, idle=idle, cancel=cancel)
+        return SimpleNamespace(
+            id=session_id, idle=idle, cancel=cancel, pause_dispatch=pause_dispatch
+        )
 
     root = session("root", idle=True)
     running = session("child-1", idle=False)
@@ -196,6 +205,7 @@ async def test_solve_cancels_and_rejects_children_with_unfinished_work_when_the_
         "child-1:harness",
         "child-2:harness",
     ]  # the finished child and the root are left alone
+    assert paused == ["child-1", "child-2"]
 
     cancelled.clear()
     await AtomHarness._settle_children(
