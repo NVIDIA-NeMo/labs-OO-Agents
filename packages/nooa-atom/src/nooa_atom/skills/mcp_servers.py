@@ -40,7 +40,6 @@ from pathlib import Path
 from typing import Any, Literal
 
 import httpx
-from mcp.shared.exceptions import McpError
 
 from nooa.agentdoc import spec
 from nooa.mcp import MCPManager
@@ -61,6 +60,11 @@ from nooa_atom.workspace.mcp_approval import (
     redact_approved_environment,
     resolve_approved_environment,
 )
+
+try:  # mcp < 2 spells it McpError; mcp >= 2 renamed it
+    from mcp.shared.exceptions import McpError
+except ImportError:  # pragma: no cover - depends on the installed mcp
+    from mcp.shared.exceptions import MCPError as McpError
 
 logger = logging.getLogger(__name__)
 

@@ -53,12 +53,16 @@ from mcp.client.auth.utils import (
 from mcp.client.sse import sse_client
 from mcp.client.streamable_http import streamable_http_client
 from mcp.shared.auth import OAuthClientInformationFull, OAuthClientMetadata, OAuthToken
-from mcp.shared.exceptions import McpError
 from mcp.types import ErrorData
 from pydantic import AnyHttpUrl
 
 from nooa.mcp import MCPBaseClient
 from nooa.paths import get_user_dir
+
+try:  # mcp < 2 spells it McpError; mcp >= 2 renamed it
+    from mcp.shared.exceptions import McpError
+except ImportError:  # pragma: no cover - depends on the installed mcp
+    from mcp.shared.exceptions import MCPError as McpError
 
 # Where the browser is sent after sign-in. Nothing listens there: the person
 # copies the address from the browser. Some gateways reject 127.0.0.1.
