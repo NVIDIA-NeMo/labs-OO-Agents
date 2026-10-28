@@ -99,6 +99,7 @@ class AtomHarness(Agent):
         try:
             root = await registry.create(options)
             outcome = await root.prompt(task)
+            await self._settle_children(registry, root)
         finally:
             try:
                 await registry.close_all()
@@ -113,3 +114,26 @@ class AtomHarness(Agent):
             )
             raise RuntimeError(f"Atom ended without a TaskResult: {ended_with}")
         return outcome.result
+
+    @hidden
+    @staticmethod
+    async def _settle_children(registry: Any, root: Any) -> None:
+        """Refuse a root outcome that leaves child turns executing.
+
+        ``Session.close`` will not close a session whose agent is mid-turn, so an orchestrator that
+        answers while a child still works would leave that child's loop, agent and model client alive
+        past ``solve()``. Such children are cancelled (their turn settles before ``cancel`` returns) and
+        the outcome is rejected: Atom's protocol keeps the root waiting until its children finish.
+        """
+        executing = [
+            session
+            for session in list(registry.sessions.values())
+            if session is not root and registry.live_info(session).status in ("running", "working")
+        ]
+        for session in executing:
+            await session.cancel(by="harness")
+        if executing:
+            ids = ", ".join(str(session.id) for session in executing)
+            raise RuntimeError(
+                f"Atom returned while {len(executing)} child turn(s) were still executing: {ids}"
+            )

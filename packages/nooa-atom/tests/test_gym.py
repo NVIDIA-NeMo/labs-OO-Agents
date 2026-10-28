@@ -161,3 +161,35 @@ async def test_harness_refuses_a_done_without_a_task_result(tmp_path, monkeypatc
     )
     with pytest.raises(RuntimeError, match="without a TaskResult.*Done carrying str"):
         await harness.solve("task")
+
+
+async def test_solve_cancels_and_rejects_children_still_executing_when_the_root_answers():
+    """Session.close will not close an agent mid-turn, so a root Done over a running child would leak
+    the child's loop; the harness cancels such children and refuses the outcome."""
+    from types import SimpleNamespace
+
+    cancelled: list[str] = []
+
+    def session(session_id: str, status: str):
+        async def cancel(*, by: str) -> bool:
+            cancelled.append(f"{session_id}:{by}")
+            return True
+
+        return SimpleNamespace(id=session_id, status=status, cancel=cancel)
+
+    root = session("root", "idle")
+    busy = session("child-1", "running")
+    done = session("child-2", "idle")
+    registry = SimpleNamespace(
+        sessions={"root": root, "child-1": busy, "child-2": done},
+        live_info=lambda s: SimpleNamespace(status=s.status),
+    )
+    with pytest.raises(RuntimeError, match="1 child turn\\(s\\) were still executing: child-1"):
+        await AtomHarness._settle_children(registry, root)
+    assert cancelled == ["child-1:harness"]  # the idle child and the root are left alone
+
+    cancelled.clear()
+    await AtomHarness._settle_children(
+        SimpleNamespace(sessions={"root": root}, live_info=registry.live_info), root
+    )
+    assert cancelled == []

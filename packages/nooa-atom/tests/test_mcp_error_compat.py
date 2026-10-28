@@ -17,3 +17,9 @@ def test_timeout_error_is_the_installed_sdks_exception_with_its_error_data():
 
 def test_both_mcp_skill_modules_agree_on_the_error_class():
     assert mcp_servers.McpError is mcp_auth.McpError
+
+
+def test_timeout_code_matches_the_installed_sdks_request_timeout():
+    """mcp 1.x reports 408 for its own response timeout; mcp 2.x reserves -32001 for request timeouts."""
+    expected = 408 if hasattr(sdk_exceptions, "McpError") else -32001
+    assert mcp_auth.MCP_TIMEOUT_CODE == expected
