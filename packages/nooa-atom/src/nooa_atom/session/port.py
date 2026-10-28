@@ -152,7 +152,9 @@ class SessionPort:
         async def hand_over(child: Session) -> None:
             if route is not None:
                 registry.route_child(child.id, route)
-            if description and str(description).strip():
+            # A benchmark description is task context, not permission to create
+            # a display title. Operational child/job routing names are unchanged.
+            if not child._benchmark_policy_required and description and str(description).strip():
                 await child.set_title(str(description).strip())
             receive = getattr(child._agent, "receive_delegated_todo", None)
             if todo is not None and callable(receive):

@@ -5,7 +5,10 @@
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from nooa_atom.agent.reflection_gate import reflection_min_seconds, reflection_min_turns
+from nooa_atom.benchmark_policy import POLICY, validate_benchmark_policy
 
 _REMOVED_OPTIONS = ("retain", "keep", "mode", "child_mode")
 """Child options that no longer exist: ``kept`` replaced all of them."""
@@ -58,12 +61,32 @@ class SessionOptions(BaseModel):
     name: str | None = None
     host: str = "headless"
     sessions_dir: Path | None = None
+    experimental_namespace: Literal["legacy", "call", "session"] = "legacy"
+    experimental_done_reflection: bool = False
+    benchmark_policy: Literal["no_reflection_no_titles_v1"] | None = None
+    benchmark_allow_session_titles: bool | None = None
+    experimental_reflection_min_turns: int = 50
+    experimental_reflection_min_seconds: float = 3600.0
+
+    @field_validator("experimental_reflection_min_turns", mode="before")
+    @classmethod
+    def _reflection_turns(cls, value: Any) -> int:
+        return reflection_min_turns(value)
+
+    @field_validator("experimental_reflection_min_seconds", mode="before")
+    @classmethod
+    def _reflection_seconds(cls, value: Any) -> float:
+        return reflection_min_seconds(value)
 
     @model_validator(mode="before")
     @classmethod
     def _no_removed_options(cls, data: Any) -> Any:
         if isinstance(data, dict):
             reject_removed_options("SessionOptions", data)
+            if data.get("benchmark_policy") is not None:
+                validate_benchmark_policy(data)
+            elif data.get("benchmark_allow_session_titles") is not None:
+                raise ValueError(f"benchmark title policy requires benchmark_policy={POLICY!r}")
         return data
 
     def inherit(self, **overrides: Any) -> "SessionOptions":

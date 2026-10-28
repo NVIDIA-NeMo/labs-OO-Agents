@@ -36,6 +36,8 @@ from nooa.interactive import (
 from nooa.llm_types import LLMResponse
 from nooa.runtime.turn_loop import TurnLoopEnded, TurnSettled
 from nooa.storage.json_snapshot import snapshot_to_json
+from nooa_atom.agent.reflection_gate import _ReflectionGate
+from nooa_atom.benchmark_policy import POLICY, BenchmarkPolicyViolation
 from nooa_atom.session.events import (
     ItemAdmitted,
     ItemConsumed,
@@ -162,6 +164,89 @@ _closing_sessions: contextvars.ContextVar[tuple[str, ...]] = contextvars.Context
 )
 
 
+class _CleanupErrors:
+    """One Session's bounded, sticky close-error evidence; never exception messages."""
+
+    __slots__ = ("count", "samples", "overflow")
+    LIMIT = 8
+    COUNT_LIMIT = 65535
+    OPERATIONS = frozenset(
+        {
+            "closing its children",
+            "stopping the turn loop",
+            "closing the pending model client",
+            "waiting for the checkpoint",
+            "unsubscribing from agent events",
+            "unsubscribing the steer flush",
+            "stopping the agent's jobs",
+            "closing the agent",
+            "unsubscribing from its queues",
+            "closing its model client",
+            "closing a model client",
+            "closing its record",
+            "other",
+        }
+    )
+
+    def __init__(self) -> None:
+        self.count = 0
+        self.samples: tuple[tuple[str, str], ...] = ()
+        self.overflow = False
+
+    def record(self, operation: str, error: BaseException) -> None:
+        # Corrupt evidence stays invalid, never reset to a clean default. Even
+        # that fault must not prevent later best-effort cleanup/lock release.
+        if self.report() is None:
+            return
+        label = operation if type(operation) is str and operation in self.OPERATIONS else "other"
+        # Use type's own descriptor, not a custom metaclass property. Limit
+        # work as well as retained bytes; never inspect the exception message.
+        name = type.__dict__["__name__"].__get__(type(error))
+        if type(name) is not str:
+            name = "UnknownError"
+        else:
+            name = name[:64]
+            if not name.isascii() or not name.isidentifier():
+                name = "UnknownError"
+        self.count = min(self.count + 1, self.COUNT_LIMIT)
+        if len(self.samples) < self.LIMIT:
+            self.samples = (*self.samples, (label, name))
+        else:
+            self.overflow = True
+
+    def report(self) -> dict[str, Any] | None:
+        count = getattr(self, "count", None)
+        samples = getattr(self, "samples", None)
+        overflow = getattr(self, "overflow", None)
+        if (
+            type(count) is not int
+            or not 0 <= count <= self.COUNT_LIMIT
+            or type(samples) is not tuple
+            or len(samples) != min(count, self.LIMIT)
+            or type(overflow) is not bool
+            or overflow != (count > self.LIMIT)
+        ):
+            return None
+        for sample in samples:
+            if type(sample) is not tuple or len(sample) != 2:
+                return None
+            operation, name = sample
+            if (
+                type(operation) is not str
+                or operation not in self.OPERATIONS
+                or type(name) is not str
+                or not 1 <= len(name) <= 64
+                or not name.isascii()
+                or not name.isidentifier()
+            ):
+                return None
+        return {
+            "error_count": count,
+            "errors": [{"operation": op, "exception_type": name} for op, name in samples],
+            "overflow": overflow,
+        }
+
+
 class Session:
     """One agent, its turn loop and its durable record.
 
@@ -190,6 +275,13 @@ class Session:
         self.name: str | None = info.name
         self.options = options
         self._agent = agent
+        self._benchmark_policy_required = options.benchmark_policy == POLICY
+        self._benchmark_guard = None  # installed by the artifact's HookedRegistry, not model code
+        self._foreground_method: str | None = None
+        self._maintenance_ready: tuple[TurnSettled, int, _ReflectionGate] | None = None
+        gate = getattr(agent, "_reflection_gate", None)
+        if isinstance(gate, _ReflectionGate):
+            gate.start_session()  # creation/load anchor, not time spent constructing the agent
         self.handle = handle
         # A deep copy: the Session owns its usage totals and pushes them to
         # the handle, whose metadata other threads read under its lock.
@@ -225,6 +317,7 @@ class Session:
         # How the last turn ended ("waiting" shows a child as "working").
         self.last_outcome_kind: str | None = None
         self._close_task: asyncio.Task[None] | None = None
+        self._cleanup_errors = _CleanupErrors()
         self._closing = False
         self._closed = False
         self._before_close = before_close
@@ -282,16 +375,46 @@ class Session:
         if self._started:
             return
         self._ensure_open()
+        if self._benchmark_policy_required:
+            if self._benchmark_guard is None:
+                raise BenchmarkPolicyViolation("benchmark owner guard missing before start")
+            self._benchmark_guard.check_session(self, require_ready=False)
         self._started = True
         context = contextvars.Context()
         for hook in self._loop_context_hooks:
             context.run(hook)
+        self._foreground_method = turn_method_of(self._agent, self.options.turn_method)
         self._agent.turns.start(
-            turn_method=turn_method_of(self._agent, self.options.turn_method),
+            turn_method=self._foreground_method,
             context=context,
             prepare=self._prepare_turn,
             commit=self._commit_turn,
+            after_settle=self._after_turn_settled
+            if self.options.experimental_done_reflection
+            else None,
         )
+
+    async def _after_turn_settled(self, event: TurnSettled) -> None:
+        # _settle set this only after successful delivery and durable settlement.
+        # Clear before awaiting; failure/timeout cannot recursively retry cleanup.
+        pending = self._maintenance_ready
+        if pending is None or pending[0] is not event or self.closing:
+            return
+        self._maintenance_ready = None
+        _, sequence, gate = pending
+        hook = getattr(self._agent, "_reflect_accepted_done", None)
+        if hook is None or not gate.admit(sequence):
+            return
+        # Admission consumed the window synchronously, before any prediction
+        # await. Failure/timeout/no-op/close cannot turn this into a hot retry.
+        try:
+            await hook(event.result)
+        finally:
+            # Reflection LLMResponse events go through ordinary usage accounting;
+            # their distinct method identifies this maintenance cost. Context
+            # edits need a new checkpoint; the namespace remains nosnapshot.
+            if not self.closing:
+                self._checkpoint()
 
     @property
     def closing(self) -> bool:
@@ -362,7 +485,10 @@ class Session:
             result = step()
             if inspect.isawaitable(result):
                 await result
-        except (Exception, asyncio.CancelledError):
+        except (Exception, asyncio.CancelledError) as error:
+            evidence = getattr(self, "_cleanup_errors", None)
+            if type(evidence) is _CleanupErrors:
+                evidence.record(what, error)
             logger.exception("Session %s: %s failed", self.id, what)
 
     async def cancel(self, *, by: str = "user") -> bool:
@@ -867,6 +993,25 @@ class Session:
             )
         )
 
+        self._maintenance_ready = None
+        gate = getattr(self._agent, "_reflection_gate", None)
+        if (
+            self.options.experimental_done_reflection
+            and getattr(self._agent, "_done_reflection", False)
+            and isinstance(gate, _ReflectionGate)
+        ):
+            # reply_count is this owner's increasing durable settlement ordinal,
+            # not a Python-cell/generation count. History before restart supplies
+            # only an ordinal; the fresh gate never credits its old turns/time.
+            if gate.settled(
+                self.info.reply_count,
+                kind=kind,
+                method=self._foreground_method,
+                committed=event.committed,
+                ran=event.ran,
+            ):
+                self._maintenance_ready = (event, self.info.reply_count, gate)
+
     def _checkpoint(self) -> None:
         """Save the agent's state if it changed since the last checkpoint.
 
@@ -1023,7 +1168,11 @@ class Session:
     # ---- title, mode, usage -----------------------------------------
 
     async def set_title(self, title: str, *, user_set: bool = False) -> None:
-        """Set the title. Once a person has set one, titles from the agent are ignored."""
+        """Set the title. Benchmark owners reject every attempt, even no-ops."""
+        if self._benchmark_policy_required or self._benchmark_guard is not None:
+            if self._benchmark_guard is None:
+                raise BenchmarkPolicyViolation("benchmark title guard missing")
+            self._benchmark_guard.title_attempt(self)
         if not user_set and self.info.title_is_user_set:
             return
         self.handle.set_title(title, user_set=user_set)

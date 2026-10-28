@@ -80,6 +80,7 @@ class JobEvent:
     kind: EventKind
     value: Annotated[Any, "The item, the result, or the error text"] = None
     dropped: int = 0
+    output: Annotated[Any, "Bounded stdout/stderr/media for experimental owned jobs"] = None
 
     def status_source(self) -> str:
         """Who sent it, for a status line: the job's name, never its value."""
@@ -275,6 +276,8 @@ class Job:
         self._sent = 0
         self._task: asyncio.Task[None] | None = None
         self._started = time.monotonic()
+        self.output: Annotated[Any, "Bounded stdout/stderr/media once finished"] = None
+        self._capture: Any = None
 
     # ---- model-facing ---------------------------------------------------
 
@@ -413,6 +416,16 @@ class Job:
     # ---- running ----------------------------------------------------------
 
     async def _run(self) -> None:
+        if self._manager._capture_factory is not None:
+            try:
+                with self._manager._capture_factory() as self._capture:
+                    await self._run_body()
+            finally:
+                self._capture = None
+        else:
+            await self._run_body()
+
+    async def _run_body(self) -> None:
         _current.set(self)
         try:
             if self._kind == "resource":
@@ -433,6 +446,7 @@ class Job:
             if inspect.iscoroutine(self._work):
                 self._work.close()  # never started: not "never awaited"
             self._finish("cancelled", "")
+        self._task = None  # a completed task need not retain its copied call/capture context
 
     async def _run_iter(self) -> None:
         iterator = self._work.__aiter__()
@@ -529,7 +543,11 @@ class Job:
             value = value or None
         self._status = kind  # type: ignore[assignment]
         self._ready.set()
-        self._final = JobEvent(self.name, self.id, kind, value, dropped=self._dropped)
+        if self._capture is not None:
+            self.output = self._capture.finish()
+        self._final = JobEvent(
+            self.name, self.id, kind, value, dropped=self._dropped, output=self.output
+        )
         self._dropped = 0
         waiters = {f for f in self._waiters if not f.done()}
         self._waiters.clear()
@@ -648,6 +666,7 @@ class WorkManager:
         max_items: int = 100,
         max_requests: int = 16,
         on_change: Callable[[], None] | None = None,
+        capture_factory: Callable[[], Any] | None = None,
     ) -> None:
         """A manager whose undelivered events go to ``outbox``.
 
@@ -681,6 +700,7 @@ class WorkManager:
         self._names: dict[str, Job] = {}
         self._closed = False
         self._on_change = on_change
+        self._capture_factory = capture_factory
 
     def launch(self, work: Any, *, name: str | None = None) -> Job:
         """Start ``work`` (awaitable, async iterable or resource) and return its Job."""

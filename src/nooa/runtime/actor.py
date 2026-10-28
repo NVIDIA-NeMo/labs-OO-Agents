@@ -1430,6 +1430,8 @@ class ActorRuntime:
         execution_count: int = 1,
         restrictions: "RestrictionsConfig | None" = None,
         sandbox_executor: Any = None,
+        execution_namespace: Any = None,
+        framework_bindings: dict[str, Any] | None = None,
     ) -> "ExecutionResult":
         """Execute Python code with namespace + strategy builtins (RuntimeServices protocol).
 
@@ -1468,6 +1470,8 @@ class ActorRuntime:
                 "execution_count": execution_count,
                 "restrictions": restrictions,
                 "sandbox_executor": sandbox_executor,
+                "execution_namespace": execution_namespace,
+                "framework_bindings": framework_bindings,
             }
             ep_ctx = ExecutePythonContext(
                 code=code,
@@ -1532,6 +1536,7 @@ class ActorRuntime:
         stdout_buffer: Any = None
         stderr_buffer: Any = None
         media_buffer: Any = None
+        capture_scope: Any = None
         # Set parent agent context for LLM inheritance by subagents
         parent_token = _parent_agent_var.set(self.agent)
         try:
@@ -1563,41 +1568,40 @@ class ActorRuntime:
             )
             from nooa.strategies.pure_python import PurePythonStrategy
 
-            exec_globals.update(
-                {
-                    "self": self.agent,
-                    "asyncio": asyncio,
-                    "typing": _typing,
-                    # Common typing constructs — LLMs use these constantly
-                    "Annotated": _typing.Annotated,
-                    "Any": _typing.Any,
-                    "Literal": _typing.Literal,
-                    "Optional": _typing.Optional,
-                    "Union": _typing.Union,
-                    # agentdoc introspection (doc respects hidden fields)
-                    "doc": doc,
-                    "methods": methods,
-                    "variables": variables,
-                    "help": doc,  # Shadow built-in help() to prevent blocking on stdin
-                    # Pretty printing with Rich-compatible API
-                    "pprint": pprint,
-                    # Media display for multimodal models
-                    "show": show,
-                    "Media": Media,
-                    "Image": Image,
-                    "Audio": Audio,
-                    "Video": Video,
-                    "File": File,
-                    # decorators and strategies for LLM-generated methods
-                    "strategy": strategy,
-                    "PurePythonStrategy": PurePythonStrategy,
-                    "CodeActStrategy": CodeActStrategy,
-                    "ReflexionStrategy": ReflexionStrategy,
-                    "PredictStrategy": PredictStrategy,
-                    "TemplateStrategy": TemplateStrategy,
-                    "CompositeStrategy": CompositeStrategy,
-                }
-            )
+            core_globals = {
+                "self": self.agent,
+                "asyncio": asyncio,
+                "typing": _typing,
+                # Common typing constructs — LLMs use these constantly
+                "Annotated": _typing.Annotated,
+                "Any": _typing.Any,
+                "Literal": _typing.Literal,
+                "Optional": _typing.Optional,
+                "Union": _typing.Union,
+                # agentdoc introspection (doc respects hidden fields)
+                "doc": doc,
+                "methods": methods,
+                "variables": variables,
+                "help": doc,  # Shadow built-in help() to prevent blocking on stdin
+                # Pretty printing with Rich-compatible API
+                "pprint": pprint,
+                # Media display for multimodal models
+                "show": show,
+                "Media": Media,
+                "Image": Image,
+                "Audio": Audio,
+                "Video": Video,
+                "File": File,
+                # decorators and strategies for LLM-generated methods
+                "strategy": strategy,
+                "PurePythonStrategy": PurePythonStrategy,
+                "CodeActStrategy": CodeActStrategy,
+                "ReflexionStrategy": ReflexionStrategy,
+                "PredictStrategy": PredictStrategy,
+                "TemplateStrategy": TemplateStrategy,
+                "CompositeStrategy": CompositeStrategy,
+            }
+            exec_globals.update(core_globals)
 
             # Add strategy builtins (includes reasoning, message, method args)
             if builtins:
@@ -1624,10 +1628,31 @@ class ActorRuntime:
                 exec_globals, effective_restrictions.blocked_modules
             )
 
+            if execution_namespace is not None:
+                if sandbox_executor is not None or not wrap_in_function:
+                    raise ValueError("Owned namespaces require the in-process async cell engine")
+                if framework_bindings is not None:
+                    execution_namespace.update_framework(
+                        _strip_blocked_modules(
+                            framework_bindings, effective_restrictions.blocked_modules
+                        )
+                    )
+                execution_namespace.initialize(exec_globals, static_names=core_globals)
+                import builtins as python_builtins
+
+                exec_globals["print"] = python_builtins.print
+                execution_namespace.bind_call(exec_globals)
+                exec_globals = execution_namespace.globals
+
             # 3. Strip redundant imports (from typing import Literal, etc.)
             from nooa.runtime.code_validator import strip_redundant_imports
 
-            code, stripped_imports = strip_redundant_imports(code, set(exec_globals.keys()))
+            # Imports are real writes in the owned engine; removing one based on
+            # a prior binding would silently change rebinding/del semantics.
+            if execution_namespace is None:
+                code, stripped_imports = strip_redundant_imports(code, set(exec_globals.keys()))
+            else:
+                stripped_imports = []
             for stmt in stripped_imports:
                 hm.import_stripped(stmt)
 
@@ -1660,7 +1685,13 @@ class ActorRuntime:
                         context = ValidationContext(
                             code=code,
                             agent_class=type(self.agent),
-                            available_names=set(exec_globals.keys()),
+                            available_names=set(exec_globals.keys())
+                            | (
+                                set(execution_namespace.reserved)
+                                | set(execution_namespace.framework)
+                                if execution_namespace is not None
+                                else set()
+                            ),
                             importable_modules=importable_modules,
                             restricted_imports=effective_restrictions.restricted_imports,
                             blocked_modules=effective_restrictions.blocked_modules,
@@ -1698,43 +1729,57 @@ class ActorRuntime:
             # executions are isolated. TruncatingStringIO prevents LLMs from
             # filling the context window.
             truncation_config = self.truncation_config
-            stdout_buffer = _make_capture_buffer(
-                limit=truncation_config.capture.max_stdout,
-                tail_chars=truncation_config.capture.tail,
-                file_backed=truncation_config.capture.file_backed,
-            )
-            stderr_buffer = _make_capture_buffer(
-                limit=truncation_config.capture.max_stderr,
-                tail_chars=truncation_config.capture.tail,
-                file_backed=truncation_config.capture.file_backed,
-            )
-            stdout_token = _stdout_buffer_var.set(stdout_buffer)
-            stderr_token = _stderr_buffer_var.set(stderr_buffer)
-            # Block stdin reads for this async task (prevents hangs from input(), etc.)
-            stdin_token = _block_stdin_var.set(True)
-            # Media capture buffer for show() calls; scoped per cell by design.
-            media_buffer = _MediaBuffer(
-                max_attachments=truncation_config.media_capture.max_attachments_per_execution
-            )
-            media_token = _media_buffer_var.set(media_buffer)
+            if execution_namespace is not None:
+                from nooa.runtime.capture_scope import CaptureScope
 
-            # Install stream wrappers around the CURRENT sys.stdout/sys.stderr/sys.stdin
-            # (which may have been replaced by pytest or other tools)
-            # We only wrap if not already wrapped, and we NEVER restore - the wrappers
-            # are transparent (fall through to original when no buffer/block is set) and
-            # must persist for parallel async executions to work correctly.
-            import sys
+                capture_scope = CaptureScope(truncation_config)
+                capture_scope.__enter__()
+                stdout_buffer, stderr_buffer = capture_scope.stdout, capture_scope.stderr
+                media_buffer = capture_scope.media
+            else:
+                stdout_buffer = _make_capture_buffer(
+                    limit=truncation_config.capture.max_stdout,
+                    tail_chars=truncation_config.capture.tail,
+                    file_backed=truncation_config.capture.file_backed,
+                )
+                stderr_buffer = _make_capture_buffer(
+                    limit=truncation_config.capture.max_stderr,
+                    tail_chars=truncation_config.capture.tail,
+                    file_backed=truncation_config.capture.file_backed,
+                )
+                stdout_token = _stdout_buffer_var.set(stdout_buffer)
+                stderr_token = _stderr_buffer_var.set(stderr_buffer)
+                # Block stdin reads for this async task (prevents hangs from input(), etc.)
+                stdin_token = _block_stdin_var.set(True)
+                # Media capture buffer for show() calls; scoped per cell by design.
+                media_buffer = _MediaBuffer(
+                    max_attachments=truncation_config.media_capture.max_attachments_per_execution
+                )
+                media_token = _media_buffer_var.set(media_buffer)
 
-            if not isinstance(sys.stdout, ContextVarStream):
-                sys.stdout = ContextVarStream(sys.stdout, _stdout_buffer_var, "stdout")
-            if not isinstance(sys.stderr, ContextVarStream):
-                sys.stderr = ContextVarStream(sys.stderr, _stderr_buffer_var, "stderr")
-            if not isinstance(sys.stdin, BlockedStdinWrapper):
-                sys.stdin = BlockedStdinWrapper(sys.stdin)
+                # Install stream wrappers around the CURRENT sys.stdout/sys.stderr/sys.stdin
+                # (which may have been replaced by pytest or other tools)
+                # We only wrap if not already wrapped, and we NEVER restore - the wrappers
+                # are transparent (fall through to original when no buffer/block is set) and
+                # must persist for parallel async executions to work correctly.
+                import sys
+
+                if not isinstance(sys.stdout, ContextVarStream):
+                    sys.stdout = ContextVarStream(sys.stdout, _stdout_buffer_var, "stdout")
+                if not isinstance(sys.stderr, ContextVarStream):
+                    sys.stderr = ContextVarStream(sys.stderr, _stderr_buffer_var, "stderr")
+                if not isinstance(sys.stdin, BlockedStdinWrapper):
+                    sys.stdin = BlockedStdinWrapper(sys.stdin)
 
             # Use the execution-cell filename for parser diagnostics as well as
             # compiled runtime tracebacks.
             cell_filename = f"Cell In[{execution_count}]"
+            if execution_namespace is not None:
+                # A retained helper must keep its original source even when a
+                # later handle restarts the visible execution counter at one.
+                cell_filename += (
+                    f" [ns:{execution_namespace.identity}:{execution_namespace.epoch + 1}]"
+                )
 
             # Parse AST to find method definitions
             source_code = code
@@ -1789,7 +1834,23 @@ class ActorRuntime:
             wrapper_line_offset = 0  # Lines of wrapper before user code (for error adjustment)
 
             try:
-                if wrap_in_function:
+                if execution_namespace is not None:
+                    from nooa.runtime.async_safety import agent_async_safety_context
+
+                    async def run_owned_cell():
+                        # Authorize the task actually executing the cell. wait_for
+                        # may use this same task (e.g. positive timeouts on 3.13),
+                        # so completion also checks the actual generation identity.
+                        with execution_namespace.executing_cell(), agent_async_safety_context():
+                            return await execution_namespace.cell(code, cell_filename)
+
+                    if timeout is None:
+                        result_value = await run_owned_cell()
+                    else:
+                        result_value = await asyncio.wait_for(run_owned_cell(), timeout=timeout)
+                    if has_explicit_return or (implicit_return_added and result_value is not None):
+                        returned_value = result_value
+                elif wrap_in_function:
                     # REPL mode: wrap entire code in async function to capture return
                     # Use try/finally to capture locals regardless of how function exits
                     indented = self._indent_code(code, "        ")
@@ -1974,14 +2035,16 @@ class ActorRuntime:
                             with agent_async_safety_context():
                                 exec(compile(other_tree, cell_filename, "exec"), exec_globals)
 
-                # Attach source code to defined functions for has_ellipsis_body() detection
-                for method_name, method_code in method_sources.items():
-                    if method_name in exec_globals and callable(exec_globals[method_name]):
-                        try:
-                            exec_globals[method_name]._generated_source = method_code
-                        except (AttributeError, TypeError):
-                            # Some built-in functions don't allow attribute assignment
-                            pass
+                # The owned compiler attaches source once, by lexical definition,
+                # including nested/class methods; never overwrite it by bare name.
+                if execution_namespace is None:
+                    for method_name, method_code in method_sources.items():
+                        if method_name in exec_globals and callable(exec_globals[method_name]):
+                            try:
+                                exec_globals[method_name]._generated_source = method_code
+                            except (AttributeError, TypeError):
+                                # Some built-in functions don't allow attribute assignment
+                                pass
 
                 # Helpers stay as REPL locals (captured via __repl_captured_locals__).
                 # The names list is kept in ExecutionResult.defined_methods for feedback only.
@@ -1991,6 +2054,8 @@ class ActorRuntime:
                     if method_name in exec_globals and callable(exec_globals[method_name])
                 }
 
+                if capture_scope is not None:
+                    capture_scope.finish()
                 result = ExecutionResult(
                     stdout=stdout_buffer.getvalue(),
                     stderr=stderr_buffer.getvalue(),
@@ -2011,6 +2076,8 @@ class ActorRuntime:
                 # that were defined before the signal was raised.
                 captured_locals = _extract_captured_locals(exec_globals)
 
+                if capture_scope is not None:
+                    capture_scope.finish()
                 result = ExecutionResult(
                     stdout=stdout_buffer.getvalue(),
                     stderr=stderr_buffer.getvalue(),
@@ -2045,6 +2112,8 @@ class ActorRuntime:
                 )
                 wrapped.__cause__ = e
 
+                if capture_scope is not None:
+                    capture_scope.finish()
                 result = ExecutionResult(
                     stdout=stdout_buffer.getvalue(),
                     stderr=stderr_buffer.getvalue(),
@@ -2065,6 +2134,8 @@ class ActorRuntime:
                 # that were defined before the exception was raised.
                 captured_locals = _extract_captured_locals(exec_globals)
 
+                if capture_scope is not None:
+                    capture_scope.finish()
                 result = ExecutionResult(
                     stdout=stdout_buffer.getvalue(),
                     stderr=stderr_buffer.getvalue(),
@@ -2088,6 +2159,8 @@ class ActorRuntime:
             # Nested execute_code calls see the same exception and each appends
             # its own result, innermost first, so the frame that just unwound is
             # always the last entry.
+            if capture_scope is not None:
+                capture_scope.finish()
             if stdout_buffer is not None and stderr_buffer is not None:
                 results = getattr(error, "execution_results", None)
                 if results is None:
@@ -2106,6 +2179,9 @@ class ActorRuntime:
             # NOTE: We do NOT restore sys.stdout/sys.stderr here.
             # The ContextVarStream wrappers are transparent (fall through to original
             # when no buffer is set) and must persist for parallel async executions.
+
+            if capture_scope is not None:
+                capture_scope.__exit__(None, None, None)
 
             # Reset task-local stdout/stderr buffers and stdin blocking (only if they were set)
             if stdout_token is not None:

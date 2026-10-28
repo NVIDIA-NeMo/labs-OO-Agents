@@ -85,6 +85,14 @@ def create_session_agent(options: SessionOptions, storage: StorageManager) -> In
         if issubclass(agent_class, AtomAgent):
             # One turn method (handle): the session's turn_method selects the role.
             settings["policy"], settings["instructions"] = role_for(options.turn_method)
+            settings["experimental_namespace"] = options.experimental_namespace
+            settings["experimental_done_reflection"] = options.experimental_done_reflection
+            settings["experimental_reflection_min_turns"] = (
+                options.experimental_reflection_min_turns
+            )
+            settings["experimental_reflection_min_seconds"] = (
+                options.experimental_reflection_min_seconds
+            )
         for name, value in settings.items():
             if name in parameters or accepts_any:
                 kwargs[name] = value

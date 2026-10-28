@@ -11,6 +11,47 @@ headless in-process host (`open_tree`). The Atom agent runs on that layer:
 `nooa_atom.agent:AtomAgent` is the agent spec a host passes in
 `SessionOptions.agent_spec`.
 
+## Combined-interface benchmark control (f497 baseline)
+
+This control keeps the f497 Todo ID lookup, SkillManager API, model-facing
+bootstrap/restriction documentation, and final-only managed `Shell` interface.
+It is **not** the treatment bundle with only a namespace switch changed.
+The matched treatment explicitly selects session-scoped cells, reviewed
+interface ergonomics and managed-Shell progress previews.
+
+Both artifacts share the actual Agent-based `AtomHarness`, native Gym worker,
+policy client and worker-owned receipt, Session/registry cleanup repairs,
+benchmark dependency profile and lockfile. Real namespace, reflection and
+owned-output backing is present in both; the source defaults remain
+`experimental_namespace="legacy"` and `experimental_done_reflection=False`.
+Legacy cells use the original call-local engine, retain no variables across
+`handle` calls, and install no job capture factory. The common additive
+`Job.output` / `JobEvent.output` fields are therefore `None` in the control;
+completed jobs release their task context. The shared dynamic-class import
+filter protects runtime/argument names, `_nooa_ns_` names and `__builtins__`.
+These enumerated common changes mean the control is not pristine f497.
+
+The native benchmark profile requires explicit settings (children inherit them):
+
+```python
+benchmark_policy="no_reflection_no_titles_v1"
+experimental_namespace="legacy"  # treatment: "session"
+experimental_done_reflection=False
+benchmark_allow_session_titles=False
+experimental_reflection_min_turns=50
+experimental_reflection_min_seconds=3600.0
+```
+
+The worker, not `agent_kwargs`, assigns `benchmark_policy_path`. Root and child
+model/automatic display-title generation, renaming and reflection are disabled
+and guarded; operational routing names are not display titles. A passing receipt
+requires covered runtime readbacks, closed sessions and no cleanup failures.
+The sidecar's invocation map must still be reconciled against the outer request
+capture; its `external_required_not_asserted` field is not self-certification.
+The `benchmark` extra pins the common package profile; OTLP remains disabled
+unless separately authorized by the benchmark protocol. No live benchmark run
+or deployed build is implied by local offline regression checks.
+
 ## The Atom agent, its role and resuming sessions
 
 `nooa atom` with no `--agent` serves `nooa_atom.agent:AtomAgent` (also

@@ -38,6 +38,7 @@ import asyncio
 import importlib
 import inspect
 import json
+import os
 import shlex
 import signal
 import socket
@@ -149,6 +150,7 @@ def _enable_artifacts(payload: dict[str, Any]) -> dict[str, str]:
 
 async def main(input_path: Path, output_path: Path) -> None:
     payload = json.loads(input_path.read_text())
+    trace_env = ",".join(sorted(name for name in os.environ if name.startswith(("OTLP_", "OTEL_"))))
     agent_cls = _import(payload["agent"])
     turn_method = payload.get("turn_method") or "solve"
     workdir = payload.get("workdir") or str(Path.cwd())
@@ -169,9 +171,25 @@ async def main(input_path: Path, output_path: Path) -> None:
             headers=access.get("headers") or {},
             cookies=resource_cookies,
         )
+    supplied = payload.get("agent_kwargs") or {}
+    policy_required = (
+        getattr(agent_cls, "benchmark_policy_required", False) is True
+        or "benchmark_policy" in supplied
+    )
+    if policy_required and (payload.get("tools") or payload.get("tool_binding") is not None):
+        raise ValueError("Atom benchmark requires no Gym tools and tool_binding=null")
+    if "benchmark_policy_path" in supplied:
+        raise ValueError("benchmark_policy_path is worker-owned, not an agent_kwargs override")
+    policy_path = (
+        output_path.with_name(output_path.name + ".atom-policy.json") if policy_required else None
+    )
     bind_tools = _import(payload["tool_binding"]) if payload.get("tool_binding") else bind_gym_tools
-
-    kwargs = _constructor_kwargs(agent_cls, run_command, workdir, payload.get("agent_kwargs") or {})
+    kwargs = _constructor_kwargs(
+        agent_cls,
+        run_command,
+        workdir,
+        {**supplied, **({"benchmark_policy_path": str(policy_path)} if policy_required else {})},
+    )
 
     # Only the supervisor's SIGTERM (sent at the agent's time budget) makes a cancelled run a
     # `timeout_exceeded` episode. Any other cancellation, and SIGINT, propagate and leave no result,
@@ -182,7 +200,13 @@ async def main(input_path: Path, output_path: Path) -> None:
     assert run is not None
 
     def write(episode) -> None:
-        if stop["signal"] and episode.stop_reason != "timeout_exceeded":
+        policy_failed = (
+            policy_required and episode.runtime.get("benchmark_policy_verdict") != "pass"
+        )
+        if policy_failed:
+            episode.stop_reason, episode.return_value = "error", None
+            episode.error = "benchmark policy verdict missing, failed, or incomplete"
+        if stop["signal"] and episode.stop_reason != "timeout_exceeded" and not policy_failed:
             # The run wound down after the stop as something else (the agent swallowed the
             # cancellation, or its teardown raised). The stop still classifies the episode; what
             # the teardown reported is kept as a diagnostic.
@@ -195,6 +219,7 @@ async def main(input_path: Path, output_path: Path) -> None:
             python=sys.executable,
             version=sys.version.split()[0],
             hostname=socket.gethostname(),
+            trace_env=trace_env,
             **artifacts,
             **({"stop_signal": stop["signal"]} if stop["signal"] else {}),
         )
@@ -227,6 +252,8 @@ async def main(input_path: Path, output_path: Path) -> None:
             bind_tools=bind_tools,
             interrupt=lambda: "timeout_exceeded" if stop["signal"] else None,
             snapshot=render.append,
+            policy_required=policy_required,
+            policy_path=policy_path,
         )
     finally:
         loop.remove_signal_handler(signal.SIGTERM)

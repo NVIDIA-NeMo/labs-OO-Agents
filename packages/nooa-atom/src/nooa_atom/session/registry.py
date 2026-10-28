@@ -235,8 +235,10 @@ class SessionRegistry:
                 session.admit(item, channel=channel, source=initial_source)
             session.start()
         except BaseException:
-            await self._close_half_built(session)
-            self._discard(session_id, handle, reservation)
+            try:
+                await self._close_half_built(session)
+            finally:
+                self._discard(session_id, handle, reservation)
             raise
         self._publish(session, reservation)
         if parent is not None:
@@ -260,10 +262,24 @@ class SessionRegistry:
         """Close a session that was built but never published (agent, client, handle)."""
         if session is None:
             return
+        # Shielding alone leaves an orphan when this caller is cancelled: the
+        # unpublished session is absent from close_all(). Keep a strong join and
+        # defer single/repeated caller cancellation until owned teardown ends.
+        closing = asyncio.create_task(session.close())
+        cancelled = None
+        while not closing.done():
+            try:
+                await asyncio.shield(closing)
+            except asyncio.CancelledError as exc:
+                cancelled = exc
+            except Exception:
+                break  # retrieve/log the actual close failure below
         try:
-            await asyncio.shield(session.close())
+            closing.result()
         except Exception:
             logger.exception("Closing the half-built session %s failed", session.id)
+        if cancelled is not None:
+            raise cancelled
 
     async def _build(
         self, options: SessionOptions, handle: SessionHandle, *, restore: bool = False
@@ -1001,12 +1017,14 @@ class SessionRegistry:
             self._requeue(session)
             session.start()
         except BaseException:
-            await self._close_half_built(session)
-            self._reserved.pop(session_id, None)
-            if not reservation.done():
-                reservation.set_result(None)
-            if handle is not None:
-                handle.close()
+            try:
+                await self._close_half_built(session)
+            finally:
+                self._reserved.pop(session_id, None)
+                if not reservation.done():
+                    reservation.set_result(None)
+                if handle is not None:
+                    handle.close()
             raise
         self._publish(session, reservation)
         return session
