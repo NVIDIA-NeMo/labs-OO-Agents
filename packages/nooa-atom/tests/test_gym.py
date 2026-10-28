@@ -163,33 +163,42 @@ async def test_harness_refuses_a_done_without_a_task_result(tmp_path, monkeypatc
         await harness.solve("task")
 
 
-async def test_solve_cancels_and_rejects_children_still_executing_when_the_root_answers():
-    """Session.close will not close an agent mid-turn, so a root Done over a running child would leak
-    the child's loop; the harness cancels such children and refuses the outcome."""
+async def test_solve_cancels_and_rejects_children_with_unfinished_work_when_the_root_answers():
+    """Session.close will not close an agent mid-turn, so a root Done over an unfinished child would leak
+    the child's loop; the harness cancels such children and refuses the outcome. Unfinished means the
+    registry's idle check fails: running, waiting, or input still queued before the first turn."""
     from types import SimpleNamespace
 
     cancelled: list[str] = []
 
-    def session(session_id: str, status: str):
+    def session(session_id: str, *, idle: bool):
         async def cancel(*, by: str) -> bool:
             cancelled.append(f"{session_id}:{by}")
             return True
 
-        return SimpleNamespace(id=session_id, status=status, cancel=cancel)
+        return SimpleNamespace(id=session_id, idle=idle, cancel=cancel)
 
-    root = session("root", "idle")
-    busy = session("child-1", "running")
-    done = session("child-2", "idle")
+    root = session("root", idle=True)
+    running = session("child-1", idle=False)
+    queued = session(
+        "child-2", idle=False
+    )  # prompt queued, turn not started: live status would say idle
+    finished = session("child-3", idle=True)
     registry = SimpleNamespace(
-        sessions={"root": root, "child-1": busy, "child-2": done},
-        live_info=lambda s: SimpleNamespace(status=s.status),
+        sessions={"root": root, "child-1": running, "child-2": queued, "child-3": finished},
+        is_idle=lambda s: s.idle,
     )
-    with pytest.raises(RuntimeError, match="1 child turn\\(s\\) were still executing: child-1"):
+    with pytest.raises(
+        RuntimeError, match=r"2 child session\(s\) had unfinished work: child-1, child-2"
+    ):
         await AtomHarness._settle_children(registry, root)
-    assert cancelled == ["child-1:harness"]  # the idle child and the root are left alone
+    assert cancelled == [
+        "child-1:harness",
+        "child-2:harness",
+    ]  # the finished child and the root are left alone
 
     cancelled.clear()
     await AtomHarness._settle_children(
-        SimpleNamespace(sessions={"root": root}, live_info=registry.live_info), root
+        SimpleNamespace(sessions={"root": root}, is_idle=lambda s: s.idle), root
     )
     assert cancelled == []

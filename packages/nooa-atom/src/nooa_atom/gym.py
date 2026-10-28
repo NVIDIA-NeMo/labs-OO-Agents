@@ -118,22 +118,25 @@ class AtomHarness(Agent):
     @hidden
     @staticmethod
     async def _settle_children(registry: Any, root: Any) -> None:
-        """Refuse a root outcome that leaves child turns executing.
+        """Refuse a root outcome that leaves child sessions with unfinished work.
 
         ``Session.close`` will not close a session whose agent is mid-turn, so an orchestrator that
         answers while a child still works would leave that child's loop, agent and model client alive
         past ``solve()``. Such children are cancelled (their turn settles before ``cancel`` returns) and
         the outcome is rejected: Atom's protocol keeps the root waiting until its children finish.
         """
-        executing = [
+        # A child is unfinished while its turn runs, while its last turn ended Waiting, or while its
+        # prompt is still queued (a freshly delegated child before its turn starts); the registry's
+        # idle check covers all three.
+        unfinished = [
             session
             for session in list(registry.sessions.values())
-            if session is not root and registry.live_info(session).status in ("running", "working")
+            if session is not root and not registry.is_idle(session)
         ]
-        for session in executing:
+        for session in unfinished:
             await session.cancel(by="harness")
-        if executing:
-            ids = ", ".join(str(session.id) for session in executing)
+        if unfinished:
+            ids = ", ".join(str(session.id) for session in unfinished)
             raise RuntimeError(
-                f"Atom returned while {len(executing)} child turn(s) were still executing: {ids}"
+                f"Atom returned while {len(unfinished)} child session(s) had unfinished work: {ids}"
             )
