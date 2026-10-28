@@ -18,11 +18,11 @@ from nooa.context_blocks.formatter import OpenAIProviderFormatter
 from nooa.context_blocks.models import (
     BlockMetadata,
     RenderedMessage,
-    ResolvedBlock,
     Role,
 )
 from nooa.context_blocks.renderer import RenderResult, render_context
 from nooa.context_blocks.renderers.cached import CachedBlockFormatter
+from nooa.context_view import Block
 from nooa.llm_types import AssistantReasoning, LLMResponse
 from nooa.unifiedllm import CacheBoundary, CompletionClient, ResponsesClient
 from nooa.unifiedllm.chat_parts import capture_chat_parts
@@ -36,21 +36,15 @@ from nooa.unifiedllm.response_parts import capture_parts
 def _render_result(dynamic: str) -> RenderResult:
     event = UserEvent(content="solve this", tag="1")
     blocks = [
-        ResolvedBlock(
+        Block(
             key="instructions",
             content="stable instructions",
             role=Role.SYSTEM,
             metadata=BlockMetadata(static=True),
         ),
-        ResolvedBlock(
-            key="event_1",
-            content=event.content,
-            role=Role.USER,
-            metadata=BlockMetadata(tag="1"),
-            event=event,
-        ),
+        event.model_copy(update={"tag": "1"}),
         CacheBoundary(),
-        ResolvedBlock(
+        Block(
             key="live_state",
             content=dynamic,
             role=Role.USER,

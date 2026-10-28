@@ -669,7 +669,7 @@ class SystemPrompt(EventBase):  # type: ignore[misc]
     Fired by ``runtime.generate()`` right after the messages list is
     built. Carries the rendered ``messages[0].content`` (the static
     system prompt: strategy prompt + ``doc(self)`` + static context
-    blocks). The trailing dynamic-context envelope is captured
+    blocks). The rendered trailing dynamic-context blocks are captured
     separately on :class:`LLMResponse.dynamic_context`.
 
     Uses ``Role.RUNTIME_EVENT`` to keep it out of LLM context — this is

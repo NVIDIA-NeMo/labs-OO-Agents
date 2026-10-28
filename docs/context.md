@@ -176,6 +176,18 @@ These are the default application's context APIs, not requirements of `ContextVi
 
 Legacy implicit policy is removed: `cache_control_injection_points` raises `ValueError`; `CachedBlockFormatter` no longer chooses placement; and `render_context(context_limit=...)` reports the limit but leaves eviction to the view.
 
+Direct UnifiedLLM callers place boundaries explicitly; without one, NOOA adds no explicit cache marker:
+
+```python
+from nooa import CacheBoundary
+
+response = await client.acall([
+    {"role": "system", "content": "Stable instructions"},
+    CacheBoundary(),
+    {"role": "user", "content": "Current task"},
+])
+```
+
 `EventQuery`, agent `event_query=`, `ScopedContext(events=...)`, and manager query overrides are removed. Event membership is view code; event inspection and context-block overrides remain available.
 
 Default views and their helpers use only public agent, call, manager, strategy, and event interfaces. `ActorRuntime` supplies call facts and budget support, resolves and collects the view, renders it, and handles transport and observability; it does not assemble context content.

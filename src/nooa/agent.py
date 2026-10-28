@@ -286,37 +286,6 @@ class Agent(metaclass=AgentMeta):
 
     @no_trace
     @hidden
-    def active_skills(self) -> tuple[Any, ...]:
-        """Return visible attached skills in stable attribute order."""
-        from nooa.skill import Skill
-
-        values = tuple(self.__instance_values__().values())
-        visible_ids = {id(value) for value in values}
-        managed_ids = {
-            id(skill)
-            for value in values
-            if isinstance(value, Skill)
-            for skill in getattr(value, "_managed_skills", lambda: ())()
-        }
-        skills: list[Skill] = []
-        seen: set[int] = set()
-        for value in values:
-            if not isinstance(value, Skill) or id(value) in seen:
-                continue
-            if id(value) in managed_ids:
-                continue
-            seen.add(id(value))
-            skills.append(value)
-            active = getattr(value, "active_skills", None)
-            if callable(active):
-                for nested in cast("tuple[Skill, ...]", active()):
-                    if id(nested) in visible_ids and id(nested) not in seen:
-                        seen.add(id(nested))
-                        skills.append(nested)
-        return tuple(skills)
-
-    @no_trace
-    @hidden
     async def aclose(self) -> None:
         """Await registered background cleanup before the owner closes shared resources.
 

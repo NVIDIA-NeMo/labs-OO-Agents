@@ -2,9 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Default context policy implemented against public framework interfaces."""
 
+import inspect
 import logging
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from nooa.context_blocks import BlockMetadata, Context, DynamicContext, Role
 from nooa.context_blocks.events import EventBase, ResultStatus, ToolCallEvent, ToolResult
@@ -21,11 +22,42 @@ from nooa.context_view import (
 
 if TYPE_CHECKING:
     from nooa.agent import Agent
+    from nooa.skill import Skill
     from nooa.strategies.current_call import CurrentCall
 
 logger = logging.getLogger(__name__)
 
 _FRAMEWORK_KEYS = frozenset({"system_prompt", "self", "state", "events_api"})
+
+
+def active_skills(agent: "Agent") -> tuple["Skill", ...]:
+    """Return visible attached skills in stable attribute order."""
+    from nooa.skill import Skill
+
+    values = tuple(agent.__instance_values__().values())
+    visible_ids = {id(value) for value in values}
+    managed_ids = {
+        id(skill)
+        for value in values
+        if isinstance(value, Skill)
+        for skill in getattr(value, "_managed_skills", lambda: ())()
+    }
+    skills: list[Skill] = []
+    seen: set[int] = set()
+    for value in values:
+        if not isinstance(value, Skill) or id(value) in seen:
+            continue
+        if id(value) in managed_ids:
+            continue
+        seen.add(id(value))
+        skills.append(value)
+        active = getattr(value, "active_skills", None)
+        if callable(active):
+            for nested in cast("tuple[Skill, ...]", active()):
+                if id(nested) in visible_ids and id(nested) not in seen:
+                    seen.add(id(nested))
+                    skills.append(nested)
+    return tuple(skills)
 
 
 def _block(
@@ -143,11 +175,9 @@ def _source_error(key: str, exc: Exception) -> str:
 async def system_prompt_block(agent: "Agent", call: "CurrentCall") -> Block | None:
     """Build the default system prompt directly from the agent."""
     try:
-        value = await evaluate_context_expression(
-            "self._resolve_system_prompt()",
-            owner=agent,
-            call=call,
-        )
+        value = agent._resolve_system_prompt()
+        if inspect.isawaitable(value):
+            value = await value
         content = context_text(value, call=call)
     except Exception as exc:
         content = _source_error("system_prompt", exc)
@@ -335,7 +365,7 @@ async def collect_skill_blocks(
 ) -> tuple[Block, ...]:
     """Evaluate active skill declarations without selecting their global placement."""
     blocks: tuple[Block, ...] = ()
-    for skill in agent.active_skills():
+    for skill in active_skills(agent):
         if skill.context_block is None:
             continue
         key, expression = skill.context_block

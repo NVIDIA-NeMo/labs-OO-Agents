@@ -25,7 +25,7 @@ import asyncio
 import contextvars
 import json
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Annotated, Any, cast
 
 from nooa.agent import Agent
@@ -640,6 +640,7 @@ class TokenBudgetSummarizer(SummarizationAgent):
     _unsub_llm: Annotated[Callable[[], None] | None, hidden] = None
     _pending_source: Annotated[tuple[tuple[str, str, str], ...] | None, hidden] = None
     _pending_source_text: Annotated[str | None, hidden] = None
+    _pending_source_events: Annotated[tuple[tuple[str, "EventBase"], ...], hidden] = ()
     _failed_summaries: Annotated[int, hidden] = 0
     _automatic_context_budget: Annotated[bool, hidden] = False
     _automatic_context_budget_percent: Annotated[float, hidden] = 0.8
@@ -678,6 +679,7 @@ class TokenBudgetSummarizer(SummarizationAgent):
             self._unsub_llm = None
         self._pending_source = None
         self._pending_source_text = None
+        self._pending_source_events = ()
         super()._uninstall()
 
     @staticmethod
@@ -757,17 +759,22 @@ class TokenBudgetSummarizer(SummarizationAgent):
     @hidden
     @no_trace
     def _snapshot_source(
-        self, client: "UnifiedLLM"
+        self,
+        client: "UnifiedLLM",
+        pairs: Sequence[tuple[str, "EventBase"]] | None = None,
+        *,
+        render: bool = True,
     ) -> tuple[tuple[tuple[str, str, str], ...], str]:
-        """Freeze the oldest fitting contiguous range, retaining hidden/replay barriers."""
+        """Select a safe source range; bound and render standalone requests only."""
         assert self.target_event_manager is not None
         from nooa.events import Summary
         from nooa.token_counter import char_approximate_token_counter
 
-        pairs = self.target_event_manager.items()
+        if pairs is None:
+            pairs = self.target_event_manager.items()
         events = [event for _, event in pairs]
         limit = max(0, len(events) - self.config.preserve_recent)
-        budget = context_budget(client, percent=0.7, fallback=None)
+        budget = context_budget(client, percent=0.7, fallback=None) if render else None
         count = getattr(client, "count_tokens", None) or char_approximate_token_counter
         source: list[tuple[str, str, str]] = []
         parts: list[str] = []
@@ -781,7 +788,11 @@ class TokenBudgetSummarizer(SummarizationAgent):
                     break
                 source, parts, used, has_original = [], [], 0, False
                 continue
-            rendered = [self._event_markdown(tag, event) for tag, event in pairs[start:end]]
+            rendered = (
+                [self._event_markdown(tag, event) for tag, event in pairs[start:end]]
+                if render
+                else []
+            )
             # Parameters use repr; include escaping and conservative separators.
             cost = sum(count(repr(part)) + count("\n\n") for part in rendered)
             if budget is not None and used + cost > budget:
@@ -812,10 +823,15 @@ class TokenBudgetSummarizer(SummarizationAgent):
 
         if _in_summary_fork.get() or self._pending_task is not None or self._unsub_llm is None:
             return await nxt(ctx)
-        source, text = (), ""
+        pairs = ()
         try:
-            if ctx.client is not None:
-                source, text = self._snapshot_source(ctx.client)
+            if ctx.client is not None and self.target_event_manager is not None:
+                # Freeze content before dispatch, without rendering, JSON serialization,
+                # or token counting. Responses and tool work from this turn are excluded.
+                pairs = tuple(
+                    (tag, event.model_copy(deep=True))
+                    for tag, event in self.target_event_manager.items()
+                )
         except Exception:
             logger.warning("Could not snapshot summary source; history is unchanged", exc_info=True)
         ctx = await nxt(ctx)
@@ -831,18 +847,35 @@ class TokenBudgetSummarizer(SummarizationAgent):
         if (
             self._unsub_llm is None
             or self._pending_task is not None
-            or not source
+            or not pairs
             or usage is None
             or usage.input_tokens <= self.config.max_tokens
             or ctx.client is None
         ):
             return ctx
+        reuse_prefix = type(ctx.context_view) in (
+            CodeActView,
+            CodeActV2View,
+            PredictView,
+            PurePythonView,
+        )
+        try:
+            source, text = self._snapshot_source(ctx.client, pairs, render=not reuse_prefix)
+        except Exception:
+            logger.warning("Could not prepare summary source; history is unchanged", exc_info=True)
+            return ctx
+        if not source:
+            return ctx
         self._pending_source = source
-        self._pending_source_text = text
+        self._pending_source_text = text if not reuse_prefix else None
+        source_tags = {tag for tag, _, _ in source}
+        self._pending_source_events = (
+            tuple(pair for pair in pairs if pair[0] in source_tags) if reuse_prefix else ()
+        )
         self._pending_range = (source[0][0], source[-1][0])
         # Exact type intentionally excludes customized subclasses. This is only
         # an optimization: unknown views still get independent state compaction.
-        if type(ctx.context_view) in (CodeActView, CodeActV2View, PredictView, PurePythonView):
+        if reuse_prefix:
             self._pending_task = asyncio.create_task(self._run_cached_summary(ctx))
         else:
             self._pending_task = asyncio.create_task(self._run_state_summary(text, ctx.client))
@@ -901,15 +934,7 @@ class TokenBudgetSummarizer(SummarizationAgent):
             self._failed_summaries = 0
         except Exception:
             logger.warning("Cache-sharing summary failed; history is unchanged", exc_info=True)
-            self._pending_summary = None
-            self._failed_summaries += 1
-            if self._failed_summaries >= 2 and self._unsub_llm is not None:
-                self._unsub_llm()
-                self._unsub_llm = None
-                logger.warning(
-                    "Token-budget summarization disabled after two consecutive failures; "
-                    "history is unchanged. Fix the cause before reinstalling."
-                )
+            self._record_summary_failure()
         finally:
             _in_summary_fork.reset(token)
 
@@ -932,15 +957,7 @@ class TokenBudgetSummarizer(SummarizationAgent):
             self._failed_summaries = 0
         except Exception:
             logger.warning("Summary failed; history is unchanged", exc_info=True)
-            self._pending_summary = None
-            self._failed_summaries += 1
-            if self._failed_summaries >= 2 and self._unsub_llm is not None:
-                self._unsub_llm()
-                self._unsub_llm = None
-                logger.warning(
-                    "Token-budget summarization disabled after two consecutive failures; "
-                    "history is unchanged. Fix the reported failure before reinstalling."
-                )
+            self._record_summary_failure()
         finally:
             _scoped_blocks_var.reset(scoped_token)
             _decorator_context_var.reset(decorator_token)
@@ -950,23 +967,53 @@ class TokenBudgetSummarizer(SummarizationAgent):
 
     @hidden
     @no_trace
+    def _record_summary_failure(self) -> None:
+        self._pending_summary = None
+        self._failed_summaries += 1
+        if self._failed_summaries >= 2 and self._unsub_llm is not None:
+            self._unsub_llm()
+            self._unsub_llm = None
+            logger.warning(
+                "Token-budget summarization disabled after two consecutive failures; "
+                "history is unchanged. Fix the cause before reinstalling."
+            )
+
+    @hidden
+    @no_trace
     def _apply_pending_summary(self) -> None:
         if self._pending_task is not None and self._pending_task.done():
             if self._pending_source and self._pending_range:
+                pairs = []
                 try:
                     pairs = self._get_events_in_range(*self._pending_range)
                     current = tuple(
                         (tag, event.id, event.model_dump_json()) for tag, event in pairs
                     )
-                    text = "\n\n".join(self._event_markdown(tag, event) for tag, event in pairs)
                 except Exception:
                     current = ()
-                    text = None
-                if current != self._pending_source or text != self._pending_source_text:
+                if current != self._pending_source:
                     logger.warning("Discarding stale summary: source events changed")
                     self._pending_summary = None
+                else:
+                    # Persistence serialization can omit details of Python values.
+                    # Compare public source content only after identity
+                    # and serialized-state checks pass.
+                    try:
+                        text = "\n\n".join(self._event_markdown(tag, event) for tag, event in pairs)
+                        expected = self._pending_source_text
+                        if expected is None:
+                            expected = "\n\n".join(
+                                self._event_markdown(tag, event)
+                                for tag, event in self._pending_source_events
+                            )
+                    except Exception:
+                        text, expected = None, ""
+                    if text != expected:
+                        logger.warning("Discarding stale summary: source content changed")
+                        self._pending_summary = None
             self._pending_source = None
             self._pending_source_text = None
+            self._pending_source_events = ()
         super()._apply_pending_summary()
 
     @classmethod

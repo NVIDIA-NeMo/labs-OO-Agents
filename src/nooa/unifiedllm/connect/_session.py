@@ -179,9 +179,10 @@ def _reasoning_values(response):
 async def session_steps(alias, entry, *, api_key, budget_tokens):
     """Three configured-cap turns, without retries; never execute model tools."""
     from nooa.context_blocks.formatter import OpenAIProviderFormatter
-    from nooa.context_blocks.models import BlockMetadata, ResolvedBlock, Role
+    from nooa.context_blocks.models import BlockMetadata, Role
     from nooa.context_blocks.renderer import render_context
     from nooa.context_blocks.renderers.cached import CachedBlockFormatter
+    from nooa.context_view import Block
     from nooa.unifiedllm import CacheBoundary, RetryConfig, Tool
     from nooa.unifiedllm.connect import ProbeUpdate, _include_rejected
     from nooa.unifiedllm.http_config import HttpConfig
@@ -239,20 +240,20 @@ async def session_steps(alias, entry, *, api_key, budget_tokens):
     )
     messages = render_context(
         [
-            ResolvedBlock(
+            Block(
                 key="instructions",
                 role=Role.SYSTEM,
                 content="Use the reference to solve the task. Do not repeat the reference.",
                 metadata=BlockMetadata(static=True),
             ),
-            ResolvedBlock(
+            Block(
                 key="reference",
                 role=Role.USER,
                 content=padding,
                 metadata=BlockMetadata(static=True),
             ),
             CacheBoundary(),
-            ResolvedBlock(
+            Block(
                 key="task",
                 # Context assembly explicitly places this volatile task after
                 # the reusable prefix boundary.

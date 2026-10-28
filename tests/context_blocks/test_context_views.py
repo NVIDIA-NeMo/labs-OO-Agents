@@ -331,6 +331,30 @@ async def test_disabled_key_suppresses_default_skill_shorthand():
     assert agent.reads == 0
 
 
+@pytest.mark.parametrize("method", [False, True])
+async def test_skill_discovery_does_not_reserve_active_skills_name(method):
+    class DeclaredSkill(Skill):
+        context_block = ("skill_state", "'visible'")
+
+    class Example(Agent, llm=object()):
+        skill = DeclaredSkill()
+
+        async def active_skills(self) -> str:
+            """A user-defined generation method, not a framework hook."""
+            ...
+
+        async def run(self): ...
+
+    agent = Example()
+    if not method:
+        agent.active_skills = "a user field"
+    items = await agent.runtime._prepare_context(Example.run)
+    assert (
+        next(item for item in items if getattr(item, "key", None) == "skill_state").content
+        == "visible"
+    )
+
+
 async def test_protected_key_suppresses_skill_fallback_without_evaluation():
     class DeclaredSkill(Skill):
         context_block = ("state", "self.read_skill_state()")
@@ -622,6 +646,41 @@ def test_budget_counts_replacement_notice_and_ignores_boundary():
     assert result[1] == CacheBoundary()
     assert result[0].content.startswith("EVICTED:")
     assert result[0].content in counted
+    assert result[0].metadata.truncated is True
+    assert block.metadata is None
+
+
+@pytest.mark.parametrize("with_metadata", [False, True])
+async def test_budget_evictions_are_counted_with_or_without_metadata(monkeypatch, with_metadata):
+    from nooa.context_blocks import BlockMetadata
+
+    metadata = BlockMetadata(expr="source", user_block=True) if with_metadata else None
+    block = Block(key="large", content="x" * 1000, metadata=metadata)
+    call = CurrentCall(
+        id="eviction",
+        method_name="run",
+        decorator="plan",
+        context_budget=100,
+        _context_token_counter=len,
+    )
+    items = apply_context_budget((block,), call=call, evictable=(block,))
+    assert items[0].metadata.truncated is True
+    assert block.metadata is metadata
+    if metadata is not None:
+        assert items[0].metadata.expr == "source"
+        assert items[0].metadata.user_block is True
+        assert not metadata.truncated
+
+    async def prepared(*args, **kwargs):
+        return items
+
+    agent = Agent(llm=object())
+    monkeypatch.setattr(agent.runtime, "_prepare_context", prepared)
+    try:
+        await agent.runtime._build_messages(lambda: None)
+        assert agent.runtime._last_context_stats.context_blocks_dropped == 1
+    finally:
+        await agent.aclose()
 
 
 async def test_current_call_exposes_call_overridden_model_and_budget():

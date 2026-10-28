@@ -265,7 +265,9 @@ class TestLLMResponseEvent:
         assert ev.usage is None
 
     @pytest.mark.asyncio
-    async def test_dynamic_context_preserves_legacy_trace_envelope(self) -> None:
+    async def test_dynamic_context_contains_rendered_blocks_without_synthetic_envelope(
+        self,
+    ) -> None:
         """Trailing view blocks remain available to ATIF without changing prompts."""
         recorded: list[LLMResponse] = []
         fake_llm = FakeLLMClient(scripted_responses=[_resp(content='{"v":1}')])
@@ -285,11 +287,13 @@ class TestLLMResponseEvent:
         await agent.run()
 
         assert len(recorded) == 1
-        assert recorded[0].dynamic_context.startswith("<context>\n<state")
+        assert recorded[0].dynamic_context.startswith("<state")
         assert "<live expr=\"'current-value'\">\ncurrent-value\n</live>" in (
             recorded[0].dynamic_context
         )
-        assert recorded[0].dynamic_context.endswith("\n</context>")
+        assert "<context>" not in recorded[0].dynamic_context
+        assert "</context>" not in recorded[0].dynamic_context
+        assert recorded[0].dynamic_context == fake_llm.last_messages[-1]["content"]
 
 
 class TestAtifExporterContextVar:

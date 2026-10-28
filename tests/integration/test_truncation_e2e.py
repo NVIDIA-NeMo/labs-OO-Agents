@@ -139,7 +139,6 @@ def _render_default_budget(blocks, limit):
         block_formatter=XMLBlockFormatter(),
         provider_formatter=_openai_formatter(),
         context_limit=limit,
-        count_tokens=_count_tokens,
         context_blocks_dropped=dropped,
     )
 
@@ -478,13 +477,13 @@ class TestL4ContextBlockEviction:
     def test_events_not_evicted_by_context_block_eviction(self):
         """Event blocks (non-SYSTEM role) are not touched by L4.1 eviction.
         Only SYSTEM-role context blocks are candidates."""
-        system_block = ResolvedBlock(
+        system_block = Block(
             key="system_prompt",
             content="You are helpful.",
             role=Role.SYSTEM,
             metadata=BlockMetadata(static=True),
         )
-        event_block = ResolvedBlock(
+        event_block = Block(
             key="event_1",
             content="big event output " * 100,
             role=Role.USER,
@@ -495,7 +494,6 @@ class TestL4ContextBlockEviction:
             block_formatter=XMLBlockFormatter(),
             provider_formatter=_openai_formatter(),
             context_limit=10,
-            count_tokens=_count_tokens,
         )
         # Context block eviction should not drop events
         assert result.stats.context_blocks_dropped == 0

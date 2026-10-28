@@ -47,6 +47,40 @@ async def trigger(agent, ctx):
     return await agent.event_manager.run_middleware("llm_call", ctx, dispatch)
 
 
+async def test_under_budget_does_not_prepare_summary_source(monkeypatch):
+    agent, summarizer, ctx = setup()
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("Summary preparation ran below the token threshold")
+
+    monkeypatch.setattr(summarizer, "_snapshot_source", unexpected)
+    monkeypatch.setattr(summarizer, "_event_markdown", unexpected)
+    monkeypatch.setattr(Message, "model_dump_json", unexpected)
+    monkeypatch.setattr(ctx.client, "count_tokens", unexpected)
+    result = await agent.event_manager.run_middleware(
+        "llm_call", ctx, lambda request: dispatch(request, tokens=1)
+    )
+    assert result.response.content == "parent"
+    assert summarizer._pending_task is None
+    await agent.aclose()
+
+
+async def test_cached_summary_does_not_prepare_standalone_prompt(monkeypatch):
+    agent, summarizer, ctx = setup()
+    ctx = ctx.model_copy(update={"context_view": PredictView(), "params": {}})
+    ctx = ctx.model_copy(update={"client": FakeLLMClient([LLMResponse(content="summary")])})
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("Standalone prompt preparation ran for a cached summary")
+
+    monkeypatch.setattr(summarizer, "_event_markdown", unexpected)
+    monkeypatch.setattr(ctx.client, "count_tokens", unexpected)
+    await trigger(agent, ctx)
+    assert summarizer._pending_summary == "summary"
+    assert summarizer._pending_source_text is None
+    await agent.aclose()
+
+
 @pytest.mark.parametrize("custom_view", [False, True])
 async def test_real_parent_uses_cache_only_with_default_view(custom_view):
     class RecordingClient(FakeLLMClient):
@@ -197,7 +231,8 @@ async def test_stale_source_never_replaces_history(change):
     await agent.aclose()
 
 
-async def test_mutated_output_hidden_by_bounded_serializer_invalidates_summary():
+@pytest.mark.parametrize("reuse_prefix", [False, True])
+async def test_mutated_output_hidden_by_bounded_serializer_invalidates_summary(reuse_prefix):
     from nooa.context_blocks.events import ResultStatus
     from nooa.events import PythonOutput
 
@@ -208,6 +243,9 @@ async def test_mutated_output_hidden_by_bounded_serializer_invalidates_summary()
             self.values = values
 
     agent, summarizer, ctx = setup(preserve=0)
+    if reuse_prefix:
+        ctx = ctx.model_copy(update={"context_view": PredictView(), "params": {}})
+        ctx = ctx.model_copy(update={"client": FakeLLMClient([LLMResponse(content="summary")])})
     payload = Payload(list(range(200)))
     output = PythonOutput(
         tool_call_id="python",
@@ -628,7 +666,9 @@ async def test_aclose_cancels_and_awaits_background_work():
 
 async def test_snapshot_failure_leaves_parent_and_history_intact():
     agent, summarizer, ctx = setup()
-    summarizer._snapshot_source = lambda _: (_ for _ in ()).throw(ValueError("bad source"))
+    summarizer._snapshot_source = lambda *args, **kwargs: (_ for _ in ()).throw(
+        ValueError("bad source")
+    )
     result = await trigger(agent, ctx)
     assert result.response.content == "parent"
     assert summarizer._pending_task is None

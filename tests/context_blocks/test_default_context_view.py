@@ -121,7 +121,7 @@ async def test_unregistered_framework_defaults_are_not_built():
 
     owner = SimpleNamespace(
         context_manager=MinimalManager(),
-        active_skills=lambda: (),
+        __instance_values__=lambda: {},
         event_manager=SimpleNamespace(values=lambda: []),
     )
     assert await collect_context_items(ManagedContextView(), owner, _call(ExampleAgent())) == ()
@@ -134,7 +134,7 @@ async def test_unprotected_framework_declaration_is_still_materialized():
     manager["system_prompt"] = "standalone override"
     owner = SimpleNamespace(
         context_manager=manager,
-        active_skills=lambda: (),
+        __instance_values__=lambda: {},
         event_manager=SimpleNamespace(values=lambda: []),
     )
     items = await collect_context_items(ManagedContextView(), owner, _call(ExampleAgent()))

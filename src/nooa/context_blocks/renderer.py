@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 
 if TYPE_CHECKING:
     from nooa.config.truncation_config import FormatConfig
+    from nooa.context_view import ContextItem
 
 from nooa.context_blocks.events import EventBase, ToolCallEvent
 from nooa.context_blocks.exceptions import UnsupportedContextLayout
@@ -79,12 +80,11 @@ def format_message_content(block: ResolvedBlock, format_type: str) -> str:
 
 
 def render_context(
-    blocks: Sequence[Any],
+    blocks: Sequence["ContextItem"],
     *,
     block_formatter: BlockFormatter,
     provider_formatter: ProviderFormatter,
     context_limit: int | None = None,
-    count_tokens: Callable[[str], int] | None = None,
     context_format: "FormatConfig | None" = None,
     event_format: "FormatConfig | None" = None,
     event_format_resolver: Callable[[Any], "FormatConfig | None"] | None = None,
@@ -117,9 +117,7 @@ def render_context(
             segment = []
             segment_index += 1
             continue
-        if isinstance(item, ResolvedBlock):
-            block = item
-        elif isinstance(item, Block):
+        if isinstance(item, Block):
             from nooa.agentdoc import pformat
 
             block = ResolvedBlock(

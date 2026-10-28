@@ -103,7 +103,6 @@ def _render_default(blocks, limit):
         block_formatter=XMLBlockFormatter(),
         provider_formatter=OpenAIProviderFormatter(),
         context_limit=limit,
-        count_tokens=_count_words,
         context_blocks_dropped=dropped,
     )
 

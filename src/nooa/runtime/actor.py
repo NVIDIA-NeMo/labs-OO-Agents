@@ -172,12 +172,7 @@ def _extract_trailing_context_envelope(messages: list[dict[str, Any]]) -> str:
 
 
 def _dynamic_context_trace_snapshot(items: tuple[Any, ...], messages: list[Any]) -> str:
-    """Project trailing context blocks into the existing trace field.
-
-    This is observability compatibility, not context assembly: provider messages
-    stay exactly as rendered. Block-aware messages provide the final rendered
-    bodies, including expression metadata, without consulting ContextManager.
-    """
+    """Capture rendered trailing context blocks without adding trace-only markup."""
     if not items or not messages:
         return ""
 
@@ -191,7 +186,7 @@ def _dynamic_context_trace_snapshot(items: tuple[Any, ...], messages: list[Any])
     if message.role != Role.USER or not message.parts:
         return ""
     blocks = [part.content for part in message.parts if isinstance(part, BlockPart)]
-    return f"<context>\n{'\n'.join(blocks)}\n</context>" if blocks else ""
+    return (message.content or "") if blocks else ""
 
 
 def _snapshot_llm_request(
@@ -204,8 +199,8 @@ def _snapshot_llm_request(
 
     Emits a :class:`SystemPrompt` event carrying ``messages[0].content`` and
     returns either an explicit trailing ``<context>…</context>`` envelope or
-    the compatibility snapshot reconstructed during rendering. The returned
-    envelope is stamped onto the matching :class:`LLMResponse`. ``record=False``
+    the trailing block text captured during rendering. The returned
+    text is stamped onto the matching :class:`LLMResponse`. ``record=False``
     keeps the snapshot out of the LLM-visible event timeline.
     """
     if messages and isinstance(messages[0], dict) and messages[0].get("role") == "system":
@@ -844,7 +839,7 @@ class ActorRuntime:
         Example:
             # Inside a context view's assemble(agent, call):
             for event in agent.event_manager.values():
-                if event.call_id == call.invocation_id:
+                if call.invocation_id in event.related_call_ids:
                     yield event
 
             # Or directly in code
@@ -3350,7 +3345,6 @@ class ActorRuntime:
                 block_formatter=self.agent.render_config.block_formatter,
                 provider_formatter=self.agent.render_config.provider_formatter,
                 context_limit=effective_context_limit,
-                count_tokens=count_tokens,
                 context_format=tc.context_block_format,
                 event_format=tc.event_format,
                 event_format_resolver=self._event_format_for_event,

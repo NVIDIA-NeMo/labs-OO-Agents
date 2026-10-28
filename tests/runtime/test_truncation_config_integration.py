@@ -251,8 +251,7 @@ class TestTokenBudgetIntegration:
     async def test_max_context_tokens_does_not_crash_on_generation(self):
         """Agent with max_context_tokens set should not raise ValueError during generation.
 
-        Regression test: render_context() raises ValueError if context_limit is non-None
-        but count_tokens is not provided. The actor must pass count_tokens to render_context().
+        The runtime supplies the view's budget and counter before rendering.
         """
         from nooa.unifiedllm import FakeLLMClient
 

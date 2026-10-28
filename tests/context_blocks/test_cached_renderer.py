@@ -15,16 +15,16 @@ from nooa.context_blocks.formatter import OpenAIProviderFormatter
 from nooa.context_blocks.models import (
     BlockMetadata,
     DynamicContext,
-    ResolvedBlock,
     Role,
 )
 from nooa.context_blocks.renderer import render_context
 from nooa.context_blocks.renderers.cached import CachedBlockFormatter
+from nooa.context_view import ContextItem
 from nooa.events import LLMResponse
 
 
-def _static_block(key: str, content: str, expr: str | None = None) -> ResolvedBlock:
-    return ResolvedBlock(
+def _static_block(key: str, content: str, expr: str | None = None) -> Block:
+    return Block(
         key=key,
         content=content,
         role=Role.SYSTEM,
@@ -32,8 +32,8 @@ def _static_block(key: str, content: str, expr: str | None = None) -> ResolvedBl
     )
 
 
-def _dynamic_block(key: str, content: str, expr: str | None = None) -> ResolvedBlock:
-    return ResolvedBlock(
+def _dynamic_block(key: str, content: str, expr: str | None = None) -> Block:
+    return Block(
         key=key,
         content=content,
         role=Role.USER,
@@ -80,14 +80,22 @@ class TestCachedBlockFormatterPartition:
 
     def test_all_static_single_system_message(self):
         fmt = CachedBlockFormatter()
-        messages = fmt.format([_static_block("a", "A"), _static_block("b", "B")])
+        messages = render_context(
+            [_static_block("a", "A"), _static_block("b", "B")],
+            block_formatter=fmt,
+            provider_formatter=OpenAIProviderFormatter(),
+        ).messages
         assert len(messages) == 1
         assert messages[0].role == Role.SYSTEM
         assert "<a>" in messages[0].content and "<b>" in messages[0].content
 
     def test_trailing_blocks_keep_user_role(self):
         fmt = CachedBlockFormatter()
-        messages = fmt.format([_dynamic_block("plan", "do stuff")])
+        messages = render_context(
+            [_dynamic_block("plan", "do stuff")],
+            block_formatter=fmt,
+            provider_formatter=OpenAIProviderFormatter(),
+        ).messages
         assert len(messages) == 1
         assert messages[0].role == Role.USER
         assert "<plan>" in messages[0].content
@@ -95,14 +103,16 @@ class TestCachedBlockFormatterPartition:
 
     def test_mixed_preserves_exact_order(self):
         fmt = CachedBlockFormatter()
-        messages = fmt.format(
+        messages = render_context(
             [
                 _static_block("sys", "S"),
                 _dynamic_block("plan", "P"),
                 _static_block("self_doc", "D"),
                 _dynamic_block("state", "T"),
-            ]
-        )
+            ],
+            block_formatter=fmt,
+            provider_formatter=OpenAIProviderFormatter(),
+        ).messages
         assert [message.role for message in messages] == [
             Role.SYSTEM,
             Role.USER,
@@ -155,13 +165,7 @@ class TestCachedRendererEndToEndOpenAI:
         user_event.tag = "1"
         blocks = [
             _static_block("sys", "S"),
-            ResolvedBlock(
-                key="event_1",
-                content="hi",
-                role=Role.USER,
-                metadata=BlockMetadata(tag="1"),
-                event=user_event,
-            ),
+            user_event.model_copy(update={"tag": "1"}),
             CacheBoundary(),
             _dynamic_block("plan", "P"),
         ]
@@ -190,15 +194,9 @@ class TestCachedRendererEndToEndOpenAI:
         tail across consecutive LLM calls (issue #208)."""
         user_event = UserEvent(content="please run task X")
         user_event.tag = "1"
-        user_block = ResolvedBlock(
-            key="event_1",
-            content="please run task X",
-            role=Role.USER,
-            metadata=BlockMetadata(tag="1"),
-            event=user_event,
-        )
+        user_block = user_event.model_copy(update={"tag": "1"})
 
-        def render(dynamic_value: str, extra_blocks: list[ResolvedBlock]) -> list[dict]:
+        def render(dynamic_value: str, extra_blocks: list[ContextItem]) -> list[dict]:
             blocks = [
                 _static_block("sys", "S"),
                 user_block,
@@ -224,13 +222,7 @@ class TestCachedRendererEndToEndOpenAI:
             result=ToolResult(tool_call_id="call_42", content="ok"),
         )
         tool_event.tag = "2"
-        tool_block = ResolvedBlock(
-            key="event_2",
-            content="",
-            role=Role.ASSISTANT,
-            metadata=BlockMetadata(tag="2"),
-            event=tool_event,
-        )
+        tool_block = tool_event.model_copy(update={"tag": "2"})
         out3 = render("plan-v3", [tool_block])
 
         # Locate the user-event message in each render (the first "user" dict
@@ -253,13 +245,7 @@ class TestCachedRendererEndToEndOpenAI:
 
     def test_opaque_state_is_appended_without_changing_cacheable_prefix(self):
         user_event = UserEvent(content="please solve the task", tag="1")
-        user_block = ResolvedBlock(
-            key="event_1",
-            content=user_event.content,
-            role=Role.USER,
-            metadata=BlockMetadata(tag="1"),
-            event=user_event,
-        )
+        user_block = user_event.model_copy(update={"tag": "1"})
         first = render_context(
             [
                 _static_block("sys", "stable instructions"),
@@ -285,13 +271,7 @@ class TestCachedRendererEndToEndOpenAI:
             [
                 _static_block("sys", "stable instructions"),
                 user_block,
-                ResolvedBlock(
-                    key="event_2",
-                    content=turn.content,
-                    role=Role.ASSISTANT,
-                    metadata=BlockMetadata(tag="2"),
-                    event=turn,
-                ),
+                turn,
                 CacheBoundary(),
                 _dynamic_block("live_state", "version two"),
             ],
@@ -313,13 +293,7 @@ class TestCachedRendererEndToEndOpenAI:
         asst_event.tag = "2"
         blocks = [
             _static_block("sys", "S"),
-            ResolvedBlock(
-                key="event_2",
-                content="",
-                role=Role.ASSISTANT,
-                metadata=BlockMetadata(tag="2"),
-                event=asst_event,
-            ),
+            asst_event.model_copy(update={"tag": "2"}),
             CacheBoundary(),
             _dynamic_block("plan", "P"),
         ]

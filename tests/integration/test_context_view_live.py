@@ -13,6 +13,7 @@ from pydantic import BaseModel
 
 from nooa import Agent, Block, Context, Skill, strategy
 from nooa.context_blocks.events import UserEvent
+from nooa.default_context_view import active_skills
 from nooa.strategies import PredictStrategy
 from nooa.unifiedllm import get_llm_client
 
@@ -47,7 +48,7 @@ class InventoryPolicyView:
 class InventoryView:
     async def assemble(self, agent, call):
         yield Block(key="instructions", content="Apply the supplied inventory policy exactly.")
-        for skill in agent.active_skills():
+        for skill in active_skills(agent):
             async for item in InventoryPolicyView().assemble(skill, call):
                 yield item
         yield UserEvent(content=call.format_parameters_as_code())

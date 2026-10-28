@@ -11,12 +11,11 @@ from nooa.context_blocks.formatter import (
     OpenAIProviderFormatter,
     XMLBlockFormatter,
 )
-from nooa.context_blocks.models import BlockMetadata, ResolvedBlock, Role
 from nooa.context_blocks.renderer import render_context
 from nooa.events import PythonOutput
 
 
-def _render_openai(blocks: list[ResolvedBlock]) -> list[dict]:
+def _render_openai(blocks: list[PythonOutput]) -> list[dict]:
     return render_context(
         blocks,
         block_formatter=XMLBlockFormatter(),
@@ -27,21 +26,15 @@ def _render_openai(blocks: list[ResolvedBlock]) -> list[dict]:
 def _make_python_output_block(
     stdout: str = "hello",
     images: list[dict] | None = None,
-) -> ResolvedBlock:
-    """Create a ResolvedBlock carrying a PythonOutput event with optional images."""
-    event = PythonOutput(
+) -> PythonOutput:
+    """Create a PythonOutput event with optional images."""
+    return PythonOutput(
+        tag="1",
         tool_call_id="tc_1",
         execution_count=1,
         execution_status=ResultStatus.COMPLETE,
         stdout=stdout,
         images=images or [],
-    )
-    return ResolvedBlock(
-        key="python_output",
-        content=f"<stdout>{stdout}</stdout>",
-        role=Role.USER,
-        metadata=BlockMetadata(tag="1"),
-        event=event,
     )
 
 
