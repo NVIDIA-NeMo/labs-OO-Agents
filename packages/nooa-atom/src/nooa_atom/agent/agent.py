@@ -532,25 +532,12 @@ class AtomAgent(AtomAgentBase):
         """Experimental selection: only handle may share an owner across calls."""
         if self._namespace_lifetime == "legacy":
             return None
-        from nooa.runtime.execution_namespace import ExecutionNamespace
+        from nooa.runtime.execution_namespace import RUNTIME_NAMES, ExecutionNamespace
 
         if call.method_name == "handle" and self._namespace_lifetime == "session":
             if self._handle_namespace is not None:
                 return self._handle_namespace
-        owner = ExecutionNamespace(
-            reserved=frozenset(
-                {
-                    "self",
-                    "print",
-                    "pprint",
-                    "show",
-                    "return_result",
-                    "python_cell_state",
-                    "Out",
-                    *call.kwargs,
-                }
-            )
-        )
+        owner = ExecutionNamespace(reserved=RUNTIME_NAMES | frozenset(call.kwargs))
         if call.method_name == "handle" and self._namespace_lifetime == "session":
             self._handle_namespace = owner
             self._session_namespace_was_live = True

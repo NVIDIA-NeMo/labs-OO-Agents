@@ -439,7 +439,8 @@ class Job:
 
     async def cancel(self) -> None:
         """Stop the work (a resource: its requests first, then its exit)."""
-        if self._status != "running" or self._task is None:
+        task = self._task  # _task_ended may release the field while requests settle
+        if self._status != "running" or task is None:
             return
         self._withdraw()
         if self._kind == "resource":
@@ -454,10 +455,10 @@ class Job:
             if self._entered is not None:
                 self._exit.set()
             else:
-                self._task.cancel()
+                task.cancel()
         else:
-            self._task.cancel()
-        await asyncio.gather(self._task, return_exceptions=True)
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
     def _withdraw(self) -> None:
         """Cancelled by its owner: no more events, and its undelivered ones are taken back."""
