@@ -59,10 +59,21 @@ from pydantic import AnyHttpUrl
 from nooa.mcp import MCPBaseClient
 from nooa.paths import get_user_dir
 
-try:  # mcp < 2 spells it McpError; mcp >= 2 renamed it
+try:  # mcp < 2 spells it McpError and constructs it from ErrorData
     from mcp.shared.exceptions import McpError
+
+    def mcp_error(error: ErrorData) -> McpError:
+        """The installed SDK's exception for ``error``."""
+        return McpError(error)
+
 except ImportError:  # pragma: no cover - depends on the installed mcp
+    # mcp >= 2 renamed it and takes (code, message, data); from_error_data keeps the ErrorData shape.
     from mcp.shared.exceptions import MCPError as McpError
+
+    def mcp_error(error: ErrorData) -> McpError:
+        """The installed SDK's exception for ``error``."""
+        return McpError.from_error_data(error)
+
 
 # Where the browser is sent after sign-in. Nothing listens there: the person
 # copies the address from the browser. Some gateways reject 127.0.0.1.
@@ -962,7 +973,7 @@ class _AuthorizedSession(ClientSession):
             if not budget.expired():
                 raise
             # Preserve the SDK's response-timeout error contract.
-            raise McpError(
+            raise mcp_error(
                 ErrorData(
                     code=408,
                     message=f"Timed out waiting for an MCP response after {seconds:g} seconds "

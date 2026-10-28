@@ -9,6 +9,7 @@ import json
 import pytest
 from atom_test_agents import CellLLM, python_cell
 from nooa_atom.gym import TURN_METHODS, AtomHarness
+from nooa_atom.session.session import TurnFailedError
 
 from nooa.interactive import TaskResult
 from nooa.runtime.hooks import hooks_scope
@@ -110,3 +111,53 @@ def test_harness_is_an_agent_without_model_facing_methods():
     text = doc(AtomHarness)
     assert "def solve" not in text and "python_cell" not in text
     assert json.dumps(TURN_METHODS) == '["handle_batch", "handle_orchestrate"]'
+
+
+async def test_harness_removes_the_session_directory_it_created_and_keeps_a_callers(
+    tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    owned = AtomHarness(
+        CellLLM([python_cell(FINISH, "call-1")]), turn_method="handle_batch", workdir=tmp_path
+    )
+    root = owned._owned_root
+    assert root is not None and root.is_dir()
+    await owned.solve("task")
+    assert not root.exists()  # nothing of the rollout's session records stays behind in /tmp
+
+    given = tmp_path / "keep"
+    kept = AtomHarness(
+        CellLLM([python_cell(FINISH, "call-2")]),
+        turn_method="handle_batch",
+        workdir=tmp_path,
+        sessions_dir=given,
+    )
+    assert kept._owned_root is None
+    await kept.solve("task")
+    assert given.is_dir() and any(
+        given.rglob("*")
+    )  # the caller's directory and its records are untouched
+
+
+async def test_harness_removes_its_session_directory_when_solve_fails(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    harness = AtomHarness(
+        CellLLM([]), turn_method="handle_batch", workdir=tmp_path
+    )  # no scripted reply: the turn fails
+    root = harness._owned_root
+    with pytest.raises(TurnFailedError):
+        await harness.solve("task")
+    assert not root.exists()
+
+
+async def test_harness_refuses_a_done_without_a_task_result(tmp_path, monkeypatch):
+    """Done.result may carry anything; only a TaskResult is a successful rollout for Gym."""
+    monkeypatch.chdir(tmp_path)
+    llm = CellLLM(
+        [python_cell("return_result(Done(explanation='finished', result='done'))", "call-1")]
+    )
+    harness = AtomHarness(
+        llm, turn_method="handle_batch", workdir=tmp_path, sessions_dir=tmp_path / "s"
+    )
+    with pytest.raises(RuntimeError, match="without a TaskResult.*Done carrying str"):
+        await harness.solve("task")

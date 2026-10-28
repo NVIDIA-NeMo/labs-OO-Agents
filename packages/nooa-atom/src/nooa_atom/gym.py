@@ -17,6 +17,7 @@ so a harness observer sees Atom's code executions and tool calls as it would any
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 from tempfile import mkdtemp
 from typing import Any
@@ -57,9 +58,14 @@ class AtomHarness(Agent):
         super().__init__(llm=llm)
         self.turn_method = turn_method
         self.workspace = Path(workdir or Path.cwd()).resolve()
-        self.sessions_dir = (
-            Path(sessions_dir) if sessions_dir else Path(mkdtemp(prefix="gym-atom-")) / "sessions"
-        )
+        # Session records (<id>.db) live under sessions_dir. A directory the harness created for
+        # one rollout is removed after solve(); a caller-supplied one is left alone.
+        self._owned_root: Path | None = None
+        if sessions_dir:
+            self.sessions_dir = Path(sessions_dir)
+        else:
+            self._owned_root = Path(mkdtemp(prefix="gym-atom-"))
+            self.sessions_dir = self._owned_root / "sessions"
 
     @hidden
     async def solve(self, task: str) -> TaskResult:
@@ -94,7 +100,16 @@ class AtomHarness(Agent):
             root = await registry.create(options)
             outcome = await root.prompt(task)
         finally:
-            await registry.close_all()
-        if not isinstance(outcome, Done) or outcome.result is None:
-            raise RuntimeError(f"Atom ended without a task result: {type(outcome).__name__}")
+            try:
+                await registry.close_all()
+            finally:
+                if self._owned_root is not None:
+                    shutil.rmtree(self._owned_root, ignore_errors=True)
+        if not isinstance(outcome, Done) or not isinstance(outcome.result, TaskResult):
+            ended_with = (
+                f"{type(outcome).__name__} carrying {type(outcome.result).__name__}"
+                if isinstance(outcome, Done)
+                else type(outcome).__name__
+            )
+            raise RuntimeError(f"Atom ended without a TaskResult: {ended_with}")
         return outcome.result
