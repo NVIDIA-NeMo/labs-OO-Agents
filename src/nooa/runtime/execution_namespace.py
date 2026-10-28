@@ -19,6 +19,7 @@ import linecache
 import symtable
 import textwrap
 import types
+import weakref
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -31,6 +32,7 @@ _DELETE = _INTERNAL + "delete"
 RUNTIME_NAMES = frozenset(
     {
         "self",
+        "_call",
         "print",
         "pprint",
         "show",
@@ -331,7 +333,6 @@ def compile_cell(source: str, filename: str, reserved: frozenset[str]) -> Compil
     for statement in wrapper.body:
         ast.increment_lineno(statement, -1)
     ast.fix_missing_locations(tree)
-    linecache.cache[filename] = (len(source), None, source.splitlines(keepends=True), filename)
     return CompiledCell(
         compile(tree, filename, "exec", dont_inherit=True),
         name,
@@ -384,6 +385,14 @@ class _RuntimeBuiltins(dict):
         raise KeyError(name)
 
 
+def _discard_sources(entries: dict[str, tuple]) -> None:
+    # Entries contain only source text/metadata, never the namespace. A reused
+    # filename may now belong to another owner (even with identical contents).
+    for filename, entry in entries.items():
+        if linecache.cache.get(filename) is entry:
+            del linecache.cache[filename]
+
+
 class ExecutionNamespace:
     """Experimental per-owner namespace. Values are never snapshot state.
 
@@ -396,6 +405,10 @@ class ExecutionNamespace:
     def __init__(self, *, reserved: frozenset[str], initial: Mapping[str, Any] | None = None):
         self.reserved = reserved
         self.identity = uuid4().hex
+        self._source_entries: dict[str, tuple] = {}
+        # Helpers retain globals -> builtins -> owner, so their traceback source
+        # stays available. Discarded owners release only their own cache entries.
+        weakref.finalize(self, _discard_sources, self._source_entries)
         self.globals = {k: v for k, v in dict(initial or {}).items() if k not in reserved}
         self.globals["__builtins__"] = _RuntimeBuiltins(self)
         self.globals[_SOURCE] = _source_decorator
@@ -629,6 +642,11 @@ class ExecutionNamespace:
 
     def cell(self, source: str, filename: str = "<experimental-cell>"):
         compiled = compile_cell(source, filename, self.reserved)
+        # Publish only after successful compilation, but before execution so
+        # runtime failures and retained tracebacks can still recover the source.
+        entry = (len(source), None, source.splitlines(keepends=True), filename)
+        self._source_entries[filename] = entry
+        linecache.cache[filename] = entry
         self.user_names.update(compiled.bindings)
         self.dependency_names.update(compiled.dependencies)
         self.epoch += 1
