@@ -320,7 +320,7 @@ class SkillWriting(Skill):
         shell = self._agent.shell
         tests_dir = self._path / lib_name / "tests"
         result = await shell.run(
-            f"PYTHONPATH={shlex.quote(str(self._path))}:$PYTHONPATH "
+            f"PYTHONPATH={shlex.quote(str(self._path))}${{PYTHONPATH:+:$PYTHONPATH}} "
             f"{shlex.quote(_sys.executable)} -m pytest {shlex.quote(str(tests_dir))} -v",
             timeout=60,
         )
