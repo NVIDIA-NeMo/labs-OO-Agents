@@ -178,6 +178,12 @@ def _utf8_safe(value: Any) -> Any:
     return value
 
 
+def _with_utf8_safe_content(block: ResolvedBlock) -> ResolvedBlock:
+    """Escape lone surrogates in ``block.content`` so budgets measure the sent text."""
+    content = _utf8_safe(block.content)
+    return block if content is block.content else block.model_copy(update={"content": content})
+
+
 def render_context(
     blocks: list[ResolvedBlock],
     *,
@@ -211,7 +217,7 @@ def render_context(
     count_fn: Callable[[str], int] = count_tokens if count_tokens is not None else len
 
     # Partition for truncation only.
-    system_blocks = [b for b in blocks if b.role == Role.SYSTEM]
+    system_blocks = [_with_utf8_safe_content(b) for b in blocks if b.role == Role.SYSTEM]
     message_blocks = [b for b in blocks if b.role != Role.SYSTEM]
 
     # Pre-serialize non-tool events so their content can be measured.
@@ -226,7 +232,7 @@ def render_context(
             )
             content = block_formatter.format_event(block.event, event_format=resolved_event_format)
             block = block.model_copy(update={"content": content})
-        serialized_messages.append(block)
+        serialized_messages.append(_with_utf8_safe_content(block))
     message_blocks = serialized_messages
 
     # Total-context eviction: mark over-budget blocks EVICTED in place.
@@ -258,8 +264,10 @@ def render_context(
         reserved_output_tokens=reserved_output_tokens,
     )
 
-    # Neutral message list → provider wire format. The neutral messages are
-    # made UTF-8 safe first: both the request and the tracing journal encode them.
+    # Neutral message list → provider wire format. Block content is already
+    # escaped (so the budget and stats above measure the sent text); this pass
+    # covers the remaining fields (tool calls, images, parts). Both the request
+    # and the tracing journal encode these messages.
     messages = _utf8_safe(block_formatter.format([*system_blocks, *message_blocks]))
     output = provider_formatter.format(messages)
     return RenderResult(

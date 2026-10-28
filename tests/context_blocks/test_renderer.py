@@ -711,6 +711,30 @@ class TestRenderContextLoneSurrogates:
         assert result.output[0]["content"] == "x\\udc80y"
         assert result.messages[0].replay_message is replay
 
+    def test_context_budget_measures_escaped_content(self):
+        """Eviction and stats see the escaped text, which is longer than the original."""
+        status = "\ud800" * 100  # 100 chars before escaping, 600 after
+        blocks = [
+            ResolvedBlock(key="persona", content="Be helpful."),
+            ResolvedBlock(
+                key="todo_status",
+                content=status,
+                metadata=BlockMetadata(user_block=True),
+            ),
+        ]
+
+        result = render_context(
+            blocks,
+            block_formatter=XMLBlockFormatter(),
+            provider_formatter=OpenAIProviderFormatter(),
+            context_limit=200,
+            count_tokens=len,
+        )
+
+        assert result.stats.context_blocks_dropped == 1
+        assert "EVICTED" in result.output[0]["content"]
+        assert "Be helpful." in result.output[0]["content"]
+
     def test_valid_unicode_is_returned_unchanged(self):
         """Encodable text, emoji included, passes through as the same objects."""
         blocks = [ResolvedBlock(key="persona", content="Héllo 🎉 — ok")]
