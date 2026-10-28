@@ -48,7 +48,8 @@ from typing import IO, Annotated, Any
 from nooa import hidden
 from nooa.agentdoc import spec
 from nooa.tools import BashSession
-from nooa_atom.agent.work_manager import describe, job_dir
+from nooa_atom.agent.work_manager import _progress_sink, describe, job_dir
+from nooa_atom.agent.work_progress import _ShellProgress
 
 __all__ = ["CommandResult", "Shell", "ShellOwner", "default_cwd", "shell_owner"]
 
@@ -129,6 +130,7 @@ class _Capture:
         self.written = 0
         self.total = 0
         self.tail = bytearray()
+        self.progress = None
 
     def feed(self, chunk: bytes) -> None:
         self.total += len(chunk)
@@ -144,6 +146,10 @@ class _Capture:
         with contextlib.suppress(Exception):
             while chunk := await stream.read(_CHUNK_BYTES):
                 self.feed(chunk)
+                if self.progress is not None:
+                    self.progress.feed(chunk)
+            if self.progress is not None:
+                self.progress.feed(b"", final=True)
 
     def summary(self) -> tuple[str, str | None]:
         """The stream's text, or its head and tail around a marker; and the path if cut."""
@@ -303,32 +309,31 @@ shell_owner: contextvars.ContextVar[ShellOwner | None] = contextvars.ContextVar(
 
 
 class Shell:
-    """One persistent bash per ``Shell`` object: ``sh = Shell()``; ``await sh.run("cd src")``.
+    """Persistent bash: ``sh = Shell()``; ``await sh.run("cd src")``; ``await sh.run("make")``.
 
-    The same object keeps its bash between commands: cd, exports and
-    unexported variables carry over; another ``Shell()`` is a separate bash.
-    Nothing starts until the first command. Commands run one at a time, in
-    order. ``Shell().run(cmd)`` on a new object is a fresh shell whose state
-    ends with it. ``cwd`` defaults to the workspace; ``run``'s ``timeout``
-    (seconds) bounds that command, which then ends with ``returncode`` 124 and
-    ``timed_out=True`` (bash and its state are kept).
+    Bash starts on first use; FIFO commands keep cwd, variables, options and
+    traps. Another Shell is fresh.
+    ``cwd`` defaults to the workspace. ``run``'s finite positive timeout is
+    seconds from command start; expiry returns code 124 and ``timed_out=True``.
+    ``job = self.jobs.launch(sh, name="sh")``: ``job.send("make")`` returns a request Job.
+    Or launch ``sh.run(cmd, timeout=60)`` for a non-default deadline.
 
-    Launched, it is a job: ``job = self.jobs.launch(sh, name="sh")``; each
-    ``job.send("make")`` is a request job whose result is a ``CommandResult``,
-    like ``sh.run`` (default timeout; else launch ``sh.run(cmd, timeout=60)``).
-    A timeout or cancel stops the whole command (the rest of it is skipped)
-    and keeps the shell's state.
-    When that cannot be done safely (a builtin loop that will not stop, or the
-    user's own USR1 trap) bash restarts; under ``set -e`` the stopped command
-    ends bash. Either way the result says the state was lost. Cancelling the
-    job closes its bash. Options (``set -euxo pipefail``) and traps persist;
-    ``exit N`` ends bash with status N, and the next command starts a new one.
+    Managed commands preview stdout/stderr as items with stream/text/sequence,
+    batched at 1s OR 8192 UTF-8 bytes per stream. Iterate the Job or use Waiting
+    for notifications. ``await job`` is final-only: unread previews are removed,
+    ordinary items stay. No terminal preview flush: tails stay in CommandResult;
+    earlier previews duplicate its prefix. ``job.progress_dropped`` counts omissions.
 
-    Closing ends bash and its background processes (under a harness's
-    ``preserve_background_services()`` scope, bash only; the harness cleans
-    up): ``await sh.aclose()``, ``async with Shell() as sh:``, or when the
-    object is dropped. An agent session closes its own Shells when it ends;
-    keep ``sh`` for as long as a background server must run.
+    Timeout/cancel skips the rest of the command, usually retaining state.
+    Unstoppable builtins or a user's USR1 trap require restarting bash;
+    ``set -e`` can end it. The result reports lost state. ``exit N`` ends bash;
+    the next command starts fresh. Options (``set -euxo pipefail``) persist otherwise.
+
+    Close with ``await sh.aclose()``, ``async with Shell()``, dropping it or
+    cancelling its resource Job. Session shutdown closes its Shells too.
+    Closing ends bash/background processes; in ``preserve_background_services()``
+    only bash ends, and the harness owns process cleanup. Keep ``sh`` while a
+    background server must run. A closed Shell restarts on its next use.
     """
 
     __nosnapshot__ = True  # a live bash is not data
@@ -577,7 +582,12 @@ class Shell:
         opened: list[tuple[asyncio.StreamReader, asyncio.BaseTransport, int]] = []
         write_fds: set[int] = set()
         pumps: list[tuple[asyncio.Task[None], asyncio.BaseTransport, _Capture]] = []
+        progress = None
         try:
+            sink = _progress_sink()
+            if sink is not None:
+                progress = _ShellProgress(sink)
+                out.progress, err.progress = progress.stdout, progress.stderr
             for fifo in fifos[:2]:
                 opened.append(await _open_fifo(fifo))
                 write_fds.add(opened[-1][2])
@@ -593,6 +603,8 @@ class Shell:
             inner = asyncio.ensure_future(
                 session.run_with_timeout_flag(wrapped, timeout + _BACKSTOP_SECONDS)
             )
+            if progress is not None:
+                progress.live = lambda: not inner.done() and self._generation == generation
             restart_notes: list[str] | None = None
             try:
                 try:
@@ -600,6 +612,8 @@ class Shell:
                         asyncio.shield(inner), timeout
                     )
                 except TimeoutError:
+                    if progress is not None:
+                        progress.close()
                     restarted = await self._interrupt(inner, before, session, generation)
                     self._check_open(generation)
                     if restarted:
@@ -609,6 +623,8 @@ class Shell:
                         stray_out, stray_err, _, _ = inner.result()
                     code, timed_out = 124, True
             except asyncio.CancelledError:
+                if progress is not None:
+                    progress.close()
                 if await self._interrupt(inner, before, session, generation):
                     raise asyncio.CancelledError(self._note) from None
                 raise
@@ -616,6 +632,8 @@ class Shell:
                 self._check_open(generation)  # closed: say so, not how the close broke it
                 raise
             finally:
+                if progress is not None:
+                    progress.close()  # terminal, not EOF: background writers may keep pipes open
                 _close_fds(write_fds)  # bash's ends close with the group: then EOF
             self._check_open(generation)
             await self._settle([pump for pump, _, _ in pumps])
@@ -631,6 +649,8 @@ class Shell:
                 notes = restart_notes
             result = _result(code, timed_out, out, err, str(session.cwd))
         finally:
+            if progress is not None:
+                progress.close()
             _close_fds(write_fds)
             for pump, transport, capture in pumps:
                 if pump.done():

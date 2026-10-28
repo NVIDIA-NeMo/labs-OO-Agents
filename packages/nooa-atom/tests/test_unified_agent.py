@@ -92,6 +92,37 @@ async def test_one_shot_subagent_returns_its_task_result_and_notes_are_job_items
     assert "CHILD-PROMPT: fix it" in _prompt(models, "fix")
     assert "One-shot task" in _prompt(models, "fix")
     assert len(models.llms[None].calls) == 2  # the note's turn ran
+    for name in (None, "fix"):
+        call = models.llms[name].calls[0]
+        rendered = "\n".join(str(m.get("content", "")) for m in call.messages)
+        self_doc = rendered.split("<self>", 1)[1].split("</self>", 1)[0]
+        assert "write ``self.v.key = value``" in self_doc
+        assert "read ``self.v.key``" in self_doc
+        assert "delete ``del self.v.key``" in self_doc
+        assert "Store serializable values" in self_doc
+        assert "get(self, id_or_title: str) -> Todo" in rendered
+        assert "Return API documentation as str; display with print(doc(obj))" in rendered
+        assert "Print (return None): max_length=items/container" in rendered
+        assert "def read(self, name: str)" not in rendered
+        [tool] = call.tools
+        assert tool.name == "python_cell"
+        assert tool.description.count("Blocked imports:") == 1
+        assert tool.description.count("Blocked calls by module") == 1
+        assert "`subprocess`" in tool.description and "literal dunder names" in tool.description
+        assert "Run commands and child agents as `self.jobs` work" in tool.description
+        assert "self.shell" not in tool.description and "self.delegate" not in tool.description
+        assert "Blocked imports:" not in rendered  # guidance is tool-local, not another block
+
+    # Atom retains a hidden legacy shell for internal file/repo tools; never recommend it.
+    from nooa.runtime.code_validator import UnifiedCodeValidator, ValidationContext, ValidationError
+    from nooa.runtime.restrictions import DEFAULT_BLOCKED_MODULES
+
+    with pytest.raises(ValidationError) as error:
+        UnifiedCodeValidator().validate(
+            "import subprocess",
+            ValidationContext(agent=root._agent, blocked_modules=DEFAULT_BLOCKED_MODULES),
+        )
+    assert "self.shell" not in str(error.value)
     assert _delegates_empty(root)
     [child] = registry.children(root.id)
     assert (child.name, child.turn_method, child.retained, child.agent) == (

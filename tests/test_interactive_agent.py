@@ -66,6 +66,16 @@ def test_persistent_vars_proxy(agent):
     assert isinstance(agent.v, AgentVars)
 
 
+def test_vars_property_documents_supported_attribute_usage(agent):
+    from nooa.agentdoc import doc
+
+    text = doc(type(agent), concise=True)
+    assert "write ``self.v.key = value``" in text
+    assert "read ``self.v.key``" in text
+    assert "delete ``del self.v.key``" in text
+    assert "Store serializable values" in text
+
+
 def test_vars_proxy_item_assignment_names_the_attribute_form(agent):
     with pytest.raises(TypeError, match=r"write self\.v\.cursor = \.\.\. instead"):
         agent.v["cursor"] = 3

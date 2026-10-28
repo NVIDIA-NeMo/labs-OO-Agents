@@ -541,8 +541,7 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
 
     @property
     def v(self) -> AgentVars:
-        """Attribute-access proxy for ``self.vars`` — the agent's
-        persistent variable dict.
+        """Durable facts: write ``self.v.key = value``, read ``self.v.key``, delete ``del self.v.key``. Store serializable values.
 
         Use for state that should survive across turns and sessions
         but isn't tied to a specific todo. Snapshot-backed via

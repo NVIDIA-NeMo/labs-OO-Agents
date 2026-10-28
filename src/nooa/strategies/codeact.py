@@ -293,6 +293,7 @@ class CodeActSession:
     session_locals: dict[str, Any] = field(default_factory=dict)
     out_accessor: Any = field(default=None)  # OutAccessor instance, created lazily
     sandbox_executor: Any = field(default=None)  # SandboxedExecutor when backend="sandbox"
+    execution_namespace: Any = field(default=None)  # explicit experimental owner
     execution_count: int = 0
     loop_guard: LoopGuard | None = None
 
@@ -732,15 +733,35 @@ Standard Python builtins and agent instance (`self`) are available."""
     def _always_available_builtins(self) -> tuple[str, ...]:
         return ("self", "print()", "pprint()", "doc()", "return_result()")
 
-    @staticmethod
-    def _restrictions_text() -> str:
-        """Shared model-facing restrictions for the two Python-tool strategies."""
-        return (
-            "- `eval`, `exec`, `compile`, `__import__`, `input`, `breakpoint`\n"
-            "- `globals`, `locals`, `vars`, `asyncio.run`, `loop.run_until_complete`\n"
-            "- Attaching callables to the agent: `self.foo = fn`, "
-            "`setattr(self, 'foo', fn)`, `type(self).foo = fn`"
+    def _restrictions_text(self) -> str:
+        """Shared fixed guardrails and this strategy's effective configured restrictions."""
+        restrictions = self.config.restrictions
+        lines = [
+            "- `eval`, `exec`, `compile`, `__import__`, `input`, `breakpoint`, "
+            "`globals`, `locals`, `vars`",
+        ]
+        imports = sorted(restrictions.blocked_modules | restrictions.restricted_imports)
+        if imports:
+            lines.append("- Blocked imports: " + ", ".join(f"`{name}`" for name in imports))
+        calls = [
+            f"{module}: {', '.join(sorted(names))}"
+            for module, names in sorted(restrictions.blocked_calls.items())
+            if names
+        ]
+        if calls:
+            lines.append("- Blocked calls by module (functions/methods): " + "; ".join(calls))
+        lines.extend(
+            [
+                "- Guarded internals (e.g. `.__dict__`, `.__class__`), and "
+                "`getattr`/`setattr`/`delattr` with literal dunder names. "
+                "Inspect with `print(doc(obj))`, `type(obj)`, and documented fields instead.",
+                "- Do not attach helper functions/methods to public agent attributes or mutate "
+                "shared classes; keep helpers cell-local.",
+                "Use documented async APIs or command/I/O tools; await directly. "
+                "Scheduling blocking work as a task does not offload it.",
+            ]
         )
+        return "\n".join(lines)
 
     def _python_tool_name(self) -> str:
         """Return the model-facing name of the Python cell tool."""
@@ -852,7 +873,7 @@ Standard Python builtins and agent instance (`self`) are available."""
     @staticmethod
     def _sync_session_locals(call: "CurrentCall", session: "CodeActSession") -> None:
         """Write back session_locals to caller's dict, filtering session internals."""
-        if call.session_locals is None:
+        if call.session_locals is None or session.execution_namespace is not None:
             return
         filtered = {
             k: v
@@ -912,8 +933,16 @@ Standard Python builtins and agent instance (`self`) are available."""
         # Guarantee the sandbox worker is torn down on EVERY exit — including the
         # GenerationError paths inside the loop — not just the success returns.
         session_holder: dict[str, Any] = {}
+        selector = getattr(runtime.agent, "_execution_namespace_for", None)
+        namespace = selector(call) if selector is not None else None
+        call.execution_namespace = namespace
         try:
-            return await self._run_generation(runtime, call, session_holder)
+            if namespace is None:
+                return await self._run_generation(runtime, call, session_holder)
+            if self.config.execution_backend != "inprocess":
+                raise ValueError("Experimental namespaces support only inprocess execution")
+            with namespace.enter({}):
+                return await self._run_generation(runtime, call, session_holder)
         finally:
             session = session_holder.get("session")
             if session is not None:
@@ -947,6 +976,12 @@ Standard Python builtins and agent instance (`self`) are available."""
         # Publish to the caller so execute()'s finally can tear down the worker.
         session_holder["session"] = session
 
+        session.execution_namespace = call.execution_namespace
+        if session.execution_namespace is not None:
+            if call.session_locals is not None:
+                raise ValueError("Owned namespaces cannot be combined with legacy session_locals")
+            session.session_locals = session.execution_namespace.globals
+
         # Seed session_locals from caller-provided dict (persistent stack)
         if call.session_locals is not None:
             session.session_locals.update(call.session_locals)
@@ -958,6 +993,9 @@ Standard Python builtins and agent instance (`self`) are available."""
         _init_hm = get_harness_metrics()
         with _init_hm.timer("time_session_init"):
             builtins = self._build_builtins(runtime, call)
+            if session.execution_namespace is not None:
+                builtins["Out"] = session.out_accessor
+                session.execution_namespace.update_framework(self._framework_bindings(runtime))
 
             # Sandbox backend: create the per-session guarded executor. Fails
             # closed here (before any cell) if a requested guardrail can't be
@@ -1971,7 +2009,7 @@ Standard Python builtins and agent instance (`self`) are available."""
         # shadows the return type, this ensures they're always fresh for the next cell.
         # Handles complex types like Optional[Answer], list[Answer] by extracting
         # all protected names and re-injecting from the execution builtins.
-        if return_type is not None:
+        if return_type is not None and session.execution_namespace is None:
             from nooa.runtime.code_validator import _collect_type_names
 
             protected_names = _collect_type_names(return_type, builtins)
@@ -3179,7 +3217,15 @@ Standard Python builtins and agent instance (`self`) are available."""
         # execute_code (rather than the executor directly) keeps the execute_python
         # middleware, before/after_code_execution hooks and events firing.
         run_kwargs: dict[str, Any]
-        if session.sandbox_executor is not None:
+        if session.execution_namespace is not None:
+            # One compiler executes definitions once. No predefinition, copying,
+            # captured-local merge or helper-global repair on this engine.
+            run_kwargs = {
+                "builtins": builtins,
+                "execution_namespace": session.execution_namespace,
+                "framework_bindings": self._framework_bindings(runtime),
+            }
+        elif session.sandbox_executor is not None:
             # Validation of restrictions and the cell guard still runs on the parent.
             run_kwargs = {"sandbox_executor": session.sandbox_executor}
         else:
@@ -3389,6 +3435,25 @@ Standard Python builtins and agent instance (`self`) are available."""
 
         return context
 
+    def _framework_bindings(self, runtime: RuntimeServices) -> dict[str, Any]:
+        """Identify only the existing dynamic class auto-import path's additions.
+
+        Module exports are initial seeds, not a live dictionary to refresh.
+        Recompute dynamic availability for each owned cell, including classes
+        activated/deactivated since this generation's initial builtins were built.
+        """
+        module = inspect.getmodule(type(runtime.agent))
+        if module is None:
+            return {}
+        from nooa.agentdoc.visibility import filter_mro_module_globals
+
+        # Include inherited module exports as static too, even for an owned
+        # nested method using ordinary CodeActV2 rather than AtomCodeAct.
+        static_names = set(filter_mro_module_globals(type(runtime.agent)))
+        static_names.update(self._extract_module_context(module, agent=None))
+        context = self._extract_module_context(module, agent=runtime.agent)
+        return {name: value for name, value in context.items() if name not in static_names}
+
     @staticmethod
     def _import_dynamic_classes(
         agent: Any, agent_module: types.ModuleType, context: dict[str, Any]
@@ -3406,13 +3471,28 @@ Standard Python builtins and agent instance (`self`) are available."""
         Package-agnostic: works for any class, not just known packages.
         """
         try:
+            from nooa.runtime.execution_namespace import RUNTIME_NAMES, framework_name_allowed
+
             seen = set(context.keys())
+            call = getattr(getattr(agent, "runtime", None), "current_call", None)
+            reserved = RUNTIME_NAMES | frozenset(getattr(call, "kwargs", {}))
+            if call is None:
+                # Out-of-call discovery (e.g. an Atom context preview) uses the
+                # agent's declared turn entry when one exists. No method runs.
+                entry = getattr(agent, "turn_entry", None)
+                method = getattr(type(agent), entry, None) if isinstance(entry, str) else None
+                if method is not None:
+                    reserved |= frozenset(inspect.signature(method).parameters)
 
             for attr_value in _iter_agent_attrs(agent):
                 cls = type(attr_value)
                 name = cls.__name__
 
-                if name in seen or cls.__module__ == "builtins":
+                if (
+                    name in seen
+                    or cls.__module__ == "builtins"
+                    or not framework_name_allowed(name, reserved)
+                ):
                     continue
 
                 context[name] = cls
