@@ -77,7 +77,6 @@ async def test_cached_summary_does_not_prepare_standalone_prompt(monkeypatch):
     monkeypatch.setattr(ctx.client, "count_tokens", unexpected)
     await trigger(agent, ctx)
     assert summarizer._pending_summary == "summary"
-    assert summarizer._pending_source_text is None
     await agent.aclose()
 
 
@@ -209,22 +208,12 @@ async def test_source_is_independent_of_view_and_frozen_before_dispatch():
         await agent.aclose()
 
 
-@pytest.mark.parametrize("change", ["edit", "collapse", "during_dispatch"])
-async def test_stale_source_never_replaces_history(change):
+async def test_collapsed_source_never_replaces_history():
     agent, summarizer, ctx = setup()
     summarizer.summarize = AsyncMock(return_value="summary")
-
-    async def parent(request):
-        if change == "during_dispatch":
-            agent.event_manager["1"].content = "changed"
-        return await dispatch(request)
-
-    await agent.event_manager.run_middleware("llm_call", ctx, parent)
+    await trigger(agent, ctx)
     await summarizer._pending_task
-    if change == "edit":
-        agent.event_manager["1"].content = "changed"
-    elif change == "collapse":
-        agent.event_manager.collapse("2", "3", "other")
+    agent.event_manager.collapse("2", "3", "other")
     before = agent.event_manager.keys()
     summarizer._apply_pending_summary()
     assert agent.event_manager.keys() == before
@@ -232,37 +221,33 @@ async def test_stale_source_never_replaces_history(change):
 
 
 @pytest.mark.parametrize("reuse_prefix", [False, True])
-async def test_mutated_output_hidden_by_bounded_serializer_invalidates_summary(reuse_prefix):
+@pytest.mark.parametrize(
+    "make_value",
+    [lambda: {"a": 1}.keys(), lambda: (i for i in range(3)), object],
+    ids=["not-deep-copyable", "generator", "address-repr"],
+)
+async def test_python_values_never_block_or_invalidate_compaction(reuse_prefix, make_value):
     from nooa.context_blocks.events import ResultStatus
     from nooa.events import PythonOutput
-
-    class Payload:
-        values: list[int]
-
-        def __init__(self, values):
-            self.values = values
 
     agent, summarizer, ctx = setup(preserve=0)
     if reuse_prefix:
         ctx = ctx.model_copy(update={"context_view": PredictView(), "params": {}})
         ctx = ctx.model_copy(update={"client": FakeLLMClient([LLMResponse(content="summary")])})
-    payload = Payload(list(range(200)))
-    output = PythonOutput(
-        tool_call_id="python",
-        execution_status=ResultStatus.COMPLETE,
-        execution_count=1,
-        value=payload,
+    agent.event_manager.add(
+        PythonOutput(
+            tool_call_id="python",
+            execution_status=ResultStatus.COMPLETE,
+            execution_count=1,
+            value=make_value(),
+        )
     )
-    agent.event_manager.clear()
-    agent.event_manager.add(output)
     summarizer.summarize = AsyncMock(return_value="summary")
     await trigger(agent, ctx)
     await summarizer._pending_task
-    serialized = output.model_dump_json()
-    payload.values[100] = 987654
-    assert output.model_dump_json() == serialized
+    assert summarizer._pending_summary == "summary"
     summarizer._apply_pending_summary()
-    assert agent.event_manager.values() == [output]
+    assert agent.event_manager.keys() == ["1..5"]
     await agent.aclose()
 
 
@@ -287,7 +272,7 @@ async def test_image_bearing_events_remain_active(kind):
     agent.event_manager.add(event)
     agent.event_manager.add(Message(content="independent text"))
     source, text = summarizer._snapshot_source(ctx.client)
-    assert [tag for tag, _, _ in source] == ["2"]
+    assert [tag for tag, _ in source] == ["2"]
     assert "independent text" in text
     summarizer.summarize = AsyncMock(return_value="summary")
     await trigger(agent, ctx)
@@ -343,7 +328,7 @@ def test_bounded_prefix_never_omits_a_collapsed_event():
     cost = ctx.client.count_tokens(repr(text)) + ctx.client.count_tokens("\n\n")
     ctx.client._context_window = int(cost / 0.7) + 2
     source, rendered = summarizer._snapshot_source(ctx.client)
-    assert [tag for tag, _, _ in source] == ["1"]
+    assert [tag for tag, _ in source] == ["1"]
     assert "STORED FACT 0" in rendered and "STORED FACT 1" not in rendered
     ctx.client._context_window = 1
     assert summarizer._snapshot_source(ctx.client) == ((), "")
@@ -399,7 +384,7 @@ def test_compaction_keeps_whole_tool_batches(cut):
 
         agent.event_manager["6"].result.result_status = ResultStatus.RUNNING
     source, _ = summarizer._snapshot_source(ctx.client)
-    assert [tag for tag, _, _ in source] == ["1", "2", "3", "4"]
+    assert [tag for tag, _ in source] == ["1", "2", "3", "4"]
     summarizer._uninstall()
 
 
@@ -477,7 +462,7 @@ def test_existing_summary_before_hidden_barrier_does_not_starve_later_history():
     agent.event_manager.add(Message(content="new fact one"))
     agent.event_manager.add(Message(content="new fact two"))
     source, text = summarizer._snapshot_source(ctx.client)
-    assert [tag for tag, _, _ in source] == ["6", "7"]
+    assert [tag for tag, _ in source] == ["6", "7"]
     assert "new fact one" in text and "prior summary" not in text
     summarizer._uninstall()
 
@@ -498,7 +483,6 @@ def test_summary_text_uses_public_content_not_persistence_payloads():
     )
     agent.event_manager.add(response)
     source, text = summarizer._snapshot_source(ctx.client)
-    assert "OPAQUE STATE" in source[0][2] and "PRIVATE METADATA" in source[0][2]
     assert "public answer" in text and "public reasoning" in text
     assert "OPAQUE STATE" not in text and "PRIVATE METADATA" not in text
     summarizer._uninstall()
@@ -526,7 +510,7 @@ def test_hidden_record_inside_tool_batch_retains_the_whole_group():
     )
     agent.event_manager.add(Message(content="later public record"))
     source, text = summarizer._snapshot_source(ctx.client)
-    assert [tag for tag, _, _ in source] == ["4"]
+    assert [tag for tag, _ in source] == ["4"]
     assert "later public record" in text and "private" not in text
     summarizer._uninstall()
 

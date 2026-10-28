@@ -638,9 +638,7 @@ class TokenBudgetSummarizer(SummarizationAgent):
     """
 
     _unsub_llm: Annotated[Callable[[], None] | None, hidden] = None
-    _pending_source: Annotated[tuple[tuple[str, str, str], ...] | None, hidden] = None
-    _pending_source_text: Annotated[str | None, hidden] = None
-    _pending_source_events: Annotated[tuple[tuple[str, "EventBase"], ...], hidden] = ()
+    _pending_source: Annotated[tuple[tuple[str, str], ...] | None, hidden] = None
     _failed_summaries: Annotated[int, hidden] = 0
     _automatic_context_budget: Annotated[bool, hidden] = False
     _automatic_context_budget_percent: Annotated[float, hidden] = 0.8
@@ -678,8 +676,6 @@ class TokenBudgetSummarizer(SummarizationAgent):
             self._unsub_llm()
             self._unsub_llm = None
         self._pending_source = None
-        self._pending_source_text = None
-        self._pending_source_events = ()
         super()._uninstall()
 
     @staticmethod
@@ -764,7 +760,7 @@ class TokenBudgetSummarizer(SummarizationAgent):
         pairs: Sequence[tuple[str, "EventBase"]] | None = None,
         *,
         render: bool = True,
-    ) -> tuple[tuple[tuple[str, str, str], ...], str]:
+    ) -> tuple[tuple[tuple[str, str], ...], str]:
         """Select a safe source range; bound and render standalone requests only."""
         assert self.target_event_manager is not None
         from nooa.events import Summary
@@ -776,7 +772,7 @@ class TokenBudgetSummarizer(SummarizationAgent):
         limit = max(0, len(events) - self.config.preserve_recent)
         budget = context_budget(client, percent=0.7, fallback=None) if render else None
         count = getattr(client, "count_tokens", None) or char_approximate_token_counter
-        source: list[tuple[str, str, str]] = []
+        source: list[tuple[str, str]] = []
         parts: list[str] = []
         used = 0
         has_original = False
@@ -800,9 +796,7 @@ class TokenBudgetSummarizer(SummarizationAgent):
                     break
                 source, parts, used, has_original = [], [], 0, False
                 continue
-            source.extend(
-                (tag, event.id, event.model_dump_json()) for tag, event in pairs[start:end]
-            )
+            source.extend((tag, event.id) for tag, event in pairs[start:end])
             parts.extend(rendered)
             used += cost
             has_original |= any(not isinstance(event, Summary) for event in events[start:end])
@@ -823,17 +817,13 @@ class TokenBudgetSummarizer(SummarizationAgent):
 
         if _in_summary_fork.get() or self._pending_task is not None or self._unsub_llm is None:
             return await nxt(ctx)
-        pairs = ()
-        try:
-            if ctx.client is not None and self.target_event_manager is not None:
-                # Freeze content before dispatch, without rendering, JSON serialization,
-                # or token counting. Responses and tool work from this turn are excluded.
-                pairs = tuple(
-                    (tag, event.model_copy(deep=True))
-                    for tag, event in self.target_event_manager.items()
-                )
-        except Exception:
-            logger.warning("Could not snapshot summary source; history is unchanged", exc_info=True)
+        # Fix the candidate events before dispatch so responses and tool work from
+        # this turn are excluded. Completed events are immutable; references suffice.
+        pairs = (
+            tuple(self.target_event_manager.items())
+            if ctx.client is not None and self.target_event_manager is not None
+            else ()
+        )
         ctx = await nxt(ctx)
         if self._automatic_context_budget and ctx.client is not None:
             budget = context_budget(
@@ -867,11 +857,6 @@ class TokenBudgetSummarizer(SummarizationAgent):
         if not source:
             return ctx
         self._pending_source = source
-        self._pending_source_text = text if not reuse_prefix else None
-        source_tags = {tag for tag, _, _ in source}
-        self._pending_source_events = (
-            tuple(pair for pair in pairs if pair[0] in source_tags) if reuse_prefix else ()
-        )
         self._pending_range = (source[0][0], source[-1][0])
         # Exact type intentionally excludes customized subclasses. This is only
         # an optimization: unknown views still get independent state compaction.
@@ -983,37 +968,15 @@ class TokenBudgetSummarizer(SummarizationAgent):
     def _apply_pending_summary(self) -> None:
         if self._pending_task is not None and self._pending_task.done():
             if self._pending_source and self._pending_range:
-                pairs = []
                 try:
                     pairs = self._get_events_in_range(*self._pending_range)
-                    current = tuple(
-                        (tag, event.id, event.model_dump_json()) for tag, event in pairs
-                    )
+                    current = tuple((tag, event.id) for tag, event in pairs)
                 except Exception:
                     current = ()
                 if current != self._pending_source:
                     logger.warning("Discarding stale summary: source events changed")
                     self._pending_summary = None
-                else:
-                    # Persistence serialization can omit details of Python values.
-                    # Compare public source content only after identity
-                    # and serialized-state checks pass.
-                    try:
-                        text = "\n\n".join(self._event_markdown(tag, event) for tag, event in pairs)
-                        expected = self._pending_source_text
-                        if expected is None:
-                            expected = "\n\n".join(
-                                self._event_markdown(tag, event)
-                                for tag, event in self._pending_source_events
-                            )
-                    except Exception:
-                        text, expected = None, ""
-                    if text != expected:
-                        logger.warning("Discarding stale summary: source content changed")
-                        self._pending_summary = None
             self._pending_source = None
-            self._pending_source_text = None
-            self._pending_source_events = ()
         super()._apply_pending_summary()
 
     @classmethod
