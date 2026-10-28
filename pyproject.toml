@@ -72,6 +72,8 @@ constraint-dependencies = [
     "openinference-instrumentation==0.1.54",
     "openinference-instrumentation-litellm==0.1.34",
     "mcp>=1.30,<2",
+    # ruff 0.16+ changes formatting; upgrade it separately with a reformat.
+    "ruff==0.15.20",
 ]
 
 [tool.uv.workspace]
