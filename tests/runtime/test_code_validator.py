@@ -2827,6 +2827,40 @@ class TestReturnTypeShadowValidator:
 # =============================================================================
 # Capability-aware fix hints (wording only)
 # =============================================================================
+@pytest.mark.parametrize(
+    "code",
+    [
+        "setattr(obj, 'data', 1)",
+        "getattr(obj, 'data')",
+        "delattr(obj, 'data')",
+        "obj._private",
+        "getattr(obj, '_private')",
+        "obj.__version__",
+        "import json\nprint(doc(obj))\ntype(obj)",
+        "await asyncio.sleep(0)",
+    ],
+)
+def test_documented_inspection_and_async_alternatives_remain_allowed(code):
+    import asyncio
+
+    UnifiedCodeValidator().validate(code, ValidationContext(exec_globals={"asyncio": asyncio}))
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "obj.__dict__",
+        "obj.__class__",
+        "getattr(obj, '__version__')",
+        "setattr(obj, '__version__', '1')",
+        "delattr(obj, '__version__')",
+    ],
+)
+def test_documented_internal_and_literal_dunder_guards_still_reject(code):
+    with pytest.raises(ValidationError):
+        UnifiedCodeValidator().validate(code, ValidationContext())
+
+
 class TestCapabilityAwareFixHints:
     """Restriction errors point to alternatives the agent actually has."""
 
@@ -2843,6 +2877,7 @@ class TestCapabilityAwareFixHints:
 
     def _error(self, code: str, agent=None) -> str:
         import asyncio
+        import os
         import time
 
         from nooa.runtime.restrictions import DEFAULT_BLOCKED_MODULES
@@ -2850,7 +2885,7 @@ class TestCapabilityAwareFixHints:
         context = ValidationContext(
             agent=agent,
             blocked_modules=DEFAULT_BLOCKED_MODULES,
-            exec_globals={"asyncio": asyncio, "time": time},
+            exec_globals={"asyncio": asyncio, "os": os, "time": time},
         )
         with pytest.raises(ValidationError) as exc_info:
             UnifiedCodeValidator().validate(code, context)
@@ -2883,6 +2918,187 @@ class TestCapabilityAwareFixHints:
         agent = self._WithoutShell()
         agent.shell = SyncShell()
         assert "self.shell" not in self._error("import subprocess", agent)
+
+    @pytest.mark.parametrize("visibility", ["annotation", "class", "instance"])
+    @pytest.mark.parametrize(
+        "code",
+        [
+            "import subprocess",
+            "import socket",
+            "import urllib.request",
+            "os.system('x')",
+            "os.popen('x')",
+        ],
+    )
+    def test_hidden_shell_is_not_recommended(self, visibility, code):
+        from typing import Annotated
+
+        from nooa.agentdoc import hidden, spec
+
+        class Public(self._WithShell):
+            pass
+
+        class Hidden(self._WithShell):
+            shell: Annotated[object, hidden]
+
+        agent = Hidden() if visibility == "annotation" else Public()
+        if visibility == "class":
+            spec(Public, "shell", hidden=True)
+        elif visibility == "instance":
+            spec(agent, "shell", hidden=True)
+        message = self._error(code, agent)
+        assert "self.shell" not in message and "self.jobs" not in message
+        assert "Fix:" not in message
+
+    def test_instance_visibility_override_preserves_public_async_shell_hints(self):
+        from nooa.agentdoc import spec
+
+        class Hidden(self._WithShell):
+            pass
+
+        spec(Hidden, "shell", hidden=True)
+        public = Hidden()
+        spec(public, "shell", hidden=False)
+        for code in ("import subprocess", "import socket", "os.system('x')", "os.popen('x')"):
+            assert "await self.shell.run" in self._error(code, public)
+            assert "self.shell" not in self._error(code, Hidden())
+
+    def _shell_descriptor_class(self, kind, inherited=False, *, raises=False):
+        from functools import cached_property
+
+        from nooa.agentdoc import hidden
+
+        descriptor = property if kind == "property" else cached_property
+        shell_type = self._Shell
+
+        class Holder:
+            def __init__(self):
+                self.reads = 0
+
+            @descriptor
+            @hidden
+            def shell(self) -> shell_type:
+                self.reads += 1
+                if raises:
+                    raise AssertionError("hidden getter must not run")
+                return shell_type()
+
+        class Child(Holder):
+            pass
+
+        return Child if inherited else Holder
+
+    @pytest.mark.parametrize("kind", ["property", "cached_property"])
+    @pytest.mark.parametrize("inherited", [False, True])
+    @pytest.mark.parametrize(
+        ("class_hidden", "instance_hidden", "exposed"),
+        [
+            (None, None, False),
+            (True, None, False),
+            (False, None, True),
+            (None, True, False),
+            (None, False, True),
+            (True, False, True),
+            (False, True, False),
+        ],
+    )
+    def test_shell_descriptor_visibility_precedence(
+        self, kind, inherited, class_hidden, instance_hidden, exposed
+    ):
+        from nooa.agentdoc import doc, spec
+        from nooa.runtime.code_validator import _has_shell
+
+        cls = self._shell_descriptor_class(kind, inherited)
+        if class_hidden is not None:
+            spec(cls, "shell", hidden=class_hidden)
+        agent = cls()
+        if instance_hidden is not None:
+            spec(agent, "shell", hidden=instance_hidden)
+        assert _has_shell(agent) is exposed
+        assert agent.reads == int(exposed)  # one lookup only after explicit opt-in
+        # Class docs agree for defaults/class overrides. Instance overrides above
+        # test metadata precedence, not rediscovery of properties omitted by doc().
+        if instance_hidden is None:
+            assert ("shell:" in doc(cls)) is exposed
+        for code in (
+            "import subprocess",
+            "import socket",
+            "import urllib.request",
+            "os.system('x')",
+            "os.popen('x')",
+        ):
+            assert ("await self.shell.run" in self._error(code, agent)) is exposed
+        if not exposed:
+            assert agent.reads == 0
+
+    @pytest.mark.parametrize("kind", ["property", "cached_property"])
+    @pytest.mark.parametrize("exposed", [False, True])
+    def test_shell_descriptor_most_derived_class_spec_wins(self, kind, exposed):
+        from nooa.agentdoc import doc, spec
+        from nooa.runtime.code_validator import _has_shell
+
+        base = self._shell_descriptor_class(kind)
+
+        class Child(base):
+            pass
+
+        spec(base, "shell", hidden=exposed)
+        spec(Child, "shell", hidden=not exposed)
+        agent = Child()
+        assert ("shell:" in doc(Child)) is exposed
+        assert _has_shell(agent) is exposed
+        assert agent.reads == int(exposed)
+
+    @pytest.mark.parametrize("kind", ["property", "cached_property"])
+    def test_shell_descriptor_inherits_explicit_class_opt_in(self, kind):
+        from nooa.agentdoc import spec
+        from nooa.runtime.code_validator import _has_shell
+
+        base = self._shell_descriptor_class(kind)
+        spec(base, "shell", hidden=False)
+
+        class Child(base):
+            pass
+
+        # Check inherited metadata precedence independently of doc() discovery.
+        agent = Child()
+        assert _has_shell(agent) and agent.reads == 1
+
+    @pytest.mark.parametrize("kind", ["property", "cached_property"])
+    @pytest.mark.parametrize("inherited", [False, True])
+    def test_hidden_shell_descriptor_getter_is_never_evaluated(self, kind, inherited):
+        from nooa.agentdoc import doc
+        from nooa.runtime.code_validator import _has_shell
+
+        agent = self._shell_descriptor_class(kind, inherited, raises=True)()
+        assert "shell:" not in doc(agent)
+        assert not _has_shell(agent)
+        for code in (
+            "import subprocess",
+            "import socket",
+            "import urllib.request",
+            "os.system('x')",
+            "os.popen('x')",
+        ):
+            assert "self.shell" not in self._error(code, agent)
+        assert agent.reads == 0
+
+    @pytest.mark.parametrize("inherited", [False, True])
+    def test_cached_shell_descriptor_visibility_survives_caching(self, inherited):
+        from nooa.agentdoc import doc, spec
+        from nooa.runtime.code_validator import _has_shell
+
+        agent = self._shell_descriptor_class("cached_property", inherited)()
+        assert not _has_shell(agent) and agent.reads == 0
+        # Explicit test setup populates the cache; hint inspection must not do this itself.
+        cached = agent.shell
+        assert agent.reads == 1
+        assert not _has_shell(agent)
+        assert "shell:" not in doc(type(agent))
+        spec(agent, "shell", hidden=False)
+        assert _has_shell(agent) and agent.shell is cached
+        spec(agent, "shell", hidden=True)
+        assert not _has_shell(agent) and agent.reads == 1
 
     def test_dunder_import_points_to_normal_import(self):
         message = self._error('json = __import__("json")')

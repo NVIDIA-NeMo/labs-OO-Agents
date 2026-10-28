@@ -44,9 +44,12 @@ with hidden:
     import types
 
     from nooa import no_trace
-    from nooa.config import CodeActConfig
+    from nooa.config import CodeActConfig, PredictConfig, TruncationConfig
+    from nooa.config.truncation_config import FormatConfig
     from nooa.interactive import InteractiveAgent, require_task_result
+    from nooa.runtime.capture_scope import CaptureScope
     from nooa.runtime.channels import ChannelReader
+    from nooa.runtime.pprint import pprint as runtime_pprint
     from nooa.storage.markers import nosnapshot
     from nooa.strategy_validation import InvariantError
     from nooa.tools import TodoManager
@@ -54,6 +57,8 @@ with hidden:
     from nooa_atom.agent import work_shell
     from nooa_atom.agent.base import AtomAgentBase, session_title_request  # noqa: F401
     from nooa_atom.agent.conditions import PERSON_NAMES, require_result
+    from nooa_atom.agent.done_reflection import DoneReflectionPlan, reflect_accepted_done
+    from nooa_atom.agent.reflection_gate import _ReflectionGate
     from nooa_atom.agent.roles import TurnPolicy
 
 __all__ = ["AtomAgent", "Files"]
@@ -123,6 +128,16 @@ class AtomCodeAct(CodeActV2):
     closes the Shells they start.
     """
 
+    async def execute(self, runtime: Any, call: Any) -> Any:
+        result = await super().execute(runtime, call)
+        if (
+            call.method_name == "handle"
+            and runtime.agent._done_reflection
+            and isinstance(result, Done)
+        ):
+            runtime.agent._reflection_candidate = (result, call.id, call.task_tag)
+        return result
+
     def _extract_module_context(
         self, agent_module: types.ModuleType, agent: Any | None = None
     ) -> dict[str, Any]:
@@ -139,6 +154,14 @@ class AtomCodeAct(CodeActV2):
         if agent_module is None:
             return ""
         context = self._extract_module_context(agent_module, agent=runtime.agent)
+        call = getattr(runtime, "current_call", None)
+        namespace = getattr(call, "execution_namespace", None)
+        if namespace is None:
+            namespace = getattr(runtime.agent, "_handle_namespace", None)
+        if namespace is not None:
+            context = namespace.advertised_framework(
+                context, dynamic_names=self._framework_bindings(runtime)
+            )
         # The stub lists only names worth using; private or hidden helper types
         # (``_AgentJobs`` behind ``self.jobs``) stay bound in cells, unlisted.
         context = {
@@ -156,7 +179,18 @@ class AtomCodeAct(CodeActV2):
         The same inventory as CodeActV2's block (``python_cell_state()`` has
         all of it), without its heading and explanations.
         """
-        state = self._cell_state(getattr(runtime, "current_call", None))
+        call = getattr(runtime, "current_call", None)
+        if call is not None and getattr(call, "execution_namespace", None) is not None:
+            inventory = call.execution_namespace.inventory()
+            label = self._python_cell_state_label
+            names = ", ".join(
+                f"{label(name, max_chars=80)} ({label(kind, max_chars=80)})"
+                for name, kind in inventory["names"].items()
+            )
+            return (
+                "Retained Python names: " + (names or "none") + f"; omitted: {inventory['omitted']}"
+            )[:2000]
+        state = self._cell_state(call)
         label = self._python_cell_state_label
 
         def listing(items: list[str], more: str) -> str:
@@ -359,16 +393,16 @@ def _tools_doc(text: str) -> str:
 # The one place the work workflows are shown (the tools block, before the work types).
 _WORK_EXAMPLES: Annotated[str, hidden] = """\
 # Work: everything that runs is a job on self.jobs.
-sh = Shell()                                               # one bash per object, started on first use
-r = await sh.run("cd src && export X=1")                   # -> CommandResult; cd/variables persist
-r = await sh.run("make")                                   # same bash: in src, X set
-self.jobs.launch(sh.run("pytest -q"), name="tests")        # long: a JobEvent arrives later
-job = self.jobs.launch(Shell(), name="sh")                 # a shell as a job; cancel closes it
-r = await job.send("make")                                 # a request -> CommandResult
-done = await Subagent("fix parser").run(todo)              # one-shot child -> TaskResult
+sh = Shell()  # one bash per object, starts on first use
+r = await sh.run("cd src && export X=1")  # CommandResult; cwd/variables persist
+r = await sh.run("make")
+self.jobs.launch(sh.run("pytest -q"), name="tests")
+job = self.jobs.launch(Shell(), name="sh")
+r = await job.send("make")
+done = await Subagent("fix parser").run(todo)  # one-shot -> TaskResult
 rev = self.jobs.launch(Subagent("review"), name="review")  # kept child
-req = rev.send(todo)                                       # await req -> TaskResult or Question
-await rev.message("also check the docs")                   # a note it reads now, even mid-turn
+req = rev.send(todo)
+await rev.message("also check the docs")  # note, even mid-turn
 """
 
 _CONTEXT: Annotated[dict[str, Any], hidden] = {
@@ -428,6 +462,13 @@ class AtomAgent(AtomAgentBase):
     # handle() turns enforce and the instructions of the ``role`` block.
     _turn_policy: Annotated[str, hidden, nosnapshot]
     _role_instructions: Annotated[str | None, hidden, nosnapshot]
+    _namespace_lifetime: Annotated[str, hidden, nosnapshot]
+    _handle_namespace: Annotated[Any, hidden, nosnapshot]
+    _done_reflection: Annotated[bool, hidden, nosnapshot]
+    _reflection_candidate: Annotated[Any, hidden, nosnapshot]
+    _reflection_gate: Annotated[_ReflectionGate, hidden, nosnapshot]
+    _namespace_restart_notified: Annotated[bool, hidden, nosnapshot]
+    _session_namespace_was_live: Annotated[bool, hidden]
     # The session runs every turn with this method, whatever its turn_method.
     turn_entry: ClassVar[str] = "handle"
 
@@ -436,6 +477,10 @@ class AtomAgent(AtomAgentBase):
         *args: Any,
         policy: TurnPolicy = "interactive",
         instructions: str | None = None,
+        experimental_namespace: str = "legacy",
+        experimental_done_reflection: bool = False,
+        experimental_reflection_min_turns: int = 50,
+        experimental_reflection_min_seconds: float = 3600.0,
         **kwargs: Any,
     ) -> None:
         """``policy`` and ``instructions`` are the role the host gives the agent.
@@ -443,7 +488,20 @@ class AtomAgent(AtomAgentBase):
         ``instructions`` become the static ``role`` block of the prompt prefix;
         ``None``, empty or whitespace-only text adds no block.
         """
+        if experimental_namespace not in ("legacy", "call", "session"):
+            raise ValueError("experimental_namespace must be legacy, call or session")
+        reflection_gate = _ReflectionGate(
+            min_turns=experimental_reflection_min_turns,
+            min_seconds=experimental_reflection_min_seconds,
+        )
+        self._namespace_lifetime = experimental_namespace
+        self._handle_namespace = None
+        self._done_reflection = experimental_done_reflection
+        self._reflection_candidate = None
+        self._namespace_restart_notified = False
+        self._session_namespace_was_live = False
         super().__init__(*args, **kwargs)
+        self._reflection_gate = reflection_gate
         if policy not in ("interactive", "unattended", "orchestrator", "child"):
             raise ValueError(f"unknown policy {policy!r}")
         self._turn_policy = policy
@@ -452,7 +510,13 @@ class AtomAgent(AtomAgentBase):
         # The legacy JobsApi never started anything; drop it and its cancel hint.
         self.queue_manager._cancel_hints.pop("jobs", None)
         self._work_records = []
-        self.jobs = _AgentJobs(self, on_change=self._record_work)
+        self.jobs = _AgentJobs(
+            self,
+            on_change=self._record_work,
+            capture_factory=(lambda: CaptureScope(self.runtime.truncation_config))
+            if experimental_namespace != "legacy"
+            else None,
+        )
         self._shells = work_shell.ShellOwner()
         self.files = Files(self.shell)
         # Atom's own to-do list: membership on the list, content on each item.
@@ -461,6 +525,36 @@ class AtomAgent(AtomAgentBase):
         # self.files and self.repo but is not offered (``/skills`` can still).
         self.skills.registry.deactivate(["nemo.shell"])
         self._install_context()
+
+    @hidden
+    @no_trace
+    def _execution_namespace_for(self, call: Any) -> Any:
+        """Experimental selection: only handle may share an owner across calls."""
+        if self._namespace_lifetime == "legacy":
+            return None
+        from nooa.runtime.execution_namespace import ExecutionNamespace
+
+        if call.method_name == "handle" and self._namespace_lifetime == "session":
+            if self._handle_namespace is not None:
+                return self._handle_namespace
+        owner = ExecutionNamespace(
+            reserved=frozenset(
+                {
+                    "self",
+                    "print",
+                    "pprint",
+                    "show",
+                    "return_result",
+                    "python_cell_state",
+                    "Out",
+                    *call.kwargs,
+                }
+            )
+        )
+        if call.method_name == "handle" and self._namespace_lifetime == "session":
+            self._handle_namespace = owner
+            self._session_namespace_was_live = True
+        return owner
 
     @hidden
     @no_trace
@@ -489,7 +583,9 @@ class AtomAgent(AtomAgentBase):
         """
         self.context["python_cell_tools"] = Context(
             _tools_doc(
-                doc(RepoTools, Files, TodoList, SkillManager, concise=True)
+                doc(doc, runtime_pprint, concise=True, inline_depth=0)
+                + "\n"
+                + doc(RepoTools, Files, TodoList, SkillManager, concise=True)
                 + "\n"
                 + _WORK_EXAMPLES
                 + doc(
@@ -507,6 +603,23 @@ class AtomAgent(AtomAgentBase):
             ),
             prefix=True,
         )
+        if self._namespace_lifetime != "legacy":
+            lifetime = (
+                "Cell variables survive Done, Waiting and NeedInput in this kept session."
+                if self._namespace_lifetime == "session"
+                else "Cell variables survive cells of this call only, not the next handle."
+            )
+            self.context["experimental_namespace"] = Context(
+                lifetime + " Overrides default one-call guidance. Restart loses these names, "
+                "not self.v. No automatic expiry. del removes names, NOT jobs/resources: "
+                "close/cancel work explicitly. Globals are shared with jobs, not transactional. "
+                "Job stdout/stderr/media: job.output / JobEvent.output, never a later cell. "
+                "Descendant output belongs to its originating open scope; late output is dropped. "
+                "Inventory: bounded names/types only.",
+                prefix=True,
+            )
+        else:
+            self.context.pop("experimental_namespace", None)
         self.context["todo_status"] = Context(expr="self.todo.status()")
         self.context["workspace_state"] = Context(self._workspace_state_context(), prefix=True)
         self.context["context_usage"] = Context(
@@ -576,6 +689,8 @@ class AtomAgent(AtomAgentBase):
                 # confirmed cwd) says more than the request's.
                 summary = owner.summary or summary
             parts = [name, _age(now - job._started), summary]
+            if job.progress_dropped:
+                parts.append(f"{job.progress_dropped} progress batches omitted")
             running.append(" · ".join(part for part in parts if part))
         hints = {
             "user_messages": "await self.user_messages.get()",
@@ -640,6 +755,17 @@ class AtomAgent(AtomAgentBase):
         from nooa_atom.workspace.options import drop_stale_memory_context
 
         InteractiveAgent.after_restore(self)
+        self._reflection_gate.start_session()
+        self._handle_namespace = None
+        if (
+            self._namespace_lifetime == "session" or self._session_namespace_was_live
+        ) and not self._namespace_restart_notified:
+            self._system_messages_in.put(
+                "Session restarted: Python cell variables and helpers were lost; "
+                "self.v and saved history remain. Recreate needed live objects."
+            )
+            self._namespace_restart_notified = True
+        self._session_namespace_was_live = False
         self._install_todo_list()
         self._install_context()
         drop_stale_memory_context(self)
@@ -679,7 +805,53 @@ class AtomAgent(AtomAgentBase):
             finally:
                 await self._shells.aclose()
         finally:
-            await super().aclose()
+            try:
+                await super().aclose()
+            finally:
+                self._handle_namespace = None
+                self._reflection_candidate = None
+
+    @hidden
+    @no_trace
+    async def _reflect_accepted_done(self, outcome: Any) -> None:
+        await reflect_accepted_done(self, outcome)
+
+    @hidden
+    @strategy(
+        PredictStrategy(
+            config=PredictConfig(
+                max_retries=1,
+                max_tokens=2048,
+                max_param_chars=28000,
+            )
+        ),
+        truncation=TruncationConfig(
+            max_context_tokens=32768,
+            event_format=FormatConfig(max_string=40000, max_length=200, max_depth=8),
+        ),
+    )
+    async def _reflect_done_plan(self, request: dict[str, Any]) -> DoneReflectionPlan:
+        """Internal bounded reflection after an already-delivered accepted Done.
+
+        Reflect on the outcome, useful findings, user decisions and outstanding
+        work. This is NOT another task response. Do not send messages or invoke
+        handle. Preserve governing instructions, pending work, stable preferences,
+        helper dependencies and evidence references (including original event tags).
+        completed_evidence contains the actual bounded source events, not just
+        tags; it is the complete prefix eligible for compaction. Other completed
+        history may have been deliberately omitted for budget/serialization.
+        Only completed_event_tags may be summarized. Summaries are archival:
+        originals remain retrievable with self.events[tag]. Return an empty
+        summary when uncertain; never summarize later arrivals or this reflection.
+
+        The notes fields replace only this maintenance pass's notes block; retain
+        useful previous_notes, especially user decisions and pending work. All
+        other context blocks are untouched. drop_names must be a subset of
+        eligible_drop_names and contain ONLY clearly request-specific obsolete
+        variables. Preserve useful helpers and future dependencies; empty is safe.
+        Separate-method del is not a cleanup mechanism for the handle namespace.
+        """
+        ...
 
     # ---- turns -------------------------------------------------------------------
 

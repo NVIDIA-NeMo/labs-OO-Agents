@@ -71,6 +71,8 @@ import types
 from dataclasses import dataclass, field
 from typing import Annotated, Any, ForwardRef, Literal, Protocol, get_args, get_origin
 
+from nooa.agentdoc._metadata import get_field_metadata
+from nooa.agentdoc.visibility import is_hidden_field, is_hidden_method
 from nooa.errors import CodeSyntaxError
 from nooa.errors import RestrictedCodeError as ValidationError
 from nooa.runtime.restrictions import (
@@ -170,6 +172,20 @@ def _has_shell(agent: Any) -> bool:
     if agent is None:
         return False
     try:
+        if is_hidden_field(agent, "shell"):
+            return False
+        agent_type = agent if isinstance(agent, type) else type(agent)
+        explicitly_visible = False
+        for owner in (agent, *agent_type.__mro__):
+            visibility = get_field_metadata(owner, "shell").get("hidden")
+            if visibility is True or visibility is False:
+                explicitly_visible = visibility is False
+                break
+        # Inspect the class without invoking getters, even when a cached_property
+        # already has an instance value. Only explicit opt-in overrides @hidden.
+        descriptor = inspect.getattr_static(agent_type, "shell", None)
+        if not explicitly_visible and is_hidden_method(descriptor):
+            return False
         run = getattr(getattr(agent, "shell", None), "run", None)
     except Exception:
         return False

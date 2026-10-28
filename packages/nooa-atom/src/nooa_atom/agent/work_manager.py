@@ -80,6 +80,7 @@ class JobEvent:
     kind: EventKind
     value: Annotated[Any, "The item, the result, or the error text"] = None
     dropped: int = 0
+    output: Annotated[Any, "Bounded stdout/stderr/media for experimental owned jobs"] = None
 
     def status_source(self) -> str:
         """Who sent it, for a status line: the job's name, never its value."""
@@ -144,6 +145,47 @@ def job_dir() -> Path | None:
     return job._dir() if job is not None else None
 
 
+@dataclass(frozen=True)
+class _ProgressItem:
+    value: Any
+
+
+class _ProgressSink:
+    """Private optional progress delivery; ordinary emit/iterator items are unchanged."""
+
+    def __init__(self, job: Job):
+        self._job: Job | None = job
+        self._close: Callable[[], None] | None = None
+        job._progress_sinks.add(self)
+
+    def on_close(self, callback: Callable[[], None]) -> None:
+        self._close = callback
+
+    def emit(self, value: Any) -> None:
+        if self._job is not None:
+            try:
+                self._job._emit_progress(value)
+            except Exception:
+                # Optional previews must not break the command's capture pump.
+                self._job.progress_dropped += 1
+                self.close()
+
+    def close(self) -> None:
+        job, self._job = self._job, None
+        if job is not None:
+            job._progress_sinks.discard(self)
+        callback, self._close = self._close, None
+        if callback is not None:
+            callback()
+
+
+def _progress_sink() -> _ProgressSink | None:
+    job = _current.get()
+    if job is None or job._silent or job._status != "running":
+        return None
+    return _ProgressSink(job)
+
+
 _END = object()
 
 
@@ -188,7 +230,7 @@ class _Reader:
             self._job._consumed = True
             self._job._outcome()  # the end is this reader's: raise if failed or cancelled
             raise StopAsyncIteration
-        return value
+        return value.value if isinstance(value, _ProgressItem) else value
 
     def _push(self, value: Any) -> None:
         self._buffer.append(value)
@@ -218,7 +260,15 @@ class _Reader:
             if value is _END:
                 job._requeue()
             else:
-                job._queue_item(value)
+                if isinstance(value, _ProgressItem):
+                    if job._silent or job._status != "running":
+                        # A terminal job must not publish late previews, but
+                        # discarding this reader-owned batch still counts.
+                        job.progress_dropped += 1
+                    else:
+                        job._emit_progress(value.value)
+                else:
+                    job._queue_item(value)
 
     def __del__(self) -> None:
         with contextlib.suppress(Exception):
@@ -226,15 +276,13 @@ class _Reader:
 
 
 class Job:
-    """A running or finished piece of work, from ``self.jobs.launch`` or ``job.send``.
+    """Work from ``self.jobs.launch`` or ``job.send``.
 
-    ``await job`` returns its result (and raises if it failed or was
-    cancelled); ``async for x in job`` reads its items, then the end. A
-    resource is neither awaited nor iterated: ``req = job.send(x)`` returns a
-    request job to await. ``await job.cancel()`` stops the work and withdraws
-    what it had not delivered (a resource: its requests, then it closes).
-    Keep names, not jobs, in ``self.v`` (``self.jobs.get(name)``): work does
-    not survive a restart.
+    ``await job`` returns its result (failure/cancel raises); ``async for``
+    reads items then ends. For resources, await ``job.send(x)``, not the resource.
+    ``await job.cancel()`` stops work and withdraws undelivered outcomes;
+    resources cancel requests, then close. Jobs do not survive restart:
+    keep names in ``self.v`` and retrieve with ``self.jobs.get(name)``.
     """
 
     __nosnapshot__ = True  # live work: a snapshot leaves it out (keep names in self.v)
@@ -275,6 +323,13 @@ class Job:
         self._sent = 0
         self._task: asyncio.Task[None] | None = None
         self._started = time.monotonic()
+        self.output: Annotated[Any, "Bounded stdout/stderr/media once finished"] = None
+        self._capture: Any = None
+        self._progress_sinks: set[_ProgressSink] = set()
+        self._progress_events: weakref.WeakSet[JobEvent] = weakref.WeakSet()
+        self.progress_dropped: Annotated[
+            int, "Omitted progress batches; final output is separate"
+        ] = 0
 
     # ---- model-facing ---------------------------------------------------
 
@@ -332,7 +387,9 @@ class Job:
         # ones a turn already took stay taken.
         for event in self._unread:
             if outbox.remove(event):
-                reader._buffer.append(event.value)
+                reader._buffer.append(
+                    _ProgressItem(event.value) if event in self._progress_events else event.value
+                )
         self._unread.clear()
         if self._status == "running":
             self._reader = reader
@@ -405,14 +462,34 @@ class Job:
     def _withdraw(self) -> None:
         """Cancelled by its owner: no more events, and its undelivered ones are taken back."""
         self._silent = True
+        self._close_progress()
+        reader = self._reader
+        if reader is not None:
+            kept = deque(value for value in reader._buffer if not isinstance(value, _ProgressItem))
+            self.progress_dropped += len(reader._buffer) - len(kept)
+            reader._buffer = kept
+            if len(kept) < self._manager.max_items:
+                reader._space.set()
         outbox = self._manager._outbox
         for event in self._unread:
-            outbox.remove(event)  # only this generation's own events, by identity
+            if outbox.remove(event) and event in self._progress_events:
+                self.progress_dropped += 1
+                self._dropped += event.dropped
         self._unread.clear()
 
     # ---- running ----------------------------------------------------------
 
     async def _run(self) -> None:
+        if self._manager._capture_factory is not None:
+            try:
+                with self._manager._capture_factory() as self._capture:
+                    await self._run_body()
+            finally:
+                self._capture = None
+        else:
+            await self._run_body()
+
+    async def _run_body(self) -> None:
         _current.set(self)
         try:
             if self._kind == "resource":
@@ -433,6 +510,7 @@ class Job:
             if inspect.iscoroutine(self._work):
                 self._work.close()  # never started: not "never awaited"
             self._finish("cancelled", "")
+        self._task = None  # a completed task need not retain its copied call/capture context
 
     async def _run_iter(self) -> None:
         iterator = self._work.__aiter__()
@@ -492,13 +570,84 @@ class Job:
 
     # ---- delivery ---------------------------------------------------------
 
+    def _close_progress(self) -> None:
+        for sink in list(self._progress_sinks):
+            sink.close()
+
+    def _discard_queued_progress(self) -> None:
+        reader = self._reader
+        if reader is not None:
+            kept_values = deque(
+                value for value in reader._buffer if not isinstance(value, _ProgressItem)
+            )
+            self.progress_dropped += len(reader._buffer) - len(kept_values)
+            reader._buffer = kept_values
+            if len(kept_values) < self._manager.max_items:
+                reader._space.set()
+        kept = deque()
+        for event in self._unread:
+            if event in self._progress_events:
+                if self._manager._outbox.remove(event):
+                    self.progress_dropped += 1
+                    self._dropped += event.dropped
+            else:
+                kept.append(event)
+        self._unread = kept
+
+    def _emit_progress(self, value: Any) -> None:
+        if self._silent or self._status != "running":
+            return
+        reader = self._reader
+        if any(not waiter.done() for waiter in self._waiters):
+            self.progress_dropped += 1  # completion-only wait: no progress notification
+            return
+        if reader is not None:
+            if len(reader._buffer) >= self._manager.max_items:
+                for index, old in enumerate(reader._buffer):
+                    if isinstance(old, _ProgressItem):
+                        del reader._buffer[index]  # never invoke an ordinary payload's __eq__
+                        self.dropped += 1
+                        self.progress_dropped += 1
+                        break
+                else:
+                    self.progress_dropped += 1  # never evict an ordinary item for progress
+                    return
+            reader._push(_ProgressItem(value))
+            return
+        # Preserve ordinary messages even under a progress flood. If the outbox
+        # can list pending events, forget history it already delivered. For a
+        # minimal Outbox without snapshot(), omission is safer than displacement.
+        if len(self._unread) >= self._manager.max_items:
+            pending = self._manager._unread()
+            if pending is not None:
+                self._unread = deque(event for event in self._unread if id(event) in pending)
+        if len(self._unread) >= self._manager.max_items:
+            for index, old in enumerate(self._unread):
+                if old in self._progress_events:
+                    del self._unread[index]
+                    if self._manager._outbox.remove(old):
+                        self._dropped += 1 + old.dropped
+                        self.dropped += 1
+                        self.progress_dropped += 1
+                    break
+            else:
+                self.progress_dropped += 1
+                return
+        event = JobEvent(self.name, self.id, "item", value, dropped=self._dropped)
+        self._progress_events.add(event)
+        self._manager._outbox.put(event)
+        self._dropped = 0
+        self._unread.append(event)
+
     def _emit_nowait(self, value: Any) -> None:
         reader = self._reader
         if reader is None:
             self._queue_item(value)
             return
         if len(reader._buffer) >= self._manager.max_items and reader._buffer[0] is not _END:
-            reader._buffer.popleft()  # a sync emit cannot wait: drop the oldest, counted
+            removed = reader._buffer.popleft()  # sync emit cannot wait: drop oldest, counted
+            if isinstance(removed, _ProgressItem):
+                self.progress_dropped += 1
             self.dropped += 1
         reader._push(value)
 
@@ -511,6 +660,8 @@ class Job:
             if outbox.remove(oldest):
                 self._dropped += 1 + oldest.dropped  # its own count carries forward
                 self.dropped += 1
+                if oldest in self._progress_events:
+                    self.progress_dropped += 1
         event = JobEvent(self.name, self.id, "item", value, dropped=self._dropped)
         self._dropped = 0
         outbox.put(event)
@@ -519,7 +670,12 @@ class Job:
     def _finish(self, kind: EventKind, value: Any) -> None:
         if self._status != "running":
             return
+        self._close_progress()
+        if kind == "cancelled":
+            self._discard_queued_progress()
         if kind == "done":
+            if self._reader is None:
+                self._discard_queued_progress()  # final result supersedes unread previews
             self._result = value
         elif kind == "failed":
             self._error = value
@@ -529,7 +685,11 @@ class Job:
             value = value or None
         self._status = kind  # type: ignore[assignment]
         self._ready.set()
-        self._final = JobEvent(self.name, self.id, kind, value, dropped=self._dropped)
+        if self._capture is not None:
+            self.output = self._capture.finish()
+        self._final = JobEvent(
+            self.name, self.id, kind, value, dropped=self._dropped, output=self.output
+        )
         self._dropped = 0
         waiters = {f for f in self._waiters if not f.done()}
         self._waiters.clear()
@@ -562,6 +722,7 @@ class Job:
             raise TypeError(
                 f"{self.name} is a resource: await its requests (job.send(...)) or cancel it"
             )
+        self._discard_queued_progress()  # switching from preview to final-only observation
         if self._status == "running":
             future = asyncio.get_running_loop().create_future()
             self._waiters.add(future)
@@ -620,17 +781,15 @@ def _remove_owned(owned: tuple[Path, int, int] | None) -> None:
 
 
 class WorkManager:
-    """Background work: ``job = self.jobs.launch(work, name="tests")`` starts it and returns at once.
+    """``job = self.jobs.launch(work, name="tests")`` starts work without waiting.
 
-    ``work`` is a coroutine (its value is the result), an async generator
-    (its yields are items) or a resource (an async context manager with
-    ``send(x)``): a resource stays open, and each ``job.send(x)`` returns a
-    request job whose result is what the resource returns for ``x``.
-    Each outcome goes to one place: a pending ``await job`` or ``async for x
-    in job``, else a ``JobEvent`` in a later turn's ``notification["jobs"]``.
-    Jobs outlive the turn: end it with ``Waiting(on=[name])`` while they run,
-    and cancel what you no longer need. Names must be valid Python identifiers; a
-    resource's requests are ``<name>#1``, ``<name>#2``...
+    ``work``: coroutine (returns a result), async iterable (yields items), or
+    async context-manager resource with ``send(x)``. Resources stay open;
+    ``job.send(x)`` returns a request job holding that call's result.
+    Each outcome goes once: to a pending await/iterator, otherwise a JobEvent
+    in the next turn's ``notification["jobs"]``. Jobs outlive turns: return
+    ``Waiting(on=[name])`` while they run; cancel unneeded work.
+    Names must be valid Python identifiers; resource requests are ``<name>#1``, ``<name>#2``...
     """
 
     __nosnapshot__ = True
@@ -648,6 +807,7 @@ class WorkManager:
         max_items: int = 100,
         max_requests: int = 16,
         on_change: Callable[[], None] | None = None,
+        capture_factory: Callable[[], Any] | None = None,
     ) -> None:
         """A manager whose undelivered events go to ``outbox``.
 
@@ -681,6 +841,7 @@ class WorkManager:
         self._names: dict[str, Job] = {}
         self._closed = False
         self._on_change = on_change
+        self._capture_factory = capture_factory
 
     def launch(self, work: Any, *, name: str | None = None) -> Job:
         """Start ``work`` (awaitable, async iterable or resource) and return its Job."""

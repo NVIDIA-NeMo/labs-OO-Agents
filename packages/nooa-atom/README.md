@@ -11,6 +11,36 @@ headless in-process host (`open_tree`). The Atom agent runs on that layer:
 `nooa_atom.agent:AtomAgent` is the agent spec a host passes in
 `SessionOptions.agent_spec`.
 
+## Opt-in benchmark runtime profile
+
+Normal Atom installs do not install the benchmark library bundle. The explicit
+`nooa-atom[benchmark]` extra includes the native benchmark worker, the pinned
+libraries selected from observed import attempts, and optional native OTLP/HTTP
+exporter support. It does not preload modules, add aliases to generated code,
+relax execution restrictions, or enable live telemetry.
+
+From this workspace, install the locked profile with:
+
+```bash
+uv sync --locked --package nooa-atom --extra benchmark --no-dev
+```
+
+Prebuilt-runtime builders can export its version constraints without development
+or local workspace requirements:
+
+```bash
+uv export --locked --package nooa-atom --extra benchmark --no-dev \
+  --no-emit-workspace --no-hashes --output-file runtime-constraints.txt
+```
+
+Constraints alone do not activate optional dependencies: the builder must also
+request `nooa-atom[benchmark]`. Install the co-built workspace packages together.
+For evaluated runtimes, verify binary artifacts, interpreter/ABI compatibility
+and installed versions on every target; successful lock resolution is not an
+import or platform check. The planned paired TB profile uses ATIF and JSONL
+exports with live OTLP explicitly disabled. Exporter package presence is not
+proof of activation or delivery.
+
 ## The Atom agent, its role and resuming sessions
 
 `nooa atom` with no `--agent` serves `nooa_atom.agent:AtomAgent` (also
@@ -197,6 +227,132 @@ level, the adapter shows `Usage: /verbosity silent|concise|verbose`. If Pool
 fails the request, the picker falls back to that text for the rest of the
 connection. Stop cancels an open picker.
 
+## Todo lookup and cell inspection
+
+`self.todo.get(id_or_title)` looks up an exact ID or a unique exact current title;
+IDs win. Ambiguous titles require an ID. There is no trimming or fuzzy lookup, and
+both open and done items participate. Use an existing Todo directly, or pass it to
+`activate`, `complete` or `delete`; those mutators also accept IDs/unique titles.
+
+`doc(obj)` returns an API-documentation string: use `print(doc(obj))` to display it.
+Runtime `pprint(obj, max_length=..., max_string=..., max_depth=...)` prints and returns
+`None`; these bounds mean elements **per container**, string characters, and nesting
+depth, respectively. `None` means unlimited for that bound. Both helpers' actual
+signatures are in `python_cell_tools`; full help remains available via `print(doc(doc))`
+and `print(doc(pprint))` without injecting full internal documentation into each turn.
+
+## Managed Shell progress
+
+Managed Shell command jobs emit bounded `ShellProgress` **items** through the
+existing Job iterator / `JobEvent` route. Each item has `stream` (`stdout` or
+`stderr`), `text`, and a per-command/per-stream `sequence`. The fixed policy is
+**1 second OR 8192 UTF-8 text bytes per stream**, copied immutably for each command.
+There is no model-facing retuning API. This is batching, not a strict wake-rate cap:
+high-volume output may reach the byte boundary earlier. Ordering is per stream;
+there is no invented stdout/stderr ordering. Partial UTF-8 is decoded incrementally;
+invalid bytes use replacement characters.
+
+```python
+job = self.jobs.launch(Shell().run("long command"), name="build")
+async for part in job:
+    print(part.stream, part.text)  # observed while the command can still be running
+result = await job                # the same unchanged CommandResult
+```
+
+Alternatively return `Waiting(on=["build"])` to receive previews in later turns.
+`await job` requests **completion-only** observation: pending final-result waiters
+suppress private Shell previews (even if an iterator remains attached). Unread
+previews are withdrawn when switching to that wait; normal `emit`, child notes
+and generic iterator values are unaffected. Cancelling that wait does not cancel
+the job. Owner cancellation does stop the command and withdraw previews.
+
+There is **no terminal tail flush**. Commands ending before either batching boundary
+produce only their final result. Once a detached command completes, its final result
+supersedes unread previews; an active iterator can drain its already-buffered items.
+Pending tail text stays in the ordinary `CommandResult` on success/nonzero exit/timeout;
+on exceptional failure or cancellation it is not separately published as progress.
+Earlier previews may duplicate a prefix of the final summary. Full-result capture
+limits/files are unchanged and independent of live-delivery queue limits.
+`job.progress_dropped` counts omitted batches (queue bounds, completion-only waits,
+withdrawn previews or preview-delivery failure), not stdout capture truncation.
+No preview is evidence that the process was silent.
+
+Timers and output sinks detach at command termination/cancellation, not FIFO EOF:
+background writers cannot emit into later requests or reused job names. Direct
+unmanaged `Shell.run` calls have no progress events. This common behavior applies to
+all three namespace modes and to roots and children; it is not a namespace-treatment
+switch. Model-visible pre-exit delivery is tested; no ACP/TUI pre-exit display claim
+or PTY/live-input API is made here.
+
+## Experimental Python namespace and Done reflection
+
+These features are **opt-in**. The default remains
+`SessionOptions(experimental_namespace="legacy", experimental_done_reflection=False)`;
+ordinary ACP/CLI/benchmark entry points do not automatically enable session persistence.
+The Atom factory consumes these options; a generic non-Atom agent retains its own
+execution strategy and does not gain Atom's namespace behavior.
+
+| `experimental_namespace` | Python cell lifetime |
+| --- | --- |
+| `legacy` (default) | Existing per-call execution engine |
+| `call` | Coherent globals for cells of one generated call, discarded before the next call |
+| `session` | Coherent globals across this Atom session's `handle` turns, including `Done`, `Waiting` and `NeedInput` |
+
+The owned engines are in-process only. Helpers see subsequent global rebindings;
+definitions/defaults/decorators execute once, and intentional library caches retain
+their normal semantics. Each root/child session owns separate state. Other generated
+methods have separate call-local owners, even in `session` mode. Reserved runtime
+names and call inputs cannot be overwritten; background/nested/stale completion
+capabilities cannot complete a different foreground call.
+
+Live Python values are **not snapshots**. Restart loses them and emits a notice;
+use serializable `self.v` values for durable facts. `del` removes a binding, not a
+job/resource: close or cancel owned work explicitly. There is no TTL or automatic
+expiry, and shared globals are not transactional. Managed jobs own bounded
+stdout/stderr/media in `job.output` / `JobEvent.output`; descendants write to the
+originating open capture scope, and late output is dropped rather than entering a
+later cell. This is not a memory-growth or sandbox-parity guarantee.
+
+`experimental_done_reflection=True` separately enables bounded post-delivery
+maintenance after an accepted `Done`. The default admission gate requires **both**
+50 settled foreground `handle` turns and 3600 monotonic seconds since session start
+or the last admitted reflection. `experimental_reflection_min_turns` and
+`experimental_reflection_min_seconds` configure those thresholds. Restart resets the
+gate; cells, nested methods and maintenance are not extra turns. Admission consumes
+the window even on timeout, error or no-op. The already-delivered result is unchanged.
+Reflection may summarize only captured completed evidence, preserve archival
+originals, update its own notes block, and conservatively propose obsolete primitive
+bindings for deletion. It is not an automatic background expiry service.
+
+### Native Gym benchmark policy (separate prerequisite)
+
+`nooa_atom.gym:AtomHarness` runs through `nooa_bench.gym_worker`. This native adapter
+requires these explicit `agent_kwargs`; omitted or incompatible values fail closed:
+
+```json
+{
+  "benchmark_policy": "no_reflection_no_titles_v1",
+  "experimental_namespace": "session",
+  "experimental_done_reflection": false,
+  "benchmark_allow_session_titles": false
+}
+```
+
+Select `legacy` or `call` explicitly for those comparison arms. This example opts in;
+it does not change product defaults. The worker owns `benchmark_policy_path` as an
+output-file sibling (`<output>.atom-policy.json`); do not supply a redirect through
+`agent_kwargs`. Direct harness construction must provide its fresh receipt path.
+The episode's `runtime` links that receipt by filename/run ID/phase/verdict. Root and
+child readiness, effective configuration, invocation attribution, title/reflection
+attempts and closure are checked. Missing/incomplete evidence cannot become a clean
+completed episode. Operational session IDs and job names are not display titles.
+
+The native Gym plumbing and typed iteration/retry stop classification are a separate
+harness prerequisite, not the persistence treatment itself. Supervisor SIGTERM
+checkpoint/cancellation behavior is retained. Tests against fake/local model servers
+are not a benchmark result, sealed dependency parity or raw-capture reconciliation.
+The separate HCB adapter is **not certified** by this native guard.
+
 ## Skills and MCP servers
 
 The Atom agent reaches all its capabilities through one `SkillManager`,
@@ -213,18 +369,25 @@ in the settings files, and the servers an ACP client sends). The model uses:
   methods of `self.<server>` (deactivating keeps it connected); a text
   skill's instructions arrive on the `system_messages` channel at the start
   of the next turn.
-- `read(name)`: a text skill's instructions, as text.
-- `doc(name)`: the full description of one skill, with an MCP server's tools. An unconnected MCP skill returns a connection-status message instead of its tools.
+- `print(self.skills.doc(name))`: full text-skill instructions, code APIs or MCP
+  tools. An unconnected MCP skill returns a connection-status message instead.
+  `read(name)` remains hidden compatibility for older text-skill callers.
 
-The prompt holds one small block, which changes only when something is
-activated:
+Atom documents this manager in `python_cell_tools`; it does not list the discovered
+skills in each prompt. `self.skills.status()` returns the active names and available
+count on demand. Agents that expose the optional `<skills>` block show that same text:
 
 ```text
 <skills>
 Active: libwriting, methodwriting, repo, shell, todo, workspace_settings, github (mcp)
-38 more (code, text, MCP): self.skills.search('query') (sync); self.skills.doc('name') (sync) for one skill's full docs (an unconnected MCP skill returns its connection status); await self.skills.activate(['name']) (async); self.skills.read('name') (sync) for text skills
+38 more (code, text, MCP): self.skills.search('query') (sync); print(self.skills.doc('name')) for full instructions/APIs (unconnected MCP: connection status); await self.skills.activate(['name']) (async)
 </skills>
 ```
+
+`SkillManager.source_dir` is an inherited implementation directory, not a discovery
+root, so it is hidden from model-facing docs. Discovery still accepts a list of
+skill directories. Individual skills retain their own `source_dir`, and text
+skills retain `read_file(path)` for their files.
 
 `/skills list` shows every skill with its kind and state; `/skills activate`
 and `/skills deactivate` save the choice for code skills in the workspace

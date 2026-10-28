@@ -15,6 +15,7 @@ prompt must raise a limit here on purpose.
 """
 
 import asyncio
+import json
 
 import pytest
 from atom_test_agents import python_cell
@@ -146,13 +147,45 @@ LIMITS = {
     # repository_instructions block is now always present, empty without an AGENTS.md,
     # 230 characters more in the system prompt and in total for every row (was
     # 18,669 / 19,398 for handle). Within the limits, so they stay.
-    (ATOM, "handle"): (19_100, 19_800),  # measured 18,899 / 19,628
-    (ATOM, "handle_batch"): (19_300, 20_100),  # measured 19,127 / 19,856
-    (ATOM, "handle_work"): (19_400, 20_200),  # measured 19,236 / 19,965
-    (ATOM, "handle_orchestrate"): (19_600, 20_400),  # measured 19,430 / 20,159
+    # 2026-10-28: compact Todo/self.v guidance; normalize workspace in BOTH sizes.
+    # Actual FakeLLM requests, normalized system/all-message CHAR counts:
+    # role         f017 docs only    Todo checkpoint   final
+    # handle       18,997/19,789     19,385/20,177      19,124/19,916
+    # batch        19,225/20,017     19,613/20,405      19,352/20,144
+    # work         19,334/20,126     19,722/20,514      19,461/20,253
+    # orchestrate  19,528/20,320     19,916/20,708      19,655/20,447
+    # f017 docs were restored in-process, not a pristine-runtime measurement.
+    # Final: +127 chars vs that reconstruction, -261 vs the Todo checkpoint.
+    # Explicit bounded rebaseline: round final sizes up to the next 100 chars.
+    (ATOM, "handle"): (19_200, 20_000),
+    (ATOM, "handle_batch"): (19_400, 20_200),
+    (ATOM, "handle_work"): (19_500, 20_300),
+    (ATOM, "handle_orchestrate"): (19_700, 20_500),
+}
+# Combined integration after helper/skill/progress docs and prose compaction:
+# normalized system / all-message chars, legacy / call / session:
+# handle       18899/19691 19428/20227 19432/20231
+# batch        19127/19919 19656/20455 19660/20459
+# work         19236/20028 19765/20564 19769/20568
+# orchestrate  19430/20222 19959/20758 19963/20762
+# Tools separately remain description=2839, schema JSON=79, canonical JSON=3032.
+# Owned modes add lifetime/capture guidance. Keep legacy limits unchanged; these
+# are separate actual-request budgets, with the same hard system ceiling below.
+OWNED_LIMITS = {
+    (ATOM, "handle"): (19_500, 20_300),
+    (ATOM, "handle_batch"): (19_700, 20_500),
+    (ATOM, "handle_work"): (19_800, 20_600),
+    (ATOM, "handle_orchestrate"): (20_000, 20_800),
 }
 # The bench guard's system-prompt ceiling; every agent stays under it.
 BENCH_SYSTEM_LIMIT = 20_000
+
+# Separate CHAR/JSON-size guards, not token counts or a full provider-wire payload.
+# Effective restriction guidance grows default tool descriptions 2,069 -> 2,839;
+# canonical function-tool JSON 2,259 -> 3,032 (+773); schema JSON stays 79.
+TOOL_DESCRIPTION_CHAR_LIMIT = 2_900
+TOOL_SCHEMA_JSON_CHAR_LIMIT = 100
+TOOL_PAYLOAD_JSON_CHAR_LIMIT = 3_100
 
 
 @pytest.fixture(autouse=True)
@@ -165,8 +198,8 @@ def _no_installed_skills(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(home))
 
 
-async def _first_call(spec, method, tmp_path, sessions_dir):
-    """Run one turn of ``method`` and return the first call's messages and workspace."""
+async def _first_call(spec, method, tmp_path, sessions_dir, *, mode="legacy"):
+    """Run one turn and return the first call's messages, workspace, and provider tools."""
     code = RESULT if method != "handle" else "return_result(Done(explanation='x'))"
     response = python_cell(code, "call_1")
     llm = FakeLLMClient([response], strict_exhaustion=True)
@@ -181,26 +214,99 @@ async def _first_call(spec, method, tmp_path, sessions_dir):
                 llm=llm,
                 turn_method=method,
                 sessions_dir=sessions_dir,
+                experimental_namespace=mode,
             )
         )
         await asyncio.wait_for(root.prompt("hello"), 30)
     finally:
         await registry.close_all()
-    return llm.calls[0].messages, workspace
+    return llm.calls[0].messages, workspace, llm.last_tools
 
 
-@pytest.mark.parametrize(("spec", "method"), list(LIMITS))
-async def test_first_call_prompt_stays_within_budget(spec, method, tmp_path, sessions_dir):
-    messages, workspace = await _first_call(spec, method, tmp_path, sessions_dir)
+def _message_sizes(messages, workspace):
     system = "\n".join(str(m.get("content", "")) for m in messages if m.get("role") == "system")
     rendered = "\n".join(str(m.get("content", "")) for m in messages)
-    # The workspace path appears in the prompt; count it as a fixed token.
-    rendered = rendered.replace(str(workspace.resolve()), "<workspace>")
-    system_limit, total_limit = LIMITS[(spec, method)]
-    print(f"{spec} {method}: system={len(system)} total={len(rendered)}")
-    assert len(system) <= system_limit
-    assert len(rendered) <= total_limit
-    assert len(system) < BENCH_SYSTEM_LIMIT
+    path = str(workspace.resolve())
+    return {
+        "raw_system": len(system),
+        "raw_messages": len(rendered),
+        "system": len(system.replace(path, "<workspace>")),
+        "messages": len(rendered.replace(path, "<workspace>")),
+    }
+
+
+async def test_prompt_sizes_normalize_workspace_in_system_and_messages(tmp_path, sessions_dir):
+    # Real requests, not synthetic strings: workspace appears in the static system block.
+    sizes = []
+    for name in ("short", "longer_workspace_path"):
+        root = tmp_path / name
+        root.mkdir()
+        messages, workspace, _ = await _first_call(ATOM, "handle", root, sessions_dir)
+        sizes.append(_message_sizes(messages, workspace))
+    short, long = sizes
+    assert short["raw_system"] < long["raw_system"]
+    assert short["raw_messages"] < long["raw_messages"]
+    assert short["system"] == long["system"]
+    assert short["messages"] == long["messages"]
+
+
+@pytest.mark.parametrize("mode", ["legacy", "call", "session"])
+@pytest.mark.parametrize(("spec", "method"), list(LIMITS))
+async def test_first_call_prompt_stays_within_budget(spec, method, mode, tmp_path, sessions_dir):
+    messages, workspace, tools = await _first_call(spec, method, tmp_path, sessions_dir, mode=mode)
+    tools_block = "\n".join(str(m.get("content", "")) for m in messages)
+    tools_block = tools_block.split("<python_cell_tools>", 1)[1].split("</python_cell_tools>", 1)[0]
+    from nooa.agentdoc import doc
+    from nooa.runtime.pprint import pprint
+
+    assert doc(doc, pprint, concise=True, inline_depth=0) in tools_block
+    assert tools_block.count("def doc(*objs:") == 1
+    assert tools_block.count("def pprint(_object:") == 1
+    assert "Return API documentation as str; display with print(doc(obj))" in tools_block
+    assert "Print (return None): max_length=items/container" in tools_block
+    assert "max_string=string chars, max_depth=nesting; None=unlimited" in tools_block
+    assert "get(self, id_or_title: str)" in tools_block
+    assert "def read(self, name: str)" not in tools_block
+    assert "_progress:" not in tools_block and "_ProgressSink" not in tools_block
+    manager_doc = tools_block.split("class SkillManager", 1)[1].split("# Work:", 1)[0]
+    assert "source_dir" not in manager_doc
+    sizes = _message_sizes(messages, workspace)
+    descriptions = sum(len(tool.description) for tool in tools)
+    schemas = [tool.get_parameter_schema() for tool in tools]
+    schema_chars = len(json.dumps(schemas, sort_keys=True, separators=(",", ":")))
+    payload = [
+        {
+            "type": "function",
+            "function": {
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": schema,
+            },
+        }
+        for tool, schema in zip(tools, schemas, strict=True)
+    ]
+    tool_chars = len(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+    print(f"provider tools: description={descriptions} schema={schema_chars} json={tool_chars}")
+    limits = LIMITS if mode == "legacy" else OWNED_LIMITS
+    system_limit, total_limit = limits[(spec, method)]
+    print(f"{spec} {method} {mode}: {sizes}")
+    rendered = "\n".join(str(message.get("content", "")) for message in messages)
+    if mode == "legacy":
+        assert "<experimental_namespace>" not in rendered
+    else:
+        assert "<experimental_namespace>" in rendered
+        assert "Overrides default one-call guidance" in rendered
+        assert "job.output / JobEvent.output" in rendered
+        if mode == "session":
+            assert "Cell variables survive Done, Waiting and NeedInput" in rendered
+        else:
+            assert "Cell variables survive cells of this call only" in rendered
+    assert sizes["system"] <= system_limit
+    assert sizes["messages"] <= total_limit
+    assert sizes["system"] < BENCH_SYSTEM_LIMIT
+    assert descriptions <= TOOL_DESCRIPTION_CHAR_LIMIT
+    assert schema_chars <= TOOL_SCHEMA_JSON_CHAR_LIMIT
+    assert tool_chars <= TOOL_PAYLOAD_JSON_CHAR_LIMIT
 
 
 @pytest.mark.parametrize(("spec", "method"), list(LIMITS))
@@ -210,7 +316,7 @@ async def test_execution_context_hides_internal_helpers(spec, method, tmp_path, 
     ``_without_removed`` once leaked there with a docstring naming the removed
     ``retain=``/``mode=``/``keep=`` options, putting them in front of the model.
     """
-    messages, _ = await _first_call(spec, method, tmp_path, sessions_dir)
+    messages, _, _ = await _first_call(spec, method, tmp_path, sessions_dir)
     rendered = "\n".join(str(m.get("content", "")) for m in messages)
     start = rendered.index("<python_cell_context>")
     stub = rendered[start : rendered.index("</python_cell_context>", start)]
@@ -226,7 +332,7 @@ async def test_prompts_reply_to_a_child_question_with_send(spec, method, tmp_pat
 
     assert not hasattr(ChildQuestion, "answer")
     assert not hasattr(SessionPort, "answer_child")
-    messages, _ = await _first_call(spec, method, tmp_path, sessions_dir)
+    messages, _, _ = await _first_call(spec, method, tmp_path, sessions_dir)
     rendered = "\n".join(str(m.get("content", "")) for m in messages)
     assert ".answer(" not in rendered
     assert "answer_child" not in rendered

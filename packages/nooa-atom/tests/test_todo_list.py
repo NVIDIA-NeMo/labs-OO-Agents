@@ -13,6 +13,7 @@ from nooa_atom.tools.todo_list import Todo, TodoList
 
 from nooa.agentdoc import doc
 from nooa.interactive import Done
+from nooa.tools.todo import Todo as CoreTodo
 
 UNIFIED = "nooa_atom.agent:AtomAgent"
 TIMEOUT = 60
@@ -26,7 +27,7 @@ def test_the_list_keeps_items_and_progress_and_an_item_keeps_its_content():
     text = doc(TodoList, concise=True)
     for wanted in (
         "def add(self, title: str, description: str = '') -> Todo",
-        "def get(self, todo: Todo | str) -> Todo",
+        "def get(self, id_or_title: str) -> Todo",
         "def delete(self, todo: Todo | str) -> None",
         "def activate(self, todo: Todo | str) -> Todo",
         "def complete(self, todo: Todo | str | None = None) -> None",
@@ -52,6 +53,235 @@ def test_the_list_keeps_items_and_progress_and_an_item_keeps_its_content():
         "source_dir",
     ):
         assert gone not in text, gone
+
+
+@pytest.mark.parametrize("concise", [False, True])
+def test_title_lookup_rules_are_in_generated_docs(concise):
+    text = doc(TodoList, concise=concise)
+    assert "Look up an exact ID or unique exact title" in text
+    assert "get/activate/complete/delete" not in text
+    assert "IDs win; use an ID for ambiguous titles" in text
+    assert "todo_status context block" in text
+    if not concise:
+        full = " ".join(text.split())
+        assert "current titles across open and done items" in full
+        assert "no trimming or fuzzy matching" in full
+        assert "ambiguous titles raise ValueError" in full
+        assert "Todo objects and legacy integer references" not in full
+
+
+def test_get_advertises_and_accepts_the_actual_string_lookup_keyword():
+    import inspect
+
+    signature = inspect.signature(TodoList.get)
+    assert list(signature.parameters) == ["self", "id_or_title"]
+    todos = TodoList()
+    item = todos.add("Current title")
+    assert todos.get(id_or_title=item.id) is item
+    assert todos.get(id_or_title=item.title) is item
+    # No public **kwargs bag or misleading renamed signature. Positional old
+    # Todo/int references are still ID-only, as the compatibility cases below check.
+    with pytest.raises(TypeError, match="unexpected keyword argument 'todo'"):
+        todos.get(todo=item.id)
+
+
+def test_public_operations_accept_a_unique_exact_title():
+    todos = TodoList()
+    first = todos.add("Read the code")
+    second = todos.add("Fix the parser", deps=[first])
+    assert todos.get(first.title) is first
+    assert todos.activate(first.title) is first
+    assert f"working on {first.id}" in todos.status()
+    todos.complete(first.title)
+    assert first.status == "done" and todos.active() is None
+    assert todos.get(first.title) is first  # done items still participate
+    todos.delete(first.title)
+    assert todos.list_todos() == [second] and second.deps == []
+
+
+@pytest.mark.parametrize("method", ["get", "activate", "complete", "delete"])
+def test_exact_ids_win_even_over_duplicate_titles(method):
+    todos = TodoList()
+    target = todos.add("By ID")
+    others = [todos.add(target.id), todos.add(target.id)]
+    result = getattr(todos, method)(target.id)
+    if method in ("get", "activate"):
+        assert result is target
+    elif method == "complete":
+        assert target.status == "done"
+    else:
+        assert todos.list_todos() == others
+    assert all(t.status == "open" for t in others)
+
+
+@pytest.mark.parametrize("method", ["get", "activate", "complete", "delete"])
+@pytest.mark.parametrize("done_count", [0, 1, 2])
+def test_ambiguous_titles_fail_without_side_effects(method, done_count):
+    todos = TodoList()
+    matches = [todos.add("Duplicate"), todos.add("Duplicate")]
+    for item in matches[:done_count]:
+        todos.complete(item)
+    active = todos.add("Keep active", deps=matches)
+    todos.activate(active)
+    active.comments.append("keep this note")
+    before = todos.to_dict()
+    with pytest.raises(ValueError, match="ambiguous item title") as error:
+        getattr(todos, method)("Duplicate")
+    assert all(item.id in str(error.value) for item in matches)
+    assert "use an id" in str(error.value)
+    assert todos.to_dict() == before
+    assert todos.active() is active and todos.get(active) is active
+
+
+@pytest.mark.parametrize("method", ["get", "activate", "complete", "delete"])
+def test_ambiguous_titles_do_not_normalize_a_wrapped_legacy_manager(method):
+    from nooa.tools.todo import TodoManager
+
+    manager = TodoManager()
+    first = manager.add("Duplicate")
+    second = manager.add("Duplicate", deps=[first])
+    manager.activate(second)
+    manager.comment(first, "legacy note")
+    before = manager.to_dict()
+    todos = TodoList(manager=manager)
+    with pytest.raises(ValueError, match="ambiguous item title"):
+        getattr(todos, method)("Duplicate")
+    assert manager.to_dict() == before
+    assert manager.get(first.id) is first and manager.get(second.id) is second
+
+
+def test_ambiguous_title_error_bounds_candidate_ids():
+    todos = TodoList()
+    matches = [todos.insert_copy(Todo(id=f"candidate-{i}", title="Duplicate")) for i in range(8)]
+    with pytest.raises(ValueError, match="ambiguous item title") as error:
+        todos.get("Duplicate")
+    text = str(error.value)
+    assert all(item.id in text for item in matches[:5])
+    assert all(item.id not in text for item in matches[5:])
+    assert "+3 more" in text
+
+
+@pytest.mark.parametrize("title", ["", " ", "  ", "\t\n"])
+def test_empty_and_whitespace_titles_use_literal_exact_equality(title):
+    todos = TodoList()
+    item = todos.add(title)
+    assert todos.get(title) is item
+    todos.add(title)
+    with pytest.raises(ValueError, match="ambiguous item title"):
+        todos.get(title)
+    assert todos.get(item.id) is item
+
+
+@pytest.mark.parametrize("method", ["get", "activate", "complete", "delete"])
+def test_unknown_or_inexact_titles_keep_the_missing_item_error(method):
+    todos = TodoList()
+    todos.add("Fix the parser")
+    before = todos.to_dict()
+    for query in ("fix the parser", "Fix", "parser", " Fix the parser", "Fix  the parser", "", " "):
+        with pytest.raises(ValueError) as error:
+            getattr(todos, method)(query)
+        assert str(error.value) == f"no item {query!r}; ids are shown in todo_status"
+        assert todos.to_dict() == before
+
+
+@pytest.mark.parametrize("todo_type", [Todo, CoreTodo])
+@pytest.mark.parametrize("method", ["get", "activate", "complete", "delete"])
+def test_todo_object_references_resolve_only_by_id(method, todo_type):
+    todos = TodoList()
+    target = todos.add("Managed")
+    other = todos.add("Other")
+    reference = todo_type(id=target.id, title=other.title)
+    result = getattr(todos, method)(reference)
+    if method in ("get", "activate"):
+        assert result is target
+    elif method == "complete":
+        assert target.status == "done"
+    else:
+        assert todos.list_todos() == [other]
+    assert other.status == "open"
+
+
+@pytest.mark.parametrize("todo_type", [Todo, CoreTodo])
+@pytest.mark.parametrize("method", ["get", "activate", "complete", "delete"])
+def test_stale_todo_objects_never_retarget_by_title_or_stringified_id(method, todo_type):
+    todos = TodoList()
+    reference = todo_type(id="stale-id", title="Reused title")
+    todos.insert_copy(reference)
+    todos.delete(reference)
+    todos.add(reference.title)
+    todos.add(reference.id)
+    before = todos.to_dict()
+    with pytest.raises(ValueError, match="no item 'stale-id'"):
+        getattr(todos, method)(reference)
+    assert todos.to_dict() == before
+
+
+@pytest.mark.parametrize("method", ["get", "activate", "complete", "delete"])
+def test_legacy_integer_references_remain_id_only(method):
+    todos = TodoList()
+    target = todos.insert_copy(Todo(id="7", title="By integer ID"))
+    other = todos.add("7")
+    result = getattr(todos, method)(7)
+    if method in ("get", "activate"):
+        assert result is target
+    elif method == "complete":
+        assert target.status == "done"
+    if method != "delete":
+        todos.delete(target)
+    before = todos.to_dict()
+    with pytest.raises(ValueError, match="no item '7'"):
+        getattr(todos, method)(7)
+    assert todos.to_dict() == before
+    assert todos.get("7") is other  # only explicit strings get the title fallback
+
+
+def test_titles_follow_rename_deletion_and_snapshot_state_without_a_cache():
+    todos = TodoList()
+    first = todos.add("Original")
+    second = todos.add("Other")
+    assert todos.get("Original") is first
+    first.title = "Renamed"
+    with pytest.raises(ValueError, match="no item 'Original'"):
+        todos.get("Original")
+    assert todos.get("Renamed") is first
+    todos.update(second.id, title="Renamed")
+    with pytest.raises(ValueError, match="ambiguous item title"):
+        todos.get("Renamed")
+    todos.delete(first)
+    assert todos.get("Renamed") is second
+    todos.activate("Renamed").comments.append("current note")
+    restored = TodoList(todos.to_dict())
+    assert restored.status() == todos.status()
+    assert restored.get("Renamed") is restored.active()
+    assert restored.get("Renamed").id == second.id
+    restored.complete("Renamed")
+    assert restored.get("Renamed").status == "done"
+    with pytest.raises(ValueError, match="already done"):
+        restored.activate("Renamed")
+    restored.delete("Renamed")
+    replacement = restored.add("Renamed")
+    assert restored.get("Renamed") is replacement
+    restored.from_dict(todos.to_dict())
+    assert restored.get("Renamed").id == second.id
+
+
+def test_legacy_comment_order_and_passthroughs_still_use_only_ids():
+    todos = TodoList()
+    first = todos.add("First")
+    second = todos.add("Second")
+    todos.activate(first)
+    todos.comment(second.title)  # title-looking note still goes on the active item
+    todos.comment(first.id, second.title)  # id first, text second
+    todos.comment(second.title, first.id)  # text first, id second
+    assert first.comments == [second.title] * 3 and second.comments == []
+    for args in (("note", second.title), (first.title, "note")):
+        with pytest.raises(ValueError, match="no item"):
+            todos.comment(*args)
+    assert todos.update(first.title, title="changed") is None
+    assert todos.done(first.title) is None
+    assert todos.remove(first.title) is False
+    assert first.title == "First" and first.status == "open"
+    assert first.comments == [second.title] * 3 and second.comments == []
 
 
 def test_items_are_edited_directly_and_the_list_tracks_progress():
@@ -247,6 +477,7 @@ async def test_unified_agent_shows_the_short_list_and_a_brief_arrives_active(
     call = models.llms[None].calls[0]
     rendered = "\n".join(str(m.get("content", "")) for m in call.messages)
     assert "class TodoList" in rendered and "comments: list[str]" in rendered
+    assert "unique exact title" in rendered and "IDs win" in rendered
     for gone in (
         "def set_var(",
         "def list_todos(",
@@ -301,6 +532,7 @@ async def test_a_saved_todo_list_reloads_with_ids_notes_and_the_active_item(
     read, fix = todos.list_todos()
     assert (read.title, fix.title) == ("Read the code", "Fix it") and todos.active().id == fix.id
     assert todos.get(fix.id).comments == ["found it"]
+    assert todos.get("Fix it") is fix and todos.get("Read the code") is read
     assert [(p.content, p.status) for p in plan] == [
         ("Read the code", "pending"),
         ("Fix it", "in_progress"),

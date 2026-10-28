@@ -5,11 +5,15 @@
 from __future__ import annotations
 
 import json
+from uuid import uuid4
 
 import pytest
-from atom_test_agents import CellLLM, python_cell
+from atom_test_agents import python_cell
+from nooa_atom.benchmark_policy import POLICY
 from nooa_atom.gym import TURN_METHODS, AtomHarness
 from nooa_atom.session.session import TurnFailedError
+from nooa_bench.gym import _ToolHooks
+from test_benchmark_policy import PolicyFake as CellLLM
 
 from nooa.interactive import TaskResult
 from nooa.runtime.hooks import hooks_scope
@@ -20,6 +24,23 @@ FINISH = (
     "solution_description='created hello.txt', evidence='file exists', how_to_verify='cat hello.txt', "
     "report='done')))"
 )
+
+
+def _harness(llm, **kwargs):
+    return AtomHarness(
+        llm,
+        benchmark_policy=POLICY,
+        experimental_namespace="legacy",
+        experimental_done_reflection=False,
+        benchmark_allow_session_titles=False,
+        benchmark_policy_path=kwargs["workdir"] / f"{uuid4().hex}.atom-policy.json",
+        **kwargs,
+    )
+
+
+async def _solve(harness, task):
+    with hooks_scope(_ToolHooks([])):
+        return await harness.solve(task)
 
 
 class _Hooks:
@@ -61,12 +82,12 @@ async def test_harness_runs_one_atom_session_to_its_result(tmp_path, monkeypatch
         workdir
     )  # Gym's worker runs with cwd = task directory; cells resolve paths against it
     llm = CellLLM([python_cell(FINISH, "call-1")])
-    harness = AtomHarness(
+    harness = _harness(
         llm, turn_method=turn_method, workdir=workdir, sessions_dir=tmp_path / "sessions"
     )
     hooks = _Hooks()
     with hooks_scope(hooks):
-        result = await harness.solve("Create hello.txt containing 'hello gym', then finish.")
+        result = await _solve(harness, "Create hello.txt containing 'hello gym', then finish.")
     assert isinstance(result, TaskResult) and result.solution_description == "created hello.txt"
     assert (workdir / "hello.txt").read_text() == "hello gym"  # cells run in the task directory
     # The observer active around solve() saw the cell Atom executed inside its session loop.
@@ -80,7 +101,7 @@ async def test_harness_runs_one_atom_session_to_its_result(tmp_path, monkeypatch
 
 async def test_harness_refuses_an_unknown_turn_method(tmp_path):
     with pytest.raises(ValueError, match="turn_method"):
-        AtomHarness(CellLLM([]), turn_method="handle_work", workdir=tmp_path)
+        _harness(CellLLM([]), turn_method="handle_work", workdir=tmp_path)
 
 
 async def test_harness_refuses_model_aliases(tmp_path, monkeypatch):
@@ -96,11 +117,12 @@ async def test_harness_refuses_model_aliases(tmp_path, monkeypatch):
             seen["llm"] = kwargs["llm"]
 
     monkeypatch.setattr(gym_module, "SessionOptions", Options)
+    monkeypatch.chdir(tmp_path)
     llm = CellLLM([python_cell(FINISH, "call-1")])
-    harness = AtomHarness(
+    harness = _harness(
         llm, turn_method="handle_batch", workdir=tmp_path, sessions_dir=tmp_path / "s"
     )
-    await harness.solve("task")
+    await _solve(harness, "task")
     assert seen["llm"] is llm
 
 
@@ -117,23 +139,23 @@ async def test_harness_removes_the_session_directory_it_created_and_keeps_a_call
     tmp_path, monkeypatch
 ):
     monkeypatch.chdir(tmp_path)
-    owned = AtomHarness(
+    owned = _harness(
         CellLLM([python_cell(FINISH, "call-1")]), turn_method="handle_batch", workdir=tmp_path
     )
     root = owned._owned_root
     assert root is not None and root.is_dir()
-    await owned.solve("task")
+    await _solve(owned, "task")
     assert not root.exists()  # nothing of the rollout's session records stays behind in /tmp
 
     given = tmp_path / "keep"
-    kept = AtomHarness(
+    kept = _harness(
         CellLLM([python_cell(FINISH, "call-2")]),
         turn_method="handle_batch",
         workdir=tmp_path,
         sessions_dir=given,
     )
     assert kept._owned_root is None
-    await kept.solve("task")
+    await _solve(kept, "task")
     assert given.is_dir() and any(
         given.rglob("*")
     )  # the caller's directory and its records are untouched
@@ -141,12 +163,12 @@ async def test_harness_removes_the_session_directory_it_created_and_keeps_a_call
 
 async def test_harness_removes_its_session_directory_when_solve_fails(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    harness = AtomHarness(
+    harness = _harness(
         CellLLM([]), turn_method="handle_batch", workdir=tmp_path
     )  # no scripted reply: the turn fails
     root = harness._owned_root
     with pytest.raises(TurnFailedError):
-        await harness.solve("task")
+        await _solve(harness, "task")
     assert not root.exists()
 
 
@@ -156,11 +178,11 @@ async def test_harness_refuses_a_done_without_a_task_result(tmp_path, monkeypatc
     llm = CellLLM(
         [python_cell("return_result(Done(explanation='finished', result='done'))", "call-1")]
     )
-    harness = AtomHarness(
+    harness = _harness(
         llm, turn_method="handle_batch", workdir=tmp_path, sessions_dir=tmp_path / "s"
     )
     with pytest.raises(RuntimeError, match="without a TaskResult.*Done carrying str"):
-        await harness.solve("task")
+        await _solve(harness, "task")
 
 
 async def test_solve_cancels_and_rejects_children_with_unfinished_work_when_the_root_answers():

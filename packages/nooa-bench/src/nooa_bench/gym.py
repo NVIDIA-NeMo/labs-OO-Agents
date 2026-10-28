@@ -29,6 +29,7 @@ import time
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -165,6 +166,8 @@ class _RecordingClient(ResponsesClient):
         self._context_window_override = context_window
         self._replay_reasoning = replay_reasoning
         self._pending: dict[int, ModelCallRecord] = {}
+        self._episode_policy_guard: Any = None
+        self._required_episode_policy: Any = None
         self._http.httpx_async.event_hooks = {
             "request": [self._on_request],
             "response": [self._on_response],
@@ -208,6 +211,19 @@ class _RecordingClient(ResponsesClient):
             input_messages, responses=True, model=model, instructions=instructions
         )
 
+    def bind_episode_policy(self, guard: Any) -> None:
+        if self._required_episode_policy is not None:
+            raise RuntimeError("episode policy was already bound")
+        self._episode_policy_guard = self._required_episode_policy = guard
+        guard.bind_client(self)
+
+    def _check_episode_policy(self, output_model: Any = None) -> None:
+        guard = self._required_episode_policy
+        if guard is not None:
+            if self._episode_policy_guard is not guard:
+                guard.refuse("client_policy_guard_missing")
+            guard.check_model(_current_invocation.get(), output_model)
+
     async def _on_request(self, request: httpx.Request) -> None:
         # Gym attributes a model call to an invocation through this header.
         request.headers["x-session-id"] = _current_invocation.get()
@@ -215,6 +231,11 @@ class _RecordingClient(ResponsesClient):
             body = json.loads(request.content or b"{}")
         except ValueError:
             body = {"_raw": request.content.decode(errors="replace")}
+        guard = self._required_episode_policy
+        if guard is not None:
+            if self._episode_policy_guard is not guard:
+                guard.refuse("client_policy_guard_missing")
+            guard.check_dispatch(_current_invocation.get(), body)
         record = ModelCallRecord(
             invocation_id=_current_invocation.get(), request=body, started_at=time.time()
         )
@@ -236,6 +257,7 @@ class _RecordingClient(ResponsesClient):
     async def acall(
         self, messages: Any, tools: Any = None, output_model: Any = None, **kwargs: Any
     ) -> Any:
+        self._check_episode_policy(output_model)  # before budget checks/serialization/inference
         used = sum(1 for r in self._records if r.status_code is not None and r.status_code < 400)
         if self._max_policy_calls is not None and used >= self._max_policy_calls:
             raise PolicyCallBudgetExceeded(
@@ -608,6 +630,47 @@ def _terminal(records: list[ModelCallRecord]) -> tuple[list[dict], list[dict], s
     return [*typed, *output], [*history, *output], str(response_id) if response_id else None
 
 
+def _missing_policy_receipt(path: str | Path | None) -> dict[str, Any]:
+    """Missing implementation is durable failure, never absence-as-success.
+
+    The worker owns this fresh path. Never overwrite/adopt another receipt for
+    a constructor that did not bind its guard to the actual episode client.
+    """
+    if path is None:
+        raise RuntimeError("required benchmark policy receipt path missing")
+    receipt = {
+        "schema": "nooa.atom.benchmark_policy.v1",
+        "policy": "no_reflection_no_titles_v1",
+        "run_id": uuid4().hex,
+        "phase": "final",
+        "verdict": "fail",
+        "outcome": "construction_error",
+        "namespace": None,
+        "sessions": [],
+        "invocations": [],
+        "violations": [
+            {
+                "code": "policy_guard_missing",
+                "session_id": None,
+                "method": None,
+                "invocation_id": None,
+                "attempt_id": None,
+            }
+        ],
+        "observed_attempt_counts": {
+            "reflection": 0,
+            "title_generation": 0,
+            "rename": 0,
+            "title_mutation": 0,
+        },
+        "overflow": False,
+        "capture_reconciliation": "external_required_not_asserted",
+    }
+    with Path(path).open("x", encoding="utf-8") as stream:
+        stream.write(json.dumps(receipt, sort_keys=True))
+    return receipt
+
+
 async def run_gym_episode(
     agent_factory: Callable[[ResponsesClient], Any],
     invoke: Callable[[Any], Awaitable[Any]],
@@ -626,6 +689,8 @@ async def run_gym_episode(
     bind_tools: ToolBinder = bind_gym_tools,
     interrupt: Callable[[], str | None] | None = None,
     snapshot: Callable[[Callable[[str], GymEpisode]], None] | None = None,
+    policy_required: bool = False,
+    policy_path: str | Path | None = None,
 ) -> GymEpisode:
     """Run one NOOA agent activation against a Gym model server and return the evidence.
 
@@ -663,10 +728,13 @@ async def run_gym_episode(
         client._http.httpx_async.cookies.update(cookies)
     stop_reason, error, return_value = "completed", None, None
     interrupted = "the agent was stopped before it finished"
+    agent: Any = None
+    required = policy_required
+    gap_receipt: dict[str, Any] | None = None
 
     def render(stop: str, *, error: str | None = None, return_value: Any = None) -> GymEpisode:
         output_items, conversation, terminal_response_id = _terminal(model_calls)
-        return GymEpisode(
+        episode = GymEpisode(
             output_items=output_items,
             conversation=conversation,
             model_calls=model_calls,
@@ -674,14 +742,58 @@ async def run_gym_episode(
             return_value=return_value,
             stop_reason=stop,
             error=error,
-            terminal_response_id=terminal_response_id,
             resource_cookies=dict(resource_cookies or {}),
+            terminal_response_id=terminal_response_id,
         )
+        nonlocal gap_receipt
+        if required or client._required_episode_policy is not None:
+            guard = client._required_episode_policy
+            if guard is None:
+                if gap_receipt is None:
+                    gap_receipt = _missing_policy_receipt(policy_path)
+                receipt, receipt_path = gap_receipt, Path(policy_path)
+            else:
+                if agent is not None and getattr(agent, "benchmark_guard", None) is not guard:
+                    guard.violate("harness_guard_changed")
+                getter = getattr(agent, "benchmark_policy_receipt", None)
+                if agent is not None and not callable(getter):
+                    guard.violate("harness_verdict_interface_missing")
+                receipt = guard.final_receipt() if guard.finalized else guard.write()
+                if (
+                    agent is not None
+                    and guard.finalized
+                    and callable(getter)
+                    and getter() != receipt
+                ):
+                    guard.violate("harness_verdict_mismatch")
+                    receipt = guard.final_receipt()
+                receipt_path = guard.path
+                if policy_path is not None and Path(policy_path).resolve() != guard.path:
+                    guard.violate("worker_receipt_path_mismatch")
+                    raise RuntimeError("benchmark policy receipt path does not match worker output")
+            episode.runtime.update(
+                benchmark_policy_required="true",
+                benchmark_policy_path=receipt_path.name,
+                benchmark_policy_run_id=receipt["run_id"],
+                benchmark_policy_phase=receipt["phase"],
+                benchmark_policy_verdict=receipt["verdict"],
+            )
+            if receipt["phase"] != "final" or receipt["verdict"] != "pass":
+                episode.stop_reason, episode.return_value = "error", None
+                episode.error = "benchmark policy/coverage verdict failed or incomplete"
+        return episode
 
     if snapshot is not None:
         snapshot(lambda stop: render(stop, error=interrupted))
     try:
         agent = agent_factory(client)
+        required = policy_required or getattr(agent, "benchmark_policy_required", False) is True
+        if required:
+            guard = getattr(agent, "benchmark_guard", None)
+            if guard is None or not callable(getattr(agent, "benchmark_policy_receipt", None)):
+                raise RuntimeError("required benchmark policy is not implemented by this artifact")
+            if client._required_episode_policy is not guard:
+                guard.refuse("client_policy_not_bound_by_harness")
         if tools:
             bind_tools(agent, list(tools))
         with hooks_scope(_ToolHooks(tool_calls)):
