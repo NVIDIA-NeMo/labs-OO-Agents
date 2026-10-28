@@ -22,8 +22,6 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 
 from pydantic import BaseModel
 
-from nooa._immutable_json import utf8_safe_text
-
 if TYPE_CHECKING:
     from nooa.config.truncation_config import FormatConfig
 
@@ -137,6 +135,17 @@ def _apply_context_total_limit(
         )
 
     return rendered, len(to_evict)
+
+
+def utf8_safe_text(text: str) -> str:
+    """Return ``text`` with lone UTF-16 surrogates escaped as ``\\udXXX`` text."""
+    if text.isascii():
+        return text
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return text.encode("utf-8", "backslashreplace").decode("utf-8")
+    return text
 
 
 def _utf8_safe(value: Any) -> Any:

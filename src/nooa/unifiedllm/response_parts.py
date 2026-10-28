@@ -9,7 +9,7 @@ There is no flattened-turn order ledger or public-content fingerprint.
 import logging
 from typing import Any
 
-from nooa._immutable_json import freeze, json_containers
+from nooa._immutable_json import freeze, json_containers, utf8_encodable
 from nooa.llm_types import AssistantPart, AssistantReasoning, AssistantText, LLMResponse, ToolCall
 
 from .replay_state import (
@@ -235,6 +235,12 @@ def project_turn(
                 )
                 compatible = False
                 break
+    if compatible and not all(utf8_encodable(part.native) for part in turn.parts):
+        logger.warning(
+            "Stored native state holds a lone surrogate that UTF-8 cannot encode; "
+            "replaying portable text instead of native state."
+        )
+        compatible = False
     if turn.replay_scope and not compatible:
         logger.warning(
             "Incompatible assistant turn: replaying portable parts without native state."

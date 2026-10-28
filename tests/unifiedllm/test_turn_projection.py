@@ -622,3 +622,19 @@ def test_relay_deletion_conservatively_discards_shifted_native_state():
 def test_native_mapping_is_intentionally_unhashable():
     with pytest.raises(TypeError):
         hash(turn().parts[0].native)
+
+
+def test_lone_surrogate_in_native_state_replays_portably_without_rewriting_it():
+    items = output_items()
+    items[0]["encrypted_content"] = "opaque\ud800"
+    original = turn(items)
+
+    public = project_turn(original, SCOPE)
+
+    assert "opaque" not in json.dumps(public)
+    json.dumps(public, ensure_ascii=False).encode("utf-8")
+    assert [call["call_id"] for call in public if call.get("type") == "function_call"] == [
+        "call_1",
+        "call_2",
+    ]
+    assert original.parts[0].native["encrypted_content"] == "opaque\ud800"

@@ -18,14 +18,7 @@ class _FrozenObject(Mapping):
 
     def __init__(self, values):
         object.__setattr__(
-            self,
-            "_values",
-            MappingProxyType(
-                {
-                    (utf8_safe_text(k) if isinstance(k, str) else k): freeze(v)
-                    for k, v in values.items()
-                }
-            ),
+            self, "_values", MappingProxyType({k: freeze(v) for k, v in values.items()})
         )
 
     def __getitem__(self, key):
@@ -41,27 +34,9 @@ class _FrozenObject(Mapping):
         return self
 
 
-def utf8_safe_text(text: str) -> str:
-    """Return ``text`` with lone UTF-16 surrogates escaped as ``\\udXXX`` text.
-
-    UTF-8 cannot encode a lone surrogate, so one left in replayed state makes
-    every later request fail to serialize. Encodable text is returned as is.
-    """
-    if text.isascii():
-        return text
-    try:
-        text.encode("utf-8")
-    except UnicodeEncodeError:
-        return text.encode("utf-8", "backslashreplace").decode("utf-8")
-    return text
-
-
 def freeze(value):
     if isinstance(value, _FrozenObject):
         return value
-    if isinstance(value, str):
-        # Escaped once on capture or restore, never per request.
-        return utf8_safe_text(value)
     if isinstance(value, dict):
         return _FrozenObject(value)
     if isinstance(value, (list, tuple)):
@@ -69,6 +44,27 @@ def freeze(value):
     if value is None or isinstance(value, (str, bool, int, float)):
         return value
     raise TypeError(f"Native extensions must contain JSON values only, got {type(value).__name__}")
+
+
+def utf8_encodable(value) -> bool:
+    """Whether every string in frozen ``value``, keys included, encodes as UTF-8.
+
+    Read-only: native payloads are never rewritten, so a caller that finds a
+    lone surrogate must replay without them instead.
+    """
+    if isinstance(value, str):
+        if value.isascii():
+            return True
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError:
+            return False
+        return True
+    if isinstance(value, Mapping):
+        return all(utf8_encodable(k) and utf8_encodable(v) for k, v in value.items())
+    if isinstance(value, tuple):
+        return all(utf8_encodable(item) for item in value)
+    return True
 
 
 def json_containers(value):

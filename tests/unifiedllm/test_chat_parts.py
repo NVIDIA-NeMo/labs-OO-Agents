@@ -402,3 +402,24 @@ def test_signed_reasoning_only_turn_survives():
     projected = prepare_chat_messages([turn], scope)
     assert projected[0]["thinking_blocks"] == source["thinking_blocks"]
     assert projected[0]["content"] == ""
+
+
+@pytest.mark.parametrize("model", MODELS)
+def test_lone_surrogate_in_native_state_replays_portably_without_rewriting_it(model):
+    source = message(model)
+    if model.startswith("anthropic"):
+        source["thinking_blocks"][0]["signature"] = "signed\ud800"
+    else:
+        source["provider_specific_fields"]["thought_signatures"] = ["opaque\ud800"]
+    scope = replay_scope(model, "chat", {})
+    turn = LLMResponse(parts=capture_chat_parts(source, scope), replay_scope=scope)
+
+    projected, ids = project_chat_turn(turn, scope)
+
+    wire = json.dumps(projected, ensure_ascii=False)
+    wire.encode("utf-8")
+    for secret in ("signed", "encrypted-redaction", "opaque"):
+        assert secret not in wire
+    assert ids == {}
+    assert projected["tool_calls"][0]["id"] == "call_1"
+    assert "\\ud800" in json.dumps([p.model_dump(mode="json")["native"] for p in turn.parts])
