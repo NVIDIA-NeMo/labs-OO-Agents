@@ -978,6 +978,23 @@ def _maybe_sanitize_response_format(
     }
 
 
+def _json_object_request(
+    messages: list[dict[str, Any]], output_model: type[BaseModel]
+) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    """JSON-mode request for endpoints that reject ``json_schema`` (e.g. DeepSeek).
+
+    JSON mode only guarantees syntactically valid JSON, so the schema travels in the
+    prompt instead. PredictStrategy still validates the parsed output client-side and
+    retries on mismatch. The instruction goes last so the cacheable prefix is unchanged.
+    """
+    schema = json.dumps(output_model.model_json_schema())
+    instruction = {
+        "role": "system",
+        "content": f"Respond with one JSON object that conforms to this JSON schema:\n{schema}",
+    }
+    return [*messages, instruction], {"type": "json_object"}
+
+
 def _responses_output_params(output_model: type[BaseModel]) -> dict[str, Any]:
     """Structured-output params for the Responses API (``litellm.responses``).
 
@@ -1975,11 +1992,20 @@ class CompletionClient(UnifiedLLM):
                 are marked.
             media_inputs: Explicit allowed inputs: image, audio, video, pdf.
                 Absent/empty is text-only. PDF means application/pdf only.
-            **config: Additional configuration passed to litellm (api_key, api_base, etc.)
+            **config: Additional configuration passed to litellm (api_key, api_base, etc.).
+                ``structured_output`` is consumed here instead: ``"json_schema"``
+                (default) or ``"json_object"`` for endpoints without schema support.
         """
         if cache_breakpoint not in {None, "auto", "anthropic"}:
             raise ValueError(
                 "CompletionClient cache_breakpoint must be 'auto', 'anthropic', or None"
+            )
+        # Not a litellm parameter, so it must not stay in self.config (sent with every request).
+        self.structured_output = config.pop("structured_output", "json_schema")
+        if self.structured_output not in ("json_schema", "json_object"):
+            raise ValueError(
+                f"structured_output must be 'json_schema' or 'json_object', "
+                f"got {self.structured_output!r}"
             )
         super().__init__(model, media_inputs=media_inputs, **config)
         self.retry_config = retry_config or RetryConfig()
@@ -2059,7 +2085,11 @@ class CompletionClient(UnifiedLLM):
             api_params["tools"] = [self._convert_tool_to_schema(tool) for tool in tools]
             api_params["parallel_tool_calls"] = False
 
-        if output_model is not None:
+        if output_model is not None and self.structured_output == "json_object":
+            api_params["messages"], api_params["response_format"] = _json_object_request(
+                prepared_messages, output_model
+            )
+        elif output_model is not None:
             api_params["response_format"] = _maybe_sanitize_response_format(
                 effective_model, output_model
             )
@@ -2173,7 +2203,11 @@ class CompletionClient(UnifiedLLM):
             api_params["tools"] = [self._convert_tool_to_schema(tool) for tool in tools]
             api_params["parallel_tool_calls"] = False
 
-        if output_model is not None:
+        if output_model is not None and self.structured_output == "json_object":
+            api_params["messages"], api_params["response_format"] = _json_object_request(
+                prepared_messages, output_model
+            )
+        elif output_model is not None:
             api_params["response_format"] = _maybe_sanitize_response_format(
                 effective_model, output_model
             )
@@ -2393,6 +2427,12 @@ class ResponsesClient(UnifiedLLM):
         """
         if cache_breakpoint not in {None, "auto", "openai"}:
             raise ValueError("ResponsesClient cache_breakpoint must be 'auto', 'openai', or None")
+        # The registry forwards structured_output for any alias; JSON mode is a
+        # CompletionClient feature, so consume the key rather than send it to litellm.
+        if config.pop("structured_output", "json_schema") != "json_schema":
+            raise ValueError(
+                "structured_output='json_object' is supported by CompletionClient only"
+            )
         super().__init__(model, media_inputs=media_inputs, **config)
         self.retry_config = retry_config or RetryConfig()
         self.cache_breakpoint = cache_breakpoint
