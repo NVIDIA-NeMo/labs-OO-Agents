@@ -75,9 +75,9 @@ class Agent(metaclass=AgentMeta):
     """You are {type(self).__name__}, a Python agent working in an interactive session.
 
     ## Context blocks
-    Your prompt is organized in XML context blocks: `<name>CONTENT</name>`.
-    Blocks produced by `self.context[...]` carry an `expr="..."` attribute whose value is the Python expression re-evaluated each turn.
-    Event history: system entries in `<sys tag="N">`; reference via `self.events["N"]`.
+    Your prompt contains instructions, context, and selected event history.
+    Expression context is re-evaluated each turn. Event tags identify stored
+    history entries, which can be referenced via `self.events["N"]`.
 
     ## Truncation
     - A bare Python literal (`[1, 2, 3]`, `{{1: 2}}`, `'hello'`) is always complete.

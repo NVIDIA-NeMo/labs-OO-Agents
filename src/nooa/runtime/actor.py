@@ -148,7 +148,9 @@ warnings.filterwarnings(
 _TRAILING_CONTEXT_RE = _re.compile(r"^(.*?)(<context>.*?</context>)\s*\Z", _re.DOTALL)
 
 
-def _extract_trailing_context_envelope(messages: list[dict[str, Any]]) -> str:
+def _extract_trailing_context_envelope(
+    messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
+) -> str:
     """Pull the trailing ``<context>…</context>`` envelope from messages.
 
     A custom context view may emit an explicit trailing ``<context>`` envelope.
@@ -191,7 +193,7 @@ def _dynamic_context_trace_snapshot(items: tuple[Any, ...], messages: list[Any])
 
 def _snapshot_llm_request(
     event_manager: Any,
-    messages: list[Any],
+    messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
     generation_id: str,
     dynamic_context_snapshot: str = "",
 ) -> str:

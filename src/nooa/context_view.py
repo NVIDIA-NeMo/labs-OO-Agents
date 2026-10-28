@@ -63,7 +63,11 @@ async def collect_context_items[Owner](
 
 
 def context_text(value: Any, *, call: "CurrentCall") -> str:
-    """Render a value with the call's bounded context-block format."""
+    """Serialize a non-string value with the call's structural format bounds.
+
+    Existing strings pass through unchanged, regardless of their length. This
+    helper is not a string-length cap or a full prompt-budget policy.
+    """
     if isinstance(value, str):
         return value
 

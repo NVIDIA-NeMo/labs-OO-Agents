@@ -6,7 +6,7 @@ DynamicContext: Marks a context block for dynamic evaluation each turn.
 ResolvedBlock: A fully-resolved block ready for rendering.
 BlockMetadata: Typed metadata for resolved blocks.
 RenderedMessage: Neutral in-memory message emitted by a BlockFormatter,
-    consumed by a ProviderFormatter to produce provider-specific output.
+    consumed by a ProviderFormatter to produce client input.
 ToolCallInfo: Structured tool-call payload carried on a RenderedMessage.
 Role: Re-exported from roles.py for backward compatibility.
 """
@@ -148,8 +148,9 @@ class Context(BaseModel):
 class BlockMetadata(BaseModel):
     """Typed metadata for resolved blocks.
 
-    Replaces the untyped dict[str, Any] with well-defined fields.
-    Used by formatters and provider formatters to render blocks correctly.
+    Describes source evaluation and presentation. The view may use these
+    fields for placement and budgeting; formatters preserve its selected order
+    and explicit cache boundaries.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -160,32 +161,32 @@ class BlockMetadata(BaseModel):
     user_block: bool = Field(
         default=False,
         description="Whether this is a user-set block (from self.context). "
-        "User blocks are dropped first during context truncation.",
+        "The default view uses this flag to prioritize budget eviction.",
     )
     static: bool = Field(
         default=False,
         description="Author's declaration that the block's content is stable across "
-        "turns. Renderers use this to place the block in a cacheable prefix. "
-        "Does not affect truncation or correctness — only caching behavior.",
+        "turns. The default view uses it for prefix placement; formatters do not "
+        "move blocks or infer cache boundaries from this flag.",
     )
     source_dynamic: bool = Field(
         default=False,
-        description="Whether this block came from self.context.set_dynamic(). "
-        "Only these blocks render their ``expr`` attribute — static blocks, "
-        "framework blocks, strategy overrides, and events suppress it.",
+        description="Whether the source is evaluated dynamically, including expression "
+        "context and default framework sources. Wrappers show ``expr`` when "
+        "this flag and an expression are present; literal values normally omit it.",
     )
 
 
 class ResolvedBlock(BaseModel):
     """A fully-resolved block ready for rendering.
 
-    All content has been evaluated — no expressions, no Dynamic markers.
-    The renderer receives these and formats them without any evaluation.
+    Materialized content is evaluated by the view. The renderer serializes
+    ordinary event content in place without evaluating expressions or choosing
+    sources, placement, or budget eviction.
 
-    For event blocks, the original event is carried through on the ``event``
-    field. Provider formatters use this for tool call events (which need
-    structured fields like function name, arguments, tool_call_id) and to
-    read the event's ``_role``.
+    The ``event`` field retains the original event for block formatting and
+    canonical tool-replay grouping. Provider formatting receives neutral
+    RenderedMessage objects, including their retained replay carriers.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -207,8 +208,9 @@ class ResolvedBlock(BaseModel):
 class ToolCallInfo(BaseModel):
     """Structured tool-call payload on a :class:`RenderedMessage`.
 
-    Provider formatters reshape this into the appropriate wire format
-    (OpenAI ``tool_calls`` array entry, Anthropic ``tool_use`` content block).
+    The OpenAI provider formatter exposes the public ``tool_calls`` shape in
+    client input. UnifiedLLM performs final provider encoding; canonical turns
+    retain their original response objects and exact argument strings.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -258,10 +260,16 @@ MessagePart = Annotated[TextPart | BlockPart, Field(discriminator="kind")]
 class RenderedMessage(BaseModel):
     """Neutral message emitted by a BlockFormatter.
 
-    The BlockFormatter is responsible for ordering the system prompt, the
-    event history, and any additional context messages into a single
-    ``list[RenderedMessage]``. The ProviderFormatter is a thin adapter that
-    converts this list into provider-specific wire format.
+    Context views select and order inputs. Block formatters serialize them
+    in place, coalescing adjacent blocks with the same role. A canonical
+    assistant tool-call response expands at its source position with its
+    complete linked results; incomplete groups may be omitted. Other history
+    is not reordered. Provider formatting adapts this list to client input;
+    final provider encoding happens downstream.
+
+    ``replay_message`` retains an original LLMResponse or CacheBoundary for
+    the client. Native reasoning and exact tool arguments must not be flattened
+    into a dictionary merely to change wrapper style.
 
     Fields are optional and combine based on message kind:
 
@@ -285,7 +293,7 @@ class RenderedMessage(BaseModel):
 
     replay_message: Any = Field(default=None, exclude=True, repr=False)
 
-    role: Role = Field(description="Message role (SYSTEM / USER / ASSISTANT / TOOL)")
+    role: Role = Field(description="Message role; METADATA carries structural cache markers")
     content: str | None = Field(
         default=None, description="Text content, pre-serialized by the BlockFormatter"
     )

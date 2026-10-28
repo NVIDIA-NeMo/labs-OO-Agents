@@ -142,6 +142,80 @@ class DecisionContextView(ContextView[Agent]):
 
 Registry skills participate when active; directly attached public skills are active by default. Hidden and inactive skills contribute nothing in the default views.
 
+## Formatting independently of views
+
+Use `RenderConfig` to select presentation without implementing another view:
+
+```python
+from nooa.context_blocks import MarkdownBlockFormatter, RenderConfig
+
+agent = MyAgent(
+    render_config=RenderConfig(block_formatter=MarkdownBlockFormatter()),
+)
+```
+
+`XMLBlockFormatter` is the XML alternative. The legacy
+`nooa.context_blocks.renderers.CachedBlockFormatter` import remains a compatibility
+subclass of `XMLBlockFormatter`, with identical serialization and guidance.
+Neither XML nor Markdown enables caching: both preserve the boundary chosen by
+the view. `RenderConfig` chooses block/event serialization and client message
+shape; it does not choose context sources, history membership, order, or eviction.
+
+`Agent`'s base instructions are format-neutral. The built-in manager-backed
+context views explicitly include the selected formatter's `format_description()`
+in the built-in Agent prompt. User class docstrings, `_resolve_system_prompt()`
+implementations, and manager/view/decorator/scoped prompt overrides retain ownership of their
+instructions. Disabling `system_prompt` also disables default format guidance.
+Guidance is evaluated only after override resolution, when the built-in prompt
+survives; replacing or removing that prompt does not call `format_description()`.
+Custom views receive no implicit guidance; they may explicitly use
+`agent.render_config.block_formatter.format_description()` when desired.
+Rendering itself never injects instructions.
+
+`context_text(value, call=call)` is separate Python-value serialization. It
+applies the call's structural bounds to **non-string** values. Existing strings
+pass through unchanged, even when longer than `max_string`; budget or shorten
+such content explicitly in the view.
+
+For plain event-field serialization, select
+`RenderConfig(block_formatter=PlainBlockFormatter())`, importing
+`PlainBlockFormatter` from `nooa.plain_formatter`. This retains XML wrappers for
+materialized blocks and optional event role/tag metadata. It is not a tag-free
+format; canonical assistant responses retain their original text and replay data.
+
+Block formatters receive one ordered resolved segment at a time, with non-tool
+event text already serialized. They may coalesce adjacent materialized blocks of
+the same role, without partitioning all system blocks ahead of history. The
+renderer handles boundary markers between segments; it does not truncate inputs.
+
+### Atomic tool replay exception
+
+A canonical `LLMResponse` tool-call batch and its linked `ToolCallEvent` results
+form one replay group. Stock formatters emit the response at its original
+position, followed by all results in tool-call order; linked execution sidecars
+emit nothing at their stored positions. Thus a result stored later than an
+unrelated block can move into its response's group. A cache boundary cannot
+split a response from its linked results.
+
+At the formatter level, incomplete canonical groups are safely omitted as a
+group, including orphan linked executions. The renderer rejects a supplied
+`ToolCallEvent` with `result=None` before formatting. This does not authorize
+arbitrary reordering or fabrication of missing results. Default-view recovery of an **existing** execution record
+with an unavailable result is a separate, explicit view policy; absent/archived
+records are not reconstructed. Wrapper-style customizations can override
+`wrap_system_block()` and `wrap_message_block()` on `BlockFormatter` while
+inheriting `format()` to preserve these rules. The first hook formats materialized
+blocks of any role; the second formats ordinary events. Canonical assistant
+replay bypasses the event wrapper.
+
+`RenderedMessage` is the neutral intermediate representation, including a
+private replay carrier. `OpenAIProviderFormatter.format()` returns client input
+containing ordinary dictionaries, original `LLMResponse` objects, and
+`CacheBoundary` markers. It is not final provider wire JSON. UnifiedLLM owns
+provider-specific encoding, native reasoning replay, exact tool argument data,
+and cache annotation mapping. Do not flatten a retained response into a
+mapping merely to satisfy an annotation or change XML/Markdown wrapping.
+
 ## Model-specific content
 
 Model-specific prompt content remains view policy, not formatter policy. A custom view may collect items, run any application-defined adapter, apply its budget, then yield the final sequence. No framework-level prompt-adapter stage is required.
