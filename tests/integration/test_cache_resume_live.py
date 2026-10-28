@@ -30,9 +30,10 @@ import pytest
 from nooa._immutable_json import json_containers
 from nooa.context_blocks.events import EventBase, ToolCallEvent, ToolResult, UserEvent
 from nooa.context_blocks.formatter import OpenAIProviderFormatter
-from nooa.context_blocks.models import BlockMetadata, ResolvedBlock, Role
+from nooa.context_blocks.models import BlockMetadata, Role
 from nooa.context_blocks.renderer import render_context
 from nooa.context_blocks.renderers.cached import CachedBlockFormatter
+from nooa.context_view import Block
 from nooa.storage import SQLiteStorageManager
 from nooa.unifiedllm import CacheBoundary, CompletionClient, LLMResponse, ResponsesClient, Tool
 from nooa.unifiedllm.http_config import HttpConfig
@@ -129,26 +130,18 @@ def _client(family):
 
 def _render(family, events, instructions, live_state, *, stable_image=False):
     blocks = [
-        ResolvedBlock(
+        Block(
             key="instructions",
             content=instructions,
             role=Role.SYSTEM,
             metadata=BlockMetadata(static=True),
         ),
-        *[
-            ResolvedBlock(
-                key=f"event_{event.tag}",
-                content=getattr(event, "content", ""),
-                role=Role.USER if isinstance(event, UserEvent) else Role.ASSISTANT,
-                metadata=BlockMetadata(tag=event.tag),
-                event=event,
-            )
-            for event in events
-        ],
-        ResolvedBlock(
+        *[event.model_copy(update={"tag": event.tag}) for event in events],
+        CacheBoundary(),
+        Block(
             key="live_state",
             content=live_state,
-            role=Role.SYSTEM,
+            role=Role.USER,
             metadata=BlockMetadata(static=False, user_block=True),
         ),
     ]

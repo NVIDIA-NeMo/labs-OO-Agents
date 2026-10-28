@@ -13,10 +13,9 @@ from nooa.context_blocks.formatter import OpenAIProviderFormatter, XMLBlockForma
 from nooa.context_blocks.models import (
     BlockMetadata,
     ContextWindowStats,
-    ResolvedBlock,
-    Role,
 )
 from nooa.context_blocks.renderer import RenderResult, render_context
+from nooa.context_view import Block
 
 
 class TestContextWindowStatsBasic:
@@ -34,7 +33,7 @@ class TestContextWindowStatsBasic:
 
     def test_render_leaves_prompt_tokens_none(self):
         """render_context never estimates tokens — prompt_tokens stays None."""
-        blocks = [ResolvedBlock(key="a", content="AAA")]
+        blocks = [Block(key="a", content="AAA")]
         stats = render_context(
             blocks,
             block_formatter=XMLBlockFormatter(),
@@ -48,8 +47,8 @@ class TestContextWindowStatsBasic:
     def test_context_blocks_counted(self):
         """System blocks counted in context_blocks_count; chars recorded."""
         blocks = [
-            ResolvedBlock(key="a", content="AAA"),
-            ResolvedBlock(key="b", content="BBB"),
+            Block(key="a", content="AAA"),
+            Block(key="b", content="BBB"),
         ]
         stats = render_context(
             blocks,
@@ -60,10 +59,12 @@ class TestContextWindowStatsBasic:
         assert stats.context_blocks_chars == 6  # len("AAA") + len("BBB")
 
     def test_events_counted(self):
-        """Message blocks counted in events_count; chars recorded."""
+        """Typed events are counted separately from blocks."""
+        from nooa.context_blocks.events import AssistantEvent, UserEvent
+
         blocks = [
-            ResolvedBlock(key="e1", content="hello", role=Role.USER),
-            ResolvedBlock(key="e2", content="world", role=Role.ASSISTANT),
+            UserEvent(content="hello"),
+            AssistantEvent(content="world"),
         ]
         stats = render_context(
             blocks,
@@ -71,7 +72,7 @@ class TestContextWindowStatsBasic:
             provider_formatter=OpenAIProviderFormatter(),
         ).stats
         assert stats.events_count == 2
-        assert stats.events_chars == 10  # len("hello") + len("world")
+        assert stats.events_chars >= 10
 
     def test_empty_blocks(self):
         """Stats for empty input are all zero / None."""
@@ -214,75 +215,69 @@ class TestProviderTokenAttribution:
 
 
 class TestContextWindowStatsTruncation:
-    """Tests for dropped block/event tracking (eviction still uses count_fn)."""
+    """The renderer reports view-owned eviction but never performs it."""
 
     def test_context_blocks_dropped_on_truncation(self):
         blocks = [
-            ResolvedBlock(key="small", content="#" * 100),
-            ResolvedBlock(key="large", content="$" * 5000),
+            Block(key="small", content="#" * 100),
+            Block(key="large", content="$" * 5000),
         ]
         stats = render_context(
             blocks,
             block_formatter=XMLBlockFormatter(),
             provider_formatter=OpenAIProviderFormatter(),
             context_limit=1000,
-            count_tokens=len,
         ).stats
-        assert stats.context_blocks_dropped == 1
-        # "small" (100) survives; "large" (5000) was evicted to a short label
-        assert stats.context_blocks_chars < 1000
+        assert stats.context_blocks_dropped == 0
+        assert stats.context_blocks_chars == 5100
 
     def test_context_blocks_dropped_multiple(self):
         blocks = [
-            ResolvedBlock(key="tiny", content="#" * 50),
-            ResolvedBlock(key="medium", content="$" * 3000),
-            ResolvedBlock(key="huge", content="@" * 8000),
+            Block(key="tiny", content="#" * 50),
+            Block(key="medium", content="$" * 3000),
+            Block(key="huge", content="@" * 8000),
         ]
         stats = render_context(
             blocks,
             block_formatter=XMLBlockFormatter(),
             provider_formatter=OpenAIProviderFormatter(),
             context_limit=500,
-            count_tokens=len,
         ).stats
-        assert stats.context_blocks_dropped == 2
+        assert stats.context_blocks_dropped == 0
 
     def test_no_drops_when_under_budget(self):
         blocks = [
-            ResolvedBlock(key="a", content="hello"),
-            ResolvedBlock(key="b", content="world"),
+            Block(key="a", content="hello"),
+            Block(key="b", content="world"),
         ]
         stats = render_context(
             blocks,
             block_formatter=XMLBlockFormatter(),
             provider_formatter=OpenAIProviderFormatter(),
             context_limit=10000,
-            count_tokens=len,
         ).stats
         assert stats.context_blocks_dropped == 0
         assert stats.events_dropped == 0
 
     def test_all_context_blocks_dropped(self):
         blocks = [
-            ResolvedBlock(key="a", content="x" * 5000),
-            ResolvedBlock(key="b", content="y" * 5000),
+            Block(key="a", content="x" * 5000),
+            Block(key="b", content="y" * 5000),
         ]
         stats = render_context(
             blocks,
             block_formatter=XMLBlockFormatter(),
             provider_formatter=OpenAIProviderFormatter(),
             context_limit=1,
-            count_tokens=len,
         ).stats
-        assert stats.context_blocks_dropped == 2
-        # Blocks are retained in-place and labeled EVICTED
+        assert stats.context_blocks_dropped == 0
         assert stats.context_blocks_count == 2
 
     def test_context_blocks_dropped_with_user_blocks(self):
         """User blocks (from self.context) are dropped first."""
         blocks = [
-            ResolvedBlock(key="framework", content="x" * 100),
-            ResolvedBlock(
+            Block(key="framework", content="x" * 100),
+            Block(
                 key="user_data",
                 content="y" * 5000,
                 metadata=BlockMetadata(user_block=True),
@@ -293,9 +288,8 @@ class TestContextWindowStatsTruncation:
             block_formatter=XMLBlockFormatter(),
             provider_formatter=OpenAIProviderFormatter(),
             context_limit=500,
-            count_tokens=len,
         ).stats
-        assert stats.context_blocks_dropped == 1
+        assert stats.context_blocks_dropped == 0
 
 
 class TestContextWindowStatsToolCallEvents:
@@ -310,17 +304,16 @@ class TestContextWindowStatsToolCallEvents:
             arguments={"code": "1+1"},
             result=ToolResult(tool_call_id="tc_1", content="2"),
         )
-        blocks = [
-            ResolvedBlock(key="msg", content="hello", role=Role.USER),
-            ResolvedBlock(key="tc", content="", role=Role.ASSISTANT, event=event),
-        ]
+        from nooa.context_blocks.events import UserEvent
+
+        blocks = [UserEvent(content="hello"), event]
         stats = render_context(
             blocks,
             block_formatter=XMLBlockFormatter(),
             provider_formatter=OpenAIProviderFormatter(),
         ).stats
         assert stats.events_count == 2
-        assert stats.events_chars == len("hello")  # ToolCallEvent contributes 0
+        assert stats.events_chars > len("hello")  # UserEvent serialized; tool call is structural
 
 
 class TestContextWindowStatsEdgeCases:
@@ -328,15 +321,14 @@ class TestContextWindowStatsEdgeCases:
 
     def test_user_block_named_truncation_notice_no_false_positive(self):
         blocks = [
-            ResolvedBlock(key="a", content="hello"),
-            ResolvedBlock(key="truncation_notice", content="user data"),
+            Block(key="a", content="hello"),
+            Block(key="truncation_notice", content="user data"),
         ]
         stats = render_context(
             blocks,
             block_formatter=XMLBlockFormatter(),
             provider_formatter=OpenAIProviderFormatter(),
             context_limit=10000,
-            count_tokens=len,
         ).stats
         assert stats.context_blocks_dropped == 0
         assert stats.context_blocks_count == 2
@@ -345,7 +337,7 @@ class TestContextWindowStatsEdgeCases:
         from nooa.context_blocks.models import RenderedMessage
 
         output, stats, messages = render_context(
-            [ResolvedBlock(key="sys", content="hello")],
+            [Block(key="sys", content="hello")],
             block_formatter=XMLBlockFormatter(),
             provider_formatter=OpenAIProviderFormatter(),
         )

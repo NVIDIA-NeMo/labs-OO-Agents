@@ -248,7 +248,10 @@ class TestExistingEventsStillWork:
             ).event_type
             == "PythonOutput"
         )
-        assert Summary(summary_tag="1..2", replaced_range=(1, 2)).event_type == "Summary"
+        assert (
+            Summary(source_call_ids=[], summary_tag="1..2", replaced_range=(1, 2)).event_type
+            == "Summary"
+        )
         assert (
             BeforeTurn(method_name="m", strategy="s", generation_id="g", turn_number=1).event_type
             == "BeforeTurn"

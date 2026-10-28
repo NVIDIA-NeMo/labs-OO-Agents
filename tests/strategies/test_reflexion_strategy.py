@@ -38,6 +38,39 @@ def make_smart_execute_nested(mock_runtime, base_results):
     return smart_side_effect
 
 
+async def test_reflexion_view_binds_base_strategy_without_mutating_outer_call():
+    from nooa.context_view import Block
+    from nooa.strategies.base import GenerationStrategy
+    from nooa.strategies.current_call import CurrentCall
+    from nooa.strategies.reflexion import ReflexionStrategy
+
+    seen = []
+
+    class View:
+        async def assemble(self, owner, call):
+            seen.append((owner, call))
+            yield Block(key="test", content="base context")
+
+    class Base(GenerationStrategy):
+        @property
+        def default_context_view(self):
+            return View()
+
+        async def execute(self, runtime, call):
+            return None
+
+    base = Base()
+    wrapper = ReflexionStrategy(base=base)
+    call = CurrentCall(id="test", method_name="run", decorator="strategy", strategy=wrapper)
+    owner = object()
+    items = [item async for item in wrapper.default_context_view.assemble(owner, call)]
+    assert items[0].content == "base context"
+    assert seen[0][0] is owner
+    assert seen[0][1].strategy is base
+    assert seen[0][1].invocation_id == call.invocation_id
+    assert call.strategy is wrapper
+
+
 class TestReflexionStrategyProperties:
     """Tests for ReflexionStrategy properties."""
 
@@ -58,14 +91,14 @@ class TestReflexionStrategyProperties:
         strategy = ReflexionStrategy(base=base)
         assert strategy.name == "REFLEXION[PURE_PYTHON]"
 
-    def test_block_overrides_delegates_to_base(self):
-        """ReflexionStrategy.get_block_overrides should delegate to base strategy."""
+    def test_default_view_delegates_to_base(self):
+        """Reflexion's view retains the wrapped strategy for assembly."""
         from nooa.strategies.pure_python import PurePythonStrategy
         from nooa.strategies.reflexion import ReflexionStrategy
 
         base = PurePythonStrategy()
         strategy = ReflexionStrategy(base=base)
-        assert strategy.get_block_overrides() == base.get_block_overrides()
+        assert strategy.default_context_view.base_strategy is base
 
     def test_requires_lock_delegates_to_base(self):
         """ReflexionStrategy.requires_lock should inherit from base."""

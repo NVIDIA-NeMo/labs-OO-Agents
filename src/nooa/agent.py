@@ -23,7 +23,6 @@ if TYPE_CHECKING:
     from nooa.runtime.context import ContextApi
     from nooa.runtime.context_manager import ContextManager
     from nooa.runtime.event_manager import EventManager
-    from nooa.runtime.event_query import EventQuery
     from nooa.runtime.events import EventsApi
     from nooa.storage.manager import StorageManager
     from nooa.unifiedllm import UnifiedLLM
@@ -103,7 +102,6 @@ class Agent(metaclass=AgentMeta):
     _storage: Annotated["StorageManager", hidden, nosnapshot]
     event_manager: Annotated["EventManager", hidden, nosnapshot]
     context_manager: Annotated["ContextManager", hidden, nosnapshot]
-    event_query: Annotated["EventQuery | None", hidden, nosnapshot]
     render_config: Annotated["RenderConfig", hidden, nosnapshot]
     _agent_id: Annotated[str, hidden, nosnapshot]
     _llm: Annotated["UnifiedLLM | None", hidden, nosnapshot]
@@ -134,7 +132,6 @@ class Agent(metaclass=AgentMeta):
     _agent_decision_alias_cache: Annotated["dict[str, UnifiedDecisionModel]", hidden, nosnapshot]
     _agent_truncation: Annotated["TruncationConfig", hidden]
     _agent_context_blocks: Annotated["dict[str, str | DynamicContext | None]", hidden]
-    _agent_event_query: Annotated["EventQuery | None", hidden]
 
     # Enable tracing for Agent classes (convention for metaclass)
     _enable_tracing = True  # type: ignore[assignment]
@@ -146,7 +143,6 @@ class Agent(metaclass=AgentMeta):
         truncation: "TruncationConfig | None" = None,
         execution: "ExecutionConfig | None" = None,
         context: "dict[str, str | DynamicContext | None] | None" = None,
-        event_query: "EventQuery | None" = None,
         **kwargs: Any,
     ):
         """Configure agent class with metaclass.
@@ -163,7 +159,6 @@ class Agent(metaclass=AgentMeta):
                 - str: Static content
                 - DynamicContext("expr"): DynamicContext expression, re-evaluated each turn
                 - None: Remove block
-            event_query: Default EventQuery for filtering events in context.
             **kwargs: Additional arguments for multiple inheritance support.
         """
         _validate_llm_param(llm, cls.__name__)
@@ -178,8 +173,6 @@ class Agent(metaclass=AgentMeta):
             cls._agent_truncation = truncation  # type: ignore[attr-defined]
         if context is not None:
             cls._agent_context_blocks = context  # type: ignore[attr-defined]
-        if event_query is not None:
-            cls._agent_event_query = event_query  # type: ignore[attr-defined]
 
         from nooa.config.execution_config import ExecutionConfig as _EC
 
@@ -193,7 +186,6 @@ class Agent(metaclass=AgentMeta):
         truncation: "TruncationConfig | None" = None,
         render_config: "RenderConfig | None" = None,
         context: "dict[str, str | DynamicContext | None] | None" = None,
-        event_query: "EventQuery | None" = None,
         storage: "StorageManager | None" = None,
     ):
         """Initialize agent with its own runtime.
@@ -210,7 +202,6 @@ class Agent(metaclass=AgentMeta):
                 - str: Static content
                 - DynamicContext("expr"): DynamicContext expression, re-evaluated each turn
                 - None: Remove block
-            event_query: Instance-level EventQuery for filtering events in context.
             storage: Optional StorageManager for persistence. Defaults to
                 InMemoryStorageManager (no persistence, same as current behavior).
 
@@ -257,23 +248,20 @@ class Agent(metaclass=AgentMeta):
 
         self.render_config = render_config or _RC()
 
-        # Resolve and store event query (instance overrides class-level)
-        self.event_query = self._resolve_event_query(event_query)
-
         # Initialize context state (always present, hidden)
         self.context_manager = ContextManager()
 
-        # Register framework blocks as protected (re-evaluated each LLM turn).
-        # ``system_prompt`` and ``self`` are stable across turns — cacheable prefix.
-        # ``state`` is the instance's current field values — re-evaluated each
-        # turn since skills can attach at runtime and field values change.
+        # Reserve framework block names and their default placement. The default
+        # view derives their content directly from the agent; declarations here
+        # are therefore overrides only.
         cm = self.context_manager
-        cm.set_static_protected("system_prompt", expr="self._resolve_system_prompt()")
-        cm.set_static_protected("self", expr="doc(type(self))")
-        cm.set_static_protected("events_api", expr="self._events_api_prompt()")
-        cm.set_dynamic_protected(
+        cm.protect("system_prompt", static=True, expression="self._resolve_system_prompt()")
+        cm.protect("self", static=True, expression="doc(type(self))")
+        cm.protect("events_api", static=True, expression="self._events_api_prompt()")
+        cm.protect(
             "state",
-            "pformat(self, max_length=50, max_string=500, max_depth=4)",
+            static=False,
+            expression="pformat(self, max_length=50, max_string=500, max_depth=4)",
         )
 
         # Apply class-level context blocks (from __init_subclass__)
@@ -455,35 +443,6 @@ class Agent(metaclass=AgentMeta):
 
         return config
 
-    @no_trace
-    @hidden
-    def _resolve_event_query(
-        self, instance_event_query: "EventQuery | None"
-    ) -> "EventQuery | None":
-        """Resolve event query with override semantics.
-
-        Resolution order (later overrides earlier):
-        1. Class-level: class MyAgent(Agent, event_query=...)
-        2. Instance-level: MyAgent(event_query=...)
-
-        Args:
-            instance_event_query: EventQuery passed to __init__
-
-        Returns:
-            Resolved EventQuery or None if no query specified
-        """
-        # Instance-level overrides class-level
-        if instance_event_query is not None:
-            return instance_event_query
-
-        # Check class-level
-        class_event_query = getattr(self.__class__, "_agent_event_query", None)
-        if class_event_query is not None:
-            return cast("EventQuery", class_event_query)
-
-        # No event query specified
-        return None
-
     @property
     @hidden
     def agent_id(self) -> str:
@@ -550,48 +509,10 @@ Inspect in REPL: print(doc(self.events))
     @no_trace
     @hidden
     def _resolve_system_prompt(self) -> str:
-        """Resolve the system prompt from the class docstring.
+        """Compatibility wrapper for the default view's prompt helper."""
+        from nooa.default_context_view import resolve_agent_system_prompt
 
-        Walks the MRO to find the nearest class with a docstring — that
-        docstring IS the system prompt. Placeholders like ``{type(self).__name__}``
-        are resolved as Python expressions (same mechanism as method docstrings).
-
-        Subclasses customize by writing a class docstring — no method override needed.
-        """
-        import string
-
-        # Walk MRO to find nearest docstring (Python doesn't inherit __doc__)
-        doc = ""
-        for cls in type(self).__mro__:
-            if cls.__doc__:
-                doc = cls.__doc__
-                break
-        if not doc or "{" not in doc:
-            return doc
-        # Resolve {expr} placeholders using the agent's namespace
-        formatter = string.Formatter()
-        parts = []
-        for literal, field, fmt_spec, conversion in formatter.parse(doc):
-            parts.append(literal)
-            if field is not None:
-                try:
-                    value = eval(field, {"self": self, "type": type})  # noqa: S307
-                    if conversion == "r":
-                        value = repr(value)
-                    elif conversion == "s":
-                        value = str(value)
-                    if fmt_spec:
-                        value = format(value, fmt_spec)
-                    parts.append(str(value))
-                except Exception:
-                    logger.debug("Prompt template eval failed for %r", field, exc_info=True)
-                    placeholder = field
-                    if conversion:
-                        placeholder = f"{field}!{conversion}"
-                    if fmt_spec:
-                        placeholder = f"{placeholder}:{fmt_spec}"
-                    parts.append("{" + placeholder + "}")
-        return "".join(parts)
+        return resolve_agent_system_prompt(self)
 
     def __setattr__(self, name: str, value: Any) -> None:
         from nooa.runtime.method_guard import guard_dynamic_method

@@ -14,11 +14,13 @@ import json
 import httpx
 import pytest
 
+from nooa import CacheBoundary
 from nooa.context_blocks.events import ToolCallEvent, ToolResult, UserEvent
 from nooa.context_blocks.formatter import OpenAIProviderFormatter
-from nooa.context_blocks.models import BlockMetadata, ResolvedBlock, Role
+from nooa.context_blocks.models import BlockMetadata, Role
 from nooa.context_blocks.renderer import render_context
 from nooa.context_blocks.renderers.cached import CachedBlockFormatter
+from nooa.context_view import Block, ContextItem
 from nooa.nemo_relay_middleware import _reconcile_messages
 from nooa.storage import SQLiteStorageManager
 from nooa.unifiedllm import CompletionClient, ResponsesClient, Tool
@@ -164,29 +166,21 @@ def _render(turn, state):
         llm_response_id=turn.id,
         result=ToolResult(tool_call_id=call.id, content="1"),
     )
-    blocks = [
-        ResolvedBlock(
+    blocks: list[ContextItem] = [
+        Block(
             key="instructions",
             content="Stable instructions",
             role=Role.SYSTEM,
             metadata=BlockMetadata(static=True),
         )
     ]
-    blocks += [
-        ResolvedBlock(
-            key=f"event_{event.tag}",
-            content="",
-            event=event,
-            role=Role.USER if event is user else Role.ASSISTANT,
-            metadata=BlockMetadata(tag=event.tag),
-        )
-        for event in (user, turn, result)
-    ]
+    blocks += [user, turn, result]
+    blocks.append(CacheBoundary())
     blocks.append(
-        ResolvedBlock(
+        Block(
             key="live",
             content=f"live-state={state}",
-            role=Role.SYSTEM,
+            role=Role.USER,
             metadata=BlockMetadata(static=False, user_block=True),
         )
     )

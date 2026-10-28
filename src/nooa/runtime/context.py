@@ -234,7 +234,7 @@ class ContextApi(Skill):
             - ``execution_context`` — available imports/types (CodeAct only)
         """
         known_strategy_keys = {"strategy_prompt", "execution_context"}
-        return set(self._context.keys()) | known_strategy_keys
+        return set(self._context.keys()) | self._context.protected_keys | known_strategy_keys
 
     def get(self, key: str, default: Any = None) -> Any:
         """Get a block value, returning default if not found."""

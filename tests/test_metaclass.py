@@ -1414,7 +1414,6 @@ def test_agent_init_succeeds_with_sync_tracing_active():
             assert call.kwargs.get("method_name") not in {
                 "_resolve_llm",
                 "_resolve_truncation",
-                "_resolve_event_query",
                 "_apply_context_dict",
                 "_system_prompt",
             }

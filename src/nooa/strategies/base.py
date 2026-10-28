@@ -14,7 +14,7 @@ from nooa.metaclass import AgentMeta
 
 if TYPE_CHECKING:
     from nooa.config.truncation_config import TruncationConfig
-    from nooa.context_blocks import DynamicContext
+    from nooa.context_view import ContextView
     from nooa.decisions import DecisionRequest, DecisionResponse, UnifiedDecisionModel
     from nooa.runtime.restrictions import RestrictionsConfig
     from nooa.strategies.current_call import CurrentCall
@@ -197,11 +197,11 @@ class DecisionRuntimeServices(RuntimeServices, Protocol):
     async def decision_state_inputs(
         self,
     ) -> tuple[dict[str, Any], list[dict[str, Any]] | None]:
-        """Resolve explicitly selected context and events for decision state.
+        """Assemble the selected view's supporting context and events for decision state.
 
         Returns:
             A pair containing resolved context blocks and selected chronological
-            events. ``None`` for events means that no event query opted in.
+            events. ``None`` for events means that the view selected no events.
         """
         ...
 
@@ -250,38 +250,12 @@ class GenerationStrategy(ABC, metaclass=AgentMeta):
         """
         return self.__class__.__name__
 
-    def get_block_overrides(self) -> dict[str, "str | DynamicContext | None"]:
-        """Return strategy-specific context block overrides.
+    @property
+    def default_context_view(self) -> "ContextView[Any]":
+        """Default complete assembly policy; method and call views may replace it."""
+        from nooa.default_context_view import ManagedContextView
 
-        Returns:
-            Dict mapping block keys to values:
-            - str: Static content
-            - DynamicContext("expr"): Re-evaluated each turn
-            - None: Remove block
-            Empty dict by default (no overrides).
-
-        Example:
-            def get_block_overrides(self) -> dict[str, str | DynamicContext | None]:
-                return {
-                    "strategy_prompt": DynamicContext("strategy.strategy_instructions(runtime)")
-                }
-        """
-        return {}
-
-    def get_block_order(self) -> list[str] | None:
-        """Return desired ordering of system-role block keys, or None for default.
-
-        When a list is returned, system blocks are reordered to match:
-        - Listed keys appear first, in the given order
-        - Unlisted system blocks keep their relative order and follow after
-
-        Applied after Phase 5 (scoped context) and before events (Phase 6).
-        Only affects Role.SYSTEM blocks; event blocks are always last.
-
-        Returns:
-            List of block keys in desired order, or None to keep default ordering.
-        """
-        return None
+        return ManagedContextView()
 
     @property
     def traceable(self) -> bool:

@@ -7,6 +7,7 @@ import warnings
 import pytest
 
 from nooa.agent import Agent
+from nooa.strategies.current_call import CurrentCall
 from nooa.unifiedllm import FakeLLMClient, LLMResponse
 
 _TEST_LLM = FakeLLMClient()
@@ -26,6 +27,10 @@ def _make_agent(llm=None):
             ...
 
     return _A()
+
+
+def _call() -> CurrentCall:
+    return CurrentCall(id="middleware", method_name="noop", decorator="plan")
 
 
 # ---------------------------------------------------------------------------
@@ -59,13 +64,8 @@ class TestLLMCallMiddlewareViaGenerate:
             _current_method_var,
         )
 
-        class FakeCall:
-            args = ()
-            kwargs = {}
-            method_name = "noop"
-
         tok1 = _current_method_var.set(agent.noop)
-        tok2 = _current_call_var.set(FakeCall())
+        tok2 = _current_call_var.set(_call())
         tok3 = _current_llm_var.set(agent._llm)
         try:
             await agent.runtime.generate()
@@ -96,13 +96,8 @@ class TestLLMCallMiddlewareViaGenerate:
             _current_method_var,
         )
 
-        class FakeCall:
-            args = ()
-            kwargs = {}
-            method_name = "noop"
-
         tok1 = _current_method_var.set(agent.noop)
-        tok2 = _current_call_var.set(FakeCall())
+        tok2 = _current_call_var.set(_call())
         tok3 = _current_llm_var.set(agent._llm)
         try:
             await agent.runtime.generate()
@@ -137,13 +132,8 @@ class TestLLMCallMiddlewareViaGenerate:
             _current_method_var,
         )
 
-        class FakeCall:
-            args = ()
-            kwargs = {}
-            method_name = "noop"
-
         tok1 = _current_method_var.set(agent.noop)
-        tok2 = _current_call_var.set(FakeCall())
+        tok2 = _current_call_var.set(_call())
         tok3 = _current_llm_var.set(agent._llm)
         try:
             resp, eid = await agent.runtime.generate()
@@ -165,13 +155,8 @@ class TestLLMCallMiddlewareViaGenerate:
             _current_method_var,
         )
 
-        class FakeCall:
-            args = ()
-            kwargs = {}
-            method_name = "noop"
-
         tok1 = _current_method_var.set(agent.noop)
-        tok2 = _current_call_var.set(FakeCall())
+        tok2 = _current_call_var.set(_call())
         tok3 = _current_llm_var.set(agent._llm)
         try:
             resp, eid = await agent.runtime.generate()
@@ -206,13 +191,8 @@ class TestLLMCallMiddlewareViaGenerate:
             _current_method_var,
         )
 
-        class FakeCall:
-            args = ()
-            kwargs = {}
-            method_name = "noop"
-
         tok1 = _current_method_var.set(agent.noop)
-        tok2 = _current_call_var.set(FakeCall())
+        tok2 = _current_call_var.set(_call())
         tok3 = _current_llm_var.set(agent._llm)
         try:
             await agent.runtime.generate()
@@ -246,13 +226,8 @@ class TestLLMCallMiddlewareViaGenerate:
             _current_method_var,
         )
 
-        class FakeCall:
-            args = ()
-            kwargs = {}
-            method_name = "noop"
-
         tok1 = _current_method_var.set(agent.noop)
-        tok2 = _current_call_var.set(FakeCall())
+        tok2 = _current_call_var.set(_call())
         tok3 = _current_llm_var.set(agent._llm)
         try:
             await agent.runtime.generate(output_model=Dummy)
@@ -434,13 +409,8 @@ class TestCrossKindIsolation:
             _current_method_var,
         )
 
-        class FakeCall:
-            args = ()
-            kwargs = {}
-            method_name = "noop"
-
         tok1 = _current_method_var.set(agent.noop)
-        tok2 = _current_call_var.set(FakeCall())
+        tok2 = _current_call_var.set(_call())
         tok3 = _current_llm_var.set(agent._llm)
         try:
             await agent.runtime.generate()
@@ -476,13 +446,8 @@ class TestContextFields:
             _current_method_var,
         )
 
-        class FakeCall:
-            args = ()
-            kwargs = {}
-            method_name = "noop"
-
         tok1 = _current_method_var.set(agent.noop)
-        tok2 = _current_call_var.set(FakeCall())
+        tok2 = _current_call_var.set(_call())
         tok3 = _current_llm_var.set(agent._llm)
         try:
             await agent.runtime.generate()
@@ -536,13 +501,8 @@ class TestShortCircuitGuard:
             _current_method_var,
         )
 
-        class FakeCall:
-            args = ()
-            kwargs = {}
-            method_name = "noop"
-
         tok1 = _current_method_var.set(agent.noop)
-        tok2 = _current_call_var.set(FakeCall())
+        tok2 = _current_call_var.set(_call())
         tok3 = _current_llm_var.set(agent._llm)
         try:
             with pytest.raises(RuntimeError, match="response"):

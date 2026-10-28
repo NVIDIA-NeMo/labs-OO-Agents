@@ -74,7 +74,7 @@ async def test_current_call_id_matches_events(strategy_type, tool_name):
         result = await agent.answer()
         assert result["count"] > 0
         task = next(event for event in agent.events.query(type="Task"))
-        assert task.metadata["call_id"] == result["id"]
+        assert task.call_id == result["id"]
         assert task.tag == result["tag"]
         assert result["id"] != result["tag"]
     finally:
@@ -536,11 +536,17 @@ async def test_imported_capability_is_advertised_and_executes_without_generic_co
 
 
 def test_python_cell_owns_the_single_static_execution_context():
+    from nooa.strategies.current_call import CurrentCall
+
     strategy_instance = CodeActV2()
-    assert strategy_instance.get_block_overrides()["execution_context"] is None
-    assert "execution_context" not in strategy_instance.get_static_block_keys()
-    assert "python_cell_context" in strategy_instance.get_static_block_keys()
-    order = strategy_instance.get_block_order()
+    view = strategy_instance.default_context_view
+    call = CurrentCall(
+        id="test", method_name="run", decorator="strategy", strategy=strategy_instance
+    )
+    assert view.instruction_blocks(call)["execution_context"] is None
+    assert "execution_context" not in view.static_keys
+    assert "python_cell_context" in view.static_keys
+    order = view.block_order
     assert "execution_context" not in order
     assert order.index("python_cell_state") == order.index("python_cell_context") + 1
 

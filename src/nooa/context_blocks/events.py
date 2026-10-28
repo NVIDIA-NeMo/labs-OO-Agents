@@ -99,6 +99,15 @@ class EventBase(BaseModel):
 
     _role: ClassVar[Role] = Role.USER
 
+    call_id: str | None = Field(
+        default=None, repr=False, description="Originating agent-method call ID"
+    )
+
+    @property
+    def related_call_ids(self) -> frozenset[str]:
+        """Calls represented by this event; relevance, not an isolation boundary."""
+        return frozenset({self.call_id}) if self.call_id is not None else frozenset()
+
     @property
     def event_role(self) -> Role:
         """The provider role this event renders as (the ``_role`` class variable)."""
@@ -194,7 +203,7 @@ class EventBase(BaseModel):
     metadata: dict[str, Any] = Field(
         default_factory=dict,
         repr=False,
-        description="Arbitrary metadata (call_id, source, etc.)",
+        description="Optional component-specific annotations",
     )
     status: EventStatus = Field(
         default=EventStatus.ACTIVE, repr=False, description="Active or archived"

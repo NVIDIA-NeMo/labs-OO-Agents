@@ -61,6 +61,6 @@ def test_codeact_block_order_no_api_keys():
     from nooa.strategies.codeact import CodeActStrategy
 
     strategy = CodeActStrategy.__new__(CodeActStrategy)
-    order = strategy.get_block_order() or []
+    order = strategy.default_context_view.block_order or []
     assert "context_api" not in order
     assert "events_api" not in order

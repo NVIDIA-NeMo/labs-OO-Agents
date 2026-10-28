@@ -173,7 +173,7 @@ class TestNestedAgentHistoryBug:
         # Dynamic context is deliberately a recomputed trailing suffix, so
         # compare only the stable history before it.
         assert inner_prefix[-1]["role"] == "user"
-        assert inner_prefix[-1]["content"].startswith("<context>")
+        assert "<state" in inner_prefix[-1]["content"]
         assert inner_prefix[-2] == CacheBoundary()
         inner_prefix = inner_prefix[:-2]
         assert outer_suffix[: len(inner_prefix)] == inner_prefix

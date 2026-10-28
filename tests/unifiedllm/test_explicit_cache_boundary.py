@@ -5,6 +5,7 @@
 import copy
 import json
 from types import SimpleNamespace
+from typing import Literal
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -12,15 +13,16 @@ import litellm
 import pytest
 
 from nooa.context_blocks.events import UserEvent
+from nooa.context_blocks.exceptions import UnsupportedContextLayout
 from nooa.context_blocks.formatter import OpenAIProviderFormatter
 from nooa.context_blocks.models import (
     BlockMetadata,
     RenderedMessage,
-    ResolvedBlock,
     Role,
 )
 from nooa.context_blocks.renderer import RenderResult, render_context
 from nooa.context_blocks.renderers.cached import CachedBlockFormatter
+from nooa.context_view import Block
 from nooa.llm_types import AssistantReasoning, LLMResponse
 from nooa.unifiedllm import CacheBoundary, CompletionClient, ResponsesClient
 from nooa.unifiedllm.chat_parts import capture_chat_parts
@@ -34,23 +36,18 @@ from nooa.unifiedllm.response_parts import capture_parts
 def _render_result(dynamic: str) -> RenderResult:
     event = UserEvent(content="solve this", tag="1")
     blocks = [
-        ResolvedBlock(
+        Block(
             key="instructions",
             content="stable instructions",
             role=Role.SYSTEM,
             metadata=BlockMetadata(static=True),
         ),
-        ResolvedBlock(
-            key="event_1",
-            content=event.content,
-            role=Role.USER,
-            metadata=BlockMetadata(tag="1"),
-            event=event,
-        ),
-        ResolvedBlock(
+        event.model_copy(update={"tag": "1"}),
+        CacheBoundary(),
+        Block(
             key="live_state",
             content=dynamic,
-            role=Role.SYSTEM,
+            role=Role.USER,
             metadata=BlockMetadata(static=False, user_block=True),
         ),
     ]
@@ -562,6 +559,45 @@ async def test_anthropic_breakpoint_survives_user_message_coalescing() -> None:
     assert bodies[1]["system"][0]["cache_control"] == {"type": "ephemeral"}
     assert "state-b" in bodies[1]["messages"][0]["content"][0]["text"]
     assert "cache_control" not in bodies[1]["messages"][0]["content"][0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cache_breakpoint", [None, "anthropic"])
+async def test_anthropic_rejects_late_system_context_before_transport(
+    cache_breakpoint: Literal["anthropic"] | None,
+) -> None:
+    requests: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        raise AssertionError("invalid Anthropic context reached the HTTP transport")
+
+    client = CompletionClient(
+        model="anthropic/claude-sonnet-4-5",
+        api_key="test",
+        api_base="https://example.test",
+        cache_breakpoint=cache_breakpoint,
+    )
+    assert client._http is not None
+    await client._http.httpx_async.aclose()
+    transport = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+    client._http.httpx_async = transport
+    client._http.async_client.client = transport
+    messages = [
+        {"role": "user", "content": "stable user context"},
+        CacheBoundary(),
+        {"role": "system", "content": "volatile system context"},
+    ]
+    try:
+        with pytest.raises(
+            UnsupportedContextLayout,
+            match="all system context before conversation messages",
+        ):
+            await client.acall(messages)
+    finally:
+        await client.aclose()
+
+    assert requests == []
 
 
 @pytest.mark.asyncio

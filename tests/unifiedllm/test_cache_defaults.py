@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Default registry clients must honor the default renderer's cache boundary."""
+"""Default registry clients must honor an explicitly rendered cache boundary."""
 
 import copy
 import json
@@ -9,9 +9,10 @@ import httpx
 import pytest
 
 from nooa.context_blocks.formatter import OpenAIProviderFormatter
-from nooa.context_blocks.models import BlockMetadata, ResolvedBlock, Role
+from nooa.context_blocks.models import BlockMetadata, Role
 from nooa.context_blocks.renderer import render_context
 from nooa.context_blocks.renderers.cached import CachedBlockFormatter
+from nooa.context_view import Block
 from nooa.unifiedllm import CacheBoundary, ResponsesClient, RetryConfig, registry
 
 
@@ -83,13 +84,14 @@ async def test_registry_default_cache_on_wire(monkeypatch, style, mode, asynchro
     monkeypatch.setattr(httpx.AsyncClient, "send", send_async)
     messages = render_context(
         [
-            ResolvedBlock(
+            Block(
                 key="instructions",
                 content="Stable instructions",
                 role=Role.SYSTEM,
                 metadata=BlockMetadata(static=True),
             ),
-            ResolvedBlock(
+            CacheBoundary(),
+            Block(
                 key="live",
                 content="Volatile suffix",
                 role=Role.SYSTEM,
@@ -128,8 +130,7 @@ async def test_registry_default_cache_on_wire(monkeypatch, style, mode, asynchro
         marked = body["input"][0]["content"][-1]
         assert "Stable instructions" in marked["text"]
         assert marked["prompt_cache_breakpoint"] == {"mode": "explicit"}
-    # Completion's existing no-boundary behavior marks only leading instructions.
-    assert ('"cache_control"' in encoded) is (style == "anthropic" and mode != "disabled")
+    assert ('"cache_control"' in encoded) is (style == "anthropic" and mode == "default")
     assert "Volatile suffix" in encoded
 
 

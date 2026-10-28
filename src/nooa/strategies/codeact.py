@@ -40,7 +40,7 @@ from pydantic import BaseModel, create_model
 from pydantic import ValidationError as PydanticValidationError
 
 from nooa.agentdoc._structured import format_type as _format_type
-from nooa.context_blocks import DynamicContext, EventBase, ResultStatus, ToolCallEvent, ToolResult
+from nooa.context_blocks import EventBase, ResultStatus, ToolCallEvent, ToolResult
 from nooa.context_blocks.events import CODEACT_INLINE_RETURN
 from nooa.context_blocks.exceptions import BlockSyntaxError
 from nooa.decorators import strategy
@@ -476,30 +476,11 @@ class CodeActStrategy(CompositeStrategy):
         """Get the active runtime config, including method-level overrides."""
         return runtime.truncation_config
 
-    def get_block_overrides(self) -> dict[str, "str | DynamicContext | None"]:
-        overrides: dict[str, str | DynamicContext | None] = {
-            "strategy_prompt": DynamicContext("strategy.strategy_instructions(runtime)"),
-            "execution_context": DynamicContext("strategy.execution_context(runtime)"),
-        }
-        # Tell the agent about the active sandbox guardrails (only when enabled).
-        if self.config.execution_backend == "sandbox" and self.config.sandbox.context_block:
-            overrides["sandbox"] = DynamicContext("strategy.sandbox_context(runtime)")
-        return overrides
+    @property
+    def default_context_view(self):
+        from nooa.default_context_view import CodeActView
 
-    def get_static_block_keys(self) -> set[str]:
-        """Block keys from get_block_overrides() that should be in the static partition."""
-        # The sandbox constraints are fixed for the session -> static (cacheable) prefix.
-        return {"execution_context", "strategy_prompt", "sandbox"}
-
-    def get_block_order(self) -> list[str] | None:
-        """Place doc(self) after execution_context so the LLM sees instructions first."""
-        return [
-            "system_prompt",
-            "strategy_prompt",
-            "sandbox",
-            "execution_context",
-            "self",
-        ]
+        return CodeActView()
 
     async def sandbox_context(self, runtime: RuntimeServices) -> str:
         """Render the active sandbox constraints as an agent-facing context block."""

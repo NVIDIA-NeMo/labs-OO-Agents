@@ -266,7 +266,7 @@ class TestMethodSummarizer:
         summarizer = MethodSummarizer(test_agent, config=MethodSummarizerConfig(min_events=10))
 
         msg = Message(content="Message 1")
-        msg.metadata["call_id"] = "call-abc"
+        msg.call_id = "call-abc"
         test_agent.event_manager.add(msg)
 
         event = AfterTurn(
@@ -278,12 +278,12 @@ class TestMethodSummarizer:
             is_final=True,
             success=True,
         )
-        event.metadata["call_id"] = "call-abc"
+        event.call_id = "call-abc"
         result = summarizer._compute_range(event)
         assert result is None
 
     def test_compute_range_returns_none_when_no_call_id(self, test_agent):
-        """Returns None when AfterTurn has no call_id in metadata."""
+        """Returns None when AfterTurn has no call_id."""
         summarizer = MethodSummarizer(test_agent, config=MethodSummarizerConfig(min_events=1))
 
         test_agent.event_manager.add(Message(content="Message 1"))
@@ -297,7 +297,7 @@ class TestMethodSummarizer:
             is_final=True,
             success=True,
         )
-        # No call_id in metadata
+        # No call_id
         result = summarizer._compute_range(event)
         assert result is None
 
@@ -319,12 +319,12 @@ class TestMethodSummarizerComputeRangeScenarios:
             is_final=True,
             success=True,
         )
-        event.metadata["call_id"] = call_id
+        event.call_id = call_id
         return event
 
     def _msg(self, content: str, call_id: str) -> Message:
         msg = Message(content=content)
-        msg.metadata["call_id"] = call_id
+        msg.call_id = call_id
         return msg
 
     def test_simple_single_method_call(self, test_agent):
@@ -421,7 +421,7 @@ class TestMethodSummarizerComputeRangeScenarios:
         # Tags 1 and 4 are outside the range
 
     def test_events_without_call_id_not_matched(self, test_agent):
-        """Events without call_id metadata don't count toward min_events."""
+        """Events without call_id field don't count toward min_events."""
         summarizer = MethodSummarizer(test_agent, config=MethodSummarizerConfig(min_events=3))
         em = test_agent.event_manager
 

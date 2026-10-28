@@ -127,10 +127,10 @@ class TestTemplateStrategy:
         strategy = TemplateStrategy()
         assert strategy.requires_lock is False
 
-    def test_block_overrides_is_empty(self):
-        """TemplateStrategy should have empty block overrides (no LLM prompting)."""
+    def test_default_view_has_no_instructions(self):
+        """TemplateStrategy does not add model instructions."""
         strategy = TemplateStrategy()
-        assert strategy.get_block_overrides() == {}
+        assert strategy.default_context_view.instruction_blocks(None) == {}
 
     @pytest.mark.asyncio
     async def test_simple_variable_substitution(self):

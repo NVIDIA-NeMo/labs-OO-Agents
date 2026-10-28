@@ -11,9 +11,10 @@ from pydantic import ValidationError
 
 from nooa.context_blocks.events import ToolCallEvent, ToolResult
 from nooa.context_blocks.formatter import OpenAIProviderFormatter
-from nooa.context_blocks.models import BlockMetadata, ResolvedBlock, Role
+from nooa.context_blocks.models import BlockMetadata, Role
 from nooa.context_blocks.renderer import render_context
 from nooa.context_blocks.renderers.cached import CachedBlockFormatter
+from nooa.context_view import Block
 from nooa.llm_types import AssistantText, LLMResponse, ToolCall
 from nooa.runtime.middleware import LLMCallContext
 from nooa.storage.sqlite import SQLiteStorageManager
@@ -77,12 +78,12 @@ def turn(items=None):
 
 def blocks(response, state="live 1"):
     result = [
-        ResolvedBlock(
+        Block(
             key="instructions",
             content="Stable instructions " * 100,
             metadata=BlockMetadata(static=True),
         ),
-        ResolvedBlock(key="turn", content="", role=Role.ASSISTANT, event=response),
+        response,
     ]
     for call in response.tool_calls:
         event = ToolCallEvent(
@@ -92,10 +93,14 @@ def blocks(response, state="live 1"):
             llm_response_id=response.id,
             result=ToolResult(tool_call_id=call.id, content="done"),
         )
-        result.append(ResolvedBlock(key=call.id, content="", role=Role.ASSISTANT, event=event))
+        result.append(event)
+    result.append(CacheBoundary())
     result.append(
-        ResolvedBlock(
-            key="live", content=state, metadata=BlockMetadata(user_block=True, static=False)
+        Block(
+            key="live",
+            content=state,
+            role=Role.USER,
+            metadata=BlockMetadata(user_block=True, static=False),
         )
     )
     return result

@@ -174,11 +174,11 @@ Calling a non-decision generation method on such an agent, or reading
 `agent.llm`, raises a `RuntimeError` that asks for `llm=...`. Without a decision
 model, an agent still requires a chat LLM.
 
-[`examples/quickstart/16_decisions.py`](../../examples/quickstart/16_decisions.py)
+[`examples/quickstart/17_decisions.py`](../../examples/quickstart/17_decisions.py)
 is a complete, runnable version with thresholded abstention and batching:
 
 ```bash
-OPENROUTER_API_KEY=... uv run python examples/quickstart/16_decisions.py
+OPENROUTER_API_KEY=... uv run python examples/quickstart/17_decisions.py
 ```
 
 ## Accept or abstain with a threshold
@@ -252,13 +252,22 @@ untrusted or potentially large argument values in the docstring.
 
 ### Add supporting context and event history
 
-A native decision request does not receive the agent's entire chat prompt.
-Opt in to supporting state with the same `ScopedContext` and `EventQuery`
-mechanisms used by other strategies:
+A decision request includes method inputs plus the supporting state selected by
+its context view. `DecisionContextView` evaluates explicit decorator/scoped
+context and includes no history by default. Extend it to select history:
 
 ```python
-from nooa import Context, EventQuery
-from nooa.context_blocks import ScopedContext
+from nooa import Context, is_model_visible
+from nooa.decisions.context_view import DecisionContextView
+
+
+class RecentDecisionView(DecisionContextView):
+    async def assemble(self, agent, call):
+        async for block in super().assemble(agent, call):
+            yield block
+        for event in agent.event_manager.values()[-5:]:
+            if is_model_visible(event):
+                yield event
 
 
 class SupportAgent(Agent, llm=llm, decision_model=decision_model):
@@ -269,13 +278,11 @@ class SupportAgent(Agent, llm=llm, decision_model=decision_model):
 
     @strategy(
         DecideStrategy(),
-        context=ScopedContext(
-            context={
-                "support_policy": Context(expr="self.render_refund_policy()"),
-                "customer_tier": Context(expr="self.customer_tier"),
-            },
-            events=EventQuery.last_n(5),
-        ),
+        context={
+            "support_policy": Context(expr="self.render_refund_policy()"),
+            "customer_tier": Context(expr="self.customer_tier"),
+        },
+        context_view=RecentDecisionView(),
     )
     async def should_escalate(self, message: str) -> bool:
         """Should this customer request be escalated?"""
@@ -309,10 +316,11 @@ Ordinary persistent context blocks are not copied into native decision state
 automatically; reference one explicitly with, for example,
 `Context(expr='self.context["policy"]')`.
 
-Events are included only when an effective `EventQuery` is configured. Runtime,
-active scoped, decorator, and agent queries use the normal precedence rules.
-Selected events retain chronological order. Stored metadata such as
-`DecisionRecord` and runtime lifecycle events are never sent back to the model.
+The selected view owns event selection; this example excludes metadata and
+runtime events with `is_model_visible`. A call-level `context_view=` overrides
+the method view. Decision context accepts unique SYSTEM-role blocks followed by
+events; layouts that would require reordering or discarding roles raise
+`UnsupportedContextLayout`. Unsupported cache markers are omitted.
 All inputs, resolved context values, and event data must be JSON-compatible;
 unsupported values fail with the offending parameter, context-block name, or
 event index instead of being stringified or truncated silently.

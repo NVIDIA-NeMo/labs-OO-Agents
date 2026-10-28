@@ -11,12 +11,11 @@ from nooa.context_blocks.formatter import (
     OpenAIProviderFormatter,
     XMLBlockFormatter,
 )
-from nooa.context_blocks.models import BlockMetadata, ResolvedBlock, Role
 from nooa.context_blocks.renderer import render_context
 from nooa.events import PythonOutput
 
 
-def _render_openai(blocks: list[ResolvedBlock]) -> list[dict]:
+def _render_openai(blocks: list[PythonOutput]) -> list[dict]:
     return render_context(
         blocks,
         block_formatter=XMLBlockFormatter(),
@@ -27,21 +26,15 @@ def _render_openai(blocks: list[ResolvedBlock]) -> list[dict]:
 def _make_python_output_block(
     stdout: str = "hello",
     images: list[dict] | None = None,
-) -> ResolvedBlock:
-    """Create a ResolvedBlock carrying a PythonOutput event with optional images."""
-    event = PythonOutput(
+) -> PythonOutput:
+    """Create a PythonOutput event with optional images."""
+    return PythonOutput(
+        tag="1",
         tool_call_id="tc_1",
         execution_count=1,
         execution_status=ResultStatus.COMPLETE,
         stdout=stdout,
         images=images or [],
-    )
-    return ResolvedBlock(
-        key="python_output",
-        content=f"<stdout>{stdout}</stdout>",
-        role=Role.USER,
-        metadata=BlockMetadata(tag="1"),
-        event=event,
     )
 
 
@@ -49,9 +42,8 @@ class TestOpenAIProviderFormatterImages:
     def test_no_images_plain_content(self):
         block = _make_python_output_block(stdout="hello", images=[])
         result = _render_openai([block])
-        # System + 1 user message
-        assert len(result) == 2
-        msg = result[1]
+        assert len(result) == 1
+        msg = result[0]
         assert msg["role"] == "user"
         assert isinstance(msg["content"], str)
 
@@ -59,7 +51,7 @@ class TestOpenAIProviderFormatterImages:
         image_block = {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
         block = _make_python_output_block(stdout="analyzed", images=[image_block])
         result = _render_openai([block])
-        msg = result[1]
+        msg = result[0]
         assert isinstance(msg["content"], list)
         assert msg["content"][0]["type"] == "text"
         assert "analyzed" in msg["content"][0]["text"]
@@ -72,7 +64,7 @@ class TestOpenAIProviderFormatterImages:
         ]
         block = _make_python_output_block(images=images)
         result = _render_openai([block])
-        msg = result[1]
+        msg = result[0]
         assert isinstance(msg["content"], list)
         assert len(msg["content"]) == 3  # text + 2 images
 

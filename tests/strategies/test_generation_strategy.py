@@ -29,8 +29,9 @@ class TestGenerationStrategyABC:
         strategy = TestStrategy()
         assert strategy.name == "TestStrategy"
 
-    def test_get_block_overrides_has_default_implementation(self):
-        """GenerationStrategy.get_block_overrides has a default (empty dict)."""
+    def test_default_context_view_has_default_implementation(self):
+        """GenerationStrategy supplies a reusable manager-backed default view."""
+        from nooa.default_context_view import ManagedContextView
         from nooa.strategies.base import GenerationStrategy
 
         class TestStrategy(GenerationStrategy):
@@ -38,7 +39,7 @@ class TestGenerationStrategyABC:
                 pass
 
         strategy = TestStrategy()
-        assert strategy.get_block_overrides() == {}
+        assert isinstance(strategy.default_context_view, ManagedContextView)
 
     def test_requires_execute_method(self):
         """GenerationStrategy subclasses must implement execute()."""

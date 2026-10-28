@@ -280,8 +280,7 @@ class Skill:
     # transitively when activate() is called.
     requires: Annotated[tuple[str, ...], hidden] = ()
 
-    # If set, SkillRegistry.activate() registers a dynamic context block
-    # with this (key, expr) pair. deactivate() removes it.
+    # Context declaration evaluated by the selected strategy view.
     context_block: Annotated[tuple[str, str] | None, hidden] = None
 
     _agent: Any = None
@@ -297,10 +296,10 @@ class Skill:
         if obj is not None:
             self._skill_obj = obj
             cls_name = name or "Skill"
-            self.__class__ = type(cls_name, (Skill,), {"__doc__": obj.__doc__ or ""})  # pyright: ignore[reportAttributeAccessIssue]
+            self.__class__ = type(cls_name, (type(self),), {"__doc__": obj.__doc__ or ""})  # pyright: ignore[reportAttributeAccessIssue]
         elif content is not None:
             cls_name = name or "Skill"
-            self.__class__ = type(cls_name, (Skill,), {"__doc__": content})  # pyright: ignore[reportAttributeAccessIssue]
+            self.__class__ = type(cls_name, (type(self),), {"__doc__": content})  # pyright: ignore[reportAttributeAccessIssue]
 
     @hidden
     def attach(self, agent: Any) -> None:

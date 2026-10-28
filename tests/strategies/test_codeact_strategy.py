@@ -74,10 +74,13 @@ class TestCodeActStrategyProperties:
         strat = CodeActStrategy(config=CodeActConfig())
         assert strat.name == "CODEACT"
 
-    def test_block_overrides_provides_strategy_prompt(self):
-        """CodeActStrategy.get_block_overrides() should provide strategy_prompt block."""
+    def test_default_view_provides_strategy_prompt(self):
+        """The CodeAct view owns the strategy instruction block."""
+        from nooa.strategies.current_call import CurrentCall
+
         strat = CodeActStrategy(config=CodeActConfig())
-        blocks = strat.get_block_overrides()
+        call = CurrentCall(id="test", method_name="run", decorator="strategy", strategy=strat)
+        blocks = strat.default_context_view.instruction_blocks(call)
         assert "strategy_prompt" in blocks
         assert blocks["strategy_prompt"] is not None
 

@@ -375,7 +375,6 @@ class BeforeAgentCall(EventBase):  # type: ignore[misc]
     _role: ClassVar[Role] = Role.RUNTIME_EVENT
 
     method_name: Annotated[str, Field(description="Name of the agent method being invoked")]
-    call_id: Annotated[str, Field(description="Unique ID for this agent-method call")]
     parent_call_id: str | None = Field(
         default=None, description="Nearest traced ancestor call ID, or None at the top level"
     )
@@ -395,7 +394,6 @@ class AfterAgentCall(EventBase):  # type: ignore[misc]
     _role: ClassVar[Role] = Role.RUNTIME_EVENT
 
     method_name: Annotated[str, Field(description="Name of the agent method that was invoked")]
-    call_id: Annotated[str, Field(description="Unique ID for this agent-method call")]
     parent_call_id: str | None = Field(
         default=None, description="Nearest traced ancestor call ID, or None at the top level"
     )
@@ -637,6 +635,15 @@ class Summary(EventBase):  # type: ignore[misc]
 
     _role: ClassVar[Role] = Role.ASSISTANT  # LLM's own recap of past actions
 
+    source_call_ids: list[str] = Field(
+        repr=False, description="Sorted call IDs covered by this summary"
+    )
+
+    @property
+    def related_call_ids(self) -> frozenset[str]:
+        """Union of calls represented by the collapsed source events."""
+        return frozenset(self.source_call_ids)
+
     # The tag for this summary event (e.g., "2..40") - REQUIRED
     summary_tag: Annotated[
         str,
@@ -662,7 +669,7 @@ class SystemPrompt(EventBase):  # type: ignore[misc]
     Fired by ``runtime.generate()`` right after the messages list is
     built. Carries the rendered ``messages[0].content`` (the static
     system prompt: strategy prompt + ``doc(self)`` + static context
-    blocks). The trailing dynamic-context envelope is captured
+    blocks). The rendered trailing dynamic-context blocks are captured
     separately on :class:`LLMResponse.dynamic_context`.
 
     Uses ``Role.RUNTIME_EVENT`` to keep it out of LLM context — this is

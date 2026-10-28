@@ -416,6 +416,7 @@ class TestCompaction:
         # Mid-trajectory compaction.
         exporter.on_summary(
             Summary(
+                source_call_ids=[],
                 summary_tag="2..3",
                 replaced_range=(2, 3),
                 summary_text="Earlier steps computed x=1.",
