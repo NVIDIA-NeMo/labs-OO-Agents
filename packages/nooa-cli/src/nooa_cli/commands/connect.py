@@ -83,7 +83,9 @@ from ._connect_stages import STAGES
 @click.option(
     "--output-tokens",
     type=click.IntRange(1, 4096),
-    default=200,
+    # Same value as nooa.unifiedllm.connect.DISCOVERY_OUTPUT_TOKENS, written out so
+    # the CLI need not import nooa.unifiedllm at load; a test keeps them equal.
+    default=2048,
     show_default=True,
     help="Cap for interface discovery only, before the saved reply budget is chosen.",
 )
@@ -226,81 +228,86 @@ def command(
         if not resolved_dir.is_dir():
             raise click.UsageError(f"--working-dir path {str(resolved_dir)!r} is not a directory.")
         output = str(resolved_dir / paths.DIR_NAME / "llm_config.yaml")
-    if stage:
-        from ._connect_stages import run_stage
+    from nooa.tracing import quiet_trace_target
 
-        code = run_stage(
-            stage,
+    # Checks create model clients, which may auto-enable tracing; its
+    # "OTel tracing enabled" line would land mid-way through the wizard output.
+    with quiet_trace_target():
+        if stage:
+            from ._connect_stages import run_stage
+
+            code = run_stage(
+                stage,
+                model=model,
+                alias=alias,
+                endpoint=endpoint,
+                api_style=api_style,
+                api_key_env=api_key_env,
+                budget_tokens=budget_tokens,
+                output_tokens=output_tokens,
+                reasoning_output_tokens=reasoning_output_tokens,
+                reasoning_template=reasoning_template if stage == "interfaces" else None,
+                reasoning_level=reasoning_level,
+                reply_tokens=reply_tokens,
+                media_inputs=media_inputs,
+                test_media_inputs=test_media_inputs,
+                levels_file=levels_file,
+                context_window=context_window,
+                input_file=input_file,
+                output=output,
+                yes=yes,
+                prompt_key=prompt_key,
+                discovery_file=discovery_file,
+                invalid_options=[
+                    name
+                    for name, used in {
+                        "--no-probe": no_probe,
+                        "--probe": probe != "all",
+                        "--provider": provider,
+                        "--catalogue-model": catalogue_model,
+                        "--reasoning-template": reasoning_template and stage != "interfaces",
+                        "--reasoning-level": reasoning_level and stage != "interfaces",
+                        "--levels": levels,
+                        "--show-config": show_config,
+                        "--edit-model": edit_model is not None,
+                    }.items()
+                    if used
+                ],
+                working_dir=bool(working_dir),
+            )
+            raise click.exceptions.Exit(code)
+        if input_file:
+            raise click.UsageError("--input requires --stage save")
+        from ._connect_wizard import run_wizard
+
+        run_wizard(
             model=model,
+            edit_model=edit_model,
+            provider=provider,
             alias=alias,
             endpoint=endpoint,
             api_style=api_style,
             api_key_env=api_key_env,
+            prompt_key=prompt_key,
+            catalogue_model=catalogue_model,
+            discovery_file=discovery_file,
+            no_catalogue=no_catalogue,
+            reasoning_template=reasoning_template,
+            reasoning_level=reasoning_level,
+            levels=levels,
+            levels_file=levels_file,
+            context_window=context_window,
+            probe=probe,
+            no_probe=no_probe,
             budget_tokens=budget_tokens,
             output_tokens=output_tokens,
             reasoning_output_tokens=reasoning_output_tokens,
-            reasoning_template=reasoning_template if stage == "interfaces" else None,
-            reasoning_level=reasoning_level,
             reply_tokens=reply_tokens,
             media_inputs=media_inputs,
             test_media_inputs=test_media_inputs,
-            levels_file=levels_file,
-            context_window=context_window,
-            input_file=input_file,
+            show_config=show_config,
+            show_diagnostics=show_diagnostics,
             output=output,
+            working_dir=working_dir,
             yes=yes,
-            prompt_key=prompt_key,
-            discovery_file=discovery_file,
-            invalid_options=[
-                name
-                for name, used in {
-                    "--no-probe": no_probe,
-                    "--probe": probe != "all",
-                    "--provider": provider,
-                    "--catalogue-model": catalogue_model,
-                    "--reasoning-template": reasoning_template and stage != "interfaces",
-                    "--reasoning-level": reasoning_level and stage != "interfaces",
-                    "--levels": levels,
-                    "--show-config": show_config,
-                    "--edit-model": edit_model is not None,
-                }.items()
-                if used
-            ],
-            working_dir=bool(working_dir),
         )
-        raise click.exceptions.Exit(code)
-    if input_file:
-        raise click.UsageError("--input requires --stage save")
-    from ._connect_wizard import run_wizard
-
-    run_wizard(
-        model=model,
-        edit_model=edit_model,
-        provider=provider,
-        alias=alias,
-        endpoint=endpoint,
-        api_style=api_style,
-        api_key_env=api_key_env,
-        prompt_key=prompt_key,
-        catalogue_model=catalogue_model,
-        discovery_file=discovery_file,
-        no_catalogue=no_catalogue,
-        reasoning_template=reasoning_template,
-        reasoning_level=reasoning_level,
-        levels=levels,
-        levels_file=levels_file,
-        context_window=context_window,
-        probe=probe,
-        no_probe=no_probe,
-        budget_tokens=budget_tokens,
-        output_tokens=output_tokens,
-        reasoning_output_tokens=reasoning_output_tokens,
-        reply_tokens=reply_tokens,
-        media_inputs=media_inputs,
-        test_media_inputs=test_media_inputs,
-        show_config=show_config,
-        show_diagnostics=show_diagnostics,
-        output=output,
-        working_dir=working_dir,
-        yes=yes,
-    )

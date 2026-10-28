@@ -38,7 +38,18 @@ directory. For code you can run immediately, use the
 2. If you want the runtime mechanics, skim
    [how a method call runs](architecture.md).
 
+### Connect a model and use media
+
+1. [Connect a model](model-connect.md) — recommended guided onboarding,
+   aliases, explicit spending approval, and diagnostics.
+2. [Configure without paid checks](model-configuration.md) — offline planning,
+   local validation, and configuration discovery.
+3. [Media API](media.md) — typed images, audio, video, and PDFs; CodeAct
+   `show()`; explicit route permissions and text-only migration.
+
 ### Learn by building
+
+First [connect a model](model-connect.md), or configure one offline. Then:
 
 1. Work through the [notebook tutorials](../notebook_tutorials/README.md) in
    order.
@@ -67,6 +78,9 @@ directory. For code you can run immediately, use the
 | [Decision models](concepts/decisions.md) | How do I use typed probability, choice, and score decisions? |
 | [Tools and visibility](concepts/tools-and-visibility.md) | How does generated code discover and call capabilities? |
 | [Prompts and context](concepts/prompts-and-context.md) | Where should instructions, inputs, and cross-call information live? |
+| [Connect a model](model-connect.md) | How do I configure and test an endpoint, then use an alias? |
+| [Model configuration](model-configuration.md) | How do I set up a model offline and find the effective configuration? |
+| [Media inputs](media.md) | How do I attach images, audio, video, or PDFs, and authorize them on a route? |
 | [Local models](local-models.md) | How do I run NOOA with local models? |
 | [Orchestration](concepts/orchestration.md) | How do I make a workflow deterministic without turning it into one giant prompt? |
 | [Multi-agent systems](concepts/multi-agent-systems.md) | When should I use another agent, and what state does it share? |

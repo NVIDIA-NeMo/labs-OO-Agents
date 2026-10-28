@@ -15,10 +15,56 @@ Usage:
 
 import types
 import typing
+import warnings
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
     from nooa.strategies.current_call import CurrentCall
+
+
+class PrefillTruncationWarning(RuntimeWarning):
+    """Input inspection omitted data through formatting or stdout capture."""
+
+
+@contextmanager
+def warn_on_prefill_truncation(call: "CurrentCall") -> Iterator[None]:
+    """Warn the developer once per truncated prefill, outside captured stderr."""
+    from nooa.agentdoc._format_observation import observe_truncation
+    from nooa.runtime.actor import _stderr_buffer_var
+
+    with observe_truncation() as reasons:
+        yield
+    if not reasons:
+        return
+
+    advice = []
+    format_limits = reasons & {"max_string", "max_length", "max_depth"}
+    if format_limits:
+        overrides = ", ".join(f"{limit}=None" for limit in sorted(format_limits))
+        advice.append(
+            "Increase truncation.prefill_format limits or set per-parameter "
+            f"Annotated[T, spec({overrides})]."
+        )
+    if "dictionary_key" in reasons:
+        advice.append(
+            "Dictionary keys have a fixed 50-character preview limit; inspect selected keys directly."
+        )
+    if "capture.max_stdout" in reasons:
+        advice.append("Increase truncation.capture.max_stdout to retain more printed output.")
+    message = (
+        f"Input inspection prefill for {call.method_name}() was truncated "
+        f"({', '.join(sorted(reasons))}). The full arguments remain available "
+        f"as REPL variables. {' '.join(advice)}"
+    )
+    # Nested generation may run inside another cell's capture context. Keep
+    # developer warnings out of that cell's stderr and therefore the LLM prompt.
+    token = _stderr_buffer_var.set(None)
+    try:
+        warnings.warn(message, PrefillTruncationWarning, stacklevel=3)
+    finally:
+        _stderr_buffer_var.reset(token)
 
 
 def _is_media(value: Any) -> bool:

@@ -1686,8 +1686,17 @@ class ActorRuntime:
             # still wrap the cell on the parent. The worker owns the namespace,
             # stdout capture and wrapper, so we skip the in-process exec below.
             if sandbox_executor is not None:
-                result = await sandbox_executor.run_cell(code, execution_count=execution_count)
-                return cast(ExecutionResult, result)
+                # Bind ``result``: the finally block below finalizes its stderr
+                # (never-awaited warning rewrite) for every backend.
+                result = cast(
+                    ExecutionResult,
+                    await sandbox_executor.run_cell(code, execution_count=execution_count),
+                )
+                from nooa.agentdoc._format_observation import record_truncation
+
+                for reason in result.truncation_reasons:
+                    record_truncation(reason)
+                return result
 
             # Set up stdout/stderr capture BEFORE ast.parse/compile so that
             # SyntaxWarnings (e.g. invalid escape sequences in LLM-generated code)
@@ -2106,6 +2115,11 @@ class ActorRuntime:
             # NOTE: We do NOT restore sys.stdout/sys.stderr here.
             # The ContextVarStream wrappers are transparent (fall through to original
             # when no buffer is set) and must persist for parallel async executions.
+
+            if isinstance(stdout_buffer, TruncatingStringIO) and stdout_buffer.was_truncated:
+                from nooa.agentdoc._format_observation import record_truncation
+
+                record_truncation("capture.max_stdout")
 
             # Reset task-local stdout/stderr buffers and stdin blocking (only if they were set)
             if stdout_token is not None:
@@ -3269,6 +3283,13 @@ class ActorRuntime:
         # Apply the resolved cache (the only side effect)
         self.agent.context_manager._update_resolved(build_result.resolved_cache)
 
+        # Hidden APIs must not leave even an empty guidance tag in the prompt.
+        # Filter the resolved blocks without mutating persistent registration,
+        # so a later visibility change can expose the guidance again.
+        from nooa.agentdoc.visibility import is_hidden_field
+
+        if is_hidden_field(self.agent, "events"):
+            return [block for block in build_result.blocks if block.key != "events_api"]
         return build_result.blocks
 
     def _update_context_limits(self, llm_client: Any, params: dict[str, Any]):

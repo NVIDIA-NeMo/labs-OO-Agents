@@ -186,6 +186,6 @@ New commands get tab-completion automatically. To enable it:
 nooa completion install   # auto-detects your shell
 
 # Or manually:
-eval "$(_NEMO_COMPLETE=zsh_source nemo)"   # zsh
-eval "$(_NEMO_COMPLETE=bash_source nemo)"  # bash
+eval "$(_NOOA_COMPLETE=zsh_source nooa)"   # zsh
+eval "$(_NOOA_COMPLETE=bash_source nooa)"  # bash
 ```

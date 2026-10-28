@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Annotated, Any, ClassVar
 from nooa import Context, hidden, no_trace, strategy
 from nooa.agentdoc import doc, spec
 from nooa.config import CodeActConfig, PredictConfig
+from nooa.context_blocks.models import ContextWindowStats
 from nooa.interactive import (
     Done,
     InteractiveAgent,
@@ -271,9 +272,7 @@ class AtomAgentBase(InteractiveAgent):
         )
         self.context["todo_status"] = Context(expr="self.todo.status()")
         self.context["workspace_state"] = Context(expr="self._workspace_state_context()")
-        self.context["context_usage"] = Context(
-            expr="self.context_stats.format() if self.context_stats else ''"
-        )
+        self.context["context_usage"] = Context(expr="self._context_usage()")
         # Re-read from the startup folder whenever an AGENTS.md changes, is
         # created, or is removed; the block is empty while there is none.
         self._instructions = RepositoryInstructions(self.cwd)
@@ -282,9 +281,23 @@ class AtomAgentBase(InteractiveAgent):
         )
         spec(self, "context", hidden=False)
         spec(self, "events", hidden=False)
+        # self.events stays exposed, but the core events_api block is redundant
+        # here: context_usage already says how to inspect and collapse events
+        # (``self.events.collapse(...)``, ``print(doc(self.events))``).
+        self.context_manager.remove_protected("events_api")
 
         self._summarization = summarization or SummarizationConfig()
         install_summarizer(self._summarization, self)
+
+    @no_trace
+    def _context_usage(self) -> str:
+        """Context window usage plus the guidance for inspecting and collapsing events.
+
+        The first render comes before any stats exist; it still carries the
+        guidance, since the core ``events_api`` block is removed here.
+        """
+        stats = self.context_stats or ContextWindowStats(context_blocks_count=0, events_count=0)
+        return stats.format()
 
     @no_trace
     def _repository_instructions(self) -> str:

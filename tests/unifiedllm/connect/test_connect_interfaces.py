@@ -12,6 +12,9 @@ from tests.unifiedllm.connect.connect_http import mock_http, mock_post, response
 
 REPLIES = {style: response_body(style) for style in ("chat", "responses", "anthropic")}
 PATHS = {"/v1/chat/completions": "chat", "/v1/responses": "responses", "/v1/messages": "anthropic"}
+# Each discovery probe reserves its reply cap plus 512 estimated input tokens.
+DISCOVERY = connect.DISCOVERY_OUTPUT_TOKENS
+PER_PROBE = DISCOVERY + 512
 
 
 @pytest.fixture(autouse=True)
@@ -40,7 +43,7 @@ async def test_all_interfaces_use_correct_wire_shapes_and_one_call_each(monkeypa
         body = json.loads(request.content)
         sent.append(body)
         assert body["model"] == "model"
-        assert body["max_output_tokens" if style == "responses" else "max_tokens"] == 200
+        assert body["max_output_tokens" if style == "responses" else "max_tokens"] == DISCOVERY
         assert ("input" if style == "responses" else "messages") in body
         assert "tools" not in body
         assert request.headers.get("x-api-key" if style == "anthropic" else "authorization") == (
@@ -55,7 +58,7 @@ async def test_all_interfaces_use_correct_wire_shapes_and_one_call_each(monkeypa
     assert [(e.name, e.outcome["outcome"]) for e in events[:-1]] == [
         (s, o) for s in REPLIES for o in ("running", "accepted")
     ]
-    assert result.tokens_charged_to_budget == 3 * 712
+    assert result.tokens_charged_to_budget == 3 * PER_PROBE
     assert "temporary-secret" not in repr(result)
 
 
@@ -100,7 +103,7 @@ async def test_failed_interface_is_not_offered_but_other_interfaces_are_checked(
         assert record["request_shape"] == {
             "api_style": "responses",
             "timeout_seconds": 30,
-            "output_tokens": 200,
+            "output_tokens": DISCOVERY,
             "store": False,
             "include": ["reasoning.encrypted_content"],
         }
@@ -108,7 +111,13 @@ async def test_failed_interface_is_not_offered_but_other_interfaces_are_checked(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "budget,usage,calls", [(1, 0, 0), (712, 0, 1), (1500, 1400, 1), (2136, 0, 3)]
+    "budget,usage,calls",
+    [
+        (1, 0, 0),
+        (PER_PROBE, 0, 1),
+        (PER_PROBE + 1000, PER_PROBE + 900, 1),
+        (3 * PER_PROBE, 0, 3),
+    ],
 )
 async def test_interface_checks_share_budget_including_reported_usage(
     monkeypatch, budget, usage, calls
@@ -133,7 +142,7 @@ async def test_interface_checks_share_budget_including_reported_usage(
     mock_post(monkeypatch, post)
     _, result = await check(budget_tokens=budget)
     assert len(sent) == calls
-    assert result.tokens_charged_to_budget == max(712, usage) * calls
+    assert result.tokens_charged_to_budget == max(PER_PROBE, usage) * calls
 
 
 @pytest.mark.asyncio
@@ -342,3 +351,12 @@ async def test_recommended_style_falls_back_to_first_accepted_without_reasoning_
     events, result = await check(api_key="temporary-secret")
     assert result.reasoning_observed == {"chat": False, "responses": False, "anthropic": False}
     assert result.recommended_style == "chat"
+
+
+def test_discovery_limit_leaves_room_for_reasoning_models():
+    """Reasoning models think before replying; a 200-token cap made them run out."""
+    import inspect
+
+    assert connect.DISCOVERY_OUTPUT_TOKENS == 2048
+    default = inspect.signature(connect.check_interfaces).parameters["output_tokens"].default
+    assert default == connect.DISCOVERY_OUTPUT_TOKENS
