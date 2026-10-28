@@ -6,6 +6,10 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- `nooa-atom`: AtomAgent drops the core `<events_api>` guidance block (added on
+  main for agents that expose `self.events`). `self.events` stays exposed, and
+  Atom's `context_usage` block already names `self.events.collapse(...)` and
+  `print(doc(self.events))`. Generic agents keep the block.
 - `nooa-atom`: the ACP server speaks Pool 2's `pool/*` extensions as well as
   Pool 1's `poolside/*` ones, picked per connection from `clientInfo`
   (`name: "pool"`; version major 1 or 2; both for an unversioned build until
@@ -106,6 +110,11 @@ to follow semantic versioning.
   the older experimental-agent spellings, such as `ExperimentalTUIAgent` and
   `ExperimentalCodingAgent`, are session-restore aliases for
   `nooa_atom.agent:AtomAgent`).
+- Prompt inspection (`print_prompt()` and `build_prompt_data()`) now applies
+  method-level truncation overrides for CodeAct and PurePython, matching runtime
+  prefill rendering. Both strategies now use the resolved runtime settings for
+  live prefill, and emit `PrefillTruncationWarning` when formatting or stdout
+  capture actually omits input, with advice for adjusting the relevant limits.
 - `RetryConfig` is the only endpoint retry budget for `CompletionClient` on
   OpenAI-compatible routes. LiteLLM let the OpenAI SDK retry each attempt twice
   more, so `RetryConfig(max_retries=2)` sent 9 requests for a persistent server

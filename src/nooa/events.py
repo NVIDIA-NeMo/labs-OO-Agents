@@ -729,6 +729,10 @@ class ExecutionResult(BaseModel):
 
     stdout: str = Field(default="", description="Captured stdout from execution")
     stderr: str = Field(default="", description="Captured stderr from execution")
+    truncation_reasons: list[str] = Field(
+        default_factory=list,
+        description="Formatting omissions reported by an isolated execution worker",
+    )
     error: Exception | None = Field(default=None, description="Exception if execution failed")
     signal: ExecutionSignal | None = Field(
         default=None, description="Control flow signal (not an error), e.g. return_result()"

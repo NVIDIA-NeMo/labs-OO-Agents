@@ -105,7 +105,7 @@ def diagnostic_context(
     api_key=None,
     budget=None,
     remaining=None,
-    output_tokens=200,
+    output_tokens=2048,  # == nooa.unifiedllm.connect.DISCOVERY_OUTPUT_TOKENS (tested)
     reasoning_output_tokens=4096,
     stage=None,
     discovery_succeeded=None,
