@@ -18,7 +18,14 @@ class _FrozenObject(Mapping):
 
     def __init__(self, values):
         object.__setattr__(
-            self, "_values", MappingProxyType({k: freeze(v) for k, v in values.items()})
+            self,
+            "_values",
+            MappingProxyType(
+                {
+                    (utf8_safe_text(k) if isinstance(k, str) else k): freeze(v)
+                    for k, v in values.items()
+                }
+            ),
         )
 
     def __getitem__(self, key):
@@ -34,9 +41,27 @@ class _FrozenObject(Mapping):
         return self
 
 
+def utf8_safe_text(text: str) -> str:
+    """Return ``text`` with lone UTF-16 surrogates escaped as ``\\udXXX`` text.
+
+    UTF-8 cannot encode a lone surrogate, so one left in replayed state makes
+    every later request fail to serialize. Encodable text is returned as is.
+    """
+    if text.isascii():
+        return text
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return text.encode("utf-8", "backslashreplace").decode("utf-8")
+    return text
+
+
 def freeze(value):
     if isinstance(value, _FrozenObject):
         return value
+    if isinstance(value, str):
+        # Escaped once on capture or restore, never per request.
+        return utf8_safe_text(value)
     if isinstance(value, dict):
         return _FrozenObject(value)
     if isinstance(value, (list, tuple)):

@@ -22,6 +22,8 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 
 from pydantic import BaseModel
 
+from nooa._immutable_json import utf8_safe_text
+
 if TYPE_CHECKING:
     from nooa.config.truncation_config import FormatConfig
 
@@ -39,6 +41,7 @@ from nooa.context_blocks.models import (
     RenderedMessage,
     ResolvedBlock,
     Role,
+    ToolCallInfo,
 )
 from nooa.context_blocks.utils import camel_to_snake
 
@@ -146,13 +149,7 @@ def _utf8_safe(value: Any) -> Any:
     no change is returned as the same object, so callers' data is never mutated.
     """
     if isinstance(value, str):
-        if value.isascii():
-            return value
-        try:
-            value.encode("utf-8")
-        except UnicodeEncodeError:
-            return value.encode("utf-8", "backslashreplace").decode("utf-8")
-        return value
+        return utf8_safe_text(value)
     if isinstance(value, dict):
         items = [(_utf8_safe(k), _utf8_safe(v)) for k, v in value.items()]
         if all(k is k0 and v is v0 for (k, v), (k0, v0) in zip(items, value.items(), strict=True)):
@@ -171,6 +168,10 @@ def _utf8_safe(value: Any) -> Any:
             if name == "replay_message":
                 continue
             field = getattr(value, name)
+            # Dict arguments reach the request and the journal only through
+            # json.dumps, whose ASCII escapes keep them exact and encodable.
+            if isinstance(value, ToolCallInfo) and name == "arguments" and isinstance(field, dict):
+                continue
             safe = _utf8_safe(field)
             if safe is not field:
                 update[name] = safe

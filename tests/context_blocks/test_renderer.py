@@ -735,6 +735,31 @@ class TestRenderContextLoneSurrogates:
         assert "EVICTED" in result.output[0]["content"]
         assert "Be helpful." in result.output[0]["content"]
 
+    def test_dict_tool_arguments_are_left_to_json_encoding(self):
+        """Dict arguments keep their exact keys; json.dumps escapes them for the wire."""
+        from nooa.context_blocks.models import ToolCallInfo
+
+        arguments = {"\ud800": "lone", "\\ud800": "literal"}
+        message = RenderedMessage(
+            role=Role.ASSISTANT,
+            tool_calls=(ToolCallInfo(id="call_1", name="python_cell", arguments=arguments),),
+        )
+
+        class Formatter(XMLBlockFormatter):
+            def format(self, blocks):
+                return [message]
+
+        result = render_context(
+            [],
+            block_formatter=Formatter(),
+            provider_formatter=OpenAIProviderFormatter(),
+        )
+
+        assert result.messages[0].tool_calls[0].arguments == arguments
+        sent = result.output[0]["tool_calls"][0]["function"]["arguments"]
+        sent.encode("utf-8")
+        assert json.loads(sent) == arguments
+
     def test_valid_unicode_is_returned_unchanged(self):
         """Encodable text, emoji included, passes through as the same objects."""
         blocks = [ResolvedBlock(key="persona", content="Héllo 🎉 — ok")]
