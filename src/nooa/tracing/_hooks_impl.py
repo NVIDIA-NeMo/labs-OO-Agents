@@ -126,6 +126,8 @@ _ERROR_MESSAGE_LIMIT = 5_000
 _TRACE_MAX_DEPTH = 16  # prevent stack overflow on deeply nested objects
 _TRACE_MAX_LENGTH = 20  # keep trace attr serialization bounded on large containers
 _TRACE_MAX_STRING = 2_000  # avoid materializing multi-MB strings in trace attrs
+_MAX_TRACED_TEXTS = 50  # python_cell ``texts`` entries whose name/length a span records
+_MAX_TRACED_TEXT_NAME = 100  # chars kept per recorded ``texts`` name
 
 
 def _error_message(exception: BaseException) -> str:
@@ -585,6 +587,17 @@ class OpenInferenceHooks:
         # OpenInference-standard input: JSON {"code": ...} is the single
         # canonical representation of the executed code (the legacy flat ``code``
         # attr is no longer emitted; ``code.length`` metadata is retained).
+        # Named texts (python_cell ``texts``): metadata only, never the bodies, in
+        # bounded attributes. The tool-call arguments are recorded elsewhere as usual.
+        cell_texts = kwargs.pop("cell_texts", None)
+        if isinstance(cell_texts, dict) and cell_texts:
+            entries = list(cell_texts.items())[:_MAX_TRACED_TEXTS]
+            span.set_attribute("code.texts.count", len(cell_texts))
+            span.set_attribute("code.texts.truncated", len(cell_texts) > len(entries))
+            span.set_attribute(
+                "code.texts.names", [str(name)[:_MAX_TRACED_TEXT_NAME] for name, _ in entries]
+            )
+            span.set_attribute("code.texts.lengths", [len(str(text)) for _, text in entries])
         code_args_json = self._safe_json_value({"code": capped_code})
         span.set_attribute(SpanAttributes.INPUT_VALUE, code_args_json)
         span.set_attribute(SpanAttributes.INPUT_MIME_TYPE, OpenInferenceMimeTypeValues.JSON.value)

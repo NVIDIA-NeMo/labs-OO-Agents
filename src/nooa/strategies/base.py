@@ -94,6 +94,7 @@ class RuntimeServices(Protocol):
         execution_count: int = 1,
         restrictions: "RestrictionsConfig | None" = None,
         sandbox_executor: Any = None,
+        text_bindings: dict[str, str] | None = None,
     ) -> Any:
         """Execute Python code with namespace + strategy builtins.
 
@@ -108,6 +109,7 @@ class RuntimeServices(Protocol):
             restrictions: Code execution restrictions (blocked modules/calls).
                 None uses defaults from RestrictionsConfig().
             sandbox_executor: Optional guarded worker used instead of in-process execution.
+            text_bindings: Named texts bound as plain ``str`` values before ``code`` runs.
 
         Returns:
             ExecutionResult with stdout, error, defined_methods.

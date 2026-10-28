@@ -66,6 +66,7 @@ from nooa.strategies.composite import CompositeStrategy
 from nooa.strategies.generated_code import (
     ExecutionNamespaceBuilder,
     GeneratedCodeValidator,
+    HelperApplyResult,
     HelperFunctionManager,
 )
 from nooa.strategies.loop_guard import LoopGuard, action_fingerprint, mentions_return_result
@@ -1309,6 +1310,68 @@ Standard Python builtins and agent instance (`self`) are available."""
         code = f"result = {call_expr}\nprint(result)"
         return code
 
+    def _record_rejected_cell(
+        self,
+        runtime: RuntimeServices,
+        tool_call: Any,
+        tool_call_event_id: str,
+        execution_count: int,
+        error: str,
+    ) -> None:
+        """Record a cell rejected before running: an error result and its output."""
+        runtime.event_manager.update(
+            tool_call_event_id,
+            result=ToolResult(
+                tool_call_id=tool_call.id,
+                content="status: error",
+                result_status=ResultStatus.ERROR,
+            ),
+        )
+        runtime.event_manager.add(
+            PythonOutput(
+                tool_call_id=tool_call.id,
+                execution_count=execution_count,
+                stdout="",
+                stderr="",
+                error=error,
+                value=None,
+                explicit_return=False,
+                execution_status=ResultStatus.ERROR,
+            )
+        )
+
+    def _supports_cell_texts(self) -> bool:
+        """Whether the Python tool accepts named ``texts`` (CodeActV2's ``python_cell``)."""
+        return False
+
+    def _reserved_cell_names(
+        self, runtime: RuntimeServices, builtins: dict[str, Any], call: "CurrentCall"
+    ) -> frozenset[str]:
+        """Names a ``texts`` entry may not bind: everything the runtime puts in a cell.
+
+        Derived from the sources that build the cell namespace, so new helpers
+        are reserved automatically: the runtime globals (``self``, ``doc``,
+        ``pprint``, ``show``, ``asyncio``...), the agent's MRO module globals
+        (skills, tools, types), the strategy builtins (``return_result``,
+        ``python_cell_state``...) and Python's builtins. Method parameters are
+        ordinary locals and may be rebound.
+        """
+        from nooa.agentdoc.visibility import filter_mro_module_globals
+        from nooa.runtime.actor import runtime_cell_globals
+        from nooa.strategies.cell_texts import PYTHON_BUILTIN_NAMES
+
+        parameters = set(call.kwargs)
+        return frozenset(
+            {
+                *runtime_cell_globals(runtime.agent),
+                *filter_mro_module_globals(type(runtime.agent)),
+                *(name for name in builtins if name not in parameters),
+                *PYTHON_BUILTIN_NAMES,
+                *self._SESSION_INTERNAL_KEYS,
+                "_call",  # bound in sandbox workers for prefill/introspection cells
+            }
+        )
+
     def _empty_code_error(self, args: dict[str, Any]) -> str:
         """Explain an empty cell, naming misplaced argument keys when present."""
         extra = sorted(str(k) for k in args if k != "code")
@@ -1865,6 +1928,24 @@ Standard Python builtins and agent instance (`self`) are available."""
         code = args.get("code", "")
         execution_count = session.record_execution()
 
+        # Named texts (python_cell ``texts``): validate before anything runs.
+        texts: dict[str, str] = {}
+        if self._supports_cell_texts() and args.get("texts") is not None:
+            from nooa.strategies.cell_texts import CellTextsError, parse_cell_texts
+
+            try:
+                texts = parse_cell_texts(
+                    args["texts"], self._reserved_cell_names(runtime, builtins, call)
+                )
+            except CellTextsError as exc:
+                session.record_error()
+                self._record_rejected_cell(
+                    runtime, tool_call, tool_call_event_id, execution_count, f"Texts error: {exc}"
+                )
+                return None
+            if texts and not (code or "").strip():
+                code = "pass"  # texts only: a no-op cell that just binds the names
+
         # Strip markdown fences early — validator and helper binding below
         # run ast.parse() which fails on fenced input. (runtime.execute_code
         # also strips fences as a safety net for non-CodeAct code paths.)
@@ -1874,28 +1955,14 @@ Standard Python builtins and agent instance (`self`) are available."""
         if fence_token:
             get_harness_metrics().fence_removal(fence_token)
 
-        if not code.strip():
+        if not code.strip() and not texts:
             session.record_error()
-            # Update ToolCallEvent with error result
-            runtime.event_manager.update(
+            self._record_rejected_cell(
+                runtime,
+                tool_call,
                 tool_call_event_id,
-                result=ToolResult(
-                    tool_call_id=tool_call.id,
-                    content="status: error",
-                    result_status=ResultStatus.ERROR,
-                ),
-            )
-            runtime.event_manager.add(
-                PythonOutput(
-                    tool_call_id=tool_call.id,
-                    execution_count=execution_count,
-                    stdout="",
-                    stderr="",
-                    error=self._empty_code_error(args),
-                    value=None,
-                    explicit_return=False,
-                    execution_status=ResultStatus.ERROR,
-                )
+                execution_count,
+                self._empty_code_error(args),
             )
             return None
 
@@ -1915,7 +1982,13 @@ Standard Python builtins and agent instance (`self`) are available."""
         # Nested agent calls may add their events to the event manager during this execution
         with get_harness_metrics().timer("time_code_execution"):
             result = await self._execute_code(
-                runtime, code, builtins, session, method_name, tool_call_id=tool_call.id
+                runtime,
+                code,
+                builtins,
+                session,
+                method_name,
+                tool_call_id=tool_call.id,
+                texts=texts or None,
             )
 
         # Determine final status
@@ -3126,8 +3199,25 @@ Standard Python builtins and agent instance (`self`) are available."""
         target_method_name: str,
         tool_call_id: str | None = None,
         output_metadata: dict[str, Any] | None = None,
+        texts: dict[str, str] | None = None,
     ) -> Any:
         """Execute Python code via the runtime.
+
+        ``texts`` (validated named texts) are bound as plain ``str`` cell locals
+        when execution starts: a cell rejected before running binds nothing and
+        leaves same-named variables and helpers unchanged; once it starts they
+        persist like assignments, even if the code raises. In-process they come
+        back in ``captured_locals``; in the sandbox the worker binds them itself.
+
+        The pre-execution stages differ by backend. Both run the REPL-policy
+        validator, then the runtime's restriction/validation policy, parse and
+        wrapper compile (``ActorRuntime.check_code`` / ``execute_code``; in the
+        sandbox the parent validates and the worker parses and compiles).
+        In-process only, helper defs are then pre-compiled before the cell runs
+        (so ``@strategy`` sees ``_generated_source``), which evaluates their
+        decorators and defaults: an error there (e.g. an undefined ``@stratgy``)
+        rejects the cell before execution starts. The sandbox has no such stage,
+        so the same error is a runtime error after execution started.
 
         If the cell is cancelled while it runs, the cancel is recorded with
         ``_record_cancelled_cell`` (tagged with ``output_metadata``) under
@@ -3162,6 +3252,12 @@ Standard Python builtins and agent instance (`self`) are available."""
             # Validation of restrictions and the cell guard still runs on the parent.
             run_kwargs = {"sandbox_executor": session.sandbox_executor}
         else:
+            # Named texts are data, never source. They are visible to this cell's
+            # helper defs (bodies, decorators, defaults) via the namespace, but
+            # session_locals is not touched here: the runtime returns them in
+            # captured_locals only once execution starts, and the caller merges
+            # those, so a cell rejected before it runs binds nothing.
+            cell_texts = texts or {}
             # Build execution namespace
             strategy_extras: dict[str, Any] = {
                 "CodeActStrategy": type(self),
@@ -3174,17 +3270,48 @@ Standard Python builtins and agent instance (`self`) are available."""
                 pass
 
             namespace = ExecutionNamespaceBuilder.build(
-                runtime.agent, extra={**builtins, **session.session_locals, **strategy_extras}
+                runtime.agent,
+                extra={**builtins, **session.session_locals, **cell_texts, **strategy_extras},
+            )
+
+            # Run the runtime's own pre-execution checks (restriction/validation
+            # policy, parse, wrapper compile) BEFORE pre-compiling helpers: helper
+            # pre-compilation evaluates decorators and defaults and installs helpers
+            # whose globals hold this cell's texts, so a cell the runtime rejects
+            # must not reach it. A rejected cell skips the helper stage and goes to
+            # execute_code, which rejects it with the same error (hooks and events
+            # still fire there).
+            # (Runtimes without check_code, e.g. test doubles, skip this gate.)
+            check_code = getattr(runtime, "check_code", None)
+            rejected_by_runtime = check_code is not None and isinstance(
+                check_code(
+                    code,
+                    builtins={**builtins, **session.session_locals, **cell_texts},
+                    validate=True,
+                    wrap_in_function=True,
+                    execution_count=session.execution_count,
+                    restrictions=self.config.restrictions,
+                    text_bindings=texts,
+                ),
+                BaseException,
             )
 
             # Pre-compile helper function defs so @strategy decorators can see
             # _generated_source at decoration time. Helpers are never attached to the agent.
+            # Known stage difference: an undefined name in a decorator or default
+            # (``@stratgy``) is rejected here, before execution starts, so nothing
+            # binds; the sandbox has no pre-compile stage and fails at runtime, after
+            # execution started, so the texts persist there.
             helper_compiler = HelperFunctionManager()
-            helper_result = helper_compiler.apply(
-                code,
-                runtime.agent,
-                session.session_locals,
-                namespace=namespace,
+            helper_result = (
+                helper_compiler.apply(
+                    code,
+                    runtime.agent,
+                    session.session_locals,
+                    namespace=namespace,
+                )
+                if not rejected_by_runtime
+                else HelperApplyResult(installed=[])
             )
 
             if helper_result.errors:
@@ -3197,8 +3324,10 @@ Standard Python builtins and agent instance (`self`) are available."""
             if helper_result.installed:
                 logger.debug(f"[CODEACT] Compiled helpers: {helper_result.installed}")
 
-            # Execute with session locals
-            run_kwargs = {"builtins": {**builtins, **session.session_locals}}
+            # Execute with session locals (texts included so REPL rebinds work)
+            run_kwargs = {"builtins": {**builtins, **session.session_locals, **cell_texts}}
+        if texts:
+            run_kwargs["text_bindings"] = texts
 
         # Track this execution so the /activity slash command can report that
         # the agent is currently running a code cell (vs blocked on an LLM call).
