@@ -11,7 +11,7 @@ workspace/project paths explicitly:
 * ``memory_edges``  — the directed, typed association graph.
 
 The vector index is abstracted behind ``VectorIndex`` so the brute-force numpy
-default can later be swapped for ``sqlite-vec`` / Chroma without touching callers.
+default can be swapped for ``sqlite-vec`` / Chroma / Qdrant without touching callers.
 The default ``NumpyVectorIndex`` does exact cosine KNN in memory over
 L2-normalised vectors.
 """
@@ -123,7 +123,7 @@ class MemoryStore:
                 self._conn.execute("PRAGMA busy_timeout=5000")
             self._migrate()
             # An explicit index wins; otherwise dispatch on the config's backend
-            # (numpy / sqlite_vec / chroma_*). Default is the zero-dependency numpy index.
+            # (numpy / sqlite_vec / chroma_* / qdrant_server). Default is the zero-dependency numpy index.
             if vector_index is not None:
                 self._index: VectorIndex = vector_index
             elif vector_config is not None:
@@ -174,8 +174,8 @@ class MemoryStore:
 
         SQLite's ``data_version`` moves only on *other* connections' commits,
         so this is a cheap no-op in the single-writer case. Only the in-memory
-        numpy index needs rebuilding; sqlite-vec and Chroma read shared storage
-        directly. SQL reads are always current and never need this.
+        numpy index needs rebuilding; sqlite-vec, Chroma and Qdrant read shared
+        storage directly. SQL reads are always current and never need this.
         """
         with self._lock:
             version = self._current_data_version()
@@ -192,8 +192,13 @@ class MemoryStore:
             cur = self._conn.execute(
                 "SELECT id, embedding FROM memories WHERE archived = 0 AND embedding IS NOT NULL"
             )
-            for row in cur.fetchall():
-                self._index.add(row["id"], _blob_to_vec(row["embedding"]))
+            items = [(row["id"], _blob_to_vec(row["embedding"])) for row in cur.fetchall()]
+            add_many = getattr(self._index, "add_many", None)
+            if add_many:
+                add_many(items)
+            else:
+                for id, vec in items:
+                    self._index.add(id, vec)
 
     def _row_to_memory(self, row: sqlite3.Row) -> Memory:
         data = json.loads(row["data"])
@@ -430,15 +435,14 @@ class MemoryStore:
             q = "SELECT COUNT(*) AS n FROM memories" + where
             return int(self._conn.execute(q, params).fetchone()["n"])
 
-    def _owned_ids(self, ids: list[str], owner: str) -> set[str]:
+    def _live_ids(self, ids: list[str], owner: str | None) -> set[str]:
         with self._lock:
             if not ids:
                 return set()
-            placeholders = ",".join("?" * len(ids))
-            clause, owner_params = self._owner_clause(owner)
+            where, params = self._filters(include_archived=False, owner=owner)
             rows = self._conn.execute(
-                f"SELECT id FROM memories WHERE id IN ({placeholders}) AND {clause}",
-                [*ids, *owner_params],
+                f"SELECT id FROM memories{where} AND id IN (SELECT value FROM json_each(?))",
+                [*params, json.dumps(ids)],
             ).fetchall()
             return {r["id"] for r in rows}
 
@@ -447,19 +451,21 @@ class MemoryStore:
     ) -> list[tuple[str, float]]:
         """Top-k by cosine similarity (excludes archived).
 
-        With ``owner``, results are post-filtered to that owner + unowned rows.
-        The ``VectorIndex`` protocol has no metadata filter, so the index is
-        oversampled (4x, growing) until ``k`` survive or it is exhausted.
+        Results are post-filtered to live rows (and, with ``owner``, to that
+        owner + unowned rows): a persistent or shared index can hold points
+        this file does not. The ``VectorIndex`` protocol has no metadata filter,
+        so the index is oversampled (4x, growing) until ``k`` survive or it is
+        exhausted.
         """
+        if k <= 0:
+            return []
         with self._lock:
             self.refresh_if_changed()
-            if owner is None:
-                return self._index.query(query_vec, k)
             total = len(self._index)
-            n = min(total, max(k * 4, k))
+            n = min(total, k * 4)
             while True:
                 ranked = self._index.query(query_vec, n)
-                allowed = self._owned_ids([mid for mid, _ in ranked], owner)
+                allowed = self._live_ids([mid for mid, _ in ranked], owner)
                 out = [(mid, score) for mid, score in ranked if mid in allowed]
                 if len(out) >= k or n >= total:
                     return out[:k]
@@ -523,4 +529,7 @@ class MemoryStore:
 
     def close(self) -> None:
         with self._lock:
+            close_index = getattr(self._index, "close", None)
+            if close_index:
+                close_index()
             self._conn.close()

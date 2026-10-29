@@ -97,6 +97,22 @@ def test_archive_excludes_from_index_and_listing(store, emb):
     assert store.get(m.id).archived is True  # still retrievable (tombstone)
 
 
+def test_knn_skips_points_the_store_does_not_hold(emb):
+    # A persistent or shared index can hold points this file archived or never had.
+    index = NumpyVectorIndex()
+    store = MemoryStore(":memory:", vector_index=index)
+    live = _add(store, emb, "deploy ship release")
+    archived = _add(store, emb, "deploy ship rollback")
+    store._conn.execute("UPDATE memories SET archived = 1 WHERE id = ?", (archived.id,))
+    index.add("foreign", emb.embed("deploy ship release now"))
+    q = emb.embed("deploy ship")
+    assert [i for i, _ in store.knn(q, 5)] == [live.id]
+    assert [i for i, _ in store.knn(q, 5, owner="")] == [live.id]
+    assert store.knn(q, 0) == []
+    assert store.knn(q, -1) == []
+    store.close()
+
+
 def test_delete_removes_everything(store, emb):
     a = _add(store, emb, "a")
     b = _add(store, emb, "b")

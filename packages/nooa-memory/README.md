@@ -8,8 +8,9 @@ across sessions backed by vector search.
 uv add nooa-memory
 ```
 
-The default vector backend is numpy-only (no extra dependencies). `sqlite-vec`
-and `chromadb` backends are imported lazily if you install them yourself.
+The default vector backend is numpy-only (no extra dependencies). `sqlite-vec`,
+`chromadb`, and `qdrant-client` backends are imported lazily if you install
+them yourself.
 
 See the [main repository](https://github.com/NVIDIA-NeMo/labs-OO-Agents) for
 documentation, and `examples/arc_agi_3` for a worked usage example.
