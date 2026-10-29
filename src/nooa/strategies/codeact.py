@@ -271,6 +271,7 @@ class CodeActSession:
     event_manager: Any  # EventManager reference for Out[n] access
     iteration: int = 0
     error_count: int = 0
+    consecutive_api_errors: int = 0
     consecutive_text_only: int = 0
     session_locals: dict[str, Any] = field(default_factory=dict)
     out_accessor: Any = field(default=None)  # OutAccessor instance, created lazily
@@ -301,6 +302,12 @@ class CodeActSession:
 
     def record_error(self) -> None:
         self.error_count += 1
+
+    def record_api_error(self) -> None:
+        self.consecutive_api_errors += 1
+
+    def reset_api_errors(self) -> None:
+        self.consecutive_api_errors = 0
 
     def record_text_only(self) -> None:
         self.consecutive_text_only += 1
@@ -410,7 +417,7 @@ class CodeActStrategy(CompositeStrategy):
 
     Configuration (fields of CodeActConfig, passed via config=):
         max_iterations: Maximum number of tool call iterations
-        max_retries: Maximum consecutive errors before failure
+        max_retries: Error budget; LLM API errors count only while consecutive
 
     Example:
         @strategy(CodeActStrategy())
@@ -1002,7 +1009,10 @@ Standard Python builtins and agent instance (`self`) are available."""
                     # Note: unifiedllm already has retry logic with exponential backoff
                     # for 429, 500, 502, 503, 504 errors. This handles cases where
                     # all retries are exhausted or the error is not retryable.
-                    session.record_error()
+                    # Only consecutive failures count: a transient endpoint error
+                    # followed by a successful call must not eat into the budget
+                    # for the rest of a long turn.
+                    session.record_api_error()
                     error_name = type(e).__name__
                     cause_parts = []
                     exc: BaseException | None = e
@@ -1013,18 +1023,19 @@ Standard Python builtins and agent instance (`self`) are available."""
                         exc = exc.__cause__ or exc.__context__
                     cause_chain = " <- ".join(cause_parts)
                     error_msg = (
-                        f"LLM API error (attempt {session.error_count}/{session.max_retries}): "
+                        f"LLM API error (attempt {session.consecutive_api_errors}/{session.max_retries}): "
                         f"{cause_chain}"
                     )
                     get_harness_metrics().llm_api_error(cause_chain[:500])
                     runtime.event_manager.add(Error(content=error_msg))
                     logger.warning(
-                        f"[CODEACT] LLM API error (iter={session.iteration}, err={session.error_count}): "
+                        f"[CODEACT] LLM API error (iter={session.iteration}, "
+                        f"api_err={session.consecutive_api_errors}): "
                         f"{cause_chain}",
                         exc_info=True,
                     )
                     turn_state.exception = error_name
-                    if session.is_exhausted():
+                    if session.consecutive_api_errors >= session.max_retries:
                         turn_state.is_final = True
                         raise GenerationError(
                             f"LLM API error after {session.max_retries} retries. "
@@ -1034,6 +1045,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                 # Skip rest of turn if LLM call failed
                 if response is None:
                     continue
+                session.reset_api_errors()
 
                 # Output-limit responses are incomplete even when they carry
                 # partial text. Preserve the exact LLMResponse for diagnostics,

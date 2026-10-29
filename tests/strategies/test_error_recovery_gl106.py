@@ -98,6 +98,24 @@ class ErrorAfterNFakeLLM(FakeLLMClient):
         return await super().acall(messages, tools, output_model, **kwargs)
 
 
+class FlakyFakeLLM(FakeLLMClient):
+    """FakeLLMClient that raises RuntimeError on the given 0-based call indices."""
+
+    def __init__(self, scripted_responses: list[LLMResponse], failing_calls: set[int]):
+        super().__init__(scripted_responses=scripted_responses)
+        self._failing_calls = failing_calls
+        self.attempts = 0
+
+    async def acall(
+        self, messages: list[dict], tools=None, output_model=None, **kwargs
+    ) -> LLMResponse:
+        index = self.attempts
+        self.attempts += 1
+        if index in self._failing_calls:
+            raise RuntimeError("Simulated transient LLM API failure")
+        return await super().acall(messages, tools, output_model, **kwargs)
+
+
 class ReasoningReplayFailingLLM(FakeLLMClient):
     """Raise a framework replay error and count attempts."""
 
@@ -181,6 +199,33 @@ class TestCodeActLLMApiErrorExhaustion:
         err = str(exc_info.value)
         # Must mention "LLM API error after 2 retries" — the exact phrase from codeact.py line 697
         assert "LLM API error after 2 retries" in err
+
+    @pytest.mark.asyncio
+    async def test_successful_call_resets_api_error_budget(self):
+        """Non-consecutive API errors must not add up across a long turn.
+
+        Calls 0, 2 and 4 fail and each retry succeeds. With max_retries=2 the
+        turn must still finish: only consecutive API errors count.
+        """
+
+        class TestAgent(Agent, llm=_DUMMY_LLM):
+            @strategy(CodeActStrategy(config=CodeActConfig(max_retries=2, max_iterations=10)))
+            async def compute(self, x: int) -> int:
+                """Compute {x}."""
+                ...
+
+        fake_llm = FlakyFakeLLM(
+            scripted_responses=[
+                _resp(tool_calls=[_exec_python("y = 1", call_id="c1")]),
+                _resp(tool_calls=[_exec_python("y = 2", call_id="c2")]),
+                _resp(tool_calls=[_return_result(42)]),
+            ],
+            failing_calls={0, 2, 4},
+        )
+
+        agent = TestAgent(llm=fake_llm)
+        assert await agent.compute(5) == 42
+        assert fake_llm.attempts == 6
 
 
 # ---------------------------------------------------------------------------
