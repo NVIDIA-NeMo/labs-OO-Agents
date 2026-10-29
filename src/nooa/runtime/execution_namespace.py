@@ -17,7 +17,6 @@ import builtins
 import contextvars
 import linecache
 import symtable
-import textwrap
 import types
 import weakref
 from collections.abc import Iterator, Mapping
@@ -296,12 +295,19 @@ class CompiledCell:
 def compile_cell(source: str, filename: str, reserved: frozenset[str]) -> CompiledCell:
     """Compile once; definitions/defaults/decorators run only on cell execution."""
     name = _INTERNAL + "cell_" + uuid4().hex
-    wrapped = "async def " + name + "():\n" + textwrap.indent(source or "pass", "    ")
-    tree = ast.parse(wrapped, filename=filename)
-    wrapper = tree.body[0]
+    # Parse before wrapping: indenting source text changes multiline literals
+    # and escaped newlines. Move the original nodes, including their locations,
+    # into a synthetic async function so await/return keep function semantics.
+    tree = ast.parse(source, filename=filename)
+    wrapper = ast.parse("async def " + name + "(): pass", filename=filename).body[0]
+    wrapper.body = tree.body or wrapper.body
+    wrapper.end_lineno = wrapper.body[-1].end_lineno
+    wrapper.end_col_offset = wrapper.body[-1].end_col_offset
+    tree.body = [wrapper]
     # First validate genuine Python scoping (including nonlocal and global
     # annotation diagnostics) before normalization changes the compiler input.
-    original_table = symtable.symtable(wrapped, filename, "exec").get_children()[0]
+    # Unparsed text is only for scope analysis; executable nodes stay original.
+    original_table = symtable.symtable(ast.unparse(tree), filename, "exec").get_children()[0]
     bindings = _CellBindings()
     for statement in wrapper.body:
         bindings.visit(statement)
@@ -327,11 +333,6 @@ def compile_cell(source: str, filename: str, reserved: frozenset[str]) -> Compil
     metadata = _SourceMetadata()
     wrapper.body = [metadata.visit(statement) for statement in wrapper.body]
     _GlobalDeletes().visit(wrapper)
-    ast.fix_missing_locations(tree)
-    # Keep source line numbers at their original cell positions (the wrapper is
-    # synthetic and line 1). Tracebacks and inspect/strategy see original text.
-    for statement in wrapper.body:
-        ast.increment_lineno(statement, -1)
     ast.fix_missing_locations(tree)
     return CompiledCell(
         compile(tree, filename, "exec", dont_inherit=True),

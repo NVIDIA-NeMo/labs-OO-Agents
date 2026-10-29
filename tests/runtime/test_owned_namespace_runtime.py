@@ -335,3 +335,34 @@ class C:
     inner = ns.globals["C"].helper._generated_source
     assert "outer definition" in outer and "inner definition" not in outer
     assert "inner definition" in inner and "outer definition" not in inner
+
+
+@pytest.mark.parametrize(
+    "literal",
+    [
+        '"""first\nsecond\n    third\n"""',
+        'b"""first\nsecond\n    third\n"""',
+        'r"""first\\n\nsecond\n    third\n"""',
+        'rf"""first\\n\n{notification}\n    third\n"""',
+        '"first\\\nsecond\\\n    third"',
+        '"""cat <<\'EOF\'\nfirst\n    second\nEOF\n"""',
+    ],
+    ids=["text", "bytes", "raw", "raw-f-string", "continuation", "heredoc"],
+)
+async def test_literal_semantics_survive_actor_execution_and_retained_helpers(literal):
+    agent, ns = CellAgent(), namespace()
+    source = "def helper():\n    return " + literal
+    source += "\nvalue = helper()\nprint(repr(value))\nreturn value"
+    try:
+        with ns.enter({}):
+            first = await run(agent, ns, source, notification="A")
+        expected = eval(literal, {"notification": "A"})
+        assert first.error is None, first.error
+        assert first.returned_value == expected
+        assert first.stdout == repr(expected) + "\n"
+        with ns.enter({}):
+            second = await run(agent, ns, "return helper()", notification="B")
+        assert second.error is None, second.error
+        assert second.returned_value == eval(literal, {"notification": "B"})
+    finally:
+        await agent.aclose()
