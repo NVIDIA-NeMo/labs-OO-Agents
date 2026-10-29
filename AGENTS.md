@@ -155,6 +155,8 @@ self.context["project_state"] = Context(expr="self.format_project_state()")
   use saved aliases in agent code. Get permission before inference checks,
   especially noninteractive stages. Offline setup and diagnostics belong in
   `skills/nooa-model-configuration/SKILL.md` and `docs/model-connect.md`.
+  On Windows, run nooa inside WSL 2: native Windows stops at `import nooa`
+  unless `NOOA_SKIP_PLATFORM_CHECK=1` is set.
 - Import `Image`, `Audio`, `Video`, and `File` from `nooa.media`. Pass them as
   method arguments or use `show()` while CodeAct runs. Configure `media_inputs`
   for each model; formats left out are replaced with text notices. `File`
@@ -252,6 +254,12 @@ For deeper authoring guidance, see `skills/nooa-agent-authoring/SKILL.md`.
 - Sync lockfile: `uv sync`
 - Run scripts: `uv run python <script>.py`
 - Run tests: `uv run pytest`
+- **POSIX-only code** (`fcntl`, `resource`, `termios`, POSIX signals,
+  `os.killpg`, fork, `/bin/bash`): import those modules inside the function that
+  uses them, never at module level, and call
+  `nooa._platform.require_posix("<feature>")` where the feature starts. Don't
+  port POSIX-only features to native Windows; WSL 2 is the supported path. See
+  CONTRIBUTING.md, "Platform support".
 
 ## Experiments
 

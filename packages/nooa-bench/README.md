@@ -9,6 +9,8 @@ uv add nooa-bench
 nemo-harbor --help
 ```
 
+> **Windows:** use [WSL 2](https://learn.microsoft.com/windows/wsl/install). Native Windows is not supported; see the [main README](https://github.com/NVIDIA-NeMo/labs-OO-Agents#installation).
+
 See the [main repository](https://github.com/NVIDIA-NeMo/labs-OO-Agents) for
 documentation.
 
