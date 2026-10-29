@@ -34,3 +34,24 @@ def test_output_untouched_off_windows(monkeypatch):
     nooa_cli._use_utf8_output()
 
     assert out.encoding == "cp1252"
+
+
+def test_piped_stdin_reads_utf8_on_windows(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "win32")
+    stdin = io.TextIOWrapper(io.BytesIO("caf\u00e9\n".encode()), encoding="cp1252")
+    monkeypatch.setattr(sys, "stdin", stdin)
+    monkeypatch.setattr(sys, "stdout", _cp1252())
+    monkeypatch.setattr(sys, "stderr", _cp1252())
+
+    nooa_cli._use_utf8_output()
+
+    assert stdin.read() == "caf\u00e9\n"
+
+
+def test_missing_streams_are_skipped(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(sys, "stdout", None)
+    monkeypatch.setattr(sys, "stderr", None)
+    monkeypatch.setattr(sys, "stdin", None)
+
+    nooa_cli._use_utf8_output()

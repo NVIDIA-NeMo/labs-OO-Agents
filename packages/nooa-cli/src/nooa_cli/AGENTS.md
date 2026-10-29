@@ -130,7 +130,7 @@ same contract as an in-repo command module.
 - **Importing `nooa_cli` must not import `nooa`** (`test_connect_entrypoint.py`
   checks this). `main()` checks the native-Windows policy itself
   (`_refuse_unsupported_platform`, kept equal to `nooa._platform` by
-  `tests/test_cli_platform_check.py`) and switches redirected output to UTF-8
+  `packages/nooa-cli/tests/test_cli_platform_check.py`) and switches redirected output to UTF-8
   on Windows. New console entry points should go through `main()`.
 
 This mirrors the existing `nooa.skills` and `nooa.bundled_configs` groups.

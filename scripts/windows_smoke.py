@@ -21,6 +21,8 @@ import tempfile
 from pathlib import Path
 
 SKIP = "NOOA_SKIP_PLATFORM_CHECK"
+# CI sets NOOA_SMOKE_STRICT=1 so a missing nooa.exe or nooa-cli fails instead of skipping.
+STRICT = os.environ.get("NOOA_SMOKE_STRICT") == "1"
 CONNECT_ARGS = [
     "fake-model",
     "--provider",
@@ -57,11 +59,15 @@ def _real_windows_checks() -> None:
         capture_output=True,
         text=True,
     )
-    assert refused.returncode != 0 and SKIP in refused.stderr, refused.stderr
-    print("refused without override: import nooa raises UnsupportedPlatformError")
+    assert refused.returncode == 1 and SKIP in refused.stderr, refused.stderr
+    assert refused.stderr.startswith("Error: nooa does not support native Windows"), refused.stderr
+    assert "Traceback" not in refused.stderr, refused.stderr
+    print("refused without override: import nooa exits 1 with one clean line")
 
     nooa_exe = Path(sys.executable).with_name("nooa.exe")
     if not nooa_exe.exists():
+        if STRICT:
+            raise AssertionError(f"nooa.exe not found next to {sys.executable}")
         print("cli checks: skipped (nooa.exe not next to python)")
         return
     cli = subprocess.run(
@@ -210,6 +216,8 @@ def main() -> None:
             from click.testing import CliRunner
             from nooa_cli.commands.connect import command as connect_command
         except ImportError:
+            if STRICT:
+                raise
             print("connect: skipped (nooa-cli not installed)")
         else:
             if importlib.util.find_spec("msvcrt") is None:

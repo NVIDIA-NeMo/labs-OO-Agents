@@ -68,13 +68,88 @@ def test_import_and_cli_refused_under_windows_simulation() -> None:
             timeout=120,
         )
 
-    lib = run("import nooa")
-    assert lib.returncode != 0
-    assert "UnsupportedPlatformError" in lib.stderr
+    for code in ("import nooa", "import nooa.trace_explorer"):
+        lib = run(code)
+        assert lib.returncode == 1, (code, lib.stderr)
+        assert lib.stderr.startswith("Error: nooa does not support native Windows"), lib.stderr
+        assert "Traceback" not in lib.stderr
+        assert len(lib.stderr.strip().splitlines()) == 1
     cli = run("import nooa_cli; nooa_cli.main()")
     assert cli.returncode == 1
     assert cli.stderr.startswith("Error: nooa does not support native Windows"), cli.stderr
     assert "Traceback" not in cli.stderr
+
+
+def test_uncaught_refusal_prints_one_line(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.delenv("NOOA_SKIP_PLATFORM_CHECK", raising=False)
+    monkeypatch.setattr(sys, "excepthook", sys.__excepthook__)
+    with pytest.raises(UnsupportedPlatformError) as info:
+        check_platform()
+    sys.excepthook(info.type, info.value, info.tb)
+    assert capsys.readouterr().err == f"Error: {info.value}\n"
+
+
+def test_custom_excepthook_is_left_alone(monkeypatch: pytest.MonkeyPatch) -> None:
+    def custom(*args: object) -> None:
+        pass
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.delenv("NOOA_SKIP_PLATFORM_CHECK", raising=False)
+    monkeypatch.setattr(sys, "excepthook", custom)
+    with pytest.raises(UnsupportedPlatformError):
+        check_platform()
+    assert sys.excepthook is custom
+
+
+@pytest.mark.parametrize("value", ["0", "false", "", "on"])
+def test_other_override_values_still_refuse(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setenv("NOOA_SKIP_PLATFORM_CHECK", value)
+    monkeypatch.setattr(sys, "excepthook", sys.__excepthook__)
+    with pytest.raises(UnsupportedPlatformError):
+        check_platform()
+
+
+# Every importable nooa module must stay importable on native Windows with the
+# override: POSIX-only modules are imported inside the functions that use them.
+_IMPORT_ALL = r"""
+import importlib, pkgutil, sys
+import nooa, nooa_cli
+POSIX = {"fcntl", "resource", "termios", "tty", "pty", "pwd", "grp", "readline", "curses", "_curses", "syslog"}
+bad = []
+for pkg in (nooa, nooa_cli):
+    for info in pkgutil.walk_packages(pkg.__path__, pkg.__name__ + "."):
+        if info.name.endswith("__main__"):
+            continue
+        try:
+            importlib.import_module(info.name)
+        except ModuleNotFoundError as exc:
+            if exc.name in POSIX:
+                bad.append(f"{info.name}: {exc!r}")
+        except AttributeError as exc:
+            if "module 'os'" in str(exc) or "module 'signal'" in str(exc):
+                bad.append(f"{info.name}: {exc!r}")
+        except Exception:
+            pass  # optional extras that are not installed, and so on
+print("\n".join(bad) or "ALL IMPORTS OK")
+sys.exit(1 if bad else 0)
+"""
+
+
+def test_every_module_imports_under_windows_simulation() -> None:
+    result = subprocess.run(
+        [sys.executable, str(REPO / "scripts" / "winsim.py"), "-c", _IMPORT_ALL],
+        cwd=REPO,
+        env={**os.environ, "NOOA_SKIP_PLATFORM_CHECK": "1"},
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "ALL IMPORTS OK" in result.stdout
 
 
 def test_require_posix_is_noop_on_posix(monkeypatch: pytest.MonkeyPatch) -> None:

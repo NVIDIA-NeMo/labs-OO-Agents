@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """nooa connect on native Windows: saving works; POSIX-only failures stay readable."""
 
+import filelock
 import yaml
 from click.testing import CliRunner
 from nooa_cli.commands import _connect_view as view
@@ -32,11 +33,23 @@ ARGS = [
 def test_connect_saves_on_native_windows(monkeypatch, tmp_path):
     # Native Windows takes the filelock branch of connect.write (no fcntl there).
     monkeypatch.setattr(platform, "is_native_windows", lambda: True)
+
+    # The Windows branch locks with filelock (whose Unix backend also uses
+    # flock, so spy on FileLock rather than blocking fcntl).
+    used = []
+    real_file_lock = filelock.FileLock
+
+    def spy(*args, **kwargs):
+        used.append(args)
+        return real_file_lock(*args, **kwargs)
+
+    monkeypatch.setattr(filelock, "FileLock", spy)
     output = tmp_path / "llm_config.yaml"
     result = CliRunner().invoke(command, [*ARGS, "--output", str(output)])
 
     assert result.exit_code == 0, result.output
     assert "fake" in yaml.safe_load(output.read_text())["models"]
+    assert used, "native Windows must take the filelock branch of connect.write"
 
 
 def test_wizard_reports_posix_only_save_cleanly(monkeypatch, tmp_path):

@@ -256,6 +256,8 @@ jobs:
       # pure-Python core and `nooa connect`. windows_smoke.py also checks that
       # the refusal (without this variable) is one clean line.
       NOOA_SKIP_PLATFORM_CHECK: "1"
+      # Fail instead of skipping when nooa.exe or nooa-cli is missing.
+      NOOA_SMOKE_STRICT: "1"
     defaults:
       run:
         shell: bash

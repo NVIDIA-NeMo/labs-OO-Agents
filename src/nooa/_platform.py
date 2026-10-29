@@ -4,8 +4,10 @@
 
 ``import nooa`` on native Windows raises :class:`UnsupportedPlatformError`
 unless ``NOOA_SKIP_PLATFORM_CHECK=1`` is set (like Node.js's
-``NODE_SKIP_PLATFORM_CHECK``). With the override, the pure-Python core and
-``nooa connect`` run and are tested in CI; nothing else is supported there.
+``NODE_SKIP_PLATFORM_CHECK``). That check lives in the stdlib-only
+:mod:`nooa._platform_policy` so it runs before other nooa modules load. With the
+override, the pure-Python core and ``nooa connect`` are tested in CI; other
+features may work but are unsupported.
 
 Features that need POSIX (bash sessions, the sandbox, process groups, file
 locks, POSIX signals) call :func:`require_posix` at the point of use, never at
@@ -14,26 +16,29 @@ import time. We do not port those features to Windows; use WSL 2 for them.
 
 from __future__ import annotations
 
-import os
-import sys
-
+from nooa._platform_policy import (
+    SKIP_PLATFORM_CHECK_ENV,
+    UNSUPPORTED_PLATFORM_MESSAGE,
+    UnsupportedPlatformError,
+    check_platform,
+    is_native_windows,
+    platform_check_skipped,
+)
 from nooa.errors import NemoOOAgentsRuntimeError
 
+__all__ = [
+    "SKIP_PLATFORM_CHECK_ENV",
+    "UNSUPPORTED_PLATFORM_MESSAGE",
+    "WSL_HINT",
+    "PosixOnlyFeatureError",
+    "UnsupportedPlatformError",
+    "check_platform",
+    "is_native_windows",
+    "platform_check_skipped",
+    "require_posix",
+]
+
 WSL_HINT = "Native Windows runs only the pure-Python core of nooa; use WSL 2 (https://learn.microsoft.com/windows/wsl/install) for this feature."
-
-
-SKIP_PLATFORM_CHECK_ENV = "NOOA_SKIP_PLATFORM_CHECK"
-UNSUPPORTED_PLATFORM_MESSAGE = (
-    "nooa does not support native Windows; use WSL 2 "
-    "(https://learn.microsoft.com/windows/wsl/install). "
-    f"Setting the {SKIP_PLATFORM_CHECK_ENV} environment variable to 1 skips this check: "
-    "the pure-Python core and `nooa connect` are tested on native Windows; "
-    "other features may work but are unsupported."
-)
-
-
-class UnsupportedPlatformError(ImportError):
-    """``import nooa`` on native Windows without ``NOOA_SKIP_PLATFORM_CHECK=1``."""
 
 
 class PosixOnlyFeatureError(NemoOOAgentsRuntimeError, NotImplementedError):
@@ -44,23 +49,7 @@ class PosixOnlyFeatureError(NemoOOAgentsRuntimeError, NotImplementedError):
         super().__init__(f"{feature} requires Linux or macOS. {WSL_HINT}")
 
 
-def is_native_windows() -> bool:
-    """True on native Windows (not WSL, which reports ``linux``)."""
-    return sys.platform == "win32"
-
-
 def require_posix(feature: str) -> None:
     """Raise :class:`PosixOnlyFeatureError` naming *feature* on native Windows."""
     if is_native_windows():
         raise PosixOnlyFeatureError(feature)
-
-
-def platform_check_skipped() -> bool:
-    """True when the user opted in to running on an unsupported platform."""
-    return os.environ.get(SKIP_PLATFORM_CHECK_ENV, "").strip().lower() in {"1", "true", "yes"}
-
-
-def check_platform() -> None:
-    """Refuse native Windows at import unless the user opted in (see module doc)."""
-    if is_native_windows() and not platform_check_skipped():
-        raise UnsupportedPlatformError(UNSUPPORTED_PLATFORM_MESSAGE)

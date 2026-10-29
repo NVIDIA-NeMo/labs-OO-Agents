@@ -10,11 +10,11 @@ serialized execution, and complete transparency.
 import logging as _logging
 import typing as _typing
 
-from nooa._platform import check_platform as _check_platform
+from nooa._platform_policy import check_platform as _check_platform
 from nooa._version import __version__
 
-# Native Windows is unsupported: stop here, before the heavy imports, unless
-# NOOA_SKIP_PLATFORM_CHECK=1 (see nooa._platform).
+# Native Windows is unsupported: stop here, before any other nooa module loads,
+# unless NOOA_SKIP_PLATFORM_CHECK=1 (see nooa._platform_policy).
 _check_platform()
 
 # ---------------------------------------------------------------------------
