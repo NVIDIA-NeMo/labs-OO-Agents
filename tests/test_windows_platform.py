@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Native-Windows policy: pure-Python core works, POSIX-only features name WSL 2.
+"""Native-Windows policy: refused at import unless NOOA_SKIP_PLATFORM_CHECK=1;
+with the override the pure-Python core works and POSIX-only features name WSL 2.
 
 The subprocess test runs ``scripts/windows_smoke.py`` under ``scripts/winsim.py``
 (POSIX-only modules, signals and os functions hidden; ``sys.platform="win32"``)
@@ -19,10 +20,61 @@ from pathlib import Path
 
 import pytest
 
-from nooa._platform import PosixOnlyFeatureError, require_posix
+from nooa._platform import (
+    PosixOnlyFeatureError,
+    UnsupportedPlatformError,
+    check_platform,
+    require_posix,
+)
 from nooa.errors import NemoOOAgentsRuntimeError
 
 REPO = Path(__file__).resolve().parents[1]
+
+
+def test_check_platform_refuses_native_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.delenv("NOOA_SKIP_PLATFORM_CHECK", raising=False)
+    with pytest.raises(UnsupportedPlatformError) as info:
+        check_platform()
+    assert isinstance(info.value, ImportError)
+    assert "WSL 2" in str(info.value)
+    assert "NOOA_SKIP_PLATFORM_CHECK" in str(info.value)
+
+
+@pytest.mark.parametrize("value", ["1", "true", "YES"])
+def test_check_platform_override(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setenv("NOOA_SKIP_PLATFORM_CHECK", value)
+    check_platform()
+
+
+def test_check_platform_is_noop_on_posix(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.delenv("NOOA_SKIP_PLATFORM_CHECK", raising=False)
+    check_platform()
+
+
+def test_import_and_cli_refused_under_windows_simulation() -> None:
+    env = {**os.environ, "NOOA_SKIP_PLATFORM_CHECK": "0"}
+    winsim = str(REPO / "scripts" / "winsim.py")
+
+    def run(code: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, winsim, "-c", code],
+            cwd=REPO,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+
+    lib = run("import nooa")
+    assert lib.returncode != 0
+    assert "UnsupportedPlatformError" in lib.stderr
+    cli = run("import nooa_cli; nooa_cli.main()")
+    assert cli.returncode == 1
+    assert cli.stderr.startswith("Error: nooa does not support native Windows"), cli.stderr
+    assert "Traceback" not in cli.stderr
 
 
 def test_require_posix_is_noop_on_posix(monkeypatch: pytest.MonkeyPatch) -> None:

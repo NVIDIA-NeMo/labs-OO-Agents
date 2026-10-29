@@ -240,15 +240,22 @@ jobs:
           # reachable from the checked-out PR merge commit instead.
           ./gitleaks git --config .gitleaks.toml --redact --no-banner --log-opts="HEAD" .
 
-  # Native Windows runs only the pure-Python core (see src/nooa/_platform.py):
-  # install the wheels as a user would, import every distribution, run a
-  # scripted agent (Predict + in-process CodeAct), and check that POSIX-only
-  # features fail with the WSL 2 message. The test suite itself needs POSIX.
+  # Native Windows is unsupported (see src/nooa/_platform.py), but with
+  # NOOA_SKIP_PLATFORM_CHECK=1 the pure-Python core and `nooa connect` are kept
+  # working: install the wheels as a user would, import every distribution, run
+  # a scripted agent (Predict + in-process CodeAct), save a model with the real
+  # CLI (output redirected), and check that POSIX-only features and the default
+  # refusal fail with the WSL 2 message. The test suite itself needs POSIX.
   windows-core-smoke:
     runs-on: windows-latest
     timeout-minutes: 20
     permissions:
       contents: read
+    env:
+      # Native Windows is refused at import by default; CI opts in to test the
+      # pure-Python core and `nooa connect`. windows_smoke.py also checks that
+      # the refusal (without this variable) is one clean line.
+      NOOA_SKIP_PLATFORM_CHECK: "1"
     defaults:
       run:
         shell: bash

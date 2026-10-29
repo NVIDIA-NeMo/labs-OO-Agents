@@ -2,21 +2,105 @@
 # SPDX-License-Identifier: Apache-2.0
 """Pure-Python core smoke test, run on native Windows CI or under scripts/winsim.py.
 
-Exits 0 and prints ``SMOKE OK`` when: ``import nooa`` works, a scripted
-(FakeLLMClient) agent runs with PredictStrategy and with in-process CodeAct,
-and every POSIX-only feature raises PosixOnlyFeatureError naming WSL 2.
+Native Windows is refused at import unless NOOA_SKIP_PLATFORM_CHECK=1; this
+script opts in for itself. Exits 0 and prints ``SMOKE OK`` when: ``import nooa``
+works, a scripted (FakeLLMClient) agent runs with PredictStrategy and with
+in-process CodeAct, every POSIX-only feature raises PosixOnlyFeatureError naming
+WSL 2, and (on real Windows) the refusal without the override is clean and the
+real ``nooa connect`` saves with its output redirected.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import os
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
+SKIP = "NOOA_SKIP_PLATFORM_CHECK"
+CONNECT_ARGS = [
+    "fake-model",
+    "--provider",
+    "custom",
+    "--endpoint",
+    "http://127.0.0.1:9/v1",
+    "--api-style",
+    "chat",
+    "--api-key-env",
+    "NOOA_SMOKE_FAKE_KEY",
+    "--as",
+    "fake",
+    "--no-probe",
+    "--no-catalogue",
+    "--yes",
+]
+
+
+def _child_env(*, skip: str | None) -> dict[str, str]:
+    """The environment of a fresh Windows user: no UTF-8 overrides, opt-in as given."""
+    env = {k: v for k, v in os.environ.items() if k not in {SKIP, "PYTHONUTF8", "PYTHONIOENCODING"}}
+    if skip is not None:
+        env[SKIP] = skip
+    return env
+
+
+def _real_windows_checks() -> None:
+    """Subprocess checks that need real Windows (redirected output, console scripts)."""
+    import yaml
+
+    refused = subprocess.run(
+        [sys.executable, "-c", "import nooa"],
+        env=_child_env(skip=None),
+        capture_output=True,
+        text=True,
+    )
+    assert refused.returncode != 0 and SKIP in refused.stderr, refused.stderr
+    print("refused without override: import nooa raises UnsupportedPlatformError")
+
+    nooa_exe = Path(sys.executable).with_name("nooa.exe")
+    if not nooa_exe.exists():
+        print("cli checks: skipped (nooa.exe not next to python)")
+        return
+    cli = subprocess.run(
+        [str(nooa_exe), "--help"], env=_child_env(skip=None), capture_output=True, text=True
+    )
+    assert cli.returncode == 1, (cli.returncode, cli.stdout, cli.stderr)
+    assert cli.stderr.startswith("Error: nooa does not support native Windows"), cli.stderr
+    assert "Traceback" not in cli.stderr, cli.stderr
+    print("refused without override: nooa --help exits 1 with one clean line")
+
+    probe = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import nooa_cli; nooa_cli._use_utf8_output(); print('\\u2713 \\u2192 \\u21bb')",
+        ],
+        env=_child_env(skip="1"),
+        capture_output=True,
+    )
+    assert probe.returncode == 0, probe.stderr.decode(errors="replace")
+    assert "\u2713" in probe.stdout.decode("utf-8"), probe.stdout
+    print("redirected output: check marks encode as UTF-8")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "llm_config.yaml"
+        save = subprocess.run(
+            [str(nooa_exe), "connect", *CONNECT_ARGS, "--output", str(out)],
+            env=_child_env(skip="1"),
+            capture_output=True,
+        )
+        assert save.returncode == 0, save.stdout.decode(errors="replace") + save.stderr.decode(
+            errors="replace"
+        )
+        assert "fake" in yaml.safe_load(out.read_text())["models"], out.read_text()
+    print("redirected output: real `nooa connect` saved model 'fake'")
+
 
 def main() -> None:
+    os.environ.setdefault(SKIP, "1")  # native Windows is refused at import otherwise
     import nooa
     import nooa.context_blocks  # noqa: F401
     import nooa.decisions  # noqa: F401
@@ -135,27 +219,7 @@ def main() -> None:
 
                 with tempfile.TemporaryDirectory() as tmp:
                     out = Path(tmp) / "llm_config.yaml"
-                    res = CliRunner().invoke(
-                        connect_command,
-                        [
-                            "fake-model",
-                            "--provider",
-                            "custom",
-                            "--endpoint",
-                            "http://127.0.0.1:9/v1",
-                            "--api-style",
-                            "chat",
-                            "--api-key-env",
-                            "NOOA_SMOKE_FAKE_KEY",
-                            "--as",
-                            "fake",
-                            "--no-probe",
-                            "--no-catalogue",
-                            "--yes",
-                            "--output",
-                            str(out),
-                        ],
-                    )
+                    res = CliRunner().invoke(connect_command, [*CONNECT_ARGS, "--output", str(out)])
                     assert res.exit_code == 0, (res.exit_code, res.output)
                     assert "fake" in yaml.safe_load(out.read_text())["models"], out.read_text()
                 print("connect: saved model 'fake' (filelock on Windows)")
@@ -164,6 +228,11 @@ def main() -> None:
 
         with SQLiteStorageManager(":memory:"):
             print("sqlite :memory: ok")
+
+        if importlib.util.find_spec("msvcrt") is None:
+            print("real-Windows checks: skipped (simulation)")
+        else:
+            _real_windows_checks()
 
     print("SMOKE OK")
 

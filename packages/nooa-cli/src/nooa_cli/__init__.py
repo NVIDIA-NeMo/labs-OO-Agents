@@ -19,6 +19,9 @@ Shell completion:
     eval "$(_NOOA_COMPLETE=zsh_source nooa)"     # zsh
 """
 
+import os
+import sys
+
 import click
 
 from .commands import discover_commands
@@ -72,6 +75,46 @@ for _name, _cmd in discover_commands():
 oo.add_command(completion)
 
 
+# Same policy and wording as nooa._platform, checked here without importing
+# nooa so the CLI stays lazy (tests/test_cli_platform_check.py keeps them equal).
+_SKIP_PLATFORM_CHECK_ENV = "NOOA_SKIP_PLATFORM_CHECK"
+_UNSUPPORTED_PLATFORM_MESSAGE = (
+    "nooa does not support native Windows; use WSL 2 "
+    "(https://learn.microsoft.com/windows/wsl/install). "
+    f"Setting the {_SKIP_PLATFORM_CHECK_ENV} environment variable to 1 skips this check: "
+    "only the pure-Python core and `nooa connect` are tested on native Windows, "
+    "and other issues found only there will not be fixed."
+)
+
+
+def _refuse_unsupported_platform() -> None:
+    """Exit with one clean line on native Windows unless the user opted in."""
+    if sys.platform != "win32":
+        return
+    if os.environ.get(_SKIP_PLATFORM_CHECK_ENV, "").strip().lower() in {"1", "true", "yes"}:
+        return
+    raise SystemExit(f"Error: {_UNSUPPORTED_PLATFORM_MESSAGE}")
+
+
+def _use_utf8_output() -> None:
+    """Write UTF-8 when output is redirected on native Windows.
+
+    Redirected stdout/stderr use the ANSI code page there (for example cp1252),
+    which cannot encode the CLI's check marks and arrows and would crash the
+    command midway. Consoles already use UTF-8, so this changes nothing there.
+    """
+    if sys.platform != "win32":
+        return
+    for stream in (sys.stdout, sys.stderr):
+        encoding = (
+            (getattr(stream, "encoding", None) or "").lower().replace("-", "").replace("_", "")
+        )
+        if encoding != "utf8" and hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
+
 def main():
     """Entry point for console_scripts: nooa <subcommand>."""
+    _refuse_unsupported_platform()
+    _use_utf8_output()
     oo()
