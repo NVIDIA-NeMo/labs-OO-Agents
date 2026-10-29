@@ -57,7 +57,8 @@ from typing import IO, Annotated, Any
 from nooa import hidden
 from nooa.agentdoc import spec
 from nooa.tools import BashSession
-from nooa_atom.agent.work_manager import describe, job_dir
+from nooa_atom.agent.work_manager import _progress_sink, describe, job_dir
+from nooa_atom.agent.work_progress import _ShellProgress
 
 __all__ = ["CommandResult", "Shell", "ShellOwner", "default_cwd", "shell_owner"]
 
@@ -109,13 +110,11 @@ _CLOSED_DURING = "the shell was closed while this command ran; the command was s
 
 @dataclass
 class CommandResult:
-    """One command's outcome: exit code, output, and the shell's directory after it.
+    """One command's outcome: exit code, output, and bash's directory after it.
 
-    ``stdout``/``stderr`` are whole up to 10 kB, else head and tail around a
-    marker. ``stdout_path``/``stderr_path`` then name the capture, capped per
-    stream by ``max_output`` (default 64 MiB; the marker reports overflow). Kept
-    while the job is listed; for a direct ``run``, until its Shell or owning
-    session closes. ``cwd`` is bash's directory after the command (a ``cd`` lasts).
+    ``stdout``/``stderr``: whole up to 10 kB, else head+tail around a marker;
+    ``*_path`` then names the capture (up to ``max_output``, default 64 MiB),
+    kept while the job is listed (direct ``run``: until its Shell/session closes).
     """
 
     returncode: int
@@ -139,6 +138,7 @@ class _Capture:
         self.written = 0
         self.total = 0
         self.tail = bytearray()
+        self.progress: Any = None  # a managed job's preview stream (work_progress)
 
     def feed(self, chunk: bytes) -> None:
         self.total += len(chunk)
@@ -154,6 +154,10 @@ class _Capture:
         with contextlib.suppress(Exception):
             while chunk := await stream.read(_CHUNK_BYTES):
                 self.feed(chunk)
+                if self.progress is not None:
+                    self.progress.feed(chunk)
+            if self.progress is not None:
+                self.progress.feed(b"", final=True)
 
     def summary(self) -> tuple[str, str | None]:
         """The stream's text, or its head and tail around a marker; and the path if cut."""
@@ -345,15 +349,13 @@ class Shell:
     force a restart. ``set -e`` or ``exit N`` can end bash; the next command starts
     fresh. Other options persist; results report lost state.
 
-    Shell output is completion-only: no output items or early notifications.
-    Await or iterate a command job, or use Waiting; its final ``CommandResult``
-    holds bounded summaries and, when cut, capture paths (see CommandResult).
+    Completion-only unless launched with ``progress=Throttle(...)``; the final
+    CommandResult supersedes unread ShellProgress items.
 
-    Close with ``await sh.aclose()``, ``async with Shell()``, dropping it or
-    cancelling its resource Job; session shutdown also closes it. Closing ends
-    bash/background processes, except under ``preserve_background_services()``:
-    only bash ends and the harness owns cleanup. Keep ``sh`` while a background
-    server must run. A closed Shell restarts on its next use.
+    Close: ``await sh.aclose()``, ``async with Shell()``, drop it or cancel its
+    job; the session closes it too. Closing ends bash and its background
+    processes (under ``preserve_background_services()`` only bash). Keep ``sh``
+    while a background server must run. A closed Shell restarts on next use.
     """
 
     __nosnapshot__ = True  # a live bash is not data
@@ -423,8 +425,7 @@ class Shell:
     ) -> CommandResult:
         """Run one command in this object's bash (started on first use); state carries over.
 
-        ``stdin`` is the command's input (else it reads nothing); ``timeout``
-        is its deadline in seconds (finite, positive) from when it starts.
+        ``stdin``: its input (else none); ``timeout``: deadline, seconds from its start.
         """
         timeout = _check_timeout(timeout)
         describe(f"$ {command}")
@@ -524,11 +525,7 @@ class Shell:
         await self.aclose()
 
     async def aclose(self) -> None:
-        """End bash, its background processes (see the class doc) and scratch files.
-
-        Safe to repeat; concurrent calls wait for one cleanup. A later ``run``
-        starts a new bash.
-        """
+        """End bash, its background processes (see the class doc) and scratch files; repeatable."""
         # Never waits for the lock: the running command is stopped by closing its
         # bash, queued commands are refused, and a start (first use or an
         # interrupt's restart) is cancelled, so no bash comes back for them. One
@@ -636,7 +633,12 @@ class Shell:
         opened: list[tuple[asyncio.StreamReader, asyncio.BaseTransport, int]] = []
         write_fds: set[int] = set()
         pumps: list[tuple[asyncio.Task[None], asyncio.BaseTransport, _Capture]] = []
+        progress = None
         try:
+            sink = _progress_sink()
+            if sink is not None:  # a managed job: previews follow its Throttle (None: quiet)
+                progress = _ShellProgress(sink, sink.policy)
+                out.progress, err.progress = progress.stdout, progress.stderr
             for fifo in fifos[:2]:
                 opened.append(await _open_fifo(fifo))
                 write_fds.add(opened[-1][2])
@@ -652,6 +654,8 @@ class Shell:
             inner = asyncio.ensure_future(
                 session.run_with_timeout_flag(wrapped, timeout + _BACKSTOP_SECONDS)
             )
+            if progress is not None:
+                progress.live = lambda: not inner.done() and self._generation == generation
             restart_notes: list[str] | None = None
             try:
                 try:
@@ -659,6 +663,8 @@ class Shell:
                         asyncio.shield(inner), timeout
                     )
                 except TimeoutError:
+                    if progress is not None:
+                        progress.close()
                     restarted = await self._interrupt(inner, before, session, generation)
                     self._check_open(generation)
                     if restarted:
@@ -668,6 +674,8 @@ class Shell:
                         stray_out, stray_err, _, _ = inner.result()
                     code, timed_out = 124, True
             except asyncio.CancelledError:
+                if progress is not None:
+                    progress.close()
                 if await self._interrupt(inner, before, session, generation):
                     raise asyncio.CancelledError(self._note) from None
                 raise
@@ -675,6 +683,8 @@ class Shell:
                 self._check_open(generation)  # closed: say so, not how the close broke it
                 raise
             finally:
+                if progress is not None:
+                    progress.close()  # terminal, not EOF: background writers may keep pipes open
                 _close_fds(write_fds)  # bash's ends close with the group: then EOF
             self._check_open(generation)
             await self._settle([pump for pump, _, _ in pumps])
@@ -692,6 +702,8 @@ class Shell:
             if kept is None:
                 self._retain(result, out, err)
         finally:
+            if progress is not None:
+                progress.close()
             _close_fds(write_fds)
             for pump, transport, capture in pumps:
                 if pump.done():

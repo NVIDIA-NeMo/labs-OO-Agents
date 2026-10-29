@@ -241,21 +241,44 @@ depth, respectively. `None` means unlimited for that bound. Both helpers' actual
 signatures are in `python_cell_tools`; full help remains available via `print(doc(doc))`
 and `print(doc(pprint))` without injecting full internal documentation into each turn.
 
-## Managed Shell completion
+## Managed Shell completion and progress
 
-Shell command output is **completion-only**, for roots and children alike.
-Commands do not emit output previews or early `item` notifications, whether
-awaited, iterated, or left running with `Waiting`.
+By default Shell command output is **completion-only**, for roots and children
+alike: no output previews or early `item` notifications, whether awaited,
+iterated, or left running with `Waiting`.
 
 ```python
 sh = Shell()
 result = await self.jobs.launch(sh.run("pwd"), name="pwd")
 print(result.stdout)
+job = self.jobs.launch(sh.run("make"), name="build", progress=Throttle(seconds=5))
+job.set_progress(None)  # quiet again; the final CommandResult still arrives
 ```
 
+`progress=Throttle(items=None, seconds=1.0, max_bytes=8192)` opts a managed
+Shell job into `ShellProgress(stdout, stderr, omitted, batches)` items. Per
+stream, a batch goes out when `items` lines are pending, the oldest pending
+output has waited `seconds`, or `max_bytes` (at most 64 KiB, never split inside
+a UTF-8 code point) are pending: batching, not a rate limit. At most one
+progress notification per job is unread at a time; later batches merge into it
+(head and tail kept, `omitted` counts the bytes left out, `progress_dropped` the
+batches cut). An `async for` reader gets each batch. The terminal outcome is
+never delayed and supersedes unread or pending progress (no terminal flush: the
+`CommandResult` has the tail). `await job` stays completion-only. Other work
+accepts `progress=` but has no output to batch.
+
+`job.progress` is the effective policy; `job.set_progress(policy)` changes it
+at once (pending output flushes once under the old policy; `None` stops future
+progress; the same policy is a no-op; an invalid one raises and changes nothing;
+it returns `False` once the job finished). On a launched `Shell()` resource the
+policy is the default for future requests only; each request (`sh#3`) has its
+own buffer, timer and policy (`self.jobs.get("sh#3").set_progress(...)`). The
+`status` block shows a job's policy and nonzero buffered/omitted counts, never
+output.
+
 Alternatively, launch a command and return `Waiting(on=["build"])` to receive
-its terminal `JobEvent` in a later turn. Iterating a Shell command job yields
-no output items; obtain its `CommandResult` with `await job`. Generic WorkManager
+its terminal `JobEvent` in a later turn. Without `progress`, iterating a Shell
+command job yields no output items; obtain its `CommandResult` with `await job`. Generic WorkManager
 iterator values, explicit `emit` values, and child messages are unaffected.
 Cancelling a final-result wait does not cancel the job; owner cancellation does
 stop the command. Timeout returns a `CommandResult` with return code 124 and

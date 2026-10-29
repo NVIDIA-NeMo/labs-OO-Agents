@@ -30,6 +30,7 @@ import contextlib
 import contextvars
 import inspect
 import keyword
+import math
 import os
 import shutil
 import stat
@@ -45,6 +46,7 @@ from typing import Annotated, Any, Literal, Protocol
 __all__ = [
     "Job",
     "JobEvent",
+    "Throttle",
     "WorkManager",
     "current_name",
     "describe",
@@ -71,8 +73,8 @@ class JobEvent:
 
     ``kind`` is ``item`` (a yielded or emitted value), ``done`` (``value`` is
     the result), ``failed`` (``value`` is the error) or ``cancelled``.
-    ``dropped`` counts this job's earlier items withdrawn to keep the queue
-    bounded. ``id`` is the job's generation: a reused name gets a new id.
+    ``dropped``: earlier items withdrawn to bound the queue. ``id`` is the
+    job's generation: a reused name gets a new id.
     """
 
     name: str
@@ -80,11 +82,64 @@ class JobEvent:
     kind: EventKind
     value: Annotated[Any, "The item, the result, or the error text"] = None
     dropped: int = 0
-    output: Annotated[Any, "Bounded stdout/stderr/media for experimental owned jobs"] = None
+    output: Annotated[Any, "Bounded stdout/stderr/media of captured jobs"] = None
 
     def status_source(self) -> str:
         """Who sent it, for a status line: the job's name, never its value."""
         return self.name
+
+
+# The largest batch a Throttle may ask for (one stream of one preview).
+MAX_BYTES_LIMIT = 64 * 1024
+
+
+def _positive(label: str, value: Any, kind: type | tuple[type, ...]) -> None:
+    if isinstance(value, bool) or not isinstance(value, kind):
+        raise TypeError(f"{label} must be a number, got {value!r}")
+    if not (math.isfinite(value) and value > 0):
+        raise ValueError(f"{label} must be finite and positive, got {value!r}")
+
+
+@dataclass(frozen=True, repr=False)
+class Throttle:
+    """Batch running Shell output into ShellProgress(stdout, stderr, omitted) items.
+
+    Sent at ``items`` lines, ``max_bytes`` per stream, or once the oldest waited
+    ``seconds``: batching, not a rate limit; unread batches merge. Only Shell
+    output batches.
+    """
+
+    items: int | None = None
+    seconds: float | None = 1.0
+    max_bytes: int = 8192
+
+    def __post_init__(self) -> None:
+        if self.items is None and self.seconds is None:
+            raise ValueError("Throttle needs items or seconds (or both)")
+        if self.items is not None:
+            _positive("items", self.items, int)
+        if self.seconds is not None:
+            _positive("seconds", self.seconds, (int, float))
+        _positive("max_bytes", self.max_bytes, int)
+        if self.max_bytes > MAX_BYTES_LIMIT:
+            raise ValueError(f"max_bytes must be at most {MAX_BYTES_LIMIT}, got {self.max_bytes}")
+
+    def __repr__(self) -> str:
+        parts = []
+        if self.items is not None:
+            parts.append(f"items={self.items}")
+        if self.seconds is not None:
+            parts.append(f"seconds={self.seconds:g}")
+        if self.max_bytes != 8192:
+            parts.append(f"max_bytes={self.max_bytes}")
+        return f"Throttle({', '.join(parts)})"
+
+
+def check_policy(policy: Any) -> Throttle | None:
+    """``policy`` if it is a ``Throttle`` or None, else ``TypeError``."""
+    if policy is not None and not isinstance(policy, Throttle):
+        raise TypeError(f"progress must be a Throttle or None, got {type(policy).__name__}")
+    return policy
 
 
 _current: contextvars.ContextVar[Job | None] = contextvars.ContextVar(
@@ -151,15 +206,38 @@ class _ProgressItem:
 
 
 class _ProgressSink:
-    """Private optional progress delivery; ordinary emit/iterator items are unchanged."""
+    """Private optional progress delivery; ordinary emit/iterator items are unchanged.
+
+    ``policy`` is the job's effective ``Throttle`` (None: quiet) when the
+    producer started; ``on_policy`` registers how a ``set_progress`` reaches it.
+    """
 
     def __init__(self, job: Job):
         self._job: Job | None = job
         self._close: Callable[[], None] | None = None
+        self._retune: Callable[[Any], None] | None = None
+        self._buffered: Callable[[], int] | None = None
+        self.policy = job._progress_policy
         job._progress_sinks.add(self)
 
     def on_close(self, callback: Callable[[], None]) -> None:
         self._close = callback
+
+    def on_policy(self, retune: Callable[[Any], None], buffered: Callable[[], int]) -> None:
+        self._retune, self._buffered = retune, buffered
+
+    def retune(self, policy: Any) -> None:
+        if self._retune is not None:
+            try:
+                self._retune(policy)
+            except Exception:
+                self.close()  # an optional preview never breaks the caller
+
+    def buffered(self) -> int:
+        try:
+            return self._buffered() if self._buffered is not None else 0
+        except Exception:
+            return 0
 
     def emit(self, value: Any) -> None:
         if self._job is not None:
@@ -281,8 +359,8 @@ class Job:
     ``await job`` returns its result (failure/cancel raises); ``async for``
     reads items then ends. For resources, await ``job.send(x)``, not the resource.
     ``await job.cancel()`` stops work and withdraws undelivered outcomes;
-    resources cancel requests, then close. Jobs do not survive restart:
-    keep names in ``self.v`` and retrieve with ``self.jobs.get(name)``.
+    resources cancel requests, then close. Jobs end on restart: keep names
+    in ``self.v``; ``self.jobs.get(name)`` finds a job.
     """
 
     __nosnapshot__ = True  # live work: a snapshot leaves it out (keep names in self.v)
@@ -327,6 +405,8 @@ class Job:
         self._capture: Any = None
         self._progress_sinks: set[_ProgressSink] = set()
         self._progress_events: weakref.WeakSet[JobEvent] = weakref.WeakSet()
+        self._progress_policy: Throttle | None = None
+        self._pending_progress: JobEvent | None = None  # the one unread preview, merged into
         self.progress_dropped: Annotated[
             int, "Omitted progress batches; final output is separate"
         ] = 0
@@ -360,6 +440,26 @@ class Job:
             except Exception as exc:
                 text = f"(summary failed: {type(exc).__name__})"
         return _one_line(text) if text else ""
+
+    @property
+    def progress(self) -> Throttle | None:
+        """Throttle in force (resource: for new requests); None: result only."""
+        return self._progress_policy
+
+    def set_progress(self, policy: Throttle | None) -> bool:
+        """Change ``progress`` (pending output flushes first); False once finished."""
+        policy = check_policy(policy)
+        if self._status != "running":
+            return False
+        if policy == self._progress_policy:
+            return True
+        self._progress_policy = policy
+        for sink in list(self._progress_sinks):
+            sink.retune(policy)
+        return True
+
+    def _progress_buffered(self) -> int:
+        return sum(sink.buffered() for sink in list(self._progress_sinks))
 
     def __repr__(self) -> str:
         summary = self.summary
@@ -416,7 +516,9 @@ class Job:
             )
         self._requests = [r for r in self._requests if r._status == "running"]
         self._sent += 1
-        request = self._manager._start(f"{self.name}#{self._sent}", self._request(item), "request")
+        request = self._manager._start(
+            f"{self.name}#{self._sent}", self._request(item), "request", self._progress_policy
+        )
         request._owner = self
         self._requests.append(request)
         return request
@@ -615,6 +717,18 @@ class Job:
                     return
             reader._push(_ProgressItem(value))
             return
+        # At most one unread preview per job: a later batch merges into it
+        # (bounded head and tail), so a noisy command wakes a turn once.
+        pending, self._pending_progress = self._pending_progress, None
+        merge = getattr(value, "_merge", None)
+        carried = self._dropped
+        if pending is not None and callable(merge) and self._manager._outbox.remove(pending):
+            with contextlib.suppress(ValueError):
+                self._unread.remove(pending)
+            policy = self._progress_policy
+            value, cut = pending.value._merge(value, policy.max_bytes if policy else 8192)
+            self.progress_dropped += cut
+            carried = pending.dropped
         # Preserve ordinary messages even under a progress flood. If the outbox
         # can list pending events, forget history it already delivered. For a
         # minimal Outbox without snapshot(), omission is safer than displacement.
@@ -634,11 +748,13 @@ class Job:
             else:
                 self.progress_dropped += 1
                 return
-        event = JobEvent(self.name, self.id, "item", value, dropped=self._dropped)
+        event = JobEvent(self.name, self.id, "item", value, dropped=carried)
         self._progress_events.add(event)
         self._manager._outbox.put(event)
         self._dropped = 0
         self._unread.append(event)
+        if callable(getattr(value, "_merge", None)):
+            self._pending_progress = event
 
     def _emit_nowait(self, value: Any) -> None:
         reader = self._reader
@@ -785,12 +901,11 @@ class WorkManager:
     """``job = self.jobs.launch(work, name="tests")`` starts work without waiting.
 
     ``work``: coroutine (returns a result), async iterable (yields items), or
-    async context-manager resource with ``send(x)``. Resources stay open;
-    ``job.send(x)`` returns a request job holding that call's result.
-    Each outcome goes once: to a pending await/iterator, otherwise a JobEvent
-    in the next turn's ``notification["jobs"]``. Jobs outlive turns: return
-    ``Waiting(on=[name])`` while they run; cancel unneeded work.
-    Names must be valid Python identifiers; resource requests are ``<name>#1``, ``<name>#2``...
+    async context-manager resource with ``send(x)`` (stays open; ``job.send(x)``
+    returns a request job). Each outcome goes once: to a pending await/iterator,
+    else a JobEvent in the next turn's ``notification["jobs"]``. Jobs outlive
+    turns: return ``Waiting(on=[name])`` while they run; cancel unneeded work.
+    Names are Python identifiers; requests are ``<name>#1``, ``<name>#2``...
     """
 
     __nosnapshot__ = True
@@ -844,9 +959,12 @@ class WorkManager:
         self._on_change = on_change
         self._capture_factory = capture_factory
 
-    def launch(self, work: Any, *, name: str | None = None) -> Job:
+    def launch(
+        self, work: Any, *, name: str | None = None, progress: Throttle | None = None
+    ) -> Job:
         """Start ``work`` (awaitable, async iterable or resource) and return its Job."""
         try:
+            check_policy(progress)
             if self._closed:
                 raise RuntimeError("the work manager is closed")
             if inspect.iscoroutinefunction(work) or inspect.isasyncgenfunction(work):
@@ -872,7 +990,7 @@ class WorkManager:
             if inspect.iscoroutine(work):
                 work.close()
             raise
-        return self._start(name, work, kind)
+        return self._start(name, work, kind, progress)
 
     def get(self, name: str) -> Job | None:
         """The newest job with this name (a running one, else the latest finished)."""
@@ -906,10 +1024,13 @@ class WorkManager:
 
     # ---- internals ----------------------------------------------------------
 
-    def _start(self, name: str | None, work: Any, kind: str) -> Job:
+    def _start(
+        self, name: str | None, work: Any, kind: str, progress: Throttle | None = None
+    ) -> Job:
         self._next_id += 1
         job_id = self._next_id
         job = Job(self, name or f"job#{job_id}", job_id, work, kind)
+        job._progress_policy = progress
         self._live[job_id] = job
         self._names[job.name] = job
         context = contextvars.copy_context()

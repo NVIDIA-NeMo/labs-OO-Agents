@@ -29,7 +29,7 @@ from nooa import Context, hidden, strategy
 from nooa.agentdoc import doc, spec
 from nooa.interactive import Done, NeedInput, Waiting
 from nooa.strategies import CodeActV2, PredictStrategy  # noqa: F401
-from nooa_atom.agent.work_manager import Job, JobEvent, WorkManager
+from nooa_atom.agent.work_manager import Job, JobEvent, Throttle, WorkManager
 from nooa_atom.agent.work_shell import CommandResult, Shell
 from nooa_atom.agent.work_subagent import Question, Subagent
 from nooa_atom.session.items import TaskResult  # noqa: F401
@@ -97,14 +97,16 @@ class _AgentJobs(WorkManager):
         super().__init__(agent._jobs_in, **kwargs)
         self._agent = agent
 
-    def launch(self, work: Any, *, name: str | None = None) -> Job:
+    def launch(
+        self, work: Any, *, name: str | None = None, progress: Throttle | None = None
+    ) -> Job:
         if name is not None and (
             name in PERSON_NAMES or name in self._agent.queue_manager.channels()
         ):
             if inspect.iscoroutine(work):
                 work.close()
             raise ValueError(f"{name!r} names a channel or the person; pick another job name")
-        return super().launch(work, name=name)
+        return super().launch(work, name=name, progress=progress)
 
 
 # CodeActV2's python_cell description names the legacy delegation method.
@@ -373,6 +375,18 @@ def _bounded(text: str, limit: int = 60) -> str:
     return flat if len(flat) <= limit else flat[: limit - 1] + "…"
 
 
+@hidden
+def _progress_parts(job: Job) -> list[str]:
+    """A job's effective Throttle and, when nonzero, its buffered/omitted counts (never output)."""
+    parts = [f"progress {job.progress!r}"] if job.progress is not None else []
+    buffered = job._progress_buffered()
+    if buffered:
+        parts.append(f"{buffered} B buffered")
+    if job.progress_dropped:
+        parts.append(f"{job.progress_dropped} progress batches omitted")
+    return parts
+
+
 # Shared repo-tool docs that name the legacy shell; this agent edits through
 # self.files and its repo searches start in the workspace.
 _DOC_FIXES: Annotated[tuple[tuple[str, str], ...], hidden] = (
@@ -395,7 +409,8 @@ _WORK_EXAMPLES: Annotated[str, hidden] = """\
 # Work: everything that runs is a job on self.jobs.
 sh = Shell()  # one bash per object, starts on first use
 r = await self.jobs.launch(sh.run("cd src && export X=1"), name="setup")
-r = await self.jobs.launch(sh.run("make"), name="build")
+job = self.jobs.launch(sh.run("make"), name="build", progress=Throttle(seconds=5))
+job.set_progress(None)  # quiet again
 self.jobs.launch(sh.run("pytest -q"), name="tests")
 job = self.jobs.launch(Shell(), name="sh")
 r = await job.send("make")
@@ -578,6 +593,7 @@ class AtomAgent(AtomAgentBase):
                     Job,
                     JobEvent,
                     Shell,
+                    Throttle,
                     CommandResult,
                     Subagent,
                     Question,
@@ -661,16 +677,19 @@ class AtomAgent(AtomAgentBase):
             summary = job.summary
             if job._kind == "resource":
                 if not _active(job):
-                    idle.append(f"{name} · {summary or 'open'}")
+                    default = job.progress
+                    new = f" · new requests: progress {default!r}" if default else ""
+                    idle.append(f"{name} · {summary or 'open'}{new}")
                 continue  # its requests are listed instead, with its summary
             owner = job._owner
+            parts = [name, _age(now - job._started), summary]
             if owner is not None and owner._status == "running":
                 # The resource's own line (a shell: the command, busy, its last
                 # confirmed cwd) says more than the request's.
-                summary = owner.summary or summary
-            parts = [name, _age(now - job._started), summary]
-            if job.progress_dropped:
-                parts.append(f"{job.progress_dropped} progress batches omitted")
+                parts[2] = owner.summary or summary
+            parts += _progress_parts(job)
+            if owner is not None and owner._status == "running" and owner.progress != job.progress:
+                parts.append(f"new {_bounded(owner.name)} requests: progress {owner.progress!r}")
             running.append(" · ".join(part for part in parts if part))
         hints = {
             "user_messages": "await self.user_messages.get()",
@@ -865,7 +884,7 @@ spec(AtomAgent, "jobs", description="Run and track work: see WorkManager")
 # Host-facing members of the work types stay out of the model's docs.
 for _cls, _members in (
     (WorkManager, ("keep", "max_items", "max_requests")),
-    (Job, ("id", "dropped")),
+    (Job, ("id", "dropped", "progress_dropped")),
 ):
     for _member in _members:
         spec(_cls, _member, hidden=True)
