@@ -82,8 +82,8 @@ _UNSUPPORTED_PLATFORM_MESSAGE = (
     "nooa does not support native Windows; use WSL 2 "
     "(https://learn.microsoft.com/windows/wsl/install). "
     f"Setting the {_SKIP_PLATFORM_CHECK_ENV} environment variable to 1 skips this check: "
-    "only the pure-Python core and `nooa connect` are tested on native Windows, "
-    "and other issues found only there will not be fixed."
+    "the pure-Python core and `nooa connect` are tested on native Windows; "
+    "other features may work but are unsupported."
 )
 
 
