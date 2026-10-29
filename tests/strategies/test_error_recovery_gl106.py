@@ -519,6 +519,33 @@ class TestPurePythonLLMApiError:
         # pure_python.py line 343: "LLM API error after {max_retries} retries."
         assert "llm api error after 2 retries" in err
 
+    @pytest.mark.asyncio
+    async def test_successful_call_resets_api_error_budget(self):
+        """Non-consecutive API errors must not add up across a long run.
+
+        Calls 0, 2 and 4 fail and each retry succeeds. With max_retries=2 the
+        run must still finish: only consecutive API errors count.
+        """
+
+        class TestAgent(Agent, llm=_DUMMY_LLM):
+            @strategy(PurePythonStrategy(max_iterations=10, max_retries=2))
+            async def compute(self, x: int) -> int:
+                """Compute {x}."""
+                ...
+
+        fake_llm = FlakyFakeLLM(
+            scripted_responses=[
+                _resp("y = 1"),
+                _resp("y = 2"),
+                _resp("return 42"),
+            ],
+            failing_calls={0, 2, 4},
+        )
+
+        agent = TestAgent(llm=fake_llm)
+        assert await agent.compute(5) == 42
+        assert fake_llm.attempts == 6
+
 
 # ---------------------------------------------------------------------------
 # PurePythonStrategy — code validation errors (pure_python.py lines 671-679)

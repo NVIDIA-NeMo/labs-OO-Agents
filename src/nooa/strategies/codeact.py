@@ -304,10 +304,16 @@ class CodeActSession:
         self.error_count += 1
 
     def record_api_error(self) -> None:
+        """Count an LLM API error toward the consecutive-failure budget."""
         self.consecutive_api_errors += 1
 
     def reset_api_errors(self) -> None:
+        """Clear the API-error count after the model responds."""
         self.consecutive_api_errors = 0
+
+    def api_errors_exhausted(self) -> bool:
+        """Whether consecutive LLM API errors have used up ``max_retries``."""
+        return self.consecutive_api_errors >= self.max_retries
 
     def record_text_only(self) -> None:
         self.consecutive_text_only += 1
@@ -984,7 +990,9 @@ Standard Python builtins and agent instance (`self`) are available."""
 
                 logger.debug(
                     f"[CODEACT] Loop iteration: iter={session.iteration}/{session.max_iterations}, "
-                    f"err={session.error_count}/{session.max_retries}, tool_choice={tool_choice}"
+                    f"err={session.error_count}/{session.max_retries}, "
+                    f"api_err={session.consecutive_api_errors}/{session.max_retries}, "
+                    f"tool_choice={tool_choice}"
                 )
 
                 response = None
@@ -1001,6 +1009,8 @@ Standard Python builtins and agent instance (`self`) are available."""
                     turn_state.is_final = True
                     raise
                 except BlockSyntaxError as e:
+                    # Raised while building the prompt, before any LLM request,
+                    # so it neither counts as nor clears an API error.
                     self._handle_block_syntax_error(e, session, runtime)
                     continue
 
@@ -1035,7 +1045,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                         exc_info=True,
                     )
                     turn_state.exception = error_name
-                    if session.consecutive_api_errors >= session.max_retries:
+                    if session.api_errors_exhausted():
                         turn_state.is_final = True
                         raise GenerationError(
                             f"LLM API error after {session.max_retries} retries. "
