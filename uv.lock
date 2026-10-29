@@ -1392,6 +1392,7 @@ wheels = [
 name = "nooa"
 source = { editable = "." }
 dependencies = [
+    { name = "filelock", marker = "sys_platform == 'win32'" },
     { name = "httpx" },
     { name = "litellm" },
     { name = "msgpack" },
@@ -1482,6 +1483,7 @@ requires-dist = [
     { name = "arc-agi", marker = "extra == 'arc'", specifier = ">=0.9.8" },
     { name = "arcengine", marker = "extra == 'arc'", specifier = ">=0.9.3" },
     { name = "fastapi", marker = "extra == 'viewer'", specifier = ">=0.100.0" },
+    { name = "filelock", marker = "sys_platform == 'win32'", specifier = ">=3.29.4" },
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "litellm", specifier = ">=1.97.0" },
     { name = "mcp", marker = "extra == 'mcp'", specifier = ">=1.0.0" },

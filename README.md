@@ -82,7 +82,7 @@ uv add nooa
 
 Or with pip: `pip install nooa`.
 
-> **Windows:** use [WSL 2](https://learn.microsoft.com/windows/wsl/install) for the full product. On native Windows only the pure-Python core runs: agents, PredictStrategy, in-process CodeAct, and in-memory storage. Features that need Linux or macOS (shell tools, the CodeAct sandbox, file-backed SQLite storage, `monitor()`, saving `nooa connect` settings, and the Atom agent) stop with a `PosixOnlyFeatureError` that points to WSL 2.
+> **Windows:** use [WSL 2](https://learn.microsoft.com/windows/wsl/install) for the full product. On native Windows only the pure-Python core runs: agents, PredictStrategy, in-process CodeAct, and in-memory storage. Features that need Linux or macOS (shell tools, the CodeAct sandbox, file-backed SQLite storage, `monitor()`, and the Atom agent) stop with a `PosixOnlyFeatureError` that points to WSL 2.
 
 <details>
 <summary><b>Optional sub-packages</b> — CLI, ACP, memory, benchmarks, evaluation pipeline</summary>

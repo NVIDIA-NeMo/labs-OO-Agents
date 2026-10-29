@@ -14,7 +14,6 @@ import sys
 
 from nooa.errors import NemoOOAgentsRuntimeError
 
-CONNECT_SAVE_FEATURE = "Saving a model with nooa connect (the registry write uses an fcntl lock)"
 WSL_HINT = "Native Windows runs only the pure-Python core of nooa; use WSL 2 (https://learn.microsoft.com/windows/wsl/install) for this feature."
 
 

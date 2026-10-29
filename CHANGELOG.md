@@ -8,13 +8,13 @@ to follow semantic versioning.
 
 - Windows: WSL 2 is the supported way to run nooa on Windows. On native Windows,
   `import nooa` and the pure-Python core now work (agents, PredictStrategy,
-  in-process CodeAct, in-memory storage); POSIX-only features (bash sessions and
-  shell tools, the CodeAct sandbox, file-backed SQLite storage, `monitor()`,
-  writing the `nooa connect` registry) raise `PosixOnlyFeatureError`, which
-  names the feature and points to WSL 2. Previously `import nooa` failed on
-  Windows (`fcntl`, `SIGUSR2`). CI adds a native-Windows core smoke, a WSL quick
-  check on every PR, and a nightly full suite under WSL.
-
+  in-process CodeAct, in-memory storage), and `nooa connect` can save models
+  (its registry lock uses `filelock` there; POSIX keeps `fcntl`). POSIX-only
+  features (bash sessions and shell tools, the CodeAct sandbox, file-backed
+  SQLite storage, `monitor()`) raise `PosixOnlyFeatureError`, which names the
+  feature and points to WSL 2. Previously `import nooa` failed on Windows
+  (`fcntl`, `SIGUSR2`). CI adds a native-Windows core smoke, a WSL quick check on
+  every PR, and a nightly full suite under WSL.
 - Prompt inspection (`print_prompt()` and `build_prompt_data()`) now applies
   method-level truncation overrides for CodeAct and PurePython, matching runtime
   prefill rendering. Both strategies now use the resolved runtime settings for

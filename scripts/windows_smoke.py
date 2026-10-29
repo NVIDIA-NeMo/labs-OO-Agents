@@ -120,34 +120,45 @@ def main() -> None:
         for name, msg in checks.items():
             print(f"clear error [{name}]: {msg}")
 
+        import importlib.util
+
         try:
             from click.testing import CliRunner
             from nooa_cli.commands.connect import command as connect_command
         except ImportError:
             print("connect: skipped (nooa-cli not installed)")
         else:
-            res = CliRunner().invoke(
-                connect_command,
-                [
-                    "fake-model",
-                    "--provider",
-                    "custom",
-                    "--endpoint",
-                    "http://127.0.0.1:9/v1",
-                    "--api-style",
-                    "chat",
-                    "--api-key-env",
-                    "NOOA_SMOKE_FAKE_KEY",
-                    "--as",
-                    "fake",
-                    "--no-probe",
-                    "--no-catalogue",
-                    "--yes",
-                ],
-            )
-            assert res.exit_code == 1, (res.exit_code, res.output)
-            assert "WSL 2" in res.output and "Traceback" not in res.output, res.output
-            print("clear error [connect]:", res.output.strip().splitlines()[-1])
+            if importlib.util.find_spec("msvcrt") is None:
+                print("connect: save skipped (simulated Windows has no msvcrt)")
+            else:
+                import yaml
+
+                with tempfile.TemporaryDirectory() as tmp:
+                    out = Path(tmp) / "llm_config.yaml"
+                    res = CliRunner().invoke(
+                        connect_command,
+                        [
+                            "fake-model",
+                            "--provider",
+                            "custom",
+                            "--endpoint",
+                            "http://127.0.0.1:9/v1",
+                            "--api-style",
+                            "chat",
+                            "--api-key-env",
+                            "NOOA_SMOKE_FAKE_KEY",
+                            "--as",
+                            "fake",
+                            "--no-probe",
+                            "--no-catalogue",
+                            "--yes",
+                            "--output",
+                            str(out),
+                        ],
+                    )
+                    assert res.exit_code == 0, (res.exit_code, res.output)
+                    assert "fake" in yaml.safe_load(out.read_text())["models"], out.read_text()
+                print("connect: saved model 'fake' (filelock on Windows)")
 
         from nooa.storage import SQLiteStorageManager
 

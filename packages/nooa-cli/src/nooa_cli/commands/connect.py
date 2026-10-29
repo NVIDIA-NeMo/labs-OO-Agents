@@ -228,14 +228,6 @@ def command(
         if not resolved_dir.is_dir():
             raise click.UsageError(f"--working-dir path {str(resolved_dir)!r} is not a directory.")
         output = str(resolved_dir / paths.DIR_NAME / "llm_config.yaml")
-    from nooa._platform import CONNECT_SAVE_FEATURE, PosixOnlyFeatureError, is_native_windows
-
-    # The interactive run always ends by writing the registry, which needs
-    # POSIX file locks: on native Windows say so before the first prompt.
-    # Non-saving --stage runs still work there; --stage save reports the
-    # same message in its JSON result.
-    if not stage and is_native_windows():
-        raise click.ClickException(str(PosixOnlyFeatureError(CONNECT_SAVE_FEATURE)))
     from nooa.tracing import quiet_trace_target
 
     # Checks create model clients, which may auto-enable tracing; its

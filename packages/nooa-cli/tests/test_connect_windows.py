@@ -1,14 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""nooa connect on native Windows: a clear WSL 2 message, never a traceback."""
+"""nooa connect on native Windows: saving works; POSIX-only failures stay readable."""
 
+import yaml
 from click.testing import CliRunner
 from nooa_cli.commands import _connect_view as view
 from nooa_cli.commands import _connect_wizard as wizard
 from nooa_cli.commands.connect import command
 
 import nooa._platform as platform
-from nooa._platform import CONNECT_SAVE_FEATURE, PosixOnlyFeatureError
+from nooa._platform import PosixOnlyFeatureError
 
 ARGS = [
     "fake-model",
@@ -28,23 +29,19 @@ ARGS = [
 ]
 
 
-def test_interactive_connect_stops_before_first_prompt_on_windows(monkeypatch):
+def test_connect_saves_on_native_windows(monkeypatch, tmp_path):
+    # Native Windows takes the filelock branch of connect.write (no fcntl there).
     monkeypatch.setattr(platform, "is_native_windows", lambda: True)
+    output = tmp_path / "llm_config.yaml"
+    result = CliRunner().invoke(command, [*ARGS, "--output", str(output)])
 
-    def wizard_must_not_run(**_):
-        raise AssertionError("wizard ran on native Windows")
-
-    monkeypatch.setattr(wizard, "run_wizard", wizard_must_not_run)
-    result = CliRunner().invoke(command, ARGS)
-
-    assert result.exit_code == 1
-    assert "WSL 2" in result.output and "Traceback" not in result.output
-    assert not isinstance(result.exception, AssertionError)
+    assert result.exit_code == 0, result.output
+    assert "fake" in yaml.safe_load(output.read_text())["models"]
 
 
 def test_wizard_reports_posix_only_save_cleanly(monkeypatch, tmp_path):
     def save_fails(state):
-        raise PosixOnlyFeatureError(CONNECT_SAVE_FEATURE)
+        raise PosixOnlyFeatureError("A POSIX-only step")
 
     for name in (
         "select_connection",
@@ -64,5 +61,5 @@ def test_wizard_reports_posix_only_save_cleanly(monkeypatch, tmp_path):
 
 
 def test_stage_json_keeps_the_wsl_hint():
-    detail = view.local_failure(PosixOnlyFeatureError(CONNECT_SAVE_FEATURE))
+    detail = view.local_failure(PosixOnlyFeatureError("A POSIX-only step"))
     assert "WSL 2" in detail and "credentials" not in detail
