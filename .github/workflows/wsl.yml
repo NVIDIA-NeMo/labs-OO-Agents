@@ -24,6 +24,7 @@ jobs:
         shell: pwsh
     env:
       MODE: ${{ github.event_name == 'pull_request' && 'quick' || 'full' }}
+      WSL_UTF8: "1"  # wsl.exe prints UTF-16 otherwise
       ROOTFS_URL: https://cloud-images.ubuntu.com/wsl/releases/24.04/current/ubuntu-noble-wsl-amd64-wsl.rootfs.tar.gz
       SUMS_URL: https://cloud-images.ubuntu.com/wsl/releases/24.04/current/SHA256SUMS
     steps:
@@ -38,8 +39,9 @@ jobs:
           persist-credentials: false
       - name: WSL status
         run: |
-          wsl --version
-          wsl --status
+          $info = (wsl --version 2>&1; wsl --status 2>&1) | Out-String
+          Write-Output $info
+          Write-Output "::notice title=WSL on this runner::$($info.Trim() -replace "`r?`n", '%0A')"
       - name: Import Ubuntu 24.04 as a WSL 2 distribution
         run: |
           $ErrorActionPreference = "Stop"
@@ -50,9 +52,16 @@ jobs:
           $line = ($sums -split "`n") | Where-Object { $_ -match [regex]::Escape($name) } | Select-Object -First 1
           $expected = ($line -split '\s+')[0].ToLower()
           $actual = (Get-FileHash $rootfs -Algorithm SHA256).Hash.ToLower()
-          if ($expected -ne $actual) { throw "rootfs checksum mismatch: expected $expected, got $actual" }
-          wsl --import nooa-ubuntu (Join-Path $env:RUNNER_TEMP "wsl") $rootfs --version 2
-          if ($LASTEXITCODE -ne 0) { throw "wsl --import failed ($LASTEXITCODE)" }
+          if ($expected -ne $actual) {
+            Write-Output "::error title=rootfs checksum mismatch::expected '$expected', got '$actual' (line: '$line')"
+            exit 1
+          }
+          $out = wsl --import nooa-ubuntu (Join-Path $env:RUNNER_TEMP "wsl") $rootfs --version 2 2>&1 | Out-String
+          Write-Output $out
+          if ($LASTEXITCODE -ne 0) {
+            Write-Output "::error title=wsl --import failed ($LASTEXITCODE)::$($out.Trim() -replace "`r?`n", '%0A')"
+            exit 1
+          }
           wsl -l -v
       - name: Tests inside WSL 2 (${{ env.MODE }})
         run: wsl --cd "$env:GITHUB_WORKSPACE" -d nooa-ubuntu -u root -- bash scripts/wsl_ci.sh $env:MODE
