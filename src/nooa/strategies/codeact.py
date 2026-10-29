@@ -18,6 +18,7 @@ Reference: "Executable Code Actions Elicit Better LLM Agents" (Wang et al.)
 
 import ast
 import asyncio
+import contextvars
 import inspect
 import json
 import logging
@@ -91,6 +92,25 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _EXECUTE_PYTHON_RECEIPT = "status: accepted"
+
+# The cell running now: (agent, tag of its ToolCallEvent). Set around the
+# execution of each python cell so work launched from it can name it later.
+_current_cell: contextvars.ContextVar[tuple[Any, str] | None] = contextvars.ContextVar(
+    "nooa_current_cell", default=None
+)
+
+
+def current_cell_tag(agent: Any | None = None) -> str | None:
+    """The event tag of the python cell running now (None outside a cell).
+
+    With ``agent``, only a cell of that agent counts: a nested agent's cell
+    is not the caller's.
+    """
+    cell = _current_cell.get()
+    if cell is None or (agent is not None and cell[0] is not agent):
+        return None
+    return cell[1]
+
 
 OUTPUT_TOKENS_EXHAUSTED_MESSAGE = (
     "The model used all available output tokens before completing a tool call. "
@@ -1970,9 +1990,13 @@ Standard Python builtins and agent instance (`self`) are available."""
         # Execute the code (pass tool_call.id for trace correlation)
         # Nested agent calls may add their events to the event manager during this execution
         with get_harness_metrics().timer("time_code_execution"):
-            result = await self._execute_code(
-                runtime, code, builtins, session, method_name, tool_call_id=tool_call.id
-            )
+            token = _current_cell.set((runtime.agent, tool_call_event_id))
+            try:
+                result = await self._execute_code(
+                    runtime, code, builtins, session, method_name, tool_call_id=tool_call.id
+                )
+            finally:
+                _current_cell.reset(token)
 
         # Determine final status
         final_status = ResultStatus.ERROR if result.error else ResultStatus.COMPLETE
@@ -3121,15 +3145,19 @@ Standard Python builtins and agent instance (`self`) are available."""
 
         # Execute the code. A cancel here is recorded exactly like a cancel in a
         # model-written cell, with the prefill tag on the recorded output.
-        result = await self._execute_code(
-            runtime,
-            code,
-            builtins,
-            session,
-            method_name,
-            tool_call_id=prefill_id,
-            output_metadata={"prefill": True, "prefill_type": prefill_type},
-        )
+        token = _current_cell.set((runtime.agent, prefill_event_id))
+        try:
+            result = await self._execute_code(
+                runtime,
+                code,
+                builtins,
+                session,
+                method_name,
+                tool_call_id=prefill_id,
+                output_metadata={"prefill": True, "prefill_type": prefill_type},
+            )
+        finally:
+            _current_cell.reset(token)
 
         # Merge captured locals into session (persists for next steps and LLM turns)
         if result.captured_locals:

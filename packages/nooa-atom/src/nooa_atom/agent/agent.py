@@ -51,6 +51,7 @@ with hidden:
     from nooa.runtime.channels import ChannelReader
     from nooa.runtime.pprint import pprint as runtime_pprint
     from nooa.storage.markers import nosnapshot
+    from nooa.strategies.codeact import current_cell_tag
     from nooa.strategy_validation import InvariantError
     from nooa.tools import TodoManager
     from nooa.tools.shell_tools import FileWrite, Match
@@ -375,6 +376,52 @@ def _bounded(text: str, limit: int = 60) -> str:
     return flat if len(flat) <= limit else flat[: limit - 1] + "…"
 
 
+_LOST_LABELS: Annotated[dict[str, str], hidden] = {
+    "await": "coroutine",
+    "coroutine": "coroutine",
+    "iter": "iterator",
+    "resource": "resource",
+    "request": "request",
+}
+
+
+@hidden
+def _work_label(work: Any, kind: str) -> dict[str, str]:
+    """What launched work is (``what``), and a Subagent run's Todo id (``todo``); never arguments."""
+    if kind == "resource":
+        if isinstance(work, Shell):
+            return {"what": "shell resource"}
+        return {"what": "subagent" if isinstance(work, Subagent) else "resource"}
+    frame = getattr(work, "cr_frame", None)
+    owner = frame.f_locals.get("self") if frame is not None else None
+    code = getattr(work, "cr_code", None)
+    if code is not None and code.co_name == "run":
+        if isinstance(owner, Shell):
+            return {"what": "shell command"}
+        if isinstance(owner, Subagent):
+            task = frame.f_locals.get("task")
+            return {"what": "subagent", **({"todo": task.id} if isinstance(task, Todo) else {})}
+    return {"what": _LOST_LABELS.get(kind, kind)}
+
+
+@hidden
+def _lost_notice(record: dict[str, Any]) -> str:
+    """The lost-on-restart text for one saved job record: where it was launched, what it ran."""
+    what = _bounded(record.get("what") or _LOST_LABELS.get(str(record.get("kind")), "job"), 40)
+    tag = str(record.get("tag") or "")
+    tag = tag if tag and len(tag) <= 20 and all(c.isdigit() or c == "." for c in tag) else ""
+    parts = [f'{what} launched in cell {tag}: self.events["{tag}"]' if tag else what]
+    if record.get("todo"):
+        parts.append(f"todo {_bounded(record['todo'], 40)}")
+    summary = str(record.get("summary") or "")
+    if summary:  # a Shell's "$ command · cwd dir": bound each half, keep the cwd
+        command, sep, cwd = summary.partition(" · cwd ")
+        parts.append(_bounded(command, 100) + (f" in {_bounded(cwd, 100)}" if sep else ""))
+    return (
+        f"lost: the session restarted while it ran ({'; '.join(parts)}). Relaunch if still needed."
+    )
+
+
 @hidden
 def _progress_parts(job: Job) -> list[str]:
     """A job's effective Throttle and, when nonzero, its buffered/omitted counts (never output)."""
@@ -530,6 +577,7 @@ class AtomAgent(AtomAgentBase):
         self.jobs = _AgentJobs(
             self,
             on_change=self._record_work,
+            launch_info=self._launch_info,
             capture_factory=lambda: CaptureScope(self.runtime.truncation_config),
         )
         self._shells = work_shell.ShellOwner()
@@ -667,6 +715,13 @@ class AtomAgent(AtomAgentBase):
 
     @hidden
     @no_trace
+    def _launch_info(self, work: Any, kind: str) -> dict[str, str]:
+        """The launching cell's event tag (when in one of this agent's cells) and what the work is."""
+        tag = current_cell_tag(self)
+        return {**({"tag": tag} if tag else {}), **_work_label(work, kind)}
+
+    @hidden
+    @no_trace
     def _status(self) -> str:
         """Unread counts and senders, read hints, running and idle work, cancel hint."""
         now = time.monotonic()
@@ -747,7 +802,9 @@ class AtomAgent(AtomAgentBase):
         ``python_cell_tools`` and ``queues`` blocks. Work does not survive a
         restart, so each job that was running (this agent's ``self.jobs``
         work, or an earlier Atom's ``self.jobs.run()``/``spawn()`` jobs) gets
-        one ``failed`` ``JobEvent`` saying it was lost; nothing is relaunched.
+        one ``failed`` ``JobEvent`` saying it was lost, naming the cell that
+        launched it and its summary when saved (``_lost_notice``); nothing is
+        relaunched.
         Child sessions from before the restart are not adopted as jobs and
         are not reported: only the saved running-job records are.
         """
@@ -770,14 +827,8 @@ class AtomAgent(AtomAgentBase):
         lost, self._work_records = list(self._work_records or []), []
         for record in lost:
             name = str(record.get("name", "?"))
-            self._jobs_in.put(
-                JobEvent(
-                    name,
-                    0,
-                    "failed",
-                    "lost: the session restarted while it ran; launch it again if needed",
-                )
-            )
+            notice = _lost_notice(record if isinstance(record, dict) else {})
+            self._jobs_in.put(JobEvent(name, 0, "failed", notice))
         # An earlier Atom's JobsApi records (name -> record of each running job).
         legacy, self._jobs_running = dict(self._jobs_running or {}), {}
         for name in legacy:

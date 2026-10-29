@@ -436,6 +436,37 @@ async def test_scratch_retention_and_owned_cleanup(tmp_path):
     )  # the manager's own root is gone; the swapped path inside it was not followed
 
 
+async def test_records_keep_launch_info_and_the_latest_summary(tmp_path):
+    saved: list[list[dict]] = []
+    manager = WorkManager(
+        QueueManager().queue("jobs"),
+        scratch=tmp_path,
+        launch_info=lambda work, kind: {"tag": "12", "what": kind, "empty": "", "long": "x" * 500},
+    )
+    manager._on_change = lambda: saved.append(manager.records())
+    started = asyncio.Event()
+
+    async def work() -> None:
+        describe("$ pytest -q · cwd /repo")
+        started.set()
+        await asyncio.sleep(3600)
+
+    job = manager.launch(work(), name="tests")
+    await started.wait()
+    [record] = saved[-1]  # describe() saved the summary at once
+    assert record == {
+        "id": 1,
+        "name": "tests",
+        "kind": "await",
+        "tag": "12",
+        "what": "await",
+        "long": "x" * 79 + "…",
+        "summary": "$ pytest -q · cwd /repo",
+    }
+    await job.cancel()
+    await manager.aclose()
+
+
 async def test_aclose_cancels_everything(tmp_path):
     channel = QueueManager().queue("jobs")
     manager = WorkManager(channel, scratch=tmp_path)

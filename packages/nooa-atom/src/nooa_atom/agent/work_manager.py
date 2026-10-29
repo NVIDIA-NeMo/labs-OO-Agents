@@ -21,6 +21,10 @@ Work code can call ``emit(item)`` to report progress, ``describe(text)`` to set
 the job's one-line summary, and ``job_dir()`` for a scratch directory the
 manager owns and removes later. A resource may instead offer ``summary() -> str``
 (sync, cheap), read whenever ``job.summary`` is.
+
+Jobs end when the session restarts; each lost job's notice names the cell that
+launched it (``self.events["N"]`` has its code), so keep long-lived helpers in
+a file or ``self.v`` and relaunch from there.
 """
 
 from __future__ import annotations
@@ -179,9 +183,12 @@ def describe(text: str) -> None:
     job = _current.get()
     if job is not None:
         job._summary = str(text)
+        job._manager._changed()  # saved records show the new summary
 
 
 _SUMMARY_CHARS = 160
+_LAUNCH_CHARS = 80  # one launch-info value in a saved record
+_RECORD_SUMMARY_CHARS = 400  # a saved record's summary
 
 
 def _one_line(text: str, limit: int = _SUMMARY_CHARS) -> str:
@@ -380,6 +387,7 @@ class Job:
         self._error: BaseException | None = None
         self._cancel_note = ""
         self._summary = ""
+        self._launch: dict[str, str] = {}  # what launch_info() said at launch
         self._silent = False  # cancelled by its owner: no event
         self._final: JobEvent | None = None
         self._queued_final: JobEvent | None = None
@@ -432,6 +440,9 @@ class Job:
     @property
     def summary(self) -> str:
         """One short line from the work itself (a shell's command and cwd), or ""."""
+        return self._summary_line(_SUMMARY_CHARS)
+
+    def _summary_line(self, limit: int) -> str:
         text = self._summary
         report = getattr(self._entered, "summary", None) if self._kind == "resource" else None
         if callable(report):
@@ -439,7 +450,7 @@ class Job:
                 text = report()
             except Exception as exc:
                 text = f"(summary failed: {type(exc).__name__})"
-        return _one_line(text) if text else ""
+        return _one_line(text, limit) if text else ""
 
     @property
     def progress(self) -> Throttle | None:
@@ -924,6 +935,7 @@ class WorkManager:
         max_requests: int = 16,
         on_change: Callable[[], None] | None = None,
         capture_factory: Callable[[], Any] | None = None,
+        launch_info: Callable[[Any, str], dict[str, str]] | None = None,
     ) -> None:
         """A manager whose undelivered events go to ``outbox``.
 
@@ -936,7 +948,9 @@ class WorkManager:
         bounds a job's queued items and a reader's buffer; ``max_requests``
         bounds a resource's requests in flight. ``on_change()`` is called
         after a job starts or finishes (to keep ``records()`` saved with a
-        snapshot).
+        snapshot). ``launch_info(work, kind)`` returns a few short strings
+        about new work (where it was launched, what it is), kept with the
+        job and in its record.
         """
         for label, value in (
             ("keep", keep),
@@ -958,6 +972,7 @@ class WorkManager:
         self._closed = False
         self._on_change = on_change
         self._capture_factory = capture_factory
+        self._launch_info = launch_info
 
     def launch(
         self, work: Any, *, name: str | None = None, progress: Throttle | None = None
@@ -1005,8 +1020,23 @@ class WorkManager:
         return sorted(self._live.values(), key=lambda job: job.id)
 
     def records(self) -> list[dict[str, Any]]:
-        """Small, snapshot-safe records of running jobs (to report them lost after a restart)."""
-        return [{"id": j.id, "name": j.name, "kind": j._kind} for j in self.running()]
+        """Small, snapshot-safe records of running jobs (to report them lost after a restart).
+
+        Each has ``id``, ``name`` and ``kind``, then the launch info and the
+        job's summary when there are any (short strings only).
+        """
+        records: list[dict[str, Any]] = []
+        for job in self.running():
+            record: dict[str, Any] = {"id": job.id, "name": job.name, "kind": job._kind}
+            record.update(job._launch)
+            try:  # longer than ``summary``: a long command must not hide the cwd after it
+                summary = job._summary_line(_RECORD_SUMMARY_CHARS)
+            except Exception:  # a summary never breaks saving
+                summary = ""
+            if summary:
+                record["summary"] = summary
+            records.append(record)
+        return records
 
     async def aclose(self) -> None:
         """Cancel every running job, wait for them, and remove the scratch directories."""
@@ -1031,6 +1061,16 @@ class WorkManager:
         job_id = self._next_id
         job = Job(self, name or f"job#{job_id}", job_id, work, kind)
         job._progress_policy = progress
+        if self._launch_info is not None:
+            try:
+                info = self._launch_info(work, kind)
+            except Exception:  # describing work never stops it
+                info = {}
+            job._launch = {
+                str(key)[:40]: _one_line(value, _LAUNCH_CHARS)
+                for key, value in list((info or {}).items())[:8]
+                if value
+            }
         self._live[job_id] = job
         self._names[job.name] = job
         context = contextvars.copy_context()
