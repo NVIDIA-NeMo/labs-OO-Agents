@@ -53,12 +53,31 @@ from mcp.client.auth.utils import (
 from mcp.client.sse import sse_client
 from mcp.client.streamable_http import streamable_http_client
 from mcp.shared.auth import OAuthClientInformationFull, OAuthClientMetadata, OAuthToken
-from mcp.shared.exceptions import McpError
 from mcp.types import ErrorData
 from pydantic import AnyHttpUrl
 
 from nooa.mcp import MCPBaseClient
 from nooa.paths import get_user_dir
+
+try:  # mcp < 2 spells it McpError and constructs it from ErrorData
+    from mcp.shared.exceptions import McpError
+
+    MCP_TIMEOUT_CODE = 408  # what the 1.x SDK's own response timeout reports
+
+    def mcp_error(error: ErrorData) -> McpError:
+        """The installed SDK's exception for ``error``."""
+        return McpError(error)
+
+except ImportError:  # pragma: no cover - depends on the installed mcp
+    # mcp >= 2 renamed it and takes (code, message, data); from_error_data keeps the ErrorData shape.
+    from mcp.shared.exceptions import MCPError as McpError
+
+    MCP_TIMEOUT_CODE = -32001  # the 2.x SDK's request-timeout code
+
+    def mcp_error(error: ErrorData) -> McpError:
+        """The installed SDK's exception for ``error``."""
+        return McpError.from_error_data(error)
+
 
 # Where the browser is sent after sign-in. Nothing listens there: the person
 # copies the address from the browser. Some gateways reject 127.0.0.1.
@@ -958,9 +977,9 @@ class _AuthorizedSession(ClientSession):
             if not budget.expired():
                 raise
             # Preserve the SDK's response-timeout error contract.
-            raise McpError(
+            raise mcp_error(
                 ErrorData(
-                    code=408,
+                    code=MCP_TIMEOUT_CODE,
                     message=f"Timed out waiting for an MCP response after {seconds:g} seconds "
                     "(excluding the human sign-in wait).",
                 )

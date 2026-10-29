@@ -398,3 +398,19 @@ async def test_failed_steer_notification_replays_on_load(
         assert any(raw["item_id"] == receipt.item_id for _, raw in rows(loaded, "ItemRequeued"))
     finally:
         await fresh.close_all()
+
+
+async def test_pause_dispatch_keeps_queued_input_queued_until_resume(make_session):
+    """A paused session admits input but starts no turn; resume_dispatch runs the queued item."""
+    session, llm = make_session(done("later"))
+    session.pause_dispatch()
+    receipt = await session.submit("queued")
+    await asyncio.sleep(0.02)
+    assert session._agent.turns.paused and not llm.calls
+    assert session._agent.queue_manager.get_channel("user_messages").snapshot() == ["queued"]
+    assert rows(session, "TurnStarted") == []
+    session.resume_dispatch()
+    assert await asyncio.wait_for(session.outcome(receipt.item_id), TIMEOUT) == Done(
+        explanation="later"
+    )
+    assert len(rows(session, "TurnStarted")) == 1
