@@ -15,6 +15,7 @@ Usage::
 """
 
 import asyncio
+import codecs
 import os
 import signal
 
@@ -37,25 +38,35 @@ async def cron(interval_seconds: float):
         yield tick
 
 
-async def tail(path: str, *, poll_interval: float = 0.5):
+async def tail(path: str, *, poll_interval: float = 0.5, max_line_bytes: int = 1 << 20):
     """Tail a file, yielding new lines as they appear.
 
     Starts from the current end of file. Polls every
     *poll_interval* seconds. A line that is still being written is
     held until its newline arrives, so a poll landing mid-write does
-    not split one line across two yields.
+    not split one line across two yields. Only ``\n`` ends a line; a
+    trailing ``\r`` is removed. Lines are decoded as UTF-8 with
+    undecodable bytes replaced, and a character split across writes is
+    decoded whole. A line that grows past *max_line_bytes* before its
+    newline is yielded in pieces of at most that size, so a newline-free
+    stream keeps memory bounded without losing its contents.
     """
-    fh = open(path)
+    decoder = codecs.getincrementaldecoder("utf-8")("replace")
+    fh = open(path, "rb")
     try:
         fh.seek(0, 2)
-        partial = ""
+        partial = b""
         while True:
-            chunk = fh.readline()
+            chunk = fh.readline(max_line_bytes - len(partial))
             if chunk:
                 partial += chunk
-                if partial.endswith("\n"):
-                    yield partial.rstrip("\n")
-                    partial = ""
+                if partial.endswith(b"\n"):
+                    line = partial[:-1].removesuffix(b"\r")
+                    partial = b""
+                    yield decoder.decode(line, final=True)
+                elif len(partial) >= max_line_bytes:
+                    piece, partial = partial, b""
+                    yield decoder.decode(piece)
             else:
                 await asyncio.sleep(poll_interval)
     finally:

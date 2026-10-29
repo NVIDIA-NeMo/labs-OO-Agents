@@ -324,7 +324,8 @@ class BashSession:
             if ctrl_lines:
                 ec = ctrl_lines[0].strip()
                 if ec.isdigit() and ec != "0":
-                    logger.warning("init_command %r exited %s", self._init_command, ec)
+                    # The command itself may carry credentials: log only its status.
+                    logger.warning("init_command exited %s", ec)
             if len(ctrl_lines) >= 2 and ctrl_lines[1].strip().startswith("/"):
                 self._cwd = Path(ctrl_lines[1].strip())
         # Only now may run() use the session: the startup drain and the init
