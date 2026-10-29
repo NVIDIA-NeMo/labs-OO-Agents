@@ -411,7 +411,9 @@ async def test_launch_errors_name_the_fix(setup):
     with pytest.raises(TypeError, match="unexpected keyword argument.*: cwd"):
         manager.launch(asyncio.sleep(0), cwd="/")  # type: ignore[call-arg]
     with pytest.raises(ValueError, match="'run_tests'"):
-        manager.launch(asyncio.sleep(0), name="run-tests")
+        manager.launch(asyncio.sleep(0), name="run tests")
+    with pytest.raises(ValueError, match="'run-tests'"):
+        manager.launch(asyncio.sleep(0), name="run-tests.")  # hint keeps the hyphen
     with pytest.raises(ValueError, match="'job_2nd'"):
         manager.launch(asyncio.sleep(0), name="2nd")
     # The catch-all only improves the error: the documented signature has no **kwargs.

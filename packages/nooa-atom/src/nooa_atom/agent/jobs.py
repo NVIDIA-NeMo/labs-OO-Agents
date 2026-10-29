@@ -425,7 +425,7 @@ class JobsApi(Skill):
     Any job's update starts the next turn; check ``u.name`` / ``u.done`` and
     return ``Waiting`` again if yours has not finished.
 
-    A name is a Python identifier (``tests``, ``ci_check``), unique among
+    A name has letters, digits, ``_`` or ``-`` (``tests``, ``ci-check``), unique among
     your running jobs and open children; the job's path is your session's
     path plus ``/name`` (``/root/tests``).
 

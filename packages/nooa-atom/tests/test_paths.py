@@ -11,12 +11,12 @@ from nooa_atom.session.registry import SessionRegistry
 from nooa_atom.session.store import SessionStore
 
 
-def test_a_name_is_an_identifier_that_is_not_a_keyword():
-    for good in ("tests", "review_pr_462", "_x", "CI"):
-        assert is_valid_name(good) and check_name(good, "job") == good
-    for bad in ("ci-check", "Fix parser", "1st", "class", "", " ", None, "a/b"):
+def test_a_name_is_letters_digits_underscores_and_hyphens_not_a_keyword():
+    for good in ("tests", "review_pr_462", "_x", "CI", "ci-check", "review-pr", "sh-1", "_a-"):
+        assert is_valid_name(good) and check_name(good, "job") == good  # never rewritten
+    for bad in ("Fix parser", "1st", "-x", "class", "", " ", None, "a/b", "a#1", "a.b", "a b"):
         assert not is_valid_name(bad)
-        with pytest.raises(ValueError, match="is not valid: use a Python identifier"):
+        with pytest.raises(ValueError, match="is not valid: use a name such as"):
             check_name(bad, "child")
 
 
@@ -85,7 +85,8 @@ async def test_an_open_childs_name_is_taken_until_it_is_closed(registry, root_op
     with pytest.raises(ValueError, match="name 'mid' is already used by child /root/mid"):
         port.check_child_name("mid")
     with pytest.raises(ValueError, match="is not valid"):
-        port.check_child_name("ci-check")
+        port.check_child_name("ci check")
+    port.check_child_name("review-pr")  # a hyphenated name is free
     for reserved in ("jobs", "delegates", "user_messages"):
         with pytest.raises(ValueError, match=f"child name '{reserved}' is reserved"):
             port.check_child_name(reserved)

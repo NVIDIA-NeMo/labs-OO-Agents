@@ -45,7 +45,7 @@ class SessionPort:
     """Your own session: delegate work to child sessions and manage them.
 
     A child is another agent session with its own history. You give it a
-    ``name`` (a Python identifier, unique among your open children; its
+    ``name`` (letters, digits, ``_`` or ``-``, unique among your open children; its
     path is yours plus ``/name``), a short ``description`` (its title) and
     the full ``prompt`` it works from, and get back a ``ChildRef``: a small
     handle you can keep in ``self.v`` across turns and sessions. Every child runs the worker turn
@@ -119,7 +119,7 @@ class SessionPort:
         Args:
             description: Short label; becomes the child's title.
             prompt: The full task the child works from.
-            name: The child's name, a Python identifier; its path is this
+            name: The child's name (letters, digits, ``_`` or ``-``); its path is this
                 session's path plus ``/name``. ``ValueError`` if it is not
                 valid or an open child of this session already has it (a
                 closed child's name can be used again).

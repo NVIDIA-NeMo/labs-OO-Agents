@@ -33,6 +33,7 @@ from nooa import hidden
 from nooa.tools import Todo as _AnyTodo
 from nooa_atom.agent.work_manager import current_name, describe, emitter
 from nooa_atom.session.items import ChildFailed, ChildQuestion, ChildResult, TaskResult
+from nooa_atom.session.names import is_valid_name
 from nooa_atom.tools.todo_list import Todo
 
 __all__ = ["Question", "Subagent"]
@@ -337,7 +338,7 @@ class Subagent:
 def _child_name(port: Any, job_name: str | None) -> str:
     """A free child name from the job's (``review#2`` -> ``review``), else ``subagent``."""
     base = "" if (job_name or "").startswith("job#") else (job_name or "").split("#", 1)[0]
-    if not base.isidentifier():
+    if not is_valid_name(base):
         base = "subagent"
     for n in range(1, 1000):
         candidate = base if n == 1 else f"{base}_{n}"

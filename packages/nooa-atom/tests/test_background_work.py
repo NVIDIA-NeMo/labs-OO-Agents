@@ -126,7 +126,7 @@ async def test_jobs_and_children_share_one_namespace_of_live_names(tmp_path, ses
                 "except ValueError as e:\n    print('JOB<<' + str(e) + '>>')\n"
                 "try:\n    await self.spawn('Lint again', 'lint it', name='lint')\n"
                 "except ValueError as e:\n    print('TWICE<<' + str(e) + '>>')\n"
-                "try:\n    await self.spawn('Bad', 'x', name='ci-check')\n"
+                "try:\n    await self.spawn('Bad', 'x', name='ci check')\n"
                 "except ValueError as e:\n    print('BAD<<' + str(e) + '>>')\n"
                 "await self.jobs.cancel('review')\n"
                 "await self.v.child.close()\n"
@@ -149,7 +149,9 @@ async def test_jobs_and_children_share_one_namespace_of_live_names(tmp_path, ses
         "the child first (await self.child('lint').close())>>"
     ) in text
     assert "TWICE<<name 'lint' is already used by child /root/lint (" in text
-    assert "BAD<<child name 'ci-check' is not valid: use a Python identifier" in text
+    assert (
+        "BAD<<child name 'ci check' is not valid: use a name such as 'tests', 'review-pr'" in text
+    )
     paths = text.split("PATHS<<", 1)[1].split(">>", 1)[0]
     assert paths.startswith("/root/review ChildRef(name='review', path='/root/review',")
     assert " id=" not in paths

@@ -233,8 +233,8 @@ async def test_names_are_unique_among_running_jobs(agent):
         await agent.jobs.run("true", name="x")
     with pytest.raises(ValueError, match="already running"):
         agent.jobs.spawn(asyncio.sleep(0), name="x")
-    for bad in (" ", "ci-check", "class", "1st"):
-        with pytest.raises(ValueError, match="is not valid: use a Python identifier"):
+    for bad in (" ", "ci check", "a/b", "a#1", "a.b", "-x", "class", "1st"):
+        with pytest.raises(ValueError, match="is not valid: use a name such as"):
             await agent.jobs.run("true", name=bad)
     for reserved in ("jobs", "delegates", "user", "user_messages", "system_messages"):
         with pytest.raises(ValueError, match=f"job name '{reserved}' is reserved: Waiting"):
@@ -1064,7 +1064,7 @@ async def test_a_bad_argument_with_replace_leaves_the_old_job_running(agent, tmp
 async def test_a_bad_name_with_replace_leaves_the_old_job_running(agent):
     await agent.jobs.run("sleep 30", name="old")
     with pytest.raises(ValueError, match="is not valid"):
-        await agent.jobs.run("true", name="old-job", replace=True)
+        await agent.jobs.run("true", name="old job", replace=True)
     assert agent.jobs.get("old").state == "running"
 
 
@@ -1076,7 +1076,7 @@ async def test_spawn_rejections_close_the_coroutine(agent):
 
     rejections = [
         lambda: agent.jobs.spawn(work(), name="busy"),  # name taken
-        lambda: agent.jobs.spawn(work(), name="not-valid"),  # bad name
+        lambda: agent.jobs.spawn(work(), name="not valid"),  # bad name
         lambda: agent.jobs.spawn(work(), name="w", items=2),  # coroutine + items
         lambda: agent.jobs.spawn(work(), name="w", seconds=1),
         lambda: agent.jobs.spawn(work(), name="w", description=5),

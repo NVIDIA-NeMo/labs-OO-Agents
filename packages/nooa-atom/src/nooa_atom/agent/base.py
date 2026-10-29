@@ -366,7 +366,7 @@ class AtomAgentBase(InteractiveAgent):
             description: Short title (2-6 words) for people.
             prompt: A ``Todo`` carrying the task's requirements, rules and
                 acceptance checks, or the full task as text.
-            name: Its name, a Python identifier such as ``"fix_parser"``, not
+            name: Its name (letters, digits, ``_`` or ``-``) such as ``"fix-parser"``, not
                 used by a running job or open child; its path is yours plus
                 ``/name``.
             brief: Extra instructions sent with the prompt.
@@ -416,7 +416,7 @@ class AtomAgentBase(InteractiveAgent):
             description: Short title (2-6 words) for people.
             prompt: A ``Todo`` carrying the task's requirements, rules and
                 acceptance checks, or the full task as text.
-            name: Its name, a Python identifier such as ``"review_pr_462"``,
+            name: Its name (letters, digits, ``_`` or ``-``) such as ``"review-pr"``,
                 not used by a running job or open child (a closed child's
                 name is free again); its path is yours plus ``/name``.
             brief: Extra instructions sent with the prompt.

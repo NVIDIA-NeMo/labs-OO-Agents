@@ -892,12 +892,22 @@ class Job:
 
 
 def _valid_name(name: Any) -> bool:
-    return isinstance(name, str) and name.isidentifier() and not keyword.iskeyword(name)
+    """A letter or ``_``, then letters, digits, ``_`` or ``-``; not a keyword.
+
+    The same rule as ``nooa_atom.session.names.is_valid_name`` (repeated: this
+    module imports no other nooa module).
+    """
+    return (
+        isinstance(name, str)
+        and not name.startswith("-")
+        and name.replace("-", "_").isidentifier()
+        and not keyword.iskeyword(name)
+    )
 
 
 def _name_hint(name: Any) -> str:
-    """A valid job name close to ``name`` ('run_tests' for 'run-tests')."""
-    hint = re.sub(r"\W+", "_", str(name)).strip("_") or "job"
+    """A valid job name close to ``name`` ('run_tests' for 'run tests', 'job_2x' for '2x')."""
+    hint = re.sub(r"[^\w-]+", "_", str(name)).strip("_-") or "job"
     if hint[0].isdigit():
         hint = "job_" + hint
     return hint + "_" if keyword.iskeyword(hint) else hint
@@ -948,7 +958,7 @@ class WorkManager:
     returns a request job). Each outcome goes once: to a pending await/iterator,
     else a JobEvent in the next turn's ``notification["jobs"]``. Jobs outlive
     turns: return ``Waiting(on=[name])`` while they run; cancel unneeded work.
-    Names are Python identifiers; requests are ``<name>#1``, ``<name>#2``...
+    Names: letters, digits, ``_`` or ``-``; requests are ``<name>#1``, ``<name>#2``...
     """
 
     __nosnapshot__ = True
@@ -1038,7 +1048,8 @@ class WorkManager:
             if name is not None:
                 if not _valid_name(name):
                     raise ValueError(
-                        f"name {name!r} is not a Python identifier; use e.g. {_name_hint(name)!r}"
+                        f"name {name!r} is not valid (a letter or _, then letters, digits, _ or -); "
+                        f"use e.g. {_name_hint(name)!r}"
                     )
                 current = self._names.get(name)
                 if current is not None and current._status == "running":
