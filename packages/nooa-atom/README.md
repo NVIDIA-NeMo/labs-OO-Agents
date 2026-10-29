@@ -262,13 +262,20 @@ stop the command. Timeout returns a `CommandResult` with return code 124 and
 `timed_out=True`.
 
 Final `stdout` and `stderr` summaries are whole up to 10 kB per stream, otherwise
-head and tail around a truncation marker. For managed jobs, `stdout_path` and
-`stderr_path` then name capture files retained while the job is listed. These
-artifacts have existing capture and retention bounds: each holds at most the
-Shell's `max_output` bytes per stream (64 MiB by default), and is removed when
-the job is pruned or the manager closes. The marker reports capture-limit
-truncation. Direct unmanaged calls keep no output files; a truncated summary
-says the full output was not kept. This does not provide a PTY or live-input API.
+head and tail around a truncation marker. Whenever a summary is cut,
+`stdout_path` and `stderr_path` name capture files, for managed jobs and direct
+`await sh.run(...)` calls alike; short output keeps no file. Each file holds at
+most the Shell's `max_output` bytes per stream (64 MiB by default); the marker
+reports capture-limit truncation. Retention: a job's files are removed when the
+job is pruned or the manager closes. A direct run's files are removed when that
+Shell closes (`aclose`, `async with` exit) or, for a Shell started under an
+owner (an Atom session owns the Shells its cells start), when the owner closes;
+under an owner they outlive a dropped Shell, so `r = await Shell().run(cmd)` in
+a cell keeps `r.stdout_path` readable until the session closes. A Shell with no
+owner that is dropped unclosed keeps them while a result naming them is alive.
+Direct-run files are not pruned before then: each long command keeps up to
+`max_output` bytes per stream until the Shell or session closes. This does not
+provide a PTY or live-input API.
 
 ## Python session namespace and optional Done reflection
 

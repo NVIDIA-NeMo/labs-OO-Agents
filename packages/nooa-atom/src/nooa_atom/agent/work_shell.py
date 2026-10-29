@@ -21,11 +21,19 @@ the Shells started under it; a launched Shell closes with its job. Inside a
 harness's ``preserve_background_services()`` scope, closing ends bash only:
 that external harness owns (and must clean up) the background processes.
 
-A command's stdout and stderr are read through pipes into files in the job's
-scratch directory, each up to an output limit (past it, bytes are counted
-but not kept, and the summary says so); outside a job they are not kept. A
-``CommandResult`` carries a bounded summary of each stream and the file path
-when the summary was cut.
+A command's stdout and stderr are read through pipes into files, each up to
+an output limit (past it, bytes are counted but not kept, and the summary says
+so): in the job's scratch directory when launched, else in the Shell's own
+output directory. A ``CommandResult`` carries a bounded summary of each stream
+and the file path when the summary was cut (short output keeps no file).
+
+Retention of those files: a job's are removed when the job is pruned or its
+manager closes. A direct ``run``'s are removed when that Shell closes
+(``aclose``, ``async with`` exit) or, for a Shell started under an owner, when
+the owner closes: under an owner they outlive a dropped Shell (``r = await
+Shell().run(...)`` in a cell keeps ``r.stdout_path`` until the session ends).
+A Shell with no owner that is dropped unclosed keeps them while any result
+naming them is alive.
 """
 
 from __future__ import annotations
@@ -37,6 +45,7 @@ import itertools
 import math
 import os
 import shlex
+import shutil
 import signal
 import sys
 import tempfile
@@ -103,10 +112,10 @@ class CommandResult:
     """One command's outcome: exit code, output, and the shell's directory after it.
 
     ``stdout``/``stderr`` are whole up to 10 kB, else head and tail around a
-    marker. ``stdout_path``/``stderr_path`` name longer managed captures, kept
-    while the job is listed, capped per stream by ``max_output`` (default 64 MiB).
-    The marker reports cap overflow. Unmanaged calls keep no files. ``cwd`` is
-    bash's directory after the command (a ``cd`` lasts).
+    marker. ``stdout_path``/``stderr_path`` then name the capture, capped per
+    stream by ``max_output`` (default 64 MiB; the marker reports overflow). Kept
+    while the job is listed; for a direct ``run``, until its Shell or owning
+    session closes. ``cwd`` is bash's directory after the command (a ``cd`` lasts).
     """
 
     returncode: int
@@ -184,6 +193,10 @@ def _result(code: int, timed_out: bool, out: _Capture, err: _Capture, cwd: str) 
     stdout, stdout_path = out.summary()
     stderr, stderr_path = err.summary()
     return CommandResult(code, timed_out, stdout, stderr, cwd, stdout_path, stderr_path)
+
+
+def _release(_directory: object) -> None:
+    """Nothing: a finalizer that only held ``_directory`` until its result went."""
 
 
 def _start_time(pid: int) -> str | None:
@@ -277,6 +290,17 @@ class ShellOwner:
     def __init__(self) -> None:
         self._shells: weakref.WeakSet[Shell] = weakref.WeakSet()
         self._closed = False
+        # Direct runs' output files of its Shells: they outlive a dropped Shell
+        # and go when the owner closes.
+        self._output: tempfile.TemporaryDirectory[str] | None = None
+
+    def _output_dir(self) -> Path | None:
+        """A new directory for one Shell's direct-run output (None once closed)."""
+        if self._closed:
+            return None
+        if self._output is None:
+            self._output = tempfile.TemporaryDirectory(prefix="nooa-shells-")
+        return Path(tempfile.mkdtemp(prefix="shell-", dir=self._output.name))
 
     def adopt(self, shell: Shell) -> None:
         if self._closed:  # closing is terminal: no bash starts under a closed owner
@@ -292,6 +316,9 @@ class ShellOwner:
         shells = list(self._shells)
         self._shells.clear()
         results = await asyncio.gather(*(s.aclose() for s in shells), return_exceptions=True)
+        output, self._output = self._output, None
+        if output is not None:  # also the output of Shells dropped unclosed
+            output.cleanup()
         errors = [r for r in results if isinstance(r, BaseException)]
         if errors:
             raise errors[0]
@@ -320,8 +347,7 @@ class Shell:
 
     Shell output is completion-only: no output items or early notifications.
     Await or iterate a command job, or use Waiting; its final ``CommandResult``
-    holds bounded summaries and managed capture paths, subject to output limits
-    and job retention.
+    holds bounded summaries and, when cut, capture paths (see CommandResult).
 
     Close with ``await sh.aclose()``, ``async with Shell()``, dropping it or
     cancelling its resource Job; session shutdown also closes it. Closing ends
@@ -349,6 +375,11 @@ class Shell:
         self._closing: asyncio.Task[None] | None = None  # the cleanup every closer awaits
         self._bash: tuple[int, str | None] | None = None  # pid and start time of bash
         self._own_dir: tempfile.TemporaryDirectory[str] | None = None
+        self._owner: ShellOwner | None = None  # who adopted it at its last start
+        # Direct runs' capture files: a directory in the owner's (removed by
+        # aclose or the owner), else the Shell's own (aclose, or garbage once
+        # neither the Shell nor a result naming it is alive).
+        self._output: Path | tempfile.TemporaryDirectory[str] | None = None
         self._lingering: set[asyncio.Task[None]] = set()
         self._count = itertools.count(1)
         self._note = ""
@@ -422,6 +453,7 @@ class Shell:
         owner = shell_owner.get()
         if owner is not None:  # before bash exists: the owner's close also ends this start
             owner.adopt(self)
+        self._owner = owner
         self._starting = True
         try:
             session = BashSession(cwd=self._directory())
@@ -511,8 +543,9 @@ class Shell:
             session, self._session = self._session, None
             pumps, self._lingering = self._lingering, set()
             own_dir, self._own_dir = self._own_dir, None
+            output, self._output = self._output, None
             closing = self._closing = asyncio.ensure_future(
-                self._cleanup(start, session, pumps, own_dir)
+                self._cleanup(start, session, pumps, own_dir, output)
             )
         await asyncio.shield(closing)
 
@@ -522,6 +555,7 @@ class Shell:
         session: BashSession | None,
         pumps: set[asyncio.Task[None]],
         own_dir: tempfile.TemporaryDirectory[str] | None,
+        output: Path | tempfile.TemporaryDirectory[str] | None = None,
     ) -> None:
         for pump in pumps:
             pump.cancel()
@@ -532,6 +566,10 @@ class Shell:
             await session.close()
         if own_dir is not None:
             own_dir.cleanup()
+        if isinstance(output, Path):
+            shutil.rmtree(output, ignore_errors=True)
+        elif output is not None:
+            output.cleanup()
 
     async def _closed(self) -> None:
         """Wait for a close under way to finish (its outcome is the closers')."""
@@ -548,6 +586,28 @@ class Shell:
     def _bash_alive(self) -> bool:
         return self._bash is not None and _start_time(self._bash[0]) == self._bash[1]
 
+    def _output_path(self) -> Path:
+        """Where a direct run's captures go (see ``_output``), made on first use."""
+        if self._output is None:
+            owned = self._owner._output_dir() if self._owner is not None else None
+            self._output = owned or tempfile.TemporaryDirectory(prefix="nooa-shell-out-")
+        output = self._output
+        return output if isinstance(output, Path) else Path(output.name)
+
+    def _retain(self, result: CommandResult, out: _Capture, err: _Capture) -> None:
+        """Keep a direct run's cut captures; remove the files of uncut streams."""
+        for capture, path in ((out, result.stdout_path), (err, result.stderr_path)):
+            if path is None and capture.path:
+                with contextlib.suppress(OSError):
+                    os.unlink(capture.path)  # short: whole in the summary
+        output = self._output
+        if isinstance(output, tempfile.TemporaryDirectory) and (
+            result.stdout_path or result.stderr_path
+        ):
+            # No owner: the result holds the directory, so dropping the Shell
+            # unclosed does not remove files a live result names.
+            weakref.finalize(result, _release, output)
+
     async def _send_locked(
         self, command: str, stdin: str | None, timeout: float, generation: int
     ) -> CommandResult:
@@ -562,7 +622,7 @@ class Shell:
                 self._own_dir = tempfile.TemporaryDirectory(prefix="nooa-shell-")
             directory = Path(self._own_dir.name)
         stem = f"cmd-{next(self._count)}"
-        out, err = _captures(kept, stem, self._max_output)
+        out, err = _captures(kept or self._output_path(), stem, self._max_output)
         fifos = [directory / f"{stem}.out.fifo", directory / f"{stem}.err.fifo"]
         source = "/dev/null"
         if stdin is not None:  # a file, written before the command starts
@@ -629,6 +689,8 @@ class Shell:
             else:  # restarted at the deadline: this result says so
                 notes = restart_notes
             result = _result(code, timed_out, out, err, str(session.cwd))
+            if kept is None:
+                self._retain(result, out, err)
         finally:
             _close_fds(write_fds)
             for pump, transport, capture in pumps:

@@ -159,3 +159,31 @@ async def test_waiting_receives_one_final_without_pre_exit_output_turns(tmp_path
         if pending is not None:
             await asyncio.gather(pending, return_exceptions=True)
         await registry.close_all()
+
+
+async def test_direct_one_liner_output_file_lives_until_the_session_closes(tmp_path):
+    import gc
+    from pathlib import Path
+
+    models = AtomModels()
+    models.scripts[None] = [
+        cell(
+            "r = await Shell().run('seq 1 100000')\n"  # the temporary Shell is dropped
+            "self.v.out = r.stdout_path\n"
+            "assert 'bytes omitted; full output:' in r.stdout\n"
+            "del r\n"
+            "return_result(Done(explanation='ran'))"
+        )
+    ]
+    registry = SessionRegistry(SessionStore(tmp_path / "sessions"), agent_factory=models)
+    try:
+        root = await registry.create(
+            SessionOptions(workspace=tmp_path, agent_spec="nooa_atom.agent:AtomAgent")
+        )
+        assert await asyncio.wait_for(root.prompt("run"), 30) == Done(explanation="ran")
+        gc.collect()
+        path = Path(root._agent.v.out)
+        assert path.read_text().count("\n") == 100000  # outlives the dropped Shell
+    finally:
+        await registry.close_all()
+    assert not path.exists()  # removed with the session
