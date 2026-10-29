@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Private preview batching and real managed-Shell pre-exit delivery; no provider."""
+"""Private preview batching and completion-only managed Shells; no provider."""
 
 import asyncio
 import contextlib
@@ -117,55 +117,81 @@ async def until(predicate, timeout=10):
             await asyncio.sleep(0.01)
 
 
-def gated_command(tmp_path, *, prefix="OUT", err="ERR", tail="TAIL"):
-    gate = tmp_path / "gate"
+NOISY_OUT = "O" * 20000
+NOISY_ERR = "E" * 20000
+
+
+def gated_command(tmp_path, *, prefix=NOISY_OUT, err=NOISY_ERR, tail="TAIL", name="gate"):
+    gate = tmp_path / name
+    ready = gate.with_suffix(".ready")
     program = (
         "import os,time,pathlib; "
         f"os.write(1,{prefix.encode()!r}); os.write(2,{err.encode()!r}); "
-        f"gate=pathlib.Path({str(gate)!r}); "
+        f"pathlib.Path({str(ready)!r}).touch(); gate=pathlib.Path({str(gate)!r}); "
         "\nwhile not gate.exists(): time.sleep(.01)\n"
         f"os.write(1,{tail.encode()!r})"
     )
     return gate, shlex.join([sys.executable, "-c", program])
 
 
-async def test_real_process_iteration_sees_stdout_stderr_before_exit_same_job(managed, tmp_path):
+async def past_old_preview_deadline(gate):
+    # The subprocess has written both streams. Keep it alive beyond the former
+    # 1s timer as well as the 8192-byte boundary, without relying on its exit.
+    await until(gate.with_suffix(".ready").exists)
+    await asyncio.sleep(1.1)
+    assert not gate.exists()
+
+
+def assert_full_capture(result, *, out=NOISY_OUT + "TAIL", err=NOISY_ERR):
+    assert result.returncode == 0 and not result.timed_out
+    assert "bytes omitted" in result.stdout and "bytes omitted" in result.stderr
+    assert Path(result.stdout_path).read_text() == out
+    assert Path(result.stderr_path).read_text() == err
+
+
+async def test_real_process_iteration_has_no_items_before_or_after_exit(managed, tmp_path):
     manager, channel = managed
     gate, command = gated_command(tmp_path)
     async with Shell(tmp_path) as shell:
         job = manager.launch(shell.run(command), name="observe")
-        got = []
         async with contextlib.aclosing(aiter(job)) as reader:
-            async with asyncio.timeout(10):
-                async for item in reader:
-                    assert isinstance(item, ShellProgress)
-                    got.append(item)
-                    if {part.stream for part in got} == {"stdout", "stderr"}:
-                        assert job.status == "running" and not gate.exists()
-                        gate.touch()
+            pending = asyncio.create_task(anext(reader))
+            try:
+                await past_old_preview_deadline(gate)
+                assert not pending.done() and job.status == "running"
+                assert channel.snapshot() == [] and not job._progress_sinks
+                gate.touch()
+                with pytest.raises(StopAsyncIteration):
+                    await asyncio.wait_for(pending, 10)
+            finally:
+                gate.touch()
+                if not pending.done():
+                    pending.cancel()
+                await asyncio.gather(pending, return_exceptions=True)
         result = await job
-    assert (result.returncode, result.stdout, result.stderr) == (0, "OUTTAIL", "ERR")
-    assert {part.stream: part.text for part in got} == {"stdout": "OUT", "stderr": "ERR"}
-    assert channel.snapshot() == []
+    assert_full_capture(result)
+    assert result.cwd == str(tmp_path)
+    assert channel.snapshot() == [] and job.progress_dropped == 0
 
 
-async def test_detached_notifications_before_exit_final_supersedes_unread_preview(
-    managed, tmp_path
-):
+async def test_detached_shell_notifies_once_only_after_exit(managed, tmp_path):
     manager, channel = managed
     gate, command = gated_command(tmp_path)
     async with Shell(tmp_path) as shell:
         job = manager.launch(shell.run(command), name="later")
-        await until(lambda: len(channel.snapshot()) >= 2)
-        first = channel.drain()
-        assert all(event.kind == "item" and event.name == job.name for event in first)
-        assert {event.value.stream for event in first} == {"stdout", "stderr"}
-        assert job.status == "running"
-        gate.touch()
-        await until(lambda: job.status == "done")
-        [final] = channel.drain()
-        assert final.kind == "done" and final.value.stdout == "OUTTAIL"
-        assert (await job).stderr == "ERR"
+        try:
+            await past_old_preview_deadline(gate)
+            assert channel.snapshot() == [] and job.status == "running"
+            gate.touch()
+            await until(lambda: job.status == "done")
+            [final] = channel.drain()
+            assert (final.kind, final.name, final.id) == ("done", job.name, job.id)
+            assert_full_capture(final.value)
+            assert await job is final.value
+            await asyncio.sleep(1.1)
+            assert channel.snapshot() == [] and job.progress_dropped == 0
+        finally:
+            gate.touch()
 
 
 async def test_completion_only_await_does_not_notify_but_ordinary_emit_does(managed, tmp_path):
@@ -180,20 +206,20 @@ async def test_completion_only_await_does_not_notify_but_ordinary_emit_does(mana
         job = manager.launch(work(), name="final_only")
         waiter = asyncio.ensure_future(job)
         try:
-            await until(lambda: job.progress_dropped == 2)
+            await past_old_preview_deadline(gate)
             assert [event.value for event in channel.snapshot()] == [
                 "ordinary child/control message"
             ]
-            assert job.status == "running"
+            assert job.status == "running" and not waiter.done()
+            assert job.progress_dropped == 0 and not job._progress_sinks
             gate.touch()
-            result = await asyncio.wait_for(waiter, 10)
-            assert result.stdout == "OUTTAIL"
+            assert_full_capture(await asyncio.wait_for(waiter, 10))
             assert [event.value for event in channel.snapshot()] == [
                 "ordinary child/control message"
             ]
         finally:
             gate.touch()
-            await asyncio.gather(waiter, return_exceptions=True)
+            await asyncio.wait_for(asyncio.gather(waiter, return_exceptions=True), 10)
 
 
 async def test_short_command_has_only_final_and_never_a_pending_tail_timer(managed, tmp_path):
@@ -315,16 +341,22 @@ async def test_pending_preview_then_terminal_queues_only_final_plus_generic(mana
     assert job.progress_dropped == 1
 
 
-async def test_timeout_and_lingering_background_writer_detach_preview(managed, tmp_path):
+async def test_timeout_and_lingering_background_writer_are_completion_only(managed, tmp_path):
     manager, channel = managed
+    gate, command = gated_command(tmp_path)
     async with Shell(tmp_path) as shell:
-        job = manager.launch(shell.run("printf start; sleep 20", timeout=1.25), name="timeout")
-        await until(lambda: bool(channel.snapshot()))
-        assert channel.drain()[0].value.text == "start" and job.status == "running"
+        job = manager.launch(shell.run(command, timeout=3), name="timeout")
+        await past_old_preview_deadline(gate)
+        assert channel.snapshot() == [] and job.status == "running"
+        await until(lambda: job.status == "done")
+        [final] = channel.drain()
+        assert final.kind == "done" and final.id == job.id
         result = await job
-        assert result.timed_out and result.returncode == 124 and result.stdout == "start"
-        assert not job._progress_sinks
-        # The command ends while a writer keeps its FIFO open past the batch deadline.
+        assert result is final.value and result.timed_out and result.returncode == 124
+        assert Path(result.stdout_path).read_text() == NOISY_OUT
+        assert Path(result.stderr_path).read_text().startswith(NOISY_ERR)
+        assert not gate.exists() and not job._progress_sinks and job.progress_dropped == 0
+        # The command ends while a writer keeps its FIFO open past the old deadline.
         lingering = manager.launch(
             shell.run("printf initial; (sleep 1.2; printf late; sleep .2) &"), name="background"
         )
@@ -335,27 +367,53 @@ async def test_timeout_and_lingering_background_writer_detach_preview(managed, t
         assert channel.snapshot() == [] and not lingering._progress_sinks
 
 
-async def test_resource_requests_keep_progress_generation_and_capture_limits_separate(
-    managed, tmp_path
-):
+@pytest.mark.parametrize("owner_cancel", [False, True], ids=["task", "owner"])
+async def test_cancel_noisy_shell_never_emits_output_items(managed, tmp_path, owner_cancel):
     manager, channel = managed
-    gate, command = gated_command(tmp_path, prefix="a" * 20000, err="", tail="z")
+    gate, command = gated_command(tmp_path)
+    async with Shell(tmp_path) as shell:
+        job = manager.launch(shell.run(command), name="cancel_shell")
+        await past_old_preview_deadline(gate)
+        assert channel.snapshot() == [] and job.status == "running"
+        if owner_cancel:
+            await job.cancel()  # owner cancellation withdraws its own terminal outcome
+            assert channel.snapshot() == []
+        else:
+            job._task.cancel()
+            await until(lambda: job.status == "cancelled")
+            [final] = channel.drain()
+            assert final.kind == "cancelled" and final.id == job.id
+        assert job.status == "cancelled" and not gate.exists()
+        assert job.progress_dropped == 0 and not job._progress_sinks
+        assert (await manager.launch(shell.run("printf next"))).stdout == "next"
+        await asyncio.sleep(1.1)
+        assert channel.snapshot() == []
+
+
+async def test_resource_requests_keep_completion_and_capture_limits_separate(managed, tmp_path):
+    manager, channel = managed
+    gate, command = gated_command(tmp_path, prefix="a" * 20000, tail="z")
     resource = manager.launch(Shell(tmp_path, max_output=12000), name="resource")
     request = resource.send(command)
-    reader = aiter(request)
-    first = await asyncio.wait_for(anext(reader), 10)
-    assert first.stream == "stdout" and len(first.text.encode()) == 8192
-    assert request.status == "running" and not gate.exists()
-    gate.touch()
-    async for _ in reader:
-        pass
+    async with contextlib.aclosing(aiter(request)) as reader:
+        try:
+            await past_old_preview_deadline(gate)
+            assert not reader._buffer and request.status == "running"
+            assert channel.snapshot() == [] and not request._progress_sinks
+            gate.touch()
+            assert [item async for item in reader] == []
+        finally:
+            gate.touch()
     result = await request
-    assert "output limit" in result.stdout and result.stdout_path
-    assert len(Path(result.stdout_path).read_bytes()) == 12000
+    assert result.returncode == 0
+    assert "output limit" in result.stdout and "output limit" in result.stderr
+    assert Path(result.stdout_path).read_text() == "a" * 12000
+    assert Path(result.stderr_path).read_text() == "E" * 12000
+    assert result.stdout.endswith("z")  # summary tail survives the on-disk capture cap
     second = resource.send("printf next")
     assert (await second).stdout == "next"
     assert second.id != request.id and not second._progress_sinks
-    assert not channel.snapshot()
+    assert request.progress_dropped == 0 and not channel.snapshot()
 
 
 def test_policy_is_fixed_per_command_and_not_publicly_retunable():
@@ -416,29 +474,31 @@ async def test_preview_delivery_failure_does_not_break_work_or_capture(managed, 
     assert job.progress_dropped == 1 and not job._progress_sinks
 
 
-async def test_queued_resource_requests_cannot_mix_live_previews(managed, tmp_path):
+async def test_queued_resource_requests_complete_in_order_without_items(managed, tmp_path):
     manager, channel = managed
     resource = manager.launch(Shell(tmp_path), name="serial")
-    first_gate, second_gate = tmp_path / "first", tmp_path / "second"
-
-    def command(gate, prefix):
-        return f"printf {prefix}; while [ ! -f {shlex.quote(str(gate))} ]; do sleep .01; done"
-
-    first = resource.send(command(first_gate, "ONE"))
-    second = resource.send(command(second_gate, "TWO"))
+    first_gate, first_command = gated_command(tmp_path, name="first")
+    second_gate, second_command = gated_command(tmp_path, name="second")
+    first = resource.send(first_command)
+    second = resource.send(second_command)
     async with contextlib.aclosing(aiter(first)) as a, contextlib.aclosing(aiter(second)) as b:
-        assert (await asyncio.wait_for(anext(a), 10)).text == "ONE"
-        assert not b._buffer and second.status == "running"
-        first_gate.touch()
-        async for _ in a:
-            pass
-        assert (await first).stdout == "ONE"
-        part = await asyncio.wait_for(anext(b), 10)
-        assert part.text == "TWO" and part.sequence == 1
-        second_gate.touch()
-        async for _ in b:
-            pass
-        assert (await second).stdout == "TWO"
+        try:
+            await past_old_preview_deadline(first_gate)
+            assert not a._buffer and not b._buffer and second.status == "running"
+            assert not second_gate.with_suffix(".ready").exists()
+            assert channel.snapshot() == []
+            first_gate.touch()
+            assert [item async for item in a] == []
+            assert_full_capture(await first)
+            await past_old_preview_deadline(second_gate)
+            assert not b._buffer and channel.snapshot() == []
+            second_gate.touch()
+            assert [item async for item in b] == []
+            assert_full_capture(await second)
+        finally:
+            first_gate.touch()
+            second_gate.touch()
+    assert first.progress_dropped == second.progress_dropped == 0
     assert not channel.snapshot()
 
 
@@ -465,29 +525,27 @@ async def test_delivered_generic_history_frees_progress_slots_and_cancel_counts_
     assert job.progress_dropped == 2 and channel.snapshot() == []
 
 
-async def test_terminal_reader_detach_counts_unread_real_shell_progress(managed, tmp_path):
+async def test_terminal_reader_detach_delivers_only_shell_result(managed, tmp_path):
     manager, channel = managed
-    gate = tmp_path / "terminal-gate"
-    command = f"printf '%8192s' x; while [ ! -f {shlex.quote(str(gate))} ]; do sleep .01; done; printf TAIL"
+    gate, command = gated_command(tmp_path)
     async with Shell(tmp_path) as shell:
         job = manager.launch(shell.run(command), name="detach_after_terminal")
         reader = aiter(job)
         try:
-            await until(lambda: bool(reader._buffer))
-            assert job.status == "running" and not gate.exists()
-            assert job.progress_dropped == 0
+            await past_old_preview_deadline(gate)
+            assert job.status == "running" and not reader._buffer
+            assert channel.snapshot() == []
             gate.touch()
             await until(lambda: job.status != "running")
             assert job.status == "done", job.error
-            # Deliberately neither consume the preview nor await the final result:
-            # both would exercise already-covered paths rather than late detach.
-            assert len(reader._buffer) == 2  # one 8192-byte preview and terminal marker
+            # Deliberately neither consume the iterator nor await the final result.
+            assert len(reader._buffer) == 1  # only the terminal marker
             await reader.aclose()
-            assert job.progress_dropped == 1
+            assert job.progress_dropped == 0
             [final] = channel.snapshot()
             assert final.kind == "done" and final.id == job.id
-            assert final.value.stdout == " " * 8191 + "xTAIL"
-            assert (await job).stdout == final.value.stdout
+            assert_full_capture(final.value)
+            assert await job is final.value
             assert channel.snapshot() == []
         finally:
             gate.touch()

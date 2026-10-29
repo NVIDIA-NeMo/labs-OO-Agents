@@ -1,10 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Real Shell output seen by scripted Atom root/children before process exit."""
+"""Real Shells are completion-only in scripted Atom root/children; no provider."""
 
 import asyncio
 import shlex
+import sys
 
+import pytest
 from atom_test_agents import AtomModels, cell
 from nooa_atom.session.options import SessionOptions
 from nooa_atom.session.registry import SessionRegistry
@@ -13,38 +15,71 @@ from nooa_atom.session.store import SessionStore
 from nooa.interactive import Done
 
 
-def preview_code(name, workspace):
-    gate = str(workspace / (name + ".gate"))
-    command = f"printf {name}; while [ ! -f {shlex.quote(gate)} ]; do sleep .01; done; printf END"
+def gated_command(name, workspace):
+    gate = workspace / (name + ".gate")
+    ready = workspace / (name + ".ready")
+    program = (
+        "import os,time,pathlib; "
+        f"os.write(1, {name.encode()!r} + b'O'*20000); os.write(2, b'E'*20000); "
+        f"pathlib.Path({str(ready)!r}).touch(); gate=pathlib.Path({str(gate)!r}); "
+        "\nwhile not gate.exists(): time.sleep(.01)\n"
+        "os.write(1,b'END')"
+    )
+    return shlex.join([sys.executable, "-c", program])
+
+
+def capture_assertions(name):
     return (
         "from pathlib import Path\n"
-        f"gate=Path({gate!r})\n"
-        f"work=self.jobs.launch(Shell().run({command!r}), name='preview')\n"
-        "seen=[]\n"
-        "async for part in work:\n"
-        f" assert part.stream == 'stdout' and part.text == {name!r}\n"
-        " assert work.status == 'running' and not gate.exists()\n"
-        " seen.append(part.text)\n"
-        " gate.touch()\n"
-        "result=await work\n"
-        f"assert result.returncode == 0 and result.stdout == {name + 'END'!r}\n"
-        f"assert seen == [{name!r}]\n"
-        "self.v.preview_seen=seen\n"
+        "assert result.returncode == 0 and not result.timed_out\n"
+        f"assert Path(result.stdout_path).read_text() == {name!r} + 'O'*20000 + 'END'\n"
+        "assert Path(result.stderr_path).read_text() == 'E'*20000\n"
+        "assert 'bytes omitted' in result.stdout and 'bytes omitted' in result.stderr\n"
     )
+
+
+def completion_code(name, workspace, observation):
+    return (
+        f"work=self.jobs.launch(Shell().run({gated_command(name, workspace)!r}), name='shell')\n"
+        + ("assert [part async for part in work] == []\n" if observation == "iterator" else "")
+        + "result=await work\n"
+        + capture_assertions(name)
+        + "assert work.progress_dropped == 0\n"
+        + "self.v.completion_seen=True\n"
+    )
+
+
+async def hold_then_release(workspace, name, models, pending):
+    ready, gate = workspace / (name + ".ready"), workspace / (name + ".gate")
+    async with asyncio.timeout(20):
+        while not ready.exists():
+            if pending.done():
+                await pending  # surface script errors instead of timing out
+                pytest.fail("session ended before the gated command started")
+            await asyncio.sleep(0.01)
+    # Both streams have exceeded 8192 bytes. Observe beyond the former 1s timer
+    # before the test (not any generated turn) releases the command.
+    await asyncio.sleep(1.1)
+    assert not pending.done() and not gate.exists()
+    assert all(len(llm.calls) == 1 for llm in models.llms.values())
+    gate.touch()
 
 
 def done(report):
     return (
-        "return_result(Done(explanation='observed', result=TaskResult("
-        f"solution_description='live output', evidence='gate', how_to_verify='test', report={report!r})))"
+        "return_result(Done(explanation='completed', result=TaskResult("
+        f"solution_description='completion only', evidence='gate', how_to_verify='test', report={report!r})))"
     )
 
 
-async def test_root_child_grandchild_observe_same_fixed_policy_in_one_handle(tmp_path):
+@pytest.mark.parametrize("observation", ["await", "iterator"])
+async def test_root_child_grandchild_complete_without_output_items_or_extra_turns(
+    tmp_path, observation
+):
     models = AtomModels()
     models.scripts[None] = [
         cell(
-            preview_code("root", tmp_path)
+            completion_code("root", tmp_path, observation)
             + "child=await self.jobs.launch(Subagent('child').run('observe'), name='child')\n"
             + "assert child.report == 'child+grand'\n"
             + done("root+child+grand")
@@ -52,70 +87,75 @@ async def test_root_child_grandchild_observe_same_fixed_policy_in_one_handle(tmp
     ]
     models.scripts["child"] = [
         cell(
-            preview_code("child", tmp_path)
+            completion_code("child", tmp_path, observation)
             + "grand=await self.jobs.launch(Subagent('grand').run('observe'), name='grand')\n"
             + "assert grand.report == 'grand'\n"
             + done("child+grand")
         )
     ]
-    models.scripts["grand"] = [cell(preview_code("grand", tmp_path) + done("grand"))]
+    models.scripts["grand"] = [
+        cell(completion_code("grand", tmp_path, observation) + done("grand"))
+    ]
     registry = SessionRegistry(SessionStore(tmp_path / "sessions"), agent_factory=models)
+    pending = None
     try:
         root = await registry.create(
-            SessionOptions(
-                workspace=tmp_path,
-                agent_spec="nooa_atom.agent:AtomAgent",
-            )
+            SessionOptions(workspace=tmp_path, agent_spec="nooa_atom.agent:AtomAgent")
         )
-        outcome = await asyncio.wait_for(root.prompt("observe the live output"), 45)
+        pending = asyncio.create_task(root.prompt("observe completion-only output"))
+        for name in ("root", "child", "grand"):
+            await hold_then_release(tmp_path, name, models, pending)
+        outcome = await asyncio.wait_for(pending, 45)
         assert outcome.result.report == "root+child+grand"
-        assert root._agent.v.preview_seen == ["root"]
-        assert all((tmp_path / (name + ".gate")).exists() for name in ("root", "child", "grand"))
+        assert root._agent.v.completion_seen is True
         await asyncio.sleep(0.1)
         for llm in models.llms.values():
-            assert len(llm.calls) == 1  # previews were observed, not extra generation turns
+            assert len(llm.calls) == 1
             prompt = str(llm.calls[0].messages)
-            assert "1s OR 8192 UTF-8 bytes" in prompt
-            assert "await job`` is final-only" in prompt
+            assert "Shell output is completion-only" in prompt
+            assert "1s OR 8192 UTF-8 bytes" not in prompt
     finally:
+        for name in ("root", "child", "grand"):
+            (tmp_path / (name + ".gate")).touch()
+        if pending is not None and not pending.done():
+            pending.cancel()
+        if pending is not None:
+            await asyncio.gather(pending, return_exceptions=True)
         await registry.close_all()
 
 
-async def test_waiting_receives_live_preview_then_one_final_without_releasing_gate_early(tmp_path):
+async def test_waiting_receives_one_final_without_pre_exit_output_turns(tmp_path):
     models = AtomModels()
-    gate = str(tmp_path / "gate")
-    command = f"printf READY; while [ ! -f {shlex.quote(gate)} ]; do sleep .01; done; printf END"
     models.scripts[None] = [
         cell(
-            f"self.jobs.launch(Shell().run({command!r}), name='live')\n"
-            "return_result(Waiting(explanation='running', on=['live']))"
+            f"self.jobs.launch(Shell().run({gated_command('root', tmp_path)!r}), name='shell')\n"
+            "return_result(Waiting(explanation='running', on=['shell']))"
         ),
         cell(
             "[event]=notification['jobs']\n"
-            "assert event.kind == 'item' and event.value.stream == 'stdout'\n"
-            "assert event.value.text == 'READY' and event.value.sequence == 1\n"
-            "assert self.jobs.get('live').status == 'running'\n"
-            f"from pathlib import Path\nassert not Path({gate!r}).exists()\nPath({gate!r}).touch()\n"
-            "return_result(Waiting(explanation='released', on=['live']))"
-        ),
-        cell(
-            "[event]=notification['jobs']\n"
-            "assert event.kind == 'done' and event.value.stdout == 'READYEND'\n"
-            "return_result(Done(explanation='observed before exit'))"
+            "assert event.kind == 'done' and event.name == 'shell'\n"
+            "result=event.value\n"
+            + capture_assertions("root")
+            + "assert self.jobs.get('shell').status == 'done'\n"
+            + "assert self.jobs.get('shell').progress_dropped == 0\n"
+            + "return_result(Done(explanation='observed only completion'))"
         ),
     ]
     registry = SessionRegistry(SessionStore(tmp_path / "sessions"), agent_factory=models)
+    pending = None
     try:
         root = await registry.create(
-            SessionOptions(
-                workspace=tmp_path,
-                agent_spec="nooa_atom.agent:AtomAgent",
-            )
+            SessionOptions(workspace=tmp_path, agent_spec="nooa_atom.agent:AtomAgent")
         )
-        assert await asyncio.wait_for(root.prompt("observe"), 30) == Done(
-            explanation="observed before exit"
-        )
-        await asyncio.sleep(0.1)
-        assert len(models.llms[None].calls) == 3
+        pending = asyncio.create_task(root.prompt("observe"))
+        await hold_then_release(tmp_path, "root", models, pending)
+        assert await asyncio.wait_for(pending, 30) == Done(explanation="observed only completion")
+        await asyncio.sleep(1.1)
+        assert len(models.llms[None].calls) == 2
     finally:
+        (tmp_path / "root.gate").touch()
+        if pending is not None and not pending.done():
+            pending.cancel()
+        if pending is not None:
+            await asyncio.gather(pending, return_exceptions=True)
         await registry.close_all()

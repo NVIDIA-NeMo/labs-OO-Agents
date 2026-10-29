@@ -390,23 +390,15 @@ async def test_worker_cannot_redirect_receipt_with_agent_kwargs(tmp_path, wire):
     assert not wire[1] and not output.exists() and not (tmp_path / "redirected.json").exists()
 
 
-async def test_worker_shell_preview_is_pre_exit_and_does_not_add_model_calls(tmp_path, wire):
-    import shlex
-
+async def test_worker_shell_is_completion_only_and_does_not_add_model_calls(tmp_path, wire):
     scripts, calls, _ = wire
-    gate = str(tmp_path / "gate")
-    command = f"printf READY; while [ ! -f {shlex.quote(gate)} ]; do sleep .01; done; printf END"
+    # Output, then a pause past the former 1-second preview window, then more output.
+    command = "printf READY; sleep 1.3; printf END"
     scripts.append(
-        "from pathlib import Path\n"
         f"work=self.jobs.launch(Shell().run({command!r}), name='live')\n"
-        "seen=[]\n"
-        "async for part in work:\n"
-        " assert part.text == 'READY' and part.stream == 'stdout'\n"
-        f" assert work.status == 'running' and not Path({gate!r}).exists()\n"
-        " seen.append(part.text)\n"
-        f" Path({gate!r}).touch()\n"
+        "seen=[part async for part in work]\n"
         "result=await work\n"
-        "assert result.stdout == 'READYEND' and seen == ['READY']\n" + DONE
+        "assert seen == [] and result.stdout == 'READYEND', (seen, result)\n" + DONE
     )
     _, inputs, output = payload(tmp_path)
     await main(inputs, output)

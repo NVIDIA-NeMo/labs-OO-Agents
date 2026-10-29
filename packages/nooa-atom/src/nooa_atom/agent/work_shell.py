@@ -48,8 +48,7 @@ from typing import IO, Annotated, Any
 from nooa import hidden
 from nooa.agentdoc import spec
 from nooa.tools import BashSession
-from nooa_atom.agent.work_manager import _progress_sink, describe, job_dir
-from nooa_atom.agent.work_progress import _ShellProgress
+from nooa_atom.agent.work_manager import describe, job_dir
 
 __all__ = ["CommandResult", "Shell", "ShellOwner", "default_cwd", "shell_owner"]
 
@@ -103,16 +102,17 @@ _CLOSED_DURING = "the shell was closed while this command ran; the command was s
 class CommandResult:
     """One command's outcome: exit code, output, and the shell's directory after it.
 
-    ``stdout`` and ``stderr`` are whole up to 10 kB, else head and tail
-    around a marker; ``stdout_path``/``stderr_path`` then name the file with
-    the full output (kept while the job is listed). ``cwd`` is the shell's
-    directory after the command, as bash reported it (a ``cd`` lasts).
+    ``stdout``/``stderr`` are whole up to 10 kB, else head and tail around a
+    marker. ``stdout_path``/``stderr_path`` name longer managed captures, kept
+    while the job is listed, capped per stream by ``max_output`` (default 64 MiB).
+    The marker reports cap overflow. Unmanaged calls keep no files. ``cwd`` is
+    bash's directory after the command (a ``cd`` lasts).
     """
 
     returncode: int
     timed_out: bool
     # Shown cut to 2,000 characters in notifications and pprint (display only):
-    # the full summary stays on the object, the full output in the *_path files.
+    # the full summary stays on the object; *_path files retain up to max_output.
     stdout: Annotated[str, spec(max_string=2000)]
     stderr: Annotated[str, spec(max_string=2000)]
     cwd: str
@@ -130,7 +130,6 @@ class _Capture:
         self.written = 0
         self.total = 0
         self.tail = bytearray()
-        self.progress = None
 
     def feed(self, chunk: bytes) -> None:
         self.total += len(chunk)
@@ -146,10 +145,6 @@ class _Capture:
         with contextlib.suppress(Exception):
             while chunk := await stream.read(_CHUNK_BYTES):
                 self.feed(chunk)
-                if self.progress is not None:
-                    self.progress.feed(chunk)
-            if self.progress is not None:
-                self.progress.feed(b"", final=True)
 
     def summary(self) -> tuple[str, str | None]:
         """The stream's text, or its head and tail around a marker; and the path if cut."""
@@ -323,11 +318,10 @@ class Shell:
     force a restart. ``set -e`` or ``exit N`` can end bash; the next command starts
     fresh. Other options persist; results report lost state.
 
-    Managed output previews carry stream/text/sequence at 1s OR 8192 UTF-8 bytes
-    per stream. Iterate the Job or use Waiting. ``await job`` is final-only:
-    unread previews are removed, ordinary items stay. No terminal preview flush:
-    tails stay in CommandResult; earlier previews duplicate its prefix.
-    ``job.progress_dropped`` counts omissions.
+    Shell output is completion-only: no output items or early notifications.
+    Await or iterate a command job, or use Waiting; its final ``CommandResult``
+    holds bounded summaries and managed capture paths, subject to output limits
+    and job retention.
 
     Close with ``await sh.aclose()``, ``async with Shell()``, dropping it or
     cancelling its resource Job; session shutdown also closes it. Closing ends
@@ -582,12 +576,7 @@ class Shell:
         opened: list[tuple[asyncio.StreamReader, asyncio.BaseTransport, int]] = []
         write_fds: set[int] = set()
         pumps: list[tuple[asyncio.Task[None], asyncio.BaseTransport, _Capture]] = []
-        progress = None
         try:
-            sink = _progress_sink()
-            if sink is not None:
-                progress = _ShellProgress(sink)
-                out.progress, err.progress = progress.stdout, progress.stderr
             for fifo in fifos[:2]:
                 opened.append(await _open_fifo(fifo))
                 write_fds.add(opened[-1][2])
@@ -603,8 +592,6 @@ class Shell:
             inner = asyncio.ensure_future(
                 session.run_with_timeout_flag(wrapped, timeout + _BACKSTOP_SECONDS)
             )
-            if progress is not None:
-                progress.live = lambda: not inner.done() and self._generation == generation
             restart_notes: list[str] | None = None
             try:
                 try:
@@ -612,8 +599,6 @@ class Shell:
                         asyncio.shield(inner), timeout
                     )
                 except TimeoutError:
-                    if progress is not None:
-                        progress.close()
                     restarted = await self._interrupt(inner, before, session, generation)
                     self._check_open(generation)
                     if restarted:
@@ -623,8 +608,6 @@ class Shell:
                         stray_out, stray_err, _, _ = inner.result()
                     code, timed_out = 124, True
             except asyncio.CancelledError:
-                if progress is not None:
-                    progress.close()
                 if await self._interrupt(inner, before, session, generation):
                     raise asyncio.CancelledError(self._note) from None
                 raise
@@ -632,8 +615,6 @@ class Shell:
                 self._check_open(generation)  # closed: say so, not how the close broke it
                 raise
             finally:
-                if progress is not None:
-                    progress.close()  # terminal, not EOF: background writers may keep pipes open
                 _close_fds(write_fds)  # bash's ends close with the group: then EOF
             self._check_open(generation)
             await self._settle([pump for pump, _, _ in pumps])
@@ -649,8 +630,6 @@ class Shell:
                 notes = restart_notes
             result = _result(code, timed_out, out, err, str(session.cwd))
         finally:
-            if progress is not None:
-                progress.close()
             _close_fds(write_fds)
             for pump, transport, capture in pumps:
                 if pump.done():

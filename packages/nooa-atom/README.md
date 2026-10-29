@@ -241,47 +241,34 @@ depth, respectively. `None` means unlimited for that bound. Both helpers' actual
 signatures are in `python_cell_tools`; full help remains available via `print(doc(doc))`
 and `print(doc(pprint))` without injecting full internal documentation into each turn.
 
-## Managed Shell progress
+## Managed Shell completion
 
-Managed Shell command jobs emit bounded `ShellProgress` **items** through the
-existing Job iterator / `JobEvent` route. Each item has `stream` (`stdout` or
-`stderr`), `text`, and a per-command/per-stream `sequence`. The fixed policy is
-**1 second OR 8192 UTF-8 text bytes per stream**, copied immutably for each command.
-There is no model-facing retuning API. This is batching, not a strict wake-rate cap:
-high-volume output may reach the byte boundary earlier. Ordering is per stream;
-there is no invented stdout/stderr ordering. Partial UTF-8 is decoded incrementally;
-invalid bytes use replacement characters.
+Shell command output is **completion-only**, for roots and children alike.
+Commands do not emit output previews or early `item` notifications, whether
+awaited, iterated, or left running with `Waiting`.
 
 ```python
-job = self.jobs.launch(Shell().run("long command"), name="build")
-async for part in job:
-    print(part.stream, part.text)  # observed while the command can still be running
-result = await job                # the same unchanged CommandResult
+sh = Shell()
+result = await self.jobs.launch(sh.run("pwd"), name="pwd")
+print(result.stdout)
 ```
 
-Alternatively return `Waiting(on=["build"])` to receive previews in later turns.
-`await job` requests **completion-only** observation: pending final-result waiters
-suppress private Shell previews (even if an iterator remains attached). Unread
-previews are withdrawn when switching to that wait; normal `emit`, child notes
-and generic iterator values are unaffected. Cancelling that wait does not cancel
-the job. Owner cancellation does stop the command and withdraw previews.
+Alternatively, launch a command and return `Waiting(on=["build"])` to receive
+its terminal `JobEvent` in a later turn. Iterating a Shell command job yields
+no output items; obtain its `CommandResult` with `await job`. Generic WorkManager
+iterator values, explicit `emit` values, and child messages are unaffected.
+Cancelling a final-result wait does not cancel the job; owner cancellation does
+stop the command. Timeout returns a `CommandResult` with return code 124 and
+`timed_out=True`.
 
-There is **no terminal tail flush**. Commands ending before either batching boundary
-produce only their final result. Once a detached command completes, its final result
-supersedes unread previews; an active iterator can drain its already-buffered items.
-Pending tail text stays in the ordinary `CommandResult` on success/nonzero exit/timeout;
-on exceptional failure or cancellation it is not separately published as progress.
-Earlier previews may duplicate a prefix of the final summary. Full-result capture
-limits/files are unchanged and independent of live-delivery queue limits.
-`job.progress_dropped` counts omitted batches (queue bounds, completion-only waits,
-withdrawn previews or preview-delivery failure), not stdout capture truncation.
-No preview is evidence that the process was silent.
-
-Timers and output sinks detach at command termination/cancellation, not FIFO EOF:
-background writers cannot emit into later requests or reused job names. Direct
-unmanaged `Shell.run` calls have no progress events. This common behavior applies to
-roots and children. Model-visible pre-exit delivery is tested; no ACP/TUI pre-exit display claim
-or PTY/live-input API is made here.
+Final `stdout` and `stderr` summaries are whole up to 10 kB per stream, otherwise
+head and tail around a truncation marker. For managed jobs, `stdout_path` and
+`stderr_path` then name capture files retained while the job is listed. These
+artifacts have existing capture and retention bounds: each holds at most the
+Shell's `max_output` bytes per stream (64 MiB by default), and is removed when
+the job is pruned or the manager closes. The marker reports capture-limit
+truncation. Direct unmanaged calls keep no output files; a truncated summary
+says the full output was not kept. This does not provide a PTY or live-input API.
 
 ## Python session namespace and optional Done reflection
 
