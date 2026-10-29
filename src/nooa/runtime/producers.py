@@ -56,17 +56,27 @@ async def tail(path: str, *, poll_interval: float = 0.5, max_line_bytes: int = 1
     try:
         fh.seek(0, 2)
         partial = b""
+        continued = False  # this line already came out in pieces
         while True:
             chunk = fh.readline(max_line_bytes - len(partial))
             if chunk:
                 partial += chunk
                 if partial.endswith(b"\n"):
-                    line = partial[:-1].removesuffix(b"\r")
+                    text = decoder.decode(partial[:-1], final=True)
                     partial = b""
-                    yield decoder.decode(line, final=True)
+                    text = text.removesuffix("\r")
+                    # The terminator of a line already yielded in pieces is no new line.
+                    if text or not continued:
+                        yield text
+                    continued = False
                 elif len(partial) >= max_line_bytes:
-                    piece, partial = partial, b""
-                    yield decoder.decode(piece)
+                    # A piece cut inside a character decodes to "" until the
+                    # rest arrives (the decoder keeps those bytes): skip it.
+                    text = decoder.decode(partial)
+                    partial = b""
+                    if text:
+                        continued = True
+                        yield text
             else:
                 await asyncio.sleep(poll_interval)
     finally:

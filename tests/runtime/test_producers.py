@@ -87,6 +87,22 @@ class TestTail:
         )
         assert lines == ["x" * 8, "xx" + "y" * 5]
 
+    async def test_newline_right_after_a_full_piece_adds_no_empty_line(self, tmp_path):
+        """A line exactly max_line_bytes long is one line, with LF or CRLF."""
+        f = tmp_path / "app.log"
+        f.write_bytes(b"")
+        lines = await self._tail_while_writing(
+            f, [b"abcd\n", b"efgh\r\n", b"next\n"], 3, max_line_bytes=4
+        )
+        assert lines == ["abcd", "efgh", "next"]
+
+    async def test_piece_cut_inside_a_character_yields_no_empty_fragment(self, tmp_path):
+        """A cut through a multi-byte character waits for the rest of it."""
+        f = tmp_path / "app.log"
+        f.write_bytes(b"")
+        lines = await self._tail_while_writing(f, ["€\n".encode(), b"ok\n"], 3, max_line_bytes=1)
+        assert lines == ["€", "o", "k"]
+
 
 class TestMonitorProcessIsolation:
     """Verify monitor() uses pipes with proper process-group isolation."""
