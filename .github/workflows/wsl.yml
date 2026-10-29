@@ -67,6 +67,13 @@ jobs:
           } catch {
             Fail "rootfs download failed" ($_ | Out-String)
           }
+          # The runner's in-box WSL lacks the WSL 2 kernel ("WSL 2 requires an
+          # update to its kernel component"): install it first.
+          $upd = (wsl --update --web-download 2>&1 | Out-String) -replace "`0", ""
+          if ($LASTEXITCODE -ne 0) { $upd += (wsl --update 2>&1 | Out-String) -replace "`0", "" }
+          Write-Output $upd
+          if ($LASTEXITCODE -ne 0) { Fail "wsl --update failed ($LASTEXITCODE)" $upd }
+          wsl --set-default-version 2
           $out = (wsl --import nooa-ubuntu (Join-Path $env:RUNNER_TEMP "wsl") $rootfs --version 2 2>&1 | Out-String)
           if ($LASTEXITCODE -ne 0) { Fail "wsl --import failed ($LASTEXITCODE)" $out }
           wsl --list --verbose
