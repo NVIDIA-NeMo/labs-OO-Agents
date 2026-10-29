@@ -15,6 +15,7 @@ import inspect
 import logging
 import re
 import shlex
+import sys
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -538,6 +539,7 @@ class RepoTools(Skill):
         self._root = Path(root).absolute() if session is not None else Path(root).resolve()
         self._session = session  # shared session with ShellTools (optional)
         self._has_rg: bool | None = None  # lazy-checked
+        self._rg = "rg"  # command used once _check_rg() found ripgrep
         if not _tree_sitter_available():
             message = "tree-sitter is not available; RepoTools will use regex/rg fallbacks"
             if require_tree_sitter:
@@ -804,15 +806,27 @@ class RepoTools(Skill):
         return _line_match_from_lines(fpath, line_no, lines, editable=self._anchors_editable)
 
     async def _check_rg(self) -> bool:
-        """Check if rg (ripgrep) is available, caching the result."""
+        """Check if rg (ripgrep) is available, caching the result.
+
+        ``ripgrep-bin`` installs ``rg`` beside the interpreter, so when PATH
+        lacks it (a harness launched by absolute path) the copy next to
+        ``sys.executable`` is used by its full path.
+        """
         if self._has_rg is None:
+            bundled = Path(sys.executable).parent / "rg"
             if self._session:
                 _, _, code = await self._session.run("command -v rg", timeout=5)
+                if code != 0:
+                    _, _, code = await self._session.run(
+                        f"test -x {shlex.quote(str(bundled))}", timeout=5
+                    )
+                    if code == 0:
+                        self._rg = shlex.quote(str(bundled))
                 self._has_rg = code == 0
             else:
                 import shutil
 
-                self._has_rg = shutil.which("rg") is not None
+                self._has_rg = shutil.which("rg") is not None or bundled.is_file()
         return self._has_rg
 
     # ------------------------------------------------------------------
@@ -913,7 +927,7 @@ class RepoTools(Skill):
             # Use rg to find files respecting gitignore, or fall back to walking
             if self._session and await self._check_rg():
                 stdout, _, _ = await self._session.run(
-                    f"rg --files {shlex.quote(str(resolved))} 2>/dev/null | head -{max_files * 3}",
+                    f"{self._rg} --files {shlex.quote(str(resolved))} 2>/dev/null | head -{max_files * 3}",
                     timeout=15,
                 )
                 for line in stdout.splitlines():
@@ -1024,7 +1038,7 @@ class RepoTools(Skill):
             pattern = f"(def|class|function|func|struct|trait|interface|type|impl|module|const)\\s+\\w*{re.escape(name)}\\w*"
             if await self._check_rg():
                 stdout, _, _ = await self._session.run(
-                    f"rg -n -i --color=never {shlex.quote(pattern)} {shlex.quote(str(resolved))} 2>/dev/null | head -{max_results * 2}",
+                    f"{self._rg} -n -i --color=never {shlex.quote(pattern)} {shlex.quote(str(resolved))} 2>/dev/null | head -{max_results * 2}",
                     timeout=30,
                 )
             else:
@@ -1168,7 +1182,7 @@ class RepoTools(Skill):
         if self._session:
             if await self._check_rg():
                 # -H: a single file also gets the file:line:text prefix parsed below.
-                cmd = f"rg -nH --color=never {shlex.quote(pattern)} {shlex.quote(str(resolved))} 2>/dev/null | head -{max_results * 3}"
+                cmd = f"{self._rg} -nH --color=never {shlex.quote(pattern)} {shlex.quote(str(resolved))} 2>/dev/null | head -{max_results * 3}"
             else:
                 # GNU grep is present in images where rg is not (e.g. SWE-bench).
                 cmd = f"grep -rnHE {shlex.quote(pattern)} {shlex.quote(str(resolved))} 2>/dev/null | head -{max_results * 3}"
