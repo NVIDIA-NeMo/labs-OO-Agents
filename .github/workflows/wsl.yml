@@ -17,7 +17,8 @@ permissions:
 
 jobs:
   wsl:
-    runs-on: windows-latest
+    # WSL 2 is available on windows-2022 runner images (see setup-wsl's docs).
+    runs-on: windows-2022
     timeout-minutes: 90
     defaults:
       run:
@@ -39,9 +40,11 @@ jobs:
           persist-credentials: false
       - name: WSL status
         run: |
-          $info = (wsl --version 2>&1; wsl --status 2>&1) | Out-String
+          $ErrorActionPreference = "Continue"
+          $info = ((& wsl.exe --version 2>&1) + (& wsl.exe --status 2>&1) | Out-String) -replace "`0", ""
           Write-Output $info
           Write-Output "::notice title=WSL on this runner::$($info.Trim() -replace "`r?`n", '%0A')"
+          exit 0
       - name: Import Ubuntu 24.04 as a WSL 2 distribution
         run: |
           $ErrorActionPreference = "Stop"
@@ -56,7 +59,7 @@ jobs:
             Write-Output "::error title=rootfs checksum mismatch::expected '$expected', got '$actual' (line: '$line')"
             exit 1
           }
-          $out = wsl --import nooa-ubuntu (Join-Path $env:RUNNER_TEMP "wsl") $rootfs --version 2 2>&1 | Out-String
+          $out = (wsl --import nooa-ubuntu (Join-Path $env:RUNNER_TEMP "wsl") $rootfs --version 2 2>&1 | Out-String) -replace "`0", ""
           Write-Output $out
           if ($LASTEXITCODE -ne 0) {
             Write-Output "::error title=wsl --import failed ($LASTEXITCODE)::$($out.Trim() -replace "`r?`n", '%0A')"
