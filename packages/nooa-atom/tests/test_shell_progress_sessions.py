@@ -5,7 +5,6 @@
 import asyncio
 import shlex
 
-import pytest
 from atom_test_agents import AtomModels, cell
 from nooa_atom.session.options import SessionOptions
 from nooa_atom.session.registry import SessionRegistry
@@ -41,8 +40,7 @@ def done(report):
     )
 
 
-@pytest.mark.parametrize("mode", ["legacy", "call", "session"])
-async def test_root_child_grandchild_observe_same_fixed_policy_in_one_handle(tmp_path, mode):
+async def test_root_child_grandchild_observe_same_fixed_policy_in_one_handle(tmp_path):
     models = AtomModels()
     models.scripts[None] = [
         cell(
@@ -67,7 +65,6 @@ async def test_root_child_grandchild_observe_same_fixed_policy_in_one_handle(tmp
             SessionOptions(
                 workspace=tmp_path,
                 agent_spec="nooa_atom.agent:AtomAgent",
-                experimental_namespace=mode,
             )
         )
         outcome = await asyncio.wait_for(root.prompt("observe the live output"), 45)
@@ -84,10 +81,7 @@ async def test_root_child_grandchild_observe_same_fixed_policy_in_one_handle(tmp
         await registry.close_all()
 
 
-@pytest.mark.parametrize("mode", ["legacy", "call", "session"])
-async def test_waiting_receives_live_preview_then_one_final_without_releasing_gate_early(
-    tmp_path, mode
-):
+async def test_waiting_receives_live_preview_then_one_final_without_releasing_gate_early(tmp_path):
     models = AtomModels()
     gate = str(tmp_path / "gate")
     command = f"printf READY; while [ ! -f {shlex.quote(gate)} ]; do sleep .01; done; printf END"
@@ -116,7 +110,6 @@ async def test_waiting_receives_live_preview_then_one_final_without_releasing_ga
             SessionOptions(
                 workspace=tmp_path,
                 agent_spec="nooa_atom.agent:AtomAgent",
-                experimental_namespace=mode,
             )
         )
         assert await asyncio.wait_for(root.prompt("observe"), 30) == Done(

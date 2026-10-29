@@ -133,45 +133,9 @@ RESULT = (
 # sentence (feat/atom-jobs-reland): system 16,279 -> 19,737 (+3,458), still
 # under BENCH_SYSTEM_LIMIT. Limits: measured totals plus about 2%, rounded up
 # to the next 100 (system: next 100).
+# Session-namespace budgets already enforced before it became unconditional.
+# Removing the selector does not relax these limits or the hard system ceiling.
 LIMITS = {
-    # The experimental unified-work agent (spike/atom-unified-work): one
-    # self.jobs vocabulary (WorkManager, Job, Shell, Subagent) documented in
-    # python_cell_tools, the stable mode guidance in the class doc, and turn
-    # docs under 300 characters. Measured values plus about 2%.
-    # The spike's UnifiedAtomAgent became AtomAgent (2026-10-20): its rows replace the old ones.
-    # Re-measured for one handle() with a static role block per turn_method, SkillManager
-    # docs in python_cell_tools instead of the <skills> block, and a one-line
-    # python_cell_state (2026-10-20): measured values plus about 2% headroom.
-    # Final prompt cleanup: static workspace, one Todo definition, persistent Shell and Job.message.
-    # Re-measured after merging dev/atom's #490 (AGENTS.md reload, 2026-10-24): the
-    # repository_instructions block is now always present, empty without an AGENTS.md,
-    # 230 characters more in the system prompt and in total for every row (was
-    # 18,669 / 19,398 for handle). Within the limits, so they stay.
-    # 2026-10-28: compact Todo/self.v guidance; normalize workspace in BOTH sizes.
-    # Actual FakeLLM requests, normalized system/all-message CHAR counts:
-    # role         f017 docs only    Todo checkpoint   final
-    # handle       18,997/19,789     19,385/20,177      19,124/19,916
-    # batch        19,225/20,017     19,613/20,405      19,352/20,144
-    # work         19,334/20,126     19,722/20,514      19,461/20,253
-    # orchestrate  19,528/20,320     19,916/20,708      19,655/20,447
-    # f017 docs were restored in-process, not a pristine-runtime measurement.
-    # Final: +127 chars vs that reconstruction, -261 vs the Todo checkpoint.
-    # Explicit bounded rebaseline: round final sizes up to the next 100 chars.
-    (ATOM, "handle"): (19_200, 20_000),
-    (ATOM, "handle_batch"): (19_400, 20_200),
-    (ATOM, "handle_work"): (19_500, 20_300),
-    (ATOM, "handle_orchestrate"): (19_700, 20_500),
-}
-# Combined integration after helper/skill/progress docs and prose compaction:
-# normalized system / all-message chars, legacy / call / session:
-# handle       18899/19691 19428/20227 19432/20231
-# batch        19127/19919 19656/20455 19660/20459
-# work         19236/20028 19765/20564 19769/20568
-# orchestrate  19430/20222 19959/20758 19963/20762
-# Tools separately remain description=2839, schema JSON=79, canonical JSON=3032.
-# Owned modes add lifetime/capture guidance. Keep legacy limits unchanged; these
-# are separate actual-request budgets, with the same hard system ceiling below.
-OWNED_LIMITS = {
     (ATOM, "handle"): (19_500, 20_300),
     (ATOM, "handle_batch"): (19_700, 20_500),
     (ATOM, "handle_work"): (19_800, 20_600),
@@ -198,7 +162,7 @@ def _no_installed_skills(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(home))
 
 
-async def _first_call(spec, method, tmp_path, sessions_dir, *, mode="legacy"):
+async def _first_call(spec, method, tmp_path, sessions_dir):
     """Run one turn and return the first call's messages, workspace, and provider tools."""
     code = RESULT if method != "handle" else "return_result(Done(explanation='x'))"
     response = python_cell(code, "call_1")
@@ -214,7 +178,6 @@ async def _first_call(spec, method, tmp_path, sessions_dir, *, mode="legacy"):
                 llm=llm,
                 turn_method=method,
                 sessions_dir=sessions_dir,
-                experimental_namespace=mode,
             )
         )
         await asyncio.wait_for(root.prompt("hello"), 30)
@@ -250,10 +213,9 @@ async def test_prompt_sizes_normalize_workspace_in_system_and_messages(tmp_path,
     assert short["messages"] == long["messages"]
 
 
-@pytest.mark.parametrize("mode", ["legacy", "call", "session"])
 @pytest.mark.parametrize(("spec", "method"), list(LIMITS))
-async def test_first_call_prompt_stays_within_budget(spec, method, mode, tmp_path, sessions_dir):
-    messages, workspace, tools = await _first_call(spec, method, tmp_path, sessions_dir, mode=mode)
+async def test_first_call_prompt_stays_within_budget(spec, method, tmp_path, sessions_dir):
+    messages, workspace, tools = await _first_call(spec, method, tmp_path, sessions_dir)
     tools_block = "\n".join(str(m.get("content", "")) for m in messages)
     tools_block = tools_block.split("<python_cell_tools>", 1)[1].split("</python_cell_tools>", 1)[0]
     from nooa.agentdoc import doc
@@ -287,20 +249,14 @@ async def test_first_call_prompt_stays_within_budget(spec, method, mode, tmp_pat
     ]
     tool_chars = len(json.dumps(payload, sort_keys=True, separators=(",", ":")))
     print(f"provider tools: description={descriptions} schema={schema_chars} json={tool_chars}")
-    limits = LIMITS if mode == "legacy" else OWNED_LIMITS
-    system_limit, total_limit = limits[(spec, method)]
-    print(f"{spec} {method} {mode}: {sizes}")
+    system_limit, total_limit = LIMITS[(spec, method)]
+    print(f"{spec} {method}: {sizes}")
     rendered = "\n".join(str(message.get("content", "")) for message in messages)
-    if mode == "legacy":
-        assert "<experimental_namespace>" not in rendered
-    else:
-        assert "<experimental_namespace>" in rendered
-        assert "Overrides default one-call guidance" in rendered
-        assert "job.output / JobEvent.output" in rendered
-        if mode == "session":
-            assert "Cell variables survive Done, Waiting and NeedInput" in rendered
-        else:
-            assert "Cell variables survive cells of this call only" in rendered
+    assert "<experimental_namespace>" not in rendered
+    assert "<python_cell_lifetime>" in rendered
+    assert "job.output / JobEvent.output" in rendered
+    assert "Cell variables survive Done, Waiting and NeedInput" in rendered
+    assert "cell locals last one method call" not in rendered
     assert sizes["system"] <= system_limit
     assert sizes["messages"] <= total_limit
     assert sizes["system"] < BENCH_SYSTEM_LIMIT

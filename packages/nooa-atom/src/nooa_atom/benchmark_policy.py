@@ -37,12 +37,8 @@ def validate_benchmark_policy(values: dict[str, Any]) -> None:
     """Exact explicit values, not defaults/coercions or silently ignored kwargs."""
     if type(values.get("benchmark_policy")) is not str or values["benchmark_policy"] != POLICY:
         raise ValueError(f"benchmark_policy must explicitly be {POLICY!r}")
-    if type(values.get("experimental_namespace")) is not str or values[
-        "experimental_namespace"
-    ] not in {"legacy", "call", "session"}:
-        raise ValueError(
-            "benchmark experimental_namespace must explicitly select legacy/call/session"
-        )
+    if "experimental_namespace" in values:
+        raise ValueError("experimental_namespace was removed; Atom always uses a session namespace")
     if values.get("experimental_done_reflection") is not False:
         raise ValueError("benchmarks require explicit experimental_done_reflection=False")
     if values.get("benchmark_allow_session_titles") is not False:
@@ -54,7 +50,6 @@ def _config(options: Any) -> dict[str, Any]:
         key: getattr(options, key, None)
         for key in (
             "benchmark_policy",
-            "experimental_namespace",
             "experimental_done_reflection",
             "benchmark_allow_session_titles",
         )
@@ -103,7 +98,7 @@ class BenchmarkPolicyGuard:
             self.outcome = "construction_error"
             self.write()
             raise
-        self.namespace = values["experimental_namespace"]
+        self.namespace = "session"
         self.write()
 
     def violate(
@@ -182,8 +177,6 @@ class BenchmarkPolicyGuard:
         }
         try:
             validate_benchmark_policy(_config(options))
-            if options.experimental_namespace != self.namespace:
-                raise ValueError("namespace arm changed")
         except Exception:
             self.refuse("session_configuration_invalid", session_id=sid)
 
@@ -294,8 +287,6 @@ class BenchmarkPolicyGuard:
             self.refuse("owner_guard_missing", session_id=sid)
         try:
             validate_benchmark_policy(_config(session.options))
-            if session.options.experimental_namespace != self.namespace:
-                raise ValueError("namespace drift")
             if (
                 session._agent._done_reflection is not False
                 or session._agent._namespace_lifetime != self.namespace

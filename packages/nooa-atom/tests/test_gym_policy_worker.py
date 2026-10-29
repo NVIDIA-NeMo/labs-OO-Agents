@@ -118,7 +118,7 @@ async def wire(monkeypatch):
     assert not blocked, "\n".join(stack for _, stack in blocked)
 
 
-def payload(tmp_path, *, mode="session", agent="nooa_atom.gym:AtomHarness", **updates):
+def payload(tmp_path, *, agent="nooa_atom.gym:AtomHarness", **updates):
     data = {
         "agent": agent,
         "task": "ordinary task quoting DoneReflectionPlan _reflect_done_plan name_session",
@@ -126,7 +126,6 @@ def payload(tmp_path, *, mode="session", agent="nooa_atom.gym:AtomHarness", **up
         "model_url": "http://policy.invalid/v1",
         "agent_kwargs": {
             "benchmark_policy": POLICY,
-            "experimental_namespace": mode,
             "experimental_done_reflection": False,
             "benchmark_allow_session_titles": False,
             "experimental_reflection_min_turns": 1,
@@ -150,18 +149,17 @@ def read(output):
     return episode, receipt
 
 
-@pytest.mark.parametrize("mode", ["legacy", "call", "session"])
-async def test_worker_actual_constructor_to_session_and_wire_map(tmp_path, wire, mode):
+async def test_worker_actual_constructor_to_session_and_wire_map(tmp_path, wire):
     scripts, calls, _ = wire
     scripts.append(DONE)
-    _, inputs, output = payload(tmp_path, mode=mode)
+    _, inputs, output = payload(tmp_path)
     await main(inputs, output)
     episode, receipt = read(output)
     assert episode.stop_reason == "completed" and receipt["verdict"] == "pass"
     assert episode.return_value["report"] == "accepted"
     assert len(calls) == len(episode.model_calls) == 1
     [session] = receipt["sessions"]
-    assert session["runtime_namespace"] == mode and session["runtime_reflection"] is False
+    assert session["runtime_namespace"] == "session" and session["runtime_reflection"] is False
     assert session["ready_context_session_id"] == session["session_id"]
     assert session["initial"]["name"] == "fixed_host_task"
     assert session["initial"]["title"] is None
@@ -231,7 +229,6 @@ async def test_worker_latched_attempt_overrides_model_done_and_never_dispatches_
     "missing",
     [
         "benchmark_policy",
-        "experimental_namespace",
         "experimental_done_reflection",
         "benchmark_allow_session_titles",
     ],
@@ -393,8 +390,7 @@ async def test_worker_cannot_redirect_receipt_with_agent_kwargs(tmp_path, wire):
     assert not wire[1] and not output.exists() and not (tmp_path / "redirected.json").exists()
 
 
-@pytest.mark.parametrize("mode", ["legacy", "call", "session"])
-async def test_worker_shell_preview_is_pre_exit_and_does_not_add_model_calls(tmp_path, wire, mode):
+async def test_worker_shell_preview_is_pre_exit_and_does_not_add_model_calls(tmp_path, wire):
     import shlex
 
     scripts, calls, _ = wire
@@ -412,20 +408,19 @@ async def test_worker_shell_preview_is_pre_exit_and_does_not_add_model_calls(tmp
         "result=await work\n"
         "assert result.stdout == 'READYEND' and seen == ['READY']\n" + DONE
     )
-    _, inputs, output = payload(tmp_path, mode=mode)
+    _, inputs, output = payload(tmp_path)
     await main(inputs, output)
     episode, receipt = read(output)
     assert episode.stop_reason == "completed" and receipt["verdict"] == "pass"
     assert len(calls) == len(episode.model_calls) == 1
-    assert receipt["sessions"][0]["runtime_namespace"] == mode
+    assert receipt["sessions"][0]["runtime_namespace"] == "session"
     assert all(count == 0 for count in receipt["observed_attempt_counts"].values())
 
 
-@pytest.mark.parametrize("mode", ["legacy", "call", "session"])
 @pytest.mark.parametrize("cancelled", [False, True], ids=["exception", "cancel"])
 @pytest.mark.parametrize("child", [False, True], ids=["root", "child"])
 async def test_worker_cleanup_failure_cannot_return_an_accepted_task_result(
-    tmp_path, wire, monkeypatch, mode, cancelled, child
+    tmp_path, wire, monkeypatch, cancelled, child
 ):
     from nooa_atom.session.session import Session
 
@@ -449,7 +444,7 @@ async def test_worker_cleanup_failure_cannot_return_an_accepted_task_result(
             "await self.jobs.launch(Subagent('child').run('task'), name='child')\n" + DONE
         )
     scripts.append(DONE)
-    _, inputs, output = payload(tmp_path, mode=mode)
+    _, inputs, output = payload(tmp_path)
     try:
         await main(inputs, output)
         episode, receipt = read(output)
@@ -522,10 +517,9 @@ async def test_worker_requires_actual_task_result(tmp_path, wire, monkeypatch):
     assert receipt["verdict"] == "pass"  # result-contract failure, not a policy violation
 
 
-@pytest.mark.parametrize("mode", ["legacy", "session"])
 @pytest.mark.parametrize("child,violate", [(False, False), (True, False), (True, True)])
 async def test_worker_native_file_exports_and_policy_correlation(
-    tmp_path, wire, monkeypatch, mode, child, violate
+    tmp_path, wire, monkeypatch, child, violate
 ):
     from opentelemetry import trace
     from opentelemetry.sdk.trace import TracerProvider
@@ -560,7 +554,6 @@ async def test_worker_native_file_exports_and_policy_correlation(
     artifacts = tmp_path / "artifacts"
     _, inputs, output = payload(
         tmp_path,
-        mode=mode,
         artifacts_dir=str(artifacts),
         atif=True,
         trace_jsonl=True,
@@ -680,3 +673,16 @@ async def test_worker_rejects_real_unfinished_children_and_closes_them(
         job.status != "running" for session in published for job in session._agent.jobs.list()
     )
     assert all(row["cleanup"]["error_count"] == 0 for row in receipt["sessions"])
+
+
+@pytest.mark.parametrize("obsolete", ["legacy", "call", "session", None])
+async def test_worker_rejects_removed_namespace_selector_before_model_call(
+    tmp_path, wire, obsolete
+):
+    data, inputs, output = payload(tmp_path)
+    data["agent_kwargs"]["experimental_namespace"] = obsolete
+    inputs.write_text(json.dumps(data))
+    await main(inputs, output)
+    episode, receipt = read(output)
+    assert episode.stop_reason == "error" and receipt["verdict"] == "fail"
+    assert receipt["phase"] == "final" and not receipt["sessions"] and not wire[1]

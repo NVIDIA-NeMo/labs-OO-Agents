@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Explicit experimental session namespace integration with strict fake models."""
+"""Default session namespace integration with strict fake models, no namespace option."""
 
 import asyncio
 
@@ -15,7 +15,7 @@ from nooa_atom.session.store import SessionStore
 from nooa.interactive import Done, NeedInput
 
 
-async def make_root(tmp_path, responses, *, lifetime="session", reflection=False):
+async def make_root(tmp_path, responses, *, reflection=False):
     llm = CellLLM(responses)
     registry = SessionRegistry(
         SessionStore(tmp_path / "sessions"), agent_factory=create_session_agent
@@ -24,7 +24,6 @@ async def make_root(tmp_path, responses, *, lifetime="session", reflection=False
         workspace=tmp_path,
         agent_spec="nooa_atom.agent:AtomAgent",
         llm=llm,
-        experimental_namespace=lifetime,
         experimental_done_reflection=reflection,
         experimental_reflection_min_turns=1,
         experimental_reflection_min_seconds=0,
@@ -56,23 +55,17 @@ async def test_kept_session_retains_names_across_done_and_need_input(tmp_path):
     assert root._agent._handle_namespace is None
 
 
-async def test_new_per_call_arm_uses_same_compiler_but_does_not_retain(tmp_path):
-    registry, root, llm = await make_root(
-        tmp_path,
-        [
-            cell(
-                "counter=0\ndef bump():\n global counter\n counter+=1\n return counter\nassert [bump(), bump(), counter] == [1, 2, 2]\nreturn_result(Done(explanation='one'))"
-            ),
-            cell("try:\n counter\nexcept NameError:\n return_result(Done(explanation='fresh'))"),
-        ],
-        lifetime="call",
-    )
-    try:
-        assert await asyncio.wait_for(root.prompt("one"), 30) == Done(explanation="one")
-        assert await asyncio.wait_for(root.prompt("two"), 30) == Done(explanation="fresh")
-        assert root._agent._handle_namespace is None and len(llm.calls) == 2
-    finally:
-        await registry.close_all()
+@pytest.mark.parametrize("obsolete", ["legacy", "call", "session", None])
+def test_namespace_selector_is_rejected_not_ignored(tmp_path, obsolete):
+    with pytest.raises(TypeError, match="experimental_namespace.*removed"):
+        AtomAgent(cwd=tmp_path, llm=CellLLM(), experimental_namespace=obsolete)
+    values = {"workspace": tmp_path, "agent_spec": "nooa_atom.agent:AtomAgent"}
+    with pytest.raises(TypeError, match="experimental_namespace.*removed"):
+        SessionOptions(**values, experimental_namespace=obsolete)
+    options = SessionOptions(**values)
+    assert "experimental_namespace" not in options.model_dump()
+    with pytest.raises(TypeError, match="experimental_namespace.*removed"):
+        options.inherit(experimental_namespace=obsolete)
 
 
 async def test_managed_background_barrier_inputs_completion_and_output_are_owned(tmp_path):
@@ -151,7 +144,7 @@ hostile = Hostile()
             )
         ]
     )
-    agent = AtomAgent(cwd=tmp_path, llm=llm, experimental_namespace="session")
+    agent = AtomAgent(cwd=tmp_path, llm=llm)
     try:
         try:
             outcome = await agent.handle({"user_messages": ["go"]})
@@ -262,7 +255,7 @@ async def test_accepted_done_reflects_archives_and_drops_only_proposed_variable(
         assert "KEEP VERBATIM" in root._agent.context["done_reflection_notes"]
         assert root._agent.context["user_decision"] == "KEEP VERBATIM"
         await root.wait_for_checkpoint()
-        saved = AtomAgent(cwd=tmp_path, llm=CellLLM(), experimental_namespace="session")
+        saved = AtomAgent(cwd=tmp_path, llm=CellLLM())
         try:
             assert root.handle.storage.restore_latest_snapshot(saved)
             assert "KEEP VERBATIM" in saved.context["done_reflection_notes"]
@@ -276,7 +269,7 @@ async def test_accepted_done_reflects_archives_and_drops_only_proposed_variable(
         await wait_idle(root)
         assert len(llm.calls) == 3  # NeedInput never reflects; no recursion
         await root.wait_for_checkpoint()
-        restored = AtomAgent(cwd=tmp_path, llm=CellLLM(), experimental_namespace="session")
+        restored = AtomAgent(cwd=tmp_path, llm=CellLLM())
         try:
             assert root.handle.storage.restore_latest_snapshot(restored)
             assert "KEEP VERBATIM" in restored.context["done_reflection_notes"]
@@ -449,7 +442,6 @@ async def test_namespace_nosnapshot_restart_notice_once_and_self_v_survives(tmp_
 
     agent = AtomAgent(
         cwd=tmp_path,
-        experimental_namespace="session",
         llm=CellLLM(
             [
                 cell(
@@ -463,7 +455,8 @@ async def test_namespace_nosnapshot_restart_notice_once_and_self_v_survives(tmp_
         await agent.handle({"user_messages": ["go"]})
         snapshot = snapshot_to_json(agent)
         assert "_handle_namespace" not in snapshot["attributes"]
-        restored = AtomAgent(cwd=tmp_path, experimental_namespace="session", llm=CellLLM())
+        assert "_namespace_lifetime" not in snapshot["attributes"]
+        restored = AtomAgent(cwd=tmp_path, llm=CellLLM())
         snapshot_from_json(snapshot, restored)
         restored.after_restore()
         assert restored._handle_namespace is None and restored.v.fact == "durable"
@@ -517,7 +510,6 @@ return_result(Done(explanation='isolated'))
             SessionOptions(
                 workspace=tmp_path,
                 agent_spec="nooa_atom.agent:AtomAgent",
-                experimental_namespace="session",
             )
         )
         assert await asyncio.wait_for(root.prompt("go"), 30) == Done(explanation="isolated")
@@ -526,7 +518,7 @@ return_result(Done(explanation='isolated'))
         root_ns, child_ns = root._agent._handle_namespace, child._agent._handle_namespace
         assert root_ns is not child_ns and root_ns.globals is not child_ns.globals
         assert "child_only" not in root_ns.globals and "parent_only" not in child_ns.globals
-        assert child.options.experimental_namespace == "session"
+        assert child._agent._namespace_lifetime == "session"
     finally:
         await registry.close_all()
 
@@ -566,22 +558,19 @@ async def test_non_done_never_reflects_and_active_work_defers_deletion(tmp_path)
             await asyncio.gather(pending, return_exceptions=True)
 
 
-async def test_reflection_can_be_enabled_independently_of_namespace_lifetime(tmp_path):
+async def test_reflection_can_summarize_context_without_dropping_bindings(tmp_path):
     registry, root, llm = await make_root(
         tmp_path,
         [
-            cell("return_result(Done(explanation='legacy engine'))"),
-            reflection(
-                summary="Legacy completed context compacted", useful_findings="context only"
-            ),
+            cell("return_result(Done(explanation='context only'))"),
+            reflection(summary="Completed context compacted", useful_findings="context only"),
         ],
-        lifetime="legacy",
         reflection=True,
     )
     try:
-        assert await root.prompt("go") == Done(explanation="legacy engine")
+        assert await root.prompt("go") == Done(explanation="context only")
         await wait_idle(root)
-        assert root._agent._handle_namespace is None
+        assert root._agent._handle_namespace is not None
         assert len(list(root._agent.events.query(type="Summary"))) == 1
         assert len(llm.calls) == 2
     finally:
@@ -591,7 +580,6 @@ async def test_reflection_can_be_enabled_independently_of_namespace_lifetime(tmp
 async def test_managed_job_output_when_no_cell_is_active(tmp_path):
     agent = AtomAgent(
         cwd=tmp_path,
-        experimental_namespace="session",
         llm=CellLLM(
             [
                 cell("""
@@ -810,3 +798,47 @@ async def test_in_memory_event_id_is_frozen_not_a_live_event_alias(monkeypatch):
     agent._reflect_done_plan = propose
     await reflect_accepted_done(agent, outcome)
     assert manager.keys() == [tag] and agent.context == {}
+
+
+async def test_registry_reload_uses_default_namespace_and_replaces_old_guidance(tmp_path):
+    registry, root, _ = await make_root(
+        tmp_path,
+        [
+            cell(
+                "transient=object()\nself.v.fact='durable'\n"
+                "self.context['experimental_namespace']='obsolete opt-in guidance'\n"
+                "return_result(Done(explanation='checkpointed'))"
+            )
+        ],
+    )
+    store, identity = registry.store, root.id
+    try:
+        assert await root.prompt("save") == Done(explanation="checkpointed")
+        await root.wait_for_checkpoint()
+    finally:
+        await registry.close_all()
+
+    client = CellLLM(
+        [
+            cell(
+                "assert self.v.fact == 'durable'\n"
+                "try:\n transient\nexcept NameError:\n pass\n"
+                "else:\n raise AssertionError('live Python value was restored')\n"
+                "counter=40\ndef bump():\n global counter\n counter+=1\n return counter\n"
+                "return_result(Done(explanation=str(bump())))"
+            ),
+            cell("return_result(Done(explanation=str(bump())))"),
+        ]
+    )
+    registry = SessionRegistry(store, agent_factory=create_session_agent)
+    try:
+        root = await registry.load(identity, llm=client)
+        assert root._agent._namespace_lifetime == "session"
+        assert root._agent._handle_namespace is None
+        assert "experimental_namespace" not in root._agent.context
+        assert "live session" in root._agent.context["python_cell_lifetime"]
+        assert await root.prompt("first after restart") == Done(explanation="41")
+        assert await root.prompt("second after restart") == Done(explanation="42")
+        assert len(client.calls) == 2
+    finally:
+        await registry.close_all()

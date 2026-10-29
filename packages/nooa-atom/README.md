@@ -280,28 +280,22 @@ No preview is evidence that the process was silent.
 Timers and output sinks detach at command termination/cancellation, not FIFO EOF:
 background writers cannot emit into later requests or reused job names. Direct
 unmanaged `Shell.run` calls have no progress events. This common behavior applies to
-all three namespace modes and to roots and children; it is not a namespace-treatment
-switch. Model-visible pre-exit delivery is tested; no ACP/TUI pre-exit display claim
+roots and children. Model-visible pre-exit delivery is tested; no ACP/TUI pre-exit display claim
 or PTY/live-input API is made here.
 
-## Experimental Python namespace and Done reflection
+## Python session namespace and optional Done reflection
 
-These features are **opt-in**. The default remains
-`SessionOptions(experimental_namespace="legacy", experimental_done_reflection=False)`;
-ordinary ACP/CLI/benchmark entry points do not automatically enable session persistence.
-The Atom factory consumes these options; a generic non-Atom agent retains its own
-execution strategy and does not gain Atom's namespace behavior.
+Atom always retains coherent Python globals across its live session's `handle`
+turns, including `Done`, `Waiting` and `NeedInput`. Ordinary ACP/CLI and benchmark
+entrypoints use this behavior without an opt-in. There is no namespace-mode option;
+`experimental_namespace` is rejected. Legacy comparisons use a separate control
+commit, not a runtime switch. A generic non-Atom agent retains its own execution
+strategy and does not gain Atom's namespace behavior.
 
-| `experimental_namespace` | Python cell lifetime |
-| --- | --- |
-| `legacy` (default) | Existing per-call execution engine |
-| `call` | Coherent globals for cells of one generated call, discarded before the next call |
-| `session` | Coherent globals across this Atom session's `handle` turns, including `Done`, `Waiting` and `NeedInput` |
-
-The owned engines are in-process only. Helpers see subsequent global rebindings;
+The owned namespaces are in-process only. Helpers see subsequent global rebindings;
 definitions/defaults/decorators execute once, and intentional library caches retain
 their normal semantics. Each root/child session owns separate state. Other generated
-methods have separate call-local owners, even in `session` mode. Reserved runtime
+methods have separate call-local owners. Reserved runtime
 names and call inputs cannot be overwritten; background/nested/stale completion
 capabilities cannot complete a different foreground call.
 
@@ -332,14 +326,15 @@ requires these explicit `agent_kwargs`; omitted or incompatible values fail clos
 ```json
 {
   "benchmark_policy": "no_reflection_no_titles_v1",
-  "experimental_namespace": "session",
   "experimental_done_reflection": false,
   "benchmark_allow_session_titles": false
 }
 ```
 
-Select `legacy` or `call` explicitly for those comparison arms. This example opts in;
-it does not change product defaults. The worker owns `benchmark_policy_path` as an
+The namespace is always `session`, matching normal Atom sessions. Older experiment
+configs must remove `experimental_namespace`; they cannot select a legacy arm on
+this code. Frozen comparison runs remain tied to their original commits/configs.
+The worker owns `benchmark_policy_path` as an
 output-file sibling (`<output>.atom-policy.json`); do not supply a redirect through
 `agent_kwargs`. Direct harness construction must provide its fresh receipt path.
 The episode's `runtime` links that receipt by filename/run ID/phase/verdict. Root and

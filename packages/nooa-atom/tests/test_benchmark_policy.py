@@ -41,14 +41,13 @@ class PolicyFake(CellLLM):
         return await super().acall(*args, **kwargs)
 
 
-def harness(tmp_path, responses, *, mode="session", **kwargs):
+def harness(tmp_path, responses, **kwargs):
     client = PolicyFake(responses)
     result = AtomHarness(
         llm=client,
         workdir=tmp_path,
         sessions_dir=tmp_path / "sessions",
         benchmark_policy=POLICY,
-        experimental_namespace=mode,
         experimental_done_reflection=False,
         benchmark_allow_session_titles=False,
         benchmark_policy_path=tmp_path / "episode.json.atom-policy.json",
@@ -65,9 +64,8 @@ async def solve(h):
         return await h.solve("test task")
 
 
-@pytest.mark.parametrize("mode", ["legacy", "call", "session"])
-async def test_ordinary_harness_has_explicit_coverage_and_persisted_invocation_map(tmp_path, mode):
-    h, client = harness(tmp_path, [cell(DONE)], mode=mode)
+async def test_ordinary_harness_has_explicit_coverage_and_persisted_invocation_map(tmp_path):
+    h, client = harness(tmp_path, [cell(DONE)])
     try:
         result = await solve(h)
     except BenchmarkPolicyViolation:
@@ -78,7 +76,7 @@ async def test_ordinary_harness_has_explicit_coverage_and_persisted_invocation_m
     assert receipt["verdict"] == "pass" and receipt["phase"] == "final"
     [session] = receipt["sessions"]
     assert session["registered"] and session["ready"] and session["closed"]
-    assert session["runtime_reflection"] is False and session["runtime_namespace"] == mode
+    assert session["runtime_reflection"] is False and session["runtime_namespace"] == "session"
     assert session["effective_options"]["benchmark_allow_session_titles"] is False
     assert session["initial"] == session["final"]
     mapping = {row["invocation_id"]: row["session_id"] for row in receipt["invocations"]}
@@ -103,12 +101,11 @@ async def test_ordinary_harness_has_explicit_coverage_and_persisted_invocation_m
         ("rename", "await self.session._session.set_title('')"),
     ],
 )
-@pytest.mark.parametrize("mode", ["legacy", "call", "session"])
 async def test_caught_forbidden_attempt_cannot_be_overridden_by_successful_done(
-    tmp_path, operation, code, mode
+    tmp_path, operation, code
 ):
     h, client = harness(
-        tmp_path, [cell("try:\n " + code + "\nexcept RuntimeError:\n pass\n" + DONE)], mode=mode
+        tmp_path, [cell("try:\n " + code + "\nexcept RuntimeError:\n pass\n" + DONE)]
     )
     with pytest.raises(BenchmarkPolicyViolation):
         await solve(h)
@@ -119,8 +116,7 @@ async def test_caught_forbidden_attempt_cannot_be_overridden_by_successful_done(
     assert all(row["initial"] == row["final"] for row in receipt["sessions"])
 
 
-@pytest.mark.parametrize("mode", ["legacy", "call", "session"])
-async def test_child_description_never_becomes_title_and_child_is_covered(tmp_path, mode):
+async def test_child_description_never_becomes_title_and_child_is_covered(tmp_path):
     h, client = harness(
         tmp_path,
         [
@@ -130,7 +126,6 @@ async def test_child_description_never_becomes_title_and_child_is_covered(tmp_pa
             ),
             cell(DONE),
         ],
-        mode=mode,
     )
     try:
         result = await solve(h)
@@ -156,7 +151,6 @@ async def test_child_description_never_becomes_title_and_child_is_covered(tmp_pa
 
 CONFIG = {
     "benchmark_policy": POLICY,
-    "experimental_namespace": "session",
     "experimental_done_reflection": False,
     "benchmark_allow_session_titles": False,
 }
@@ -172,7 +166,7 @@ def test_missing_explicit_configuration_is_rejected_by_constructor_and_options(t
     receipt = json.loads(path.read_text())
     assert receipt["phase"] == "final" and receipt["verdict"] == "fail"
     assert not client.requests
-    with pytest.raises(ValueError):
+    with pytest.raises((TypeError, ValueError)):
         SessionOptions(workspace=tmp_path, agent_spec="unused", **config)
 
 
@@ -187,6 +181,10 @@ def test_missing_explicit_configuration_is_rejected_by_constructor_and_options(t
         ("benchmark_allow_session_titles", "false"),
         ("benchmark_policy", "unknown"),
         ("experimental_namespace", "unknown"),
+        ("experimental_namespace", "legacy"),
+        ("experimental_namespace", "call"),
+        ("experimental_namespace", "session"),
+        ("experimental_namespace", None),
     ],
 )
 def test_invalid_policy_is_not_coerced_or_ignored(tmp_path, key, value):
@@ -195,20 +193,19 @@ def test_invalid_policy_is_not_coerced_or_ignored(tmp_path, key, value):
     with pytest.raises(ValueError):
         AtomHarness(llm=PolicyFake([]), benchmark_policy_path=path, **config)
     assert json.loads(path.read_text())["verdict"] == "fail"
-    with pytest.raises(ValueError):
+    with pytest.raises((TypeError, ValueError)):
         SessionOptions(workspace=tmp_path, agent_spec="unused", **config)
 
 
-@pytest.mark.parametrize("mode", ["legacy", "call", "session"])
-def test_policy_inheritance_is_explicit_and_preserves_routing_names(tmp_path, mode):
+def test_policy_inheritance_is_explicit_and_preserves_routing_names(tmp_path):
     root = SessionOptions(
         workspace=tmp_path,
         agent_spec="unused",
         name="host_root",
-        **{**CONFIG, "experimental_namespace": mode},
+        **CONFIG,
     )
     child = root.inherit(name="worker_route", kept=True)
-    assert child.benchmark_policy == POLICY and child.experimental_namespace == mode
+    assert child.benchmark_policy == POLICY
     assert (
         child.experimental_done_reflection is False
         and child.benchmark_allow_session_titles is False
@@ -230,7 +227,6 @@ def test_worker_only_extras_remain_compatible_but_experiment_typos_fail(tmp_path
     assert json.loads((tmp_path / "policy.json").read_text())["verdict"] == "fail"
 
 
-@pytest.mark.parametrize("mode", ["legacy", "call", "session"])
 @pytest.mark.parametrize(
     "method,operation",
     [
@@ -238,9 +234,7 @@ def test_worker_only_extras_remain_compatible_but_experiment_typos_fail(tmp_path
         ("name_session('quoted markers')", "title_generation"),
     ],
 )
-async def test_child_forbidden_generation_is_counted_before_predict(
-    tmp_path, mode, method, operation
-):
+async def test_child_forbidden_generation_is_counted_before_predict(tmp_path, method, operation):
     h, client = harness(
         tmp_path,
         [
@@ -249,7 +243,6 @@ async def test_child_forbidden_generation_is_counted_before_predict(
             ),
             cell("try:\n await self." + method + "\nexcept RuntimeError:\n pass\n" + DONE),
         ],
-        mode=mode,
     )
     with pytest.raises(BenchmarkPolicyViolation):
         await solve(h)
@@ -418,10 +411,7 @@ async def test_pre_first_turn_automatic_title_attempt_is_not_an_initialization_l
     )
 
 
-@pytest.mark.parametrize("mode", ["legacy", "call", "session"])
-async def test_ordinary_dynamic_provider_remains_available_under_policy(
-    tmp_path, monkeypatch, mode
-):
+async def test_ordinary_dynamic_provider_remains_available_under_policy(tmp_path, monkeypatch):
     original = BenchmarkPolicyGuard.install
     provider = type("OrdinaryBenchmarkDynamic", (), {"__module__": "dynamic_benchmark_fixture"})
 
@@ -433,7 +423,6 @@ async def test_ordinary_dynamic_provider_remains_available_under_policy(
     h, _ = harness(
         tmp_path,
         [cell("assert isinstance(self.tool, OrdinaryBenchmarkDynamic)\n" + DONE)],
-        mode=mode,
         run_command=None,
         extra_tools=[],
         session_name="fixed_host_root",

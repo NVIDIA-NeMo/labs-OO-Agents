@@ -15,7 +15,12 @@ _REMOVED_OPTIONS = ("retain", "keep", "mode", "child_mode")
 
 
 def reject_removed_options(where: str, names: Any) -> None:
-    """Raise a one-line ``TypeError`` when ``names`` holds a removed child option."""
+    """Raise a one-line ``TypeError`` for an obsolete session/child option."""
+    if "experimental_namespace" in names:
+        raise TypeError(
+            f"{where} got experimental_namespace=, which was removed: "
+            "Atom always uses a session namespace"
+        )
     removed = [name for name in _REMOVED_OPTIONS if name in names]
     if removed:
         raise TypeError(
@@ -61,7 +66,6 @@ class SessionOptions(BaseModel):
     name: str | None = None
     host: str = "headless"
     sessions_dir: Path | None = None
-    experimental_namespace: Literal["legacy", "call", "session"] = "legacy"
     experimental_done_reflection: bool = False
     benchmark_policy: Literal["no_reflection_no_titles_v1"] | None = None
     benchmark_allow_session_titles: bool | None = None

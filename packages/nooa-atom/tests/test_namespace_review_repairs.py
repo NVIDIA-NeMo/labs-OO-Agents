@@ -29,12 +29,12 @@ class OwnedChild(AtomAgent):
 @pytest.mark.parametrize(
     "outer_timeout,child_timeout", [(None, None), (5, None), (None, 5), (5, 5)]
 )
-@pytest.mark.parametrize("child_mode", ["non_atom", "legacy", "call", "session"])
+@pytest.mark.parametrize("child_kind", ["non_atom", "atom"])
 async def test_completion_checks_actual_generation_for_every_engine_and_timeout(
     tmp_path,
     outer_timeout,
     child_timeout,
-    child_mode,
+    child_kind,
 ):
     child_llm = CellLLM(
         [
@@ -46,8 +46,8 @@ async def test_completion_checks_actual_generation_for_every_engine_and_timeout(
     )
     child = (
         LegacyChild(llm=child_llm)
-        if child_mode == "non_atom"
-        else OwnedChild(cwd=tmp_path, llm=child_llm, experimental_namespace=child_mode)
+        if child_kind == "non_atom"
+        else OwnedChild(cwd=tmp_path, llm=child_llm)
     )
     outer_llm = CellLLM(
         [
@@ -57,7 +57,7 @@ async def test_completion_checks_actual_generation_for_every_engine_and_timeout(
             cell("saved(Done(explanation=str(value)))"),  # same-call later-cell alias stays valid
         ]
     )
-    outer = AtomAgent(cwd=tmp_path, llm=outer_llm, experimental_namespace="session")
+    outer = AtomAgent(cwd=tmp_path, llm=outer_llm)
     outer.child = child
     outer.child_strategy = CodeActV2(config=CodeActConfig(prefill=None, cell_timeout=child_timeout))
     try:
@@ -80,8 +80,7 @@ def fresh_class():
     return type("FreshSkill", (), {"__module__": "dynamic_skill_example"})
 
 
-@pytest.mark.parametrize("mode", ["legacy", "call", "session"])
-async def test_newly_advertised_dynamic_class_is_available_in_all_lifetime_arms(tmp_path, mode):
+async def test_newly_advertised_dynamic_class_is_available_in_default_session(tmp_path):
     llm = CellLLM(
         [
             cell("return_result(Done(explanation='init'))"),
@@ -90,16 +89,15 @@ async def test_newly_advertised_dynamic_class_is_available_in_all_lifetime_arms(
             ),
         ]
     )
-    agent = AtomAgent(cwd=tmp_path, llm=llm, experimental_namespace=mode)
+    agent = AtomAgent(cwd=tmp_path, llm=llm)
     try:
         await agent.handle({"user_messages": ["one"]})
         owner = agent._handle_namespace
         agent.fresh = fresh_class()()
         assert "FreshSkill" in await AtomCodeAct().python_cell_context(agent.runtime)
         assert await agent.handle({"user_messages": ["two"]}) == Done(explanation="available")
-        if mode == "session":
-            assert owner is agent._handle_namespace
-            assert "FreshSkill" not in owner.globals  # framework fallback, not user state
+        assert owner is agent._handle_namespace
+        assert "FreshSkill" not in owner.globals  # framework fallback, not user state
     finally:
         await agent.aclose()
 
@@ -117,7 +115,7 @@ async def test_provider_replacement_and_deactivation_preserve_alias_and_globals_
             cell("try:\n lookup()\nexcept NameError:\n return_result(Done(explanation='gone'))"),
         ]
     )
-    agent = AtomAgent(cwd=tmp_path, llm=llm, experimental_namespace="session")
+    agent = AtomAgent(cwd=tmp_path, llm=llm)
     try:
         await agent.handle({"user_messages": ["one"]})
         ns = agent._handle_namespace
@@ -155,7 +153,7 @@ async def test_user_store_same_object_or_import_wins_on_replacement_and_removal(
             ),
         ]
     )
-    agent = AtomAgent(cwd=tmp_path, llm=llm, experimental_namespace="session")
+    agent = AtomAgent(cwd=tmp_path, llm=llm)
     agent.fresh = fresh_class()()
     try:
         await agent.handle({"user_messages": ["one"]})
@@ -191,7 +189,7 @@ async def test_explicit_deletion_tombstone_prevents_reactivation_but_not_explici
             cell("assert FreshSkill is restored\nreturn_result(Done(explanation='kept'))"),
         ]
     )
-    agent = AtomAgent(cwd=tmp_path, llm=llm, experimental_namespace="session")
+    agent = AtomAgent(cwd=tmp_path, llm=llm)
     original = fresh_class()
     if provider_present:
         agent.fresh = original()
@@ -231,7 +229,7 @@ async def test_dynamic_availability_updates_between_cells_of_one_handle(tmp_path
             ),
         ]
     )
-    agent = ChangingTools(cwd=tmp_path, llm=llm, experimental_namespace="session")
+    agent = ChangingTools(cwd=tmp_path, llm=llm)
     try:
         assert await agent.handle({"user_messages": ["go"]}) == Done(
             explanation="gone in same call"
@@ -267,7 +265,7 @@ return_result(Done(explanation='private deleted'))
         "try:\n _C__x\nexcept NameError:\n return_result(Done(explanation='correct bindings'))"
     )
     llm = CellLLM([cell(first), cell(second)])
-    agent = AtomAgent(cwd=tmp_path, llm=llm, experimental_namespace="session")
+    agent = AtomAgent(cwd=tmp_path, llm=llm)
     try:
         assert await agent.handle({"user_messages": ["one"]}) == Done(explanation="private deleted")
         assert await agent.handle({"user_messages": ["two"]}) == Done(
@@ -298,11 +296,8 @@ _COLLISIONS = [
 ]
 
 
-@pytest.mark.parametrize("mode", ["legacy", "call", "session"])
 @pytest.mark.parametrize("name", _COLLISIONS)
-async def test_runtime_binding_and_advertisement_resist_dynamic_provider_collisions(
-    tmp_path, mode, name
-):
+async def test_runtime_binding_and_advertisement_resist_dynamic_provider_collisions(tmp_path, name):
     # Host receives the actual captured objects, not only a type-name assertion.
     captures = []
     checks = """
@@ -316,7 +311,7 @@ self.capture(notification, self, print, pprint, show, return_result, python_cell
         checks += "assert isinstance(self.tool, OrdinaryDynamic)\n"
     checks += "return_result(Done(explanation='runtime bindings win'))"
     llm = CellLLM([cell("return_result(Done(explanation='init'))"), cell(checks)])
-    agent = CapturingAtom(cwd=tmp_path, llm=llm, experimental_namespace=mode, captures=captures)
+    agent = CapturingAtom(cwd=tmp_path, llm=llm, captures=captures)
     try:
         await agent.handle({"user_messages": ["one"]})
         provider = type(name, (), {"__module__": "dynamic_probe"})
@@ -372,19 +367,17 @@ async def test_current_call_parameters_keep_identity_and_are_not_provider_advert
         await agent.aclose()
 
 
-async def test_shared_autoimport_fix_preserves_explicit_legacy_user_binding(tmp_path):
+async def test_shared_autoimport_fix_preserves_explicit_non_atom_user_binding():
     llm = CellLLM(
         [
             cell("print = 'explicit user binding'"),
-            cell(
-                "assert print == 'explicit user binding'\nreturn_result(Done(explanation='user wins'))"
-            ),
+            cell("assert print == 'explicit user binding'\nreturn_result(7)"),
         ]
     )
-    agent = AtomAgent(cwd=tmp_path, llm=llm, experimental_namespace="legacy")
+    agent = LegacyChild(llm=llm)
     agent.tool = type("print", (), {"__module__": "dynamic_probe"})()
     try:
-        assert await agent.handle({"user_messages": ["go"]}) == Done(explanation="user wins")
+        assert await agent.answer(None) == 7
         assert len(llm.calls) == 2
     finally:
         await agent.aclose()

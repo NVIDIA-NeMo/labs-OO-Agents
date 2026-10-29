@@ -432,7 +432,7 @@ class AtomAgent(AtomAgentBase):
     references, ``self.todo`` is your plan for multi-step work (activate the
     item you work on, append findings and checks to its ``comments``, complete
     it), and ``self.v`` keeps
-    durable facts (cell locals last one method call). Everything else that
+    durable facts across restarts (handle locals last this live session). Everything else that
     runs is a job on ``self.jobs``: commands (``Shell``) and child agents
     (``Subagent``); the python_cell_tools block shows each way to run them.
 
@@ -477,7 +477,6 @@ class AtomAgent(AtomAgentBase):
         *args: Any,
         policy: TurnPolicy = "interactive",
         instructions: str | None = None,
-        experimental_namespace: str = "legacy",
         experimental_done_reflection: bool = False,
         experimental_reflection_min_turns: int = 50,
         experimental_reflection_min_seconds: float = 3600.0,
@@ -488,13 +487,15 @@ class AtomAgent(AtomAgentBase):
         ``instructions`` become the static ``role`` block of the prompt prefix;
         ``None``, empty or whitespace-only text adds no block.
         """
-        if experimental_namespace not in ("legacy", "call", "session"):
-            raise ValueError("experimental_namespace must be legacy, call or session")
+        if "experimental_namespace" in kwargs:
+            raise TypeError(
+                "experimental_namespace was removed; Atom always uses a session namespace"
+            )
         reflection_gate = _ReflectionGate(
             min_turns=experimental_reflection_min_turns,
             min_seconds=experimental_reflection_min_seconds,
         )
-        self._namespace_lifetime = experimental_namespace
+        self._namespace_lifetime = "session"
         self._handle_namespace = None
         self._done_reflection = experimental_done_reflection
         self._reflection_candidate = None
@@ -513,9 +514,7 @@ class AtomAgent(AtomAgentBase):
         self.jobs = _AgentJobs(
             self,
             on_change=self._record_work,
-            capture_factory=(lambda: CaptureScope(self.runtime.truncation_config))
-            if experimental_namespace != "legacy"
-            else None,
+            capture_factory=lambda: CaptureScope(self.runtime.truncation_config),
         )
         self._shells = work_shell.ShellOwner()
         self.files = Files(self.shell)
@@ -529,16 +528,14 @@ class AtomAgent(AtomAgentBase):
     @hidden
     @no_trace
     def _execution_namespace_for(self, call: Any) -> Any:
-        """Experimental selection: only handle may share an owner across calls."""
-        if self._namespace_lifetime == "legacy":
-            return None
+        """Handle shares this live session's owner; other methods are call-local."""
         from nooa.runtime.execution_namespace import RUNTIME_NAMES, ExecutionNamespace
 
-        if call.method_name == "handle" and self._namespace_lifetime == "session":
+        if call.method_name == "handle":
             if self._handle_namespace is not None:
                 return self._handle_namespace
         owner = ExecutionNamespace(reserved=RUNTIME_NAMES | frozenset(call.kwargs))
-        if call.method_name == "handle" and self._namespace_lifetime == "session":
+        if call.method_name == "handle":
             self._handle_namespace = owner
             self._session_namespace_was_live = True
         return owner
@@ -590,23 +587,18 @@ class AtomAgent(AtomAgentBase):
             ),
             prefix=True,
         )
-        if self._namespace_lifetime != "legacy":
-            lifetime = (
-                "Cell variables survive Done, Waiting and NeedInput in this kept session."
-                if self._namespace_lifetime == "session"
-                else "Cell variables survive cells of this call only, not the next handle."
-            )
-            self.context["experimental_namespace"] = Context(
-                lifetime + " Overrides default one-call guidance. Restart loses these names, "
-                "not self.v. No automatic expiry. del removes names, NOT jobs/resources: "
-                "close/cancel work explicitly. Globals are shared with jobs, not transactional. "
-                "Job stdout/stderr/media: job.output / JobEvent.output, never a later cell. "
-                "Descendant output belongs to its originating open scope; late output is dropped. "
-                "Inventory: bounded names/types only.",
-                prefix=True,
-            )
-        else:
-            self.context.pop("experimental_namespace", None)
+        self.context.pop("experimental_namespace", None)  # replace an earlier snapshot's block
+        self.context["python_cell_lifetime"] = Context(
+            "Cell variables survive Done, Waiting and NeedInput in this live session. "
+            "Other generated methods are call-local. "
+            "Restart loses these names, not self.v. No automatic expiry. "
+            "del removes names, NOT jobs/resources: close/cancel work explicitly. "
+            "Globals are shared with jobs, not transactional. "
+            "Job stdout/stderr/media: job.output / JobEvent.output, never a later cell. "
+            "Descendant output belongs to its originating open scope; late output is dropped. "
+            "Inventory: bounded names/types only.",
+            prefix=True,
+        )
         self.context["todo_status"] = Context(expr="self.todo.status()")
         self.context["workspace_state"] = Context(self._workspace_state_context(), prefix=True)
         # Same fallback as AtomAgentBase: the first prompt has no stats yet but
@@ -744,9 +736,7 @@ class AtomAgent(AtomAgentBase):
         InteractiveAgent.after_restore(self)
         self._reflection_gate.start_session()
         self._handle_namespace = None
-        if (
-            self._namespace_lifetime == "session" or self._session_namespace_was_live
-        ) and not self._namespace_restart_notified:
+        if not self._namespace_restart_notified:
             self._system_messages_in.put(
                 "Session restarted: Python cell variables and helpers were lost; "
                 "self.v and saved history remain. Recreate needed live objects."

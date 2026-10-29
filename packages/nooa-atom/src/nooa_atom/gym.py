@@ -56,7 +56,6 @@ class AtomHarness(Agent):
         workdir: str | Path | None = None,
         sessions_dir: str | Path | None = None,
         benchmark_policy: str | None = None,
-        experimental_namespace: str | None = None,
         experimental_done_reflection: bool | None = None,
         benchmark_allow_session_titles: bool | None = None,
         benchmark_policy_path: str | Path | None = None,
@@ -71,7 +70,6 @@ class AtomHarness(Agent):
         self.benchmark_guard = BenchmarkPolicyGuard(benchmark_policy_path)
         config = {
             "benchmark_policy": benchmark_policy,
-            "experimental_namespace": experimental_namespace,
             "experimental_done_reflection": experimental_done_reflection,
             "benchmark_allow_session_titles": benchmark_allow_session_titles,
         }

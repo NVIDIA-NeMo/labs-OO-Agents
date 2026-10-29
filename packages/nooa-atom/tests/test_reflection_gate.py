@@ -200,7 +200,6 @@ async def make_root(tmp_path, responses, clock, *, llm=None, **values):
         workspace=tmp_path,
         agent_spec="nooa_atom.agent:AtomAgent",
         llm=llm,
-        experimental_namespace="session",
         experimental_done_reflection=True,
         **values,
     )
@@ -600,10 +599,7 @@ async def test_standalone_enabled_positive_control_proves_runtime_canary_livenes
 _WORK_DONE = "return_result(Done(explanation='child', result=TaskResult(solution_description='s', evidence='e', how_to_verify='v', report='child')))"
 
 
-@pytest.mark.parametrize("mode", ["legacy", "call", "session"])
-async def test_benchmark_policy_explicit_off_root_child_has_zero_live_reflection_attempts(
-    tmp_path, mode
-):
+async def test_benchmark_policy_explicit_off_root_child_has_zero_live_reflection_attempts(tmp_path):
     # This is a fake-model canary, not a benchmark run or preset activation.
     clock, seen, agents = Clock(), [], {}
     clients = {
@@ -635,7 +631,6 @@ async def test_benchmark_policy_explicit_off_root_child_has_zero_live_reflection
         options = SessionOptions(
             workspace=tmp_path,
             agent_spec="nooa_atom.agent:AtomAgent",
-            experimental_namespace=mode,
             experimental_done_reflection=False,
             experimental_reflection_min_turns=1,
             experimental_reflection_min_seconds=0,
@@ -690,7 +685,6 @@ async def test_root_and_kept_child_gate_state_and_options_are_independent(tmp_pa
             SessionOptions(
                 workspace=tmp_path,
                 agent_spec="nooa_atom.agent:AtomAgent",
-                experimental_namespace="session",
                 experimental_done_reflection=True,
                 experimental_reflection_min_turns=2,
                 experimental_reflection_min_seconds=10,
@@ -730,7 +724,9 @@ async def test_root_and_kept_child_gate_state_and_options_are_independent(tmp_pa
         await registry.close_all()
 
 
-async def test_restart_rearms_without_monotonic_snapshot_and_load_uses_explicit_selection(tmp_path):
+async def test_restart_rearms_without_monotonic_snapshot_and_load_uses_explicit_reflection_selection(
+    tmp_path,
+):
     from nooa.storage.json_snapshot import snapshot_to_json
 
     clock = Clock()
@@ -758,7 +754,6 @@ async def test_restart_rearms_without_monotonic_snapshot_and_load_uses_explicit_
                         done(),
                     ]
                 ),
-                experimental_namespace="call",
                 experimental_done_reflection=True,
                 experimental_reflection_min_turns=2,
                 experimental_reflection_min_seconds=10,
@@ -787,7 +782,6 @@ async def test_restart_rearms_without_monotonic_snapshot_and_load_uses_explicit_
         root = await registry.load(
             identity,
             llm=client,
-            experimental_namespace="call",
             experimental_done_reflection=True,
             experimental_reflection_min_turns=3,
             experimental_reflection_min_seconds=20,
@@ -806,7 +800,7 @@ async def test_restart_rearms_without_monotonic_snapshot_and_load_uses_explicit_
     finally:
         await registry.close_all()
 
-    # Experimental selection is explicit on load, not inherited from a snapshot.
+    # Reflection selection is explicit on load, not inherited from a snapshot.
     clock.now = 2000
     registry = SessionRegistry(store, agent_factory=factory)
     try:

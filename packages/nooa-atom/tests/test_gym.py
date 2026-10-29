@@ -30,7 +30,6 @@ def _harness(llm, **kwargs):
     return AtomHarness(
         llm,
         benchmark_policy=POLICY,
-        experimental_namespace="legacy",
         experimental_done_reflection=False,
         benchmark_allow_session_titles=False,
         benchmark_policy_path=kwargs["workdir"] / f"{uuid4().hex}.atom-policy.json",

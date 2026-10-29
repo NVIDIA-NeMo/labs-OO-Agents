@@ -492,7 +492,9 @@ async def test_first_call_offers_one_work_vocabulary(
         "def status(self) -> str:",
         "async def message(self, item",  # Job.message
         "Names must be valid Python identifiers;",
-        "<python_cell_state>\nCell locals: notification (dict)\n</python_cell_state>",
+        "<python_cell_state>\nRetained Python names: none; omitted: 0\n</python_cell_state>",
+        "<python_cell_lifetime>",
+        "Other generated methods are call-local.",
     ):
         assert wanted in rendered, wanted
     for legacy in (

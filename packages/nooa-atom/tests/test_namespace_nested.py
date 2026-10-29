@@ -28,7 +28,7 @@ async def test_nested_generated_method_has_independent_owner_and_del(tmp_path):
             cell("assert scratch == 7\nreturn_result(Done(explanation='retained'))"),
         ]
     )
-    agent = NestedAtom(cwd=tmp_path, llm=llm, experimental_namespace="session")
+    agent = NestedAtom(cwd=tmp_path, llm=llm)
     try:
         assert await agent.handle({"user_messages": ["one"]}) == Done(explanation="isolated")
         assert await agent.handle({"user_messages": ["two"]}) == Done(explanation="retained")
