@@ -6,6 +6,11 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- CodeAct and PurePython `max_retries` now count only consecutive LLM API
+  errors; a successful LLM call resets the count. Other errors, such as
+  invalid tool calls and failed result validation, still add up across the
+  call. Previously a few scattered transient endpoint errors could end a long
+  turn even though every retry succeeded.
 - Dependency security update: the locked versions of Pillow, PyJWT,
   cryptography, aiohttp, urllib3, AnyIO, filelock, multidict, Werkzeug,
   setuptools, certifi, OpenTelemetry, and mcp now include their published
