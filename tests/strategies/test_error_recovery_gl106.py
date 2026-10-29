@@ -546,6 +546,32 @@ class TestPurePythonLLMApiError:
         assert await agent.compute(5) == 42
         assert fake_llm.attempts == 6
 
+    @pytest.mark.asyncio
+    async def test_xml_format_error_resets_api_error_budget(self):
+        """An XML format error is a model reply, so it clears the API-error count.
+
+        API error, XMLFormatError, API error, success: with max_retries=2 the two
+        API errors are not consecutive and the run must finish.
+        """
+
+        class TestAgent(Agent, llm=_DUMMY_LLM):
+            @strategy(PurePythonStrategy(max_iterations=10, max_retries=2))
+            async def compute(self, x: int) -> int:
+                """Compute {x}."""
+                ...
+
+        fake_llm = FlakyFakeLLM(
+            scripted_responses=[
+                _resp("<tool_code><code>return 1</code></tool_code>"),
+                _resp("return 42"),
+            ],
+            failing_calls={0, 2},
+        )
+
+        agent = TestAgent(llm=fake_llm)
+        assert await agent.compute(5) == 42
+        assert fake_llm.attempts == 4
+
 
 # ---------------------------------------------------------------------------
 # PurePythonStrategy — code validation errors (pure_python.py lines 671-679)
