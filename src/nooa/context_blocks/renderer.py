@@ -137,7 +137,7 @@ def _apply_context_total_limit(
     return rendered, len(to_evict)
 
 
-def utf8_safe_text(text: str) -> str:
+def _utf8_safe_text(text: str) -> str:
     """Return ``text`` with lone UTF-16 surrogates escaped as ``\\udXXX`` text."""
     if text.isascii():
         return text
@@ -158,7 +158,7 @@ def _utf8_safe(value: Any) -> Any:
     no change is returned as the same object, so callers' data is never mutated.
     """
     if isinstance(value, str):
-        return utf8_safe_text(value)
+        return _utf8_safe_text(value)
     if isinstance(value, dict):
         items = [(_utf8_safe(k), _utf8_safe(v)) for k, v in value.items()]
         if all(k is k0 and v is v0 for (k, v), (k0, v0) in zip(items, value.items(), strict=True)):

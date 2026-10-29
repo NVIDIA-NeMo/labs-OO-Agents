@@ -9,7 +9,7 @@ adapter knows the names of LiteLLM's native extension fields.
 
 from typing import Any
 
-from nooa._immutable_json import json_containers, utf8_encodable
+from nooa._immutable_json import json_containers
 from nooa.llm_types import AssistantPart, AssistantReasoning, AssistantText, LLMResponse, ToolCall
 from nooa.unifiedllm.cache_policy import wrap_anthropic_text
 
@@ -203,12 +203,6 @@ def project_chat_turn(
     know how those ids encode private state. No stored part is mutated.
     """
     compatible = scope is not None and turn.replay_scope == scope
-    if compatible and not all(utf8_encodable(part.native) for part in turn.parts):
-        logger.warning(
-            "Stored native state holds a lone surrogate that UTF-8 cannot encode; "
-            "replaying portable text instead of native state."
-        )
-        compatible = False
     provider = _scope_provider(scope)
     if turn.replay_scope and not compatible:
         logger.warning(
