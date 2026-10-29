@@ -31,6 +31,7 @@ import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 
+from nooa._platform import require_posix
 from nooa.agentdoc import TruncatingStringIO
 
 logger = logging.getLogger(__name__)
@@ -220,6 +221,7 @@ class BashSession:
         """Start the bash subprocess with a dedicated control fd."""
         if self._started:
             return
+        require_posix("The bash session (ShellTools, RepoTools, skills that run shell commands)")
 
         self._start_count += 1
         env = os.environ.copy()

@@ -1,0 +1,40 @@
+name: WSL nightly
+
+# Full test suite inside WSL 2 on a Windows host: the supported way to run the
+# whole product on Windows. Nightly (not per PR) because it is slow; ci.yml runs
+# a quick WSL check on every PR.
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  wsl-full-suite:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: wsl-bash {0}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: Vampire/setup-wsl@v7
+        with:
+          distribution: Ubuntu-24.04
+          additional-packages: curl ca-certificates git rsync ripgrep
+      - name: Install uv inside WSL
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+      - name: Copy checkout into WSL
+        run: rsync -a --delete --exclude .venv ./ ~/repo/
+      - name: Sync
+        run: cd ~/repo && ~/.local/bin/uv sync --frozen --all-extras --no-extra sandbox
+      - name: Unit tests (no live API calls)
+        run: cd ~/repo && ~/.local/bin/uv run --frozen pytest -q -m "not integration and not stress and not sandbox"
+      - name: Sandbox containment tests
+        run: cd ~/repo && ~/.local/bin/uv run --frozen pytest -q -m sandbox

@@ -239,3 +239,74 @@ jobs:
           # branch can fail an otherwise-clean PR. Scan the complete history
           # reachable from the checked-out PR merge commit instead.
           ./gitleaks git --config .gitleaks.toml --redact --no-banner --log-opts="HEAD" .
+
+  # Native Windows runs only the pure-Python core (see src/nooa/_platform.py):
+  # install the wheels as a user would, import every distribution, run a
+  # scripted agent (Predict + in-process CodeAct), and check that POSIX-only
+  # features fail with the WSL 2 message. The test suite itself needs POSIX.
+  windows-core-smoke:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # tags needed for uv-dynamic-versioning
+          persist-credentials: false
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - name: Build wheels
+        run: |
+          rm -rf dist
+          for pkg in nooa nooa-cli nooa-acp nooa-memory nooa-bench; do
+            uv build --no-sources --package "$pkg" --out-dir dist
+          done
+      - name: Install wheels into a clean environment
+        run: |
+          uv venv .smoke
+          uv pip install --python .smoke/Scripts/python.exe dist/*.whl
+      - name: Import every distribution
+        run: .smoke/Scripts/python.exe -c "import nooa, nooa_cli, nooa_acp, nooa_memory, nooa_bench; print(nooa.__version__)"
+      - name: CLI help
+        run: .smoke/Scripts/nooa.exe --help
+      - name: Pure-Python core smoke
+        run: .smoke/Scripts/python.exe scripts/windows_smoke.py
+
+  # WSL 2 is the supported way to run the full product on Windows. On every PR
+  # run a quick check of the POSIX features inside WSL; wsl-nightly.yml runs
+  # the full suite there.
+  wsl-quick:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: wsl-bash {0}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: Vampire/setup-wsl@v7
+        with:
+          distribution: Ubuntu-24.04
+          additional-packages: curl ca-certificates git rsync ripgrep
+      - name: Install uv inside WSL
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+      # Work on the Linux filesystem: /mnt/c is slow and ignores chmod.
+      - name: Copy checkout into WSL
+        run: rsync -a --delete --exclude .venv ./ ~/repo/
+      - name: Sync
+        run: cd ~/repo && ~/.local/bin/uv sync --frozen --all-extras --no-extra sandbox
+      - name: Smoke and POSIX features
+        run: |
+          cd ~/repo
+          ~/.local/bin/uv run --frozen python scripts/windows_smoke.py
+          ~/.local/bin/uv run --frozen pytest -q tests/test_windows_platform.py tests/tools/test_bash_session.py tests/storage tests/runtime/test_producers.py

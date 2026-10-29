@@ -7,7 +7,6 @@ Provides persistent storage using stdlib sqlite3 — no new dependencies.
 
 from __future__ import annotations
 
-import fcntl
 import json
 import logging
 import os
@@ -25,6 +24,7 @@ from typing import TYPE_CHECKING, Literal, Self
 
 from pydantic import ValidationError as PydanticValidationError
 
+from nooa._platform import require_posix
 from nooa.context_blocks import Event, EventBase, EventStatus, Metadata
 from nooa.context_blocks.events import _EVENT_REGISTRY
 from nooa.events import (
@@ -682,10 +682,13 @@ def _acquire_session_lock(lock_path: str) -> int:
     with ``read_lock_owner``). We truncate before writing so a shorter
     record can't leave trailing bytes from a longer predecessor.
 
-    The caller releases the lock with ``fcntl.flock(fd, fcntl.LOCK_UN)``
-    and ``os.close(fd)``. Taking the lock only to test whether a session is
-    free still rewrites the record with this process's pid and host.
+    The caller releases the lock with ``_release_session_lock(fd)``.
+    Taking the lock only to test whether a session is free still rewrites
+    the record with this process's pid and host.
     """
+    require_posix("File-backed SQLite storage (its session lock uses fcntl)")
+    import fcntl
+
     fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -711,6 +714,16 @@ def _acquire_session_lock(lock_path: str) -> int:
     os.ftruncate(fd, 0)
     os.write(fd, _lock_owner_record())
     return fd
+
+
+def _release_session_lock(fd: int) -> None:
+    """Release and close a lock fd returned by ``_acquire_session_lock``."""
+    import fcntl
+
+    try:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
 
 
 def delete_sqlite_database(db_path: str | Path) -> bool:
@@ -746,8 +759,7 @@ def delete_sqlite_database(db_path: str | Path) -> bool:
         # Blank the record before releasing, as a clean close does, so the
         # retained lock file does not name this process as a live owner.
         _blank_lock_if_ours(lock_path)
-        fcntl.flock(lock_fd, fcntl.LOCK_UN)
-        os.close(lock_fd)
+        _release_session_lock(lock_fd)
 
 
 class SQLiteStorageManager:
@@ -999,8 +1011,7 @@ class SQLiteStorageManager:
                 # the kernel lock reads "free" and not a stale owner.
                 if self._db_path != ":memory:":
                     _blank_lock_if_ours(str(Path(self._db_path).with_suffix(".lock")))
-                fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
-                os.close(self._lock_fd)
+                _release_session_lock(self._lock_fd)
                 self._lock_fd = None
 
     def __enter__(self) -> Self:
