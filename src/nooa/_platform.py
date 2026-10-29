@@ -3,8 +3,8 @@
 """Platform policy: native Windows is unsupported; use WSL 2.
 
 ``import nooa`` on native Windows raises :class:`UnsupportedPlatformError`
-unless ``NOOA_SKIP_PLATFORM_CHECK=1`` is set (like Node.js's
-``NODE_SKIP_PLATFORM_CHECK``). That check lives in the stdlib-only
+unless ``NOOA_SKIP_PLATFORM_CHECK=1`` is set; the override is modelled on
+Node.js, whose own variable is ``NODE_SKIP_PLATFORM_CHECK``. That check lives in the stdlib-only
 :mod:`nooa._platform_policy` so it runs before other nooa modules load. With the
 override, the pure-Python core and ``nooa connect`` are tested in CI; other
 features may work but are unsupported.

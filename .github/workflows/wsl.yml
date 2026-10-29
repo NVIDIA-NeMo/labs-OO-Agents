@@ -16,14 +16,14 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: wsl-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-
 jobs:
   wsl:
     # Adding any other label must not start a run.
     if: github.event.action != 'labeled' || github.event.label.name == 'wsl-full'
+    # Job-level, so a skipped run (another label) cannot cancel a real one.
+    concurrency:
+      group: wsl-${{ github.event.pull_request.number || github.ref }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     # windows-latest (Windows Server 2025) has no usable WSL. windows-2022 has the
     # in-box WSL, which works once `wsl --update` installs the WSL 2 kernel.
     runs-on: windows-2022
