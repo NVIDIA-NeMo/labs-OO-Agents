@@ -1573,7 +1573,9 @@ def _extract_methods(obj: type) -> list[CallableInfo]:
     source_order: dict[str, int] = {}
     idx = 0
     for klass in obj.__mro__:
-        for name, value in klass.__dict__.items():
+        # Attribute lookup on lazy values (e.g. Pydantic validators) can rebuild
+        # the class while we inspect it. Preserve this pass's definition order.
+        for name, value in list(klass.__dict__.items()):
             try:
                 qualname = getattr(value, "__qualname__", None) or f"{klass.__qualname__}.{name}"
             except Exception:
