@@ -90,7 +90,7 @@ as a skill.
                          • ReflectionEngine (merge · reconsolidate · abstract · prune)
                          • ForgettingEngine (decay + prune)
                          • Embedder      (hashing | litellm)
-                         • VectorIndex   (numpy | sqlite-vec | chroma)
+                         • VectorIndex   (numpy | sqlite-vec | chroma | qdrant)
 ```
 
 `install()` also injects `MEMORY_SCHEMA_GUIDE` (the "you own your memory + here's the
@@ -337,8 +337,13 @@ protocol (`vector_backends.py`):
 | `sqlite_vec` | ANN inside the same SQLite file | `sqlite-vec` |
 | `chroma_embedded` | Chroma over a local dir | `chromadb` |
 | `chroma_http` | a running Chroma server | `chromadb` |
+| `qdrant_server` | a Qdrant server or Qdrant Cloud cluster | `qdrant-client` |
 
-All four return identical ranking; swap freely. Embeddings (`embeddings.py`):
+All five return identical ranking; swap freely. `qdrant_server` connects with
+`url` and `api_key`, or `host` and `port`. With an `api_key`, `host` connects
+over HTTPS; give the scheme in `url` for a server without TLS.
+
+Embeddings (`embeddings.py`):
 
 | `embedding.backend` | what |
 |---|---|

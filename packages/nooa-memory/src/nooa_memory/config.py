@@ -83,12 +83,17 @@ class VectorConfig(BaseModel, frozen=True):
     * ``sqlite_vec``     — ANN inside the same SQLite file (needs ``sqlite-vec``).
     * ``chroma_embedded``— Chroma over a local dir beside the store (needs ``chromadb``).
     * ``chroma_http``    — a running Chroma server (needs ``chromadb``).
+    * ``qdrant_server``  — a Qdrant server or Qdrant Cloud cluster (needs ``qdrant-client``).
     """
 
-    backend: Literal["numpy", "sqlite_vec", "chroma_embedded", "chroma_http"] = "numpy"
+    backend: Literal["numpy", "sqlite_vec", "chroma_embedded", "chroma_http", "qdrant_server"] = (
+        "numpy"
+    )
     collection: str = "agent_memory"
-    host: str | None = None  # chroma_http
+    host: str | None = None  # chroma_http / qdrant_server
     port: int | None = None
+    url: str | None = None  # qdrant_server
+    api_key: str | None = None  # qdrant_server
 
 
 class WritePolicy(BaseModel, frozen=True):

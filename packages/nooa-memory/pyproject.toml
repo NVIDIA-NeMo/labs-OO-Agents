@@ -12,8 +12,8 @@ dependencies = [
     "numpy>=1.24.0",
 ]
 
-# Optional ANN vector backends (sqlite-vec, chromadb) are imported lazily by
-# vector_backends.py and deliberately NOT declared as an extra: `uv sync
+# Optional ANN vector backends (sqlite-vec, chromadb, qdrant-client) are imported
+# lazily by vector_backends.py and deliberately NOT declared as an extra: `uv sync
 # --all-extras` in CI would otherwise install the heavy chromadb stack that
 # the numpy default backend makes unnecessary.
 

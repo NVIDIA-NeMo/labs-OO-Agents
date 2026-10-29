@@ -12,6 +12,8 @@ store repopulates on open (so swapping backends never loses data).
                              extension (``uv pip install sqlite-vec``).
 * ``ChromaVectorIndex``    — Chroma embedded (persistent/ephemeral) or HTTP server
                              (``uv pip install chromadb``).
+* ``QdrantVectorIndex``    — a Qdrant server or Qdrant Cloud cluster
+                             (``uv pip install qdrant-client``).
 
 Select one with ``MemoryConfig.vector.backend``; ``make_vector_index`` dispatches.
 """
@@ -19,6 +21,7 @@ Select one with ``MemoryConfig.vector.backend``; ``make_vector_index`` dispatche
 from __future__ import annotations
 
 import sqlite3
+import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
@@ -201,6 +204,77 @@ class ChromaVectorIndex:
 
 
 # ---------------------------------------------------------------------------
+# Qdrant (a Qdrant server or Qdrant Cloud cluster)
+# ---------------------------------------------------------------------------
+class QdrantVectorIndex:
+    """Vector index backed by a Qdrant collection (cosine distance).
+
+    Point IDs are UUIDv5s of the memory ids, which ride along in the payload.
+    """
+
+    def __init__(self, config: VectorConfig, *, dim: int) -> None:
+        try:
+            from qdrant_client import QdrantClient, models
+        except ImportError as e:  # pragma: no cover - exercised only without the dep
+            raise ImportError(
+                "The qdrant_server backend requires the qdrant-client package. "
+                "Install it with: uv pip install qdrant-client"
+            ) from e
+        self._models = models
+        self._name = config.collection
+        self._client = QdrantClient(
+            url=config.url, host=config.host, port=config.port or 6333, api_key=config.api_key
+        )
+        if self._client.collection_exists(self._name):
+            vectors = self._client.get_collection(self._name).config.params.vectors
+            if (
+                getattr(vectors, "size", None) != dim
+                or getattr(vectors, "distance", None) != models.Distance.COSINE
+            ):
+                raise ValueError(
+                    f"Qdrant collection {self._name!r} must hold unnamed {dim}-dim cosine vectors"
+                )
+        else:
+            self._client.create_collection(
+                collection_name=self._name,
+                vectors_config=models.VectorParams(size=dim, distance=models.Distance.COSINE),
+            )
+
+    @staticmethod
+    def _point_id(id: str) -> str:
+        return str(uuid.uuid5(uuid.NAMESPACE_OID, id))
+
+    def _point(self, id: str, vector: np.ndarray):
+        return self._models.PointStruct(
+            id=self._point_id(id), vector=vector.tolist(), payload={"memory_id": id}
+        )
+
+    def add(self, id: str, vector: np.ndarray) -> None:
+        self._client.upsert(collection_name=self._name, points=[self._point(id, vector)])
+
+    def add_many(self, items: list[tuple[str, np.ndarray]]) -> None:
+        points = (self._point(id, vector) for id, vector in items)
+        self._client.upload_points(self._name, points, batch_size=256, wait=True)
+
+    def remove(self, id: str) -> None:
+        self._client.delete(collection_name=self._name, points_selector=[self._point_id(id)])
+
+    def query(self, vector: np.ndarray, k: int) -> list[tuple[str, float]]:
+        if k <= 0:
+            return []
+        res = self._client.query_points(
+            collection_name=self._name, query=vector.tolist(), limit=k, with_payload=True
+        )
+        return [(p.payload["memory_id"], p.score) for p in res.points]
+
+    def __len__(self) -> int:
+        return self._client.count(collection_name=self._name).count
+
+    def close(self) -> None:
+        self._client.close()
+
+
+# ---------------------------------------------------------------------------
 # factory
 # ---------------------------------------------------------------------------
 def make_vector_index(
@@ -222,4 +296,8 @@ def make_vector_index(
         return SqliteVecVectorIndex(conn, dim)
     if backend in ("chroma_embedded", "chroma_http"):
         return ChromaVectorIndex(config, dim=dim, path=path)
+    if backend == "qdrant_server":
+        if dim is None:
+            raise ValueError("qdrant_server backend needs the embedding dim")
+        return QdrantVectorIndex(config, dim=dim)
     raise ValueError(f"Unknown vector backend: {backend!r}")

@@ -73,6 +73,7 @@ from nooa_memory.store import SCHEMA_VERSION, MemorySchemaError, MemoryStore
 from nooa_memory.vector_backends import (
     ChromaVectorIndex,
     NumpyVectorIndex,
+    QdrantVectorIndex,
     SqliteVecVectorIndex,
     VectorIndex,
     make_vector_index,
@@ -119,6 +120,7 @@ __all__ = [
     "NumpyVectorIndex",
     "SqliteVecVectorIndex",
     "ChromaVectorIndex",
+    "QdrantVectorIndex",
     "make_vector_index",
     # verbal descriptors (agent-facing vocabulary)
     "ladder",

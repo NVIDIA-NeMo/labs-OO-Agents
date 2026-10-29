@@ -1,10 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for swappable vector backends (numpy / sqlite-vec / chroma).
+"""Tests for swappable vector backends (numpy / sqlite-vec / chroma / qdrant).
 
 The numpy backend always runs; the others ``importorskip`` their optional
 dependency so the suite stays green whether or not they are installed.
 """
+
+import os
+import uuid
 
 import numpy as np
 import pytest
@@ -24,7 +27,16 @@ from nooa import Agent
 from nooa.unifiedllm import FakeLLMClient
 
 DIM = 64
-ALL_BACKENDS = ["numpy", "sqlite_vec", "chroma_embedded", "chroma_http"]
+ALL_BACKENDS = [
+    "numpy",
+    "sqlite_vec",
+    "chroma_embedded",
+    "chroma_http",
+    "qdrant_server",
+]
+# Run the qdrant_server cases against a server, e.g. QDRANT_URL=http://localhost:6333.
+QDRANT_URL = os.environ.get("QDRANT_URL")
+_qdrant_collections: list[str] = []
 
 
 def _require(backend: str) -> None:
@@ -34,11 +46,36 @@ def _require(backend: str) -> None:
         pytest.importorskip("chromadb")
     if backend == "chroma_http":
         pytest.skip("chroma_http needs a running server")
+    if backend == "qdrant_server":
+        pytest.importorskip("qdrant_client")
+        if not QDRANT_URL:
+            pytest.skip("qdrant_server needs a running server (set QDRANT_URL)")
 
 
-def _store(backend: str) -> MemoryStore:
+def _vector_config(backend: str) -> VectorConfig:
     _require(backend)
-    return MemoryStore(":memory:", vector_config=VectorConfig(backend=backend), embedding_dim=DIM)
+    if backend == "qdrant_server":
+        name = f"nooa-test-{uuid.uuid4().hex[:8]}"
+        _qdrant_collections.append(name)
+        return VectorConfig(backend=backend, url=QDRANT_URL, collection=name)
+    return VectorConfig(backend=backend)
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _drop_qdrant_collections():
+    yield
+    if _qdrant_collections:
+        from qdrant_client import QdrantClient
+
+        client = QdrantClient(url=QDRANT_URL)
+        for name in _qdrant_collections:
+            client.delete_collection(name)
+        client.close()
+
+
+def _store(backend: str, path: str = ":memory:", vector: VectorConfig | None = None) -> MemoryStore:
+    _require(backend)
+    return MemoryStore(path, vector_config=vector or _vector_config(backend), embedding_dim=DIM)
 
 
 @pytest.fixture
@@ -98,7 +135,7 @@ def test_all_available_backends_agree_on_ranking(emb):
     for backend in ALL_BACKENDS:
         try:
             _require(backend)
-        except Exception:
+        except pytest.skip.Exception:
             continue
         store = _store(backend)
         ids = []
@@ -140,7 +177,7 @@ def test_manager_wires_backend_end_to_end(backend):
     agent = MemAgent()
     mgr = MemoryManager.install(
         agent,
-        config=MemoryConfig(enabled=True, path=":memory:", vector=VectorConfig(backend=backend)),
+        config=MemoryConfig(enabled=True, path=":memory:", vector=_vector_config(backend)),
     )
     agent.remember("the deploy command is make ship", type="info")
     res = agent.recall("how do I deploy", k=1)
@@ -164,3 +201,38 @@ def test_npindex_unit():
     idx.add("a", np.array([1.0, 0.0], dtype=np.float32))
     idx.add("b", np.array([0.0, 1.0], dtype=np.float32))
     assert idx.query(np.array([1.0, 0.0], dtype=np.float32), 1)[0][0] == "a"
+
+
+def test_qdrant_persists_across_reopen(tmp_path, emb):
+    path = str(tmp_path / "mem.db")
+    vector = _vector_config("qdrant_server")
+    store = _store("qdrant_server", path, vector)
+    m = Memory(content="deploy ship release", type=MemoryType.INFO)
+    store.add(m, emb.embed(m.embedding_text()))
+    store.close()
+
+    store = _store("qdrant_server", path, vector)
+    assert store.knn(emb.embed("deploy ship"), 1)[0][0] == m.id
+    store.close()
+
+
+def test_qdrant_index_unit():
+    vector = _vector_config("qdrant_server")
+    from nooa_memory import QdrantVectorIndex
+
+    idx = QdrantVectorIndex(vector, dim=2)
+    idx.add("a", np.array([1.0, 0.0], dtype=np.float32))
+    idx.add("b", np.array([0.0, 1.0], dtype=np.float32))
+    idx.add("a", np.array([1.0, 0.0], dtype=np.float32))
+    assert len(idx) == 2
+    assert [mid for mid, _ in idx.query(np.array([1.0, 0.0], dtype=np.float32), 2)] == ["a", "b"]
+    idx.remove("a")
+    assert len(idx) == 1
+    idx.close()
+
+
+def test_qdrant_rejects_collection_with_other_dim():
+    vector = _vector_config("qdrant_server")
+    _store("qdrant_server", vector=vector).close()
+    with pytest.raises(ValueError, match="128-dim cosine"):
+        MemoryStore(":memory:", vector_config=vector, embedding_dim=DIM * 2)
