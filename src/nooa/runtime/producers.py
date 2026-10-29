@@ -15,6 +15,7 @@ Usage::
 """
 
 import asyncio
+import codecs
 import os
 import signal
 
@@ -37,19 +38,45 @@ async def cron(interval_seconds: float):
         yield tick
 
 
-async def tail(path: str, *, poll_interval: float = 0.5):
+async def tail(path: str, *, poll_interval: float = 0.5, max_line_bytes: int = 1 << 20):
     """Tail a file, yielding new lines as they appear.
 
     Starts from the current end of file. Polls every
-    *poll_interval* seconds.
+    *poll_interval* seconds. A line that is still being written is
+    held until its newline arrives, so a poll landing mid-write does
+    not split one line across two yields. Only ``\n`` ends a line; a
+    trailing ``\r`` is removed. Lines are decoded as UTF-8 with
+    undecodable bytes replaced, and a character split across writes is
+    decoded whole. A line that grows past *max_line_bytes* before its
+    newline is yielded in pieces of at most that size, so a newline-free
+    stream keeps memory bounded without losing its contents.
     """
-    fh = open(path)
+    decoder = codecs.getincrementaldecoder("utf-8")("replace")
+    fh = open(path, "rb")
     try:
         fh.seek(0, 2)
+        partial = b""
+        continued = False  # this line already came out in pieces
         while True:
-            line = fh.readline()
-            if line:
-                yield line.rstrip("\n")
+            chunk = fh.readline(max_line_bytes - len(partial))
+            if chunk:
+                partial += chunk
+                if partial.endswith(b"\n"):
+                    text = decoder.decode(partial[:-1], final=True)
+                    partial = b""
+                    text = text.removesuffix("\r")
+                    # The terminator of a line already yielded in pieces is no new line.
+                    if text or not continued:
+                        yield text
+                    continued = False
+                elif len(partial) >= max_line_bytes:
+                    # A piece cut inside a character decodes to "" until the
+                    # rest arrives (the decoder keeps those bytes): skip it.
+                    text = decoder.decode(partial)
+                    partial = b""
+                    if text:
+                        continued = True
+                        yield text
             else:
                 await asyncio.sleep(poll_interval)
     finally:

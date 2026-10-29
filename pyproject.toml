@@ -64,7 +64,18 @@ nooa-atom = { workspace = true }
 [tool.uv]
 # Extra index URLs to search for packages (in addition to PyPI)
 # Ignore packages uploaded less than 7 days ago to mitigate supply-chain attacks
-exclude-newer = "2026-08-18T00:00:00Z"
+exclude-newer = "2026-10-21T00:00:00Z"
+# Newer LiteLLM/OpenInference releases export opaque provider reasoning state
+# in OTLP spans, and mcp 2.x stops raising MCP tool-level errors. Hold them
+# until NOOA is adapted; mcp 1.30 carries the 1.x security fix.
+constraint-dependencies = [
+    "litellm==1.97.0",
+    "openinference-instrumentation==0.1.54",
+    "openinference-instrumentation-litellm==0.1.34",
+    "mcp>=1.30,<2",
+    # ruff 0.16+ changes formatting; upgrade it separately with a reformat.
+    "ruff==0.15.20",
+]
 
 [tool.uv.workspace]
 members = [
@@ -121,7 +132,8 @@ sandbox = [
 # (kept optional so glibc<2.28 hosts can `uv sync` without pulling
 # pydantic-core wheels that only target manylinux_2_28). See issue 189.
 mcp = [
-    "mcp>=1.0.0",
+    # mcp 2.x reports tool errors as is_error, which nooa.mcp does not read yet.
+    "mcp>=1.30,<2",
 ]
 # NeMo Relay integration (guardrails, intercepts, event subscribers, ATIF
 # export).

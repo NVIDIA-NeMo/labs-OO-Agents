@@ -9,7 +9,99 @@ import sys
 
 import pytest
 
-from nooa.runtime.producers import monitor
+from nooa.runtime.producers import monitor, tail
+
+
+class TestTail:
+    """Verify tail() assembles whole lines."""
+
+    async def test_partial_line_is_not_split(self, tmp_path):
+        """A poll landing mid-write must not split one line across two yields."""
+        f = tmp_path / "app.log"
+        f.write_text("", encoding="utf-8")
+
+        async def write_in_two_parts():
+            await asyncio.sleep(0.05)
+            with open(f, "a", encoding="utf-8") as fh:
+                fh.write("ERROR db timeout")
+                fh.flush()
+                await asyncio.sleep(0.3)  # tail polls repeatedly during this gap
+                fh.write(" after 30s\n")
+
+        async def first_line():
+            async for line in tail(str(f), poll_interval=0.01):
+                return line
+            return None
+
+        writer = asyncio.create_task(write_in_two_parts())
+        line = await asyncio.wait_for(first_line(), timeout=5.0)
+        await writer
+        assert line == "ERROR db timeout after 30s"
+
+    @staticmethod
+    async def _tail_while_writing(path, parts, count, **kwargs):
+        """Collect *count* lines while *parts* are appended with polls between them."""
+
+        async def write():
+            await asyncio.sleep(0.05)
+            with open(path, "ab") as fh:
+                for part in parts:
+                    fh.write(part)
+                    fh.flush()
+                    await asyncio.sleep(0.1)  # tail polls during each gap
+
+        async def collect():
+            lines = []
+            async for line in tail(str(path), poll_interval=0.01, **kwargs):
+                lines.append(line)
+                if len(lines) == count:
+                    return lines
+            return lines
+
+        writer = asyncio.create_task(write())
+        lines = await asyncio.wait_for(collect(), timeout=5.0)
+        await writer
+        return lines
+
+    async def test_utf8_character_split_across_writes(self, tmp_path):
+        """A multi-byte character split across writes decodes whole."""
+        f = tmp_path / "app.log"
+        f.write_bytes(b"")
+        euro = "€".encode()
+        lines = await self._tail_while_writing(f, [b"cost " + euro[:1], euro[1:] + b"5\n"], 1)
+        assert lines == ["cost €5"]
+
+    async def test_crlf_split_across_polls_is_one_line(self, tmp_path):
+        """A \\r before its \\n arrives neither ends the line nor leaves an empty one."""
+        f = tmp_path / "app.log"
+        f.write_bytes(b"")
+        lines = await self._tail_while_writing(f, [b"one\r", b"\ntwo\r\n"], 2)
+        assert lines == ["one", "two"]
+
+    async def test_newline_free_stream_yields_bounded_pieces(self, tmp_path):
+        """A line longer than max_line_bytes comes out in pieces, contents intact."""
+        f = tmp_path / "app.log"
+        f.write_bytes(b"")
+        lines = await self._tail_while_writing(
+            f, [b"x" * 10, b"y" * 5 + b"\n"], 2, max_line_bytes=8
+        )
+        assert lines == ["x" * 8, "xx" + "y" * 5]
+
+    async def test_newline_right_after_a_full_piece_adds_no_empty_line(self, tmp_path):
+        """A line exactly max_line_bytes long is one line, with LF or CRLF."""
+        f = tmp_path / "app.log"
+        f.write_bytes(b"")
+        lines = await self._tail_while_writing(
+            f, [b"abcd\n", b"efgh\r\n", b"next\n"], 3, max_line_bytes=4
+        )
+        assert lines == ["abcd", "efgh", "next"]
+
+    async def test_piece_cut_inside_a_character_yields_no_empty_fragment(self, tmp_path):
+        """A cut through a multi-byte character waits for the rest of it."""
+        f = tmp_path / "app.log"
+        f.write_bytes(b"")
+        lines = await self._tail_while_writing(f, ["€\n".encode(), b"ok\n"], 3, max_line_bytes=1)
+        assert lines == ["€", "o", "k"]
 
 
 class TestMonitorProcessIsolation:

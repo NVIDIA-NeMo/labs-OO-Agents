@@ -110,6 +110,20 @@ to follow semantic versioning.
   the older experimental-agent spellings, such as `ExperimentalTUIAgent` and
   `ExperimentalCodingAgent`, are session-restore aliases for
   `nooa_atom.agent:AtomAgent`).
+- CodeAct and PurePython `max_retries` now count only consecutive LLM API
+  errors; a successful LLM call resets the count. Other errors, such as
+  invalid tool calls and failed result validation, still add up across the
+  call. Previously a few scattered transient endpoint errors could end a long
+  turn even though every retry succeeded.
+- Dependency security update: the locked versions of Pillow, PyJWT,
+  cryptography, aiohttp, urllib3, AnyIO, filelock, multidict, Werkzeug,
+  setuptools, certifi, OpenTelemetry, and mcp now include their published
+  vulnerability fixes. The `exclude-newer` cutoff, documented as a 7-day window,
+  had been frozen at 2026-08-18 and blocked these releases; it now stands at
+  2026-10-21. LiteLLM and its OpenInference instrumentation stay at their
+  current versions and mcp stays on 1.x (1.30+) until NOOA is adapted to their
+  newer releases: with them, opaque provider reasoning state reaches exported
+  OTLP spans and MCP tool-level errors are no longer raised.
 - Prompt inspection (`print_prompt()` and `build_prompt_data()`) now applies
   method-level truncation overrides for CodeAct and PurePython, matching runtime
   prefill rendering. Both strategies now use the resolved runtime settings for

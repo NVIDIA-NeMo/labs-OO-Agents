@@ -19,6 +19,7 @@ If this test fails:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import tempfile
 import urllib.request
@@ -26,7 +27,7 @@ import urllib.request
 import pytest
 from otlp_test_helpers import read_all_otlp_jsonl_spans
 
-from nooa.tracing import enable_tracing, exporters, set_session
+from nooa.tracing import enable_tracing, exporters, set_session, shutdown_traces
 
 
 def _gather_otlp_from_jsonl(text: str) -> dict[str, dict]:
@@ -88,7 +89,7 @@ async def test_file_save_equals_viewer_download(live_viewer, monkeypatch):
 
     from nooa.tracing._litellm_journal import MessageJournalCallback
 
-    with tempfile.TemporaryDirectory() as tmpdir:
+    with tempfile.TemporaryDirectory() as tmpdir, contextlib.ExitStack() as cleanup:
         # Both sinks active simultaneously: file + journal-to-viewer.
         enable_tracing(
             exporters=[
@@ -96,6 +97,9 @@ async def test_file_save_equals_viewer_download(live_viewer, monkeypatch):
                 exporters.journal(endpoint=f"{live_viewer}/v1/traces"),
             ]
         )
+        # Stop exporters before TemporaryDirectory removes their output, even
+        # if an assertion or timeout interrupts the test.
+        cleanup.callback(shutdown_traces)
         session_id = "t2-file-vs-viewer"
         set_session(session_id)
 
