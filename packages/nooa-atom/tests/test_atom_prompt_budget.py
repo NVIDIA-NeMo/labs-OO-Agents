@@ -143,11 +143,14 @@ RESULT = (
 # 19,377 -> 19,689, handle_batch 19,605 -> 19,884, handle_work 19,714 ->
 # 20,052, handle_orchestrate 19,908 -> 20,187. Limits: measured values plus
 # about 2%, rounded up to the next 100; BENCH_SYSTEM_LIMIT raised with them.
+# Totals raised on the rebase onto dev/atom 060f59e66 (2026-10-29), whose own
+# prompt additions came along: totals 21,045 / 21,240 / 21,408 / 21,543; system
+# limits unchanged. Limits: measured totals plus about 2%, rounded up to the next 100.
 LIMITS = {
-    (ATOM, "handle"): (20_100, 20_900),
-    (ATOM, "handle_batch"): (20_300, 21_100),
-    (ATOM, "handle_work"): (20_500, 21_300),
-    (ATOM, "handle_orchestrate"): (20_600, 21_500),
+    (ATOM, "handle"): (20_100, 21_500),
+    (ATOM, "handle_batch"): (20_300, 21_700),
+    (ATOM, "handle_work"): (20_500, 21_900),
+    (ATOM, "handle_orchestrate"): (20_600, 22_000),
 }
 # The bench guard's system-prompt ceiling; every agent stays under it.
 # Raised from 20,000 for the Done(message=...) guidance (2026-10-29, see above).
