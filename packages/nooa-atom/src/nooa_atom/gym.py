@@ -33,10 +33,21 @@ from nooa_atom.session.loader import ATOM_AGENT
 from nooa_atom.session.options import SessionOptions
 from nooa_atom.session.registry import SessionRegistry
 from nooa_atom.session.store import SessionStore, sessions_root
+from nooa_atom.session.tracing import trace_under_caller
 
 __all__ = ["TURN_METHODS", "AtomHarness"]
 
 TURN_METHODS = ("handle_batch", "handle_orchestrate")
+
+
+async def _trace_root_under_harness(session: Any) -> None:
+    """Trace the root session's turns under the harness call, in the harness's trace session.
+
+    Each session loop starts in a fresh Context, so without this the root's
+    turn, generation and LLM spans start a separate trace with no
+    ``session.id``. Children already continue their caller's trace.
+    """
+    trace_under_caller(session)
 
 
 class AtomHarness(Agent):
@@ -189,7 +200,7 @@ class AtomHarness(Agent):
                 or getattr(self.llm, "_episode_policy_guard", None) is not guard
             ):
                 guard.refuse("client_policy_guard_missing")
-            root = await registry.create(self.options)
+            root = await registry.create(self.options, prepare=_trace_root_under_harness)
             outcome = await root.prompt(task)
             await self._settle_children(registry, root)
         except BaseException as exc:
@@ -270,7 +281,7 @@ class AtomHarness(Agent):
             llm_factory=refuse_alias,
         )
         try:
-            root = await registry.create(self.options)
+            root = await registry.create(self.options, prepare=_trace_root_under_harness)
             outcome = await root.prompt(task)
             await self._settle_children(registry, root)
         finally:

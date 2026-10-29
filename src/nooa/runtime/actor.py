@@ -12,6 +12,7 @@ import linecache
 import logging
 import math
 import re as _re
+import time
 import tokenize
 import types
 import warnings
@@ -65,7 +66,7 @@ from nooa.runtime.harness_metrics import (
     restore_harness_metrics,
     start_harness_metrics,
 )
-from nooa.runtime.hooks import call_after_hook, call_before_hook
+from nooa.runtime.hooks import call_after_hook, call_before_hook, call_on_llm_call
 
 logger = logging.getLogger(__name__)
 
@@ -1180,7 +1181,25 @@ class ActorRuntime:
             "turn_number": _gen_hm.turn_count if isinstance(_gen_hm.turn_count, int) else 0,
         }
 
+        _llm_started_ns = [time.time_ns()]
+
+        def _notify_llm_call(response: Any = None, exception_type: str | None = None) -> None:
+            # One observation per logical call (tracing turns it into an llm_call span).
+            call_on_llm_call(
+                agent=self.agent,
+                method_name=_llm_event_meta["method_name"],
+                generation_id=_llm_event_meta["generation_id"],
+                start_time_ns=_llm_started_ns[0],
+                end_time_ns=time.time_ns(),
+                response=response,
+                exception_type=exception_type,
+                turn_number=_llm_event_meta["turn_number"],
+                strategy=_llm_event_meta["strategy"],
+                llm_client=llm_client,
+            )
+
         def _emit_llm_start() -> None:
+            _llm_started_ns[0] = time.time_ns()
             em.add(LLMCallStart(**_llm_event_meta), record=False)
 
         def _emit_llm_end(*, success: bool, exception_type: str | None = None) -> None:
@@ -1188,6 +1207,8 @@ class ActorRuntime:
                 LLMCallEnd(**_llm_event_meta, success=success, exception_type=exception_type),
                 record=False,
             )
+            if not success:
+                _notify_llm_call(exception_type=exception_type)
 
         has_mw = bool(em._middleware.get("llm_call"))
         with _gen_hm.timer("time_llm_call"):
@@ -1395,6 +1416,7 @@ class ActorRuntime:
         response.model_name = getattr(llm_client, "model", "") or response.model_name
         response.generation_id = current_generation_id or ""
         response.dynamic_context = _dynamic_context
+        _notify_llm_call(response=response)
         usage = response.usage
         if usage is not None and usage.input_tokens > 0:
             self._last_prompt_tokens_actual = usage.input_tokens

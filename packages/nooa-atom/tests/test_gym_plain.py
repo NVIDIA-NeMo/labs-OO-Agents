@@ -81,6 +81,60 @@ async def test_plain_harness_runs_one_episode(tmp_path):
         await harness.solve("twice")
 
 
+async def test_plain_harness_traces_the_root_session_under_the_harness_call(tmp_path):
+    """The root's turn, generation and LLM-call spans join the harness's trace and session."""
+    pytest.importorskip("opentelemetry.sdk.trace")
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    import nooa.tracing as tracing
+    from nooa.runtime.hooks import set_hooks
+    from nooa.tracing._hooks_impl import OpenInferenceHooks
+    from nooa.tracing._session_processor import SessionSpanProcessor
+
+    exporter = InMemorySpanExporter()
+    provider = trace.get_tracer_provider()
+    if not hasattr(provider, "add_span_processor"):
+        provider = TracerProvider()
+        trace.set_tracer_provider(provider)
+    provider.add_span_processor(SessionSpanProcessor())
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    saved = tracing._hooks
+    tracing._hooks = OpenInferenceHooks(tracer=provider.get_tracer(__name__))
+    try:
+        tracing.set_session("episode-1")
+        tracing.register_hooks_in_current_context()
+        target = repr(str(tmp_path / "hello.txt"))
+        harness = AtomHarness(
+            CellLLM([cell(FINISH.replace("'hello.txt'", target))]), workdir=tmp_path
+        )
+        await harness.solve("write hello.txt")
+        finished = exporter.get_finished_spans()
+    finally:
+        tracing._hooks = saved
+        set_hooks(None)
+        tracing.set_session(None)
+        exporter.clear()
+    by_id = {s.context.span_id: s for s in finished}
+    [solve] = [s for s in finished if s.name == "method.solve"]
+    handles = [s for s in finished if s.name.startswith("method.handle")]
+    assert handles, sorted({s.name for s in finished})
+    handle = handles[0]
+    [llm_call] = [s for s in finished if s.name == "llm_call"]
+    for span in (handle, llm_call):
+        assert span.context.trace_id == solve.context.trace_id, span.name
+        assert span.attributes.get("session.id") == "episode-1", span.name
+    ancestors = []
+    parent = handle.parent
+    while parent is not None and parent.span_id in by_id:
+        ancestors.append(by_id[parent.span_id].name)
+        parent = by_id[parent.span_id].parent
+    assert "method.solve" in ancestors
+    assert tuple(llm_call.attributes["nooa.llm.tool_calls.names"]) == ("python_cell",)
+
+
 @pytest.mark.parametrize(
     "keys",
     [
