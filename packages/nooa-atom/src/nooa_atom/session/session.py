@@ -314,6 +314,11 @@ class Session:
         self._started = False
         self._usage_before: Usage = self.info.usage.model_copy()
         self._turn_messages: set[str] = set()
+        # For the Done fallback (_send_result_message): the open items a person
+        # sent (user_messages or steers), and whether any agent message went out
+        # since the oldest of them was consumed.
+        self._user_items: set[str] = set()
+        self._replied: bool = False
         # How the last turn ended ("waiting" shows a child as "working").
         self.last_outcome_kind: str | None = None
         self._close_task: asyncio.Task[None] | None = None
@@ -624,6 +629,7 @@ class Session:
                 )
                 self.handle.events.add(ItemConsumed(item_id=item_id))
                 self._consumed.append(item_id)
+                self._user_items.add(item_id)
                 self._pending_steers.pop(0)
                 self._emit(ItemConsumedUpdate(session_id=self.id, channel="steer", item_id=item_id))
             except (Exception, asyncio.CancelledError) as exc:
@@ -807,6 +813,8 @@ class Session:
             return
         del entries[index]
         self._consumed.append(item_id)
+        if channel == "user_messages":
+            self._user_items.add(item_id)
         self._emit(ItemConsumedUpdate(session_id=self.id, channel=channel, item_id=item_id))
 
     def _on_discarded(self, channel: str, items: list[Any]) -> None:
@@ -866,6 +874,9 @@ class Session:
             del entries[index]
         self._batch_consumed = [(channel, item_id) for channel, _, item_id in selected]
         self._consumed.extend(item_ids)
+        self._user_items.update(
+            item_id for channel, _, item_id in selected if channel == "user_messages"
+        )
         self.turn_started_at = time.monotonic()
         self.info.status = "running"
 
@@ -911,6 +922,8 @@ class Session:
         """Settle a turn whose own settling failed: its prompts get ``TurnFailedError``."""
         owed = self._waiting + self._consumed + [item_id for item_id, _, _ in self._pending_steers]
         self._waiting, self._consumed = [], []
+        self._user_items.clear()
+        self._replied = False
         if self._pending_steers:
             self._record_failure(exc, owed)
         error = TurnFailedError(f"{type(exc).__name__}: {exc}", exc)
@@ -930,9 +943,15 @@ class Session:
 
         It goes through ``agent.message()`` like any reply, before the turn
         is recorded as ended; text the turn already sent is not sent again.
+        A root session's ``Done`` without a message that answers a person's
+        input, when no agent message went out since that input, sends its
+        ``explanation`` as the reply instead, so the person never gets an
+        empty reply (children, ``Waiting`` and ``NeedInput`` never do).
         Returns whether it sent one.
         """
         text = getattr(outcome, "message", None) if isinstance(outcome, Done | Waiting) else None
+        if not text and isinstance(outcome, Done) and self._explanation_is_the_reply():
+            text = outcome.explanation
         if not text or text in self._turn_messages:
             return False
         # A Done's message is marked on the event itself: a parent gets it
@@ -945,6 +964,18 @@ class Session:
         else:
             self._agent.event_manager.add(AgentMessage(content=text, is_result_text=is_result_text))
         return True
+
+    def _explanation_is_the_reply(self) -> bool:
+        """Whether a message-less ``Done`` must reply with its explanation.
+
+        Only for a root session (a child's ``Done`` goes to its parent in the
+        ``ChildResult``) whose ``Done`` answers input a person sent
+        (``user_messages`` or a steer) and that has sent no agent message
+        since that input arrived.
+        """
+        if self.parent_id is not None or self._replied:
+            return False
+        return any(item_id in self._user_items for item_id in self._waiting + self._consumed)
 
     def _settle(self, event: TurnSettled) -> None:
         # Items stay in self._consumed / self._waiting until the end, so a
@@ -984,7 +1015,9 @@ class Session:
         if kind != "waiting":
             for item_id in waiting:
                 self._resolve(item_id, outcome)
+                self._user_items.discard(item_id)
             waiting = []
+            self._replied = False
         self._waiting = waiting
         self._consumed = [i for i in self._consumed if i not in consumed]
         if kind != "cancelled":
@@ -1380,6 +1413,7 @@ class Session:
             self._count_usage(event)
         if isinstance(event, AgentMessage) and self.info.status == "running":
             self._turn_messages.add(event.content)
+            self._replied = True
 
     def plan(self) -> list[PlanEntry]:
         """The agent's plan for a host to show, as ACP plan entries; empty if it has none.

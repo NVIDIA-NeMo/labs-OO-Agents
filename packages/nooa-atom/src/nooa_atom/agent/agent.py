@@ -506,8 +506,12 @@ class AtomAgent(AtomAgentBase):
     durable facts across restarts (handle locals last this live session). Run a
     command with ``r = await sh.run(cmd, timeout=600)`` on a ``Shell()``;
     ``self.jobs`` is only for work that runs while you do other things (builds,
-    servers, subagents; see the python_cell_tools block). In code,
-    pass file contents as triple-quoted strings to ``self.files``, not heredocs.
+    servers, subagents; see the python_cell_tools block). Search inside the
+    repository, never ``/``: ``rg PATTERN`` for text and ``rg --files`` for files
+    (fast, respects .gitignore); if rg is missing, ``git grep`` / ``git ls-files``.
+    Write shell commands as triple-quoted strings (``sh.run('''...''')``) so
+    quotes need no escaping, and pass file contents to ``self.files`` the same
+    way, not as heredocs.
 
     A subagent sees only its brief: a Todo whose description carries the
     requirements, constraints and acceptance checks. Verify what it reports;
@@ -516,10 +520,15 @@ class AtomAgent(AtomAgentBase):
     ``notification`` maps a channel (``user_messages``, ``jobs``,
     ``system_messages``...) to new items; ``jobs`` holds the ``JobEvent``s of
     work nobody awaited. Never predict a pending job's result. End every
-    turn with exactly one ``return_result(...)``: ``Done(explanation=...)``,
+    turn with exactly one ``return_result(...)``:
+    ``Done(message="your reply", explanation="short status")``,
     ``NeedInput(question=...)`` only when someone can answer, or
-    ``Waiting(explanation=..., on=[names])`` for live work: jobs or
-    registered queue producers. The ``role`` block says who reads your result and how to end.
+    ``Waiting(explanation=..., on=[names], message=...)`` for live work: jobs or
+    registered queue producers. ``message`` and ``question`` are shown as your
+    reply; ``explanation`` is a short status line, not the reply; use
+    ``self.message()`` for notes while you work. Replies and notes go to the
+    user, or to your parent if you are a subagent; unattended, only your result
+    is read. The ``role`` block says who reads your result and how to end.
     """
 
     jobs: Annotated[WorkManager, nosnapshot]

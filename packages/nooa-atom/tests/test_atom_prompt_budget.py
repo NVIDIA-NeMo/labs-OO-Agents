@@ -135,14 +135,23 @@ RESULT = (
 # to the next 100 (system: next 100).
 # Session-namespace budgets already enforced before it became unconditional.
 # Removing the selector does not relax these limits or the hard system ceiling.
+# Raised when Done(message=...) became the documented reply (2026-10-29,
+# PR503 follow-up, user-approved: prompt budget is not a constraint here): the
+# class doc shows the Done/Waiting forms with message=, says what is shown as
+# the reply and who receives replies and notes (user or parent), and the
+# interactive and child roles say the same. System before/after: handle
+# 19,377 -> 19,689, handle_batch 19,605 -> 19,884, handle_work 19,714 ->
+# 20,052, handle_orchestrate 19,908 -> 20,187. Limits: measured values plus
+# about 2%, rounded up to the next 100; BENCH_SYSTEM_LIMIT raised with them.
 LIMITS = {
-    (ATOM, "handle"): (19_500, 20_300),
-    (ATOM, "handle_batch"): (19_700, 20_500),
-    (ATOM, "handle_work"): (19_800, 20_600),
-    (ATOM, "handle_orchestrate"): (20_000, 20_800),
+    (ATOM, "handle"): (20_100, 20_900),
+    (ATOM, "handle_batch"): (20_300, 21_100),
+    (ATOM, "handle_work"): (20_500, 21_300),
+    (ATOM, "handle_orchestrate"): (20_600, 21_500),
 }
 # The bench guard's system-prompt ceiling; every agent stays under it.
-BENCH_SYSTEM_LIMIT = 20_000
+# Raised from 20,000 for the Done(message=...) guidance (2026-10-29, see above).
+BENCH_SYSTEM_LIMIT = 20_700
 
 # Separate CHAR/JSON-size guards, not token counts or a full provider-wire payload.
 # Effective restriction guidance grows default tool descriptions 2,069 -> 2,839;
@@ -292,6 +301,32 @@ async def test_prompts_reply_to_a_child_question_with_send(spec, method, tmp_pat
     rendered = "\n".join(str(m.get("content", "")) for m in messages)
     assert ".answer(" not in rendered
     assert "answer_child" not in rendered
+
+
+@pytest.mark.parametrize(("spec", "method"), list(LIMITS))
+async def test_prompts_make_done_message_the_reply(spec, method, tmp_path, sessions_dir):
+    """Done(message=...) is the documented reply; the role says who receives it."""
+    messages, _, _ = await _first_call(spec, method, tmp_path, sessions_dir)
+    rendered = " ".join("\n".join(str(m.get("content", "")) for m in messages).split())
+    assert 'Done(message="your reply", explanation="short status")' in rendered
+    assert "Waiting(explanation=..., on=[names], message=...)" in rendered
+    assert (
+        "``message`` and ``question`` are shown as your reply; ``explanation`` is a short "
+        "status line, not the reply; use ``self.message()`` for notes while you work."
+    ) in rendered
+    assert (
+        "Replies and notes go to the user, or to your parent if you are a subagent; unattended, "
+        "only your result is read."
+    ) in rendered
+    assert "the reply with self.message()" not in rendered
+    role = rendered.split("<role>", 1)[1].split("</role>", 1)[0]
+    if method == "handle_work":
+        assert "not for the user: everything you send goes to your parent" in role
+        assert "the user," not in role
+    else:
+        assert "parent" not in role
+    if method == "handle":
+        assert "You are working with a person, the user. Reply with Done(message=...)" in role
 
 
 class _InstalledSkill:

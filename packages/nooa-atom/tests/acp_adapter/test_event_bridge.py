@@ -803,6 +803,36 @@ def _messages(client: _RecordingClient) -> list[str]:
     ]
 
 
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [
+        (
+            "return_result(Done(explanation='Fixed parse(); tests pass.'))",
+            ["Fixed parse(); tests pass."],
+        ),
+        (
+            "return_result(Done(explanation='x', message='The answer is 42.'))",
+            ["The answer is 42."],
+        ),
+        ("self.message('Here it is.')\nreturn_result(Done(explanation='x'))", ["Here it is."]),
+    ],
+    ids=["explanation_only", "message", "noted"],
+)
+async def test_a_root_turn_always_ends_with_reply_text(make_session, code, expected):
+    """A Done with no reply text sends its explanation once, as agent text."""
+    from atom_test_agents import cell
+
+    session, _ = make_session(cell(code))
+    client = _RecordingClient()
+    bridge = ACPEventBridge(session, client)  # type: ignore[arg-type]
+    try:
+        await asyncio.wait_for(session.prompt("go"), 30)
+        await bridge.flush()
+        assert [text.strip() for text in _messages(client)] == expected
+    finally:
+        await bridge.close()
+
+
 @pytest.fixture
 async def bridged(tmp_path):
     """An Atom agent behind a fake session, bridged to a recording client."""
