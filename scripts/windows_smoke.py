@@ -120,6 +120,35 @@ def main() -> None:
         for name, msg in checks.items():
             print(f"clear error [{name}]: {msg}")
 
+        try:
+            from click.testing import CliRunner
+            from nooa_cli.commands.connect import command as connect_command
+        except ImportError:
+            print("connect: skipped (nooa-cli not installed)")
+        else:
+            res = CliRunner().invoke(
+                connect_command,
+                [
+                    "fake-model",
+                    "--provider",
+                    "custom",
+                    "--endpoint",
+                    "http://127.0.0.1:9/v1",
+                    "--api-style",
+                    "chat",
+                    "--api-key-env",
+                    "NOOA_SMOKE_FAKE_KEY",
+                    "--as",
+                    "fake",
+                    "--no-probe",
+                    "--no-catalogue",
+                    "--yes",
+                ],
+            )
+            assert res.exit_code == 1, (res.exit_code, res.output)
+            assert "WSL 2" in res.output and "Traceback" not in res.output, res.output
+            print("clear error [connect]:", res.output.strip().splitlines()[-1])
+
         from nooa.storage import SQLiteStorageManager
 
         with SQLiteStorageManager(":memory:"):

@@ -2434,9 +2434,9 @@ def write(entry: dict, path: Path, *, alias: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     # Lock a stable sidecar inode, not the registry inode replaced atomically.
     # Keep the lock file: unlinking it would let a third writer bypass waiters.
-    from nooa._platform import require_posix
+    from nooa._platform import CONNECT_SAVE_FEATURE, require_posix
 
-    require_posix("Writing the model registry (nooa connect uses an fcntl lock)")
+    require_posix(CONNECT_SAVE_FEATURE)
     import fcntl
 
     with path.with_name(f".{path.name}.lock").open("a") as lock:
