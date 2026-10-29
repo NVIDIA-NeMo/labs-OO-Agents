@@ -67,25 +67,44 @@ class AtomHarness(Agent):
         if turn_method not in TURN_METHODS:
             raise ValueError(f"turn_method must be one of {TURN_METHODS}, got {turn_method!r}")
         super().__init__(llm=llm)
-        self.benchmark_guard = BenchmarkPolicyGuard(benchmark_policy_path)
-        config = {
-            "benchmark_policy": benchmark_policy,
-            "experimental_done_reflection": experimental_done_reflection,
-            "benchmark_allow_session_titles": benchmark_allow_session_titles,
-        }
-        try:
-            bind = getattr(llm, "bind_episode_policy", None)
-            if not callable(bind):
-                raise ValueError("Atom benchmark requires the instrumented Gym policy client")
-            bind(self.benchmark_guard)
-            self.benchmark_guard.configure(config)
-            unknown = [key for key in extra if key.startswith(("experimental_", "benchmark_"))]
+        unknown = [key for key in extra if key.startswith(("experimental_", "benchmark_"))]
+        # The benchmark policy guard is opt-in: any benchmark key (or a receipt path)
+        # selects it, and then every key must be explicit and valid (fail closed).
+        # With none, a plain Gym adapter runs Atom on its defaults: reflection is
+        # off and this harness never requests a session title. No receipt is written.
+        guarded = any(
+            value is not None
+            for value in (
+                benchmark_policy,
+                experimental_done_reflection,
+                benchmark_allow_session_titles,
+                benchmark_policy_path,
+            )
+        )
+        self.benchmark_guard: BenchmarkPolicyGuard | None = None
+        config: dict[str, Any] = {}
+        if not guarded:
             if unknown:
                 raise ValueError(f"unknown benchmark/experiment keys: {sorted(unknown)}")
-        except BaseException:
-            self.benchmark_guard.violate("construction_configuration_invalid")
-            self.benchmark_guard.finish(None, "construction_error")
-            raise
+        else:
+            self.benchmark_guard = BenchmarkPolicyGuard(benchmark_policy_path)
+            config = {
+                "benchmark_policy": benchmark_policy,
+                "experimental_done_reflection": experimental_done_reflection,
+                "benchmark_allow_session_titles": benchmark_allow_session_titles,
+            }
+            try:
+                bind = getattr(llm, "bind_episode_policy", None)
+                if not callable(bind):
+                    raise ValueError("Atom benchmark requires the instrumented Gym policy client")
+                bind(self.benchmark_guard)
+                self.benchmark_guard.configure(config)
+                if unknown:
+                    raise ValueError(f"unknown benchmark/experiment keys: {sorted(unknown)}")
+            except BaseException:
+                self.benchmark_guard.violate("construction_configuration_invalid")
+                self.benchmark_guard.finish(None, "construction_error")
+                raise
         self._used = False
         self.turn_method = turn_method
         self.workspace = Path(workdir or Path.cwd()).resolve()
@@ -110,12 +129,17 @@ class AtomHarness(Agent):
         )
 
     @hidden
-    def benchmark_policy_receipt(self) -> dict[str, Any]:
+    def benchmark_policy_receipt(self) -> dict[str, Any] | None:
+        """The final policy receipt, or None for a plain (unguarded) harness."""
+        if self.benchmark_guard is None:
+            return None
         return self.benchmark_guard.final_receipt()
 
     @hidden
     async def solve(self, task: str) -> TaskResult:
         guard = self.benchmark_guard
+        if guard is None:
+            return await self._solve_plain(task)
         if self._used:
             guard.refuse("harness_episode_reused")
         self._used = True
@@ -210,6 +234,61 @@ class AtomHarness(Agent):
         if error is not None:
             raise error
         guard.final_receipt()  # successful Done cannot replace a missing/unwritten verdict
+        if not isinstance(outcome, Done) or not isinstance(outcome.result, TaskResult):
+            ended_with = (
+                f"{type(outcome).__name__} carrying {type(outcome.result).__name__}"
+                if isinstance(outcome, Done)
+                else type(outcome).__name__
+            )
+            raise RuntimeError(f"Atom ended without a TaskResult: {ended_with}")
+        return outcome.result
+
+    @hidden
+    async def _solve_plain(self, task: str) -> TaskResult:
+        """No benchmark policy: one Atom session, the harness hooks carried into its loops."""
+        if self._used:
+            raise RuntimeError("an AtomHarness runs one episode; construct another")
+        self._used = True
+        outer_hooks = get_hooks()
+
+        class HookedRegistry(SessionRegistry):
+            async def _build(self, options, handle, *, restore=False):
+                session = await super()._build(options, handle, restore=restore)
+                # Atom starts each session loop in a fresh Context; carry the
+                # harness hooks (tool records, invocation ids) into it.
+                session.add_loop_context_hook(
+                    lambda: set_hooks(compose_hooks(get_hooks(), outer_hooks))
+                )
+                return session
+
+        def refuse_alias(alias: str | None, workspace: Path) -> Any:
+            raise ValueError("A Gym rollout permits only its registered policy model")
+
+        registry = HookedRegistry(
+            SessionStore(sessions_root(self.workspace, self.sessions_dir)),
+            agent_factory=create_session_agent,
+            llm_factory=refuse_alias,
+        )
+        try:
+            root = await registry.create(self.options)
+            outcome = await root.prompt(task)
+            await self._settle_children(registry, root)
+        finally:
+            # Own teardown to completion even if the caller cancels again.
+            cleanup = asyncio.create_task(registry.close_all())
+            cancelled: asyncio.CancelledError | None = None
+            try:
+                while not cleanup.done():
+                    try:
+                        await asyncio.shield(cleanup)
+                    except asyncio.CancelledError as exc:
+                        cancelled = cancelled or exc
+                cleanup.result()
+            finally:
+                if self._owned_root is not None:
+                    shutil.rmtree(self._owned_root, ignore_errors=True)
+            if cancelled is not None:
+                raise cancelled
         if not isinstance(outcome, Done) or not isinstance(outcome.result, TaskResult):
             ended_with = (
                 f"{type(outcome).__name__} carrying {type(outcome.result).__name__}"
