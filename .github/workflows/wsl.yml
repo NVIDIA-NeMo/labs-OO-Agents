@@ -1,0 +1,58 @@
+name: WSL
+
+# WSL 2 is the supported way to run nooa on Windows: a quick check on every PR,
+# the full suite nightly. No third-party actions (the org's action allow-list
+# blocks setup-wsl): import the official Ubuntu WSL rootfs with `wsl --import`
+# and run scripts/wsl_ci.sh inside it.
+
+on:
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  wsl:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      MODE: ${{ github.event_name == 'pull_request' && 'quick' || 'full' }}
+      ROOTFS_URL: https://cloud-images.ubuntu.com/wsl/releases/24.04/current/ubuntu-noble-wsl-amd64-wsl.rootfs.tar.gz
+      SUMS_URL: https://cloud-images.ubuntu.com/wsl/releases/24.04/current/SHA256SUMS
+    steps:
+      # Keep LF line endings: the checkout is copied into Linux and run there.
+      - name: Disable CRLF conversion
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.eol lf
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # tags needed for uv-dynamic-versioning
+          persist-credentials: false
+      - name: WSL status
+        run: |
+          wsl --version
+          wsl --status
+      - name: Import Ubuntu 24.04 as a WSL 2 distribution
+        run: |
+          $ErrorActionPreference = "Stop"
+          $rootfs = Join-Path $env:RUNNER_TEMP "ubuntu-wsl.rootfs.tar.gz"
+          Invoke-WebRequest $env:ROOTFS_URL -OutFile $rootfs
+          $name = Split-Path $env:ROOTFS_URL -Leaf
+          $sums = (Invoke-WebRequest $env:SUMS_URL).Content
+          $line = ($sums -split "`n") | Where-Object { $_ -match [regex]::Escape($name) } | Select-Object -First 1
+          $expected = ($line -split '\s+')[0].ToLower()
+          $actual = (Get-FileHash $rootfs -Algorithm SHA256).Hash.ToLower()
+          if ($expected -ne $actual) { throw "rootfs checksum mismatch: expected $expected, got $actual" }
+          wsl --import nooa-ubuntu (Join-Path $env:RUNNER_TEMP "wsl") $rootfs --version 2
+          if ($LASTEXITCODE -ne 0) { throw "wsl --import failed ($LASTEXITCODE)" }
+          wsl -l -v
+      - name: Tests inside WSL 2 (${{ env.MODE }})
+        run: wsl --cd "$env:GITHUB_WORKSPACE" -d nooa-ubuntu -u root -- bash scripts/wsl_ci.sh $env:MODE

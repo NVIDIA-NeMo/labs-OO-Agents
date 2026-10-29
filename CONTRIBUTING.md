@@ -86,7 +86,7 @@ nooa supports Linux and macOS, and Windows through WSL 2. Native Windows is not 
 - Import POSIX-only modules inside the function that uses them, never at module level, so `import nooa` keeps working on Windows with the override.
 - Call `nooa._platform.require_posix("<feature name>")` where the feature starts, so Windows users get one clear error that points to WSL 2.
 
-CI checks this: `windows-core-smoke` imports every package, runs a scripted agent and saves a model with `nooa connect` on native Windows, `tests/test_windows_platform.py` simulates Windows on Linux, and `wsl-quick` plus the nightly `wsl-nightly.yml` run the tests inside WSL 2.
+CI checks this: `windows-core-smoke` imports every package, runs a scripted agent and saves a model with `nooa connect` on native Windows, `tests/test_windows_platform.py` simulates Windows on Linux, and `.github/workflows/wsl.yml` runs the tests inside WSL 2 (a quick set on every PR, the full suite nightly).
 
 ## Automated AI Agents
 
