@@ -216,6 +216,26 @@ in the settings files, and the servers an ACP client sends). The model uses:
 - `read(name)`: a text skill's instructions, as text.
 - `doc(name)`: the full description of one skill, with an MCP server's tools. An unconnected MCP skill returns a connection-status message instead of its tools.
 
+Atom ships a callable-and-guidance `multimodal` skill as the installed
+`nemo.multimodal` entry point; no skill-directory setup or extra media tools
+are required. It is loaded but inactive by default. Find it with
+`self.skills.search("multimodal")`, activate with
+`await self.skills.activate(["multimodal"])`, and read on demand with
+`print(self.skills.doc("multimodal"))` or `doc(self.multimodal)`.
+Users can list/activate it through `/skills list` and
+`/skills activate nemo.multimodal`. It covers existing NOOA `Image`, `Audio`,
+`Video`, `File` and `show()` APIs, screenshots/charts, bounded inspection,
+URL/privacy concerns, and model perception versus user/Pool delivery.
+In normal in-process NOOA cells, `self.multimodal.from_file(path)` loads a
+bounded local file with MIME inference and `self.multimodal.show(path_or_media)`
+captures it for the next model request without imports. Relative paths follow
+the current agent shell cwd. Both helpers reject sandbox-configured generation
+and missing capture context before file access/conversion. This conservative
+supported-context policy also rejects calls outside supported execution; it is
+not an exact sandbox-origin detector. Raw NOOA media APIs remain unchanged.
+It adds no permanent media prompt block and guarantees no model/provider/client
+modality support. Pillow/matplotlib remain optional; the skill installs neither.
+
 The prompt holds one small block, which changes only when something is
 activated:
 
