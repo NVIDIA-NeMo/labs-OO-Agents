@@ -14,6 +14,7 @@ from __future__ import annotations
 import base64
 import re as _re
 import shlex
+import shutil
 from pathlib import Path
 
 import pytest
@@ -70,6 +71,8 @@ class FakeSession:
                 ok = target in self.fs
             elif flag == "-d":
                 ok = self._is_dir(target)
+            elif flag == "-x":
+                ok = target in self.fs and self.fs[target] == "<rg>"
             else:
                 ok = False
             return ("", "", 0 if ok else 1)
@@ -83,6 +86,7 @@ class FakeSession:
                 return (base64.b64encode(self.fs[target].encode()).decode(), "", 0)
             return ("", "", 1)
 
+        parts[0] = parts[0].rsplit("/", 1)[-1]  # an absolute rg path still means rg
         if parts[0] == "rg" and "--files" in parts:
             root = parts[parts.index("--files") + 1]
             files = sorted(f for f in self.fs if f.startswith(root))
@@ -96,7 +100,14 @@ class FakeSession:
         if parts[0] in ("rg", "grep"):
             pattern: str | None = None
             path: str | None = None
+            skip_next = False
             for tok in parts[1:]:
+                if skip_next:
+                    skip_next = False
+                    continue
+                if tok == "--glob":
+                    skip_next = True  # the glob value is not the pattern
+                    continue
                 if tok.startswith("-") or tok.startswith("2>") or tok == "/dev/null":
                     continue
                 if pattern is None:
@@ -376,3 +387,58 @@ async def test_real_bash_session_anchors_remain_editable(tmp_path: Path) -> None
         assert (tmp_path / "mod.py").read_text() == "def renamed():\n    pass\n"
     finally:
         await shell.close()
+
+
+@pytest.mark.asyncio
+async def test_rg_beside_the_interpreter_is_used_when_path_lacks_it() -> None:
+    """ripgrep-bin installs rg next to python; a harness launched by absolute path has no venv bin on PATH."""
+    import sys
+    from pathlib import Path
+
+    bundled = str(Path(sys.executable).parent / "rg")
+    session = FakeSession({**FS, bundled: "<rg>"}, has_rg=False)
+    repo = RepoTools(root="/app", session=session)  # type: ignore[arg-type]
+
+    result = await repo.refs("handler", path="/app")
+
+    assert result.total_matches > 0
+    assert f"test -x {shlex.quote(bundled)}" in session.calls, session.calls
+    assert any(c.startswith(f"{shlex.quote(bundled)} ") and " -nH " in c for c in session.calls), (
+        session.calls
+    )
+    assert not any(c.startswith("grep") for c in session.calls), session.calls
+
+
+@pytest.mark.asyncio
+async def test_grep_fallback_when_rg_is_nowhere() -> None:
+    """Without rg on PATH or beside the interpreter, refs() falls back to grep."""
+    session = FakeSession(FS, has_rg=False)
+    repo = RepoTools(root="/app", session=session)  # type: ignore[arg-type]
+
+    result = await repo.refs("handler", path="/app")
+
+    assert result.total_matches > 0
+    assert any(c.startswith("grep") for c in session.calls), session.calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(shutil.which("rg") is None, reason="ripgrep not installed")
+async def test_rg_searches_dot_directories_and_honors_gitignore_without_git(tmp_path: Path) -> None:
+    """Source archives have .gitignore but no .git; tracked files may live under .github."""
+    (tmp_path / ".github" / "scripts").mkdir(parents=True)
+    (tmp_path / ".github" / "scripts" / "ci.py").write_text(
+        "from mod import handler\n\nhandler()\n"
+    )
+    (tmp_path / "build").mkdir()
+    (tmp_path / "build" / "gen.py").write_text("from mod import handler\n\nhandler()\n")
+    (tmp_path / ".gitignore").write_text("build/\n")
+    shell = ShellTools(cwd=str(tmp_path))
+    try:
+        repo = RepoTools(root=tmp_path, session=await shell._get_session())
+        assert await repo._check_rg()
+        result = await repo.refs("handler", path=str(tmp_path))
+        files = {line.split(":", 1)[0] for line in result.lines}
+    finally:
+        await shell.close()
+    assert any(f.endswith(".github/scripts/ci.py") for f in files), result.lines
+    assert not any("build/gen.py" in f for f in files), result.lines

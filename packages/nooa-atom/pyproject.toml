@@ -16,6 +16,9 @@ dependencies = [
     "pyyaml>=6.0",
     # nooa atom --http (ACP over WebSocket).
     "websockets>=14",
+    # Static ripgrep binary (upstream release, Unlicense OR MIT) installed as the `rg` script, so RepoTools'
+    # search works the same in every environment Atom runs in, including minimal task images.
+    "ripgrep-bin>=15.2.0",
 ]
 
 [project.entry-points."nooa_cli.commands"]
