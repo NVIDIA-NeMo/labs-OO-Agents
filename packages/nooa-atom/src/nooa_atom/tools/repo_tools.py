@@ -30,6 +30,10 @@ from nooa.tools.shell_tools import Match
 
 logger = logging.getLogger(__name__)
 
+# Honor .gitignore in archives without .git, and search dot-directories such as
+# .github the way the grep fallback does, while skipping .git itself.
+_RG_FLAGS = "--no-require-git --hidden --glob '!.git'"
+
 # Core ``Match(editable=...)`` and read-only anchors come with #382. Until
 # then every anchor is editable, and the docs the model reads must not tell
 # it to filter on an attribute that does not exist.
@@ -927,7 +931,7 @@ class RepoTools(Skill):
             # Use rg to find files respecting gitignore, or fall back to walking
             if self._session and await self._check_rg():
                 stdout, _, _ = await self._session.run(
-                    f"{self._rg} --files {shlex.quote(str(resolved))} 2>/dev/null | head -{max_files * 3}",
+                    f"{self._rg} {_RG_FLAGS} --files {shlex.quote(str(resolved))} 2>/dev/null | head -{max_files * 3}",
                     timeout=15,
                 )
                 for line in stdout.splitlines():
@@ -1038,7 +1042,7 @@ class RepoTools(Skill):
             pattern = f"(def|class|function|func|struct|trait|interface|type|impl|module|const)\\s+\\w*{re.escape(name)}\\w*"
             if await self._check_rg():
                 stdout, _, _ = await self._session.run(
-                    f"{self._rg} -n -i --color=never {shlex.quote(pattern)} {shlex.quote(str(resolved))} 2>/dev/null | head -{max_results * 2}",
+                    f"{self._rg} {_RG_FLAGS} -n -i --color=never {shlex.quote(pattern)} {shlex.quote(str(resolved))} 2>/dev/null | head -{max_results * 2}",
                     timeout=30,
                 )
             else:
@@ -1182,7 +1186,7 @@ class RepoTools(Skill):
         if self._session:
             if await self._check_rg():
                 # -H: a single file also gets the file:line:text prefix parsed below.
-                cmd = f"{self._rg} -nH --color=never {shlex.quote(pattern)} {shlex.quote(str(resolved))} 2>/dev/null | head -{max_results * 3}"
+                cmd = f"{self._rg} {_RG_FLAGS} -nH --color=never {shlex.quote(pattern)} {shlex.quote(str(resolved))} 2>/dev/null | head -{max_results * 3}"
             else:
                 # GNU grep is present in images where rg is not (e.g. SWE-bench).
                 cmd = f"grep -rnHE {shlex.quote(pattern)} {shlex.quote(str(resolved))} 2>/dev/null | head -{max_results * 3}"
