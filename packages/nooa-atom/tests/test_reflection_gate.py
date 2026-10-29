@@ -788,7 +788,9 @@ async def test_restart_rearms_without_monotonic_snapshot_and_load_uses_explicit_
         )
         gate = root._agent._reflection_gate
         assert (gate.min_turns, gate.min_seconds, gate.turns, gate.anchor) == (3, 20, 0, 1000)
-        assert root._agent.v.fact == "durable" and root.info.reply_count == 3
+        # Three explanation-only Done turns: each TurnEnded plus the explanation the
+        # session now sends as the reply (an AgentMessage row); the store counts both.
+        assert root._agent.v.fact == "durable" and root.info.reply_count == 6
         clock.now = 1020
         for _ in range(2):
             await root.prompt("new turn")
