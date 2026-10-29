@@ -684,7 +684,7 @@ def test_timeout_is_a_run_parameter_not_shell_configuration():
     docs = (Shell.__doc__ or "") + (inspect.getmodule(Shell).__doc__ or "")
     assert "sh = self.jobs.launch(" not in docs and "sh = manager.launch(" not in docs
     assert "sh = Shell()" in docs
-    assert 'self.jobs.launch(sh.run("pwd"), name="pwd")' in docs
+    assert 'r = await sh.run("pytest -q", timeout=600)' in docs  # direct, with the deadline
     run_docs = inspect.getdoc(Shell.run)
     assert "timeout" in run_docs and "deadline" in run_docs
 

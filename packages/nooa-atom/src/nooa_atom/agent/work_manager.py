@@ -36,6 +36,7 @@ import inspect
 import keyword
 import math
 import os
+import re
 import shutil
 import stat
 import tempfile
@@ -894,6 +895,37 @@ def _valid_name(name: Any) -> bool:
     return isinstance(name, str) and name.isidentifier() and not keyword.iskeyword(name)
 
 
+def _name_hint(name: Any) -> str:
+    """A valid job name close to ``name`` ('run_tests' for 'run-tests')."""
+    hint = re.sub(r"\W+", "_", str(name)).strip("_") or "job"
+    if hint[0].isdigit():
+        hint = "job_" + hint
+    return hint + "_" if keyword.iskeyword(hint) else hint
+
+
+def _unexpected_launch_keywords(unexpected: dict[str, Any]) -> str:
+    """The TypeError text for keywords launch() does not take (it has no deadline)."""
+    names = ", ".join(sorted(unexpected))
+    text = (
+        f"launch() got unexpected keyword argument(s): {names}; it takes only name= and progress="
+    )
+    if "timeout" in unexpected:
+        text += (
+            ". launch() takes no timeout: pass it to the work, "
+            "e.g. self.jobs.launch(sh.run(cmd, timeout=600), name=...)"
+        )
+    return text
+
+
+def _public_signature(func: Any) -> Any:
+    """Show ``func`` without its ``**unexpected`` catch-all (it only improves the error)."""
+    sig = inspect.signature(func)
+    func.__signature__ = sig.replace(
+        parameters=[p for p in sig.parameters.values() if p.kind is not p.VAR_KEYWORD]
+    )
+    return func
+
+
 def _remove_owned(owned: tuple[Path, int, int] | None) -> None:
     """Remove a directory this manager created, only if it is still that directory."""
     if owned is None:
@@ -974,11 +1006,19 @@ class WorkManager:
         self._capture_factory = capture_factory
         self._launch_info = launch_info
 
+    @_public_signature
     def launch(
-        self, work: Any, *, name: str | None = None, progress: Throttle | None = None
+        self,
+        work: Any,
+        *,
+        name: str | None = None,
+        progress: Throttle | None = None,
+        **unexpected: Any,
     ) -> Job:
         """Start ``work`` (awaitable, async iterable or resource) and return its Job."""
         try:
+            if unexpected:
+                raise TypeError(_unexpected_launch_keywords(unexpected))
             check_policy(progress)
             if self._closed:
                 raise RuntimeError("the work manager is closed")
@@ -997,7 +1037,9 @@ class WorkManager:
                 )
             if name is not None:
                 if not _valid_name(name):
-                    raise ValueError(f"name {name!r} is not a Python identifier")
+                    raise ValueError(
+                        f"name {name!r} is not a Python identifier; use e.g. {_name_hint(name)!r}"
+                    )
                 current = self._names.get(name)
                 if current is not None and current._status == "running":
                     raise ValueError(f"{name!r} is running; cancel it or pick another name")

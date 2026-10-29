@@ -48,22 +48,24 @@ def test_file_write_documents_real_string_fields():
 
 async def test_shell_quickstart_executes_as_written(tmp_path):
     description = inspect.getdoc(Shell)
-    snippet = description.split("Common managed use::", 1)[1].lstrip("\n").split("\n\n", 1)[0]
+    snippet = description.split("Persistent bash::", 1)[1].lstrip("\n").split("\n\n", 1)[0]
     code = textwrap.dedent(snippet)
     assert len(code.splitlines()) == 3
+    assert "self.jobs" not in code and "timeout=600" in code
+    (tmp_path / "test_quick.py").write_text("def test_ok():\n    pass\n")
     llm = CellLLM(
         [
             cell(
                 code
-                + "\nassert r.returncode == 0\nreturn_result(Done(explanation=r.stdout.strip()))"
+                + "\nassert r.returncode == 0, r.stdout\n"
+                + "return_result(Done(explanation=r.stdout.strip().splitlines()[-1]))"
             )
         ]
     )
     agent = AtomAgent(cwd=tmp_path, llm=llm)
     try:
-        assert await agent.handle({"user_messages": ["run the quickstart"]}) == Done(
-            explanation=str(tmp_path)
-        )
+        result = await agent.handle({"user_messages": ["run the quickstart"]})
+        assert "1 passed" in result.explanation
         assert len(llm.calls) == 1
     finally:
         await agent.aclose()
@@ -107,7 +109,8 @@ async def test_mesh_wait_guidance_uses_a_real_registered_producer(tmp_path, prod
             assert not errors
         else:
             assert "no running job has that name" in str(llm.calls[1].messages)
-        assert 'on=["mesh"]' in str(llm.calls[0].messages)
+        # The generic sentence stays; the mesh example belongs to the mesh skill.
+        assert 'on=["mesh"]' not in str(llm.calls[0].messages)
         assert "registered queue producers" in str(llm.calls[0].messages)
     finally:
         await registry.close_all()

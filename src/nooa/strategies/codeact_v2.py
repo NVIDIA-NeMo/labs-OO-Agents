@@ -98,6 +98,7 @@ class CodeActV2(CodeActStrategy):
             "# Python cell context",
             "# Already in scope inside python_cell(); state persists across cells.",
             "# Use these names directly; do not re-import or re-define them.",
+            "# Import anything else you need (os, re, json...).",
             "# Use print(doc(name)) for details about any type or function.",
             "",
             *code,

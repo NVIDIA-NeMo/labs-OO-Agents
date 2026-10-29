@@ -323,6 +323,7 @@ class AtomAgentBase(InteractiveAgent):
             "remove one: `del self.v.<name>`; clear all: `self.vars.clear()`"
         )
 
+    @hidden  # the host's [session-title] request names the call; benchmarks forbid it
     async def rename_session(self, title: str) -> str:
         """Set this session's title and return the normalized title.
 

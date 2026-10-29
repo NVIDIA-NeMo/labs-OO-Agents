@@ -6,6 +6,7 @@ import ast
 import asyncio
 import contextlib
 import gc
+import inspect
 from pathlib import Path
 
 import pytest
@@ -399,6 +400,22 @@ async def test_name_validation_and_bad_work(setup):
         manager.launch(coro)
     with pytest.raises(TypeError):
         manager.launch(42)
+
+
+async def test_launch_errors_name_the_fix(setup):
+    manager, _ = setup
+    work = asyncio.sleep(0)
+    with pytest.raises(TypeError, match=r"takes no timeout.*sh\.run\(cmd, timeout=600\)"):
+        manager.launch(work, name="tests", timeout=600)  # type: ignore[call-arg]
+    assert work.cr_frame is None  # closed, no "never awaited" warning
+    with pytest.raises(TypeError, match="unexpected keyword argument.*: cwd"):
+        manager.launch(asyncio.sleep(0), cwd="/")  # type: ignore[call-arg]
+    with pytest.raises(ValueError, match="'run_tests'"):
+        manager.launch(asyncio.sleep(0), name="run-tests")
+    with pytest.raises(ValueError, match="'job_2nd'"):
+        manager.launch(asyncio.sleep(0), name="2nd")
+    # The catch-all only improves the error: the documented signature has no **kwargs.
+    assert "unexpected" not in str(inspect.signature(WorkManager.launch))
 
 
 async def test_scratch_retention_and_owned_cleanup(tmp_path):

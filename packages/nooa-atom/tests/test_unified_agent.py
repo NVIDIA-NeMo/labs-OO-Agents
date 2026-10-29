@@ -109,7 +109,7 @@ async def test_one_shot_subagent_returns_its_task_result_and_notes_are_job_items
         assert tool.description.count("Blocked imports:") == 1
         assert tool.description.count("Blocked calls by module") == 1
         assert "`subprocess`" in tool.description and "literal dunder names" in tool.description
-        assert "Run commands and child agents as `self.jobs` work" in tool.description
+        assert "Run commands with `await sh.run(cmd)` on a `Shell()`" in tool.description
         assert "self.shell" not in tool.description and "self.delegate" not in tool.description
         assert "Blocked imports:" not in rendered  # guidance is tool-local, not another block
 
@@ -466,7 +466,7 @@ async def test_first_call_offers_one_work_vocabulary(
     await asyncio.wait_for(root.prompt("hello"), TIMEOUT)
     call = models.llms[None].calls[0]
     tools = "\n".join(str(getattr(tool, "description", tool)) for tool in call.tools or ())
-    assert "Run commands and child agents as `self.jobs` work" in tools
+    assert "Run commands with `await sh.run(cmd)` on a `Shell()`" in tools
     messages = "\n".join(str(m.get("content", "")) for m in call.messages)
     rendered = messages + "\n" + tools  # what the model reads: the messages and the tool
     prefix = str(call.messages[0].get("content", ""))
@@ -490,7 +490,7 @@ async def test_first_call_offers_one_work_vocabulary(
         'notification["jobs"]',
         "<status ",
         ROLE_INSTRUCTIONS[MODES[method]],
-        "# Work: everything that runs is a job on self.jobs.",
+        "# Work: self.jobs is for background work.",
         "documented in the python_cell_tools block",
         "class SkillManager",
         "def status(self) -> str:",
@@ -502,7 +502,8 @@ async def test_first_call_offers_one_work_vocabulary(
         "<python_cell_lifetime>",
         "Other generated methods are call-local.",
         "registered queue producers",
-        'on=["mesh"]',
+        'r = await sh.run("cd src && make", timeout=600)',
+        "Import anything else you need",
     ):
         assert wanted in rendered, wanted
     for legacy in (
@@ -540,6 +541,9 @@ async def test_first_call_offers_one_work_vocabulary(
         "async def send(self, command",  # adapters' send(): the manager's protocol
         "async def send(self, task",
         "async def message(self, text",  # Subagent's: the model uses Job.message
+        "await self.jobs.launch(sh.run",  # commands are awaited directly
+        "rename_session",  # the host's title request names it
+        'on=["mesh"]',
     ):
         assert legacy not in rendered, legacy
     for other, text in ROLE_INSTRUCTIONS.items():
@@ -551,7 +555,7 @@ async def test_first_call_offers_one_work_vocabulary(
     start = messages.index("<system_prompt")
     system_prompt = messages[start : messages.index("</system_prompt>", start)]
     assert "Shell().run(" not in system_prompt and "python_cell_tools block" in system_prompt
-    assert messages.count("# Work: everything that runs is a job on self.jobs.") == 1
+    assert messages.count("# Work: self.jobs is for background work.") == 1
     question = rendered[rendered.index("class Question") :]
     question = question[: question.index("\n@dataclass") if "\n@dataclass" in question else 400]
     assert "id:" not in question

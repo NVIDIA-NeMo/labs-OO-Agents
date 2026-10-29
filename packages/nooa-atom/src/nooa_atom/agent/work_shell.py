@@ -335,11 +335,11 @@ shell_owner: contextvars.ContextVar[ShellOwner | None] = contextvars.ContextVar(
 
 
 class Shell:
-    """Persistent bash. Common managed use::
+    """Persistent bash::
 
         sh = Shell()
-        r = await self.jobs.launch(sh.run("pwd"), name="pwd")
-        print(r.stdout)
+        r = await sh.run("pytest -q", timeout=600)
+        print(r.returncode, r.stdout)
 
     Reuse ``sh``: FIFO commands preserve cwd, variables, options and traps.
     A new Shell starts fresh in the workspace; bash starts on first use.

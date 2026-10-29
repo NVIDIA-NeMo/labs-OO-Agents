@@ -61,6 +61,7 @@ with hidden:
     from nooa_atom.agent.done_reflection import DoneReflectionPlan, reflect_accepted_done
     from nooa_atom.agent.reflection_gate import _ReflectionGate
     from nooa_atom.agent.roles import TurnPolicy
+    from nooa_atom.agent.work_manager import _public_signature
 
 __all__ = ["AtomAgent", "Files"]
 
@@ -98,16 +99,24 @@ class _AgentJobs(WorkManager):
         super().__init__(agent._jobs_in, **kwargs)
         self._agent = agent
 
+    @_public_signature
     def launch(
-        self, work: Any, *, name: str | None = None, progress: Throttle | None = None
+        self,
+        work: Any,
+        *,
+        name: str | None = None,
+        progress: Throttle | None = None,
+        **unexpected: Any,
     ) -> Job:
-        if name is not None and (
-            name in PERSON_NAMES or name in self._agent.queue_manager.channels()
+        if (
+            not unexpected
+            and name is not None
+            and (name in PERSON_NAMES or name in self._agent.queue_manager.channels())
         ):
             if inspect.iscoroutine(work):
                 work.close()
             raise ValueError(f"{name!r} names a channel or the person; pick another job name")
-        return super().launch(work, name=name, progress=progress)
+        return super().launch(work, name=name, progress=progress, **unexpected)
 
 
 # CodeActV2's python_cell description names the legacy delegation method.
@@ -115,8 +124,8 @@ _LEGACY_TOOL_HINT: Annotated[str, hidden] = (
     "If `self` exposes delegation, inspect its documentation with `print(doc(self.delegate))`."
 )
 _TOOL_HINT: Annotated[str, hidden] = (
-    "Run commands and child agents as `self.jobs` work (`Shell`, `Subagent`), "
-    "documented in the python_cell_tools block."
+    "Run commands with `await sh.run(cmd)` on a `Shell()`; background work and child "
+    "agents go on `self.jobs`, documented in the python_cell_tools block."
 )
 
 
@@ -453,10 +462,10 @@ def _tools_doc(text: str) -> str:
 
 # The one place the work workflows are shown (the tools block, before the work types).
 _WORK_EXAMPLES: Annotated[str, hidden] = """\
-# Work: everything that runs is a job on self.jobs.
-sh = Shell()  # one bash per object, starts on first use
-r = await self.jobs.launch(sh.run("cd src && export X=1"), name="setup")
-job = self.jobs.launch(sh.run("make"), name="build", progress=Throttle(seconds=5))
+# Work: self.jobs is for background work.
+sh = Shell()  # make one; bash starts on first use
+r = await sh.run("cd src && make", timeout=600)  # wait for it
+job = self.jobs.launch(sh.run("make"), name="build", progress=Throttle(seconds=5))  # background
 job.set_progress(None)  # quiet again
 self.jobs.launch(sh.run("pytest -q"), name="tests")
 job = self.jobs.launch(Shell(), name="sh")
@@ -494,9 +503,11 @@ class AtomAgent(AtomAgentBase):
     references, ``self.todo`` is your plan for multi-step work (activate the
     item you work on, append findings and checks to its ``comments``, complete
     it), and ``self.v`` keeps
-    durable facts across restarts (handle locals last this live session). Everything else that
-    runs is a job on ``self.jobs``: commands (``Shell``) and child agents
-    (``Subagent``); the python_cell_tools block shows each way to run them.
+    durable facts across restarts (handle locals last this live session). Run a
+    command with ``r = await sh.run(cmd, timeout=600)`` on a ``Shell()``;
+    ``self.jobs`` is only for work that runs while you do other things (builds,
+    servers, subagents; see the python_cell_tools block). In code,
+    pass file contents as triple-quoted strings to ``self.files``, not heredocs.
 
     A subagent sees only its brief: a Todo whose description carries the
     requirements, constraints and acceptance checks. Verify what it reports;
@@ -507,9 +518,8 @@ class AtomAgent(AtomAgentBase):
     work nobody awaited. Never predict a pending job's result. End every
     turn with exactly one ``return_result(...)``: ``Done(explanation=...)``,
     ``NeedInput(question=...)`` only when someone can answer, or
-    ``Waiting(explanation=..., on=[names])`` for live work. Names may be jobs
-    or registered queue producers: ``on=["mesh"]`` after its inbox pump connects.
-    The ``role`` block says who reads your result and how to end.
+    ``Waiting(explanation=..., on=[names])`` for live work: jobs or
+    registered queue producers. The ``role`` block says who reads your result and how to end.
     """
 
     jobs: Annotated[WorkManager, nosnapshot]
