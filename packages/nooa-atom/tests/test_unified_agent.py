@@ -495,6 +495,8 @@ async def test_first_call_offers_one_work_vocabulary(
         "<python_cell_state>\nRetained Python names: none; omitted: 0\n</python_cell_state>",
         "<python_cell_lifetime>",
         "Other generated methods are call-local.",
+        "registered queue producers",
+        'on=["mesh"]',
     ):
         assert wanted in rendered, wanted
     for legacy in (
@@ -518,7 +520,8 @@ async def test_first_call_offers_one_work_vocabulary(
         "nobody reads ``self.message()``",
         "ActivityShellTools",
         "DepthLimitError",
-        "producers",
+        "def producers(",
+        "class Producer",
         "<queues ",
         "def running(",
         "def records(",

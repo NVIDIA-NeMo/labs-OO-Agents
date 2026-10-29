@@ -393,7 +393,7 @@ class AgentVars:
 
     Use for variables that need to survive across turns and across
     sessions but aren't tied to a specific todo. (For per-todo state,
-    use ``self.todo.<id>.v`` — same shape, narrower scope.)
+    use ``self.todo.get(id).v`` — same shape, narrower scope.)
 
     Values are snapshot-backed: assigning something that can't be
     snapshot-serialized (a live client, socket, callable, ...) logs a

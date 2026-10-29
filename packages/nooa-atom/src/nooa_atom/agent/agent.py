@@ -394,8 +394,8 @@ def _tools_doc(text: str) -> str:
 _WORK_EXAMPLES: Annotated[str, hidden] = """\
 # Work: everything that runs is a job on self.jobs.
 sh = Shell()  # one bash per object, starts on first use
-r = await sh.run("cd src && export X=1")  # CommandResult; cwd/variables persist
-r = await sh.run("make")
+r = await self.jobs.launch(sh.run("cd src && export X=1"), name="setup")
+r = await self.jobs.launch(sh.run("make"), name="build")
 self.jobs.launch(sh.run("pytest -q"), name="tests")
 job = self.jobs.launch(Shell(), name="sh")
 r = await job.send("make")
@@ -445,8 +445,9 @@ class AtomAgent(AtomAgentBase):
     work nobody awaited. Never predict a pending job's result. End every
     turn with exactly one ``return_result(...)``: ``Done(explanation=...)``,
     ``NeedInput(question=...)`` only when someone can answer, or
-    ``Waiting(explanation=..., on=[job names])`` while launched work runs.
-    The ``role`` block, when present, says who reads your result and how to end.
+    ``Waiting(explanation=..., on=[names])`` for live work. Names may be jobs
+    or registered queue producers: ``on=["mesh"]`` after its inbox pump connects.
+    The ``role`` block says who reads your result and how to end.
     """
 
     jobs: Annotated[WorkManager, nosnapshot]

@@ -309,31 +309,31 @@ shell_owner: contextvars.ContextVar[ShellOwner | None] = contextvars.ContextVar(
 
 
 class Shell:
-    """Persistent bash: ``sh = Shell()``; ``await sh.run("cd src")``; ``await sh.run("make")``.
+    """Persistent bash. Common managed use::
 
-    Bash starts on first use; FIFO commands keep cwd, variables, options and
-    traps. Another Shell is fresh.
-    ``cwd`` defaults to the workspace. ``run``'s finite positive timeout is
-    seconds from command start; expiry returns code 124 and ``timed_out=True``.
-    ``job = self.jobs.launch(sh, name="sh")``: ``job.send("make")`` returns a request Job.
-    Or launch ``sh.run(cmd, timeout=60)`` for a non-default deadline.
+        sh = Shell()
+        r = await self.jobs.launch(sh.run("pwd"), name="pwd")
+        print(r.stdout)
 
-    Managed commands preview stdout/stderr as items with stream/text/sequence,
-    batched at 1s OR 8192 UTF-8 bytes per stream. Iterate the Job or use Waiting
-    for notifications. ``await job`` is final-only: unread previews are removed,
-    ordinary items stay. No terminal preview flush: tails stay in CommandResult;
-    earlier previews duplicate its prefix. ``job.progress_dropped`` counts omissions.
+    Reuse ``sh``: FIFO commands preserve cwd, variables, options and traps.
+    A new Shell starts fresh in the workspace; bash starts on first use.
 
-    Timeout/cancel skips the rest of the command, usually retaining state.
-    Unstoppable builtins or a user's USR1 trap require restarting bash;
-    ``set -e`` can end it. The result reports lost state. ``exit N`` ends bash;
-    the next command starts fresh. Options (``set -euxo pipefail``) persist otherwise.
+    Timeout returns 124 with ``timed_out=True``. Timeout/cancel skips remaining
+    commands, usually retaining state. Unstoppable builtins or a USR1 trap may
+    force a restart. ``set -e`` or ``exit N`` can end bash; the next command starts
+    fresh. Other options persist; results report lost state.
+
+    Managed output previews carry stream/text/sequence at 1s OR 8192 UTF-8 bytes
+    per stream. Iterate the Job or use Waiting. ``await job`` is final-only:
+    unread previews are removed, ordinary items stay. No terminal preview flush:
+    tails stay in CommandResult; earlier previews duplicate its prefix.
+    ``job.progress_dropped`` counts omissions.
 
     Close with ``await sh.aclose()``, ``async with Shell()``, dropping it or
-    cancelling its resource Job. Session shutdown closes its Shells too.
-    Closing ends bash/background processes; in ``preserve_background_services()``
-    only bash ends, and the harness owns process cleanup. Keep ``sh`` while a
-    background server must run. A closed Shell restarts on its next use.
+    cancelling its resource Job; session shutdown also closes it. Closing ends
+    bash/background processes, except under ``preserve_background_services()``:
+    only bash ends and the harness owns cleanup. Keep ``sh`` while a background
+    server must run. A closed Shell restarts on its next use.
     """
 
     __nosnapshot__ = True  # a live bash is not data

@@ -609,8 +609,10 @@ def test_timeout_is_a_run_parameter_not_shell_configuration():
     # The docs keep a raw Shell (sh) apart from its Job: a Job has no run().
     docs = (Shell.__doc__ or "") + (inspect.getmodule(Shell).__doc__ or "")
     assert "sh = self.jobs.launch(" not in docs and "sh = manager.launch(" not in docs
-    assert 'job = self.jobs.launch(sh, name="sh")' in docs
-    assert "sh.run(cmd, timeout=60)" in docs
+    assert "sh = Shell()" in docs
+    assert 'self.jobs.launch(sh.run("pwd"), name="pwd")' in docs
+    run_docs = inspect.getdoc(Shell.run)
+    assert "timeout" in run_docs and "deadline" in run_docs
 
 
 async def test_the_documented_launched_shell_and_timed_run_variant(manager, tmp_path):
