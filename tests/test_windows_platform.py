@@ -129,11 +129,9 @@ for pkg in (nooa, nooa_cli):
         except ModuleNotFoundError as exc:
             if exc.name in POSIX:
                 bad.append(f"{info.name}: {exc!r}")
-        except AttributeError as exc:
-            if "module 'os'" in str(exc) or "module 'signal'" in str(exc):
-                bad.append(f"{info.name}: {exc!r}")
-        except Exception:
-            pass  # optional extras that are not installed, and so on
+            # otherwise: an optional extra that is not installed
+        except Exception as exc:  # anything else is a real failure
+            bad.append(f"{info.name}: {exc!r}")
 print("\n".join(bad) or "ALL IMPORTS OK")
 sys.exit(1 if bad else 0)
 """
