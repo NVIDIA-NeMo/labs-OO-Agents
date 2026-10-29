@@ -41,30 +41,34 @@ jobs:
       - name: WSL status
         run: |
           $ErrorActionPreference = "Continue"
-          $info = ((& wsl.exe --version 2>&1) + (& wsl.exe --status 2>&1) | Out-String) -replace "`0", ""
+          $info = ((& wsl.exe --status 2>&1) + (& wsl.exe --list --verbose 2>&1) | Out-String) -replace "`0", ""
           Write-Output $info
           Write-Output "::notice title=WSL on this runner::$($info.Trim() -replace "`r?`n", '%0A')"
           exit 0
       - name: Import Ubuntu 24.04 as a WSL 2 distribution
         run: |
           $ErrorActionPreference = "Stop"
-          $rootfs = Join-Path $env:RUNNER_TEMP "ubuntu-wsl.rootfs.tar.gz"
-          Invoke-WebRequest $env:ROOTFS_URL -OutFile $rootfs
-          $name = Split-Path $env:ROOTFS_URL -Leaf
-          $sums = (Invoke-WebRequest $env:SUMS_URL).Content
-          $line = ($sums -split "`n") | Where-Object { $_ -match [regex]::Escape($name) } | Select-Object -First 1
-          $expected = ($line -split '\s+')[0].ToLower()
-          $actual = (Get-FileHash $rootfs -Algorithm SHA256).Hash.ToLower()
-          if ($expected -ne $actual) {
-            Write-Output "::error title=rootfs checksum mismatch::expected '$expected', got '$actual' (line: '$line')"
+          function Fail([string]$title, [string]$text) {
+            Write-Output $text
+            Write-Output "::error title=$title::$(($text -replace "`0", '').Trim() -replace "`r?`n", '%0A')"
             exit 1
           }
-          $out = (wsl --import nooa-ubuntu (Join-Path $env:RUNNER_TEMP "wsl") $rootfs --version 2 2>&1 | Out-String) -replace "`0", ""
-          Write-Output $out
-          if ($LASTEXITCODE -ne 0) {
-            Write-Output "::error title=wsl --import failed ($LASTEXITCODE)::$($out.Trim() -replace "`r?`n", '%0A')"
-            exit 1
+          try {
+            $rootfs = Join-Path $env:RUNNER_TEMP "ubuntu-wsl.rootfs.tar.gz"
+            $sumsFile = Join-Path $env:RUNNER_TEMP "SHA256SUMS"
+            Invoke-WebRequest $env:ROOTFS_URL -OutFile $rootfs
+            Invoke-WebRequest $env:SUMS_URL -OutFile $sumsFile
+            $name = Split-Path $env:ROOTFS_URL -Leaf
+            $line = Get-Content $sumsFile | Where-Object { $_ -match [regex]::Escape($name) } | Select-Object -First 1
+            if (-not $line) { Fail "rootfs checksum missing" "no line for $name in SHA256SUMS" }
+            $expected = ($line -split '\s+')[0].ToLower()
+            $actual = (Get-FileHash $rootfs -Algorithm SHA256).Hash.ToLower()
+            if ($expected -ne $actual) { Fail "rootfs checksum mismatch" "expected $expected, got $actual" }
+          } catch {
+            Fail "rootfs download failed" ($_ | Out-String)
           }
-          wsl -l -v
+          $out = (wsl --import nooa-ubuntu (Join-Path $env:RUNNER_TEMP "wsl") $rootfs --version 2 2>&1 | Out-String)
+          if ($LASTEXITCODE -ne 0) { Fail "wsl --import failed ($LASTEXITCODE)" $out }
+          wsl --list --verbose
       - name: Tests inside WSL 2 (${{ env.MODE }})
         run: wsl --cd "$env:GITHUB_WORKSPACE" -d nooa-ubuntu -u root -- bash scripts/wsl_ci.sh $env:MODE
