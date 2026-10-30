@@ -405,6 +405,20 @@ class SkillRegistry(Skill):
                 elif _is_python_skill_file(entry):
                     self._register_python_skill(entry)
 
+    def discover_text_skills_dirs(self, dirs: "list[Path]") -> None:
+        """Scan skill roots for TextSkills only, skipping executable code."""
+        from pathlib import Path
+
+        skill_roots = [Path(path) for path in dirs if Path(path).is_dir()]
+        for skills_dir in skill_roots:
+            for entry in skills_dir.iterdir():
+                if entry.is_dir():
+                    skill_md = entry / "SKILL.md"
+                    if not skill_md.exists():
+                        skill_md = entry / "skill.md"
+                    if skill_md.exists():
+                        self._register_text_skill(entry)
+
     def _register_text_skill(self, entry: "Path") -> None:
         """Register a TextSkill from a SKILL.md directory."""
         from nooa.skill import TextSkill
