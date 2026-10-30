@@ -152,6 +152,10 @@ _current: contextvars.ContextVar[Job | None] = contextvars.ContextVar(
 )
 
 
+wait_cancelled_hook: Callable[[Job], None] | None = None
+"""Told of a running job whose await outside any job was cancelled (the host sets it)."""
+
+
 def emit(item: Any) -> None:
     """Report a progress item from the running job (a no-op outside a job)."""
     job = _current.get()
@@ -868,6 +872,11 @@ class Job:
                     # The outcome was handed to this await, which will not see it.
                     self._handoff.discard(future)
                     self._requeue()
+                hook = wait_cancelled_hook
+                if hook is not None and _current.get() is None and self._status == "running":
+                    # Only this await ends: the job runs on and delivers its event.
+                    with contextlib.suppress(Exception):
+                        hook(self)
                 raise
             self._handoff.discard(future)
             self._consumed = True
