@@ -1446,3 +1446,30 @@ async def test_answered_and_closed_children_leave_no_registry_entries(
             await loaded._agent.session.send_child(ref.id, "more", channel="user_messages")
     finally:
         await registry.close_all()
+
+
+async def test_wait_after_answering_a_queued_question_returns_the_next_outcome(
+    atom_registry, atom_options, atom_models
+):
+    # The parent is busy in a blocked turn, so the child's question stays
+    # unread on delegates. Answering it ends it: wait() returns the answer's
+    # result, not the question already answered (flaky before, when the
+    # parent's loop had not taken the question yet).
+    root = await atom_registry.create(atom_options)
+    atom_models.scripts["asker"] = [cell(ASK), work_done("used main")]
+    started, block = fresh_events()
+    atom_models.llms[None]._response_queue.append(cell(BLOCKING))
+    await root.submit("block")
+    await asyncio.wait_for(started.wait(), TIMEOUT)
+    port = root._agent.session
+    delegates = root._agent.queue_manager.get_channel("delegates")
+    try:
+        ref = await port.delegate("asker", "do it", kept=True, name="asker")
+        await until(lambda: delegates.qsize() == 1, TIMEOUT)
+        assert port.pending_question(ref.id) is not None
+        await port.send_child(ref.id, "main", channel="user_messages")
+        result = await asyncio.wait_for(port.wait_child(ref.id), TIMEOUT)
+        assert result.done.explanation == "used main"
+        assert delegates.qsize() == 0  # the answered question was withdrawn
+    finally:
+        block.set()
