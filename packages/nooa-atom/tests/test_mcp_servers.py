@@ -251,6 +251,33 @@ def test_share_from_skips_a_server_this_view_defines_differently(tmp_path, monke
     assert "probe" not in other.connected()
 
 
+def test_share_from_skips_a_server_this_view_defines_invalidly(tmp_path, monkeypatch):
+    monkeypatch.setenv("NEMO_OO_USER_DIR", str(tmp_path / "user"))
+    parent = _servers_at(tmp_path, tmp_path / ".nooa", {"probe": {"command": "probe-a"}})
+    parent._connected["probe"] = object()
+    child = _servers_at(tmp_path, tmp_path / ".nooa", {"probe": {"command": 5}})
+    assert child.share_from(parent) == [
+        "MCP server 'probe' was not shared: it is defined here with an invalid configuration"
+    ]
+    assert "probe" not in child.connected()
+
+
+def test_share_from_compares_with_the_definition_the_parent_connected(tmp_path, monkeypatch):
+    monkeypatch.setenv("NEMO_OO_USER_DIR", str(tmp_path / "user"))
+    parent = _servers_at(tmp_path, tmp_path / ".nooa", {"probe": {"command": "probe-a"}})
+    tool = object()
+    parent._attach("probe", tool)
+    parent._connected_requests["probe"] = parent.approval_request("probe")
+    parent._servers["probe"] = {"command": "probe-b"}  # the config changed after connecting
+    newer = _servers_at(tmp_path, tmp_path / ".nooa", {"probe": {"command": "probe-b"}})
+    assert newer.share_from(parent) == [
+        "MCP server 'probe' was not shared: it is defined differently here"
+    ]
+    same = _servers_at(tmp_path, tmp_path / ".nooa", {"probe": {"command": "probe-a"}})
+    assert same.share_from(parent) == [] and same.tool("probe") is tool
+    assert same._connected_requests["probe"] == parent._connected_requests["probe"]
+
+
 def test_share_from_shares_nothing_across_approval_scopes(tmp_path, monkeypatch):
     monkeypatch.setenv("NEMO_OO_USER_DIR", str(tmp_path / "user"))
     parent = _servers_at(tmp_path, tmp_path / "a" / ".nooa", {"probe": {"command": "probe-a"}})

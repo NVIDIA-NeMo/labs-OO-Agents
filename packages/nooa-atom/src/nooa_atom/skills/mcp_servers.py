@@ -178,6 +178,8 @@ class MCPServers:
         self._token_path = token_path
         self._discovered_cache: tuple[tuple[Any, ...], list[str]] | None = None
         self._connected: dict[str, Any] = {}
+        # The approved definition each connected tool was opened with.
+        self._connected_requests: dict[str, MCPApprovalRequest] = {}
         self._activated: set[str] = set()
         self._connecting: set[str] = set()
         self._signins: dict[str, _PendingSignIn] = {}
@@ -627,6 +629,7 @@ class MCPServers:
                 "Review and approve the current configuration before connecting again."
             )
         self._attach(name, tool)
+        self._connected_requests[name] = request
         if activate:
             self._activated.add(name)
 
@@ -756,6 +759,8 @@ class MCPServers:
             except ValueError as exc:
                 warnings.append(f"MCP server {name!r} was not shared: {exc}")
                 continue
+            if name in parent._connected_requests:
+                self._connected_requests[name] = parent._connected_requests[name]
             if name not in self._servers and name in parent._servers:
                 self._servers[name] = copy.deepcopy(parent._servers[name])
                 self._registered_server_names.add(name)
@@ -779,15 +784,23 @@ class MCPServers:
         return matched
 
     def _definition_mismatch(self, parent: MCPServers, name: str) -> str | None:
-        """Why this view's definition of ``name`` differs from ``parent``'s, else None."""
-        try:
-            own = self.approval_request(name)
-        except (KeyError, ValueError):
+        """Why this view's definition of ``name`` differs from ``parent``'s, else None.
+
+        ``parent``'s side is the definition its tool was connected with (its
+        current configuration may have changed since), when that is known.
+        """
+        if name not in self.discovered():
             return None  # not defined here: the parent's definition is copied
         try:
-            theirs = parent.approval_request(name)
-        except (KeyError, ValueError):
-            return "it is defined here but not in the parent"
+            own = self.approval_request(name)
+        except ValueError:
+            return "it is defined here with an invalid configuration"
+        theirs = parent._connected_requests.get(name)
+        if theirs is None:
+            try:
+                theirs = parent.approval_request(name)
+            except (KeyError, ValueError):
+                return "it is defined here but not in the parent"
         if own != theirs:  # fingerprint, transport, target and bindings
             return "it is defined differently here"
         return None
@@ -886,6 +899,7 @@ class MCPServers:
     def _detach(self, name: str) -> None:
         self._activated.discard(name)
         self._connected.pop(name, None)
+        self._connected_requests.pop(name, None)
         attr = attr_name(name)
         if self.agent is not None and attr in vars(self.agent):
             delattr(self.agent, attr)
