@@ -4,9 +4,10 @@
 
 Setup: run ``uv run nooa connect``, save a vision-capable route as ``vision``,
 and choose image in its media_inputs (YAML: ``media_inputs: [image]``).
+Connect also configures the reply token limit and known or supplied context size.
 Enable image inputs for the saved model before running this example.
 
-Usage (makes real inference calls; may incur provider charges):
+Usage:
   uv run python examples/quickstart/13_multimodal.py
   uv run python examples/quickstart/13_multimodal.py --model vision --config FILE
 
