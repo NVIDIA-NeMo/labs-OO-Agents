@@ -2528,7 +2528,14 @@ def _write_entry(entry: dict, path: Path, *, alias: str) -> None:
     temporary_path = None
     try:
         with tempfile.NamedTemporaryFile(
-            mode="w", encoding="utf-8", dir=path.parent, prefix=path.name + ".", delete=False
+            mode="w",
+            encoding="utf-8",
+            # Line endings are converted above; Windows text mode would turn
+            # each \r\n into \r\r\n.
+            newline="",
+            dir=path.parent,
+            prefix=path.name + ".",
+            delete=False,
         ) as temporary:
             temporary_path = Path(temporary.name)
             temporary.write(text.replace("\n", newline))
