@@ -130,6 +130,39 @@ async def test_startup_warnings_are_sent_as_an_agent_message(make_adapter, works
     assert "'remote'" in text
 
 
+async def test_a_child_session_shares_the_mcp_servers_the_client_sent(
+    make_adapter, workspace, monkeypatch
+):
+    from acp.schema import McpServerStdio
+    from nooa_atom.acp import server as acp_server
+
+    made = []
+
+    class _Remote:
+        async def ping(self) -> str:
+            return "pong"
+
+    async def create(name, **kwargs):
+        made.append(name)
+        return _Remote()
+
+    monkeypatch.setattr(acp_server.MCPManager, "create_stdio_server", create)
+    adapter = await make_adapter(AtomModels(), agent_spec=ATOM_SPEC)
+    response = await adapter.new_session(
+        str(workspace),
+        mcp_servers=[McpServerStdio(name="hcb_resources", command="hcb", args=[], env=[])],
+    )
+    root = adapter.session(response.session_id)
+    tool = root._agent.hcb_resources
+    ref = await root._agent.session.delegate("look", "use the server", name="worker")
+    child = adapter.session(ref.id)
+    assert child._agent.hcb_resources is tool
+    assert "hcb_resources (mcp: self.hcb_resources)" in child._agent.skills.status()
+    await child.close()
+    assert root._agent.hcb_resources is tool
+    assert made == ["hcb_resources"]  # one connection, the root's
+
+
 # ---- load --------------------------------------------------------------------
 
 

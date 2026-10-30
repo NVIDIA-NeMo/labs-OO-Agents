@@ -562,6 +562,19 @@ class AtomAgentBase(InteractiveAgent):
         return await connect_session_mcp(self, AtomOptions.load(self.cwd))
 
     @hidden
+    def inherit_tools(self, parent: Any) -> list[str]:
+        """Share ``parent``'s connected MCP servers with this child agent; return warnings.
+
+        Called through ``Session.inherit_tools()`` by the registry before a
+        child's first turn. The tool objects are the parent's: no new
+        connection, and closing this child leaves them to the parent.
+        """
+        parent_skills = getattr(parent, "skills", None)
+        if not isinstance(parent_skills, SkillManager):
+            return []
+        return self.skills.share_from(parent_skills)
+
+    @hidden
     @no_trace
     def plan(self) -> list[PlanEntry]:
         """The todo list as ACP plan entries, read through ``Session.plan()``.
