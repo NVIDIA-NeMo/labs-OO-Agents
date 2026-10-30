@@ -2900,7 +2900,8 @@ class TestCapabilityAwareFixHints:
     @pytest.mark.parametrize("module", ["socket", "urllib.request"])
     def test_network_import_points_to_shell_run_when_available(self, module):
         message = self._error(f"import {module}", self._WithShell())
-        assert "Fix: for network access, run the command with `await self.shell.run" in message
+        assert "Fix: use `httpx.AsyncClient`" in message
+        assert "or curl: run the command with `await self.shell.run" in message
 
     @pytest.mark.parametrize("agent", [None, _WithoutShell()])
     @pytest.mark.parametrize("code", ["import subprocess", "import socket"])
@@ -2908,7 +2909,10 @@ class TestCapabilityAwareFixHints:
         message = self._error(code, agent)
         assert "is blocked" in message
         assert "self.shell" not in message
-        assert "Fix:" not in message
+        if code == "import socket":  # an async client needs no shell
+            assert "Fix: use `httpx.AsyncClient`" in message and "curl" not in message
+        else:
+            assert "Fix:" not in message
 
     def test_sync_shell_run_is_not_advertised_as_awaitable(self):
         class SyncShell:
@@ -2948,7 +2952,10 @@ class TestCapabilityAwareFixHints:
             spec(agent, "shell", hidden=True)
         message = self._error(code, agent)
         assert "self.shell" not in message and "self.jobs" not in message
-        assert "Fix:" not in message
+        if code.startswith(("import socket", "import urllib")):  # an async client needs no shell
+            assert "Fix: use `httpx.AsyncClient`" in message and "curl" not in message
+        else:
+            assert "Fix:" not in message
 
     def test_instance_visibility_override_preserves_public_async_shell_hints(self):
         from nooa.agentdoc import spec

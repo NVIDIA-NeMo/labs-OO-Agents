@@ -556,6 +556,8 @@ class AtomAgent(AtomAgentBase):
     _session_namespace_was_live: Annotated[bool, hidden]
     # The session runs every turn with this method, whatever its turn_method.
     turn_entry: ClassVar[str] = "handle"
+    # The fix hint of a blocked subprocess/os.system/network import or call.
+    _shell_run_hint: ClassVar[str] = "use a Shell: `sh = Shell()` then `r = await sh.run(cmd)`"
 
     def __init__(
         self,
