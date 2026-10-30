@@ -21,7 +21,6 @@ interface, or this agent's spike spelling
 
 from __future__ import annotations
 
-import os
 from typing import Annotated, Any, ClassVar
 
 # Cells see this module's names: the model builds Done/TaskResult/Todo, Shell and
@@ -118,14 +117,6 @@ class _AgentJobs(WorkManager):
                 work.close()
             raise ValueError(f"{name!r} names a channel or the person; pick another job name")
         return super().launch(work, name=name, progress=progress, **unexpected)
-
-    def _resolve_path(self, path: Any) -> Any:
-        """``tail`` paths: relative ones are from the agent's workspace."""
-        base = getattr(self._agent, "cwd", None)
-        full = os.path.expanduser(os.fspath(path))
-        if base is not None and not os.path.isabs(full):
-            full = os.path.join(str(base), full)
-        return super()._resolve_path(full)
 
 
 # CodeActV2's python_cell description names the legacy delegation method.
@@ -479,7 +470,7 @@ job = self.jobs.launch(sh.run("make"), name="build", progress=Throttle(seconds=5
 job.set_progress(None)  # quiet again
 self.jobs.after(120, name="t")  # timer: a delay counts from now: subtract time you have already spent
 self.jobs.every(60, name="poll")  # tick items
-self.jobs.tail("app.log", name="log")  # new lines
+self.jobs.launch(sh.run("tail -F app.log", timeout=3600), name="log", progress=Throttle(seconds=5))  # follow a file
 self.jobs.launch(sh.run("pytest -q"), name="tests")
 job = self.jobs.launch(Shell(), name="sh")
 r = await job.send("make")
@@ -611,7 +602,7 @@ class AtomAgent(AtomAgentBase):
         # The legacy JobsApi never started anything; drop it and its cancel hint.
         self.queue_manager._cancel_hints.pop("jobs", None)
         # Core's ``self.producers`` (QueueManager.spawn helpers) is not Atom's:
-        # its timers and tails are ``self.jobs.after/every/tail``.
+        # its timers are ``self.jobs.after/every``; tails are ``tail -F`` in a Shell.
         self.__dict__.pop("producers", None)
         self._work_records = []
         self.jobs = _AgentJobs(

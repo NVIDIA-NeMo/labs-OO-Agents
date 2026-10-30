@@ -30,7 +30,6 @@ a file or ``self.v`` and relaunch from there.
 from __future__ import annotations
 
 import asyncio
-import codecs
 import contextlib
 import contextvars
 import inspect
@@ -956,10 +955,7 @@ def _remove_owned(owned: tuple[Path, int, int] | None) -> None:
     shutil.rmtree(path, ignore_errors=True)  # does not follow symlinks inside
 
 
-# ---- built-in work: timers and file tails ---------------------------------------
-
-_TAIL_POLL = 0.25  # seconds between polls of a quiet file
-_TAIL_PIECE = 1 << 20  # a line longer than this (1 MiB) arrives in pieces
+# ---- built-in work: timers ------------------------------------------------------
 
 
 def _seconds(value: Any, *, zero_ok: bool) -> float:
@@ -994,83 +990,6 @@ async def _every(seconds: float):
         yield tick
 
 
-async def _tail(path: Path, origin: tuple[int, int, int] | None):
-    """Yield the lines appended to ``path``: the core ``nooa.runtime.producers.tail``,
-    plus rotation. ``origin`` is ``(dev, ino, size)`` when the call saw the file
-    (start there), else None (start at the beginning of the file once it exists).
-
-    Only ``\n`` ends a line; a trailing ``\r`` is removed. UTF-8 with undecodable
-    bytes replaced; a character split across writes is decoded whole. A line
-    longer than 1 MiB arrives in pieces; no empty piece is ever yielded. When the
-    file is replaced (rotated, new inode) or truncated, reading restarts at the
-    start of the new contents; a pending unfinished line is yielded first.
-    """
-    fh = None
-    decoder = codecs.getincrementaldecoder("utf-8")("replace")
-    partial = b""
-    continued = False  # this line already came out in pieces
-
-    def flush() -> str:
-        nonlocal partial, continued, decoder
-        text = decoder.decode(partial, final=True).removesuffix("\r") if partial else ""
-        partial, continued = b"", False
-        decoder = codecs.getincrementaldecoder("utf-8")("replace")
-        return text
-
-    try:
-        while True:
-            if fh is None:
-                try:
-                    fh = open(path, "rb")
-                except (FileNotFoundError, NotADirectoryError):
-                    await asyncio.sleep(_TAIL_POLL)
-                    continue
-                info = os.fstat(fh.fileno())
-                if origin is not None and (info.st_dev, info.st_ino) == origin[:2]:
-                    fh.seek(origin[2] if info.st_size >= origin[2] else 0)
-                origin = None  # a reopened (rotated) file is read from its start
-            chunk = fh.readline(_TAIL_PIECE - len(partial))
-            if chunk:
-                partial += chunk
-                if partial.endswith(b"\n"):
-                    was_continued = continued
-                    partial = partial[:-1]
-                    text = flush()
-                    # The terminator of a line already yielded in pieces is no new line.
-                    if text or not was_continued:
-                        yield text
-                elif len(partial) >= _TAIL_PIECE:
-                    # A piece cut inside a character decodes to "" until the rest arrives.
-                    text = decoder.decode(partial)
-                    partial = b""
-                    if text:
-                        continued = True
-                        yield text
-                continue
-            # Nothing new: was the file replaced or truncated?
-            try:
-                now = os.stat(path)
-            except (FileNotFoundError, NotADirectoryError):
-                now = None
-            mine = os.fstat(fh.fileno())
-            replaced = now is not None and (now.st_dev, now.st_ino) != (mine.st_dev, mine.st_ino)
-            truncated = not replaced and now is not None and now.st_size < fh.tell()
-            if replaced or truncated:
-                text = flush()
-                if text:
-                    yield text  # an unfinished line that will never be finished
-                if replaced:
-                    fh.close()
-                    fh = None
-                else:
-                    fh.seek(0)
-                continue
-            await asyncio.sleep(_TAIL_POLL)
-    finally:
-        if fh is not None:
-            fh.close()
-
-
 class WorkManager:
     """``job = self.jobs.launch(work, name="tests")`` starts work without waiting.
 
@@ -1080,9 +999,10 @@ class WorkManager:
     else a JobEvent in the next turn's ``notification["jobs"]``. Jobs outlive
     turns: return ``Waiting(on=[name])`` while they run; cancel unneeded work.
     Names: letters, digits, ``_`` or ``-``; requests are ``<name>#1``, ``<name>#2``...
-    Built in, as launch(): ``after(s)`` timer; ``every(s)`` ticks; ``tail(path)`` new
-    lines. A delay counts from now: subtract time you have already spent.
-    Watch a command: ``launch(sh.run(cmd), progress=Throttle(seconds=5))``.
+    Built in, as launch(): ``after(s)`` timer; ``every(s)`` ticks.
+    A delay counts from now: subtract time you have already spent.
+    Watch a command or follow a file:
+    ``launch(sh.run("tail -F app.log"), progress=Throttle(seconds=5))``.
     """
 
     __nosnapshot__ = True
@@ -1198,32 +1118,6 @@ class WorkManager:
         job._coalesce = True
         job._summary = f"every {seconds:g} s"
         return job
-
-    def tail(self, path: str | Path, *, name: str | None = None) -> Job:
-        """Each new complete line of a file is an item, until cancelled.
-
-        From the current end (a missing file: its start once it appears);
-        follows truncation and rotation; lines over 1 MiB come in pieces.
-        Relative paths are from the workspace.
-        """
-        if not isinstance(path, (str, os.PathLike)):
-            raise TypeError(f"path must be a str or Path, got {type(path).__name__}")
-        full = self._resolve_path(path)
-        try:
-            info = os.stat(full)
-        except (FileNotFoundError, NotADirectoryError):
-            origin = None
-        else:
-            if stat.S_ISDIR(info.st_mode):
-                raise IsADirectoryError(f"{full} is a directory; tail a file")
-            origin = (info.st_dev, info.st_ino, info.st_size)
-        job = self.launch(_tail(full, origin), name=name)
-        job._summary = _one_line(f"tail {full}")
-        return job
-
-    def _resolve_path(self, path: str | Path) -> Path:
-        """An absolute path for ``tail`` (relative: from the process directory)."""
-        return Path(os.path.abspath(os.path.expanduser(os.fspath(path))))
 
     def get(self, name: str) -> Job | None:
         """The newest job with this name (a running one, else the latest finished)."""
