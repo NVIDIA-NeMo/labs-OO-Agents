@@ -223,3 +223,40 @@ async def test_a_failed_connection_is_reported_in_the_state(servers):
         await servers.connect(["broken"])
     assert servers.state("broken") == "failed"
     assert "broken" in servers.error("broken")
+
+
+def _servers_at(tmp_path, project, definitions):
+    project.mkdir(parents=True, exist_ok=True)
+    made = MCPServers(
+        servers=definitions,
+        approval_path=tmp_path / "approvals.json",
+        project_dir=project,
+        token_path=tmp_path / "tokens.json",
+    )
+    made.bind(_Agent())
+    return made
+
+
+def test_share_from_skips_a_server_this_view_defines_differently(tmp_path, monkeypatch):
+    monkeypatch.setenv("NEMO_OO_USER_DIR", str(tmp_path / "user"))
+    parent = _servers_at(tmp_path, tmp_path / ".nooa", {"probe": {"command": "probe-a"}})
+    tool = object()
+    parent._connected["probe"] = tool
+    same = _servers_at(tmp_path, tmp_path / ".nooa", {"probe": {"command": "probe-a"}})
+    assert same.share_from(parent) == [] and same.tool("probe") is tool
+    other = _servers_at(tmp_path, tmp_path / ".nooa", {"probe": {"command": "probe-b"}})
+    assert other.share_from(parent) == [
+        "MCP server 'probe' was not shared: it is defined differently here"
+    ]
+    assert "probe" not in other.connected()
+
+
+def test_share_from_shares_nothing_across_approval_scopes(tmp_path, monkeypatch):
+    monkeypatch.setenv("NEMO_OO_USER_DIR", str(tmp_path / "user"))
+    parent = _servers_at(tmp_path, tmp_path / "a" / ".nooa", {"probe": {"command": "probe-a"}})
+    parent._connected["probe"] = object()
+    child = _servers_at(tmp_path, tmp_path / "b" / ".nooa", {})
+    assert child.share_from(parent) == [
+        "MCP servers probe were not shared: the parent approved them for another workspace"
+    ]
+    assert child.connected() == []
