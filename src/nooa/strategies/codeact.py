@@ -1775,7 +1775,7 @@ Standard Python builtins and agent instance (`self`) are available."""
             # Return the final result
             try:
                 validated, error_msg = self._handle_return_result(
-                    runtime, args, return_type, session, call
+                    runtime, args, return_type, session, call, via_tool=True
                 )
             except GenerationError:
                 # _handle_return_result raises GenerationError when validation
@@ -2248,8 +2248,13 @@ Standard Python builtins and agent instance (`self`) are available."""
         return_type: Any,
         session: CodeActSession,
         call: Any,
+        *,
+        via_tool: bool = False,
     ) -> tuple[Any, str | None]:
         """Validate return_result arguments and return the result.
+
+        ``via_tool``: a direct ``return_result`` tool call (JSON arguments),
+        not ``return_result(...)`` inside Python code; it shapes the hint.
 
         Pure validation - does NOT update ToolCallEvent.result. Caller is responsible
         for updating the ToolCallEvent with the result when return_result is called
@@ -2406,7 +2411,9 @@ Standard Python builtins and agent instance (`self`) are available."""
                 e, return_type, actual_value, runtime.truncation_config
             )
             if not isinstance(e, InvariantError):
-                call_hint = return_call_hint(return_type)
+                call_hint = return_call_hint(
+                    return_type, self._python_tool_name() if via_tool else None
+                )
                 if call_hint:
                     error_msg = f"{error_msg}\n{call_hint}"
             logger.debug(f"[CODEACT] return_result validation failed: {e}")

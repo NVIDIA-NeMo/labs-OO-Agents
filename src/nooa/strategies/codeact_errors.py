@@ -42,13 +42,17 @@ def return_type_field_names(return_type: Any) -> set[str]:
     return names
 
 
-def return_call_hint(return_type: Any) -> str | None:
+def return_call_hint(return_type: Any, python_tool: str | None = None) -> str | None:
     """Name the call that returns a model return type, e.g. ``return_result(Done(...))``.
 
     Only for return types whose members are all Pydantic models: other types
-    already get an example from the formatter.
+    already get an example from the formatter. ``python_tool``: the failed
+    call was a direct ``return_result`` tool call, which takes JSON arguments;
+    the constructor form is then labelled as code for that Python tool, and a
+    JSON example follows.
     """
     forms = []
+    json_forms = []
     for member in _return_type_members(return_type):
         fields = getattr(member, "model_fields", None)
         if not isinstance(member, type) or not isinstance(fields, dict):
@@ -60,11 +64,17 @@ def return_call_hint(return_type: Any) -> str | None:
         ]
         args = ", ".join(f"{name}=..." for name in required)
         forms.append(f"return_result({member.__name__}({args}))")
+        fields_json = ", ".join(f'"{name}": ...' for name in required)
+        json_forms.append(f'{{"result": {{{fields_json}}}}}')
     if not forms:
         return None
-    if len(forms) == 1:
-        return f"Call it as {forms[0]}."
-    return f"Call it as one of: {', '.join(forms)}."
+    call = forms[0] if len(forms) == 1 else f"one of: {', '.join(forms)}"
+    if python_tool is None:
+        return f"Call it as {call}."
+    return (
+        f"In {python_tool} code, call it as {call}. As a direct return_result tool call, "
+        f"pass JSON arguments: {' or '.join(json_forms)}."
+    )
 
 
 def format_validation_error(
