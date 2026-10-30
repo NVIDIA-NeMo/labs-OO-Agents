@@ -508,9 +508,10 @@ class AtomAgent(AtomAgentBase):
     command with ``sh = Shell()`` then ``r = await sh.run(cmd, timeout=600)``;
     ``self.jobs`` is only for work that runs while you do other things (builds,
     servers, subagents; see the python_cell_tools block). Search inside the
-    repository, never ``/``. Prefer ``rg`` to search for text and ``rg --files``
-    to list files: it's much faster than ``grep`` or ``find``. If ``rg`` isn't
-    installed, use another tool.
+    repository, never ``/``: a scan of the whole filesystem (``find /``,
+    ``grep -r /``, ``du /``) can run until the timeout. Prefer ``rg`` to search
+    for text and ``rg --files`` to list files: it's much faster than ``grep`` or
+    ``find``. If ``rg`` isn't installed, use another tool.
     Write shell commands as triple-quoted strings (``sh.run('''...''')``) so
     quotes need no escaping, and pass file contents to ``self.files`` the same
     way, not as heredocs.

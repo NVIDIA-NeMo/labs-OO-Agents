@@ -152,10 +152,15 @@ RESULT = (
 # 20,202 / 21,227, handle_batch 20,321 / 21,346, handle_work 20,489 / 21,514,
 # handle_orchestrate 20,624 / 21,649.
 # Limits: measured values plus about 2%, rounded up to the next 100.
+# Raised for the filesystem-scan warning (2026-10-30, friction PR part 3,
+# user-approved): the class doc says a scan of the whole filesystem can run until
+# the timeout. Measured system / total: handle 20,298 / 21,323, handle_batch
+# 20,417 / 21,442, handle_work 20,585 / 21,610, handle_orchestrate 20,720 / 21,745.
+# Limits: measured values plus about 2%, rounded up to the next 100.
 LIMITS = {
     (ATOM, "handle"): (20_700, 21_500),
     (ATOM, "handle_batch"): (20_800, 21_700),
-    (ATOM, "handle_work"): (20_500, 21_900),
+    (ATOM, "handle_work"): (21_000, 21_900),
     (ATOM, "handle_orchestrate"): (21_100, 22_000),
 }
 # The bench guard's system-prompt ceiling; every agent stays under it.
@@ -310,6 +315,18 @@ async def test_prompts_reply_to_a_child_question_with_send(spec, method, tmp_pat
     rendered = "\n".join(str(m.get("content", "")) for m in messages)
     assert ".answer(" not in rendered
     assert "answer_child" not in rendered
+
+
+@pytest.mark.parametrize(("spec", "method"), list(LIMITS))
+async def test_prompts_warn_that_a_whole_filesystem_scan_can_hit_the_timeout(
+    spec, method, tmp_path, sessions_dir
+):
+    messages, _, _ = await _first_call(spec, method, tmp_path, sessions_dir)
+    rendered = " ".join("\n".join(str(m.get("content", "")) for m in messages).split())
+    assert (
+        "Search inside the repository, never ``/``: a scan of the whole filesystem "
+        "(``find /``, ``grep -r /``, ``du /``) can run until the timeout. Prefer ``rg``"
+    ) in rendered
 
 
 @pytest.mark.parametrize(("spec", "method"), list(LIMITS))
