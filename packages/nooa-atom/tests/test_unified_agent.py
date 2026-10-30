@@ -109,7 +109,10 @@ async def test_one_shot_subagent_returns_its_task_result_and_notes_are_job_items
         assert tool.description.count("Blocked imports:") == 1
         assert tool.description.count("Blocked calls by module") == 1
         assert "`subprocess`" in tool.description and "literal dunder names" in tool.description
-        assert "Run commands with `await sh.run(cmd)` on a `Shell()`" in tool.description
+        assert (
+            "Run commands with `sh = Shell()` then `r = await sh.run(cmd, timeout=600)`"
+            in tool.description
+        )
         assert "self.shell" not in tool.description and "self.delegate" not in tool.description
         assert "Blocked imports:" not in rendered  # guidance is tool-local, not another block
 
@@ -466,7 +469,7 @@ async def test_first_call_offers_one_work_vocabulary(
     await asyncio.wait_for(root.prompt("hello"), TIMEOUT)
     call = models.llms[None].calls[0]
     tools = "\n".join(str(getattr(tool, "description", tool)) for tool in call.tools or ())
-    assert "Run commands with `await sh.run(cmd)` on a `Shell()`" in tools
+    assert "Run commands with `sh = Shell()` then `r = await sh.run(cmd, timeout=600)`" in tools
     messages = "\n".join(str(m.get("content", "")) for m in call.messages)
     rendered = messages + "\n" + tools  # what the model reads: the messages and the tool
     prefix = str(call.messages[0].get("content", ""))
