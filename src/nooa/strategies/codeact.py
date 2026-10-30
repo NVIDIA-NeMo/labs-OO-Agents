@@ -844,6 +844,11 @@ Standard Python builtins and agent instance (`self`) are available."""
         # ``_call`` is referenced by prefill/introspection cells (doc(_call.return_type));
         # inject it alongside the framework builtins so the worker namespace has it.
         framework_builtins = {**builtins, "_call": call}
+        max_media = getattr(
+            getattr(runtime.truncation_config, "media_capture", None),
+            "max_attachments_per_execution",
+            None,
+        )
         return SandboxedExecutor(
             runtime.agent,
             self.config.sandbox,
@@ -852,6 +857,7 @@ Standard Python builtins and agent instance (`self`) are available."""
             restrictions=self.config.restrictions,
             max_error=runtime.truncation_config.capture.max_error,
             error_tail=runtime.truncation_config.capture.tail,
+            max_media_attachments=max_media,
         )
 
     async def _close_sandbox(self, session: "CodeActSession") -> None:

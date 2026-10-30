@@ -433,7 +433,7 @@ def install_debug_handler(dump_dir: Path | None = None) -> None:
     try:
         signal.signal(debug_signal, _debug_signal_handler)
         _handler_installed = True
-    except (ValueError, OSError):
+    except (ValueError, OSError, AttributeError):
         # Can't set signal handler (not main thread, or platform issue)
         pass
 
