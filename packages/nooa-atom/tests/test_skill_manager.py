@@ -156,7 +156,11 @@ async def test_search_matches_names_and_descriptions_of_every_kind(agent):
     assert agent.skills.search("review") == (
         "review (text, available): Review a change for defects"
     )
-    assert agent.skills.search("greet people") == "greeter (code, available): Greet people by name."
+    assert agent.skills.search("greet people").splitlines() == [
+        "greeter (code, available): Greet people by name.",
+        # A loaded code skill's public methods are searched too.
+        "greeter has greet (method: self.greeter.greet)",
+    ]
     assert agent.skills.search("probe").startswith("probe (mcp, available): stdio MCP server")
     assert agent.skills.search("nothing-like-this") == "No skills match 'nothing-like-this'."
 
@@ -411,4 +415,38 @@ async def test_search_hint_comes_before_matching_skills(agent):
     assert agent.skills.search("greet later").splitlines() == [
         agent.skills.search("later"),
         "greeter (code, available): Greet people by name.",
+        "greeter has greet (method: self.greeter.greet)",
     ]
+
+
+async def test_search_matches_mcp_tool_names_after_skills(agent):
+    class Resources:
+        """MCP server 'hcb_resources'."""
+
+        _tool_method_names = ("issue_parking_permit", "list_rooms", "permit_status")
+
+    agent.skills.register("mcp.hcb_resources", Resources())
+    await agent.skills.activate(["mcp.hcb_resources"])
+    # The skill line (its description lists the tools, cut at 100 characters)
+    # comes first, then each matching tool.
+    found = agent.skills.search("permit").splitlines()
+    assert found[0].startswith("hcb_resources (mcp, active")
+    assert found[1:] == [
+        "hcb_resources has issue_parking_permit (MCP tool: self.hcb_resources.issue_parking_permit)",
+        "hcb_resources has permit_status (MCP tool: self.hcb_resources.permit_status)",
+    ]
+    # Tool matches are bounded by the limit.
+    assert agent.skills.search("permit", limit=1).splitlines()[1:] == [
+        "hcb_resources has issue_parking_permit (MCP tool: self.hcb_resources.issue_parking_permit)",
+        "... 1 more tools; narrow the query",
+    ]
+    # Short words do not match tool names.
+    assert not any(" has " in line for line in agent.skills.search("is").splitlines())
+    # The self.jobs hint still comes first.
+    assert agent.skills.search("permit later").splitlines()[0].startswith("self.jobs (built in")
+
+
+async def test_search_matches_a_connected_mcp_servers_tools(agent):
+    approve(agent, "probe")
+    await agent.skills.activate(["probe"])
+    assert "probe has probe (MCP tool: self.probe.probe)" in agent.skills.search("probe")

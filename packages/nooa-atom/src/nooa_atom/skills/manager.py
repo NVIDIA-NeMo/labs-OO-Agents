@@ -24,6 +24,7 @@ from nooa_atom.workspace.mcp_approval import MCPApprovalRequired
 Kind = Literal["code", "text", "mcp"]
 _KIND_LABELS = {"code": "code", "text": "text", "mcp": "MCP"}
 _DESCRIPTION_WIDTH = 100
+_TOOL_MATCHES_SHOWN = 10  # tool/method-name matches a search lists
 
 # Timers and ticks are built into ``self.jobs``, and a file tail is a Shell command,
 # not skills: a search for them points there instead of answering "No skills match".
@@ -67,6 +68,18 @@ class SkillEntry:
         return text if len(text) <= 160 else text[:159] + "…"
 
 
+def _public_methods(obj: Any) -> list[str]:
+    """Public method names a skill object's class defines (not ``Skill``'s own)."""
+    names: set[str] = set()
+    for cls in type(obj).__mro__:
+        if cls in (Skill, TextSkill, object):
+            break
+        for name, value in cls.__dict__.items():
+            if not name.startswith("_") and callable(value):
+                names.add(name)
+    return sorted(names)
+
+
 def _first_line(text: str | None) -> str:
     return (text or "").strip().split("\n", 1)[0].strip()
 
@@ -74,7 +87,8 @@ def _first_line(text: str | None) -> str:
 class SkillManager(Skill):
     """Find, activate and inspect code/text skills and MCP servers.
 
-    ``search(query)`` finds skills of every kind by name and description.
+    ``search(query)`` finds skills of every kind by name and description,
+    and the tool names of connected MCP servers and loaded code skills.
     ``await activate([...])`` turns skills on: a code skill is loaded and its
     object is ``self.<name>``; an MCP server is connected and its tools are
     methods of ``self.<server>``; a text skill's instructions arrive on the
@@ -105,23 +119,38 @@ class SkillManager(Skill):
         """Find skills whose name or description contains any word of ``query``.
 
         One line per match: name, kind, state and a one-line description.
-        Names that match come first. Searching loads nothing.
+        Names that match come first. Then tool names that match, as
+        ``<skill> has <tool>``: the tools of connected MCP servers and the
+        public methods of loaded code skills. Searching loads nothing.
         """
         words = [word for word in query.lower().split() if word]
         hint = [_BUILT_IN_WORK] if any(w.strip(".,;:!?\"'()") in _WORK_WORDS for w in words) else []
         scored = []
+        tools = []
         for entry in self.entries():
             name = entry.name.lower()
             text = f"{name} {entry.key.lower()} {entry.description.lower()}"
             hits = sum(word in text for word in words)
             if hits:
                 scored.append((-sum(word in name for word in words), -hits, entry.name, entry))
-        if not scored:
+            for tool in self._tool_names(entry):
+                # Short words ("a", "in") would match most tool names.
+                tool_hits = sum(len(word) >= 3 and word in tool.lower() for word in words)
+                if tool_hits:
+                    tools.append((-tool_hits, entry.name, tool, entry))
+        if not scored and not tools:
             return hint[0] if hint else f"No skills match {query!r}."
         scored.sort(key=lambda item: item[:3])
         lines = hint + [entry.line() for *_, entry in scored[:limit]]
         if len(scored) > limit:
             lines.append(f"... {len(scored) - limit} more; narrow the query or raise limit")
+        tools.sort(key=lambda item: item[:3])
+        shown = min(limit, _TOOL_MATCHES_SHOWN)
+        for _, _, tool, entry in tools[:shown]:
+            kind = "MCP tool" if entry.kind == "mcp" else "method"
+            lines.append(f"{entry.name} has {tool} ({kind}: self.{attr_name(entry.name)}.{tool})")
+        if len(tools) > shown:
+            lines.append(f"... {len(tools) - shown} more tools; narrow the query")
         return "\n".join(lines)
 
     async def activate(self, names: list[str]) -> str:
@@ -510,6 +539,19 @@ class SkillManager(Skill):
         if entry is None:
             raise KeyError(f"No skill called {name!r}; try self.skills.search({name!r})")
         return entry
+
+    def _tool_names(self, entry: SkillEntry) -> list[str]:
+        """Tool names known without loading: connected MCP servers, loaded code skills."""
+        if entry.kind == "mcp" and not entry.key.startswith("mcp."):
+            return self.mcp.tool_names(entry.key) if self.mcp is not None else []
+        if entry.kind == "text" or entry.key not in self.registry.loaded():
+            return []
+        skill = self.registry[entry.key]
+        return (
+            tool_names(skill)
+            if entry.kind == "mcp" and tool_names(skill)
+            else _public_methods(skill)
+        )
 
     def _mcp_tool(self, entry: SkillEntry) -> Any:
         if entry.key.startswith("mcp."):
