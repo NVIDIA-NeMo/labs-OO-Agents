@@ -611,7 +611,7 @@ class SessionRegistry:
             # A new turn, by any route (the parent's send, a host
             # submit), ends the child's pending question.
             if child.parent_id is not None:
-                self._questions.pop((child.parent_id, child.id), None)
+                self._end_question((child.parent_id, child.id))
             started = getattr(self._routes.get(child.id), "turn_started", None)
             if started is not None:
                 started(list(update.item_ids))
@@ -806,7 +806,31 @@ class SessionRegistry:
 
     def clear_question(self, parent: Session, child_id: str) -> None:
         """The parent sent the child a message (its reply): no question is pending."""
-        self._questions.pop((parent.id, child_id), None)
+        self._end_question((parent.id, child_id))
+
+    def _end_question(self, key: tuple[str, str]) -> None:
+        """An answered question is over: forget it and withdraw its unread queued copy.
+
+        Otherwise the next ``wait()`` would return the question it answered
+        (``take_queued_result`` takes the oldest queued outcome first).
+        A copy the parent has already read stays read.
+        """
+        self._questions.pop(key, None)
+        queued = self._queued.get(key)
+        if not queued:
+            return
+        parent = self.sessions.get(key[0])
+        kept = []
+        for receipt, item in queued:
+            if isinstance(item, ChildQuestion):
+                if parent is not None:
+                    parent.withdraw(receipt)
+                continue
+            kept.append((receipt, item))
+        if kept:
+            self._queued[key] = kept
+        else:
+            self._queued.pop(key, None)
 
     def _forget_parent(self, parent_id: str) -> None:
         """Drop a closed or deleted parent's per-child state.
