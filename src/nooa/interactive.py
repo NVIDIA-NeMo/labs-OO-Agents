@@ -146,6 +146,8 @@ class NeedInput(BaseModel):
     ``self.message()``. The answer arrives as a plain ``str``; put any
     suggested answers in the question text. ``reason`` optionally says in
     one sentence why progress is not possible or not desirable without it.
+    ``explanation`` is an optional short status line, as on ``Done`` and
+    ``Waiting``; it is not shown as the question.
     """
 
     model_config = {"extra": "forbid"}
@@ -155,8 +157,10 @@ class NeedInput(BaseModel):
     reason: str | None = Field(
         default=None, description="Why progress is not possible or not desirable without it"
     )
+    explanation: str | None = Field(default=None, description="Short status line; not the question")
 
     _check_question = field_validator("question")(_non_blank)
+    _check_explanation = field_validator("explanation")(_blank_to_none)
 
 
 class Waiting(BaseModel):
