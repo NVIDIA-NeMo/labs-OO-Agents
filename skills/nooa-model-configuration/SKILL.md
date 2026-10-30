@@ -39,6 +39,9 @@ unknown. `--no-probe` prevents generation but may still fetch discovery/catalogu
 metadata; use an explicit model/interface/endpoint plus `--no-catalogue` when
 using the wizard without any network access.
 
+**Windows:** run Connect inside WSL 2. Native Windows refuses `nooa` unless
+`NOOA_SKIP_PLATFORM_CHECK=1` is set; with it, `nooa connect` works and is tested.
+
 **Interactive:** `uv run nooa connect` offers the wizard; `--edit-model ALIAS`
 edits an existing entry, and `--edit-model` alone opens the registry selector.
 Saving/replacing an alias and storing credentials are separate decisions from

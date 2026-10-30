@@ -32,6 +32,10 @@ dependencies = [
     "httpx>=0.27.0",
     "openinference-instrumentation-litellm>=0.1.30",
     "msgpack>=1.2.1",
+    # `nooa connect` locks its registry with fcntl on POSIX and with filelock on
+    # native Windows (no fcntl there). Only filelock's Windows lock is used, so
+    # CVE-2026-112940 (ReadWriteLock) and CVE-2026-112909 (UnixFileLock) do not apply.
+    "filelock>=3.29.4; sys_platform == 'win32'",
 ]
 
 [project.urls]

@@ -18,6 +18,8 @@ import asyncio
 import os
 import signal
 
+from nooa._platform import require_posix
+
 
 async def after(delay: float) -> None:
     """One-shot timer: sleep *delay* seconds, then return None."""
@@ -82,7 +84,11 @@ async def monitor(cmd: str):
     (and the agent itself) don't contend for ptys or interfere
     with each other.  On cancellation the entire process group
     is killed to prevent orphaned children.
+
+    POSIX-only (process groups); on native Windows the first iteration
+    raises :class:`~nooa._platform.PosixOnlyFeatureError`.
     """
+    require_posix("monitor() (process-group cleanup uses os.killpg)")
     proc = await asyncio.create_subprocess_shell(
         cmd,
         stdout=asyncio.subprocess.PIPE,

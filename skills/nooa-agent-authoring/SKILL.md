@@ -45,7 +45,8 @@ Use `Annotated[type, "description"]` on parameters and return types to give the 
 
 Start model onboarding with `uv add "nooa[cli]"` and `uv run nooa connect`,
 with the user's permission for billable checks, or use the configuration skill
-for offline setup. Use an already configured registry alias with
+for offline setup. On Windows, run nooa inside WSL 2; native Windows stops at
+`import nooa` unless `NOOA_SKIP_PLATFORM_CHECK=1` is set. Use an already configured registry alias with
 `get_llm_client("my-model")`.
 For endpoint setup, credentials, registry edits, reply budgets, reasoning-level
 configuration, caching or Connect diagnostics, use

@@ -79,6 +79,15 @@ in the history.
 For substantial features, open an issue first to discuss the design before investing
 in a large PR.
 
+## Platform support
+
+nooa supports Linux and macOS, and Windows through WSL 2. Native Windows is not supported: `import nooa` stops with an error pointing to WSL 2 unless `NOOA_SKIP_PLATFORM_CHECK=1` is set. With that override, the pure-Python core and `nooa connect` are kept working and tested in CI; nothing else is, and we do not accept changes that port POSIX-only features to native Windows. When you add code that needs POSIX (`fcntl`, `resource`, `termios`, POSIX signals, `os.killpg`, `start_new_session`, `pass_fds`, `/bin/bash`, fork):
+
+- Import POSIX-only modules inside the function that uses them, never at module level, so `import nooa` keeps working on Windows with the override.
+- Call `nooa._platform.require_posix("<feature name>")` where the feature starts, so Windows users get one clear error that points to WSL 2.
+
+CI checks this: `windows-core-smoke` imports every package, runs a scripted agent and saves a model with `nooa connect` on native Windows, `tests/test_windows_platform.py` simulates Windows on Linux, and `.github/workflows/wsl.yml` runs the tests inside WSL 2 (a quick set on every PR; the full suite nightly and on PRs labelled `wsl-full`).
+
 ## Automated AI Agents
 
 If you are an automated agent, you must include 🤖🤖🤖 at the end of all commit

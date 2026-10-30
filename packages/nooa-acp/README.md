@@ -20,6 +20,8 @@ This is new and we would like it exercised. If something breaks, please say so.
 uv add nooa-acp                 # or: uv add "nooa[acp]"
 ```
 
+> **Windows:** use [WSL 2](https://learn.microsoft.com/windows/wsl/install). Native Windows is not supported; see the [main README](https://github.com/NVIDIA-NeMo/labs-OO-Agents#installation).
+
 There is no default model. Set `NOOA_MODEL` or pass `--model`, or the command
 exits with a usage error.
 

@@ -5,6 +5,8 @@
 ### Root-level tests
 Broad framework tests: metaclass behavior, event system, sandbox, error formatting, actor, decorator/strategy wiring, method definition, media handling, storage compatibility, skill registry, visibility, and module imports.
 
+`test_windows_platform.py` covers the native-Windows policy: the import-time refusal and `NOOA_SKIP_PLATFORM_CHECK`, and the `PosixOnlyFeatureError` guards. Its subprocess tests run `scripts/windows_smoke.py` under `scripts/winsim.py`, which hides POSIX-only modules, signals and os functions on Linux and sets `sys.platform = "win32"`. It is a simulation; real Windows runs in CI (`windows-core-smoke`, `.github/workflows/wsl.yml`).
+
 ### `agentdoc/` - Agent documentation and visibility
 `doc(self)` rendering, visibility rules, referenced types, annotated parameters and fields, truncating `pformat`/`pprint`, metadata, protocols, and fixture modules under `agentdoc/fixtures/`.
 
