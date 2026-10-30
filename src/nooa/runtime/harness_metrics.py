@@ -146,6 +146,8 @@ class HarnessMetrics(BaseModel):
     need_input_explanations: int = 0
     # A Shell command queued behind another still running in the same Shell
     shell_queued_behind_running: int = 0
+    # A Shell command awaited in a cell refused: the Shell runs a launched job's command
+    shell_busy_rejected: int = 0
     # Waiting on the person (user_messages) rejected; the role whose turn did it
     waiting_on_person_rejections: list[str] = Field(default_factory=list)
     # LLM-facing queue reads that timed out mid-cell (channel name)
@@ -330,6 +332,10 @@ class HarnessMetrics(BaseModel):
     def shell_queued(self) -> None:
         """A Shell command was queued behind another still running in the same Shell."""
         self.shell_queued_behind_running += 1
+
+    def shell_busy(self) -> None:
+        """A Shell command awaited in a cell was refused behind a launched job's command."""
+        self.shell_busy_rejected += 1
 
     # Error Recovery
     def validation_error(self, error_type: str, message: str) -> None:
@@ -823,6 +829,12 @@ _SPAN_SCHEMA: tuple[SchemaEntry, ...] = (
         "Shell commands queued behind a running one",
         "Tool Usage",
         lambda m: m.shell_queued_behind_running,
+    ),
+    SchemaEntry(
+        "harness.shell_busy_rejected.count",
+        "Shell commands refused behind a background job",
+        "Tool Usage",
+        lambda m: m.shell_busy_rejected,
     ),
     SchemaEntry(
         "harness.waiting_on_person_rejected.count",

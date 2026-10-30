@@ -294,16 +294,19 @@ def _blocker(command: str | None, job: str | None) -> str:
     return f"`{flat}`" + (f" (job {job})" if job else "")
 
 
-def _queued_note(blocker: str, waited: float, ran: bool) -> str:
+def _queued_note(blocker: str, waited: float) -> str:
     """What a command queued behind a running one waited for, and how to avoid it."""
-    if ran:
-        head = f"waited {waited:.0f} s for its turn behind {blocker} in this Shell"
-    else:
-        head = (
-            f"did not run: still queued after {waited:g} s behind {blocker}, "
-            "still running in this Shell"
-        )
+    head = f"waited {waited:.0f} s for its turn behind {blocker} in this Shell"
     return f"[{head}; a Shell runs one command at a time: use another Shell() for other commands]"
+
+
+def _busy_message(blocker: str) -> str:
+    """Why a command awaited in a cell was refused behind a launched job's command."""
+    return (
+        f"this Shell is busy running {blocker}, which was launched in the background: "
+        "a Shell runs one command at a time. Use another Shell() for this command "
+        "(e.g. sh2 = Shell()), or wait for the job."
+    )
 
 
 def _check_timeout(value: Any) -> float:
@@ -464,36 +467,33 @@ class Shell:
     ) -> CommandResult:
         """Run one command in this object's bash (started on first use); state carries over.
 
-        ``stdin``: its input (else none); ``timeout``: deadline, seconds from its start
-        (queued behind a job: from the call; 124 unrun).
+        ``stdin``: its input (else none); ``timeout``: deadline, seconds from its start.
+        Awaited in a cell while this Shell runs a background job: fails at once; use another Shell().
         """
         timeout = _check_timeout(timeout)
         describe(f"$ {command}")
         await self._closed()
         generation = self._generation
         note = ""
-        if self._lock.locked() and self._busy is not None:  # FIFO: wait behind it
+        if self._lock.locked() and self._busy is not None:
             blocker = _blocker(self._busy, self._busy_job)
-            get_harness_metrics().shell_queued()
+            if self._busy_job is not None and current_name() is None:
+                # Awaited in a cell behind a background job (often a never-ending tail):
+                # waiting would block the turn, so say so at once instead.
+                get_harness_metrics().shell_busy()
+                raise RuntimeError(_busy_message(blocker))
+            get_harness_metrics().shell_queued()  # FIFO: wait behind it
             describe(f"$ {command} · queued behind {blocker}")
             loop = asyncio.get_running_loop()
             queued_at = loop.time()
-            # Behind a job (often a never-ending tail): the deadline covers the wait.
-            # Behind a direct run the deadline still counts from its own start.
-            limit = timeout if self._busy_job is not None else None
             self._queued += 1
             try:
-                await asyncio.wait_for(self._lock.acquire(), limit)
-            except TimeoutError:
-                if self._generation != generation:
-                    raise RuntimeError(_CLOSED_BEFORE) from None
-                stderr = _queued_note(blocker, timeout, ran=False)
-                return CommandResult(124, True, "", stderr, self._confirmed_cwd or "")
+                await self._lock.acquire()
             finally:
                 self._queued -= 1
             waited = loop.time() - queued_at
             if waited >= _QUEUE_NOTE_SECONDS:
-                note = _queued_note(blocker, waited, ran=True)
+                note = _queued_note(blocker, waited)
         else:
             await self._lock.acquire()
         try:

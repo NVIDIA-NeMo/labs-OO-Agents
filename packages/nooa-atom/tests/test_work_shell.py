@@ -1121,7 +1121,7 @@ async def test_a_python_script_runs_on_stdin_without_nested_quotes(tmp_path):
     assert (r.returncode, r.stdout) == (0, "it's 3\n")
 
 
-async def test_a_command_queued_behind_a_job_times_out_naming_it(manager, tmp_path):
+async def test_an_inline_command_behind_a_job_fails_at_once_naming_it(manager, tmp_path):
     from nooa.runtime.harness_metrics import harness_metrics_session
 
     with harness_metrics_session() as metrics:
@@ -1130,21 +1130,59 @@ async def test_a_command_queued_behind_a_job_times_out_naming_it(manager, tmp_pa
         async with asyncio.timeout(10):
             while "running" not in sh.summary():
                 await asyncio.sleep(0.02)
-        poll = asyncio.ensure_future(sh.run("echo polled", timeout=0.5))
-        await asyncio.sleep(0.1)
-        assert "1 queued behind it" in sh.summary()
-        result = await asyncio.wait_for(poll, 10)
-        assert (result.returncode, result.timed_out, result.stdout) == (124, True, "")
-        assert (
-            "did not run" in result.stderr and "`sleep 30; echo never` (job log)" in result.stderr
-        )
-        assert "use another Shell()" in result.stderr
+        # Awaited directly (not in a job): no queueing, an error at once.
+        with pytest.raises(RuntimeError) as caught:
+            await asyncio.wait_for(sh.run("echo polled", timeout=0.5), 2)
+        message = str(caught.value)
+        assert "busy running `sleep 30; echo never` (job log)" in message
+        assert "launched in the background" in message and "another Shell()" in message
         attrs = metrics.to_span_attributes()
-        assert attrs["harness.shell_queued_behind_running.count"] == 1
+        assert attrs["harness.shell_busy_rejected.count"] == 1
+        assert "harness.shell_queued_behind_running.count" not in attrs
+        assert log.status == "running"  # the job goes on
         await log.cancel()
         after = await asyncio.wait_for(sh.run("echo next", timeout=10), 20)
-        assert after.stdout == "next\n"  # the queued command never ran; the Shell goes on
+        assert after.stdout == "next\n"  # the refused command never ran; the Shell goes on
         await sh.aclose()
+
+
+async def test_a_job_behind_a_job_waits_and_its_timeout_counts_from_its_start(manager, tmp_path):
+    from nooa.runtime.harness_metrics import harness_metrics_session
+
+    with harness_metrics_session() as metrics:
+        async with Shell(tmp_path) as sh:
+            make = manager.launch(sh.run("sleep 1.5; echo make", timeout=10), name="make")
+            async with asyncio.timeout(10):
+                while "running" not in sh.summary():
+                    await asyncio.sleep(0.02)
+            test = manager.launch(sh.run("echo pytest", timeout=0.5), name="pytest")
+            async with asyncio.timeout(10):
+                while "1 queued behind it" not in sh.summary():
+                    await asyncio.sleep(0.02)
+            assert test.summary == "$ echo pytest · queued behind `sleep 1.5; echo make` (job make)"
+            first, second = await asyncio.wait_for(asyncio.gather(make, test), 20)
+            # Its 0.5 s deadline counts from its own start, not from the call: it ran.
+            assert (first.stdout, second.stdout) == ("make\n", "pytest\n")
+            assert (second.returncode, second.timed_out) == (0, False)
+            assert "waited" not in second.stderr  # under the 5 s note threshold
+        attrs = metrics.to_span_attributes()
+        assert attrs["harness.shell_queued_behind_running.count"] == 1
+        assert "harness.shell_busy_rejected.count" not in attrs
+
+
+async def test_a_long_wait_behind_a_job_is_noted_on_the_result(manager, tmp_path, monkeypatch):
+    import nooa_atom.agent.work_shell as work_shell
+
+    monkeypatch.setattr(work_shell, "_QUEUE_NOTE_SECONDS", 0.2)
+    async with Shell(tmp_path) as sh:
+        make = manager.launch(sh.run("sleep 0.6; echo make"), name="make")
+        async with asyncio.timeout(10):
+            while "running" not in sh.summary():
+                await asyncio.sleep(0.02)
+        test = manager.launch(sh.run("echo pytest", timeout=0.3), name="pytest")
+        _, second = await asyncio.wait_for(asyncio.gather(make, test), 20)
+        assert (second.stdout, second.timed_out) == ("pytest\n", False)
+        assert "waited" in second.stderr and "`sleep 0.6; echo make` (job make)" in second.stderr
 
 
 async def test_a_long_wait_behind_a_direct_run_is_noted_on_the_result(tmp_path, monkeypatch):
