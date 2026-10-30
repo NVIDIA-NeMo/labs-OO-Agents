@@ -452,6 +452,61 @@ async def test_search_matches_mcp_tool_names_after_skills(agent):
     assert agent.skills.search("permit later").splitlines()[0].startswith("self.jobs (built in")
 
 
+async def test_a_client_server_shown_under_its_key_is_called_on_its_attribute(agent):
+    # A code skill already shows as "greeter", so the client server shows as
+    # "mcp.greeter"; SkillRegistry still attaches it as self.greeter.
+    class Server:
+        """MCP server 'greeter'."""
+
+        _tool_method_names = ("wave_hello",)
+
+    agent.skills.register("mcp.greeter", Server())
+    await agent.skills.activate(["mcp.greeter"])
+    assert agent.greeter is agent.skills.registry["mcp.greeter"]
+    found = agent.skills.search("wave")
+    assert "mcp.greeter has wave_hello (MCP tool: self.greeter.wave_hello)" in found
+    assert "self.mcp." not in found
+    assert "self.mcp." not in agent.skills.search("greeter")
+    assert "mcp.greeter (mcp: await self.greeter.<tool>(...))" in agent.skills.status()
+
+
+async def test_search_omits_hidden_methods_of_code_skills(agent):
+    from nooa.agentdoc import hidden
+
+    class Stash(Skill):
+        """Keep things."""
+
+        def stash_put(self, item: str) -> None:
+            """Keep ``item``."""
+
+        @hidden
+        def stash_restore(self, data: dict) -> None:
+            """Host-only: replace the state."""
+
+    agent.skills.register("tools.stash", Stash())
+    found = agent.skills.search("stash")
+    assert "stash has stash_put (method: self.stash.stash_put)" in found
+    assert "stash_restore" not in found
+    # The todo skill's restore hook (@hidden from_dict) is not advertised either.
+    assert "todo has from_dict" not in agent.skills.search("from_dict")
+
+
+def test_share_from_keeps_an_attachable_client_skill_with_its_parent(tmp_path):
+    class Bound(Skill):
+        """MCP server 'bound'."""
+
+        async def ping(self) -> str:
+            return "pong"
+
+    parent = AtomAgentBase(llm=FakeLLMClient(), cwd=tmp_path)
+    child = AtomAgentBase(llm=FakeLLMClient(), cwd=tmp_path)
+    bound = Bound()
+    parent.skills.register("mcp.bound", bound)
+    warnings = child.skills.share_from(parent.skills)
+    assert warnings == ["MCP server 'bound' was not shared: it is bound to the parent agent"]
+    assert getattr(bound, "_agent", None) is parent and "mcp.bound" not in child.skills.loaded()
+
+
 async def test_search_matches_a_connected_mcp_servers_tools(agent):
     approve(agent, "probe")
     await agent.skills.activate(["probe"])
