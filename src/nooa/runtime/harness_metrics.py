@@ -142,6 +142,8 @@ class HarnessMetrics(BaseModel):
     return_result_keyword_aliases: list[str] = Field(default_factory=list)
     # Invalid return_result values sent back as a retryable cell error; the error type
     return_result_invalid_retries: list[str] = Field(default_factory=list)
+    # NeedInput(explanation=...) accepted (NeedInput used to reject the extra field)
+    need_input_explanations: int = 0
 
     # ── Error Recovery ──
     validation_errors: list[ErrorRecord] = Field(default_factory=list)
@@ -171,6 +173,10 @@ class HarnessMetrics(BaseModel):
     llm_queue_unavailable_errors: int = 0
     llm_queue_max_depth: int = 0
     llm_queue_wait: TimingStat = Field(default_factory=TimingStat)
+
+    # ── Media Recovery (from unifiedllm via callback) ──
+    # A provider rejected an attachment; retried with a note in its place (kind)
+    media_rejected_retries: list[str] = Field(default_factory=list)
 
     # ── Code Execution ──
     exec_python_total: int = 0
@@ -302,6 +308,10 @@ class HarnessMetrics(BaseModel):
         """An invalid return_result value went back to the model as a retryable error."""
         self._append(self.return_result_invalid_retries, error_type)
 
+    def need_input_explanation(self) -> None:
+        """NeedInput(explanation=...) was accepted as a status line."""
+        self.need_input_explanations += 1
+
     # Error Recovery
     def validation_error(self, error_type: str, message: str) -> None:
         self._append_error(
@@ -372,6 +382,11 @@ class HarnessMetrics(BaseModel):
         wait_s = detail.get("wait_s")
         if isinstance(wait_s, int | float) and not isinstance(wait_s, bool):
             self.llm_queue_wait.record(float(wait_s))
+
+    # Media recovery (dispatched from unifiedllm callback)
+    def record_media_rejected_retry(self, kind: Any) -> None:
+        """The provider rejected an attachment; the request was retried without it."""
+        self._append(self.media_rejected_retries, str(kind or "unknown"))
 
     # Code Execution
     def exec_python(self, *, success: bool) -> None:
@@ -774,6 +789,12 @@ _SPAN_SCHEMA: tuple[SchemaEntry, ...] = (
         lambda m: m.return_result_invalid_retries,
         True,
     ),
+    SchemaEntry(
+        "harness.need_input_explanation.count",
+        "NeedInput(explanation=) accepted",
+        "Return Value Handling",
+        lambda m: m.need_input_explanations,
+    ),
     # Error Recovery
     SchemaEntry(
         "harness.validation_error.count",
@@ -931,6 +952,20 @@ _SPAN_SCHEMA: tuple[SchemaEntry, ...] = (
         "Admission queue wait",
         "LLM Admission",
         lambda m: m.llm_queue_wait,
+    ),
+    # Media Recovery
+    SchemaEntry(
+        "harness.media_rejected_retry.count",
+        "Rejected attachments retried without them",
+        "Media Recovery",
+        lambda m: len(m.media_rejected_retries),
+    ),
+    SchemaEntry(
+        "harness.media_rejected_retry.kinds",
+        "Rejected attachment kinds",
+        "Media Recovery",
+        lambda m: m.media_rejected_retries,
+        True,
     ),
     # Code Execution
     SchemaEntry(

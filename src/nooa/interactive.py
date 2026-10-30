@@ -106,6 +106,16 @@ def _blank_to_none(value: str | None) -> str | None:
     return None if value is None else (value.strip() or None)
 
 
+def _accepted_need_input_explanation(value: str | None) -> str | None:
+    """Blank reads as unset; a set explanation is counted as an accepted fix-up."""
+    value = _blank_to_none(value)
+    if value is not None:
+        from nooa.runtime.harness_metrics import get_harness_metrics
+
+        get_harness_metrics().need_input_explanation()
+    return value
+
+
 class Done(BaseModel):
     """Turn result: the work for this turn is finished.
 
@@ -160,7 +170,7 @@ class NeedInput(BaseModel):
     explanation: str | None = Field(default=None, description="Short status line; not the question")
 
     _check_question = field_validator("question")(_non_blank)
-    _check_explanation = field_validator("explanation")(_blank_to_none)
+    _check_explanation = field_validator("explanation")(_accepted_need_input_explanation)
 
 
 class Waiting(BaseModel):

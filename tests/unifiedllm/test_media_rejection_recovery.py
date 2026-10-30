@@ -108,6 +108,26 @@ async def test_rejected_image_is_retried_once_as_a_note(client_type, asynchronou
             assert images(sent_blocks(wire.call_args, responses)) == []
 
 
+async def test_rejected_image_retry_is_a_harness_metric():
+    from nooa.runtime.actor import _make_llm_metrics_bridge
+    from nooa.runtime.harness_metrics import HarnessMetrics
+    from nooa.unifiedllm.unifiedllm import _llm_metrics_callback
+
+    metrics = HarnessMetrics()
+    token = _llm_metrics_callback.set(_make_llm_metrics_bridge(metrics))
+    try:
+        messages = [{"role": "user", "content": [IMAGE]}]
+        with CompletionClient("openai/test", media_inputs=["image"], cache_breakpoint=None) as c:
+            with patch("litellm.acompletion", new_callable=AsyncMock) as wire:
+                wire.side_effect = [bad_request(GPT), ok(False)]
+                await c.acall(messages)
+    finally:
+        _llm_metrics_callback.reset(token)
+    attrs = metrics.to_span_attributes()
+    assert attrs["harness.media_rejected_retry.count"] == 1
+    assert attrs["harness.media_rejected_retry.kinds"] == ["image"]
+
+
 async def test_generic_400_still_fails_without_a_retry():
     messages = [{"role": "user", "content": [IMAGE]}]
     with CompletionClient("openai/test", media_inputs=["image"], cache_breakpoint=None) as client:
