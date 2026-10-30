@@ -996,6 +996,8 @@ async def _every(seconds: float):
             tick = int((now - start) // seconds) + 1
             due = start + tick * seconds
         await asyncio.sleep(due - now)
+        # The wake-up itself may be late: yield the latest tick that is due.
+        tick = max(tick, int((time.monotonic() - start) // seconds))
         yield tick
 
 
