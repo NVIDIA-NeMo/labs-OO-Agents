@@ -168,17 +168,25 @@ RESULT = (
 # line instead. Measured system / total: handle 21,247 / 22,272, handle_batch
 # 21,366 / 22,391, handle_work 21,534 / 22,559, handle_orchestrate 21,669 / 22,694.
 # Limits: measured values plus about 2%, rounded up to the next 100.
+# Raised for the PR512 small fixes (2026-10-30, friction PR, user-approved): the
+# libs attribute says where libraries are saved, the Subagent doc says awaiting a
+# request blocks until the child ends its turn (together about 220 characters),
+# and the class doc adds the quote-style and script-on-stdin advice next to the
+# triple-quote rule (about 210). Measured system / total: handle 21,676 / 22,701,
+# handle_batch 21,795 / 22,820, handle_work 21,963 / 22,988, handle_orchestrate
+# 22,098 / 23,123. Limits: measured values plus about 2%, rounded up to the next 100.
 LIMITS = {
-    (ATOM, "handle"): (21_700, 22_800),
-    (ATOM, "handle_batch"): (21_800, 22_900),
-    (ATOM, "handle_work"): (22_000, 23_100),
-    (ATOM, "handle_orchestrate"): (22_200, 23_200),
+    (ATOM, "handle"): (22_200, 23_200),
+    (ATOM, "handle_batch"): (22_300, 23_300),
+    (ATOM, "handle_work"): (22_500, 23_500),
+    (ATOM, "handle_orchestrate"): (22_600, 23_600),
 }
 # The bench guard's system-prompt ceiling; every agent stays under it.
 # Raised from 20,000 for the Done(message=...) guidance (2026-10-29, see above),
 # then from 21,200 to 22,600 for self.jobs.after/every/tail (2026-10-30), and
-# lowered to 22,300 when self.jobs.tail was dropped (2026-10-30).
-BENCH_SYSTEM_LIMIT = 22_300
+# lowered to 22,300 when self.jobs.tail was dropped (2026-10-30), then raised to
+# 22,600 for the PR512 small fixes (2026-10-30, see above; handle_orchestrate 22,098).
+BENCH_SYSTEM_LIMIT = 22_600
 
 # Separate CHAR/JSON-size guards, not token counts or a full provider-wire payload.
 # Effective restriction guidance grows default tool descriptions 2,069 -> 2,839;
@@ -421,3 +429,19 @@ async def test_installed_skills_are_counted_not_listed(monkeypatch, tmp_path, se
     for skill in extra:
         assert skill.description not in rendered
         assert skill.name.split(".")[-1] not in rendered
+
+
+def test_the_quoting_advice_keeps_triple_quotes_and_adds_quote_choice_and_stdin():
+    from nooa_atom.agent.agent import AtomAgent
+
+    text = " ".join(AtomAgent.__doc__.split())
+    # The triple-quote rule stays (it cut SWE quoting errors 35 -> 9).
+    assert "Write shell commands as triple-quoted strings (``sh.run('''...''')``)" in text
+    assert (
+        "Pick the quote style the text neither contains nor ends with (``'''`` when it "
+        'has three double quotes or ends with ``"``).' in text
+    )
+    assert (
+        'Run a script on stdin, not in nested quotes: ``sh.run("python3 -", stdin=script)``.'
+        in text
+    )
