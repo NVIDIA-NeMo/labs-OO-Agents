@@ -77,7 +77,7 @@ _CHUNK_BYTES = 64 * 1024
 # Seconds a cancelled persistent command gets to end after SIGTERM, then SIGKILL.
 _INTERRUPT_GRACE = 2.0
 # Seconds a command may run by default (``Shell.run``'s ``timeout``).
-_DEFAULT_TIMEOUT = 1800.0
+_DEFAULT_TIMEOUT = 600.0
 # Seconds past a command's deadline before the bash session's own timeout fires.
 _BACKSTOP_SECONDS = 60.0
 # Skips each command once an interrupt set __nooa_stop, except the epilogue's first.
@@ -272,6 +272,14 @@ def _closed_error(message: str) -> BaseException:
     return asyncio.CancelledError() if _cancelling() else RuntimeError(message)
 
 
+def _timeout_note(timeout: float) -> str:
+    """How to go on after a command ran into its deadline."""
+    return (
+        f"[timed out after {timeout:g} s: pass a larger timeout= for a longer command, or "
+        "run it in the background: self.jobs.launch(sh.run(cmd, timeout=...), name=...)]"
+    )
+
+
 def _check_timeout(value: Any) -> float:
     """``value`` as a command deadline: a non-bool int or float, finite and positive."""
     if isinstance(value, bool) or not isinstance(value, int | float):
@@ -344,7 +352,8 @@ class Shell:
     Reuse ``sh``: FIFO commands preserve cwd, variables, options and traps.
     A new Shell starts fresh in the workspace; bash starts on first use.
 
-    Timeout returns 124 with ``timed_out=True``. Timeout/cancel skips remaining
+    ``timeout`` defaults to 600 s. Timeout returns 124 with ``timed_out=True``
+    and a note in stderr on how to go on. Timeout/cancel skips remaining
     commands, usually retaining state. Unstoppable builtins or a USR1 trap may
     force a restart. ``set -e`` or ``exit N`` can end bash; the next command starts
     fresh. Other options persist; results report lost state.
@@ -698,6 +707,8 @@ class Shell:
                 notes = self._check_bash(pidfile, code, timed_out, ended)
             else:  # restarted at the deadline: this result says so
                 notes = restart_notes
+            if timed_out:
+                notes.append(_timeout_note(timeout))
             result = _result(code, timed_out, out, err, str(session.cwd))
             if kept is None:
                 self._retain(result, out, err)

@@ -55,6 +55,9 @@ async def test_one_shot_result_and_streams(manager, tmp_path):
 async def test_one_shot_timeout(manager):
     r = await manager.launch(Shell().run("sleep 30; echo never", timeout=0.3))
     assert (r.returncode, r.timed_out, r.stdout) == (124, True, "")
+    # The result says how to go on: a larger timeout=, or the background.
+    assert "[timed out after 0.3 s: pass a larger timeout= for a longer command" in r.stderr
+    assert "self.jobs.launch(sh.run(cmd, timeout=...), name=...)]" in r.stderr
 
 
 async def test_long_output_bounded_with_retained_file(manager):
@@ -675,7 +678,7 @@ def test_timeout_is_a_run_parameter_not_shell_configuration():
 
     params = inspect.signature(Shell.run).parameters
     assert params["timeout"].kind is inspect.Parameter.KEYWORD_ONLY
-    assert params["timeout"].default == 1800.0  # omitted: 30 minutes
+    assert params["timeout"].default == 600.0  # omitted: 10 minutes
     assert "timeout" not in inspect.signature(Shell).parameters
     assert not hasattr(Shell(), "timeout")
     with pytest.raises(TypeError):

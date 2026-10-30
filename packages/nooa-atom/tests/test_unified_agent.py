@@ -322,7 +322,7 @@ async def test_a_shell_timeout_delivers_a_result_and_wakes_the_waiting_turn(
     models.scripts[None] = [
         cell(
             "import inspect\n"
-            "assert inspect.signature(Shell.run).parameters['timeout'].default == 1800.0\n"
+            "assert inspect.signature(Shell.run).parameters['timeout'].default == 600.0\n"
             "self.jobs.launch(Shell().run('sleep 30; echo never', timeout=0.5), name='slow')\n"
             "return_result(Waiting(explanation='slow command running', on=['slow']))"
         ),
@@ -332,6 +332,7 @@ async def test_a_shell_timeout_delivers_a_result_and_wakes_the_waiting_turn(
             "r = event.value\n"
             "assert isinstance(r, CommandResult), r\n"
             "assert (r.returncode, r.timed_out, r.stdout) == (124, True, ''), r\n"
+            "assert 'pass a larger timeout=' in r.stderr, r\n"
             "return_result(Done(explanation='timed out as expected'))"
         ),
     ]
