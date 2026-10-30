@@ -514,7 +514,7 @@ job = self.jobs.launch(sh.run("make"), name="build", progress=Throttle(seconds=5
 job.set_progress(None)  # quiet again
 self.jobs.after(120, name="t")  # timer: a delay counts from now: subtract time you have already spent
 self.jobs.every(60, name="poll")  # tick items
-self.jobs.launch(sh.run("tail -F app.log", timeout=3600), name="log", progress=Throttle(seconds=5))  # follow a file
+self.jobs.launch(Shell().run("tail -F app.log", timeout=3600), name="log", progress=Throttle(seconds=5))  # own Shell: one command at a time
 self.jobs.launch(sh.run("pytest -q"), name="tests")
 job = self.jobs.launch(Shell(), name="sh")
 r = await job.send("make")
