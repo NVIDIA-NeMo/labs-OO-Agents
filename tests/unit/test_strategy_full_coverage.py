@@ -180,55 +180,42 @@ class TestCodeActGenerationIdNone:
 
 
 # ===========================================================================
-# CODEACT: Lines 626-627 — BlockSyntaxError handler + continue
+# CODEACT: BlockSyntaxError from context assembly is fatal
 # ===========================================================================
 
 
 class TestCodeActBlockSyntaxError:
-    """Cover lines 625-627: BlockSyntaxError catch → handler → continue."""
+    """BlockSyntaxError from context assembly propagates without retry."""
 
     @pytest.mark.asyncio
-    async def test_block_syntax_error_recovery(self):
-        """When generate() raises BlockSyntaxError, the loop should
-        handle it and continue to the next iteration (lines 625-627)."""
+    async def test_block_syntax_error_is_not_retried(self):
+        """A declaration that bypassed validation fails once instead of looping."""
         from nooa.context_blocks.exceptions import BlockSyntaxError
 
         class TestAgent(Agent, llm=_TEST_LLM):
-            @strategy(CodeActStrategy(config=CodeActConfig(max_iterations=3)))
+            @strategy(CodeActStrategy(config=CodeActConfig(max_iterations=None)))
             async def do_task(self) -> int:
                 """Do a task."""
                 ...
 
-        fake_llm = FakeLLMClient(
-            scripted_responses=[
-                # Second call after error recovery
-                _resp("", tool_calls=[_return_result(result=99)]),
-            ]
-        )
-        agent = TestAgent(llm=fake_llm)
+        agent = TestAgent(llm=FakeLLMClient(scripted_responses=[]))
+        calls = [0]
 
-        call_count = [0]
-
-        # Patch within the agent execution
         from nooa.runtime.actor import ActorRuntime
 
-        orig_gen = ActorRuntime.generate
-
         async def patched_generate(self_rt, *args, **kwargs):
-            call_count[0] += 1
-            if call_count[0] == 1:
-                raise BlockSyntaxError(
-                    key="test_block",
-                    expr="invalid python [[[",
-                    original_error=SyntaxError("invalid syntax"),
-                )
-            return await orig_gen(self_rt, *args, **kwargs)
+            calls[0] += 1
+            raise BlockSyntaxError(
+                key="test_block",
+                expr="invalid python [[[",
+                original_error=SyntaxError("invalid syntax"),
+            )
 
-        call_count[0] = 0
         with patch.object(ActorRuntime, "generate", patched_generate):
-            result = await agent.do_task()
+            with pytest.raises(BlockSyntaxError):
+                await agent.do_task()
 
-        assert result == 99
+        assert calls[0] == 1
 
 
 # ===========================================================================

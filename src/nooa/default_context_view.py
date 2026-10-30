@@ -80,14 +80,16 @@ async def _resolve_value(
     key: str,
     value: Any,
     *,
-    agent: "Agent",
+    owner: Any,
     call: "CurrentCall",
 ) -> str:
-    """Resolve one declaration using the framework expression environment."""
+    """Resolve one declaration with ``self`` bound to its declaring owner."""
+    if isinstance(value, Context):
+        value = value.value if value.expr is None else DynamicContext(value.expr)
     if not isinstance(value, DynamicContext):
         return context_text(value, call=call)
     try:
-        resolved = await evaluate_context_expression(value.expr, owner=agent, call=call)
+        resolved = await evaluate_context_expression(value.expr, owner=owner, call=call)
     except Exception as exc:
         logger.warning(
             "Dynamic context block %r failed to resolve: %s: %s (expr: %s)",
@@ -118,7 +120,7 @@ async def materialize_manager_blocks(
             continue
 
         is_dynamic = isinstance(value, DynamicContext)
-        content = await _resolve_value(key, value, agent=agent, call=call)
+        content = await _resolve_value(key, value, owner=agent, call=call)
         if is_dynamic:
             resolved_cache[key] = content
         protected = manager.is_protected(key)
@@ -285,7 +287,7 @@ async def apply_block_overrides(
         else:
             is_static = not isinstance(value, DynamicContext)
 
-        content = await _resolve_value(key, value, agent=agent, call=call)
+        content = await _resolve_value(key, value, owner=agent, call=call)
         metadata = BlockMetadata(
             expr=value.expr if isinstance(value, DynamicContext) else static_expr(key),
             static=is_static,
@@ -368,13 +370,17 @@ async def collect_skill_blocks(
     for skill in active_skills(agent):
         if skill.context_block is None:
             continue
-        key, expression = skill.context_block
+        key, declaration = skill.context_block
         if key in disabled or key in declaration_keys or agent.context_manager.is_protected(key):
             continue
-        value = await _resolve_value(key, DynamicContext(expression), agent=agent, call=call)
-        block = _block(
-            key, value, BlockMetadata(expr=expression, user_block=True, source_dynamic=True)
+        content = await _resolve_value(key, declaration, owner=skill, call=call)
+        metadata = BlockMetadata(
+            expr=declaration.expr,
+            static=declaration.prefix,
+            user_block=True,
+            source_dynamic=declaration.is_dynamic,
         )
+        block = _block(key, content, metadata)
         blocks = replace_blocks_by_key(blocks, [block])
     return blocks
 

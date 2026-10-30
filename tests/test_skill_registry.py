@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from nooa.context_blocks import Context
 from nooa.skill import Skill
 from nooa.skill_registry import SkillRegistry
 
@@ -227,7 +228,7 @@ class TestActivation:
 class SkillWithContextBlock(Skill):
     """A skill that declares a context block."""
 
-    context_block = ("my_status", "self.my_skill.status()")
+    context_block = ("my_status", Context(expr="self.status()"))
 
     def status(self) -> str:
         return "ok"

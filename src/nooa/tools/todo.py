@@ -13,7 +13,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
-from nooa import Skill, hidden
+from nooa import Context, Skill, hidden
 from nooa.storage.markers import snapshotable
 from nooa.storage.persistent_vars import PersistentVars
 from nooa.storage.snapshot_vars import SnapshotVars
@@ -153,7 +153,7 @@ class TodoManager(Skill):
     """
 
     __nosnapshot__ = False  # Override Skill's __nosnapshot__ = True
-    context_block = ("todo_status", "self.todo.status()")
+    context_block = ("todo_status", Context(expr="self.status()"))
 
     def __init__(self, state: dict | None = None) -> None:
         self._todos: dict[str, Todo] = {}

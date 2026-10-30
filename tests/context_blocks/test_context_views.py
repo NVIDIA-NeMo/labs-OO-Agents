@@ -11,6 +11,7 @@ from nooa import (
     Block,
     CacheBoundary,
     CodeActView,
+    Context,
     ContextView,
     DynamicContext,
     Skill,
@@ -175,7 +176,7 @@ def test_skill_constructor_argument_is_not_intercepted():
 
 async def test_custom_agent_view_bypasses_managers_and_skills():
     class DeclaredSkill(Skill):
-        context_block = ("skill", "'skill'")
+        context_block = ("skill", Context("skill"))
 
     class Example(Agent, llm=object()):
         skill = DeclaredSkill()
@@ -217,7 +218,7 @@ async def test_method_view_composes_explicit_boundary_contribution():
 
 async def test_hidden_skill_contributes_nothing():
     class DeclaredSkill(Skill):
-        context_block = ("hidden_skill", "'secret'")
+        context_block = ("hidden_skill", Context("secret"))
 
     class Example(Agent, llm=object()):
         def __init__(self):
@@ -237,7 +238,7 @@ async def test_registry_skill_contributes_only_while_active():
     from nooa.skill_registry import SkillRegistry
 
     class RegisteredSkill(Skill):
-        context_block = ("registered", "'active'")
+        context_block = ("registered", Context("active"))
 
     class Example(Agent, llm=object()):
         def __init__(self):
@@ -269,7 +270,7 @@ async def test_hidden_active_registry_skill_contributes_nothing():
     from nooa.skill_registry import SkillRegistry
 
     class RegisteredSkill(Skill):
-        context_block = ("registered", "'active'")
+        context_block = ("registered", Context("active"))
 
     class Example(Agent, llm=object()):
         def __init__(self):
@@ -288,10 +289,10 @@ async def test_hidden_active_registry_skill_contributes_nothing():
 
 async def test_skill_declaration_is_materialized_by_strategy_view():
     class DeclaredSkill(Skill):
-        context_block = ("skill_state", "self.value")
+        context_block = ("skill_state", Context(expr="self.value"))
+        value = "ready"
 
     class Example(Agent, llm=object()):
-        value = "ready"
         skill = DeclaredSkill()
 
         async def run(self): ...
@@ -307,20 +308,75 @@ async def test_skill_declaration_is_materialized_by_strategy_view():
     assert block.metadata.source_dynamic is True
 
 
+@pytest.mark.parametrize(
+    "declaration",
+    [("notes", "self.notes.render("), ("notes", Context(expr="'a'"), "extra"), ("notes",)],
+    ids=["raw-string", "three-tuple", "one-tuple"],
+)
+def test_malformed_skill_declaration_fails_at_class_definition(declaration):
+    with pytest.raises(TypeError, match="context_block must be"):
+
+        class _BadSkill(Skill):
+            context_block = declaration
+
+
+def test_skill_expression_syntax_error_fails_at_class_definition():
+    from nooa.context_blocks.exceptions import BlockSyntaxError
+
+    with pytest.raises(BlockSyntaxError):
+
+        class _BadSkill(Skill):
+            context_block = ("notes", Context(expr="self.render("))
+
+
+async def test_skill_expression_binds_skill_under_any_attribute_name():
+    from nooa.tools.todo import TodoManager
+
+    class Example(Agent, llm=object()):
+        def __init__(self):
+            super().__init__()
+            self.todos = TodoManager()
+
+        async def run(self): ...
+
+    agent = Example()
+    agent.todos.add("ship the fix")
+    items = await agent.runtime._prepare_context(Example.run)
+    block = next(item for item in items if getattr(item, "key", None) == "todo_status")
+    assert "ship the fix" in block.content
+    assert "Error" not in block.content
+
+
+async def test_prefixed_skill_context_is_static():
+    class DeclaredSkill(Skill):
+        context_block = ("guide", Context("Use the guide.", prefix=True))
+
+    class Example(Agent, llm=object()):
+        skill = DeclaredSkill()
+
+        async def run(self): ...
+
+    items = await Example().runtime._prepare_context(Example.run)
+    block = next(item for item in items if getattr(item, "key", None) == "guide")
+    assert block.content == "Use the guide."
+    assert block.metadata is not None and block.metadata.static is True
+    assert block.metadata.source_dynamic is False
+
+
 async def test_disabled_key_suppresses_default_skill_shorthand():
     class DeclaredSkill(Skill):
-        context_block = ("skill_state", "self.read_skill_state()")
+        context_block = ("skill_state", Context(expr="self.read_skill_state()"))
+        reads = 0
+
+        def read_skill_state(self):
+            self.reads += 1
+            return "visible"
 
     class Example(Agent, llm=object()):
         skill = DeclaredSkill()
 
         def __init__(self):
             super().__init__()
-            self.reads = 0
-
-        def read_skill_state(self):
-            self.reads += 1
-            return "visible"
 
         async def run(self): ...
 
@@ -328,13 +384,13 @@ async def test_disabled_key_suppresses_default_skill_shorthand():
     agent.context["skill_state"] = None
     items = await agent.runtime._prepare_context(Example.run)
     assert "skill_state" not in [getattr(item, "key", None) for item in items]
-    assert agent.reads == 0
+    assert agent.skill.reads == 0
 
 
 @pytest.mark.parametrize("method", [False, True])
 async def test_skill_discovery_does_not_reserve_active_skills_name(method):
     class DeclaredSkill(Skill):
-        context_block = ("skill_state", "'visible'")
+        context_block = ("skill_state", Context("visible"))
 
     class Example(Agent, llm=object()):
         skill = DeclaredSkill()
@@ -357,41 +413,41 @@ async def test_skill_discovery_does_not_reserve_active_skills_name(method):
 
 async def test_protected_key_suppresses_skill_fallback_without_evaluation():
     class DeclaredSkill(Skill):
-        context_block = ("state", "self.read_skill_state()")
+        context_block = ("state", Context(expr="self.read_skill_state()"))
+        reads = 0
+
+        def read_skill_state(self):
+            self.reads += 1
+            return "skill state"
 
     class Example(Agent, llm=object()):
         skill = DeclaredSkill()
 
         def __init__(self):
             super().__init__()
-            self.reads = 0
-
-        def read_skill_state(self):
-            self.reads += 1
-            return "skill state"
 
         async def run(self): ...
 
     agent = Example()
     items = await agent.runtime._prepare_context(Example.run)
     assert len([item for item in items if getattr(item, "key", None) == "state"]) == 1
-    assert agent.reads == 0
+    assert agent.skill.reads == 0
 
 
 async def test_manager_declaration_wins_without_evaluating_skill_fallback():
     class DeclaredSkill(Skill):
-        context_block = ("skill_state", "self.read_skill_state()")
+        context_block = ("skill_state", Context(expr="self.read_skill_state()"))
+        reads = 0
+
+        def read_skill_state(self):
+            self.reads += 1
+            return "fallback"
 
     class Example(Agent, llm=object()):
         skill = DeclaredSkill()
 
         def __init__(self):
             super().__init__(context={"skill_state": "explicit"})
-            self.reads = 0
-
-        def read_skill_state(self):
-            self.reads += 1
-            return "fallback"
 
         async def run(self): ...
 
@@ -399,7 +455,7 @@ async def test_manager_declaration_wins_without_evaluating_skill_fallback():
     items = await agent.runtime._prepare_context(Example.run)
     block = next(item for item in items if getattr(item, "key", None) == "skill_state")
     assert block.content == "explicit"
-    assert agent.reads == 0
+    assert agent.skill.reads == 0
 
 
 async def test_default_view_partitions_and_evicts_manager_blocks():
@@ -427,7 +483,7 @@ async def test_default_view_partitions_and_evicts_manager_blocks():
 
 async def test_default_skill_shorthand_keeps_legacy_trailing_order():
     class DeclaredSkill(Skill):
-        context_block = ("skill", "'skill'")
+        context_block = ("skill", Context("skill"))
 
     class Example(Agent, llm=object(), context={"tail": DynamicContext("'tail'")}):
         skill = DeclaredSkill()
@@ -558,7 +614,7 @@ async def test_custom_view_without_boundary_gets_no_implicit_boundary():
 
 async def test_agent_view_controls_exact_skill_placement():
     class DeclaredSkill(Skill):
-        context_block = ("skill", "'skill'")
+        context_block = ("skill", Context("skill"))
 
     class PlacementView:
         async def assemble(self, agent, call):
