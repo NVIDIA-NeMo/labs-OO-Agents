@@ -68,6 +68,19 @@ def _describe_exceptions(exceptions: Sequence[BaseException]) -> str:
     return "; ".join(deduped)
 
 
+class MCPToolError(RuntimeError):
+    """An MCP tool reported an error (``isError``); ``message`` is the server's text."""
+
+    def __init__(self, server: str, tool: str, message: str | None = None) -> None:
+        super().__init__(
+            f"MCP tool {tool!r} on {server!r} returned an error"
+            + (f": {message}" if message else "")
+        )
+        self.server = server
+        self.tool = tool
+        self.message = message
+
+
 @dataclass
 class MCPToolSpec:
     """Represents an MCP tool specification from a server.
@@ -77,12 +90,14 @@ class MCPToolSpec:
         description: Tool description
         input_schema: Raw JSON schema dictionary
         required: Set of required parameter names
+        output_schema: JSON schema of the structured result, if the tool declares one
     """
 
     name: str
     description: str
     input_schema: dict[str, Any]
     required: set[str] = field(default_factory=set)
+    output_schema: dict[str, Any] | None = None
 
 
 def _json_schema_type_to_python_type(json_type: str) -> type:
@@ -117,6 +132,7 @@ def _create_method_from_schema(
     input_schema: dict[str, Any],
     required: set[str],
     mcp_tool_class: type,
+    output_schema: dict[str, Any] | None = None,
 ) -> types.FunctionType:
     """Create a properly typed async method from JSON schema.
 
@@ -138,6 +154,7 @@ def _create_method_from_schema(
         input_schema: Raw JSON schema dictionary (must have "type": "object" and "properties")
         required: Set of required parameter names from JSON Schema
         mcp_tool_class: The MCPTool class (for type annotation)
+        output_schema: The tool's output schema; when set, the method returns ``dict[str, Any]``
 
     Returns:
         An async function with proper type annotations and constraint documentation.
@@ -418,7 +435,7 @@ Args:
 
     # Set annotations
     func.__annotations__ = {
-        "return": Any,
+        "return": dict[str, Any] if output_schema else Any,
         **{name: annotations[name] for name in param_names},
     }
 
@@ -496,6 +513,7 @@ def _make_dynamic_class(
             input_schema=spec.input_schema,
             required=spec.required,
             mcp_tool_class=mcp_tool_class,
+            output_schema=spec.output_schema,
         )
 
         methods[method_name] = method
@@ -510,7 +528,10 @@ def _make_dynamic_class(
     if not class_name.isidentifier():
         class_name = "DynamicMCPServerTools"
 
-    class_doc = f"MCP server '{server_name}'."
+    class_doc = (
+        f"MCP server '{server_name}'. A tool returns the structured result (dict) if the "
+        "server sends one, else the text; an error result raises MCPToolError."
+    )
     reserved = {"__doc__", "_tool_method_names"}
     collisions = reserved.intersection(methods)
     if collisions:
@@ -614,6 +635,8 @@ class MCPTool:
 
         try:
             return await self._invoke(tool_name, clean_args)
+        except MCPToolError:
+            raise  # The server's own error: its message, not a transport failure.
         except Exception as exc:
             # A cached access token can expire between connect and call. Surface
             # the *real* cause (a streaming MCP transport otherwise masks a 401
@@ -647,18 +670,24 @@ class MCPTool:
         async with self._client.connect_to_server() as session:
             result = await session.call_tool(tool_name, clean_args)
 
-        if getattr(result, "isError", False) is True:
+        # ``is_error``/``structured_content``: the snake_case names of newer SDKs.
+        structured = getattr(result, "structuredContent", None)
+        if structured is None:
+            structured = getattr(result, "structured_content", None)
+        if getattr(result, "isError", None) is True or getattr(result, "is_error", None) is True:
             details = None
             if hasattr(result, "content") and result.content:
                 for content in result.content:
                     if hasattr(content, "text") and content.text:
                         details = content.text
                         break
+            if details is None and structured:
+                details = json.dumps(structured, default=str)
+            raise MCPToolError(self._server_name, tool_name, details)
 
-            raise RuntimeError(
-                f"MCP tool {tool_name!r} on {self._server_name!r} returned an error"
-                + (f": {details}" if details else "")
-            )
+        if isinstance(structured, dict) and not _wraps_text(structured, result):
+            # The tool's typed result; its text content is a serialized copy.
+            return structured
 
         if hasattr(result, "content") and result.content:
             for content in result.content:
@@ -734,6 +763,7 @@ def _create_tool_instance(
                 description=tool.description or "",
                 input_schema=input_schema,
                 required=set(input_schema.get("required", [])),
+                output_schema=_tool_output_schema(tool),
             )
         )
 
@@ -750,6 +780,37 @@ def _tool_input_schema(tool: Any) -> dict[str, Any]:
         if isinstance(schema, dict):
             return schema
     return {}
+
+
+def _wraps_text(structured: dict[str, Any], result: Any) -> bool:
+    """Whether ``structured`` only wraps the text result, as ``{"result": <the text>}``.
+
+    FastMCP servers wrap a non-object return value (``-> str``) that way; such
+    a tool still returns its text, as it did before structured content.
+    """
+    if set(structured) != {"result"}:
+        return False
+    wrapped = structured["result"]
+    for content in getattr(result, "content", None) or ():
+        text = getattr(content, "text", None)
+        if not isinstance(text, str):
+            continue
+        if text == wrapped:
+            return True
+        try:
+            return json.loads(text) == wrapped
+        except ValueError:
+            return False
+    return False
+
+
+def _tool_output_schema(tool: Any) -> dict[str, Any] | None:
+    """The tool's declared output schema, across MCP SDK field naming conventions."""
+    for attribute in ("output_schema", "outputSchema"):
+        schema = getattr(tool, attribute, None)
+        if isinstance(schema, dict):
+            return schema
+    return None
 
 
 async def _list_server_tools(server_name: str, client: Any) -> Any:

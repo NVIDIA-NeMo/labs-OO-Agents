@@ -155,3 +155,109 @@ async def test_401_refresh_fails_raises_actionable(monkeypatch):
     monkeypatch.setattr(tool, "_refresh_access_token", fake_refresh)
     with pytest.raises(RuntimeError, match="re-authenticate|Re-authenticate"):
         await tool._call_tool("x", {})
+
+
+class _OneResultClient:
+    """A client whose session answers every call with ``result``."""
+
+    def __init__(self, result):
+        self._result = result
+
+    def connect_to_server(self):
+        result = self._result
+
+        class _Session:
+            async def call_tool(self, name, args):
+                return result
+
+        class _CM:
+            async def __aenter__(self):
+                return _Session()
+
+            async def __aexit__(self, *a):
+                return False
+
+        return _CM()
+
+
+@pytest.mark.asyncio
+async def test_an_error_result_raises_mcp_tool_error_with_the_servers_message():
+    from nooa.mcp import MCPToolError
+
+    result = CallToolResult(
+        isError=True, content=[TextContent(type="text", text="transfer_rejected: no room")]
+    )
+    with pytest.raises(MCPToolError) as exc_info:
+        await _make_tool(_OneResultClient(result))._call_tool("transfer", {})
+    error = exc_info.value
+    assert isinstance(error, RuntimeError)  # callers catching RuntimeError still do
+    assert (error.server, error.tool, error.message) == (
+        "test-server",
+        "transfer",
+        "transfer_rejected: no room",
+    )
+    assert str(error) == (
+        "MCP tool 'transfer' on 'test-server' returned an error: transfer_rejected: no room"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_snake_case_is_error_result_raises_too():
+    from types import SimpleNamespace
+
+    from nooa.mcp import MCPToolError
+
+    result = SimpleNamespace(
+        is_error=True, structured_content={"error": {"code": "denied"}}, content=[]
+    )
+    with pytest.raises(MCPToolError, match='"code": "denied"'):
+        await _make_tool(_OneResultClient(result))._call_tool("read", {})
+
+
+@pytest.mark.asyncio
+async def test_structured_content_is_returned_as_a_dict():
+    result = CallToolResult(
+        content=[TextContent(type="text", text='{"receipt": "PUB-1"}')],
+        structuredContent={"receipt": "PUB-1"},
+    )
+    assert await _make_tool(_OneResultClient(result))._call_tool("publish", {}) == {
+        "receipt": "PUB-1"
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_text_only_result_is_returned_as_its_text():
+    result = CallToolResult(content=[TextContent(type="text", text='{"receipt": "PUB-1"}')])
+    assert (
+        await _make_tool(_OneResultClient(result))._call_tool("publish", {})
+        == '{"receipt": "PUB-1"}'
+    )
+
+
+def test_a_tool_with_an_output_schema_is_annotated_as_returning_a_dict():
+    from typing import Any
+
+    from mcp.types import ListToolsResult, Tool
+
+    from nooa.mcp.tool import _create_tool_instance
+
+    tools = ListToolsResult(
+        tools=[
+            Tool(name="typed", inputSchema={"type": "object"}, outputSchema={"type": "object"}),
+            Tool(name="plain", inputSchema={"type": "object"}),
+        ]
+    )
+    tool = _create_tool_instance("srv", _OneResultClient(None), tools)
+    assert type(tool).typed.__annotations__["return"] == dict[str, Any]
+    assert type(tool).plain.__annotations__["return"] is Any
+    assert "raises MCPToolError" in type(tool).__doc__
+
+
+@pytest.mark.asyncio
+async def test_a_wrapped_text_result_is_still_returned_as_its_text():
+    """FastMCP wraps ``-> str`` / ``-> int`` results as ``{"result": ...}``."""
+    for text, wrapped in (("## Notes", "## Notes"), ("5", 5)):
+        result = CallToolResult(
+            content=[TextContent(type="text", text=text)], structuredContent={"result": wrapped}
+        )
+        assert await _make_tool(_OneResultClient(result))._call_tool("notes", {}) == text
