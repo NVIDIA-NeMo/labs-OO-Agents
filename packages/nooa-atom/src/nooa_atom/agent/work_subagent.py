@@ -167,7 +167,8 @@ class Subagent:
     (``rev = self.jobs.launch(Subagent("review"), name="review")``) it is a
     kept child: each ``rev.send(todo or text)`` is a request whose result is
     a ``TaskResult`` or a ``Question``; answer with the next ``send``.
-    Cancelling a request stops the child's turn; cancelling ``rev`` closes
+    Awaiting a request blocks until the child ends its turn (with a
+    ``TaskResult`` or a ``Question``). Cancelling a request stops the child's turn; cancelling ``rev`` closes
     it. The brief is all it sees of your task, and its ``self.message()``
     notes arrive as job items.
     """
