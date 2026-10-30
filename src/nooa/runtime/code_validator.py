@@ -210,12 +210,16 @@ _AWAIT_HINT = (
 
 
 def _module_fix_hint(
-    module_name: str, shell: bool | str | None, call: str | None = None
+    module_name: str,
+    shell: bool | str | None,
+    call: str | None = None,
+    denied: frozenset[str] = frozenset(),
 ) -> str | None:
     """Point a blocked module/call at an alternative the agent actually has.
 
     ``shell`` is how the agent runs a command (see ``_shell_hint``); ``True``
     means ``self.shell.run``, a falsy value that the agent has no shell.
+    ``denied``: the active deny lists; a denied ``httpx`` is not recommended.
     """
     if shell is True:
         shell = _SHELL_RUN_HINT
@@ -224,6 +228,8 @@ def _module_fix_hint(
     if root is not None or (module_name, call) in _PROCESS_CALLS:
         return shell
     if match_blocked_module(module_name, _NETWORK_MODULES) is not None:
+        if match_blocked_module("httpx", denied) is not None:
+            return f"curl: {shell}" if shell else None
         return f"{_HTTP_HINT}, or curl: {shell}" if shell else _HTTP_HINT
     if module_name == "asyncio" and call in ("run", "run_until_complete"):
         return (
@@ -667,7 +673,11 @@ class _SecurityVisitor(ast.NodeVisitor):
             col=node.col_offset,
             message=msg,
             code="E002",
-            fix_hint=_module_fix_hint(module_name, _shell_hint(self.context.agent)),
+            fix_hint=_module_fix_hint(
+                module_name,
+                _shell_hint(self.context.agent),
+                denied=self.context.blocked_modules | self.context.restricted_imports,
+            ),
         )
 
 
@@ -1373,6 +1383,7 @@ class _BlockingCallVisitor(ast.NodeVisitor):
         # True (``self.shell.run``) or the agent's own hint for running a command.
         self.has_shell = has_shell
         self.blocked_modules = restrictions.blocked_modules
+        self.denied_modules = restrictions.blocked_modules | restrictions.restricted_imports
         self.blocked_calls = restrictions.blocked_calls
         self.issues: list[ValidationIssue] = []
         # Track local variables assigned from constructors on blocked-call modules.
@@ -1419,7 +1430,9 @@ class _BlockingCallVisitor(ast.NodeVisitor):
                 ),
                 code="E310",
                 severity="error",
-                fix_hint=_module_fix_hint(module_name, self.has_shell, call_name),
+                fix_hint=_module_fix_hint(
+                    module_name, self.has_shell, call_name, denied=self.denied_modules
+                ),
             )
         )
 
