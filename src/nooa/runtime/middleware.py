@@ -138,6 +138,8 @@ class LLMCallContext(BaseModel):
                 Read-only: route overrides belong in params, not a replacement client.
         context_view: Selected view for this invocation, or None for direct requests.
                       Informational; changing views requires a new assembly.
+        event_ids: Ids of the events the view placed in ``messages``. Middleware
+                   that removes event content from ``messages`` updates it.
         response: ``None`` on the way *in*; set to the ``LLMResponse`` by the
                   innermost handler on the way *out*.
     """
@@ -150,6 +152,7 @@ class LLMCallContext(BaseModel):
     runtime: ActorRuntime | None = None
     client: UnifiedLLM | None = Field(default=None, frozen=True)
     context_view: Any = Field(default=None, frozen=True)
+    event_ids: frozenset[str] = frozenset()
     response: LLMResponse | None = None
 
 

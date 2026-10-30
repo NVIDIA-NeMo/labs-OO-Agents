@@ -700,12 +700,7 @@ class TokenBudgetSummarizer(SummarizationAgent):
     @no_trace
     async def _compact_after_call(self, ctx: Any, nxt: Any) -> Any:
         """Observe usage; compact stored state rather than the parent's projection."""
-        from nooa.default_context_view import (
-            CodeActV2View,
-            CodeActView,
-            PredictView,
-            PurePythonView,
-        )
+        from nooa.context_view import is_model_visible
 
         if _in_summary_fork.get() or self._pending_task is not None or self._unsub_llm is None:
             return await nxt(ctx)
@@ -735,15 +730,15 @@ class TokenBudgetSummarizer(SummarizationAgent):
             or ctx.client is None
         ):
             return ctx
-        reuse_prefix = type(ctx.context_view) in (
-            CodeActView,
-            CodeActV2View,
-            PredictView,
-            PurePythonView,
-        )
         source = self._select_source(pairs)
         if not source:
             return ctx
+        # Reuse the parent request only when it carries every event to summarize.
+        reuse_prefix = all(
+            event.id in ctx.event_ids
+            for _, event in pairs[: len(source)]
+            if is_model_visible(event)
+        )
         start, end = source[0][0], source[-1][0]
         text = ""
         if not reuse_prefix:
@@ -758,8 +753,6 @@ class TokenBudgetSummarizer(SummarizationAgent):
                 return ctx
         self._pending_source = source
         self._pending_range = (start, end)
-        # Exact type intentionally excludes customized subclasses. This is only
-        # an optimization: unknown views still get independent state compaction.
         if reuse_prefix:
             self._pending_task = asyncio.create_task(self._run_cached_summary(ctx))
         else:
