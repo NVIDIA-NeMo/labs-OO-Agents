@@ -425,3 +425,84 @@ class TestIntegrationSpawnFlushReplaceRespawn:
         assert h.state == "cancelled"
 
         await qm.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# Cancellation propagation
+# ---------------------------------------------------------------------------
+
+
+async def test_shutdown_does_not_swallow_the_callers_own_cancellation():
+    """A caller cancelled inside shutdown() must stay cancelled.
+
+    ``Task.cancel()`` delegates to the future the task is awaiting, so the
+    caller's own CancelledError arrives at the same ``await self._task`` that
+    JobHandle.cancel() uses to reap the job it just cancelled.
+    """
+    qm = QueueManager()
+    qm.queue("slow")
+
+    async def slow_job():
+        try:
+            await asyncio.sleep(100)
+        except asyncio.CancelledError:
+            await asyncio.sleep(0.2)  # cleanup holds the caller inside cancel()
+            raise
+
+    qm.spawn(slow_job(), channel="slow")
+    await asyncio.sleep(0)  # let the job task start
+
+    reached_end = False
+
+    async def caller():
+        nonlocal reached_end
+        await qm.shutdown()
+        reached_end = True
+
+    task = asyncio.create_task(caller())
+    await asyncio.sleep(0.05)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert not reached_end
+
+
+async def test_race_does_not_swallow_the_callers_own_cancellation():
+    """A caller cancelled inside race() must stay cancelled.
+
+    race() cancels the losing drain tasks and awaits each one to reap it. That
+    ``await`` is where a cancellation aimed at the *caller* is delivered too, so
+    a blanket handler there cannot tell the two apart and drops the caller's.
+    """
+    qm = QueueManager()
+    fast = qm.queue("fast")
+    slow = qm.queue("slow")
+
+    async def slow_to_cancel():
+        try:
+            await asyncio.sleep(100)
+        except asyncio.CancelledError:
+            await asyncio.sleep(0.2)  # unwinding holds the caller inside `await t`
+            raise
+
+    # race() drains losers through the internal _drain_one; make the loser's
+    # cancellation slow so the caller is provably inside that await.
+    slow._drain_one = slow_to_cancel  # type: ignore[method-assign]
+
+    reached_end = False
+
+    async def caller():
+        nonlocal reached_end
+        await qm.race()
+        reached_end = True
+
+    task = asyncio.create_task(caller())
+    await asyncio.sleep(0)  # let race() reach asyncio.wait
+    fast.put("winner")  # fast wins; slow becomes a pending loser
+    await asyncio.sleep(0.05)  # race() is now reaping the loser
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert not reached_end
