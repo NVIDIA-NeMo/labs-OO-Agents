@@ -36,6 +36,14 @@ _NOTE_CHARS = 400
 _NOTES_SHOWN = 8
 _ROWS_SHOWN = 15
 _TITLE_MATCHES_SHOWN = 5
+_IDS_SHOWN = 8  # ids a failed lookup lists
+_TITLE_SHOWN = 30  # characters of each listed title
+
+
+def _short(title: str) -> str:
+    return title if len(title) <= _TITLE_SHOWN else title[: _TITLE_SHOWN - 1] + "…"
+
+
 _DONE_SHOWN = 4
 _STATUS_CHARS = 8_000
 
@@ -124,8 +132,13 @@ class TodoList(Skill):
 
     # ── the agent's interface ─────────────────────
 
-    def add(self, title: str, description: str = "", **legacy: Any) -> Todo:
+    def add(self, title: str, description: str = "", *extra: Any, **legacy: Any) -> Todo:
         """Add an open item."""
+        if extra:
+            raise TypeError(
+                f"add() takes add(title, description=''), got {2 + len(extra)} positional "
+                "arguments; put everything else in the description, then use the Todo it returns"
+            )
         notes = legacy.pop("notes", None)
         if notes is not None:
             if description:
@@ -171,6 +184,9 @@ class TodoList(Skill):
         self._held().complete(todo_id)
 
     # ── hidden: earlier calls and the manager's own ──
+
+    def __getitem__(self, key: Any) -> Any:
+        raise TypeError(f"self.todo is not subscriptable; use self.todo.get({key!r})")
 
     def __getattr__(self, name: str) -> Any:
         # Everything else TodoManager offers (update, list_todos, active, set_var,
@@ -311,7 +327,17 @@ class TodoList(Skill):
                 if len(matches) > _TITLE_MATCHES_SHOWN:
                     shown += f", +{len(matches) - _TITLE_MATCHES_SHOWN} more"
                 raise ValueError(f"ambiguous item title {todo!r}; use an id: {shown}")
-        raise ValueError(f"no item {todo_id!r}; ids are shown in todo_status")
+        raise ValueError(f"no item {todo_id!r}; {self._valid_ids()}")
+
+    def _valid_ids(self) -> str:
+        """The current ids with short titles, bounded, for a lookup error."""
+        items = list(self._manager._todos.items())
+        if not items:
+            return "the list is empty: add one with self.todo.add(title, description)"
+        shown = ", ".join(f"{key} ({_short(item.title)})" for key, item in items[:_IDS_SHOWN])
+        if len(items) > _IDS_SHOWN:
+            shown += f", +{len(items) - _IDS_SHOWN} more (see todo_status)"
+        return f"valid ids: {shown}"
 
     def _known(self, value: Any) -> bool:
         value = self._coerce(value)
