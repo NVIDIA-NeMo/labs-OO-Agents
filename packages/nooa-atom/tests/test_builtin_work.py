@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""``self.jobs.after/every/tail`` in a real Atom turn: they wake a ``Waiting`` turn."""
+"""``self.jobs.after/every`` in a real Atom turn: they wake a ``Waiting`` turn."""
 
 import asyncio
 
@@ -61,21 +61,12 @@ async def test_after_wakes_a_waiting_turn(tmp_path, sessions_dir):
     assert len(calls) == 2
 
 
-async def test_tail_and_every_in_a_turn(tmp_path, sessions_dir):
+async def test_every_in_a_turn(tmp_path, sessions_dir):
     calls = await _run(
         tmp_path,
         sessions_dir,
         [
             cell(
-                "log = self.cwd / 'app.log'\n"
-                "log.write_text('old\\n')\n"
-                "self.jobs.tail('app.log', name='log')\n"  # relative: from the workspace
-                "with log.open('a') as fh: fh.write('new line\\n')\n"
-                "return_result(Waiting(explanation='w', on=['log']))"
-            ),
-            cell(
-                "assert [e.value for e in notification['jobs']] == ['new line'], notification\n"
-                "await self.jobs.get('log').cancel()\n"
                 "self.jobs.every(0.1, name='poll')\n"
                 "return_result(Waiting(explanation='w', on=['poll']))"
             ),
@@ -85,21 +76,26 @@ async def test_tail_and_every_in_a_turn(tmp_path, sessions_dir):
             ),
         ],
     )
-    assert len(calls) == 3
+    assert len(calls) == 2
     for text in calls[1:]:
         assert "AssertionError" not in text, text
 
 
-def test_the_tools_doc_shows_after_every_and_tail():
+def test_the_tools_doc_shows_after_every_and_the_tail_idiom():
     from nooa_atom.agent.agent import _WORK_EXAMPLES
     from nooa_atom.agent.work_manager import WorkManager
 
     from nooa.agentdoc import doc
 
     text = doc(WorkManager, inline_depth=0)
-    for wanted in ("def after(", "def every(", "def tail(", "progress=Throttle("):
+    for wanted in ("def after(", "def every(", "progress=Throttle("):
         assert wanted in text, wanted
+    assert "def tail(" not in text and "self.jobs.tail(" not in _WORK_EXAMPLES
     clause = "a delay counts from now: subtract time you have already spent"
     assert clause in text.lower() and clause in _WORK_EXAMPLES
-    for call in ("self.jobs.after(", "self.jobs.every(", "self.jobs.tail("):
+    for call in ("self.jobs.after(", "self.jobs.every("):
         assert sum(call in line for line in _WORK_EXAMPLES.splitlines()) == 1
+    # Following a file is a Shell command watched with a Throttle: one line each.
+    assert 'sh.run("tail -F app.log"' in text
+    [line] = [line for line in _WORK_EXAMPLES.splitlines() if "tail -F" in line]
+    assert 'sh.run("tail -F app.log"' in line and "progress=Throttle(" in line

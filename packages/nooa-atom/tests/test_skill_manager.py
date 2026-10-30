@@ -401,8 +401,9 @@ async def test_search_for_timers_and_tails_points_to_self_jobs(agent, query):
     assert "No skills match" not in found
     first = found.splitlines()[0]
     assert first.startswith("self.jobs (built in, no skill needed):")
-    for call in ("self.jobs.after(", "self.jobs.every(", "self.jobs.tail("):
+    for call in ("self.jobs.after(", "self.jobs.every(", 'sh.run("tail -F', "progress=Throttle("):
         assert call in first
+    assert "self.jobs.tail(" not in first
     assert "a delay counts from now: subtract time you have already spent" in first
 
 

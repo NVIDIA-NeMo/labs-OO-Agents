@@ -25,8 +25,8 @@ Kind = Literal["code", "text", "mcp"]
 _KIND_LABELS = {"code": "code", "text": "text", "mcp": "MCP"}
 _DESCRIPTION_WIDTH = 100
 
-# Timers, ticks and file tails are built into ``self.jobs``, not skills: a search
-# for them points there instead of answering "No skills match".
+# Timers and ticks are built into ``self.jobs``, and a file tail is a Shell command,
+# not skills: a search for them points there instead of answering "No skills match".
 _WORK_WORDS = frozenset(
     "timer timers schedule scheduler scheduled cron remind reminder later after every "
     "periodic periodically monitor watch tail follow delay sleep wait".split()
@@ -34,8 +34,8 @@ _WORK_WORDS = frozenset(
 _BUILT_IN_WORK = (
     "self.jobs (built in, no skill needed): self.jobs.after(seconds, name=...) timer "
     "(a delay counts from now: subtract time you have already spent), "
-    "self.jobs.every(seconds, name=...) ticks, self.jobs.tail(path, name=...) new lines "
-    "of a file; watch a command: self.jobs.launch(sh.run(cmd), progress=Throttle(seconds=5))"
+    "self.jobs.every(seconds, name=...) ticks; watch a command or follow a file: "
+    'self.jobs.launch(sh.run("tail -F app.log"), name=..., progress=Throttle(seconds=5))'
 )
 
 

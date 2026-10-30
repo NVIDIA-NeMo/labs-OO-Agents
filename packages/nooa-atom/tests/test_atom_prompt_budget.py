@@ -163,16 +163,22 @@ RESULT = (
 # system / total: handle 21,553 / 22,578, handle_batch 21,672 / 22,697, handle_work
 # 21,840 / 22,865, handle_orchestrate 21,975 / 23,000.
 # Limits: measured values plus about 2%, rounded up to the next 100.
+# Lowered when self.jobs.tail was dropped (2026-10-30, user decision: a Shell
+# running ``tail -F`` with a Throttle covers it): the docs show that idiom in one
+# line instead. Measured system / total: handle 21,247 / 22,272, handle_batch
+# 21,366 / 22,391, handle_work 21,534 / 22,559, handle_orchestrate 21,669 / 22,694.
+# Limits: measured values plus about 2%, rounded up to the next 100.
 LIMITS = {
-    (ATOM, "handle"): (22_000, 23_100),
-    (ATOM, "handle_batch"): (22_200, 23_200),
-    (ATOM, "handle_work"): (22_300, 23_400),
-    (ATOM, "handle_orchestrate"): (22_500, 23_500),
+    (ATOM, "handle"): (21_700, 22_800),
+    (ATOM, "handle_batch"): (21_800, 22_900),
+    (ATOM, "handle_work"): (22_000, 23_100),
+    (ATOM, "handle_orchestrate"): (22_200, 23_200),
 }
 # The bench guard's system-prompt ceiling; every agent stays under it.
 # Raised from 20,000 for the Done(message=...) guidance (2026-10-29, see above),
-# then from 21,200 for self.jobs.after/every/tail (2026-10-30).
-BENCH_SYSTEM_LIMIT = 22_600
+# then from 21,200 to 22,600 for self.jobs.after/every/tail (2026-10-30), and
+# lowered to 22,300 when self.jobs.tail was dropped (2026-10-30).
+BENCH_SYSTEM_LIMIT = 22_300
 
 # Separate CHAR/JSON-size guards, not token counts or a full provider-wire payload.
 # Effective restriction guidance grows default tool descriptions 2,069 -> 2,839;
