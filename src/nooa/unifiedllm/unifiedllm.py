@@ -1341,6 +1341,7 @@ class UnifiedLLM(ABC):
         for kind, key in reversed(sent):
             if key not in rejected and explicitly_rejected(exc, kind):
                 rejected.add(key)
+                _record_llm_metric("media_rejected_retry", kind)
                 logger.warning(
                     "Provider rejected an attached %s; retrying with a note in its place: %s",
                     kind,
