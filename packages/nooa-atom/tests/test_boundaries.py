@@ -10,6 +10,12 @@ import nooa_atom
 
 _FORBIDDEN = ("nooa_cli", "nooa_acp")
 
+# Exactly one module may import nooa_cli. ``acp/terminal_auth.py`` runs the
+# ``nooa connect`` wizard for ACP terminal authentication: it imports nooa_cli
+# lazily, only inside ``run_terminal_connect``, which only the ``nooa atom
+# --connect`` terminal process runs. The server never imports it.
+_EXEMPT = {"acp/terminal_auth.py": {"nooa_cli"}}
+
 
 def _imported_modules(path: Path) -> set[str]:
     tree = ast.parse(path.read_text(), filename=str(path))
@@ -22,17 +28,54 @@ def _imported_modules(path: Path) -> set[str]:
     return names
 
 
+def _offenders(root: Path) -> dict[str, list[str]]:
+    """Forbidden imports by module (relative path), less each module's exemption."""
+    offenders = {}
+    for path in sorted(root.rglob("*.py")):
+        relative = path.relative_to(root).as_posix()
+        allowed = _EXEMPT.get(relative, set())
+        names = sorted(
+            name
+            for name in _imported_modules(path)
+            if name.split(".")[0] in _FORBIDDEN and name.split(".")[0] not in allowed
+        )
+        if names:
+            offenders[relative] = names
+    return offenders
+
+
 def test_no_module_imports_the_cli_or_acp_packages():
     root = Path(nooa_atom.__file__).parent
-    sources = sorted(root.rglob("*.py"))
-    assert sources
-    offenders = {
-        str(path.relative_to(root)): sorted(
-            name for name in _imported_modules(path) if name.split(".")[0] in _FORBIDDEN
-        )
-        for path in sources
+    assert sorted(root.rglob("*.py"))
+    assert _offenders(root) == {}
+
+
+def test_the_exemption_covers_one_file_and_only_nooa_cli(tmp_path):
+    assert _EXEMPT == {"acp/terminal_auth.py": {"nooa_cli"}}
+    (tmp_path / "acp").mkdir()
+    (tmp_path / "acp" / "terminal_auth.py").write_text(
+        "def f():\n    import nooa_cli.commands\n    import nooa_acp\n"
+    )
+    (tmp_path / "acp" / "server.py").write_text("from nooa_cli.commands import connect\n")
+    (tmp_path / "terminal_auth.py").write_text("import nooa_cli\n")
+    assert _offenders(tmp_path) == {
+        "acp/server.py": ["nooa_cli.commands"],
+        "acp/terminal_auth.py": ["nooa_acp"],
+        "terminal_auth.py": ["nooa_cli"],
     }
-    assert {path: names for path, names in offenders.items() if names} == {}
+
+
+def test_the_server_does_not_import_nooa_cli_at_load_time():
+    import subprocess
+    import sys
+
+    code = (
+        "import sys\n"
+        "import nooa_atom.acp.server, nooa_atom.acp.terminal_auth, nooa_atom.acp.router\n"
+        "print(sorted(m for m in sys.modules if m.split('.')[0] == 'nooa_cli'))\n"
+    )
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
+    assert out.stdout.strip() == "[]"
 
 
 def test_the_agent_modules_use_no_retired_turn_or_worker_types():
