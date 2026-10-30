@@ -46,6 +46,15 @@ class Question:
     text: str
     id: str = ""
 
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("_"):
+            raise AttributeError(name)
+        raise AttributeError(
+            f"Question has no attribute {name!r}: the child asked instead of finishing. "
+            "Read its .text and answer with job.send(answer); that request's result is "
+            "the next TaskResult or Question."
+        )
+
 
 class _Route:
     """Where the registry sends a routed child's notes and outcomes (a ``ChildRoute``).
@@ -182,6 +191,15 @@ class Subagent:
 
     def __repr__(self) -> str:
         return f"Subagent({self.description!r}; {self.summary()})"
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("_"):
+            raise AttributeError(name)
+        raise AttributeError(
+            f"Subagent has no attribute {name!r}: it is the worker, not its result. "
+            "`await Subagent(...).run(todo)` returns a TaskResult (fields: "
+            "solution_description, evidence, how_to_verify, report, value)."
+        )
 
     @hidden
     def summary(self) -> str:
