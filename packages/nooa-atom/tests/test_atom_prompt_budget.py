@@ -198,7 +198,7 @@ BENCH_SYSTEM_LIMIT = 22_600
 # The one line every agent (root and child) gets in python_cell_lifetime.
 LIVE_NAMES_LINE = (
     'Your live Python names are in the python_cell_state block ("omitted: N" counts '
-    "the rest); python_cell_state() lists all of them: check it before recreating a name."
+    "the rest); python_cell_state() lists up to 20: check both and your context before recreating a name."
 )
 
 # Separate CHAR/JSON-size guards, not token counts or a full provider-wire payload.
