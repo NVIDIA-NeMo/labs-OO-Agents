@@ -87,15 +87,16 @@ shared assistant-response format in the [replay guide](../../docs/assistant-turn
 
 ## Check, migrate, and report
 
-Use Connect's wizard to choose or test formats. Wizard `--yes` confirms checks
-and saving. For diagnostics, `--stage media --test-media-inputs image,pdf
---max-tokens 4096 --budget-tokens 32768` runs text and generated-sample checks
-without confirmation or automatic saving. Review failures and skips; audio/video
-checks currently run only for Chat. A pass confirms access, not general accuracy.
+Agents use [nooa-connect](../nooa-connect/SKILL.md) stages, not the wizard.
+Within the user's authorized formats, samples and allowance,
+`--stage media --test-media-inputs image,pdf --max-tokens 4096
+--budget-tokens 32768` runs text and generated-sample checks. The stage does not
+prompt or save. Review failures and skips; audio/video checks currently run only
+for Chat. A pass confirms access, not general accuracy.
 
-For an unsaved proposal, use `--stage plan --media-inputs image,pdf`, then save
-separately. Wizard `--no-probe` skips model checks but may fetch metadata; supply
-exact model/endpoint/API style plus `--no-catalogue` to skip discovery too.
+For an unsaved proposal, use `--stage plan --media-inputs image,pdf`; this
+declares unverified formats. Save the reviewed entry separately when authorized.
+On stage save, `--yes` permits alias replacement; it is not user authorization.
 
 Older aliases need an explicit list; `[]` also silences the missing-list warning.
 Agent method `llm=vision` overrides use the selected client's configured list.
