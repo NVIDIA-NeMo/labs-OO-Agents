@@ -23,6 +23,7 @@ import logging
 import threading
 import time
 from collections.abc import Callable
+from functools import cached_property
 from typing import Any
 
 from nooa.agent import Agent
@@ -141,24 +142,7 @@ class MemoryManager:
         # the TUI pass their stable per-agent key; "" writes to the shared
         # namespace); the honest library default is the agent's class name.
         self.owner = self.config.owner if self.config.owner is not None else type(agent).__name__
-        self.embedder = embedder or get_embedder(self.config.embedding)
-        self.store = self._make_store(agent)
-        self.retrieval = RetrievalEngine(
-            self.store,
-            self.embedder,
-            self.config.retrieval,
-            access_log_cap=self.config.observability.access_log_cap,
-        )
-        # Engines consolidate at ROLE scope: instance scope would fragment
-        # knowledge per session (and reflection must fold across instances).
-        self.reflection_engine = ReflectionEngine(
-            self.store,
-            self.embedder,
-            self.config.reflection,
-            self.config.forget,
-            owner=self.role,
-        )
-        self.forgetting = ForgettingEngine(self.store, self.config.forget, owner=self.role)
+        self._provided_embedder = embedder
         self._reasoner = reasoner
         self._reconciler = reconciler
         self.stats = MemoryStats()
@@ -174,9 +158,50 @@ class MemoryManager:
         self._last_query_hash: int | None = None
         self._primed = False
 
+        if self.config.enabled:
+            # Keep enabled installs eager, including backend validation.
+            _ = self.retrieval, self.reflection_engine, self.forgetting
         self._install_hooks()
 
+    @cached_property
+    def embedder(self) -> Embedder:
+        """Reuse the supplied embedder or construct the configured backend on first use."""
+        return self._provided_embedder or get_embedder(self.config.embedding)
+
+    @cached_property
+    def store(self) -> MemoryStore:
+        """Open the configured memory database once, only when storage is needed."""
+        return self._make_store(self.agent)
+
+    @cached_property
+    def retrieval(self) -> RetrievalEngine:
+        """Build the recall engine against this manager's shared store and embedder."""
+        return RetrievalEngine(
+            self.store,
+            self.embedder,
+            self.config.retrieval,
+            access_log_cap=self.config.observability.access_log_cap,
+        )
+
+    @cached_property
+    def reflection_engine(self) -> ReflectionEngine:
+        """Initialize role-scoped reflection lazily, sharing the manager's resources."""
+        # Engines consolidate at ROLE scope, folding knowledge across instances.
+        return ReflectionEngine(
+            self.store,
+            self.embedder,
+            self.config.reflection,
+            self.config.forget,
+            owner=self.role,
+        )
+
+    @cached_property
+    def forgetting(self) -> ForgettingEngine:
+        """Initialize role-scoped forgetting against the cached memory store."""
+        return ForgettingEngine(self.store, self.config.forget, owner=self.role)
+
     def _make_store(self, agent: Agent) -> MemoryStore:
+        """Open explicit or agent-default storage using the configured embedding dimension."""
         path = self.config.path or self._default_path(agent)
         return MemoryStore(path, vector_config=self.config.vector, embedding_dim=self.embedder.dim)
 
@@ -244,7 +269,10 @@ class MemoryManager:
             if not task.done():
                 task.cancel()
         self._pending.clear()
-        self.store.close()
+        # Uninstalling an unused disabled manager must not initialize its store.
+        store = self.__dict__.get("store")
+        if store is not None:
+            store.close()
         if getattr(self.agent, "_memory", None) is self:
             del self.agent._memory  # type: ignore[attr-defined]
 
