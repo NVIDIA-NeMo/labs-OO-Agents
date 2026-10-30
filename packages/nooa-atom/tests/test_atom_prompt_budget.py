@@ -180,7 +180,9 @@ RESULT = (
 # python_cell_state block; anything not listed there does not exist in this
 # session." (199 characters, every row). Measured system / total: handle 21,875 /
 # 22,900, handle_batch 21,994 / 23,019, handle_work 22,162 / 23,187,
-# handle_orchestrate 22,297 / 23,322. Within the limits, so they stay.
+# handle_orchestrate 22,297 / 23,322. Within the limits, so they stay. The line was
+# reworded (CodeRabbit: the block is bounded, so "anything not listed does not
+# exist" was wrong) to the python_cell_state() wording below; still within the limits.
 LIMITS = {
     (ATOM, "handle"): (22_200, 23_200),
     (ATOM, "handle_batch"): (22_300, 23_300),
@@ -195,8 +197,8 @@ LIMITS = {
 BENCH_SYSTEM_LIMIT = 22_600
 # The one line every agent (root and child) gets in python_cell_lifetime.
 LIVE_NAMES_LINE = (
-    "All your live Python names are listed in the python_cell_state block; "
-    "anything not listed there does not exist in this session."
+    'Your live Python names are in the python_cell_state block ("omitted: N" counts '
+    "the rest); python_cell_state() lists all of them: check it before recreating a name."
 )
 
 # Separate CHAR/JSON-size guards, not token counts or a full provider-wire payload.

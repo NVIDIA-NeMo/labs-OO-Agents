@@ -24,8 +24,8 @@ from nooa.storage.snapshot_vars import SnapshotVars
 UNIFIED = "nooa_atom.agent:AtomAgent"
 TIMEOUT = 60
 LIVE_NAMES_LINE = (
-    "All your live Python names are listed in the python_cell_state block; "
-    "anything not listed there does not exist in this session."
+    'Your live Python names are in the python_cell_state block ("omitted: N" counts '
+    "the rest); python_cell_state() lists all of them: check it before recreating a name."
 )
 
 WORK_RESULT = (
@@ -1266,8 +1266,9 @@ async def test_a_name_error_points_at_python_cell_state_and_is_counted(
     after_sh = seen(1)
     assert "name 'sh' is not defined" in after_sh
     assert (
-        "Live names are listed in the python_cell_state block; anything not listed "
-        "there does not exist in this session. Create it first, e.g. `sh = Shell()`."
+        "Live names are listed in the python_cell_state block (it may omit some); "
+        "python_cell_state() lists all of them. A name in neither does not exist in this "
+        "session. Create it first, e.g. `sh = Shell()`."
     ) in after_sh
     after_results = seen(2)
     assert "name 'results' is not defined" in after_results
