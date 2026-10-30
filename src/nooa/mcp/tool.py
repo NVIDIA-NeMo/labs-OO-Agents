@@ -531,8 +531,9 @@ def _make_dynamic_class(
     class_doc = (
         f"MCP server '{server_name}'. Call a tool as a method of this object, "
         "e.g. await self.<server>.<tool>(...), not as a bare name. It returns the structured "
-        "result (dict) if the server sends one, else the text; an error result raises "
-        "MCPToolError."
+        "result (dict) if the server sends one, else the text. MCPToolError is raised "
+        "when the server marks the call failed; a tool can also report failure in its "
+        "result (e.g. an 'error' field): check the value before going on."
     )
     reserved = {"__doc__", "_tool_method_names"}
     collisions = reserved.intersection(methods)
