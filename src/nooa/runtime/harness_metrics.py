@@ -196,6 +196,7 @@ class HarnessMetrics(BaseModel):
 
     # ── Code Validation ──
     missing_awaits_detected: list[str] = Field(default_factory=list)
+    name_error_hints: list[str] = Field(default_factory=list)
     infinite_loops_detected: int = 0
     return_types_redefined: list[str] = Field(default_factory=list)
 
@@ -467,6 +468,10 @@ class HarnessMetrics(BaseModel):
     # Code Validation
     def missing_await(self, method_name: str) -> None:
         self._append(self.missing_awaits_detected, method_name)
+
+    def name_error_hint(self, name: str) -> None:
+        """A cell's NameError got the pointer to the python_cell_state block."""
+        self._append(self.name_error_hints, name)
 
     def infinite_loop(self) -> None:
         self.infinite_loops_detected += 1
@@ -1120,6 +1125,19 @@ _SPAN_SCHEMA: tuple[SchemaEntry, ...] = (
         "Missing await details",
         "Code Validation",
         lambda m: m.missing_awaits_detected,
+        True,
+    ),
+    SchemaEntry(
+        "harness.name_error_hint.count",
+        "NameErrors pointed at python_cell_state",
+        "Code Validation",
+        lambda m: len(m.name_error_hints),
+    ),
+    SchemaEntry(
+        "harness.name_error_hint.names",
+        "Undefined names in hinted NameErrors",
+        "Code Validation",
+        lambda m: m.name_error_hints,
         True,
     ),
     SchemaEntry(

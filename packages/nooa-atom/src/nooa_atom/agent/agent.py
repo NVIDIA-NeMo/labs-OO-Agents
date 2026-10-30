@@ -21,6 +21,7 @@ interface, or this agent's spike spelling
 
 from __future__ import annotations
 
+import re
 from typing import Annotated, Any, ClassVar
 
 # Cells see this module's names: the model builds Done/TaskResult/Todo, Shell and
@@ -28,6 +29,7 @@ from typing import Annotated, Any, ClassVar
 from nooa import Context, hidden, strategy
 from nooa.agentdoc import doc, spec
 from nooa.interactive import Done, NeedInput, Waiting
+from nooa.runtime.harness_metrics import get_harness_metrics
 from nooa.strategies import CodeActV2, PredictStrategy  # noqa: F401
 from nooa_atom.agent.work_manager import Job, JobEvent, Throttle, WorkManager
 from nooa_atom.agent.work_shell import CommandResult, Shell
@@ -130,6 +132,30 @@ _TOOL_HINT: Annotated[str, hidden] = (
     "python_cell_tools block."
 )
 
+_NAME_ERROR_RE = re.compile(r"^NameError: name '(?P<name>\w+)' is not defined", re.MULTILINE)
+
+
+def _name_error_hint(error: BaseException, formatted: str) -> str | None:
+    """The hint for a cell's ``name 'x' is not defined``; counted in harness metrics.
+
+    The sandbox path reports the error as text, so the formatted text is
+    matched when the exception is not a plain ``NameError``.
+    """
+    name = getattr(error, "name", None) if type(error) is NameError else None
+    if not isinstance(name, str):
+        match = _NAME_ERROR_RE.search(formatted)
+        if match is None:
+            return None
+        name = match.group("name")
+    hint = (
+        "Live names are listed in the python_cell_state block; anything not listed "
+        "there does not exist in this session."
+    )
+    if name == "sh":
+        hint += " Create it first, e.g. `sh = Shell()`."
+    get_harness_metrics().name_error_hint(name)
+    return hint
+
 
 @hidden
 class AtomCodeAct(CodeActV2):
@@ -224,6 +250,12 @@ class AtomCodeAct(CodeActV2):
             more = 'print(python_cell_state()["cell_imports"])'
             line += "; imports: " + listing(imports, more)
         return line
+
+    def _format_error(self, error: Exception, code: str | None = None, **kwargs: Any) -> str:
+        """Point a cell's NameError at the python_cell_state block (and ``sh = Shell()``)."""
+        formatted = super()._format_error(error, code, **kwargs)
+        hint = _name_error_hint(error, formatted)
+        return f"{formatted}\n\n{hint}" if hint else formatted
 
     def _build_execute_python_tool(self) -> Any:
         tool = super()._build_execute_python_tool()
@@ -708,6 +740,8 @@ class AtomAgent(AtomAgentBase):
         )
         self.context.pop("experimental_namespace", None)  # replace an earlier snapshot's block
         self.context["python_cell_lifetime"] = Context(
+            "All your live Python names are listed in the python_cell_state block; "
+            "anything not listed there does not exist in this session. "
             "Cell variables survive Done, Waiting and NeedInput in this live session. "
             "Other generated methods are call-local. "
             "Restart loses these names, not self.v. No automatic expiry. "
