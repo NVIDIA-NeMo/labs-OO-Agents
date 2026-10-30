@@ -1108,3 +1108,13 @@ async def test_run_during_aclose_waits_and_keeps_its_scratch_files(tmp_path, gat
     finally:
         with contextlib.suppress(ProcessLookupError):
             os.kill(bg, 9)
+
+
+async def test_a_python_script_runs_on_stdin_without_nested_quotes(tmp_path):
+    # The prompt advice: sh.run("python3 -", stdin=script), and "bash -s" for bash.
+    script = 'print("double", \'single\', """triple""")\nprint(\'ends with "\')\n'
+    r = await Shell(tmp_path).run("python3 -", stdin=script)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == 'double single triple\nends with "\n'
+    r = await Shell(tmp_path).run("bash -s", stdin='echo "it\'s $((1 + 2))"\n')
+    assert (r.returncode, r.stdout) == (0, "it's 3\n")

@@ -532,7 +532,9 @@ class AtomAgent(AtomAgentBase):
     ``find``. If ``rg`` isn't installed, use another tool.
     Write shell commands as triple-quoted strings (``sh.run('''...''')``) so
     quotes need no escaping, and pass file contents to ``self.files`` the same
-    way, not as heredocs.
+    way, not as heredocs. Pick the quote style the text neither contains nor
+    ends with (``'''`` when it has three double quotes or ends with ``"``). Run
+    a script on stdin, not in nested quotes: ``sh.run("python3 -", stdin=script)``.
 
     A subagent sees only its brief: a Todo whose description carries the
     requirements, constraints and acceptance checks. Verify what it reports;
