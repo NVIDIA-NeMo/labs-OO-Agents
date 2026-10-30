@@ -1001,8 +1001,8 @@ class WorkManager:
     Names: letters, digits, ``_`` or ``-``; requests are ``<name>#1``, ``<name>#2``...
     Built in, as launch(): ``after(s)`` timer; ``every(s)`` ticks.
     A delay counts from now: subtract time you have already spent.
-    Watch a command or follow a file:
-    ``launch(sh.run("tail -F app.log"), progress=Throttle(seconds=5))``.
+    Watch a command or follow a file in its own Shell:
+    ``launch(Shell().run("tail -F app.log"), progress=Throttle(seconds=5))``.
     """
 
     __nosnapshot__ = True

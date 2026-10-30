@@ -95,7 +95,10 @@ def test_the_tools_doc_shows_after_every_and_the_tail_idiom():
     assert clause in text.lower() and clause in _WORK_EXAMPLES
     for call in ("self.jobs.after(", "self.jobs.every("):
         assert sum(call in line for line in _WORK_EXAMPLES.splitlines()) == 1
-    # Following a file is a Shell command watched with a Throttle: one line each.
-    assert 'sh.run("tail -F app.log"' in text
+    # Following a file is a command in its own Shell watched with a Throttle: one
+    # line each, never on the Shell other commands use (it would queue them).
+    assert 'Shell().run("tail -F app.log"' in text and "its own Shell" in text
     [line] = [line for line in _WORK_EXAMPLES.splitlines() if "tail -F" in line]
-    assert 'sh.run("tail -F app.log"' in line and "progress=Throttle(" in line
+    assert 'Shell().run("tail -F app.log"' in line and "progress=Throttle(" in line
+    assert "one command at a time" in line
+    assert 'sh.run("tail' not in _WORK_EXAMPLES
