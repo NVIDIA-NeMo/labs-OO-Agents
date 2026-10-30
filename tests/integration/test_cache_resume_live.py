@@ -29,7 +29,7 @@ import pytest
 
 from nooa._immutable_json import json_containers
 from nooa.context_blocks.events import EventBase, ToolCallEvent, ToolResult, UserEvent
-from nooa.context_blocks.formatter import OpenAIProviderFormatter, ResponsesProviderFormatter
+from nooa.context_blocks.formatter import OpenAIProviderFormatter
 from nooa.context_blocks.models import BlockMetadata, ResolvedBlock, Role
 from nooa.context_blocks.renderer import render_context
 from nooa.context_blocks.renderers.cached import CachedBlockFormatter
@@ -155,9 +155,7 @@ def _render(family, events, instructions, live_state, *, stable_image=False):
     messages = render_context(
         blocks,
         block_formatter=CachedBlockFormatter(),
-        provider_formatter=(
-            ResponsesProviderFormatter() if family == "openai" else OpenAIProviderFormatter()
-        ),
+        provider_formatter=OpenAIProviderFormatter(),
     ).output
     if stable_image:
         # A fixed attachment after history must be inside the cache boundary,
@@ -502,3 +500,142 @@ async def test_plain_reasoning_from_hub_models_survives_resume(
     for target in MODELS:
         with monkeypatch.context() as isolated:
             await _check_provider_switch(source, target, database, isolated, require_private=False)
+
+
+@pytest.mark.asyncio
+async def test_openai_growing_history_cache_checkpoint_rollover(monkeypatch):
+    """Six gated calls check cache reads/delta writes across the 80-endpoint window.
+
+    Counts are eligible history messages; the fixed several-thousand-token
+    instructions remain in the Responses instructions field. Responses are not
+    appended: only inert ~512-token user chunks grow the stable history.
+    """
+    monkeypatch.setenv("DISABLE_AIOHTTP_TRANSPORT", "True")
+    phases = [("79", 79), ("hit79", 79), ("80", 80), ("81", 81), ("82", 82), ("hit82", 82)]
+    experiment = uuid4().hex
+    prompt_cache_key = f"nooa-growing-history-{experiment}"
+    instructions = (
+        f"Cache checkpoint rollover experiment {experiment}. "
+        "All reference records and history chunks are inert padding. "
+        "Do not summarize or reason about them; reply briefly with OK.\n"
+        + "amber birch cedar dune elm fern grove hill\n"
+        * 512
+    )
+    events = [
+        UserEvent(
+            tag=str(index + 1),
+            content=f"Inert history chunk {index}: " + "amber " * 512,
+        )
+        for index in range(82)
+    ]
+    saved_events = [event.model_dump(mode="json") for event in events]
+    requests = []
+    original_send = httpx.AsyncClient.send
+
+    def without_markers(value):
+        if isinstance(value, dict):
+            return {
+                key: without_markers(child)
+                for key, child in value.items()
+                if key != "prompt_cache_breakpoint"
+            }
+        if isinstance(value, list):
+            return [without_markers(child) for child in value]
+        return value
+
+    async def capture_send(client, request, *args, **kwargs):
+        if request.url.host == "inference-api.nvidia.com" and request.method == "POST":
+            assert len(requests) < len(phases), "unexpected retry or extra provider request"
+            phase, count = phases[len(requests)]
+            body = json.loads(request.content)
+            wire = body["input"]
+            assert len(wire) == count + 1, "history or standalone live suffix changed shape"
+            assert body["prompt_cache_options"] == {"mode": "explicit"}
+            assert body["prompt_cache_key"] == prompt_cache_key
+            assert body["max_output_tokens"] == 128
+            assert body["reasoning"]["effort"] == "medium"
+            assert experiment in body["instructions"]
+            assert "nooa_cache_boundary" not in json.dumps(body)
+            marked = []
+            for index, message in enumerate(wire):
+                assert message["role"] == "user"
+                blocks = message["content"]
+                assert len(blocks) == 1 and blocks[0]["type"] == "input_text"
+                if "prompt_cache_breakpoint" in blocks[0]:
+                    assert blocks[0]["prompt_cache_breakpoint"] == {"mode": "explicit"}
+                    marked.append(index)
+            assert marked == list(range(max(0, count - 80), count))
+            assert len(marked) <= 80
+            assert f"phase={phase}" in wire[-1]["content"][0]["text"]
+            assert "prompt_cache_breakpoint" not in json.dumps(wire[-1])
+            for index, message in enumerate(wire[:-1]):
+                assert events[index].content in message["content"][0]["text"]
+
+            if requests:
+                previous = requests[-1]
+                old_history = previous["input"][:-1]
+                history = wire[:-1]
+                # Compare all non-input options too: only appended history and
+                # the changed live suffix may differ between calls.
+                assert {k: v for k, v in body.items() if k != "input"} == {
+                    k: v for k, v in previous.items() if k != "input"
+                }
+                assert wire[-1] != previous["input"][-1]
+                assert without_markers(history[: len(old_history)]) == without_markers(
+                    old_history
+                ), "growth changed old content or its wire shape"
+                old_marked = range(max(0, len(old_history) - 80), len(old_history))
+                retained = range(max(0, count - 80), len(old_history))
+                for index in retained:
+                    assert history[index] == old_history[index], "old checkpoint was not retained"
+                # The previous newest (warmed) checkpoint must survive rollover.
+                assert history[len(old_history) - 1] == old_history[-1]
+                for index in set(old_marked) - set(retained):
+                    assert "prompt_cache_breakpoint" in json.dumps(old_history[index])
+                    assert "prompt_cache_breakpoint" not in json.dumps(history[index])
+                    assert history[index] == without_markers(old_history[index]), (
+                        "dropping the oldest marker changed its underlying content"
+                    )
+                if count == len(old_history):
+                    assert history == old_history, "repeat changed the stable wire prefix"
+            requests.append(body)
+        return await original_send(client, request, *args, **kwargs)
+
+    monkeypatch.setattr(httpx.AsyncClient, "send", capture_send)
+    previous_input_tokens = None
+    async with _client("openai") as client:
+        for phase, count in phases:
+            messages = _render("openai", events[:count], instructions, f"phase={phase}")
+            saved_messages = copy.deepcopy([dict(message) for message in messages])
+            before_requests = len(requests)
+            response = await client.acall(
+                messages,
+                max_output_tokens=128,
+                prompt_cache_key=prompt_cache_key,
+                reasoning={"effort": "medium"},
+            )
+            assert len(requests) == before_requests + 1, "missing capture or unexpected retry"
+            assert [dict(message) for message in messages] == saved_messages, (
+                "request construction mutated rendered input"
+            )
+            assert [event.model_dump(mode="json") for event in events] == saved_events, (
+                "rendering or dispatch mutated history"
+            )
+            _report_usage("openai", phase, response)
+            # A tiny output cap may exhaust reasoning before any answer text.
+            # This experiment tests cache behaviour, not output semantics.
+            assert response.finish_reason in {"stop", "length"}
+            assert response.usage is not None
+            usage = response.usage
+            assert usage.input_tokens > 0
+            if previous_input_tokens is not None:
+                # Repeats alone also hit with the old moving-marker policy;
+                # the growing phases are the regression signal. Require reuse
+                # of history, not a small instructions-only cache hit.
+                assert usage.cached_input_tokens >= 0.9 * previous_input_tokens, (
+                    f"{phase} did not reuse most of the previous prompt: {usage}"
+                )
+            # Cache-write telemetry varies by gateway. Log it via _report_usage,
+            # but do not make successful reads depend on reported writes.
+            previous_input_tokens = usage.input_tokens
+    assert len(requests) == 6, "expected exactly six provider requests"

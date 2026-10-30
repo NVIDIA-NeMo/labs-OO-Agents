@@ -33,7 +33,7 @@ SIGNAL_DESCRIPTIONS: dict[str, str] = {
     "repo_queries": "Calls to self.repo navigation methods.",
     "user_messages": "Calls to self.message.",
     "completion_calls": "Observed return_result tool calls.",
-    "execution_attempts": "Observed PythonOutput execution attempts.",
+    "execution_attempts": "Observed PythonOutput execution attempts, not counting cancelled cells.",
     "execution_errors": "PythonOutput events with error execution status.",
     "text_only_replies": "Model replies that did not initially use a tool.",
 }
@@ -246,10 +246,12 @@ def analyze_events(
             for name, count in _analyze_code(code).items():
                 signals[name] += count
         elif event_type == "PythonOutput":
-            if framework_execution:
+            status = str(event.get("execution_status", "")).lower()
+            # A cancelled cell was stopped from outside: neither a finished
+            # attempt nor an error by the model.
+            if framework_execution or status.endswith("cancelled"):
                 continue
             signals["execution_attempts"] += 1
-            status = str(event.get("execution_status", "")).lower()
             is_error = status.endswith("error")
             if is_error:
                 signals["execution_errors"] += 1

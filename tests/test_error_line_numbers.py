@@ -163,28 +163,18 @@ e = c.get("foo")
 
     @pytest.mark.asyncio
     async def test_validated_syntax_error_identifies_cell(self, test_agent):
-        """A syntax error caught by validation names the cell, not ``<unknown>``.
-
-        The validator parses the code before the execution path does, so a
-        parse failure is raised from the validator. That parse must use the
-        Jupyter-style cell filename; otherwise the agent only sees
-        ``(<unknown>, line 1)`` and cannot locate its own mistake.
-        Regression test for the "syntax errors reach the agent without cell
-        location" bug.
-        """
+        """Validation errors returned by the runtime identify the cell and line."""
         from nooa.errors import RestrictedCodeError
 
-        code = "value = (1 + 2"  # Unclosed paren — fails to parse.
+        code = "first = 1\nsecond = 2\nvalue = (1 + 2"
 
         result = await test_agent.runtime.execute_code(
             code, execution_count=42, wrap_in_function=True
         )
 
-        # Validation turns the SyntaxError into a RestrictedCodeError.
         assert isinstance(result.error, RestrictedCodeError)
         message = str(result.error)
-        print(f"\n=== Validated syntax error ===\n{message}")
-        assert "Cell In[42]" in message, f"Expected cell location, got:\n{message}"
+        assert "Cell In[42], line 3" in message, f"Expected cell and line, got:\n{message}"
         assert "<unknown>" not in message, f"Cell location missing:\n{message}"
 
     @pytest.mark.asyncio

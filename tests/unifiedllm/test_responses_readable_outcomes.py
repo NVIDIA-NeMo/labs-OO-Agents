@@ -80,7 +80,12 @@ async def test_responses_calibration_counts_instructions(monkeypatch, is_async):
     messages = [{"role": "system", "content": "x" * 1000}, {"role": "user", "content": "y"}]
     async with ResponsesClient("openai/gpt-5.6", api_key="test") as client:
         await client.acall(messages) if is_async else client.call(messages)
-    assert estimates == [messages]
+    assert estimates == [
+        [
+            messages[0],
+            {"role": "user", "content": [{"type": "text", "text": "y"}]},
+        ]
+    ]
     assert calibration.ratio("openai/gpt-5.6") == 1.0
 
 
@@ -94,3 +99,116 @@ def test_malformed_refusal_still_raises(bad):
             [{"type": "message", "content": [{"type": "refusal", "refusal": bad}]}],
             "responses:openai:test",
         )
+
+
+def test_calibration_survives_input_text_wrapped_content(monkeypatch):
+    """litellm.token_counter chokes on Responses input_text/output_text blocks,
+    and the fallback only recognizes type=="text" -- so wrapped content used
+    to silently undercount to near-zero, driving the shared per-model
+    calibration ratio to absurd multiples (observed ~41x) from one call. The
+    estimate must survive the real (unmocked) litellm.token_counter.
+    """
+    from nooa.unifiedllm import unifiedllm as implementation
+
+    calibration = implementation.TokenCalibration()
+    monkeypatch.setattr(implementation, "_token_calibration", calibration)
+    messages = [
+        {"role": "system", "content": "You are a helpful coding assistant. " * 20},
+        {"role": "user", "content": [{"type": "input_text", "text": "Please help me. " * 50}]},
+        {
+            "type": "function_call_output",
+            "call_id": "c1",
+            "output": [{"type": "input_text", "text": "result data. " * 50}],
+        },
+    ]
+    implementation._update_token_calibration(
+        "gpt-5.6", messages, LLMUsage(input_tokens=1000), tools=None, instructions=None
+    )
+    ratio = calibration.ratio("gpt-5.6")
+    assert 0.3 <= ratio <= 5.0, f"calibration ratio blew up to {ratio}; estimate likely collapsed"
+
+
+def test_calibration_counts_wrapped_tool_output_text():
+    """litellm.token_counter silently ignores function_call_output.output
+    text entirely (confirmed against the real, unmocked counter: a
+    2000-word tool result counts identically to a 2-word one), so large
+    tool results were invisible to the estimate -- collapsing it and
+    inflating the calibration ratio for any tool-heavy conversation.
+    _token_counter_messages must give that text a countable representation.
+    """
+    import litellm
+
+    from nooa.unifiedllm import unifiedllm as implementation
+
+    short = [
+        {"role": "user", "content": "hi"},
+        {
+            "type": "function_call_output",
+            "call_id": "c1",
+            "output": [{"type": "input_text", "text": "ok"}],
+        },
+    ]
+    long = [
+        {"role": "user", "content": "hi"},
+        {
+            "type": "function_call_output",
+            "call_id": "c1",
+            "output": [{"type": "input_text", "text": "result data. " * 500}],
+        },
+    ]
+    short_count = litellm.token_counter(
+        model="gpt-5.6", messages=implementation._token_counter_messages(short)
+    )
+    long_count = litellm.token_counter(
+        model="gpt-5.6", messages=implementation._token_counter_messages(long)
+    )
+    assert long_count > short_count + 500, (
+        f"tool-output text change ({short_count} -> {long_count}) barely moved the "
+        "estimate; function_call_output.output text is still not being counted"
+    )
+
+
+def test_calibration_counts_wrapped_input_image_blocks():
+    """litellm.token_counter raises on Responses' input_image block shape
+    (confirmed against the real, unmocked counter), which _update_token_
+    calibration's outer except then falls back to a per-message text sum
+    that skips non-"text" blocks entirely -- an image billed several hundred
+    tokens by the real API silently contributes 0 to the estimate.
+    _token_counter_messages must give it a countable representation.
+    """
+    import litellm
+
+    from nooa.unifiedllm import unifiedllm as implementation
+
+    no_image = [{"role": "user", "content": [{"type": "input_text", "text": "describe this"}]}]
+    with_image = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "describe this"},
+                {"type": "input_image", "image_url": "https://example.test/photo.png"},
+            ],
+        }
+    ]
+    # The real, unmocked counter raises on the raw input_image shape.
+    with pytest.raises(Exception, match="input_image"):
+        litellm.token_counter(
+            model="gpt-5.6",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [{"type": "input_image", "image_url": "https://example.test/x"}],
+                }
+            ],
+        )
+
+    bare_count = litellm.token_counter(
+        model="gpt-5.6", messages=implementation._token_counter_messages(no_image)
+    )
+    image_count = litellm.token_counter(
+        model="gpt-5.6", messages=implementation._token_counter_messages(with_image)
+    )
+    assert image_count > bare_count + 50, (
+        f"image block ({bare_count} -> {image_count}) barely moved the estimate; "
+        "input_image is still not being counted"
+    )

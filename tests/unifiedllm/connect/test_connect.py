@@ -119,7 +119,7 @@ async def test_run_transient_or_no_key_never_changes_environment(monkeypatch, ke
 
     async def post(self, url, **kwargs):
         requests.append(kwargs)
-        return httpx.Response(200, json={"choices": [{"message": {"content": "323"}}]})
+        return httpx.Response(200, json={"choices": [{"message": {"content": '{"value":323}'}}]})
 
     mock_post(monkeypatch, post)
     result = await connect.run(proposal, approved="minimal", api_key=key)
@@ -199,14 +199,10 @@ async def test_minimal_approval_posts_exact_plan_once(monkeypatch, style, suffix
     assert len(requests) == 1
     url, kwargs = requests[0]
     assert url.endswith(suffix)
-    expected = deepcopy(proposal.probes[0].body)
-    if style == "responses":
-        expected["truncation"] = "disabled"
-    elif style == "anthropic":
-        expected["messages"][0]["content"] = [
-            {"type": "text", "text": expected["messages"][0]["content"]}
-        ]
-    assert kwargs["json"] == expected
+    # Configured routing is a native typed generation, not the discovery
+    # prompt's exact wire body. Its generated schema enforces an integer.
+    assert "Compute 17 * 19" in json.dumps(kwargs["json"])
+    assert '"type": "integer"' in json.dumps(kwargs["json"])
     assert kwargs["json"][token_key] == 32768
     assert kwargs["json"]["model"] == "wire/model"
     assert result.entry["provenance"]["probes"]["routing"]["outcome"] == "accepted"
@@ -242,7 +238,7 @@ async def test_budget_stops_before_second_call_and_reconnect_skips_accepted(monk
         return httpx.Response(
             200,
             json={
-                "choices": [{"message": {"content": "323"}}],
+                "choices": [{"message": {"content": '{"value":323}'}}],
                 "usage": {"prompt_tokens": 100, "completion_tokens": 10},
             },
         )
@@ -276,9 +272,27 @@ def test_write_replaces_hand_written_alias_preserving_neighbors(tmp_path):
     assert text.startswith("# human notes\n")
     assert "  other: {model_name: openai/other} # keep this\n" in text
     assert "settings: true # keep this too\n" in text
-    assert yaml.safe_load(text)["models"]["local"] == connect.configure_entry(
-        {"model_name": "openai/new"}
-    )
+    expected = connect.configure_entry({"model_name": "openai/new"})
+    expected.pop("provenance", None)  # connect evidence never reaches the registry
+    assert yaml.safe_load(text)["models"]["local"] == expected
+
+
+def test_write_persists_settings_without_connect_history(tmp_path):
+    """The registry captures discovered settings, not the connect call's history."""
+    entry = make_plan().entry
+    entry["provenance"]["probes"]["routing"] = {
+        "outcome": "accepted",
+        "request": {
+            "input": [{"role": "user", "content": "Compute 17 * 19. Reply with the number."}]
+        },
+    }
+    entry["provenance"]["catalogue"] = {"url": "https://example.test", "id": "provider/model"}
+    path = tmp_path / "llm_config.yaml"
+    connect.write(entry, path, alias="local")
+    saved = yaml.safe_load(path.read_text())["models"]["local"]
+    assert "provenance" not in saved
+    assert saved["model_name"] == entry["model_name"]
+    assert saved["max_tokens"] == entry["max_tokens"]
 
 
 @pytest.mark.parametrize(
@@ -325,7 +339,8 @@ def test_connect_uses_existing_registry_discovery(tmp_path, monkeypatch):
     monkeypatch.setattr(layered_config, "get_project_dir", lambda name: project / name)
     monkeypatch.delenv("NEMO_OO_LLM_CONFIG", raising=False)
     assert llm_config.llm_config_chain() == [manual]
-    assert yaml.safe_load(manual.read_text())["models"]["local"] == make_plan().entry
+    persisted = {k: v for k, v in make_plan().entry.items() if k != "provenance"}
+    assert yaml.safe_load(manual.read_text())["models"]["local"] == persisted
 
 
 @pytest.mark.parametrize(
@@ -334,13 +349,17 @@ def test_connect_uses_existing_registry_discovery(tmp_path, monkeypatch):
         (
             "chat",
             {"reasoning_effort": "high"},
-            {"choices": [{"message": {"content": "323", "reasoning_content": "reason"}}]},
+            {"choices": [{"message": {"content": '{"value":323}', "reasoning_content": "reason"}}]},
         ),
-        ("chat", {"thinking": {"type": "enabled"}}, {"choices": [{"message": {"content": "323"}}]}),
+        (
+            "chat",
+            {"thinking": {"type": "enabled"}},
+            {"choices": [{"message": {"content": '{"value":323}'}}]},
+        ),
         (
             "chat",
             {"chat_template_kwargs": {"enable_thinking": True}},
-            {"choices": [{"message": {"content": "323"}}]},
+            {"choices": [{"message": {"content": '{"value":323}'}}]},
         ),
         (
             "responses",
@@ -406,7 +425,7 @@ async def test_budget_template_cannot_raise_approved_output_cap(monkeypatch):
 
     async def post(self, url, **kwargs):
         bodies.append(kwargs["json"])
-        return httpx.Response(200, json={"choices": [{"message": {"content": "323"}}]})
+        return httpx.Response(200, json={"choices": [{"message": {"content": '{"value":323}'}}]})
 
     mock_post(monkeypatch, post)
     proposal = make_plan(
@@ -426,14 +445,39 @@ async def test_alternate_cap_cannot_bypass_budget(monkeypatch):
 
     async def post(self, url, **kwargs):
         bodies.append(kwargs["json"])
-        return httpx.Response(200, json={"choices": [{"message": {"content": "323"}}]})
+        return httpx.Response(200, json={"choices": [{"message": {"content": '{"value":323}'}}]})
 
     mock_post(monkeypatch, post)
     result = await connect.run(
-        make_plan(reasoning_levels={"high": {"max_completion_tokens": 100000}}), approved="all"
+        make_plan(
+            reasoning_levels={"high": {"max_completion_tokens": 100000}},
+            budget_tokens=131072,
+        ),
+        approved="all",
     )
     assert len(bodies) == 2
     assert result.entry["provenance"]["probes"]["level:high"]["outcome"] == "not_probed"
+
+
+def test_fuzzy_match_finds_a_gateway_routed_model_by_its_catalogue_name():
+    catalogue = [
+        {"id": "anthropic/claude-opus-5"},
+        {"id": "anthropic/claude-opus-4.5"},
+        {"id": "openai/gpt-5.6"},
+        {"id": "google/gemini-3-pro"},
+    ]
+    assert connect.match_models("aws/anthropic/bedrock-claude-opus-5", catalogue) == []
+    matches = connect.fuzzy_match_models("aws/anthropic/bedrock-claude-opus-5", catalogue)
+    ids = [item["id"] for item in matches]
+    assert "anthropic/claude-opus-5" in ids
+    assert len(matches) <= 3
+    assert "openai/gpt-5.6" not in ids
+    assert "google/gemini-3-pro" not in ids
+
+
+def test_fuzzy_match_returns_nothing_below_the_cutoff():
+    catalogue = [{"id": "openai/gpt-5.6"}, {"id": "google/gemini-3-pro"}]
+    assert connect.fuzzy_match_models("totally-unrelated-vendor/made-up-model", catalogue) == []
 
 
 def test_entry_loads_through_main_registry(tmp_path, monkeypatch):
@@ -549,9 +593,9 @@ def test_comment_only_registry_and_quoted_alias_round_trip(tmp_path):
     connect.write({"model_name": "openai/m"}, path, alias="off")
     connect.write({"model_name": "openai/n"}, path, alias="off")
     assert path.read_text().startswith("# Keep this note\n")
-    assert yaml.safe_load(path.read_text())["models"] == {
-        "off": connect.configure_entry({"model_name": "openai/n"})
-    }
+    expected = connect.configure_entry({"model_name": "openai/n"})
+    expected.pop("provenance", None)
+    assert yaml.safe_load(path.read_text())["models"] == {"off": expected}
 
 
 @pytest.mark.asyncio
@@ -561,7 +605,7 @@ async def test_probe_cannot_multiply_generations_or_stream(monkeypatch, settings
 
     async def post(self, url, **kwargs):
         calls.append(kwargs)
-        return httpx.Response(200, json={"choices": [{"message": {"content": "323"}}]})
+        return httpx.Response(200, json={"choices": [{"message": {"content": '{"value":323}'}}]})
 
     mock_post(monkeypatch, post)
     result = await connect.run(
@@ -602,6 +646,8 @@ async def test_reconnect_keeps_observed_tools_without_spending_again(monkeypatch
     async def post(self, url, **kwargs):
         calls.append(kwargs)
         data = response_body("chat")
+        if len(calls) == 1:
+            return httpx.Response(200, json=data)
         data["choices"][0]["finish_reason"] = "tool_calls"
         data["choices"][0]["message"]["tool_calls"] = [
             {
@@ -641,7 +687,7 @@ async def test_progress_events_arrive_before_and_after_each_request(monkeypatch)
     async def post(self, url, **kwargs):
         assert events[-1].outcome["outcome"] == "running"
         calls.append(kwargs)
-        return httpx.Response(200, json={"choices": [{"message": {"content": "323"}}]})
+        return httpx.Response(200, json={"choices": [{"message": {"content": '{"value":323}'}}]})
 
     mock_post(monkeypatch, post)
     async for event in connect.run_steps(make_plan(), approved="all", api_key="test-key"):

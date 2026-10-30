@@ -63,6 +63,7 @@ class NooaBenchAgent(BaseInstalledAgent):
         git_ref: str | None = None,
         agent_type: str = "bench",
         api_base: str | None = None,
+        enable_atif: bool = False,
         *args,
         **kwargs,
     ) -> None:
@@ -76,6 +77,7 @@ class NooaBenchAgent(BaseInstalledAgent):
         self._git_ref = git_ref or os.environ.get("NOOA_GIT_REF")
         self._agent_type = agent_type
         self._api_base = api_base
+        self._enable_atif = enable_atif
 
     @staticmethod
     def name() -> str:
@@ -120,6 +122,7 @@ class NooaBenchAgent(BaseInstalledAgent):
         context: AgentContext,
     ) -> None:
         api_base = f"--api-base {shlex.quote(self._api_base)} " if self._api_base else ""
+        enable_atif = "--enable-atif " if self._enable_atif else ""
         # Exit code 1 means the agent reported task failure: map it to exit 0 so
         # the verifier scores reward=0 instead of raising a harness error.
         command = (
@@ -128,6 +131,7 @@ class NooaBenchAgent(BaseInstalledAgent):
             f"--model {shlex.quote(self.model_name or '')} "
             f"--agent-type {shlex.quote(self._agent_type)} "
             f"{api_base}"
+            f"{enable_atif}"
             f"; EC=$?; [ $EC -eq 1 ] && exit 0 || exit $EC) "
             f"2>&1 | tee /logs/agent/nooa_bench.log"
         )

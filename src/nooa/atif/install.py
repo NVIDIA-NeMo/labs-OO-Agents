@@ -165,6 +165,8 @@ def install_atif(
                 # best-effort cleanup.
                 pass
             exporter._install_token = None
+        # Flush buffered events and release any remaining exporter state.
+        exporter.close()
 
     # Expose the exporter on the uninstall callable so callers (e.g.
     # atif_scope) can read final state without re-installing.

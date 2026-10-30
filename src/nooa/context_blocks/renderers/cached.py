@@ -14,9 +14,8 @@ Structure produced:
                 what enables provider-side prompt caching to hit on the
                 event tail)
 
-Implemented as a single :class:`CachedBlockFormatter`. Pair with any stock
-provider formatter (``OpenAIProviderFormatter``, ``AnthropicProviderFormatter``);
-no paired provider formatter is needed.
+Implemented as a single :class:`CachedBlockFormatter`. Pair with the stock
+``OpenAIProviderFormatter``; no paired provider formatter is needed.
 
 Decoration is minimal by design: no "you are an agent" prose. The format
 description mirrors XMLBlockFormatter since the wire format is the same XML

@@ -562,3 +562,36 @@ def test_status_bounds_framing_when_no_rows_fit() -> None:
 
     assert len(output) <= 200
     assert "1000 open" in output
+
+
+def test_status_without_active_work_shows_only_the_two_newest_done_rows() -> None:
+    manager = TodoManager()
+    finished = [manager.add(f"finished {index}") for index in range(8)]
+    for todo in finished:
+        manager.done(todo)
+
+    lines = manager.status().splitlines()
+
+    assert lines[0] == "Todos (8/8 done; showing 2):"
+    assert "finished 7" in lines[1] and "finished 6" in lines[2]
+    assert lines[3] == "  … +6 not shown (6 done)"
+    assert not any(f"finished {index}" in line for index in range(6) for line in lines)
+
+
+def test_status_keeps_open_rows_and_caps_done_rows() -> None:
+    manager = TodoManager()
+    for index in range(5):
+        manager.done(manager.add(f"finished {index}"))
+    blocker = manager.add("blocker")
+    manager.add("blocked", deps=[blocker])
+    manager.add("open")
+
+    output = manager.status()
+    rows = [line for line in output.splitlines() if line.startswith("  ") and "[" in line]
+
+    assert output.startswith("Todos (5/8 done; showing 5):")
+    assert len(rows) == 5
+    assert ["blocker", "open", "blocked", "finished 4", "finished 3"] == [
+        row.split("] ", 1)[1].split(" ·")[0].split(" [needs")[0] for row in rows
+    ]
+    assert "… +3 not shown (3 done)" in output

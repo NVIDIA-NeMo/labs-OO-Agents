@@ -10,6 +10,7 @@ STAGES = (
     "routing",
     "tools",
     "reasoning",
+    "media",
     "session",
     "all",
     "save",
@@ -51,7 +52,11 @@ def run_stage(
     budget_tokens,
     output_tokens,
     reasoning_output_tokens=4096,
+    reasoning_template=None,
+    reasoning_level="medium",
     reply_tokens=None,
+    media_inputs=None,
+    test_media_inputs=None,
     levels_file,
     context_window,
     input_file,
@@ -60,6 +65,7 @@ def run_stage(
     prompt_key=False,
     discovery_file=None,
     invalid_options=(),
+    working_dir=False,
 ):
     """Return JSON; only an explicit --prompt-key enables a masked stdin prompt."""
     import asyncio
@@ -81,7 +87,14 @@ def run_stage(
     ok = False
     failure_code = 1
     key = None
+    from ._connect_prompts import parse_media_inputs
+
     try:
+        declared_media = parse_media_inputs(media_inputs)
+        if media_inputs is not None and stage in {"discover", "catalogue", "interfaces"}:
+            raise click.UsageError(
+                "--media-inputs is a connection declaration; use a plan or save stage"
+            )
         if invalid_options:
             raise click.UsageError(
                 "Stage mode does not use "
@@ -107,7 +120,17 @@ def run_stage(
             try:
                 alias, entry = (
                     data["alias"],
-                    connect.configure_entry(data["entry"], reply_tokens=reply_tokens),
+                    connect.configure_entry(
+                        {
+                            **data["entry"],
+                            **(
+                                {"media_inputs": declared_media}
+                                if declared_media is not None
+                                else {}
+                            ),
+                        },
+                        reply_tokens=reply_tokens,
+                    ),
                 )
             except ValueError as exc:
                 raise click.UsageError(str(exc)) from None
@@ -126,18 +149,40 @@ def run_stage(
             data = {"alias": alias, "path": str(path), "entry": entry}
             from ._connect_registry import shadowing_source
 
-            if shadow := shadowing_source(alias, path):
+            if shadow := shadowing_source(alias, path, extra_priority=bool(working_dir)):
                 data["shadowed_by"] = shadow
                 click.echo(f"Warning: alias is still resolved from {shadow}.", err=True)
             ok = True
         elif stage == "catalogue":
             models = asyncio.run(connect.catalogue())
-            data = {"models": connect.match_models(model, models) if model else models}
+            matches = connect.match_models(model, models) if model else models
+            data = {"models": matches}
+            if model and not matches:
+                # An exact/suffix match found nothing — likely a gateway
+                # prefix (aws/..., bedrock-..., vertex/...) the catalogue
+                # never records. Surface fuzzy suggestions for the caller to
+                # confirm; never auto-select one, matching the wizard's own
+                # "did you mean" behavior for the same situation.
+                fuzzy = connect.fuzzy_match_models(model, models)
+                if fuzzy:
+                    data["fuzzy_models"] = fuzzy
             ok = True
         else:
             if not endpoint:
                 raise click.UsageError("Stage requires --endpoint")
             style = api_style or "chat"
+            if style in connect.DECISION_API_STYLES and stage == "discover":
+                raise click.UsageError(
+                    "Decision endpoints do not list decision models; pass the exact MODEL "
+                    "and use --stage interfaces or --stage routing"
+                )
+            if style in connect.DECISION_API_STYLES and discovery_file:
+                raise click.UsageError(f"--discovery-file does not apply to --api-style {style}")
+            if style in connect.DECISION_API_STYLES and (reasoning_template or reasoning_level):
+                raise click.UsageError(
+                    "--reasoning-template and --reasoning-level do not apply to "
+                    f"--api-style {style}"
+                )
             key_env = api_key_env or ""
             budget = connect.DEFAULT_CHECK_BUDGET if budget_tokens is None else budget_tokens
             levels = None
@@ -154,8 +199,11 @@ def run_stage(
                 output_tokens=output_tokens,
                 reasoning_output_tokens=reasoning_output_tokens,
                 reply_tokens=reply_tokens,
+                media_inputs=declared_media,
+                test_media_inputs=parse_media_inputs(test_media_inputs),
                 reasoning_levels=levels,
-                session_checks=stage in {"session", "all"},
+                session_checks=stage in {"session", "all"}
+                and style not in connect.DECISION_API_STYLES,
                 endpoint_model=next(
                     (m for m in read_discovery(discovery_file, endpoint) if m["id"] == model), None
                 )
@@ -198,6 +246,10 @@ def run_stage(
                         budget_tokens=budget,
                         output_tokens=output_tokens,
                         api_key=key,
+                        reasoning_template=reasoning_template,
+                        reasoning_level=reasoning_level or "medium",
+                        reasoning_output_tokens=reasoning_output_tokens,
+                        **({"styles": (style,)} if style in connect.DECISION_API_STYLES else {}),
                     ):
                         if isinstance(event, connect.InterfaceResult):
                             result = event
@@ -207,6 +259,8 @@ def run_stage(
                     result = asyncio.run(interfaces())
                 data = asdict(result)
                 data["accepted"] = list(result.accepted)
+                data["reasoning_observed"] = result.reasoning_observed
+                data["recommended_style"] = result.recommended_style
                 checks = {
                     name: r.entry["provenance"]["probes"]["routing"]
                     for name, r in result.results.items()
@@ -220,6 +274,15 @@ def run_stage(
                 with view.quiet_provider_messages():
                     result = asyncio.run(connect.check_stage(proposal, stage, api_key=key))
                 entry = result.entry
+                if test_media_inputs is not None:
+                    retained = list(entry.get("media_inputs", []))
+                    entry["media_inputs"] = retained + [
+                        kind
+                        for kind in parse_media_inputs(test_media_inputs)
+                        if kind not in retained
+                        and entry["provenance"]["probes"].get(f"media:{kind}", {}).get("outcome")
+                        == "passed"
+                    ]
                 data = asdict(result)
                 checks = {
                     **entry["provenance"]["probes"],
@@ -260,6 +323,7 @@ def run_stage(
         alias=alias,
         model=model,
         endpoint=endpoint,
+        api_style=api_style,
         api_key_env=api_key_env,
         api_key=key,
         budget=total_budget,
@@ -272,6 +336,21 @@ def run_stage(
     from nooa.unifiedllm.connect._diagnostics import scrub_report
     from nooa.unifiedllm.connect._records import public_record
 
+    # Public results retain safe media facts, not inline generated payloads.
+    # Plan previews intentionally include their proposed synthetic request bodies.
+    if stage != "plan" and isinstance(data, dict):
+
+        def hide_media_requests(value):
+            if not isinstance(value, dict):
+                return
+            for name, child in value.items():
+                if name == "probes" and isinstance(child, dict):
+                    for probe_name, record in child.items():
+                        if probe_name.startswith("media:"):
+                            record.pop("request", None)
+                hide_media_requests(child)
+
+        hide_media_requests(data)
     report = {
         "version": 1,
         "stage": stage,

@@ -84,10 +84,7 @@ def _setup_tracing(model: str, agent_type: str) -> None:
     For Docker containers set ``OTLP_ENDPOINT=http://host.docker.internal:5001``.
     """
     try:
-        from nooa.tracing import (
-            enable_tracing,
-            probe_otlp_endpoint,
-        )
+        import nooa.tracing
         from nooa.tracing import exporters as nemo_exporters
     except ImportError:
         logger.warning("nooa.tracing not available, no tracing")
@@ -98,13 +95,16 @@ def _setup_tracing(model: str, agent_type: str) -> None:
     TRACES_DIR.mkdir(parents=True, exist_ok=True)
     exporters = [nemo_exporters.jsonl(TRACES_DIR)]
 
-    if probe_otlp_endpoint(endpoint):
-        exporters.append(nemo_exporters.journal(endpoint=endpoint))
-        logger.info("OTLP endpoint reachable (%s) — also streaming live", endpoint)
+    # The same resolution as nooa.tracing's own set-up, including the upgrade
+    # of an http:// endpoint whose server only speaks HTTPS.
+    resolved = nooa.tracing.resolve_otlp_endpoint(endpoint)
+    if resolved is not None:
+        exporters.append(nemo_exporters.journal(endpoint=resolved))
+        logger.info("OTLP endpoint reachable (%s) — also streaming live", resolved)
     else:
         logger.info("OTLP endpoint unreachable (%s) — writing files only", endpoint)
 
-    enable_tracing(
+    nooa.tracing.enable_tracing(
         exporters=exporters,
         extra_resource_attrs={"eval.model": model, "eval.agent_type": agent_type},
     )
@@ -164,8 +164,8 @@ def _public_json_default(value: Any) -> Any:
     return str(value)
 
 
-def _write_trajectory(agent: Any) -> bool:
-    """Dump the agent's full event history to LOGS_DIR/trajectory.json.
+def _write_trajectory(agent: Any, *, filename: str = "trajectory.json") -> bool:
+    """Dump the agent's full event history to a NOOA trajectory JSON file.
 
     The OTLP spans under ``agent/traces/`` remain the canonical record, but
     failure analysis starts in the per-task ``agent/`` directory — which
@@ -174,7 +174,7 @@ def _write_trajectory(agent: Any) -> bool:
     previously found nothing.
     """
     # Reused log directories must not label a previous task's data as this run.
-    out = LOGS_DIR / "trajectory.json"
+    out = LOGS_DIR / filename
     try:
         out.unlink(missing_ok=True)
         (LOGS_DIR / "behavior.json").unlink(missing_ok=True)
@@ -214,13 +214,15 @@ def _write_trajectory(agent: Any) -> bool:
     return True
 
 
-def _write_behavior_report(model: str, agent_type: str) -> None:
+def _write_behavior_report(
+    model: str, agent_type: str, *, trajectory_filename: str = "trajectory.json"
+) -> None:
     """Write deterministic interface-behavior metrics beside the trajectory.
 
     Behavior analysis is observability only: malformed or missing artifacts must
     never turn a completed benchmark task into a failure.
     """
-    trajectory = LOGS_DIR / "trajectory.json"
+    trajectory = LOGS_DIR / trajectory_filename
     try:
         from nooa_bench.behavior_analyzer import analyze_trajectory
 
@@ -260,6 +262,7 @@ async def _run(
     agent_type: str,
     api_base: str | None,
     working_dir: str | None = None,
+    enable_atif: bool = False,
 ) -> int:
     """Async main: instantiate, wire, run.  Returns exit code (0 = success)."""
     from nooa.unifiedllm import get_llm_client
@@ -282,6 +285,17 @@ async def _run(
         AgentClass = _import_agent_class(agent_type)
         agent = AgentClass(llm=llm_client)
 
+        if enable_atif:
+            from nooa.atif import atif_scope
+
+            trajectory_path = LOGS_DIR / "trajectory.json"
+            try:
+                trajectory_path.unlink(missing_ok=True)
+                (LOGS_DIR / "trajectory.nooa.json").unlink(missing_ok=True)
+                (LOGS_DIR / "behavior.json").unlink(missing_ok=True)
+            except OSError as e:
+                logger.warning("Could not invalidate old trajectory artifacts: %s", e)
+
         # All agents share the same interface: {"user_message": instruction}.
         # Benchmark-specific parsing (system prompts, data paths, etc.) happens
         # inside the agent's _run_evaluation method.
@@ -292,11 +306,22 @@ async def _run(
         task_input: dict[str, Any] = {"user_message": instruction}
         if working_dir:
             task_input["working_dir"] = working_dir
-        result = await agent._run_evaluation(task_input)
+        if enable_atif:
+            async with atif_scope(
+                agent,
+                path=LOGS_DIR / "trajectory.json",
+                agent_model_name=model,
+            ):
+                result = await agent._run_evaluation(task_input)
+        else:
+            result = await agent._run_evaluation(task_input)
         result.update(get_task_tokens())
         _write_result(result, model, agent_type)
-        if _write_trajectory(agent):
-            _write_behavior_report(model, agent_type)
+        nooa_trajectory_filename = "trajectory.nooa.json" if enable_atif else "trajectory.json"
+        if _write_trajectory(agent, filename=nooa_trajectory_filename):
+            _write_behavior_report(model, agent_type, trajectory_filename=nooa_trajectory_filename)
+        if enable_atif:
+            logger.info("ATIF trajectory written → %s", LOGS_DIR / "trajectory.json")
         _write_answer(result)
 
         if result.get("success"):
@@ -330,12 +355,14 @@ async def _run(
 @click.option("--instruction", required=True, help="Task instruction / problem statement")
 @click.option("--model", required=True, help="Model name in litellm format")
 @click.option("--agent-type", default="bench", show_default=True, help="Agent variant to run")
+@click.option("--enable-atif", is_flag=True, help="Also write an ATIF trajectory")
 @click.option("--working-dir", default=None, help="Working directory for the agent shell session")
 @click.option("--api-base", default=None, help="Override API base URL")
 def main(
     instruction: str,
     model: str,
     agent_type: str,
+    enable_atif: bool,
     working_dir: str | None,
     api_base: str | None,
 ) -> None:
@@ -344,6 +371,7 @@ def main(
     logger.info("nooa-bench runner starting")
     logger.info("  model:      %s", model)
     logger.info("  agent_type: %s", agent_type)
+    logger.info("  enable_atif: %s", enable_atif)
     if api_base:
         logger.info("  api_base:   %s", api_base)
 
@@ -359,7 +387,16 @@ def main(
     _setup_tracing(model=model, agent_type=agent_type)
 
     try:
-        exit_code = asyncio.run(_run(instruction, model, agent_type, api_base, working_dir))
+        exit_code = asyncio.run(
+            _run(
+                instruction,
+                model,
+                agent_type,
+                api_base,
+                working_dir,
+                enable_atif,
+            )
+        )
     except Exception as e:
         logger.exception("Runner failed with unhandled exception: %s", e)
         exit_code = 1

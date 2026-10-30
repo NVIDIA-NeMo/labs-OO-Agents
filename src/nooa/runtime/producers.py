@@ -18,6 +18,8 @@ import asyncio
 import os
 import signal
 
+from nooa._platform import require_posix
+
 
 async def after(delay: float) -> None:
     """One-shot timer: sleep *delay* seconds, then return None."""
@@ -41,15 +43,21 @@ async def tail(path: str, *, poll_interval: float = 0.5):
     """Tail a file, yielding new lines as they appear.
 
     Starts from the current end of file. Polls every
-    *poll_interval* seconds.
+    *poll_interval* seconds. A line that is still being written is
+    held until its newline arrives, so a poll landing mid-write does
+    not split one line across two yields.
     """
     fh = open(path)
     try:
         fh.seek(0, 2)
+        partial = ""
         while True:
-            line = fh.readline()
-            if line:
-                yield line.rstrip("\n")
+            chunk = fh.readline()
+            if chunk:
+                partial += chunk
+                if partial.endswith("\n"):
+                    yield partial.rstrip("\n")
+                    partial = ""
             else:
                 await asyncio.sleep(poll_interval)
     finally:
@@ -69,12 +77,18 @@ async def monitor(cmd: str):
     """Stream stdout lines from a shell command as they appear.
 
     Yields each line (stripped) as it's written to stdout.
+    Output is decoded as UTF-8 with undecodable bytes replaced, so a
+    command that emits non-UTF-8 output does not terminate the stream.
     stderr is merged into stdout.  Uses ``start_new_session=True``
     for process-group isolation so multiple concurrent monitors
     (and the agent itself) don't contend for ptys or interfere
     with each other.  On cancellation the entire process group
     is killed to prevent orphaned children.
+
+    POSIX-only (process groups); on native Windows the first iteration
+    raises :class:`~nooa._platform.PosixOnlyFeatureError`.
     """
+    require_posix("monitor() (process-group cleanup uses os.killpg)")
     proc = await asyncio.create_subprocess_shell(
         cmd,
         stdout=asyncio.subprocess.PIPE,
@@ -84,7 +98,7 @@ async def monitor(cmd: str):
     assert proc.stdout is not None
     try:
         async for line in proc.stdout:
-            yield line.decode().rstrip("\n")
+            yield line.decode("utf-8", errors="replace").rstrip("\n")
         await proc.wait()
     finally:
         if proc.returncode is None:

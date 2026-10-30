@@ -25,7 +25,9 @@ def test_save_preserves_indentation_and_neighbor_comments(tmp_path, indent, alia
     connect.write({"model_name": "openai/new"}, path, alias=alias)
     text = path.read_text()
     expected = yaml.safe_load(source)
-    expected["models"][alias] = connect.configure_entry({"model_name": "openai/new"})
+    expected_entry = connect.configure_entry({"model_name": "openai/new"})
+    expected_entry.pop("provenance", None)
+    expected["models"][alias] = expected_entry
     assert yaml.safe_load(text) == expected
     assert neighbor in text
     assert "# Unrelated configuration\nsettings: true\n" in text
@@ -92,6 +94,7 @@ def test_no_probe_can_authenticate_model_discovery(monkeypatch, tmp_path):
 
     mock_http(monkeypatch, handle)
     monkeypatch.setattr(_connect_prompts, "prompt", prompt)
+    monkeypatch.setattr(_connect_prompts, "choose_media_inputs", lambda current=(): list(current))
     target = tmp_path / "models.yaml"
     result = CliRunner().invoke(
         cli.command,

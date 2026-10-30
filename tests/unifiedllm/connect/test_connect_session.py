@@ -102,7 +102,8 @@ async def test_session_checks_observe_wire_and_usage(monkeypatch, style, mode):
         # #341 enables explicit caching from the formatter boundary by default.
         # A server miss is a warning, not evidence that the runtime lost it.
         assert records["cache"]["explicit_mode"] is True
-        assert records["cache"]["marker_count"] == 1
+        # Stable instructions/history/tool output retain their own checkpoints.
+        assert records["cache"]["marker_count"] == 3
         assert all(body["prompt_cache_options"] == {"mode": "explicit"} for body in sent)
     if mode == "early-hit":
         assert records["cache"]["cached_input_tokens"] == 12

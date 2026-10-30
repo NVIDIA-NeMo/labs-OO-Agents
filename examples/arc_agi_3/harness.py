@@ -499,9 +499,8 @@ def main() -> int:
                 levels_completed=levels_completed,
                 action_results=[],
                 note=f"URGENT: {kill_after:.0f}s with no action. Respond THIS "
-                "turn with ONLY self.submit_actions([...]) then "
-                "return_result(RespondReason.WAIT) — no analysis, no other "
-                "code. If you stay silent the harness will apply a default "
+                "turn with ONLY self.submit_actions([...]) — it ends the turn "
+                "by itself; no analysis, no other code. If you stay silent the harness will apply a default "
                 "action to keep the game going.",
             )
             batch = reader.next_batch(fw)

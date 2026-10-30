@@ -18,9 +18,12 @@ from nooa.unifiedllm import AssistantReasoning, AssistantText, FakeLLMClient, LL
 
 
 class _FakeShell:
-    def __init__(self, cwd: str, init_command: str | None = None) -> None:
+    def __init__(
+        self, cwd: str, init_command: str | None = None, *, keep_background_on_close=False
+    ) -> None:
         self.cwd = cwd
         self.init_command = init_command
+        self.keep_background_on_close = keep_background_on_close
         self.commands: list[str] = []
         self._session = object()
 
@@ -125,6 +128,10 @@ def test_task_result_model(how_to_verify):
     )
     assert "URL-encoding" in r.solution_description
     assert r.how_to_verify == how_to_verify
+    assert r.report == ""
+    assert r.value == ""
+    with_report = TaskResult(**r.model_dump(exclude={"report"}), report="Fixed URL-encoding.")
+    assert with_report.report == "Fixed URL-encoding."
     properties = TaskResult.model_json_schema()["properties"]
     assert properties["how_to_verify"]["title"] == "How to Verify"
     assert "command_to_verify" not in properties
@@ -201,17 +208,20 @@ def test_bench_agent_close_is_hidden_from_model_docs():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("agent_class", [BenchAgent, RLMBenchAgent])
-async def test_merge_error_is_not_advertised_in_python_cell_context(agent_class):
-    """Recovery exceptions remain importable but are not up-front capabilities."""
+async def test_bench_agent_exposes_no_todo_interface(agent_class):
+    """The todo tool is absent from attributes, prompts, live context and cell context."""
     from nooa.strategies import CodeActV2
 
     agent = agent_class(llm=FakeLLMClient())
     runtime = type("Runtime", (), {"agent": agent})()
     try:
+        assert not hasattr(agent, "todo")
+        assert "todo_status" not in agent.context_manager.keys()
+        assert "TodoManager" not in agent.context_manager["python_cell_tools"]
         rendered = await CodeActV2().python_cell_context(runtime)
-        assert "DelegationMergeError" not in rendered
         assert "TaskResult" in rendered
-        assert issubclass(bench_agent_module.DelegationMergeError, ValueError)
+        for text in (rendered, doc(agent_class), agent_class._solve_task.__doc__ or ""):
+            assert "todo" not in text.lower()
     finally:
         await agent.aclose()
 
@@ -223,10 +233,8 @@ def test_bench_agent_context_is_minimal_and_automatic(agent_type):
 
     keys = list(agent.context_manager.keys())
 
-    assert "todo_status" in keys
     assert "python_cell_tools" in keys
     assert "task" not in keys
-    assert "todo" not in keys
     assert "context_usage" in keys
     assert getattr(agent, "_summarizers", [])
 
@@ -279,7 +287,7 @@ async def test_run_evaluation_handles_non_task_result(monkeypatch, tmp_path, val
 async def test_run_evaluation_returns_structured_task_result(monkeypatch, tmp_path, how_to_verify):
     shells: list[_FakeShell] = []
 
-    def fake_make_shell(cwd: str, init_command=None):
+    def fake_make_shell(cwd: str, init_command=None, **kwargs):
         shell = _FakeShell(cwd)
         shells.append(shell)
         return shell
@@ -308,6 +316,8 @@ async def test_run_evaluation_returns_structured_task_result(monkeypatch, tmp_pa
             "solution_description": "Fixed the bug.",
             "evidence": "pytest passed",
             "how_to_verify": how_to_verify,
+            "report": "",
+            "value": "",
         },
     }
     assert shells[-1].cwd == str(tmp_path)
@@ -315,8 +325,46 @@ async def test_run_evaluation_returns_structured_task_result(monkeypatch, tmp_pa
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("value", ["EXISTS", "  two\nlines \n", "0"])
+async def test_run_evaluation_returns_exact_value_as_answer(monkeypatch, tmp_path, value):
+    async def fake_solve_task(description: str):
+        return TaskResult(
+            solution_description="Kept the existing destination.",
+            evidence="destination unchanged",
+            how_to_verify="cat dest",
+            report="EXISTS — the destination was already present.",
+            value=value,
+        )
+
+    monkeypatch.setattr(bench_agent_module, "ShellTools", lambda cwd, **kwargs: _FakeShell(cwd))
+    monkeypatch.setattr(bench_agent_module, "RepoTools", _FakeRepo)
+    agent = BenchAgent(llm=FakeLLMClient())
+    monkeypatch.setattr(agent, "_solve_task", fake_solve_task)
+
+    result = await agent._run_evaluation(
+        {"problem_statement": "move", "working_dir": str(tmp_path)}
+    )
+
+    assert result["answer"] == value
+    assert result["response"] == "cat dest"
+    assert result["result"]["value"] == value
+
+
+def test_solve_task_prompts_for_exact_value():
+    from nooa_bench.rlm_bench_agent import RLMBenchAgent
+
+    for agent_class in (BenchAgent, RLMBenchAgent):
+        assert "exactly that output in ``value``" in " ".join(
+            agent_class._solve_task.__doc__.split()
+        )
+    description = TaskResult.model_json_schema()["properties"]["value"]["description"]
+    assert "exact output the task asks for" in description
+    assert "Leave empty when the task only asks for actions" in description
+
+
+@pytest.mark.asyncio
 async def test_run_evaluation_returns_failure_on_exception(monkeypatch, tmp_path):
-    def fake_make_shell(cwd: str, init_command=None):
+    def fake_make_shell(cwd: str, init_command=None, **kwargs):
         return _FakeShell(cwd)
 
     async def fake_solve_task(description: str):
@@ -338,7 +386,7 @@ async def test_run_evaluation_returns_failure_on_exception(monkeypatch, tmp_path
 async def test_run_evaluation_clears_optional_context_between_tasks(monkeypatch, tmp_path):
     """Absent per-task metadata must not leak from an earlier evaluation."""
 
-    def fake_make_shell(cwd: str, init_command=None):
+    def fake_make_shell(cwd: str, init_command=None, **kwargs):
         return _FakeShell(cwd)
 
     async def fake_solve_task(description: str):
@@ -369,7 +417,7 @@ async def test_run_evaluation_clears_optional_context_between_tasks(monkeypatch,
 async def test_run_evaluation_requires_problem_statement(monkeypatch, tmp_path):
     """BenchAgent rejects tasks without a usable task description."""
 
-    def fake_make_shell(cwd: str, init_command=None):
+    def fake_make_shell(cwd: str, init_command=None, **kwargs):
         return _FakeShell(cwd)
 
     monkeypatch.setattr(bench_agent_module, "ShellTools", fake_make_shell)
@@ -381,29 +429,23 @@ async def test_run_evaluation_requires_problem_statement(monkeypatch, tmp_path):
 
 
 def test_bench_agent_python_tools_follow_agent_attribute_order():
-    """Python tool docs follow the model-facing shell, repo, todo order."""
+    """Python tool docs follow the model-facing shell, repo, method-writing order."""
     agent = BenchAgent(llm=FakeLLMClient())
 
     keys = list(agent.context_manager.keys())
     assert "python_cell_tools" in keys
-    assert "todo_status" in keys
-    assert "todo" not in keys
 
     python_tools_doc = agent.context_manager["python_cell_tools"]
     assert "class ShellTools" in python_tools_doc
     assert "def run(" in python_tools_doc
     assert "class RepoTools" in python_tools_doc
     assert "def symbols(" in python_tools_doc
-    assert "class TodoManager" in python_tools_doc
     assert "class MethodWriting" in python_tools_doc
     assert "@strategy(PredictStrategy())" in python_tools_doc
     assert "asyncio.gather" in python_tools_doc
     assert agent.methodwriting._agent is agent
     assert python_tools_doc.index("class ShellTools") < python_tools_doc.index("class RepoTools")
-    assert python_tools_doc.index("class RepoTools") < python_tools_doc.index("class TodoManager")
-    assert python_tools_doc.index("class TodoManager") < python_tools_doc.index(
-        "class MethodWriting"
-    )
+    assert python_tools_doc.index("class RepoTools") < python_tools_doc.index("class MethodWriting")
 
 
 def test_bench_agent_wires_repo_to_shell_session():
@@ -415,12 +457,22 @@ def test_bench_agent_wires_repo_to_shell_session():
     assert agent.repo.session is agent.shell.session
 
 
+def test_bench_agent_shell_keeps_background_jobs_on_close():
+    """Servers the agent backgrounds must outlive it for the task verifier."""
+
+    agent = BenchAgent(llm=FakeLLMClient())
+
+    assert agent.shell.session._keep_background_on_close is True
+
+
 def test_tool_repr_shows_state():
     """pprint()/repr expose held tool state instead of object addresses."""
 
     agent = BenchAgent(llm=FakeLLMClient())
 
-    assert repr(agent.shell) == f"ShellTools(cwd={agent.shell.cwd!s})"
+    assert repr(agent.shell) == (
+        f"ShellTools(cwd={agent.shell.cwd!s}, default_timeout={agent.shell.default_timeout!r})"
+    )
     assert repr(agent.repo) == (
         f"RepoTools(root={str(agent.repo.root)!r}, session=shared, has_rg=None)"
     )
@@ -432,41 +484,7 @@ def test_solve_task_prompt_is_compact_and_non_ritualized():
 
     assert "Inspect before editing" in prompt
     assert "minimum sufficient change" in prompt
-    assert "Plan with ``self.todo`` only when useful" in prompt
     assert "1. Explore" not in prompt
-
-
-def test_bench_agent_does_not_preseed_todos():
-    """Simple tasks start without an artificial planning obligation."""
-    agent = BenchAgent(llm=FakeLLMClient())
-
-    assert agent.todo.list_todos() == []
-
-
-@pytest.mark.asyncio
-async def test_run_evaluation_clears_stale_todos(monkeypatch, tmp_path):
-    """Per-task reset clears prior state without adding a ritual todo."""
-
-    def fake_make_shell(cwd: str, init_command=None):
-        return _FakeShell(cwd)
-
-    async def fake_solve_task(description: str):
-        assert agent.todo.list_todos() == []
-        return TaskResult(
-            solution_description="Fixed.", evidence="check passed", how_to_verify="true"
-        )
-
-    monkeypatch.setattr(bench_agent_module, "ShellTools", fake_make_shell)
-    monkeypatch.setattr(bench_agent_module, "RepoTools", _FakeRepo)
-    agent = BenchAgent(llm=FakeLLMClient())
-    agent.todo.add("stale todo")
-    monkeypatch.setattr(agent, "_solve_task", fake_solve_task)
-
-    result = await agent._run_evaluation(
-        {"problem_statement": "fix the bug", "working_dir": str(tmp_path)}
-    )
-
-    assert result["success"] is True
 
 
 @pytest.mark.asyncio
@@ -474,7 +492,6 @@ async def test_run_evaluation_clears_stale_todos(monkeypatch, tmp_path):
 async def test_bench_workers_start_with_task_local_state(agent_type, tmp_path):
     worker = agent_type(llm=FakeLLMClient(), working_dir=str(tmp_path), delegation_depth=1)
     try:
-        assert worker.todo.list_todos() == []
         assert not hasattr(worker, "v")
         assert worker._delegation_depth == 1
     finally:
@@ -563,8 +580,8 @@ async def test_delegate_launches_isolated_subagent_of_same_type(agent_type, monk
     config = SummarizationConfig(policy="none")
     agent = agent_type(llm=llm, working_dir=str(tmp_path), summarization=config)
 
-    todo = agent.todo.add("Investigate empty parser input")
-    result = await agent.delegate("inspect parser", todo)
+    supplied = {"focus": "empty parser input"}
+    result = await agent.delegate("inspect parser", supplied)
 
     assert result == expected
     assert observed["child_type"] is agent_type
@@ -572,75 +589,12 @@ async def test_delegate_launches_isolated_subagent_of_same_type(agent_type, monk
     assert observed["child"].llm is llm
     assert observed["child"]._summarization is config
     assert observed["description"] == "inspect parser"
-    assert observed["supplied_context"] is todo
+    assert observed["supplied_context"] is supplied
     assert observed["cwd"] == str(tmp_path)
     assert observed["depth"] == 1
     assert observed["max_depth"] == 4
     assert observed["child"].shell.init_command == bench_agent_module._OPTIONAL_TESTBED_ACTIVATE
     assert observed["closed"] is True
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("agent_type", [BenchAgent, RLMBenchAgent])
-async def test_delegate_todo_merges_worker_description(agent_type, monkeypatch, tmp_path):
-    expected = TaskResult(
-        solution_description="Inspected parser.",
-        evidence="Focused check passed.",
-        how_to_verify="pytest -q tests/test_parser.py",
-    )
-
-    async def fake_solve(self, description: str, supplied_context=None):
-        delegated = self.todo.list_todos()[0]
-        assert delegated is not task
-        assert description.startswith(f"{task.title}\n\nWork on active todo {task.id}.")
-        assert "Record material findings" in description
-        self.todo.comment(delegated, "worker finding")
-        self.todo.set_var(delegated, "path", "parser.py")
-        return expected
-
-    async def fake_close(self):
-        pass
-
-    monkeypatch.setattr(bench_agent_module, "ShellTools", _FakeShell)
-    monkeypatch.setattr(bench_agent_module, "RepoTools", _FakeRepo)
-    monkeypatch.setattr(agent_type, "_solve_task", fake_solve)
-    monkeypatch.setattr(_FakeShell, "close", fake_close, raising=False)
-    agent = agent_type(llm=FakeLLMClient(), working_dir=str(tmp_path))
-    task = agent.todo.add("Inspect parser", description="focus on errors")
-
-    result = await agent.delegate(task)
-
-    assert result == expected
-    assert [comment.body for comment in task.comments] == ["worker finding"]
-    assert task.v.path == "parser.py"
-
-
-@pytest.mark.asyncio
-async def test_delegate_todo_does_not_merge_when_close_fails(monkeypatch, tmp_path):
-    expected = TaskResult(
-        solution_description="Inspected parser.",
-        evidence="Focused check passed.",
-        how_to_verify="pytest -q tests/test_parser.py",
-    )
-
-    async def fake_solve(self, description: str, supplied_context=None):
-        self.todo.comment(self.todo.list_todos()[0], "worker finding")
-        return expected
-
-    async def fake_close(self):
-        raise RuntimeError("close failed")
-
-    monkeypatch.setattr(bench_agent_module, "ShellTools", _FakeShell)
-    monkeypatch.setattr(bench_agent_module, "RepoTools", _FakeRepo)
-    monkeypatch.setattr(BenchAgent, "_solve_task", fake_solve)
-    monkeypatch.setattr(_FakeShell, "close", fake_close, raising=False)
-    agent = BenchAgent(llm=FakeLLMClient(), working_dir=str(tmp_path))
-    task = agent.todo.add("Inspect parser")
-
-    with pytest.raises(RuntimeError, match="close failed"):
-        await agent.delegate(task)
-
-    assert task.comments == []
 
 
 @pytest.mark.asyncio
@@ -754,54 +708,10 @@ async def test_solve_task_uses_v2_single_tool_contract(agent_type, tmp_path):
         assert "supplied_context" in rendered
         # The prefix uses concise docs; doc(self.delegate) expands the guidance.
         assert "ordinary method argument" in doc(agent.delegate)
-        assert len(system_prompt) < 20_000
-    finally:
-        await agent.close()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("conflict", ["title", "dependency", "removed"])
-async def test_delegation_merge_failure_keeps_result_and_worker_state(
-    monkeypatch, tmp_path, conflict
-):
-    from nooa_bench.bench_agent import DelegationMergeError
-
-    expected = TaskResult(solution_description="done", evidence="passed", how_to_verify="true")
-
-    async def fake_solve(self, description, supplied_context=None):
-        delegated = self.todo.list_todos()[0]
-        self.todo.comment(delegated, "useful finding")
-        if conflict == "title":
-            agent.todo.update(task, title="parent edit")
-            self.todo.update(delegated, title="worker edit")
-        elif conflict == "dependency":
-            child = self.todo.add("worker dependency")
-            self.todo.add_dep(delegated, child)
-        else:
-            self.todo.remove(delegated)
-        return expected
-
-    monkeypatch.setattr(bench_agent_module, "ShellTools", _FakeShell)
-    monkeypatch.setattr(bench_agent_module, "RepoTools", _FakeRepo)
-    monkeypatch.setattr(BenchAgent, "_solve_task", fake_solve)
-    agent = BenchAgent(llm=FakeLLMClient(), working_dir=str(tmp_path))
-    task = agent.todo.add("work")
-    try:
-        with pytest.raises(DelegationMergeError) as caught:
-            await agent.delegate(task)
-        assert caught.value.result == expected
-        restored = bench_agent_module.TodoManager(caught.value.worker_state)
-        if conflict == "removed":
-            assert restored.get(task.id) is None
-            assert "disappeared" in str(caught.value)
-        else:
-            assert restored.get(task.id).comments[0].body == "useful finding"
-        assert task.comments == []
-        assert task.deps == []
-        if conflict == "title":
-            assert task.title == "parent edit"
-        elif conflict == "dependency":
-            assert restored.get(task.id).deps[0] == restored.list_todos()[1].id
+        # Size guard against prompt bloat. Import lines in the cell context use
+        # each symbol's declared module (stable across reloads), which is ~80
+        # characters longer than the shortest public paths were.
+        assert len(system_prompt) < 20_500
     finally:
         await agent.close()
 
@@ -827,7 +737,8 @@ for name in ('agent', 'activity', 'slash_commands', 'settings'):
 
 
 @pytest.mark.asyncio
-async def test_original_task_remains_after_prefill_compaction(tmp_path):
+@pytest.mark.parametrize("agent_type", [BenchAgent, RLMBenchAgent])
+async def test_original_task_remains_after_prefill_compaction(agent_type, tmp_path):
     class CompactingLLM(FakeLLMClient):
         async def acall(self, messages, **kwargs):
             if not self.compacted:
@@ -846,20 +757,47 @@ async def test_original_task_remains_after_prefill_compaction(tmp_path):
         scripted_responses=[
             response("pass", "one"),
             response(
-                "assert Todo is not None and TodoManager is not None and ShellTools is not None "
-                "and RepoTools is not None and MethodWriting is not None\n"
+                "assert ShellTools is not None and RepoTools is not None "
+                "and MethodWriting is not None\n"
                 "return_result(TaskResult(solution_description='done', evidence='ok', how_to_verify='true'))",
                 "two",
             ),
         ]
     )
     llm.compacted = False
-    agent = BenchAgent(llm=llm, working_dir=str(tmp_path))
+    agent = agent_type(llm=llm, working_dir=str(tmp_path))
     try:
-        assert (await agent._solve_task("UNIQUE-ORIGINAL-TASK")).solution_description == "done"
+        description = (
+            "task start " + "a" * 3000 + " MIDDLE-TASK-INSTRUCTIONS " + "b" * 3000 + " task end"
+        )
+        supplied_context = "context start " + "c" * 3000 + " MIDDLE-SUPPLIED-CONTEXT " + "d" * 3000
+        assert (
+            await agent._solve_task(description, supplied_context=supplied_context)
+        ).solution_description == "done"
         assert llm.compacted
         rendered = str(llm.last_messages)
-        assert "UNIQUE-ORIGINAL-TASK" in rendered
+        assert len(llm.calls) == 2
+        # The first model request includes the input prefill; the second must
+        # retain the full task after that prefill has been summarized away.
+        for call in llm.calls:
+            messages = str(call.messages)
+            assert "MIDDLE-TASK-INSTRUCTIONS" in messages
+            assert "MIDDLE-SUPPLIED-CONTEXT" not in messages
+        initial_prefill = str([m for m in llm.calls[0].messages if m["role"] != "system"])
+        assert "MIDDLE-TASK-INSTRUCTIONS" in initial_prefill
+        persistent_context = str([m for m in llm.calls[1].messages if m["role"] == "system"])
+        assert "MIDDLE-TASK-INSTRUCTIONS" in persistent_context
+        assert "MIDDLE-SUPPLIED-CONTEXT" not in persistent_context
+        assert "MIDDLE-TASK-INSTRUCTIONS" in rendered
         assert "TaskResult" in rendered
     finally:
         await agent.close()
+
+
+def test_bench_agents_enable_the_default_loop_guard():
+    """BenchAgent and RLMBenchAgent share this strategy for _solve_task."""
+    from nooa.config import LoopGuardConfig
+
+    config = bench_agent_module._SOLVE_STRATEGY.config
+    assert config.loop_guard == LoopGuardConfig()
+    assert config.max_retries == 10

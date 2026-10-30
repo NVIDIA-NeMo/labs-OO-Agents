@@ -63,6 +63,7 @@ from nooa_cli.sessions import (
 from nooa.errors import GenerationError
 from nooa.mcp import MCPManager, MCPTool
 from nooa.slash_dispatch import CoercionError
+from nooa.strategies.codeact import MAX_ITERATIONS_MESSAGE, OUTPUT_TOKENS_EXHAUSTED_MESSAGE
 from nooa.unifiedllm import UnifiedLLM
 from nooa_acp._runtime import (
     SessionBusyError,
@@ -76,6 +77,7 @@ from nooa_acp.event_bridge import ACPEventBridge
 logger = logging.getLogger(__name__)
 
 _SESSION_PAGE_SIZE = 50
+_GENERATION_LIMIT_PREFIX = MAX_ITERATIONS_MESSAGE.partition("{")[0]
 
 
 @dataclass(slots=True)
@@ -337,15 +339,15 @@ class CodingACPAdapter:
                     await session.bridge.fail_open_tools("Did not finish.", title="Unfinished")
                     await session.bridge.flush()
                     message = str(exc)
-                    if message.startswith(
-                        "Empty response: the model used all available output tokens"
-                    ):
+                    if message == OUTPUT_TOKENS_EXHAUSTED_MESSAGE:
                         return PromptResponse(stop_reason="max_tokens")
-                    if message.startswith("Generation failed after ") and (
+                    # MAX_ITERATIONS_MESSAGE and the max_retries message share
+                    # this prefix; the limit name tells them from other errors.
+                    if message.startswith(_GENERATION_LIMIT_PREFIX) and (
                         "max_iterations=" in message or "max_retries=" in message
                     ):
                         return PromptResponse(stop_reason="max_turn_requests")
-                    raise
+                    raise RequestError(-32603, message, {"details": message}) from exc
                 if result is None:
                     await session.cancel_complete.wait()
                     # stop_reason and the tool card both carry the outcome, but

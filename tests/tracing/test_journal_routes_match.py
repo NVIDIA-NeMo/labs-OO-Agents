@@ -16,7 +16,10 @@ the viewer's FastAPI app and the headless OTLP backend's FastAPI app.
 
 from __future__ import annotations
 
+import contextlib
 from urllib.parse import urlparse
+
+import pytest
 
 
 def _exporter_routes() -> set[str]:
@@ -83,3 +86,40 @@ def test_exporter_journal_paths_are_registered_on_headless_backend_app():
         f"  headless registers: "
         f"{sorted(p for p in registered if p.startswith('/v1/journal/'))}"
     )
+
+
+@pytest.mark.parametrize("receiver", ["viewer", "headless"])
+def test_receiver_requests_do_not_feed_global_tracing(receiver, monkeypatch):
+    """The OTLP receiver must not create spans that are exported back to itself."""
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+    from starlette.testclient import TestClient
+
+    collector = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(collector))
+    monkeypatch.setattr(trace, "get_tracer_provider", lambda: provider)
+    try:
+        # Confirm application tracing remains active independently of the receiver.
+        with trace.get_tracer(__name__).start_as_current_span("application"):
+            pass
+        assert len(collector.get_finished_spans()) == 1
+        collector.clear()
+
+        if receiver == "viewer":
+            from nooa.viewer.main import app
+        else:
+            from eval_pipeline.headless_backend import _make_headless_app
+
+            app = _make_headless_app()
+
+        # Missing session is rejected before any database write. Use the real
+        # routing/middleware stack without starting the database lifespan.
+        with contextlib.closing(TestClient(app)) as client:
+            response = client.post("/v1/journal/blocks", json=[])
+        assert response.status_code == 400
+        assert not collector.get_finished_spans(), "receiver request created recursive trace spans"
+    finally:
+        provider.shutdown()

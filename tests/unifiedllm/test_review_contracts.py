@@ -11,8 +11,6 @@ from litellm import ModelResponse
 from pydantic import BaseModel
 
 from nooa.context_blocks.events import EventBase
-from nooa.context_blocks.formatter import AnthropicProviderFormatter
-from nooa.context_blocks.models import RenderedMessage, Role, ToolCallInfo
 from nooa.llm_types import AssistantText, LLMResponse, ToolCall, assistant_message
 from nooa.unifiedllm import CompletionClient, ResponsesClient
 from nooa.unifiedllm.chat_parts import capture_chat_parts, project_chat_turn
@@ -201,38 +199,6 @@ def test_public_projection_is_built_once_and_edits_invalidate_only_the_copy():
         assert build.call_count == 2
     assert "_public_projection" not in turn.model_dump_json()
     assert LLMResponse.model_validate_json(turn.model_dump_json()) == turn
-
-
-def test_anthropic_export_is_native_public_shape_without_framework_markers():
-    turn = LLMResponse(
-        parts=(
-            AssistantText(text="answer"),
-            ToolCall(id="c", name="run", arguments='{"x":1}'),
-        )
-    )
-    result = AnthropicProviderFormatter().format(
-        [
-            RenderedMessage(
-                role=Role.ASSISTANT,
-                content="answer",
-                reasoning="why",
-                tool_calls=(ToolCallInfo(id="c", name="run", arguments='{"x":1}'),),
-                replay_message=turn,
-            )
-        ]
-    )
-    assert result == {
-        "system": "",
-        "messages": [
-            {
-                "role": "assistant",
-                "content": [
-                    {"type": "text", "text": "why\n\nanswer"},
-                    {"type": "tool_use", "id": "c", "name": "run", "input": {"x": 1}},
-                ],
-            }
-        ],
-    }
 
 
 def test_extra_function_metadata_does_not_break_public_responses_input():

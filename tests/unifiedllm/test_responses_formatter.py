@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 """
-Unit tests for ResponsesProviderFormatter and ResponsesClient._transform_messages.
+Unit tests for ResponsesClient's projection of public messages (_transform_messages).
 
 Tests the formatting pipeline without requiring a live API.
 """
@@ -10,7 +10,7 @@ import json
 
 import pytest
 
-from nooa.context_blocks.formatter import ResponsesProviderFormatter
+from nooa.context_blocks.formatter import OpenAIProviderFormatter
 from nooa.context_blocks.models import RenderedMessage, Role, ToolCallInfo
 from nooa.unifiedllm import ResponsesClient
 
@@ -18,14 +18,12 @@ from nooa.unifiedllm import ResponsesClient
 def _project_rendered(messages):
     # Formatters retain logical turns; native wire expansion is the client job.
     with ResponsesClient(model="openai/gpt-5.6") as client:
-        wire, instructions = client._transform_messages(
-            ResponsesProviderFormatter().format(messages)
-        )
+        wire, instructions = client._transform_messages(OpenAIProviderFormatter().format(messages))
     return ([{"role": "system", "content": instructions}] if instructions else []) + wire
 
 
-class TestResponsesProviderFormatter:
-    """Test that ResponsesProviderFormatter emits correct wire format."""
+class TestResponsesClientProjection:
+    """ResponsesClient projects the public message list into Responses wire format."""
 
     def test_simple_user_message(self):
         messages = [
@@ -33,7 +31,7 @@ class TestResponsesProviderFormatter:
         ]
         result = _project_rendered(messages)
 
-        assert result == [{"role": "user", "content": "Hello"}]
+        assert result == [{"role": "user", "content": [{"type": "input_text", "text": "Hello"}]}]
 
     def test_system_message_preserved_in_list(self):
         """System messages stay in the list for downstream budget clamping."""
@@ -45,7 +43,7 @@ class TestResponsesProviderFormatter:
 
         assert result == [
             {"role": "system", "content": "You are helpful."},
-            {"role": "user", "content": "Hi"},
+            {"role": "user", "content": [{"type": "input_text", "text": "Hi"}]},
         ]
 
     def test_tool_call_format(self):
@@ -113,7 +111,7 @@ class TestResponsesProviderFormatter:
             {
                 "type": "function_call_output",
                 "call_id": "call_123",
-                "output": "status: complete",
+                "output": [{"type": "input_text", "text": "status: complete"}],
             }
         ]
 
@@ -135,15 +133,19 @@ class TestResponsesProviderFormatter:
 
         assert result == [
             {"role": "system", "content": "You are a coding assistant."},
-            {"role": "user", "content": "Add 2+2"},
+            {"role": "user", "content": [{"type": "input_text", "text": "Add 2+2"}]},
             {
                 "type": "function_call",
                 "call_id": "tc_1",
                 "name": "execute_python",
                 "arguments": json.dumps({"code": "2+2"}),
             },
-            {"type": "function_call_output", "call_id": "tc_1", "output": "4"},
-            {"role": "user", "content": "Now multiply by 3"},
+            {
+                "type": "function_call_output",
+                "call_id": "tc_1",
+                "output": [{"type": "input_text", "text": "4"}],
+            },
+            {"role": "user", "content": [{"type": "input_text", "text": "Now multiply by 3"}]},
         ]
 
     def test_skips_metadata_and_runtime_event_roles(self):
@@ -154,7 +156,7 @@ class TestResponsesProviderFormatter:
         ]
         result = _project_rendered(messages)
 
-        assert result == [{"role": "user", "content": "visible"}]
+        assert result == [{"role": "user", "content": [{"type": "input_text", "text": "visible"}]}]
 
 
 class TestResponsesClientTransformMessages:
@@ -178,9 +180,13 @@ class TestResponsesClientTransformMessages:
 
         assert instructions == "Be helpful."
         assert input_msgs == [
-            {"role": "user", "content": "Hi"},
+            {"role": "user", "content": [{"type": "input_text", "text": "Hi"}]},
             {"type": "function_call", "call_id": "tc1", "name": "foo", "arguments": "{}"},
-            {"type": "function_call_output", "call_id": "tc1", "output": "bar"},
+            {
+                "type": "function_call_output",
+                "call_id": "tc1",
+                "output": [{"type": "input_text", "text": "bar"}],
+            },
         ]
 
     def test_legacy_openai_format_conversion(self, client):
@@ -205,14 +211,18 @@ class TestResponsesClientTransformMessages:
 
         assert instructions == "System prompt"
         assert input_msgs == [
-            {"role": "user", "content": "Do something"},
+            {"role": "user", "content": [{"type": "input_text", "text": "Do something"}]},
             {
                 "type": "function_call",
                 "call_id": "tc1",
                 "name": "execute_python",
                 "arguments": '{"code": "1+1"}',
             },
-            {"type": "function_call_output", "call_id": "tc1", "output": "2"},
+            {
+                "type": "function_call_output",
+                "call_id": "tc1",
+                "output": [{"type": "input_text", "text": "2"}],
+            },
         ]
 
     def test_multiple_system_messages_concatenated(self, client):
@@ -225,7 +235,7 @@ class TestResponsesClientTransformMessages:
         input_msgs, instructions = client._transform_messages(messages)
 
         assert instructions == "Part 1\n\nPart 2"
-        assert input_msgs == [{"role": "user", "content": "Hi"}]
+        assert input_msgs == [{"role": "user", "content": [{"type": "input_text", "text": "Hi"}]}]
 
     def test_no_system_messages_returns_none(self, client):
         """No system messages → instructions is None."""
@@ -233,4 +243,24 @@ class TestResponsesClientTransformMessages:
         input_msgs, instructions = client._transform_messages(messages)
 
         assert instructions is None
-        assert input_msgs == [{"role": "user", "content": "Hi"}]
+        assert input_msgs == [{"role": "user", "content": [{"type": "input_text", "text": "Hi"}]}]
+
+    def test_empty_string_content_is_still_list_wrapped(self, client):
+        """cache_policy's Responses marker wraps a string unconditionally, even
+        "" -- the pre-wrap here must match, or an empty-content message flips
+        shape between the turn it's marked and every turn after, exactly the
+        instability this PR fixes for nonempty content."""
+        messages = [
+            {"role": "user", "content": ""},
+            {"type": "function_call_output", "call_id": "c1", "output": ""},
+        ]
+        input_msgs, _ = client._transform_messages(messages)
+
+        assert input_msgs == [
+            {"role": "user", "content": [{"type": "input_text", "text": ""}]},
+            {
+                "type": "function_call_output",
+                "call_id": "c1",
+                "output": [{"type": "input_text", "text": ""}],
+            },
+        ]

@@ -184,7 +184,20 @@ async def lifespan(app: FastAPI):
         log.info("Shutdown complete")
 
 
-app = FastAPI(title="NVIDIA OO Agents Viewer", version="2.0.0", lifespan=lifespan)
+# The receiver shares the application's OTel provider. Tracing its ingest
+# requests feeds exported spans back into the same pipeline indefinitely.
+app = FastAPI(
+    title="NVIDIA OO Agents Viewer",
+    version="2.0.0",
+    lifespan=lifespan,
+    telemetry={
+        "tracing": False,
+        "operation_spans": False,
+        "metrics": False,
+        "logs": False,
+        "auto_configure": False,
+    },
+)
 
 
 SESSION_COOKIE = "nooa_viewer_session"

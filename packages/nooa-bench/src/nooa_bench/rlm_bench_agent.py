@@ -16,7 +16,13 @@ with _hidden:
     from typing import Any
 
     from nooa import strategy
-    from nooa_bench.bench_agent import _SOLVE_CONTEXT, _SOLVE_STRATEGY, BenchAgent, TaskResult
+    from nooa_bench.bench_agent import (
+        _SOLVE_CONTEXT,
+        _SOLVE_STRATEGY,
+        BenchAgent,
+        TaskResult,
+        _TaskDescription,
+    )
 
 
 class RLMBenchAgent(BenchAgent):
@@ -37,13 +43,17 @@ class RLMBenchAgent(BenchAgent):
         _SOLVE_STRATEGY,
         context=_SOLVE_CONTEXT,
     )
-    async def _solve_task(self, description: str, supplied_context: Any = None) -> TaskResult:
+    async def _solve_task(
+        self, description: _TaskDescription, supplied_context: Any = None
+    ) -> TaskResult:
         """Solve the supplied task completely.
 
         Inspect before editing. Use ``await self.delegate(objective, supplied_context)`` only
         for bounded work whose isolated context is an advantage; give each worker a
         self-contained request and inspect its report. The controller owns the plan,
         integration, final tests, and ``TaskResult``. Make the minimum sufficient
-        change and cite only verification you observed.
+        change and cite only verification you observed. If the task asks for a specific
+        output, put exactly that output in ``value`` and keep any explanation in the
+        other fields.
         """
         ...

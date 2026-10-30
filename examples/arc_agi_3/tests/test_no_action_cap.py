@@ -64,7 +64,7 @@ def test_default_cap_truncates_oversized_batch_and_warns(tmp_path):
     entry = json.loads((tmp_path / "actions.jsonl").read_text().strip())
     assert entry["actions"] == BIG_BATCH[:20]  # first 20 submitted, in order
     assert entry["truncated_from"] == len(BIG_BATCH)  # harness relays this as a state note
-    explanation = str(excinfo.value.result.get("explanation", ""))
+    explanation = excinfo.value.result["result"].explanation
     assert "NOT executed" in explanation
     assert "20" in explanation and str(len(BIG_BATCH)) in explanation
 
@@ -183,12 +183,9 @@ async def test_fake_llm_submits_26_actions_with_no_cap(tmp_path):
     assert len(entries) == 1
     assert entries[0]["actions"] == BIG_BATCH  # all 26, uncapped, in order
     assert entries[0]["turn"] == 0
-    # the submit auto-yielded the turn (WAIT), consuming exactly one LLM call
+    # the submit auto-yielded the turn (Waiting), consuming exactly one LLM call
     assert llm.call_count == 1
-    kind = getattr(result, "kind", None) or (
-        result.get("kind") if isinstance(result, dict) else None
-    )
-    assert str(kind).lower().endswith("wait")
+    assert isinstance(result, sa.Waiting)
 
 
 @pytest.mark.asyncio

@@ -221,6 +221,27 @@ class TestCompletionClientEmptyContentRetry:
         sleep.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_completion_client_default_retries_request_timeout_408(self):
+        error = litellm.Timeout(
+            message="Connection timed out", model="test-model", llm_provider="anthropic"
+        )
+        mock_acompletion = AsyncMock(side_effect=[error, make_mock_response(content="ok")])
+        sleep = AsyncMock()
+
+        with (
+            patch("nooa.unifiedllm.retry.asyncio.sleep", sleep),
+            patch("litellm.acompletion", mock_acompletion),
+        ):
+            async with CompletionClient(
+                model="anthropic/test-model", api_key="test-key-not-real"
+            ) as client:
+                response = await client.acall([{"role": "user", "content": "Hi"}])
+
+        assert response.content == "ok"
+        assert mock_acompletion.call_count == 2
+        sleep.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_completion_client_zero_retry_config_disables_async_retries(self):
         """RetryConfig(max_retries=0, rate_limit_extra_retries=0) opts out for acall()."""
         client = CompletionClient(

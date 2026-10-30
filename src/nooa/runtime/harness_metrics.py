@@ -122,6 +122,8 @@ class HarnessMetrics(BaseModel):
     stop_to_return_result_count: int = 0
     stop_to_return_result_previews: list[str] = Field(default_factory=list)
     text_only_loop_aborts_count: int = 0
+    loop_guard_nudges_count: int = 0
+    loop_guard_stops_count: int = 0
     empty_response_count: int = 0
     gpt4o_double_quote_fix_count: int = 0
     gpt4o_double_quote_fix_previews: list[str] = Field(default_factory=list)
@@ -155,6 +157,16 @@ class HarnessMetrics(BaseModel):
     json_escape_fixed: int = 0
     json_nested_extraction: int = 0
     json_double_decoded: int = 0
+
+    # ── LLM Admission (from unifiedllm via callback) ──
+    llm_queue_admissions: int = 0
+    llm_queue_queued: int = 0
+    llm_queue_call_cap_rejections: int = 0
+    llm_queue_timeouts: int = 0
+    llm_queue_cancellations: int = 0
+    llm_queue_unavailable_errors: int = 0
+    llm_queue_max_depth: int = 0
+    llm_queue_wait: TimingStat = Field(default_factory=TimingStat)
 
     # ── Code Execution ──
     exec_python_total: int = 0
@@ -239,6 +251,12 @@ class HarnessMetrics(BaseModel):
     def text_only_loop_abort(self) -> None:
         self.text_only_loop_aborts_count += 1
 
+    def loop_guard_nudge(self) -> None:
+        self.loop_guard_nudges_count += 1
+
+    def loop_guard_stop(self) -> None:
+        self.loop_guard_stops_count += 1
+
     def empty_response(self) -> None:
         self.empty_response_count += 1
 
@@ -317,6 +335,31 @@ class HarnessMetrics(BaseModel):
 
     def record_json_double_decoded(self) -> None:
         self.json_double_decoded += 1
+
+    # LLM admission (dispatched from unifiedllm callback)
+    def record_llm_queue(self, detail: Any) -> None:
+        if not isinstance(detail, dict):
+            return
+        outcome = detail.get("outcome")
+        if outcome in ("immediate", "admitted_after_wait"):
+            self.llm_queue_admissions += 1
+        elif outcome == "call_cap":
+            self.llm_queue_call_cap_rejections += 1
+        elif outcome == "timeout":
+            self.llm_queue_timeouts += 1
+        elif outcome == "cancelled":
+            self.llm_queue_cancellations += 1
+        elif outcome == "unavailable":
+            self.llm_queue_unavailable_errors += 1
+
+        if detail.get("queued") is True:
+            self.llm_queue_queued += 1
+        queue_depth = detail.get("queue_depth")
+        if isinstance(queue_depth, int) and not isinstance(queue_depth, bool):
+            self.llm_queue_max_depth = max(self.llm_queue_max_depth, queue_depth)
+        wait_s = detail.get("wait_s")
+        if isinstance(wait_s, int | float) and not isinstance(wait_s, bool):
+            self.llm_queue_wait.record(float(wait_s))
 
     # Code Execution
     def exec_python(self, *, success: bool) -> None:
@@ -591,6 +634,18 @@ _SPAN_SCHEMA: tuple[SchemaEntry, ...] = (
         lambda m: m.text_only_loop_aborts_count,
     ),
     SchemaEntry(
+        "harness.loop_guard_nudges.count",
+        "Loop-guard warnings",
+        "Response Format Fixups",
+        lambda m: m.loop_guard_nudges_count,
+    ),
+    SchemaEntry(
+        "harness.loop_guard_stops.count",
+        "Loop-guard stops",
+        "Response Format Fixups",
+        lambda m: m.loop_guard_stops_count,
+    ),
+    SchemaEntry(
         "harness.empty_response.count",
         "Empty responses",
         "Response Format Fixups",
@@ -789,6 +844,55 @@ _SPAN_SCHEMA: tuple[SchemaEntry, ...] = (
         "JSON double-decoded",
         "JSON Cleanup",
         lambda m: m.json_double_decoded,
+    ),
+    # LLM Admission
+    SchemaEntry(
+        "harness.llm_queue.admissions",
+        "Admitted provider attempts",
+        "LLM Admission",
+        lambda m: m.llm_queue_admissions,
+    ),
+    SchemaEntry(
+        "harness.llm_queue.queued",
+        "Queued provider attempts",
+        "LLM Admission",
+        lambda m: m.llm_queue_queued,
+    ),
+    SchemaEntry(
+        "harness.llm_queue.call_cap_rejections",
+        "Admission call-cap rejections",
+        "LLM Admission",
+        lambda m: m.llm_queue_call_cap_rejections,
+    ),
+    SchemaEntry(
+        "harness.llm_queue.timeouts",
+        "Admission timeouts",
+        "LLM Admission",
+        lambda m: m.llm_queue_timeouts,
+    ),
+    SchemaEntry(
+        "harness.llm_queue.cancellations",
+        "Admission cancellations",
+        "LLM Admission",
+        lambda m: m.llm_queue_cancellations,
+    ),
+    SchemaEntry(
+        "harness.llm_queue.unavailable_errors",
+        "Admission unavailable errors",
+        "LLM Admission",
+        lambda m: m.llm_queue_unavailable_errors,
+    ),
+    SchemaEntry(
+        "harness.llm_queue.max_depth",
+        "Maximum admission queue depth",
+        "LLM Admission",
+        lambda m: m.llm_queue_max_depth,
+    ),
+    *_timing_schema_entries(
+        "harness.llm_queue.wait",
+        "Admission queue wait",
+        "LLM Admission",
+        lambda m: m.llm_queue_wait,
     ),
     # Code Execution
     SchemaEntry(

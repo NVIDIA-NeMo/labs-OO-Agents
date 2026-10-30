@@ -9,7 +9,7 @@ import httpx
 import pytest
 
 from nooa.unifiedllm import connect
-from nooa.unifiedllm.connect._session import session_steps
+from nooa.unifiedllm.connect._session import _history_prefix_stable, session_steps
 from tests.unifiedllm.connect.connect_http import mock_http, response_body
 
 
@@ -146,3 +146,24 @@ async def test_retry_stops_at_explicit_bounds_and_never_retries_errors(
     assert updates[-1].outcome["outcome"] == ("not_probed" if mode == "budget" else "not_confirmed")
     assert updates[-1].outcome.get("tokens_charged_to_budget", 0) <= budget
     assert not any(u.name in {"cache", "reasoning_retention"} for u in updates)
+
+
+def test_history_prefix_stable_checks_the_anthropic_system_field_too():
+    """Anthropic's cacheable prefix and marker can live in a top-level
+    "system" field, separate from "messages" -- litellm renders a leading
+    system-role message that way. A regression confined to that field must
+    not be reported as a stable prefix."""
+    prior = {
+        "messages": [{"role": "user", "content": "hi"}],
+        "system": [{"type": "text", "text": "be helpful", "cache_control": {"type": "ephemeral"}}],
+    }
+    same_system = {
+        "messages": [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "ok"}],
+        "system": [{"type": "text", "text": "be helpful"}],
+    }
+    changed_system = {
+        "messages": [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "ok"}],
+        "system": [{"type": "text", "text": "be helpful now"}],
+    }
+    assert _history_prefix_stable(prior, same_system, "messages") is True
+    assert _history_prefix_stable(prior, changed_system, "messages") is False

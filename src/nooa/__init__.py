@@ -8,8 +8,14 @@ serialized execution, and complete transparency.
 """
 
 import logging as _logging
+import typing as _typing
 
+from nooa._platform_policy import check_platform as _check_platform
 from nooa._version import __version__
+
+# Native Windows is unsupported: stop here, before any other nooa module loads,
+# unless NOOA_SKIP_PLATFORM_CHECK=1 (see nooa._platform_policy).
+_check_platform()
 
 # ---------------------------------------------------------------------------
 # Library logging: add NullHandler so applications that don't configure
@@ -26,6 +32,21 @@ from nooa._visible import visible  # noqa: E402
 from nooa.agent import Agent  # noqa: E402
 from nooa.agentdoc import hidden, spec  # noqa: E402
 from nooa.context_blocks import Context, ContextWindowStats, DynamicContext  # noqa: E402
+from nooa.decisions import (  # noqa: E402
+    BooleanDecision,
+    ChoiceDecision,
+    Criteria,
+    Decision,
+    DecisionClient,
+    DecisionModel,
+    DecisionModelRequiredError,
+    DecisionRequest,
+    DecisionResponse,
+    Instructions,
+    ScoreDecision,
+    Threshold,
+    UnifiedDecisionModel,
+)
 from nooa.decorators import strategy  # noqa: E402
 
 # Export errors
@@ -60,41 +81,65 @@ from nooa.skill_registry import skill_from_module  # noqa: E402
 
 # Export storage
 from nooa.storage import StorageManager  # noqa: E402
-
-# Export strategy base class and implementations.
-# NOTE: ReflexionStrategy is experimental. It is exposed lazily via __getattr__
-# below, which returns the warning-emitting factory from nooa.experimental.
-from nooa.strategies import (  # noqa: E402
-    CodeActStrategy,
-    CodeActV2,
-    GenerationStrategy,
-    InspectInputsPrefill,
-    PredictStrategy,
-    TextOnlyResponseAction,
-    TextOnlyResponseContext,
-    TextOnlyResponseHandler,
-    get_default_strategy,
-    retry_text_only_response,
-    return_text_as_result,
-    set_default_strategy,
-)
 from nooa.strategy_validation import (  # noqa: E402
     InvariantError,
     MethodPostcondition,
     MethodPrecondition,
 )
 from nooa.token_counter import char_approximate_token_counter  # noqa: E402
-from nooa.unifiedllm import LLMResponse  # noqa: E402
+
+# Names loaded on first use. The strategies import CodeAct, which imports
+# the LLM client and LiteLLM (about two seconds); llm_config_chain touches
+# the llm_config / paths machinery. ``import nooa`` stays cheap, and
+# ``from nooa import CodeActStrategy`` still works.
+# NOTE: ReflexionStrategy is experimental; it resolves to the
+# warning-emitting factory in nooa.experimental (below).
+if _typing.TYPE_CHECKING:  # the same names, for type checkers and IDEs
+    from nooa.llm_config import llm_config_chain
+    from nooa.llm_types import LLMResponse
+    from nooa.strategies import (
+        CodeActStrategy,
+        CodeActV2,
+        DecideStrategy,
+        GenerationStrategy,
+        InspectInputsPrefill,
+        PredictStrategy,
+        TextOnlyResponseAction,
+        TextOnlyResponseContext,
+        TextOnlyResponseHandler,
+        get_default_strategy,
+        retry_text_only_response,
+        return_text_as_result,
+        set_default_strategy,
+    )
+
+_LAZY = {
+    "CodeActStrategy": "nooa.strategies",
+    "CodeActV2": "nooa.strategies",
+    "DecideStrategy": "nooa.strategies",
+    "GenerationStrategy": "nooa.strategies",
+    "InspectInputsPrefill": "nooa.strategies",
+    "PredictStrategy": "nooa.strategies",
+    "TextOnlyResponseAction": "nooa.strategies",
+    "TextOnlyResponseContext": "nooa.strategies",
+    "TextOnlyResponseHandler": "nooa.strategies",
+    "get_default_strategy": "nooa.strategies",
+    "retry_text_only_response": "nooa.strategies",
+    "return_text_as_result": "nooa.strategies",
+    "set_default_strategy": "nooa.strategies",
+    "LLMResponse": "nooa.llm_types",  # the class nooa.unifiedllm re-exports
+    "llm_config_chain": "nooa.llm_config",
+}
 
 
-# Lazy re-export of llm_config_chain — defer importing the llm_config /
-# paths machinery (and the registry it touches) until the helper is
-# actually called, keeping ``import nooa`` cheap.
 def __getattr__(name):
-    if name == "llm_config_chain":
-        from nooa.llm_config import llm_config_chain
+    module_name = _LAZY.get(name)
+    if module_name is not None:
+        import importlib
 
-        return llm_config_chain
+        value = getattr(importlib.import_module(module_name), name)
+        globals()[name] = value
+        return value
     # Experimental strategies: route through the warning factories so that
     # `from nooa import ReflexionStrategy; ReflexionStrategy()`
     # emits the same FutureWarning as importing from nooa.experimental.
@@ -107,7 +152,7 @@ def __getattr__(name):
 
 __all__ = [
     "__version__",
-    "llm_config_chain",  # Lazy re-export (see __getattr__)
+    "llm_config_chain",  # Lazy (see _LAZY)
     # Types
     "ContextWindowStats",  # Re-exported from context_blocks
     "Context",  # Re-exported from context_blocks
@@ -131,6 +176,7 @@ __all__ = [
     "return_text_as_result",
     "ReflexionStrategy",
     "PredictStrategy",
+    "DecideStrategy",
     "get_default_strategy",
     "set_default_strategy",
     # Method validators
@@ -160,6 +206,20 @@ __all__ = [
     "strategy",
     "no_trace",
     "AgentMeta",
+    # Decisions
+    "BooleanDecision",
+    "ChoiceDecision",
+    "Criteria",
+    "Decision",
+    "DecisionClient",
+    "DecisionModel",
+    "DecisionModelRequiredError",
+    "DecisionRequest",
+    "DecisionResponse",
+    "Instructions",
+    "ScoreDecision",
+    "Threshold",
+    "UnifiedDecisionModel",
     # Logging
     "enable_logging",
     # Visibility

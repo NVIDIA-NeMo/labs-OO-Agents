@@ -227,3 +227,52 @@ async def test_a_directly_assigned_protected_attribute_is_still_protected(tmp_pa
         agent.skills.register("nemo.shell", shell)
     finally:
         await agent.close()
+
+
+async def test_summarization_status_reports_installed_token_budget(tmp_path):
+    from nooa.interactive import SummarizationConfig
+
+    agent = CodingAgent(
+        llm=FakeLLMClient(),
+        cwd=tmp_path,
+        summarization=SummarizationConfig(threshold_fraction=0.60),
+    )
+    try:
+        summarizer = agent._summarizers[0]
+        status = agent.get_summarization_status()
+
+        assert status["has_summarizer"] is True
+        assert status["policy"] == "token_budget"
+        assert status["max_tokens"] == summarizer.config.max_tokens
+        assert status["threshold_fraction"] == 0.60
+        assert status["preserve_recent"] == summarizer.config.preserve_recent
+        assert status["compaction_pending"] is False
+        assert status["compaction_ready"] is False
+    finally:
+        await agent.close()
+
+
+async def test_summarization_status_reports_disabled_policy(tmp_path):
+    from nooa.interactive import SummarizationConfig
+
+    agent = CodingAgent(
+        llm=FakeLLMClient(),
+        cwd=tmp_path,
+        summarization=SummarizationConfig(policy="none"),
+    )
+    try:
+        assert agent.get_summarization_status() == {
+            "active_events": 0,
+            "summary_count": 0,
+            "summary_tags": [],
+            "has_summarizer": False,
+            "policy": "none",
+            "current_tokens": 0,
+            "max_tokens": 0,
+            "threshold_fraction": None,
+            "preserve_recent": 0,
+            "compaction_pending": False,
+            "compaction_ready": False,
+        }
+    finally:
+        await agent.close()

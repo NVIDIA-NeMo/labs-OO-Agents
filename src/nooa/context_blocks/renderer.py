@@ -20,6 +20,8 @@ serialization produce new :class:`ResolvedBlock` instances via ``model_copy()``.
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, NamedTuple
 
+from pydantic import BaseModel
+
 if TYPE_CHECKING:
     from nooa.config.truncation_config import FormatConfig
 
@@ -37,6 +39,7 @@ from nooa.context_blocks.models import (
     RenderedMessage,
     ResolvedBlock,
     Role,
+    ToolCallInfo,
 )
 from nooa.context_blocks.utils import camel_to_snake
 
@@ -134,6 +137,63 @@ def _apply_context_total_limit(
     return rendered, len(to_evict)
 
 
+def _utf8_safe_text(text: str) -> str:
+    """Return ``text`` with lone UTF-16 surrogates escaped as ``\\udXXX`` text."""
+    if text.isascii():
+        return text
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return text.encode("utf-8", "backslashreplace").decode("utf-8")
+    return text
+
+
+def _utf8_safe(value: Any) -> Any:
+    """Return ``value`` with lone UTF-16 surrogates escaped as ``\\udXXX`` text.
+
+    Python strings can hold lone surrogates (an agent writing ``"\\ud800"`` in
+    code, ``os.listdir`` on non-UTF-8 names), but UTF-8 cannot encode them, so a
+    single one anywhere in the context makes every request fail to serialize.
+    Walks strings, dicts, lists, tuples and pydantic models; anything that needs
+    no change is returned as the same object, so callers' data is never mutated.
+    """
+    if isinstance(value, str):
+        return _utf8_safe_text(value)
+    if isinstance(value, dict):
+        items = [(_utf8_safe(k), _utf8_safe(v)) for k, v in value.items()]
+        if all(k is k0 and v is v0 for (k, v), (k0, v0) in zip(items, value.items(), strict=True)):
+            return value
+        return dict(items)
+    if isinstance(value, (list, tuple)):
+        safe = [_utf8_safe(v) for v in value]
+        if all(v is v0 for v, v0 in zip(safe, value, strict=True)):
+            return value
+        return safe if isinstance(value, list) else tuple(safe)
+    if isinstance(value, BaseModel):
+        update = {}
+        for name in type(value).model_fields:
+            # Native replay turns are resent verbatim; a turn whose content
+            # changed here is rendered from that content instead.
+            if name == "replay_message":
+                continue
+            field = getattr(value, name)
+            # Dict arguments reach the request and the journal only through
+            # json.dumps, whose ASCII escapes keep them exact and encodable.
+            if isinstance(value, ToolCallInfo) and name == "arguments" and isinstance(field, dict):
+                continue
+            safe = _utf8_safe(field)
+            if safe is not field:
+                update[name] = safe
+        return value.model_copy(update=update) if update else value
+    return value
+
+
+def _with_utf8_safe_content(block: ResolvedBlock) -> ResolvedBlock:
+    """Escape lone surrogates in ``block.content`` so budgets measure the sent text."""
+    content = _utf8_safe(block.content)
+    return block if content is block.content else block.model_copy(update={"content": content})
+
+
 def render_context(
     blocks: list[ResolvedBlock],
     *,
@@ -167,7 +227,7 @@ def render_context(
     count_fn: Callable[[str], int] = count_tokens if count_tokens is not None else len
 
     # Partition for truncation only.
-    system_blocks = [b for b in blocks if b.role == Role.SYSTEM]
+    system_blocks = [_with_utf8_safe_content(b) for b in blocks if b.role == Role.SYSTEM]
     message_blocks = [b for b in blocks if b.role != Role.SYSTEM]
 
     # Pre-serialize non-tool events so their content can be measured.
@@ -182,7 +242,7 @@ def render_context(
             )
             content = block_formatter.format_event(block.event, event_format=resolved_event_format)
             block = block.model_copy(update={"content": content})
-        serialized_messages.append(block)
+        serialized_messages.append(_with_utf8_safe_content(block))
     message_blocks = serialized_messages
 
     # Total-context eviction: mark over-budget blocks EVICTED in place.
@@ -214,8 +274,11 @@ def render_context(
         reserved_output_tokens=reserved_output_tokens,
     )
 
-    # Neutral message list → provider wire format.
-    messages = block_formatter.format([*system_blocks, *message_blocks])
+    # Neutral message list → provider wire format. Block content is already
+    # escaped (so the budget and stats above measure the sent text); this pass
+    # covers the remaining fields (tool calls, images, parts). Both the request
+    # and the tracing journal encode these messages.
+    messages = _utf8_safe(block_formatter.format([*system_blocks, *message_blocks]))
     output = provider_formatter.format(messages)
     return RenderResult(
         output=output,

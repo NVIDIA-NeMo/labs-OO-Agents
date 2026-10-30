@@ -41,6 +41,16 @@ logger = logging.getLogger(__name__)
 _in_summary_fork = contextvars.ContextVar("in_summary_fork", default=False)
 
 
+@hidden
+def summary_fork_active() -> bool:
+    """Whether this model call is best-effort memory compaction, not parent execution.
+
+    Integrations can use this task-local marker to avoid treating a contained
+    summary transport failure as the parent's terminal failure.
+    """
+    return _in_summary_fork.get()
+
+
 def _copy_request_containers(value: Any) -> Any:
     """Detach mutable JSON containers; borrow tools, responses and other objects."""
     if isinstance(value, dict):
@@ -54,6 +64,7 @@ if TYPE_CHECKING:
     from nooa.config.summarizer_config import MethodSummarizerConfig, TokenBudgetConfig
     from nooa.events import AfterTurn, EventBase
     from nooa.runtime.event_manager import EventManager
+    from nooa.unifiedllm import UnifiedLLM
 
 
 class SummarizationAgent(Agent):
@@ -105,7 +116,7 @@ class SummarizationAgent(Agent):
 
         Args:
             agent: Agent to attach to. The summarizer:
-                   - Inherits LLM from agent (unless explicitly overridden)
+                   - Follows the parent's current LLM (unless explicitly overridden)
                    - Attaches to agent's event manager automatically
             **kwargs: Passed to constructor (use config= on subclasses)
 
@@ -133,14 +144,18 @@ class SummarizationAgent(Agent):
 
         Args:
             agent: Parent agent to attach to. The summarizer:
-                   - Inherits LLM from agent (unless explicitly overridden)
+                   - Follows the parent's current LLM (unless explicitly overridden)
                    - Attaches to agent's event manager automatically
             **kwargs: Passed through to Agent.__init__ (e.g. llm=)
         """
-        # Inherit LLM from parent agent unless explicitly provided
+        # Default summaries follow later parent model switches as well.
+        self._inherits_parent_llm = "llm" not in kwargs
         kwargs.setdefault("llm", agent.llm)
         self.target_event_manager = agent.event_manager
         self._target_agent = agent
+        self._summary_llm_override: contextvars.ContextVar[UnifiedLLM | None] = (
+            contextvars.ContextVar(f"summary_llm_override_{id(self)}", default=None)
+        )
 
         # Extract annotated class attributes from kwargs (max_tokens, preserve_recent, etc.)
         # Skip descriptors (e.g. Agent's ``llm`` property): they are not summarizer
@@ -165,6 +180,22 @@ class SummarizationAgent(Agent):
 
         # Install event subscriptions
         self._install()
+
+    @hidden
+    @no_trace
+    def set_llm(self, llm: "UnifiedLLM") -> None:
+        """Select a fixed summary client, opting out of parent model switches."""
+        super().set_llm(llm)
+        self._inherits_parent_llm = False
+
+    @hidden
+    @no_trace
+    def _summary_llm(self) -> "UnifiedLLM":
+        """Resolve the client for standalone summaries and their input budget."""
+        override = self._summary_llm_override.get()
+        if override is not None:
+            return override
+        return self._target_agent.llm if self._inherits_parent_llm else self.llm
 
     @hidden
     @no_trace
@@ -295,7 +326,9 @@ class SummarizationAgent(Agent):
     # The source document is rendered explicitly by _render_range_to_markdown().
     # Do not use a method-level unbounded TruncationConfig here: that would also
     # re-render unrelated context events in this generation with unbounded event_format.
-    @strategy(PredictStrategy(PredictConfig(max_param_chars=None)))
+    @strategy(
+        PredictStrategy(PredictConfig(max_param_chars=None)), llm=lambda self: self._summary_llm()
+    )
     async def summarize(self, history_markdown: str, target_chars: int) -> str:
         """Summarize the `history_markdown` parameter into approximately {target_chars} characters.
 
@@ -332,24 +365,23 @@ class SummarizationAgent(Agent):
             return
 
         self._pending_range = (start_tag, end_tag)
-
-        # Render events to markdown for LLM consumption
-        history_markdown = self._render_range_to_markdown(start_tag, end_tag)
-
-        logger.debug(
-            f"Scheduling summarization: {start_tag} -> {end_tag} ({len(history_markdown)} chars)"
-        )
-
-        # Schedule the async summarization
-        self._pending_task = asyncio.create_task(
-            self._run_summarization(history_markdown, start_tag, end_tag)
-        )
+        self._pending_task = asyncio.create_task(self._run_summarization(None, start_tag, end_tag))
 
     @hidden
     @no_trace
-    async def _run_summarization(self, history_markdown: str, start_tag: str, end_tag: str) -> None:
-        """Run summarization and store result for later application."""
+    async def _run_summarization(
+        self, history_markdown: str | None, start_tag: str, end_tag: str
+    ) -> None:
+        """Render and summarize with one task-local resolved client."""
+        summary_llm = self._summary_llm()
+        override_token = self._summary_llm_override.set(summary_llm)
         try:
+            if history_markdown is None:
+                history_markdown = self._render_range_to_markdown(start_tag, end_tag)
+            logger.debug(
+                f"Scheduling summarization: {start_tag} -> {end_tag} "
+                f"({len(history_markdown)} chars)"
+            )
             summary = await self.summarize(history_markdown, self.config.target_chars)
             self._pending_summary = summary
             logger.debug(
@@ -360,6 +392,7 @@ class SummarizationAgent(Agent):
             logger.warning(f"Summarization failed: {e}")
             self._pending_summary = None
         finally:
+            self._summary_llm_override.reset(override_token)
             # Clear our own events to stay stateless
             self.event_manager.clear()
 
@@ -526,7 +559,7 @@ class SummarizationAgent(Agent):
         Prefer the summarizer LLM's ``count_tokens``; fall back to the shared
         char-approximate counter so the cap still applies when no counter is set.
         """
-        llm = getattr(self, "_llm", None)
+        llm = self._summary_llm()
         counter = getattr(llm, "count_tokens", None)
         if callable(counter):
             return counter
@@ -544,8 +577,7 @@ class SummarizationAgent(Agent):
         target_chars) and the completion. ``None`` (no cap) when the model
         window can't be determined — never wipe the input on a misconfig; the
         API error path is still the backstop."""
-        llm = getattr(self, "_llm", None)
-        return context_budget(llm, percent=0.7, fallback=None)
+        return context_budget(self._summary_llm(), percent=0.7, fallback=None)
 
 
 # =============================================================================
@@ -592,20 +624,23 @@ def context_budget(
 # Example Summarizers (Good Defaults)
 # =============================================================================
 class TokenBudgetSummarizer(SummarizationAgent):
-    """Summarize old events asynchronously when provider input exceeds the budget.
+    """Summarize old events before the agent continues when input exceeds the budget.
 
     Fork the completed parent request with a trailing summary
-    instruction. Tools, model settings and cache key stay unchanged so the
-    provider can reuse its prefix. Only events present before that request
-    are eligible for collapse; the latest response/tool work stays active.
+    instruction. History, tool definitions, output schema, model settings,
+    cache key and tool choice stay unchanged so the provider can reuse its prefix.
+    The appended instruction requests text; executable-tool replies are rejected.
+    Only events present before that request are eligible for collapse; the latest
+    response/tool work stays active.
 
     The fork never executes tools. A nonempty string returned through one
     return_result call is read as data. Failed or unusable replies leave history
     unchanged; there is no standalone retry. Filtered history is skipped because
     the request cannot explain all events selected for collapse. Structured
-    parents drop their output schema on the fork so it can return summary text;
-    that schema change may reduce cache reuse.
+    parents retain their output schema to preserve the rendered prefix; the
+    summary must also satisfy that contract.
 
+    The parent awaits the summary before returning its response to the agent.
     Completed summaries apply at BeforeTurn, provided the selected event IDs
     still match. Owners should await aclose() before closing the shared client.
 
@@ -623,6 +658,7 @@ class TokenBudgetSummarizer(SummarizationAgent):
     _warned_filtered: Annotated[bool, hidden] = False
     _failed_forks: Annotated[int, hidden] = 0
     _automatic_context_budget: Annotated[bool, hidden] = False
+    _automatic_context_budget_percent: Annotated[float, hidden] = 0.8
 
     @hidden
     @no_trace
@@ -675,6 +711,7 @@ class TokenBudgetSummarizer(SummarizationAgent):
         if self._automatic_context_budget and ctx.client is not None:
             budget = context_budget(
                 ctx.client,
+                self._automatic_context_budget_percent,
                 request_params=ctx.params,
                 fallback_reserve=ctx.runtime.truncation_config.response_reserve_tokens,
             )
@@ -701,7 +738,7 @@ class TokenBudgetSummarizer(SummarizationAgent):
         try:
             messages = _copy_request_containers(ctx.messages)
             params = _copy_request_containers(ctx.params)
-            params["output_model"] = None
+            params.setdefault("output_model", None)
         except Exception:
             logger.warning(
                 "Could not snapshot summary fork; parent call is unchanged", exc_info=True
@@ -713,9 +750,13 @@ class TokenBudgetSummarizer(SummarizationAgent):
                 "content": (
                     f"Background memory compaction: summarize only events {start} through {end} "
                     f"in approximately {self.config.target_chars} characters. Other events are "
-                    "context only. Preserve decisions, exact numbers, outcomes and pending work. "
-                    "Write only the summary as plain text. Do not continue the original task "
-                    "or call any tools. This is an isolated summary, not an execution turn."
+                    "context only. Preserve decisions, exact numbers, outcomes, files, failed "
+                    "approaches and pending work. Distinguish completed work from proposals. "
+                    "For this request only, produce a memory summary rather than continuing "
+                    "the original task. Respond directly with the summary as text. Do not call "
+                    "python_cell, execute_python, return_result, or any other tool; do not "
+                    "write code to produce the summary. Earlier execution instructions are "
+                    "historical context for this isolated summary turn."
                 ),
             }
         )
@@ -729,6 +770,9 @@ class TokenBudgetSummarizer(SummarizationAgent):
         self._pending_source = source
         self._pending_range = (start, end)
         self._pending_task = asyncio.create_task(self._run_fork(fork))
+        # Pause this agent until compaction finishes. Keep the completed task
+        # pending so history is still replaced at the next BeforeTurn boundary.
+        await self._pending_task
         return ctx
 
     @hidden
@@ -736,12 +780,18 @@ class TokenBudgetSummarizer(SummarizationAgent):
     async def _run_fork(self, ctx: Any) -> None:
         """Use the same policy chain; read a final answer without executing tools."""
         token = _in_summary_fork.set(True)
+        # Keep the exact snapshotted prefix/contracts through final rendering.
+        # Middleware still observes the fork, but cannot rewrite its prompt,
+        # effective client or tool/schema settings at the final dispatch boundary.
+        client = ctx.client
+        messages = _copy_request_containers(ctx.messages)
+        params = _copy_request_containers(ctx.params)
         try:
 
             async def dispatch(request: Any) -> Any:
-                params = dict(request.params)
-                params.setdefault("output_model", None)
-                request.response = await request.client.acall(request.messages, **params)
+                request.response = await client.acall(
+                    _copy_request_containers(messages), **_copy_request_containers(params)
+                )
                 return request
 
             result = await self.target_event_manager.run_middleware("llm_call", ctx, dispatch)

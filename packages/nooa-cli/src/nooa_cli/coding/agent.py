@@ -9,12 +9,14 @@ from typing import TYPE_CHECKING, Annotated, Any
 
 from nooa import Context, hidden, strategy
 from nooa.agentdoc import doc, spec
+from nooa.agents import TokenBudgetSummarizer
 from nooa.config import CodeActConfig, PredictConfig
 from nooa.interactive import (
+    Done,
     InteractiveAgent,
-    RespondReason,
-    RespondResult,
+    NeedInput,
     SummarizationConfig,
+    Waiting,
     install_summarizer,
 )
 from nooa.paths import get_project_dir
@@ -31,7 +33,7 @@ if TYPE_CHECKING:
     from nooa.runtime.channels import Channel
     from nooa.unifiedllm import UnifiedLLM
 
-__all__ = ["CodingAgent", "RespondReason"]
+__all__ = ["CodingAgent"]
 
 
 class CodingAgent(InteractiveAgent):
@@ -41,10 +43,10 @@ class CodingAgent(InteractiveAgent):
     unrelated worktree changes. Use the shell for files and commands, the repo
     tools for definitions and references, and todos for multi-step work.
 
-    Complete and verify the requested work before returning ``DONE``. Send each
-    user-facing answer or question through ``self.message()`` as a complete
-    Markdown document. Return ``NEED_INPUT`` only when human input is required,
-    and ``WAIT`` only while an actual background job is active.
+    Complete and verify the requested work before returning ``Done``. Put the
+    reply to the user in ``Done.message`` as a complete Markdown document.
+    Return ``NeedInput`` only when human input is required, and ``Waiting``
+    only while an actual background job is active.
     """
 
     # Attributes carrying this agent's own tools. SkillRegistry refuses to let
@@ -144,16 +146,41 @@ class CodingAgent(InteractiveAgent):
         summary_tags = [tag for tag in tags if ".." in tag]
         summarizers = getattr(self, "_summarizers", [])
         summarizer = summarizers[0] if summarizers else None
+        config = getattr(summarizer, "config", None) if summarizer else None
+        pending = getattr(summarizer, "_pending_task", None) if summarizer else None
+        automatic = bool(getattr(summarizer, "_automatic_context_budget", False))
+        declared_policy = getattr(summarizer, "policy", None) if summarizer else None
+        policy = (
+            declared_policy
+            if isinstance(declared_policy, str) and declared_policy
+            else "token_budget"
+            if isinstance(summarizer, TokenBudgetSummarizer)
+            else "custom"
+            if summarizer is not None
+            else "none"
+        )
         stats = self.context_stats
         return {
             "active_events": len(tags),
             "summary_count": len(summary_tags),
             "summary_tags": summary_tags,
             "has_summarizer": summarizer is not None,
-            "policy": getattr(summarizer, "policy", "none") if summarizer else "none",
-            "current_tokens": getattr(stats, "total_tokens", 0) if stats else 0,
-            "max_tokens": getattr(summarizer, "max_tokens", 0) if summarizer else 0,
-            "preserve_recent": getattr(summarizer, "preserve_recent", 0) if summarizer else 0,
+            "policy": policy,
+            "current_tokens": getattr(stats, "prompt_tokens", 0) if stats else 0,
+            "max_tokens": getattr(config, "max_tokens", 0) if config else 0,
+            "threshold_fraction": (
+                getattr(summarizer, "_automatic_context_budget_percent", None)
+                if automatic
+                else None
+            ),
+            "preserve_recent": getattr(config, "preserve_recent", 0) if config else 0,
+            "compaction_pending": pending is not None,
+            "compaction_ready": bool(
+                pending is not None
+                and pending.done()
+                and getattr(summarizer, "_pending_summary", None)
+                and getattr(summarizer, "_pending_range", None)
+            ),
         }
 
     @hidden
@@ -165,16 +192,23 @@ class CodingAgent(InteractiveAgent):
 
     @hidden
     @strategy(CodeActStrategy(config=CodeActConfig(cell_timeout=1800.0)))
-    async def handle(self, notification: dict[str, list[Any]]) -> RespondResult:
+    async def handle(self, notification: dict[str, list[Any]]) -> Done | NeedInput | Waiting:
         """Fulfill the newest coding request delivered in ``notification``.
 
         Work until the request is complete or genuinely needs user input. Use
         as many small execution cells as necessary and inspect each result
         before proceeding. Never claim a check passed without running it.
 
-        End with exactly one ``return_result(RespondReason.<reason>,
-        explanation="...")``. The explanation must say what completed, what
-        input is needed, or which live job is still running.
+        End the turn with exactly one ``return_result(...)`` of one of these:
+
+        - ``Done(message=..., explanation=...)`` — the request is complete.
+          ``message`` is the reply the host shows the user; ``explanation``
+          is a short status line. Add ``evidence=[...]`` for checks you ran.
+        - ``NeedInput(question=...)`` — you cannot continue without an
+          answer. The host shows the question, so do not also send it with
+          ``self.message()``. Add ``options=[...]`` for a single choice.
+        - ``Waiting(message=..., explanation=..., on=[...])`` — a background
+          job is still running; ``on`` names the job or channel.
         """
         ...
 

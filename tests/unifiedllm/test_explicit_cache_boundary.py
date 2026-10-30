@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Stable-prefix boundaries from dynamic context to provider wire payload."""
 
+import copy
 import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -11,11 +12,7 @@ import litellm
 import pytest
 
 from nooa.context_blocks.events import UserEvent
-from nooa.context_blocks.formatter import (
-    AnthropicProviderFormatter,
-    OpenAIProviderFormatter,
-    ResponsesProviderFormatter,
-)
+from nooa.context_blocks.formatter import OpenAIProviderFormatter
 from nooa.context_blocks.models import (
     BlockMetadata,
     RenderedMessage,
@@ -179,12 +176,10 @@ def test_renderer_emits_a_standalone_boundary_before_provider_formatting():
     assert result.messages[:-1] == _render_result("state-b").messages[:-1]
 
 
-@pytest.mark.parametrize("formatter", [OpenAIProviderFormatter, ResponsesProviderFormatter])
-def test_boundary_formats_without_a_following_message(formatter):
+def test_boundary_formats_without_a_following_message():
     boundary = CacheBoundary()
     block = RenderedMessage(role=Role.METADATA, replay_message=boundary)
-    assert formatter().format([block])[0] is boundary
-    assert AnthropicProviderFormatter().format([block]) == {"system": "", "messages": []}
+    assert OpenAIProviderFormatter().format([block])[0] is boundary
 
 
 def test_boundary_beside_readonly_response_preserves_identity_and_native_parts():
@@ -286,8 +281,8 @@ def test_dynamic_system_messages_remain_after_the_cache_boundary(static_prefix: 
     assert enabled is True
     assert instructions is None
     assert wire[-2:] == [
-        {"role": "system", "content": "live state"},
-        {"role": "system", "content": "more live state"},
+        {"role": "system", "content": [{"type": "input_text", "text": "live state"}]},
+        {"role": "system", "content": [{"type": "input_text", "text": "more live state"}]},
     ]
     if static_prefix:
         assert wire[0]["content"][0] == {
@@ -413,7 +408,7 @@ def test_openai_can_mark_a_system_only_stable_prefix() -> None:
     assert instructions is None
     assert messages[0]["role"] == "system"
     assert messages[0]["content"][0]["prompt_cache_breakpoint"] == {"mode": "explicit"}
-    assert "state-a" in messages[-1]["content"]
+    assert "state-a" in messages[-1]["content"][0]["text"]
 
 
 def test_openai_falls_back_to_instructions_behind_ineligible_output() -> None:
@@ -508,7 +503,9 @@ async def test_openai_fields_reach_the_serialized_http_body(stable_prefix: bool)
             "mode": "explicit"
         }
     else:
-        assert bodies[0]["input"] == [{"role": "user", "content": "changing state"}]
+        assert bodies[0]["input"] == [
+            {"role": "user", "content": [{"type": "input_text", "text": "changing state"}]}
+        ]
     assert "cache_boundary" not in repr(bodies[0])
     assert response.usage is not None
     assert response.usage.cached_input_tokens == 500
@@ -619,11 +616,16 @@ async def test_multimodal_breakpoint_reaches_provider_http(provider, with_text, 
             api_key="test",
             api_base="https://example.test/v1",
             cache_breakpoint="openai",
+            media_inputs=["image", "pdf"],
         )
         block = (
             {"type": "input_image", "image_url": png}
             if media == "image"
-            else {"type": "input_file", "file_id": "file-test"}
+            else {
+                "type": "input_file",
+                "file_data": "data:application/pdf;base64,JVBERi0xLjQKJSVFT0YK",
+                "filename": "test.pdf",
+            }
         )
         marker = "prompt_cache_breakpoint"
     else:
@@ -632,6 +634,7 @@ async def test_multimodal_breakpoint_reaches_provider_http(provider, with_text, 
             api_key="test",
             api_base="https://example.test",
             cache_breakpoint="anthropic",
+            media_inputs=["image", "pdf"],
         )
         block = (
             {"type": "image_url", "image_url": {"url": png}}
@@ -805,7 +808,10 @@ def test_replay_expansion_stays_inside_the_stable_prefix() -> None:
         "user",
     ]
     assert messages[-2]["output"][-1]["prompt_cache_breakpoint"] == {"mode": "explicit"}
-    assert messages[-1] == {"role": "user", "content": "live state"}
+    assert messages[-1] == {
+        "role": "user",
+        "content": [{"type": "input_text", "text": "live state"}],
+    }
 
 
 def test_gemini_gets_no_invented_inline_cache_field() -> None:
@@ -846,3 +852,241 @@ async def test_gemini_boundary_is_inert_on_the_actual_call_path() -> None:
         assert not any("nooa_cache_boundary" in item for item in sent)
     finally:
         await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_openai_serialized_growing_requests_retain_recent_checkpoints():
+    bodies = []
+
+    def respond(request):
+        bodies.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "id": "resp_test",
+                "object": "response",
+                "created_at": 0,
+                "status": "completed",
+                "model": "gpt-5.6",
+                "output": [
+                    {
+                        "id": "msg_test",
+                        "type": "message",
+                        "status": "completed",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": "ok",
+                                "annotations": [],
+                            }
+                        ],
+                    }
+                ],
+                "parallel_tool_calls": False,
+                "tools": [],
+            },
+        )
+
+    client = ResponsesClient(
+        "openai/gpt-5.6",
+        api_key="test",
+        api_base="https://example.test/v1",
+        cache_breakpoint="openai",
+    )
+    await client._http.httpx_async.aclose()
+    transport = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+    client._http.httpx_async = transport
+    client._http.async_client.client = transport
+    history = [{"role": "user", "content": f"stable {i}"} for i in range(85)]
+    before = json.dumps(history)
+    try:
+        for size in (6, 7, 84, 85):
+            await client.acall(
+                [
+                    *history[:size],
+                    CacheBoundary(),
+                    {"role": "user", "content": f"live {size}"},
+                ]
+            )
+    finally:
+        await client.aclose()
+
+    assert json.dumps(history) == before
+    for body, size in zip(bodies, (6, 7, 84, 85), strict=True):
+        assert body["prompt_cache_options"] == {"mode": "explicit"}
+        marked = [
+            i
+            for i, item in enumerate(body["input"])
+            if "prompt_cache_breakpoint" in item["content"][-1]
+        ]
+        assert marked == list(range(max(0, size - 80), size))
+        assert "prompt_cache_breakpoint" not in repr(body["input"][-1])
+        assert "nooa_cache_boundary" not in repr(body)
+    # Below the cap, the entire old marked prefix is retained on growth.
+    assert bodies[0]["input"][:-1] == bodies[1]["input"][:6]
+    # Above the cap, only the oldest marker drops; recent warmed endpoints remain.
+    assert bodies[2]["input"][5:84] == bodies[3]["input"][5:84]
+    assert bodies[2]["input"][83]["content"][-1]["prompt_cache_breakpoint"] == {"mode": "explicit"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prefix_repetitions", [32, 1_000_000], ids=["small", "synthetic-1M"])
+async def test_codeact_v2_runtime_growing_http_prefix_retains_checkpoints(
+    prefix_repetitions, tmp_path
+):
+    from nooa import Agent, Context, strategy
+    from nooa.config import CodeActConfig, TruncationConfig
+    from nooa.storage import SQLiteStorageManager
+    from nooa.strategies.codeact_v2 import CodeActV2
+
+    bodies = []
+    # Synthetic tokenizer assumption: one token per " alpha" repetition, not
+    # measured provider usage. Six MB exercises real rendering/SDK serialization
+    # without a tokenizer dependency, 1M live inference, or timing/RSS assertions.
+    prefix = " alpha" * prefix_repetitions
+    codes = [
+        "self._live_state = 'live step one'; print('step one')",
+        "self._live_state = 'live step two'; print('step two')",
+        "return_result('done')",
+    ]
+    middleware_calls = []
+    database = tmp_path / "runtime-turns.db"
+
+    def respond(request):
+        bodies.append(json.loads(request.content))
+        index = len(bodies) - 1
+        return httpx.Response(
+            200,
+            json={
+                "id": f"resp_{index}",
+                "object": "response",
+                "created_at": 0,
+                "status": "completed",
+                "model": "gpt-5.6",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "id": f"fc_{index}",
+                        "call_id": f"call_{index}",
+                        "name": "python_cell",
+                        "arguments": json.dumps({"code": codes[index]}),
+                        "status": "completed",
+                    }
+                ],
+                "parallel_tool_calls": False,
+                "tools": [],
+            },
+        )
+
+    client = ResponsesClient(
+        "openai/gpt-5.6",
+        api_key="test",
+        api_base="https://example.test/v1",
+        cache_breakpoint="openai",
+    )
+    await client._http.httpx_async.aclose()
+    transport = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+    client._http.httpx_async = transport
+    client._http.async_client.client = transport
+
+    # A synthetic large-context deployment: don't let the real route's default
+    # context-block eviction erase the live suffix in this offline wire test.
+    class TestAgent(Agent, llm=client, truncation=TruncationConfig(max_context_tokens=4_000_000)):
+        def __init__(self):
+            super().__init__()
+            self._live_state = "live initial"
+            self.context["fixed_reference"] = Context(prefix, prefix=True)
+            self.context["live_reference"] = Context(expr="self._live_state")
+
+        @strategy(CodeActV2(config=CodeActConfig(prefill=None)))
+        async def answer(self) -> str:
+            """Run two Python steps and then return done."""
+            ...
+
+    def strings(value):
+        if isinstance(value, str):
+            yield value
+        elif isinstance(value, dict):
+            for child in value.values():
+                yield from strings(child)
+        elif isinstance(value, list):
+            for child in value:
+                yield from strings(child)
+
+    async def round_trip_middleware(ctx, nxt):
+        # Actual llm_call interception, not a manually constructed context.
+        assert sum(isinstance(message, CacheBoundary) for message in ctx.messages) == 1
+        public = [dict(message) for message in ctx.messages]
+        assert any(prefix in text for text in strings(public))
+        # Deepcopy duplicates containers, not the six-MB immutable string. Keep
+        # only one snapshot at a time instead of serializing multiple huge copies.
+        before = copy.deepcopy(public)
+        turns = [
+            (i, message)
+            for i, message in enumerate(ctx.messages)
+            if isinstance(message, LLMResponse)
+        ]
+        native_before = [message.model_dump(mode="json") for _, message in turns]
+        with SQLiteStorageManager(database) as storage:
+            for i, message in turns:
+                if storage.event_backend.get(str(i)) is None:
+                    storage.event_backend.store(str(i), message)
+        with SQLiteStorageManager(database) as storage:
+            for i, message in turns:
+                loaded = storage.event_backend.get(str(i))
+                assert loaded is not message and loaded.raw_response is None
+                assert loaded.parts == message.parts
+                assert loaded.replay_scope == message.replay_scope
+                ctx.messages[i] = loaded
+        result = await nxt(ctx)
+        assert [dict(message) for message in ctx.messages] == before
+        assert [message.model_dump(mode="json") for _, message in turns] == native_before
+        middleware_calls.append(len(turns))
+        return result
+
+    agent = TestAgent()
+    agent.event_manager.intercept("llm_call", round_trip_middleware)
+    try:
+        assert await agent.answer() == "done"
+    finally:
+        await agent.aclose()
+        await client.aclose()
+
+    assert len(bodies) == len(middleware_calls) == 3
+    assert middleware_calls == [0, 1, 2]
+    assert agent.context["fixed_reference"] == prefix
+    endpoints = []
+    for body, live in zip(bodies, ("live initial", "live step one", "live step two"), strict=True):
+        assert body["prompt_cache_options"] == {"mode": "explicit"}
+        marked = [
+            i
+            for i, item in enumerate(body["input"])
+            if any(
+                "prompt_cache_breakpoint" in block
+                for block in item.get("output", item.get("content", []))
+                if isinstance(block, dict)
+            )
+        ]
+        assert 1 <= len(marked) <= 80
+        # Leading fixed context can be in Responses instructions (implicitly
+        # included by every later input checkpoint), or in marked input text.
+        assert prefix in body.get("instructions", "") or any(
+            prefix in text for text in strings(body["input"][: marked[-1] + 1])
+        )
+        assert "nooa_cache_boundary" not in body
+        endpoints.append(marked)
+        suffix = body["input"][marked[-1] + 1 :]
+        live_block = f'<live_reference expr="self._live_state">\n{live}\n</live_reference>'
+        assert any(live_block in text for text in strings(suffix)), list(strings(suffix))
+        assert not any(
+            "<live_reference " in text for text in strings(body["input"][: marked[-1] + 1])
+        )
+        assert "<live_reference " not in body.get("instructions", "")
+        assert "prompt_cache_breakpoint" not in repr(suffix)
+    for earlier, later, marked in zip(bodies, bodies[1:], endpoints, strict=False):
+        end = marked[-1] + 1
+        assert earlier["input"][:end] == later["input"][:end]
+        assert earlier.get("instructions") == later.get("instructions")
+    assert len(endpoints[0]) < len(endpoints[1]) < len(endpoints[2])
+    assert any(item.get("type") == "function_call_output" for item in bodies[2]["input"])

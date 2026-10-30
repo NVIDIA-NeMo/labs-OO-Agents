@@ -22,7 +22,7 @@ def test_retry_config_defaults():
     assert c.rate_limit_extra_retries == 3
     assert c.rate_limit_base_delay == 3.0
     assert c.rate_limit_backoff_base == 3.0
-    assert c.retryable_status_codes == frozenset({429, 500, 502, 503, 504})
+    assert c.retryable_status_codes == frozenset({408, 429, 500, 502, 503, 504})
     assert asyncio.TimeoutError in c.retryable_exceptions
     assert c.retry_on_empty_content is False
     assert c.on_retry is None

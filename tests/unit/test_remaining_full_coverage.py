@@ -726,6 +726,7 @@ class TestSQLiteSessionLocking:
         mislead diagnostics.
         """
         import fcntl
+        import socket
 
         from nooa.storage.sqlite import _acquire_session_lock
 
@@ -735,7 +736,9 @@ class TestSQLiteSessionLocking:
 
         fd = _acquire_session_lock(str(lock_path))
         try:
-            assert lock_path.read_bytes() == str(os.getpid()).encode()
+            # The record is "<pid> <hostname>" (the host lets another machine
+            # sharing the directory tell the session is in use).
+            assert lock_path.read_bytes() == f"{os.getpid()} {socket.gethostname()}".encode()
         finally:
             fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)

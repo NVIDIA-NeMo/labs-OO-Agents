@@ -245,7 +245,7 @@ class TestConfigMergeEdgeCases:
 
 
 class TestTokenBudgetIntegration:
-    """Tests for token budget fields (max_context_tokens, max_event_tokens)."""
+    """Tests for enforced and reserved token-budget settings."""
 
     @pytest.mark.asyncio
     async def test_max_context_tokens_does_not_crash_on_generation(self):
@@ -272,7 +272,7 @@ class TestTokenBudgetIntegration:
         assert result == "done"
 
     @pytest.mark.asyncio
-    async def test_max_event_tokens_does_not_crash_on_generation(self):
+    async def test_max_event_tokens_is_accepted_but_inert(self):
         """Agent with max_event_tokens set should not raise ValueError during generation."""
         from nooa.unifiedllm import FakeLLMClient
 
@@ -484,7 +484,7 @@ class TestMethodLevelTruncationConfig:
 
         class TestAgent(
             Agent,
-            llm=_TEST_LLM,
+            llm=FakeLLMClient(media_inputs=["image"]),
             truncation=TruncationConfig(
                 media_capture=MediaCaptureConfig(max_attachments_per_execution=2)
             ),
@@ -532,7 +532,7 @@ for i in range(4):
 
         class TestAgent(
             Agent,
-            llm=_TEST_LLM,
+            llm=FakeLLMClient(media_inputs=["image"]),
             truncation=TruncationConfig(
                 media_capture=MediaCaptureConfig(max_attachments_per_execution=4)
             ),

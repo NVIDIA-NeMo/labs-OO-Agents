@@ -62,7 +62,7 @@ def test_wizard_saves_endpoint_limits_not_catalogue(tmp_path, monkeypatch):
     assert entry["context_window"] == 100000
     assert entry["max_tokens"] == 16000
     assert "endpoint input limit" in result.output
-    assert entry["provenance"]["endpoint_limits"]["max_input_tokens"] == 100000
+    assert "provenance" not in entry
 
 
 @pytest.mark.parametrize("cached", [(12, 0), (0, 0)])
@@ -187,30 +187,39 @@ def test_wizard_retries_only_selected_interface_at_120_seconds(tmp_path, monkeyp
             "--output",
             str(target),
         ],
-        input="y\nmodel\nlonger\nchat\ny\n",
+        input="y\n-\nmodel\nlonger\nchat\ny\n",
     )
     assert result.exit_code == 0, result.output
-    assert len(posts) == 5  # Configured-cap routing is distinct from interface discovery.
-    assert result.output.count("Approve API checks") == 1
+    # Configured-cap routing is distinct from interface discovery;
+    # check_interfaces now also probes reasoning by default for chat.
+    assert len(posts) == 6
+    assert result.output.count("Approve setup and optional media checks") == 1
     assert result.output.count("Results ·") == 1
     assert "route may be slow" in result.output
     assert "private server detail" not in result.output
     entry = yaml.safe_load(target.read_text())["models"]["local"]
-    assert entry["provenance"]["tokens_charged_to_budget"] == 4 * 712 + 8192 + 512
+    assert "provenance" not in entry
 
 
 @pytest.mark.parametrize("correct", [True, False])
 def test_progress_reports_puzzle_result_and_parse_failure(correct):
     @click.command()
     def display():
-        progress = view.CheckProgress()
+        progress = view.CheckProgress(diagnostics=True)
         progress.update(
             "level:high",
-            {"outcome": "accepted", "reasoning_observed": True, "answer_correct": correct},
+            {
+                "outcome": "accepted",
+                "reasoning_observed": True,
+                "answer_correct": correct,
+                "reasoning_tokens": 4096,
+            },
         )
         progress.update("anthropic", {"outcome": "not_confirmed", "error": "ReasoningReplayError"})
 
     result = CliRunner().invoke(display)
-    assert ("answer correct" if correct else "answer incorrect") in result.output
-    assert "Reply not understood (ReasoningReplayError)" in result.output
+    normalized_output = " ".join(result.output.split())
+    assert "4,096 reasoning tokens" in normalized_output
+    assert ("answer correct" if correct else "answer incorrect") in normalized_output
+    assert "Could not read the reply" in result.output
     assert "Not checked" not in result.output

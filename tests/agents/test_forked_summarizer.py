@@ -10,7 +10,7 @@ import pytest
 from nooa import Agent
 from nooa.agents import TokenBudgetSummarizer
 from nooa.config.summarizer_config import TokenBudgetConfig
-from nooa.events import Message
+from nooa.events import BeforeTurn, Message
 from nooa.runtime.middleware import LLMCallContext
 from nooa.unifiedllm import CacheBoundary, FakeLLMClient, LLMResponse, LLMUsage, ToolCall
 
@@ -58,7 +58,7 @@ def setup():
 
 
 @pytest.mark.asyncio
-async def test_fork_is_background_isolated_and_applied_only_at_boundary():
+async def test_fork_blocks_parent_and_is_applied_only_at_boundary():
     agent, summarizer, ctx = setup()
     entered, release = asyncio.Event(), asyncio.Event()
     seen = []
@@ -76,10 +76,10 @@ async def test_fork_is_background_isolated_and_applied_only_at_boundary():
         request.response = parent
         return request
 
-    result = await agent.event_manager.run_middleware("llm_call", ctx, core)
-    assert result.response is parent
-    assert summarizer._pending_task is not None
+    parent_call = asyncio.create_task(agent.event_manager.run_middleware("llm_call", ctx, core))
     await asyncio.wait_for(entered.wait(), 1)
+    assert not parent_call.done()
+    assert summarizer._pending_task is not None
     assert not summarizer._pending_task.done()
     assert agent.event_manager.keys() == ["1", "2", "3", "4"]
     assert seen[0][0][1] is ctx.messages[1]
@@ -93,9 +93,14 @@ async def test_fork_is_background_isolated_and_applied_only_at_boundary():
     assert seen[0][1]["extra_body"]["setting"] == "original"
     agent.event_manager.add(Message(content="new work"))
     release.set()
-    await summarizer._pending_task
+    result = await asyncio.wait_for(parent_call, 1)
+    assert result.response is parent
     assert agent.event_manager.keys() == ["1", "2", "3", "4", "5"]
-    summarizer._apply_pending_summary()
+    agent.event_manager.add(
+        BeforeTurn(
+            method_name="reply", strategy="CodeActStrategy", generation_id="test", turn_number=2
+        )
+    )
     assert agent.event_manager.keys() == ["1..3", "4", "5"]
     assert agent.event_manager["1..3"].summary_text == "summary"
     summarizer._uninstall()
@@ -180,13 +185,15 @@ async def test_uninstall_cancels_fork_and_removes_middleware():
         request.response = response("parent")
         return request
 
-    await agent.event_manager.run_middleware("llm_call", ctx, core)
+    parent_call = asyncio.create_task(agent.event_manager.run_middleware("llm_call", ctx, core))
+    await asyncio.wait_for(entered.wait(), 1)
     assert summarizer._pending_task is not None
     task = summarizer._pending_task
-    await asyncio.wait_for(entered.wait(), 1)
     summarizer._uninstall()
     with pytest.raises(asyncio.CancelledError):
         await task
+    with pytest.raises(asyncio.CancelledError):
+        await parent_call
     assert agent.event_manager._middleware["llm_call"] == []
 
 
@@ -242,14 +249,7 @@ async def test_unavailable_fork_preserves_history_without_fallback(missing, capl
 @pytest.mark.asyncio
 async def test_pending_summary_is_not_replaced_or_queued():
     agent, summarizer, ctx = setup()
-    release = asyncio.Event()
-    agent.llm.acall = AsyncMock(side_effect=lambda *a, **kw: None)
-
-    async def summary(*args, **kwargs):
-        await release.wait()
-        return response()
-
-    agent.llm.acall = summary
+    agent.llm.acall = AsyncMock(return_value=response())
 
     async def core(request):
         request.response = response("parent")
@@ -257,12 +257,10 @@ async def test_pending_summary_is_not_replaced_or_queued():
 
     await agent.event_manager.run_middleware("llm_call", ctx, core)
     task = summarizer._pending_task
+    assert task.done()
     await agent.event_manager.run_middleware("llm_call", ctx, core)
     assert summarizer._pending_task is task
-    release.set()
-    await task
-    await agent.event_manager.run_middleware("llm_call", ctx, core)
-    assert summarizer._pending_task is task
+    agent.llm.acall.assert_awaited_once()
     summarizer._uninstall()
 
 
@@ -408,7 +406,7 @@ def test_model_switch_keeps_fork_subscription():
 
 
 @pytest.mark.asyncio
-async def test_structured_parent_forks_with_text_output_without_mutating_parent():
+async def test_structured_parent_preserves_output_contract_without_mutating_parent():
     from pydantic import BaseModel
 
     agent, summarizer, ctx = setup()
@@ -422,7 +420,7 @@ async def test_structured_parent_forks_with_text_output_without_mutating_parent(
 
     await agent.event_manager.run_middleware("llm_call", ctx, core)
     await summarizer._pending_task
-    assert agent.llm.acall.call_args.kwargs["output_model"] is None
+    assert agent.llm.acall.call_args.kwargs["output_model"] is ctx.params["output_model"]
     assert ctx.params["output_model"] is BaseModel
     assert summarizer._pending_summary == "summary"
     summarizer.summarize.assert_not_awaited()
@@ -535,7 +533,7 @@ async def test_trigger_uses_current_provider_usage_and_preserves_recent(tokens, 
 
 
 @pytest.mark.asyncio
-async def test_aclose_awaits_cancelled_background_task():
+async def test_aclose_cancels_summary_and_waiting_parent():
     agent, summarizer, ctx = setup()
     entered, cancelled = asyncio.Event(), asyncio.Event()
 
@@ -552,10 +550,12 @@ async def test_aclose_awaits_cancelled_background_task():
         request.response = response("parent")
         return request
 
-    await agent.event_manager.run_middleware("llm_call", ctx, core)
+    parent_call = asyncio.create_task(agent.event_manager.run_middleware("llm_call", ctx, core))
     await asyncio.wait_for(entered.wait(), 1)
     try:
         await agent.aclose()
+        with pytest.raises(asyncio.CancelledError):
+            await parent_call
         assert cancelled.is_set()
         assert summarizer._pending_task is None
         assert agent.event_manager._middleware["llm_call"] == []
@@ -594,3 +594,39 @@ async def test_close_callbacks_are_awaited_once_in_reverse_order(caplog):
     assert calls == ["broken", "first"]
     removed.assert_not_awaited()
     assert "cleanup failed" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_append_only_fork_resists_middleware_prompt_and_tool_rewrites():
+    agent, summarizer, ctx = setup()
+    tool = object()
+    ctx.params["tools"] = [tool]
+    ctx.params["extra_body"]["tool_choice"] = "required"
+
+    async def policy(request, nxt):
+        if "Background memory compaction" in str(request.messages):
+            request.messages[0]["content"] = "Replacement execution prompt"
+            request = request.model_copy(update={"client": FakeLLMClient()})
+            request.params.update(tools=[], tool_choice="required", output_model=str)
+            request.params["extra_body"]["tool_choice"] = "required"
+        return await nxt(request)
+
+    agent.event_manager.intercept("llm_call", policy)
+    agent.llm.acall = AsyncMock(return_value=response())
+
+    async def core(request):
+        request.response = response("parent")
+        return request
+
+    await agent.event_manager.run_middleware("llm_call", ctx, core)
+    await summarizer._pending_task
+    args = agent.llm.acall.call_args
+    assert args.args[0][:-1] == ctx.messages
+    assert args.kwargs["tools"] == [tool]
+    assert args.kwargs["tool_choice"] == "auto"
+    assert args.kwargs["output_model"] is None
+    assert args.kwargs["extra_body"]["tool_choice"] == "required"
+    assert ctx.params["extra_body"]["tool_choice"] == "required"
+    assert ctx.params["tool_choice"] == "auto"
+    assert ctx.messages[0]["content"] == "stable"
+    summarizer._uninstall()

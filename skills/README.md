@@ -10,6 +10,7 @@ These are instructions *for coding agents about the framework* — not `nooa.Ski
 |---|---|
 | [`nooa-agent-authoring`](nooa-agent-authoring/SKILL.md) | Core authoring: Agent subclasses, generation methods (`...`), docstring prompts, structured output, strategies (CodeAct/Predict), visibility, orchestrators, subagents, prompt debugging |
 | [`nooa-model-configuration`](nooa-model-configuration/SKILL.md) | Model onboarding and diagnostics: Connect CLI/library, registry aliases, credentials, reply budgets, reasoning levels, caching and reasoning replay |
+| [`nooa-media`](nooa-media/SKILL.md) | Typed image/audio/video/PDF inputs, CodeAct show(), route-local media permissions, MIME/URL/size limits, and text-only replay |
 | [`nooa-codeact-advanced`](nooa-codeact-advanced/SKILL.md) | Advanced strategy tuning: prefill (custom/disable/pre-ellipsis), loop guards, truncation tuning, code restrictions, execution internals, PredictConfig |
 | [`nooa-agentdoc`](nooa-agentdoc/SKILL.md) | Making types render beautiful docs for the LLM: `doc()`, `spec()`, `hidden`, `Annotated` descriptions, `pformat`/`pprint` tuning |
 | [`nooa-context-and-state`](nooa-context-and-state/SKILL.md) | Context blocks, event history and `EventQuery`, history summarization, persistence and memory |
@@ -32,12 +33,18 @@ Copy or symlink skill directories into the location your coding agent reads:
 mkdir -p ~/.claude/skills
 cp -R skills/nooa-* ~/.claude/skills/
 
-# Or one skill into a project
+# Or the core authoring/setup/media skills into a project
 mkdir -p .claude/skills
-cp -R skills/nooa-agent-authoring .claude/skills/
+cp -R skills/nooa-agent-authoring skills/nooa-model-configuration skills/nooa-media .claude/skills/
 ```
 
 Other hosts read from different directories (e.g. `.codex/skills/`, `.agents/skills/`).
+
+Sibling-skill links require those siblings to be installed together. Links to
+`../../docs/` resolve in the source checkout, not in a copied skill directory.
+Keep the matching source checkout or obtain the docs for your installed release
+tag/commit from this repository; do not assume development `main` describes an
+older wheel. Give the coding agent that checkout's absolute path when needed.
 
 ## Validate
 

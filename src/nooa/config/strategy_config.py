@@ -30,6 +30,32 @@ def _default_prefill() -> Any:
     return InspectInputsPrefill()
 
 
+class LoopGuardConfig(BaseModel):
+    """Deterministic detection of a CodeAct loop that repeats one tool call.
+
+    An action is a tool name plus its normalized arguments; for a Python cell,
+    the parsed code, so comments and formatting do not matter. Its outcome is
+    the error or the complete output it produced.
+
+    * A failing action whose last ``repeat_threshold - 1`` runs in the window
+      failed with an identical outcome is not run again; the model receives a
+      fixed loop-guard message instead.
+    * A succeeding action that produced identical output ``repeat_threshold``
+      times in the window runs, then the model receives the message.
+    * Repeating that action (with identical output, if it succeeded) within
+      ``window`` tool calls after the message stops generation with
+      ``LoopDetectedError``.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    repeat_threshold: int = Field(default=7, ge=2)
+    # Number of most recent tool calls, including the current one, that are compared.
+    window: int = Field(default=15, ge=2)
+    # Bound on the previous outcome quoted in the loop-guard message.
+    max_outcome_chars: int = Field(default=500, ge=0)
+
+
 class CodeActConfig(BaseModel):
     """Config for CodeActStrategy."""
 
@@ -38,6 +64,9 @@ class CodeActConfig(BaseModel):
     model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
 
     max_iterations: int | None = None
+    # Error budget per call. LLM API errors are counted only while
+    # consecutive (a successful LLM call resets them); other errors such as
+    # invalid tool calls and failed result validation accumulate.
     max_retries: int = 3
     # Maximum consecutive turns where the LLM returns plain text instead of a
     # tool call before the run is aborted. A real tool call resets the counter.
@@ -73,6 +102,8 @@ class CodeActConfig(BaseModel):
     top_p: float | None = None
     max_tool_calls: int | None = None
     translate_tool_calls: bool = False
+    # Opt-in detection of repeated identical tool calls; ``None`` disables it.
+    loop_guard: LoopGuardConfig | None = None
     restrictions: RestrictionsConfig = RestrictionsConfig()
 
     # Execution backend for execute_python cells:

@@ -23,6 +23,8 @@ _STATUS_MAX_ITEMS = 10
 _STATUS_MAX_CHARS = 2_000
 _STATUS_TITLE_CHARS = 120
 _STATUS_MAX_DEPS = 3
+# Completed rows shown when no todo is active; the rest are counted.
+_STATUS_MAX_DONE = 2
 
 
 class TodoComment(BaseModel):
@@ -622,8 +624,8 @@ class TodoManager(Skill):
         """Return a compact, bounded progress summary.
 
         When a todo is active, shows its description and transitive dependencies,
-        followed by a compact summary of unrelated work. Otherwise, orders open
-        and blocked work before newest completed history. ``list_todos()`` always
+        followed by a compact summary of unrelated work. Otherwise, lists open
+        and blocked work, then the two newest done. ``list_todos()`` always
         returns the full workspace.
         """
         if max_items < 0:
@@ -718,12 +720,15 @@ class TodoManager(Skill):
         for todo in todos:
             effective = self._effective_status(todo)
             by_status[effective].append(todo)
-        ordered = [*by_status["open"], *by_status["blocked"], *reversed(by_status["done"])]
+        # Open and blocked work keeps its rows; completed history shows only the
+        # newest few and is otherwise counted in the "not shown" line.
+        recent_done = list(reversed(by_status["done"]))[:_STATUS_MAX_DONE]
+        ordered = [*by_status["open"], *by_status["blocked"], *recent_done]
         selected = ordered[:max_items]
 
         def render(rows: list[Todo]) -> str:
             shown_ids = {todo.id for todo in rows}
-            omitted = [todo for todo in ordered if todo.id not in shown_ids]
+            omitted = [todo for todo in todos if todo.id not in shown_ids]
             header = f"Todos ({len(by_status['done'])}/{len(todos)} done"
             if omitted:
                 header += f"; showing {len(rows)}"

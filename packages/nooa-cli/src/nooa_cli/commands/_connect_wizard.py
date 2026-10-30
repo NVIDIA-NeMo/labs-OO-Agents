@@ -15,7 +15,9 @@ import httpx
 import yaml
 
 from nooa import paths
+from nooa._platform import PosixOnlyFeatureError
 from nooa.unifiedllm import connect
+from nooa.unifiedllm.connect._records import text_baseline_passed
 
 from . import _connect_prompts as prompts
 from . import _connect_view as view
@@ -53,6 +55,9 @@ class WizardState:
     interfaces: Any = None
     levels: Any = None
     levels_file: Any = None
+    media_inputs: Any = None
+    inherit_media_inputs: bool = False
+    test_media_inputs: Any = None
     model: Any = None
     no_catalogue: Any = None
     no_probe: Any = None
@@ -64,6 +69,7 @@ class WizardState:
     prompt_key: Any = None
     proposal: Any = None
     provider: Any = None
+    reasoning_level: Any = None
     reasoning_output_tokens: Any = None
     reasoning_template: Any = None
     registry: Any = None
@@ -72,17 +78,30 @@ class WizardState:
     result: Any = None
     server_urls: Any = None
     show_config: Any = None
+    show_diagnostics: Any = False
     unobserved: Any = None
+    working_dir: Any = None
     yes: Any = None
 
 
-async def show_checks(events, *, reasoning_levels=None, summary=True):
+async def show_checks(
+    events, *, reasoning_levels=None, summary=True, media_inputs=None, diagnostics=False
+):
     with view.quiet_provider_messages():
-        return await display_checks(events, reasoning_levels=reasoning_levels, summary=summary)
+        return await display_checks(
+            events,
+            reasoning_levels=reasoning_levels,
+            summary=summary,
+            media_inputs=media_inputs,
+            diagnostics=diagnostics,
+        )
 
 
-async def display_checks(events, *, reasoning_levels=None, summary=True):
+async def display_checks(
+    events, *, reasoning_levels=None, summary=True, media_inputs=None, diagnostics=False
+):
     progress = view.CheckProgress()
+    progress.diagnostics = diagnostics
     try:
         async with aclosing(events) as steps:
             async for event in steps:
@@ -94,7 +113,12 @@ async def display_checks(events, *, reasoning_levels=None, summary=True):
                         "provenance": {"probes": {event.name: event.outcome}},
                     }
                 )
-                progress.update(event.name, event.outcome, missing_reasoning=bool(missing))
+                progress.update(
+                    event.name,
+                    event.outcome,
+                    missing_reasoning=bool(missing),
+                    media_inputs=media_inputs,
+                )
     finally:
         progress.finish(summary=summary)
     raise click.ClickException("Checks ended without a result.")
@@ -140,16 +164,26 @@ def select_connection(state: WizardState) -> bool:
         state.alias = state.alias or state.edit_model
         routed = state.editing.get("model_name", state.edit_model)
         state.api_style = state.editing.get("api_style") or (
-            "responses"
+            "systemone"
+            if state.editing.get("client_type") == "decision"
+            else "responses"
             if state.editing.get("client_type") == "responses"
             else "anthropic"
             if routed.startswith("anthropic/")
             else "chat"
         )
-        prefix = "anthropic/" if state.api_style == "anthropic" else "openai/"
+        prefix = (
+            ""
+            if state.api_style in connect.DECISION_API_STYLES
+            else "anthropic/"
+            if state.api_style == "anthropic"
+            else "openai/"
+        )
         state.model = routed.removeprefix(prefix)
         state.endpoint = (
-            state.editing.get("api_base")
+            state.editing.get("endpoint")
+            if state.api_style in connect.DECISION_API_STYLES
+            else state.editing.get("api_base")
             or connect.PROVIDERS[
                 "anthropic" if state.api_style == "anthropic" else "openai"
             ].api_base
@@ -159,6 +193,19 @@ def select_connection(state: WizardState) -> bool:
         state.explicit_key_env = True
         state.no_catalogue = True
         view.line(f"Editing {state.edit_model} from {source_path}. No model discovery is needed.")
+        # --working-dir only redirects entries() to the target's own file
+        # when that file already exists (it cannot read a file that isn't
+        # there yet) — otherwise this alias was found via the general
+        # chain (cwd/global), not target's own copy. Silently saving that
+        # into target without saying so looks like an in-place edit of
+        # target's own prior settings when it's actually a copy from
+        # elsewhere into a project that never had this alias.
+        if state.working_dir and source_path.resolve() != state.path.resolve():
+            view.line(
+                f"{state.path} does not define {state.edit_model!r} yet; copying it in from "
+                f"{source_path} rather than editing it in place there.",
+                fg="yellow",
+            )
     state.data = {}
     if state.path.exists():
         with state.path.open() as source:
@@ -172,7 +219,9 @@ def select_connection(state: WizardState) -> bool:
             state.registry.setdefault(name, (entry, state.path))
     state.server_urls = [p.api_base for p in connect.PROVIDERS.values()]
     for entry, _ in state.registry.values():
-        address = entry.get("api_base") if isinstance(entry, dict) else None
+        address = (
+            entry.get("endpoint") or entry.get("api_base") if isinstance(entry, dict) else None
+        )
         if isinstance(address, str):
             try:
                 state.server_urls.append(connect.normalize_endpoint(address))
@@ -192,14 +241,16 @@ def select_connection(state: WizardState) -> bool:
         reasoning_output_tokens=state.reasoning_output_tokens,
     )
     if state.approval != "none" and not state.yes:
-        if not prompts.confirm("Approve API checks within this budget?", default=True):
-            click.echo("No API checks approved. Run with --no-probe for manual setup.")
+        if not prompts.confirm(
+            "Approve setup and optional media checks with this token budget?", default=True
+        ):
+            click.echo("Checks not approved. Run with --no-probe for manual setup.")
             return False
     if state.editing is None:
         view.step(1, "Connection")
     if state.provider and state.provider not in (*connect.PROVIDERS, "custom"):
         raise click.UsageError(
-            "Unknown provider. Choose nvidia, openai, anthropic, google, openrouter, or custom."
+            f"Unknown provider. Choose {', '.join(connect.PROVIDERS)}, or custom."
         )
     if not state.provider and not state.endpoint and not state.yes:
         state.provider = prompts.prompt(
@@ -227,13 +278,25 @@ def select_connection(state: WizardState) -> bool:
         "Model server URL", suggestions=state.server_urls, open_menu=True
     )
     state.endpoint = connect.normalize_endpoint(state.endpoint)
+    announced = False
     if not state.explicit_key_env:
         saved_names = credential_names(state.registry, state.endpoint)
         if len(saved_names) == 1:
             state.api_key_env = saved_names[0]
-            view.line(
-                f"Using saved key variable {state.api_key_env or '(no authentication)'} for this endpoint."
-            )
+            announced = True
+            if not state.api_key_env:
+                view.line("Using this endpoint without authentication, as saved.")
+            elif os.environ.get(state.api_key_env):
+                view.line(f"Using saved key variable {state.api_key_env} for this endpoint.")
+            else:
+                # credential_names only remembers which variable NAME this
+                # endpoint used last time, not whether a value is still set —
+                # saying "using" here when we're about to prompt for the same
+                # key again reads as broken, not reassuring.
+                view.line(
+                    f"This endpoint previously used key variable {state.api_key_env}, "
+                    "but it has no value set."
+                )
         elif len(saved_names) > 1:
             if state.yes:
                 raise click.UsageError(
@@ -242,6 +305,7 @@ def select_connection(state: WizardState) -> bool:
             state.api_key_env = prompts.prompt(
                 "Saved key variable",
                 choices=[name or "-" for name in saved_names],
+                labels={name or "-": name or "No authentication" for name in saved_names},
                 open_menu=True,
             )
             if state.api_key_env == "-":
@@ -251,7 +315,11 @@ def select_connection(state: WizardState) -> bool:
     state.discovery_style = state.api_style or state.default_style
     if state.api_key_env is None:
         default_env = (
-            "ANTHROPIC_API_KEY" if state.discovery_style == "anthropic" else "OPENAI_API_KEY"
+            "DECISION_MODEL_API_KEY"
+            if state.discovery_style in connect.DECISION_API_STYLES
+            else "ANTHROPIC_API_KEY"
+            if state.discovery_style == "anthropic"
+            else "OPENAI_API_KEY"
         )
         state.api_key_env = (
             default_env
@@ -287,14 +355,42 @@ def select_connection(state: WizardState) -> bool:
         and state.api_key_env
         and not os.environ.get(state.api_key_env)
     )
+    asked = bool(state.prompt_key or needs_key)
     state.api_key = (
         prompts.prompt("API key (used only for this setup)", hide_input=True)
-        if state.prompt_key or needs_key
+        if asked
         else os.environ.get(state.api_key_env)
         if state.api_key_env
         else None
     )
+    if state.api_key and not asked and not announced:
+        # A preset's variable is used silently otherwise; a stale key there
+        # then looks like a broken provider.
+        view.line(f"Using the key in {state.api_key_env}.")
     return True
+
+
+def ask_for_rejected_key(state: WizardState) -> None:
+    """The server refused the key: say where it came from and ask for another.
+
+    The new key is used for this setup; the save step offers to store it
+    under ``state.api_key_env``, as for any key typed during setup.
+    """
+    source = (
+        f"the key in {state.api_key_env}"
+        if state.api_key_env and state.api_key == os.environ.get(state.api_key_env)
+        else "that key"
+        if state.api_key
+        else "the request without a key"
+    )
+    view.line(f"The server rejected {source}. Enter a key to try again (Ctrl-C to cancel).")
+    if not state.api_key_env:
+        state.api_key_env = prompts.prompt(
+            "Save key under variable name",
+            default="NOOA_MODEL_API_KEY",
+            suggestions=prompts.environment_names(),
+        )
+    state.api_key = prompts.prompt("API key (used only for this setup)", hide_input=True)
 
 
 def select_model(state: WizardState) -> bool:
@@ -305,11 +401,18 @@ def select_model(state: WizardState) -> bool:
     state.discovery_endpoint = None
     state.endpoint_models = ()
     if state.discovery_file:
+        if state.discovery_style in connect.DECISION_API_STYLES:
+            raise click.UsageError(
+                f"--discovery-file does not apply to --api-style {state.discovery_style}"
+            )
         from ._connect_stages import read_discovery
 
         state.endpoint_models = read_discovery(state.discovery_file, state.endpoint)
         state.discovery_endpoint = state.endpoint
-    if not state.model:
+    if not state.model and state.discovery_style in connect.DECISION_API_STYLES:
+        # Decision endpoints do not list decision models, so ask for the exact ID.
+        state.model = prompts.prompt("Exact decision model ID (Ctrl-C to cancel)")
+    while not state.model:
         click.echo("Connecting to the server and listing models...")
         try:
             found = asyncio.run(
@@ -322,9 +425,12 @@ def select_model(state: WizardState) -> bool:
             state.discovery_endpoint = state.endpoint
             click.echo(f"Could not list models: {exc}", err=True)
             if exc.status_code in {401, 403}:
-                raise click.ClickException(
-                    "Authentication failed. Check the key and try again."
-                ) from None
+                if state.yes:
+                    raise click.ClickException(
+                        "Authentication failed. Check the key and try again."
+                    ) from None
+                ask_for_rejected_key(state)
+                continue
             state.model = prompts.prompt("Exact model ID (if known; Ctrl-C to cancel)")
         else:
             state.endpoint = found.api_base
@@ -332,10 +438,12 @@ def select_model(state: WizardState) -> bool:
             state.discovery_endpoint = state.endpoint
             state.endpoint_models = found.models
             names = [item["id"] for item in found.models]
-            click.echo(
-                f"Server listed {len(names)} model(s). Credentials are checked next. Type part of a name to search, then Tab to select."
+            click.echo(f"Found {len(names)} models. Type part of a name, then Tab to select.")
+            state.model = prompts.prompt(
+                "Search advertised model IDs (type to search; Tab to select)",
+                choices=names,
+                searchable=True,
             )
-            state.model = prompts.prompt("Model", choices=names)
     return True
 
 
@@ -351,6 +459,16 @@ def check_interfaces(state: WizardState) -> bool:
             retry_styles = ("chat", "responses", "anthropic")
             interface_timeout = 30
             while True:
+                # Always test reasoning per interface, not just connectivity --
+                # "nooa connect" with no arguments should run the best check we
+                # have by default, not require the caller to already know to
+                # ask for it. If the user gave us their own --reasoning-template
+                # (e.g. for an Anthropic-only setup), that shape wins; "effort"
+                # is a reasonable default elsewhere, understood by chat and
+                # responses (and harmless if a style ignores/rejects it).
+                reasoning_level = state.reasoning_level or (
+                    state.levels.split(",")[0].strip() if state.levels else "medium"
+                )
                 state.interfaces = asyncio.run(
                     show_checks(
                         connect.check_interfaces(
@@ -363,8 +481,15 @@ def check_interfaces(state: WizardState) -> bool:
                             api_key=state.api_key,
                             styles=retry_styles,
                             timeout_seconds=interface_timeout,
+                            reasoning_template=state.reasoning_template or "effort",
+                            reasoning_level=reasoning_level,
+                            reasoning_output_tokens=(
+                                state.reasoning_output_tokens
+                                or connect.DEFAULT_REASONING_OUTPUT_TOKENS
+                            ),
                         ),
                         summary=False,
+                        diagnostics=state.show_diagnostics,
                     )
                 )
                 state.interface_spent += state.interfaces.tokens_charged_to_budget
@@ -373,6 +498,8 @@ def check_interfaces(state: WizardState) -> bool:
                 )
                 available = state.interfaces.accepted
                 if available:
+                    if state.interfaces.recommended_style in available:
+                        state.default_style = state.interfaces.recommended_style
                     break
                 failed_checks = {
                     style: r.entry["provenance"]["probes"]["routing"]
@@ -389,36 +516,41 @@ def check_interfaces(state: WizardState) -> bool:
                     else "Could not confirm a working connection. Listing models does not validate the key.",
                     fg="yellow",
                 )
-                click.echo(
-                    "Agent diagnostic prompt:\n"
-                    + connect.diagnostic_prompt(
-                        "interfaces",
-                        {
-                            "model_name": state.model,
-                            "api_base": state.endpoint,
-                            "api_key_env": state.api_key_env,
-                        },
-                        failed_checks,
-                        api_key=state.api_key,
-                        run_context=diagnostic_context(
-                            target=state.path,
-                            alias=state.alias,
-                            model=state.model,
-                            endpoint=state.endpoint,
-                            api_key_env=state.api_key_env,
+                if state.show_diagnostics:
+                    click.echo(
+                        "Agent diagnostic prompt:\n"
+                        + connect.diagnostic_prompt(
+                            "interfaces",
+                            {
+                                "model_name": state.model,
+                                "api_base": state.endpoint,
+                                "api_key_env": state.api_key_env,
+                            },
+                            failed_checks,
                             api_key=state.api_key,
-                            budget=state.budget_tokens,
-                            remaining=max(0, state.budget_tokens - state.interface_spent),
-                            output_tokens=state.output_tokens,
-                            reasoning_output_tokens=state.reasoning_output_tokens,
-                            stage="interfaces",
-                            interface_timeout_seconds=interface_timeout,
-                            discovery_succeeded=state.discovery_succeeded
-                            if state.endpoint == state.discovery_endpoint
-                            else None,
-                        ),
+                            run_context=diagnostic_context(
+                                target=state.path,
+                                alias=state.alias,
+                                model=state.model,
+                                endpoint=state.endpoint,
+                                api_key_env=state.api_key_env,
+                                api_key=state.api_key,
+                                budget=state.budget_tokens,
+                                remaining=max(0, state.budget_tokens - state.interface_spent),
+                                output_tokens=state.output_tokens,
+                                reasoning_output_tokens=state.reasoning_output_tokens,
+                                stage="interfaces",
+                                interface_timeout_seconds=interface_timeout,
+                                discovery_succeeded=state.discovery_succeeded
+                                if state.endpoint == state.discovery_endpoint
+                                else None,
+                            ),
+                        )
                     )
-                )
+                else:
+                    view.line(
+                        "For troubleshooting details, rerun with --show-diagnostics.", dim=True
+                    )
                 if state.yes:
                     raise click.ClickException(
                         "Check credentials and endpoint, or run without --yes to correct them interactively."
@@ -452,6 +584,10 @@ def check_interfaces(state: WizardState) -> bool:
                         prompts.prompt(
                             "Interface to retry",
                             choices=("chat", "responses", "anthropic"),
+                            labels={
+                                style: prompts.choice_label(style)
+                                for style in ("chat", "responses", "anthropic")
+                            },
                             default=state.default_style,
                         ),
                     )
@@ -490,19 +626,27 @@ def check_interfaces(state: WizardState) -> bool:
                     )
                     state.model = prompts.prompt("Exact model ID", default=state.model)
             click.echo(
-                "Interfaces that returned the expected response format: " + ", ".join(available)
+                "Working API formats: "
+                + ", ".join(prompts.choice_label(style) for style in available)
+            )
+            observed = [s for s in available if state.interfaces.reasoning_observed.get(s)]
+            click.echo(
+                "API formats that returned reasoning: "
+                + (
+                    ", ".join(prompts.choice_label(style) for style in observed)
+                    if observed
+                    else "none"
+                )
             )
         if state.interfaces and len(available) == 1:
             state.api_style = available[0]
-            click.echo(f"Using {state.api_style} for {state.model}.")
+            click.echo(f"Using {prompts.choice_label(state.api_style)} for {state.model}.")
         else:
             click.echo(f"Choose the request interface for {state.model}:")
-            click.echo(
-                "chat = OpenAI-compatible; responses = OpenAI Responses; anthropic = Anthropic Messages."
-            )
             state.api_style = prompts.prompt(
                 "API format",
                 choices=available,
+                labels={style: prompts.choice_label(style) for style in available},
                 default=state.default_style if state.default_style in available else available[0],
             )
         if state.api_style == "responses":
@@ -519,18 +663,20 @@ def configure_metadata(state: WizardState) -> bool:
     )
     state.candidate = None
     state.edited_settings = False
+    if state.api_style in connect.DECISION_API_STYLES:
+        if state.catalogue_model:
+            raise click.UsageError("Decision models do not use --catalogue-model")
+        state.no_catalogue = True
+        click.echo("Decision models skip chat catalogue and endpoint model discovery.")
+        return True
     if state.editing is not None:
         state.candidate = {
             "id": state.editing.get("underlying_model", state.model),
             "context_length": state.editing.get("context_window"),
-            "top_provider": {
-                "max_completion_tokens": state.editing.get(
-                    "max_output_tokens",
-                    state.editing.get("provenance", {})
-                    .get("catalogue_limits", {})
-                    .get("max_completion_tokens"),
-                )
-            },
+            # Saved entries keep settings only, not the catalogue limits, and an
+            # edit does not look the model up, so its ceiling is known here only
+            # if the entry saved max_output_tokens. The saved cap is kept as is.
+            "top_provider": {"max_completion_tokens": state.editing.get("max_output_tokens")},
             "reasoning": {
                 "supported_efforts": list(state.editing.get("reasoning_levels", {})),
                 "default_effort": state.editing.get("reasoning_default"),
@@ -578,7 +724,27 @@ def configure_metadata(state: WizardState) -> bool:
                 if state.candidate is None:
                     raise click.ClickException("Choose one of the displayed model IDs.")
         else:
-            click.echo("No catalogue match; model limits and reasoning levels remain unknown.")
+            # An exact/suffix match found nothing — likely a gateway prefix
+            # (aws/..., bedrock-..., vertex/...) the catalogue never records.
+            # Never auto-select a fuzzy guess; only offer it for confirmation.
+            fuzzy = [] if state.yes else connect.fuzzy_match_models(state.model, models)
+            if fuzzy:
+                click.echo(
+                    "Model not found; did you mean one of these? "
+                    + ", ".join(item["id"] for item in fuzzy)
+                )
+                selected = prompts.prompt(
+                    "Catalogue model (blank leaves it unknown)",
+                    default="",
+                    show_default=False,
+                    choices=[""] + [item["id"] for item in fuzzy],
+                )
+                if selected:
+                    state.candidate = next((item for item in fuzzy if item["id"] == selected), None)
+                    if state.candidate is None:
+                        raise click.ClickException("Choose one of the displayed model IDs.")
+            if state.candidate is None:
+                click.echo("No catalogue match; model limits and reasoning levels remain unknown.")
     endpoint_model = (
         next((item for item in state.endpoint_models if item.get("id") == state.model), None)
         if state.endpoint == state.discovery_endpoint
@@ -653,12 +819,78 @@ def configure_metadata(state: WizardState) -> bool:
     return True
 
 
+def configure_media_inputs(state: WizardState) -> bool:
+    """Declaration belongs to this connection, not optional published metadata."""
+    from nooa.unifiedllm.media_inputs import validate_media_inputs
+
+    if state.media_inputs is not None:
+        state.media_inputs = prompts.parse_media_inputs(state.media_inputs)
+        return True
+    previous_entry = state.editing or (
+        (state.data or {}).get("models", {}).get(state.alias) if state.alias else None
+    )
+    previous = ()
+    if previous_entry and state.model and state.api_style:
+        route = connect.plan(
+            state.alias or "candidate",
+            state.model,
+            state.api_style,
+            state.endpoint,
+            state.api_key_env or "",
+            existing_entry=previous_entry,
+        ).entry
+        previous = validate_media_inputs(route.get("media_inputs"))
+    elif state.editing:
+        previous = validate_media_inputs(state.editing.get("media_inputs"))
+    if state.test_media_inputs is not None:
+        state.test_media_inputs = prompts.parse_media_inputs(state.test_media_inputs)
+    elif state.api_style in connect.DECISION_API_STYLES:
+        state.media_inputs = []  # Decision models take no media.
+        return True
+    elif not state.yes and state.approval == "all":
+        mode = prompts.choose_media_mode(editing=bool(state.editing))
+        if mode == "test":
+            state.test_media_inputs = ["image", "audio", "video", "pdf"]
+        else:
+            state.media_inputs = prompts.choose_media_inputs(previous)
+            return True
+    if state.test_media_inputs:
+        # Retesting is evidence collection, not permission revocation.
+        # Resolve again after model/interface selection; this list is the menu
+        # preview, not permission to forward to a subsequently changed route.
+        state.inherit_media_inputs = True
+        state.media_inputs = list(previous)
+        view.line(
+            "Selected media tests: "
+            + ", ".join(state.test_media_inputs)
+            + ". Uses the approved token budget."
+        )
+    else:
+        state.inherit_media_inputs = bool(state.yes)
+        state.media_inputs = list(previous) if state.yes else prompts.choose_media_inputs(previous)
+    return True
+
+
 def configure_checks(state: WizardState) -> bool:
     """Configure checks; return False when the user cancels."""
+    if state.api_style in connect.DECISION_API_STYLES and any(
+        (state.levels_file, state.levels, state.reasoning_template, state.reply_tokens)
+    ):
+        raise click.UsageError("Decision models do not use reasoning-level or reply-token options")
+    if state.media_inputs is None or state.inherit_media_inputs:
+        previous = connect.plan(
+            state.alias or "candidate",
+            state.model,
+            state.api_style,
+            state.endpoint,
+            state.api_key_env,
+            existing_entry=state.existing,
+        ).entry
+        state.media_inputs = previous.get("media_inputs", [])
     if state.levels_file and (state.levels or state.reasoning_template):
         raise click.UsageError("Use either --levels-file or --reasoning-template with --levels.")
     state.patches = None
-    if state.editing is not None:
+    if state.editing is not None and state.api_style not in connect.DECISION_API_STYLES:
         labels = state.candidate.get("reasoning", {}).get("supported_efforts", [])
         original_levels = state.editing.get("reasoning_levels", {})
         if not state.levels_file and any(label not in original_levels for label in labels):
@@ -686,6 +918,8 @@ def configure_checks(state: WizardState) -> bool:
         state.endpoint,
         state.api_key_env,
         catalogue=state.candidate,
+        media_inputs=state.media_inputs,
+        test_media_inputs=state.test_media_inputs,
         reasoning_levels=state.patches,
         budget_tokens=state.budget_tokens,
         output_tokens=state.output_tokens,
@@ -693,13 +927,15 @@ def configure_checks(state: WizardState) -> bool:
         existing_entry=state.interfaces.results[state.api_style].entry
         if state.interfaces
         else state.existing,
-        session_checks=state.approval == "all",
+        session_checks=state.approval == "all"
+        and state.api_style not in connect.DECISION_API_STYLES,
         reply_tokens=state.reply_tokens,
     )
     if state.editing is not None:
         # Preserve transport controls, custom parameters and exact level blocks.
         merged = deepcopy(state.editing)
         for field in (
+            "media_inputs",
             "context_window",
             "max_output_tokens",
             "reasoning_levels",
@@ -761,82 +997,114 @@ def configure_checks(state: WizardState) -> bool:
             "source": "user",
             "template": state.reasoning_template,
         }
-    if "context_window" not in state.proposal.entry:
+    if (
+        state.api_style not in connect.DECISION_API_STYLES
+        and "context_window" not in state.proposal.entry
+    ):
         click.echo(
-            "No context window selected. The runtime will use its fallback; set --context-window to supply a limit."
+            "Context limit unknown; NOOA will use its default. Set --context-window if you know the server limit."
         )
     state.configured = connect.configure_entry(
         state.proposal.entry, reply_tokens=state.reply_tokens
     )
+    if state.api_style in connect.DECISION_API_STYLES:
+        state.proposal = connect.refresh_plan(replace(state.proposal, entry=state.configured))
+        state.remaining_estimate = state.proposal.token_estimate
+        view.line("Decision models have no reply-token or reasoning configuration.")
+        return True
     if state.reply_tokens is None and not state.yes:
+        output_ceiling = (
+            state.configured["provenance"].get("catalogue_limits", {}).get("max_completion_tokens")
+        )
+        if not (
+            isinstance(output_ceiling, int)
+            and not isinstance(output_ceiling, bool)
+            and output_ceiling > 0
+        ):
+            output_ceiling = None
         bounds = [
             v
             for v in (
                 state.configured["context_window"] - 1
                 if state.configured.get("context_window")
                 else None,
-                state.configured["provenance"]
-                .get("catalogue_limits", {})
-                .get("max_completion_tokens"),
+                output_ceiling,
             )
             if isinstance(v, int) and v > 0
         ]
         chosen_cap = prompts.choose_reply_limit(
             state.configured["max_tokens"],
             min(bounds) if bounds else None,
+            output_ceiling=output_ceiling,
             source=state.configured["provenance"]["reply_limit"]["source"],
         )
         state.configured = connect.configure_entry(state.configured, reply_tokens=chosen_cap)
     state.proposal = connect.refresh_plan(replace(state.proposal, entry=state.configured))
     state.remaining_estimate = state.proposal.token_estimate
     view.line(
-        f"Saved reply budget: {state.configured['max_tokens']:,} tokens, shared by reasoning and the answer."
+        f"Saved reply limit: {state.configured['max_tokens']:,} tokens, shared by reasoning and the answer."
     )
     for label, limit in state.configured["provenance"].get("level_reply_limits", {}).items():
         view.line(
-            f"Reasoning level {label}: reply budget raised to {limit['value']:,} tokens to leave room for its thinking budget.",
+            f"Reasoning level {label}: reply limit raised to {limit['value']:,} tokens to leave room for its thinking budget.",
             fg="yellow",
         )
     return True
 
 
+def baseline_allows_save(state: WizardState) -> bool:
+    """Fail closed for approved checks; manual setup is explicitly unverified."""
+    if state.no_probe or state.approval == "none":
+        return True
+    entry = state.result.entry if state.result is not None else {}
+    record = entry.get("provenance", {}).get("probes", {}).get("routing", {})
+    if state.api_style in connect.DECISION_API_STYLES:
+        # Decision models have no text baseline: the accepted decision check is the gate.
+        if connect.check_status("routing", record) == "passed":
+            return True
+    elif text_baseline_passed(record):
+        return True
+    reason = view.connection_detail(record)
+    # Only sanitized display facts: never echo raw provider errors or replies.
+    click.echo(
+        "Nothing was saved. Connection: " + reason.rstrip(".") + ". "
+        "Review the server URL and settings, or increase --budget-tokens if checks were skipped. "
+        "Rerun with --no-probe for manual, unverified setup. "
+        "Add --no-catalogue and an explicit model ID to avoid listing/metadata requests. "
+        "See docs/model-configuration.md. No model entry or key was written.",
+        err=True,
+    )
+    return False
+
+
 def run_checks(state: WizardState) -> bool:
     """Run checks; return False when the user cancels."""
-    price = (
-        "unknown"
-        if state.proposal.price_estimate is None
-        else f"~${state.proposal.price_estimate:.6f} at catalogue prices"
-    )
-    view.line("Check plan", fg="bright_cyan", bold=True)
-    view.line(
-        f"Connection · tools · {len(state.proposal.entry.get('reasoning_levels', {}))} reasoning settings",
-        dim=True,
-    )
+    if state.api_style in connect.DECISION_API_STYLES:
+        checks = ["the decision interface"]
+    else:
+        checks = ["connection", "tools"]
+        if state.proposal.entry.get("reasoning_levels"):
+            checks.append("reasoning")
+        if any(p.name.startswith("media:") for p in state.proposal.probes):
+            checks.append("media inputs")
     if state.proposal.session_checks:
-        view.line(
-            "Then 3 conversation replies to check cache reuse and reasoning retention.",
-            dim=True,
-        )
+        checks.append("conversation")
     view.line(
-        "Configured checks send the saved reply cap, including level overrides. Insufficient budget skips the check; caps are never reduced for testing.",
-        dim=True,
-    )
-    view.line(
-        f"Estimated tokens: {state.remaining_estimate:,} · budget remaining: {state.proposal.budget_tokens:,} · estimated price: {price}",
-        dim=True,
+        "Checking " + ", ".join(checks[:-1]) + " and " + checks[-1] + "…",
+        fg="bright_cyan",
+        bold=True,
     )
     if state.remaining_estimate > state.proposal.budget_tokens:
         click.echo(
             "Warning: the approved budget is too small for all checks. Some will be skipped. Restart with a larger --budget-tokens value to run them all.",
             err=True,
         )
-    click.echo(
-        "No retries or capacity probes. Estimates are not billing limits: endpoints can ignore output caps."
-    )
     state.result = asyncio.run(
         show_checks(
             connect.run_steps(state.proposal, approved=state.approval, api_key=state.api_key),
             reasoning_levels=state.proposal.entry.get("reasoning_levels"),
+            media_inputs=state.media_inputs,
+            diagnostics=state.show_diagnostics,
         )
     )
     state.result.entry["provenance"]["tokens_charged_to_budget"] = (
@@ -854,6 +1122,13 @@ def run_checks(state: WizardState) -> bool:
             + ". These settings have not been checked.",
             err=True,
         )
+    if state.test_media_inputs:
+        facts = state.result.entry["provenance"]["probes"]
+        enabled = list(state.media_inputs)
+        for kind in state.test_media_inputs:
+            if facts.get(f"media:{kind}", {}).get("outcome") == "passed" and kind not in enabled:
+                enabled.append(kind)
+        state.result.entry["media_inputs"] = enabled
     decision = connect.verdict(state.result.entry)
     state.unobserved = decision.unobserved_levels
     checks = {
@@ -864,46 +1139,99 @@ def run_checks(state: WizardState) -> bool:
         decision.needs_attention
         or any(checks[name].get("reason") != "not approved" for name in decision.skipped)
     ):
-        click.echo(
-            "Agent diagnostic prompt:\n"
-            + connect.diagnostic_prompt(
-                "checks",
-                state.result.entry,
-                checks,
-                api_key=state.api_key,
-                run_context=diagnostic_context(
-                    target=state.path,
-                    alias=state.alias,
-                    model=state.model,
-                    endpoint=state.endpoint,
-                    api_key_env=state.api_key_env,
+        if state.show_diagnostics:
+            click.echo(
+                "Agent diagnostic prompt:\n"
+                + connect.diagnostic_prompt(
+                    "checks",
+                    state.result.entry,
+                    checks,
                     api_key=state.api_key,
-                    budget=state.budget_tokens,
-                    remaining=max(
-                        0,
-                        state.proposal.budget_tokens
-                        - state.result.entry["provenance"].get("tokens_charged_to_budget", 0),
+                    run_context=diagnostic_context(
+                        target=state.path,
+                        alias=state.alias,
+                        model=state.model,
+                        endpoint=state.endpoint,
+                        api_key_env=state.api_key_env,
+                        api_key=state.api_key,
+                        budget=state.budget_tokens,
+                        remaining=max(
+                            0,
+                            state.proposal.budget_tokens
+                            - state.result.entry["provenance"].get("tokens_charged_to_budget", 0),
+                        ),
+                        output_tokens=state.output_tokens,
+                        reasoning_output_tokens=state.reasoning_output_tokens,
                     ),
-                    output_tokens=state.output_tokens,
-                    reasoning_output_tokens=state.reasoning_output_tokens,
-                ),
+                )
             )
-        )
+        else:
+            view.line("For troubleshooting details, rerun with --show-diagnostics.", dim=True)
     if state.unobserved:
         click.echo(
             "Warning: no reasoning information was returned for: "
             + ", ".join(state.unobserved)
-            + ". These checks have not confirmed reasoning for those levels. "
-            "Try another API format or review the server's reasoning settings. "
-            "Some servers do not expose reasoning information.",
+            + ". Reasoning may still be active. Try another API format or review the server settings.",
             err=True,
         )
-    return True
+    return baseline_allows_save(state)
 
 
 def save_model(state: WizardState) -> bool:
-    """Save model; return False when the user cancels."""
+    """Save model; return False when canceled or the baseline is unverified."""
+    if not baseline_allows_save(state):
+        return False
     view.step(4, "Save model")
+    if state.no_probe or state.approval == "none":
+        view.line("Connection: Unverified (manual setup; no model checks)", fg="yellow")
+    if state.api_style not in connect.DECISION_API_STYLES:
+        view.line(
+            "Enabled media inputs: "
+            + (", ".join(state.result.entry["media_inputs"]) or "none (text-only)")
+        )
+    if state.test_media_inputs:
+        facts = state.result.entry["provenance"]["probes"]
+        unavailable = [
+            kind
+            for kind in state.test_media_inputs
+            if facts.get(f"media:{kind}", {}).get("outcome") == "unavailable"
+        ]
+        if unavailable:
+            view.line("Not available in this test: " + ", ".join(unavailable))
+            view.line(
+                "Continue with enabled inputs. For unavailable inputs, choose another model or API; choose manually only if you know this connection supports them.",
+                dim=True,
+            )
+    tested_media_inputs = list(state.result.entry.get("media_inputs", []))
+    if not state.yes and state.test_media_inputs:
+        action = prompts.review_media_inputs(state.result.entry["media_inputs"])
+        if action == "manual":
+            view.line("Manual choices are unverified.", fg="yellow")
+            state.result.entry["media_inputs"] = prompts.choose_media_inputs(
+                state.result.entry["media_inputs"]
+            )
+    if tested_media_inputs != state.result.entry.get("media_inputs", []):
+        view.line(
+            "Media inputs to save: "
+            + (", ".join(state.result.entry["media_inputs"]) or "none (text-only)")
+        )
+    if state.test_media_inputs:
+        facts = state.result.entry["provenance"]["probes"]
+        for kind in state.test_media_inputs:
+            record = facts.get(f"media:{kind}", {})
+            if record.get("outcome") in {"inconclusive", "rejected", "unavailable"} and (
+                kind in tested_media_inputs
+            ) != (kind in state.result.entry["media_inputs"]):
+                headline = view.check_outcome("media:" + kind, record, "attention")
+                view.progress_result(
+                    "–" if headline == "Not available" else "!",
+                    view.check_label("media:" + kind),
+                    view.media_test_detail(
+                        kind, record, media_inputs=state.result.entry["media_inputs"]
+                    ),
+                    headline=headline,
+                )
+    # The effective declarations above are reviewed before the final save decision.
     # Checks may take a while: refresh names before offering completion or
     # asking to replace an entry added since setup started.
     state.data = {}
@@ -930,28 +1258,31 @@ def save_model(state: WizardState) -> bool:
         if not state.yes and not prompts.confirm("Replace this model?", default=False):
             return False
     state.result = replace(state.result, alias=state.alias)
-    view.line(f"{state.alias} · {state.model} · {state.api_style}", bold=True)
+    view.line(f"{state.alias} · {state.model} · {prompts.choice_label(state.api_style)}", bold=True)
     if state.show_config:
         click.echo(yaml.safe_dump({"models": {state.alias: state.result.entry}}, sort_keys=False))
     else:
         view.line(
-            "Full configuration is saved with the model. Use --show-config to preview the YAML.",
+            "Use --show-config to preview the full YAML settings.",
             dim=True,
         )
-    if shadow := shadowing_source(state.alias, state.path):
+    if shadow := shadowing_source(state.alias, state.path, extra_priority=bool(state.working_dir)):
         view.line(
             f"Warning: {shadow} currently defines this alias and takes precedence over this destination. Update that file or explicitly load {state.path} to use this entry.",
             fg="yellow",
         )
-    view.line(
-        f"Save summary: {state.result.entry['api_style']} · reply budget {state.result.entry['max_tokens']:,} tokens"
-    )
-    view.line(
-        "Reasoning levels: "
-        + (", ".join(state.result.entry.get("reasoning_levels", {})) or "none configured")
-        + "; default: "
-        + str(state.result.entry.get("reasoning_default", "server default"))
-    )
+    if state.api_style in connect.DECISION_API_STYLES:
+        view.line(f"Save summary: {state.api_style} decision interface")
+    else:
+        view.line(
+            f"Save summary: {prompts.choice_label(state.result.entry['api_style'])} · reply limit {state.result.entry['max_tokens']:,} tokens"
+        )
+        view.line(
+            "Reasoning levels: "
+            + (", ".join(state.result.entry.get("reasoning_levels", {})) or "none configured")
+            + "; default: "
+            + str(state.result.entry.get("reasoning_default", "server default"))
+        )
     if state.yes or prompts.confirm(f"Write model entry to {state.path}?", default=True):
         save_key = False
         if (
@@ -981,14 +1312,25 @@ def save_model(state: WizardState) -> bool:
         connect.write(state.result.entry, state.path, alias=state.alias)
         click.echo(f"Saved {state.alias} to {state.path}.")
         view.line(
-            f"Interface: {state.api_style} · max_tokens: {state.result.entry['max_tokens']:,} · reasoning levels: {', '.join(state.result.entry.get('reasoning_levels', {})) or 'unknown'} · default: {state.result.entry.get('reasoning_default', 'unknown')}"
+            f"Interface: {state.api_style} · decision model: {state.result.entry['model_name']}"
+            if state.api_style in connect.DECISION_API_STYLES
+            else "Enabled media inputs: "
+            + (", ".join(state.result.entry["media_inputs"]) or "none (text-only)")
         )
+        if state.api_style not in connect.DECISION_API_STYLES:
+            view.line(
+                f"API format: {prompts.choice_label(state.api_style)} · reply limit: {state.result.entry['max_tokens']:,} tokens"
+            )
         if state.api_key and not save_key and state.api_key != os.environ.get(state.api_key_env):
             click.echo(
                 f"The key was not saved. Set {state.api_key_env} (or add it to your NOOA secrets file) before using this alias."
             )
-        click.echo(f'Use it in Python: get_llm_client("{state.alias}")')
-        if state.output:
+        click.echo(
+            f'Use it in Python: get_decision_model("{state.alias}")'
+            if state.api_style in connect.DECISION_API_STYLES
+            else f'Use it in Python: get_llm_client("{state.alias}")'
+        )
+        if state.output and not state.working_dir:
             click.echo(
                 "For a custom path, include it in NEMO_OO_LLM_CONFIG or reload_registry(path)."
             )
@@ -1005,6 +1347,7 @@ def run_wizard(**options):
     try:
         for step in (
             select_connection,
+            configure_media_inputs,
             select_model,
             check_interfaces,
             configure_metadata,
@@ -1014,25 +1357,28 @@ def run_wizard(**options):
         ):
             if not step(state):
                 return
-    except (ValueError, OSError, yaml.YAMLError, httpx.HTTPError) as exc:
+    except (ValueError, OSError, yaml.YAMLError, httpx.HTTPError, PosixOnlyFeatureError) as exc:
         detail = view.local_failure(exc, api_key=state.api_key, api_key_env=state.api_key_env)
-        click.echo(
-            "Agent diagnostic prompt:\n"
-            + connect.diagnostic_prompt(
-                "setup",
-                {},
-                {"setup": {"outcome": "failed", "error": type(exc).__name__, "detail": detail}},
-                api_key=state.api_key,
-                run_context=diagnostic_context(
-                    target=state.path,
-                    alias=state.alias,
-                    model=state.model,
-                    api_key_env=state.api_key_env,
+        if state.show_diagnostics:
+            click.echo(
+                "Agent diagnostic prompt:\n"
+                + connect.diagnostic_prompt(
+                    "setup",
+                    {},
+                    {"setup": {"outcome": "failed", "error": type(exc).__name__, "detail": detail}},
                     api_key=state.api_key,
-                    output_tokens=state.output_tokens,
-                    reasoning_output_tokens=state.reasoning_output_tokens,
+                    run_context=diagnostic_context(
+                        target=state.path,
+                        alias=state.alias,
+                        model=state.model,
+                        api_key_env=state.api_key_env,
+                        api_key=state.api_key,
+                        output_tokens=state.output_tokens,
+                        reasoning_output_tokens=state.reasoning_output_tokens,
+                    ),
                 ),
-            ),
-            err=True,
-        )
+                err=True,
+            )
+        else:
+            view.line("For troubleshooting details, rerun with --show-diagnostics.", dim=True)
         raise click.ClickException(detail) from None
