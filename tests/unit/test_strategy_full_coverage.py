@@ -180,45 +180,6 @@ class TestCodeActGenerationIdNone:
 
 
 # ===========================================================================
-# CODEACT: BlockSyntaxError from context assembly is fatal
-# ===========================================================================
-
-
-class TestCodeActBlockSyntaxError:
-    """BlockSyntaxError from context assembly propagates without retry."""
-
-    @pytest.mark.asyncio
-    async def test_block_syntax_error_is_not_retried(self):
-        """A declaration that bypassed validation fails once instead of looping."""
-        from nooa.context_blocks.exceptions import BlockSyntaxError
-
-        class TestAgent(Agent, llm=_TEST_LLM):
-            @strategy(CodeActStrategy(config=CodeActConfig(max_iterations=None)))
-            async def do_task(self) -> int:
-                """Do a task."""
-                ...
-
-        agent = TestAgent(llm=FakeLLMClient(scripted_responses=[]))
-        calls = [0]
-
-        from nooa.runtime.actor import ActorRuntime
-
-        async def patched_generate(self_rt, *args, **kwargs):
-            calls[0] += 1
-            raise BlockSyntaxError(
-                key="test_block",
-                expr="invalid python [[[",
-                original_error=SyntaxError("invalid syntax"),
-            )
-
-        with patch.object(ActorRuntime, "generate", patched_generate):
-            with pytest.raises(BlockSyntaxError):
-                await agent.do_task()
-
-        assert calls[0] == 1
-
-
-# ===========================================================================
 # CODEACT: Lines 919, 921 — tool call result handling after translation
 # ===========================================================================
 

@@ -9,7 +9,15 @@ class BlockError(Exception):
     pass
 
 
-class UnsupportedContextLayout(BlockError):
+class ContextAssemblyError(BlockError):
+    """Raised when a request's context cannot be assembled or rendered.
+
+    Assembly is deterministic local code, so strategies propagate this error
+    instead of retrying it as a model or provider failure.
+    """
+
+
+class UnsupportedContextLayout(ContextAssemblyError):
     """Raised when a provider cannot preserve an assembled context layout."""
 
 
