@@ -117,6 +117,7 @@ class ResultDTO:
 
     stdout: str = ""
     stderr: str = ""
+    truncation_reasons: list[str] = field(default_factory=list)
     error: ErrorDTO | None = None
     signal: SignalDTO | None = None
     returned_value: bytes = b""
@@ -130,6 +131,7 @@ class ResultDTO:
 _DTO_FIELDS = {
     "stdout": str,
     "stderr": str,
+    "truncation_reasons": list,
     "returned_value": bytes,
     "has_return": bool,
     "explicit_return": bool,
@@ -157,6 +159,11 @@ def dto_from_wire(data: Any) -> ResultDTO:
         ok = all(isinstance(getattr(dto, k), t) for k, t in _DTO_FIELDS.items())
         ok = ok and all(isinstance(i, dict) for i in dto.images)
         ok = ok and all(isinstance(n, str) for n in dto.defined_method_names)
+        ok = ok and all(
+            isinstance(reason, str)
+            and reason in {"max_string", "max_length", "max_depth", "dictionary_key"}
+            for reason in dto.truncation_reasons
+        )
         ok = ok and (dto.error is None or all(isinstance(v, str) for v in vars(dto.error).values()))
         ok = ok and (dto.signal is None or isinstance(dto.signal.result, bytes))
         # Exactly one outcome, as result_to_dto produces.
@@ -188,6 +195,7 @@ def result_to_dto(
     dto = ResultDTO(
         stdout=result.stdout or "",
         stderr=result.stderr or "",
+        truncation_reasons=list(result.truncation_reasons),
         images=list(result.images or []),
         wrapper_line_offset=getattr(result, "wrapper_line_offset", 0),
         defined_method_names=sorted(getattr(result, "defined_methods", {}) or {}),
@@ -333,6 +341,7 @@ def dto_to_result(dto: ResultDTO, *, signal_factory: Any = None, codec: Codec | 
     return ExecutionResult(
         stdout=dto.stdout,
         stderr=dto.stderr,
+        truncation_reasons=dto.truncation_reasons,
         error=error,
         signal=signal,
         defined_methods={},

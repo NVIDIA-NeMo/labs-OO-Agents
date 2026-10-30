@@ -239,3 +239,50 @@ jobs:
           # branch can fail an otherwise-clean PR. Scan the complete history
           # reachable from the checked-out PR merge commit instead.
           ./gitleaks git --config .gitleaks.toml --redact --no-banner --log-opts="HEAD" .
+
+  # Native Windows is unsupported (see src/nooa/_platform.py), but with
+  # NOOA_SKIP_PLATFORM_CHECK=1 the pure-Python core and `nooa connect` are kept
+  # working: install the wheels as a user would, import every distribution, run
+  # a scripted agent (Predict + in-process CodeAct), save a model with the real
+  # CLI (output redirected), and check that POSIX-only features and the default
+  # refusal fail with the WSL 2 message. The test suite itself needs POSIX.
+  windows-core-smoke:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      # Native Windows is refused at import by default; CI opts in to test the
+      # pure-Python core and `nooa connect`. windows_smoke.py also checks that
+      # the refusal (without this variable) is one clean line.
+      NOOA_SKIP_PLATFORM_CHECK: "1"
+      # Fail instead of skipping when nooa.exe or nooa-cli is missing.
+      NOOA_SMOKE_STRICT: "1"
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # tags needed for uv-dynamic-versioning
+          persist-credentials: false
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - name: Build wheels
+        run: |
+          rm -rf dist
+          for pkg in nooa nooa-cli nooa-acp nooa-memory nooa-bench; do
+            uv build --no-sources --package "$pkg" --out-dir dist
+          done
+      - name: Install wheels into a clean environment
+        run: |
+          uv venv .smoke
+          uv pip install --python .smoke/Scripts/python.exe dist/*.whl
+      - name: Import every distribution
+        run: .smoke/Scripts/python.exe -c "import nooa, nooa_cli, nooa_acp, nooa_memory, nooa_bench; print(nooa.__version__)"
+      - name: CLI help
+        run: .smoke/Scripts/nooa.exe --help
+      - name: Pure-Python core smoke
+        run: .smoke/Scripts/python.exe scripts/windows_smoke.py

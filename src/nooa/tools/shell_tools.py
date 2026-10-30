@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import difflib
 import json
+import math
 import re
 import shlex
 from collections.abc import AsyncIterator
@@ -242,9 +243,10 @@ class ShellResult(str):
 
     String operations (``"x" in r``, ``r.splitlines()``, ``r.strip()``) act on
     stdout, so existing code keeps working. But ``repr(r)`` / ``print(r)`` show
-    a structured ``BashOutput(...)`` view that surfaces stderr and a non-zero
-    return code as named fields — so failures can't be missed (a crashing
-    command with empty stdout no longer prints as blank).
+    a structured ``ShellResult(returncode=..., stdout=..., stderr=...)`` view
+    that uses the attribute names and always shows the return code, so
+    failures can't be missed (a crashing command with empty stdout no longer
+    prints as blank) and the printed names work as attributes.
 
     ``.matches`` is a ``list[Match]`` when the command was a pure search and the
     anchors are trustworthy; otherwise ``None``.
@@ -254,6 +256,7 @@ class ShellResult(str):
     stderr: str
     returncode: int
     timed_out: bool
+    timeout_seconds: float | None
     success: bool
     matches: list[Match] | None
 
@@ -264,23 +267,29 @@ class ShellResult(str):
         returncode: int = 0,
         matches: list[Match] | None = None,
         timed_out: bool = False,
+        *,
+        timeout_seconds: float | None = None,
     ):
         obj = super().__new__(cls, stdout)
         obj.stdout = stdout
         obj.stderr = stderr
         obj.returncode = returncode
         obj.timed_out = timed_out
+        obj.timeout_seconds = timeout_seconds
         obj.success = returncode == 0
         obj.matches = matches
         return obj
 
     def __repr__(self) -> str:
-        parts = [f"stdout={self.stdout!r}"]
+        parts = [f"returncode={self.returncode}"]
+        if self.timed_out:
+            parts.append("timed_out=True")
+            if self.timeout_seconds is not None:
+                parts.append(f"timeout_seconds={self.timeout_seconds!r}")
+        parts.append(f"stdout={self.stdout!r}")
         if self.stderr:
             parts.append(f"stderr={self.stderr!r}")
-        if self.returncode != 0:
-            parts.append(f"return_code={self.returncode}")
-        return f"BashOutput({', '.join(parts)})"
+        return f"ShellResult({', '.join(parts)})"
 
     def __str__(self) -> str:
         return self.__repr__()
@@ -395,6 +404,18 @@ class ShellTools(Skill):
         replace(match_or_path, ...)    — edit at a Match anchor, or by unique string
         write_file(path, content)      — create/overwrite a file
 
+    Commands are asynchronous: use ``await shell.run(...)``. Configure the
+    instance with ``ShellTools(default_timeout=300)``; the library default is
+    30 seconds. Both run() and run_stream() inherit ``default_timeout`` when
+    ``timeout`` is omitted or None. Pass ``timeout=600`` to override one call.
+    A shell command's own ``timeout`` utility does not extend this outer limit.
+
+    Inspect ``result.returncode`` and ``result.timed_out`` before treating output
+    as a completed command. ``result.stdout`` and ``result.stderr`` retain partial
+    output after a timeout; partial output is not evidence of successful completion.
+    Timeouts return a result, not an exception. Printed timeout results include
+    ``timed_out=True`` and the effective ``timeout_seconds``.
+
     Grep that you can edit from directly. When run() executes a plain search
     (grep/rg/egrep), the result still prints the EXACT bytes your command
     produced — and it also carries ``.matches``, a list of Match objects you can
@@ -424,15 +445,30 @@ class ShellTools(Skill):
 
     """
 
+    default_timeout: Annotated[
+        float,
+        spec(
+            description="Default command timeout in seconds; run/run_stream timeout= overrides it."
+        ),
+    ] = 30.0
+
     def __init__(
         self,
         cwd: str = ".",
         init_command: str | None = None,
         *,
+        default_timeout: float = 30.0,
         keep_background_on_close: bool = False,
         **kwargs: Any,
     ):
+        if (
+            isinstance(default_timeout, bool)
+            or not math.isfinite(default_timeout)
+            or default_timeout <= 0
+        ):
+            raise ValueError("default_timeout must be a positive finite number of seconds")
         super().__init__(**kwargs)
+        self.default_timeout = float(default_timeout)
         self.cwd = Path(cwd).resolve()
         # Construct the session eagerly (it starts lazily on first run) so a
         # consumer wired at construction time — e.g. RepoTools(session=shell.session)
@@ -447,7 +483,7 @@ class ShellTools(Skill):
         )
 
     def __repr__(self) -> str:
-        return f"ShellTools(cwd={self.cwd!s})"
+        return f"ShellTools(cwd={self.cwd!s}, default_timeout={self.default_timeout!r})"
 
     @property
     @hidden
@@ -476,7 +512,10 @@ class ShellTools(Skill):
         stdin: Annotated[
             str | None, spec(description="Text piped to stdin (replaces heredocs)")
         ] = None,
-        timeout: Annotated[float, spec(description="Max seconds")] = 30.0,
+        timeout: Annotated[
+            float | None,
+            spec(description="Max seconds; None inherits this shell's default_timeout."),
+        ] = None,
         cwd: Annotated[
             str | Path | None,
             spec(
@@ -491,7 +530,8 @@ class ShellTools(Skill):
         Run a shell command in the persistent session (cd/env/cwd survive).
 
         Pass a payload as stdin= instead of heredocs. Result is a str subclass
-        with .stdout / .stderr / .returncode / .success.
+        with .stdout / .stderr / .returncode / .success / .timed_out.
+        A timeout preserves partial output and reports the effective .timeout_seconds.
 
         If the command is a pure search (grep/rg/egrep, no mangling pipe or
         anchor-dropping flag), the result also carries .matches — a list of
@@ -501,9 +541,10 @@ class ShellTools(Skill):
         Args:
             command: Shell command to execute.
             stdin: Text piped to stdin (no quoting needed).
-            timeout: Max seconds before timeout.
+            timeout: Max seconds before timeout; None uses this instance's default_timeout.
             cwd: Directory for this command only; the shell returns to its own.
         """
+        timeout = self.default_timeout if timeout is None else timeout
         session = await self._get_session()
         run_cmd = self._with_stdin(self._in_directory(command, cwd), stdin)
         stdout, stderr, code, timed_out = await session.run_with_timeout_flag(
@@ -533,6 +574,7 @@ class ShellTools(Skill):
             stderr=stderr,
             returncode=code,
             timed_out=timed_out,
+            timeout_seconds=timeout,
             matches=matches,
         )
 
@@ -543,7 +585,10 @@ class ShellTools(Skill):
         stdin: Annotated[
             str | None, spec(description="Text piped to stdin (replaces heredocs)")
         ] = None,
-        timeout: Annotated[float, spec(description="Max seconds")] = 30.0,
+        timeout: Annotated[
+            float | None,
+            spec(description="Max seconds; None inherits this shell's default_timeout."),
+        ] = None,
         cwd: Annotated[
             str | Path | None,
             spec(
@@ -572,9 +617,10 @@ class ShellTools(Skill):
         Args:
             command: Shell command to execute.
             stdin: Text piped to stdin (no quoting needed).
-            timeout: Max seconds before timeout.
+            timeout: Max seconds before timeout; None uses this instance's default_timeout.
             cwd: As for run().
         """
+        timeout = self.default_timeout if timeout is None else timeout
         session = await self._get_session()
         run_cmd = self._with_stdin(self._in_directory(command, cwd), stdin)
         timed_out = False

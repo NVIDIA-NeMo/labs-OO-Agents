@@ -30,6 +30,9 @@ release/commit; use absolute installation references from a diagnostic handoff.
   Environment variables override layered `secrets.yaml`; credential persistence
   requires separate consent. Follow the canonical skill for headless key use.
 
+**Windows:** run Connect inside WSL 2. Native Windows refuses `nooa` unless
+`NOOA_SKIP_PLATFORM_CHECK=1` is set; with it, `nooa connect` works and is tested.
+
 ## Keep settings truthful
 
 - Use the endpoint's exact model ID and supported interface, not guesses from

@@ -15,6 +15,7 @@ import httpx
 import yaml
 
 from nooa import paths
+from nooa._platform import PosixOnlyFeatureError
 from nooa.unifiedllm import connect
 from nooa.unifiedllm.connect._records import text_baseline_passed
 
@@ -1356,7 +1357,7 @@ def run_wizard(**options):
         ):
             if not step(state):
                 return
-    except (ValueError, OSError, yaml.YAMLError, httpx.HTTPError) as exc:
+    except (ValueError, OSError, yaml.YAMLError, httpx.HTTPError, PosixOnlyFeatureError) as exc:
         detail = view.local_failure(exc, api_key=state.api_key, api_key_env=state.api_key_env)
         if state.show_diagnostics:
             click.echo(

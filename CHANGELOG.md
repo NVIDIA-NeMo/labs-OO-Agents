@@ -6,6 +6,37 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- Windows: WSL 2 is the supported way to run nooa on Windows. Native Windows is
+  unsupported: `import nooa` raises `UnsupportedPlatformError` (an
+  `ImportError`) and the `nooa` command exits with one line pointing to WSL 2,
+  unless `NOOA_SKIP_PLATFORM_CHECK=1` is set. With the override, the pure-Python
+  core (agents, PredictStrategy, in-process CodeAct, in-memory storage) and
+  `nooa connect` work and are tested in CI (the registry lock uses `filelock`
+  there; POSIX keeps `fcntl`), redirected CLI output is written as UTF-8, and
+  POSIX-only features (bash sessions and shell tools, the CodeAct sandbox,
+  file-backed SQLite storage, `monitor()`) raise `PosixOnlyFeatureError` naming
+  WSL 2. Previously `import nooa` failed on Windows with `fcntl`/`SIGUSR2`
+  errors. CI adds a native-Windows smoke, a WSL quick check on every PR, and a
+  nightly full suite under WSL.
+- CodeAct and PurePython `max_retries` now count only consecutive LLM API
+  errors; a successful LLM call resets the count. Other errors, such as
+  invalid tool calls and failed result validation, still add up across the
+  call. Previously a few scattered transient endpoint errors could end a long
+  turn even though every retry succeeded.
+- Dependency security update: the locked versions of Pillow, PyJWT,
+  cryptography, aiohttp, urllib3, AnyIO, filelock, multidict, Werkzeug,
+  setuptools, certifi, OpenTelemetry, and mcp now include their published
+  vulnerability fixes. The `exclude-newer` cutoff, documented as a 7-day window,
+  had been frozen at 2026-08-18 and blocked these releases; it now stands at
+  2026-10-21. LiteLLM and its OpenInference instrumentation stay at their
+  current versions and mcp stays on 1.x (1.30+) until NOOA is adapted to their
+  newer releases: with them, opaque provider reasoning state reaches exported
+  OTLP spans and MCP tool-level errors are no longer raised.
+- Prompt inspection (`print_prompt()` and `build_prompt_data()`) now applies
+  method-level truncation overrides for CodeAct and PurePython, matching runtime
+  prefill rendering. Both strategies now use the resolved runtime settings for
+  live prefill, and emit `PrefillTruncationWarning` when formatting or stdout
+  capture actually omits input, with advice for adjusting the relevant limits.
 - `RetryConfig` is the only endpoint retry budget for `CompletionClient` on
   OpenAI-compatible routes. LiteLLM let the OpenAI SDK retry each attempt twice
   more, so `RetryConfig(max_retries=2)` sent 9 requests for a persistent server

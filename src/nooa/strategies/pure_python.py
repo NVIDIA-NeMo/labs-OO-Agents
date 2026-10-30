@@ -85,6 +85,7 @@ class GenerationSession:
     iteration: int = 0
     execution_count: int = 0
     error_count: int = 0
+    consecutive_api_errors: int = 0
     session_locals: dict[str, Any] = field(default_factory=dict)
     task_event_id: str = ""
     out_accessor: Any = field(default=None)  # OutAccessor instance, created lazily
@@ -111,6 +112,18 @@ class GenerationSession:
 
     def record_error(self) -> None:
         self.error_count += 1
+
+    def record_api_error(self) -> None:
+        """Count an LLM API error toward the consecutive-failure budget."""
+        self.consecutive_api_errors += 1
+
+    def reset_api_errors(self) -> None:
+        """Clear the API-error count after the model responds."""
+        self.consecutive_api_errors = 0
+
+    def api_errors_exhausted(self) -> bool:
+        """Whether consecutive LLM API errors have used up ``max_retries``."""
+        return self.consecutive_api_errors >= self.max_retries
 
     def record_output(self, execution_count: int, value: Any) -> None:
         """Record an execution output for Out[n] access."""
@@ -170,10 +183,8 @@ class PurePythonStrategy(CompositeStrategy):
         return "PURE_PYTHON"
 
     def _get_truncation_config(self, runtime: RuntimeServices):
-        """Get truncation config from runtime's agent, same as CodeActStrategy."""
-        from nooa.config.truncation_config import DEFAULT_TRUNCATION_CONFIG
-
-        return getattr(runtime.agent, "_truncation", DEFAULT_TRUNCATION_CONFIG)
+        """Get the active runtime config, including method-level overrides."""
+        return runtime.truncation_config
 
     def get_block_overrides(self) -> dict[str, str | DynamicContext | None]:
         return {
@@ -313,19 +324,21 @@ class PurePythonStrategy(CompositeStrategy):
                     turn_exception = type(e).__name__
                     raise
                 except _HTTPX_TIMEOUT_EXCEPTIONS as e:
-                    # Catch httpx timeout exceptions and preserve them
-                    session.record_error()
+                    # Catch httpx timeout exceptions and preserve them. Like other
+                    # LLM API errors, timeouts count only while consecutive.
+                    session.record_api_error()
                     error_msg = (
-                        f"LLM request timed out (attempt {session.error_count}/{session.max_retries}): "
-                        f"{type(e).__name__}: {e}"
+                        f"LLM request timed out (attempt {session.consecutive_api_errors}/"
+                        f"{session.max_retries}): {type(e).__name__}: {e}"
                     )
                     runtime.event_manager.add(Error(content=error_msg))
                     logger.warning(
-                        f"[PURE_PYTHON] LLM timeout (iter={session.iteration}, err={session.error_count}): {e}"
+                        f"[PURE_PYTHON] LLM timeout (iter={session.iteration}, "
+                        f"api_err={session.consecutive_api_errors}): {e}"
                     )
                     turn_exception = type(e).__name__
 
-                    if session.is_exhausted():
+                    if session.api_errors_exhausted():
                         turn_final = True
                         turn_exception = "GenerationError"
                         raise GenerationError(
@@ -333,7 +346,9 @@ class PurePythonStrategy(CompositeStrategy):
                             f"Original error: {type(e).__name__}: {e}"
                         ) from e
                 except XMLFormatError as e:
-                    # XML format error - already logged in _generate_code, just count as error
+                    # XML format error - already logged in _generate_code, just count as error.
+                    # The model responded, so the endpoint is healthy.
+                    session.reset_api_errors()
                     session.record_error()
                     logger.warning(
                         f"[PURE_PYTHON] XML format error (iter={session.iteration}, err={session.error_count})"
@@ -346,8 +361,11 @@ class PurePythonStrategy(CompositeStrategy):
                         self._sync_session_locals(call, session)
                         raise session.build_failure_error() from None
                 except Exception as e:
-                    # Catch other LLM API errors (rate limits, connection errors, etc.)
-                    session.record_error()
+                    # Catch other LLM API errors (rate limits, connection errors, etc.).
+                    # Only consecutive failures count: a transient endpoint error
+                    # followed by a successful call must not eat into the budget
+                    # for the rest of a long run.
+                    session.record_api_error()
                     error_name = type(e).__name__
                     cause_parts = []
                     exc: BaseException | None = e
@@ -358,18 +376,18 @@ class PurePythonStrategy(CompositeStrategy):
                         exc = exc.__cause__ or exc.__context__
                     cause_chain = " <- ".join(cause_parts)
                     error_msg = (
-                        f"LLM API error (attempt {session.error_count}/{session.max_retries}): "
-                        f"{cause_chain}"
+                        f"LLM API error (attempt {session.consecutive_api_errors}/"
+                        f"{session.max_retries}): {cause_chain}"
                     )
                     runtime.event_manager.add(Error(content=error_msg))
                     logger.warning(
-                        f"[PURE_PYTHON] LLM API error (iter={session.iteration}, err={session.error_count}): "
-                        f"{cause_chain}",
+                        f"[PURE_PYTHON] LLM API error (iter={session.iteration}, "
+                        f"api_err={session.consecutive_api_errors}): {cause_chain}",
                         exc_info=True,
                     )
                     turn_exception = error_name
 
-                    if session.is_exhausted():
+                    if session.api_errors_exhausted():
                         turn_final = True
                         turn_exception = "GenerationError"
                         raise GenerationError(
@@ -380,6 +398,7 @@ class PurePythonStrategy(CompositeStrategy):
                 # Skip rest of turn if code generation failed (caught exception above)
                 if code is None:
                     continue
+                session.reset_api_errors()
 
                 if not code:
                     session.record_error()
@@ -545,9 +564,12 @@ class PurePythonStrategy(CompositeStrategy):
         prefill_builtins = {**builtins, "_call": call}
 
         # Execute through normal code path
-        result = await self._execute_code(
-            runtime, code, prefill_builtins, session, call.method_name
-        )
+        from nooa.strategies.prefill import warn_on_prefill_truncation
+
+        with warn_on_prefill_truncation(call):
+            result = await self._execute_code(
+                runtime, code, prefill_builtins, session, call.method_name
+            )
 
         # Merge captured locals into session
         if result.captured_locals:
@@ -595,7 +617,8 @@ class PurePythonStrategy(CompositeStrategy):
         """
         logger.debug(
             f"[PURE_PYTHON] Loop iteration: iter={session.iteration}/{session.max_iterations}, "
-            f"err={session.error_count}/{session.max_retries}"
+            f"err={session.error_count}/{session.max_retries}, "
+            f"api_err={session.consecutive_api_errors}/{session.max_retries}"
         )
 
         response, event_id = await runtime.generate(tools=None)
