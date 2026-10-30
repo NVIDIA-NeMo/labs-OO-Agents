@@ -199,12 +199,16 @@ class SkillManager(Skill):
         active, rest_kinds, rest = [], [], 0
         for name, kind, key in self._index():
             if self._is_active(kind, key):
-                active.append(f"{name} (mcp: self.{attr_name(name)})" if kind == "mcp" else name)
+                active.append(
+                    f"{name} (mcp: await self.{attr_name(name)}.<tool>(...))"
+                    if kind == "mcp"
+                    else name
+                )
             else:
                 rest += 1
                 if _KIND_LABELS[kind] not in rest_kinds:
                     rest_kinds.append(_KIND_LABELS[kind])
-        mcp_last = sorted(active, key=lambda item: (" (mcp: self." in item, item))
+        mcp_last = sorted(active, key=lambda item: (" (mcp: await self." in item, item))
         lines = [f"Active: {', '.join(mcp_last) or 'none'}"]
         if rest:
             order = [label for label in _KIND_LABELS.values() if label in rest_kinds]

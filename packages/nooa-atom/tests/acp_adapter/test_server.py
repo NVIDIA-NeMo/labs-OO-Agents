@@ -157,7 +157,9 @@ async def test_a_child_session_shares_the_mcp_servers_the_client_sent(
     ref = await root._agent.session.delegate("look", "use the server", name="worker")
     child = adapter.session(ref.id)
     assert child._agent.hcb_resources is tool
-    assert "hcb_resources (mcp: self.hcb_resources)" in child._agent.skills.status()
+    assert (
+        "hcb_resources (mcp: await self.hcb_resources.<tool>(...))" in child._agent.skills.status()
+    )
     await child.close()
     assert root._agent.hcb_resources is tool
     assert made == ["hcb_resources"]  # one connection, the root's
