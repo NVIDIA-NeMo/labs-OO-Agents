@@ -40,6 +40,7 @@ from nooa.events import (
     DecisionCallEnd,
     DecisionCallStart,
     DecisionRecord,
+    EventBase,
     ExecutionResult,
     ExecutionSignal,
     LLMCallEnd,
@@ -634,6 +635,9 @@ class ActorRuntime:
         self._last_context_stats: ContextWindowStats | None = None
         self._last_prompt_tokens_actual: int | None = None
         self._last_dynamic_context_snapshot = ""
+        # Ids of the events the view placed in the last built request. Read it
+        # right after awaiting _build_messages, before any other await.
+        self._last_context_event_ids: frozenset[str] = frozenset()
         self._event_format_cache: dict[tuple[tuple[str, Any], ...], Any] = {}
         self._event_format_cache_max_entries = 32
         # Chars→tokens ratio, calibrated from the last provider response
@@ -1071,6 +1075,7 @@ class ActorRuntime:
             tools=tools,
             request_params=kwargs,
         )
+        context_event_ids = self._last_context_event_ids
         _gen_hm = get_harness_metrics()
 
         # Get LLM client from context var (set by _execute_with_generation)
@@ -1134,6 +1139,7 @@ class ActorRuntime:
                     runtime=self,
                     client=llm_client,
                     context_view=_current_context_view_var.get(),
+                    event_ids=context_event_ids,
                 )
 
                 async def _core_llm(ctx: LLMCallContext) -> LLMCallContext:
@@ -1202,6 +1208,7 @@ class ActorRuntime:
                             request_params=ctx.params,
                             llm_client=ctx.client,
                         )
+                        ctx.event_ids = self._last_context_event_ids
                         _dynamic_context = _snapshot_llm_request(
                             self.event_manager,
                             ctx.messages,
@@ -3399,6 +3406,9 @@ class ActorRuntime:
             tuple(blocks), result.messages
         )
         messages = result.output
+        self._last_context_event_ids = frozenset(
+            item.id for item in blocks if isinstance(item, EventBase)
+        )
         self._last_context_stats = result.stats.model_copy(
             update={"output_reserve_is_fallback": limits.reserve_is_fallback}
         )

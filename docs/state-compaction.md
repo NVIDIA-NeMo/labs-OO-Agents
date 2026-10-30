@@ -20,12 +20,15 @@ Before dispatch, the compactor selects every stored event except the
 earlier summaries and records the model never sees. Events created during the
 request are outside this selection. Archived events remain in storage.
 
-With the built-in CodeAct, CodeActV2, Predict, and PurePython views, a summary request reuses the completed parent
+When the parent request carries every model-visible event in the range
+(`LLMCallContext.event_ids`), a summary request reuses the completed parent
 request and appends a summary instruction, preserving its cache prefix, tools,
-schema and settings. Tools are never executed by the summary request. Custom
-views use a dedicated Predict request built from the range's model-visible stored
-events, bounded to the summary input budget, with the parent's effective client,
-without inheriting its prompt, tools, schema or cache key.
+schema and settings. This holds for the built-in views and for any view that
+keeps their history. Tools are never executed by the summary request. Otherwise
+the summarizer uses a dedicated Predict request built from the range's
+model-visible stored events, bounded to the summary input budget, with the
+parent's effective client, without inheriting its prompt, tools, schema or
+cache key.
 At most one summary runs or waits for application.
 Cached-summary requests pass through agent middleware again; use `summary_fork_active()` to distinguish them, and preserve source history and the prefix when cache reuse is desired.
 

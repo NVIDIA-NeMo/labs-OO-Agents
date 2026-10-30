@@ -38,6 +38,17 @@ def setup(preserve=1):
     return agent, summarizer, ctx
 
 
+def carrying_source(agent, ctx, reply="summary"):
+    """A parent request that contains every stored event, so the summary can reuse it."""
+    return ctx.model_copy(
+        update={
+            "event_ids": frozenset(event.id for event in agent.event_manager.values()),
+            "params": {},
+            "client": FakeLLMClient([LLMResponse(content=reply)]),
+        }
+    )
+
+
 async def dispatch(ctx, tokens=1000):
     ctx.response = LLMResponse(content="parent", usage=LLMUsage(input_tokens=tokens))
     return ctx
@@ -67,8 +78,7 @@ async def test_under_budget_does_not_prepare_summary_source(monkeypatch):
 
 async def test_cached_summary_does_not_prepare_standalone_prompt(monkeypatch):
     agent, summarizer, ctx = setup()
-    ctx = ctx.model_copy(update={"context_view": PredictView(), "params": {}})
-    ctx = ctx.model_copy(update={"client": FakeLLMClient([LLMResponse(content="summary")])})
+    ctx = carrying_source(agent, ctx)
 
     def unexpected(*args, **kwargs):
         pytest.fail("Standalone prompt preparation ran for a cached summary")
@@ -80,8 +90,30 @@ async def test_cached_summary_does_not_prepare_standalone_prompt(monkeypatch):
     await agent.aclose()
 
 
-@pytest.mark.parametrize("custom_view", [False, True])
-async def test_real_parent_uses_cache_only_with_default_view(custom_view):
+class HidesMessages(PredictView):
+    """Leaves stored messages out of the request."""
+
+    async def assemble(self, owner, call):
+        async for item in super().assemble(owner, call):
+            if not isinstance(item, Message):
+                yield item
+
+
+class AddsBlock(PredictView):
+    """A customized default view that still carries the full history."""
+
+    async def assemble(self, owner, call):
+        async for item in super().assemble(owner, call):
+            yield item
+        yield Block(key="extra", content="EXTRA BLOCK")
+
+
+@pytest.mark.parametrize(
+    ("view", "reuses"),
+    [(PredictView, True), (AddsBlock, True), (HidesMessages, False)],
+    ids=["default", "subclass", "hides-source"],
+)
+async def test_real_parent_reuses_request_only_when_it_carries_the_source(view, reuses):
     class RecordingClient(FakeLLMClient):
         def __init__(self):
             super().__init__(
@@ -103,10 +135,6 @@ async def test_real_parent_uses_cache_only_with_default_view(custom_view):
             ...
 
     client = RecordingClient()
-
-    class CustomView(PredictView):
-        pass
-
     agent = Parent(llm=client)
     agent.event_manager.add(Message(content="STORED_SOURCE_FACT"))
     summarizer = TokenBudgetSummarizer.install(
@@ -114,18 +142,15 @@ async def test_real_parent_uses_cache_only_with_default_view(custom_view):
     )
     try:
         with ScopedContext(context={"system_prompt": "PARENT_SCOPED_MARKER"}):
-            assert (
-                await agent.run(context_view=CustomView() if custom_view else PredictView())
-                == "parent"
-            )
+            assert await agent.run(context_view=view()) == "parent"
             await summarizer._pending_task
-        assert summarizer._pending_summary == ("summary" if custom_view else '{"value":"summary"}')
+        assert summarizer._pending_summary == ('{"value":"summary"}' if reuses else "summary")
         assert len(client.requests) == 2
         parent, summary = client.requests
         for marker in ("PARENT_DECORATOR_MARKER", "PARENT_SCOPED_MARKER"):
             assert marker in parent
-            assert (marker in summary) is not custom_view
-        if not custom_view:
+            assert (marker in summary) is reuses
+        if reuses:
             assert json.loads(summary)[:-1] == json.loads(parent)
         assert "STORED_SOURCE_FACT" in summary
     finally:
@@ -231,9 +256,6 @@ async def test_python_values_never_block_or_invalidate_compaction(reuse_prefix, 
     from nooa.events import PythonOutput
 
     agent, summarizer, ctx = setup(preserve=0)
-    if reuse_prefix:
-        ctx = ctx.model_copy(update={"context_view": PredictView(), "params": {}})
-        ctx = ctx.model_copy(update={"client": FakeLLMClient([LLMResponse(content="summary")])})
     agent.event_manager.add(
         PythonOutput(
             tool_call_id="python",
@@ -242,6 +264,8 @@ async def test_python_values_never_block_or_invalidate_compaction(reuse_prefix, 
             value=make_value(),
         )
     )
+    if reuse_prefix:
+        ctx = carrying_source(agent, ctx)
     summarizer.summarize = AsyncMock(return_value="summary")
     await trigger(agent, ctx)
     await summarizer._pending_task
