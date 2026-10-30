@@ -1146,6 +1146,29 @@ async def test_an_inline_command_behind_a_job_fails_at_once_naming_it(manager, t
         await sh.aclose()
 
 
+async def test_an_inline_command_behind_a_job_starting_bash_fails_at_once(
+    manager, tmp_path, monkeypatch
+):
+    # The job holds the lock while bash first starts: still busy for a cell's run.
+    sh = Shell(tmp_path)
+    boot = Shell._boot
+    booting = asyncio.Event()
+
+    async def slow_boot(self, session):
+        booting.set()
+        await asyncio.sleep(0.5)
+        return await boot(self, session)
+
+    monkeypatch.setattr(Shell, "_boot", slow_boot)
+    log = manager.launch(sh.run("sleep 30", timeout=60), name="log")
+    await asyncio.wait_for(booting.wait(), 10)
+    with pytest.raises(RuntimeError) as caught:
+        await asyncio.wait_for(sh.run("echo polled", timeout=5), 2)
+    assert "busy running `sleep 30` (job log)" in str(caught.value)
+    await log.cancel()
+    await sh.aclose()
+
+
 async def test_a_job_behind_a_job_waits_and_its_timeout_counts_from_its_start(manager, tmp_path):
     from nooa.runtime.harness_metrics import harness_metrics_session
 

@@ -499,10 +499,11 @@ class Shell:
         try:
             if self._generation != generation:
                 raise RuntimeError(_CLOSED_BEFORE)
-            if self._session is None:
-                await self._start(generation)
+            # Busy from first use on: a cell's run behind a job starting bash fails too.
             self._busy, self._busy_job = command, current_name()
             try:
+                if self._session is None:
+                    await self._start(generation)
                 result = await self._send_locked(command, stdin, timeout, generation)
             finally:
                 self._busy = self._busy_job = None
@@ -533,7 +534,7 @@ class Shell:
             self._starting = False
         self._session, self._note = session, ""
         self._bash = (pid, _start_time(pid))
-        self._confirmed_cwd, self._busy, self._lost = str(session.cwd), None, False
+        self._confirmed_cwd, self._lost = str(session.cwd), False
         self._reset_tracked()
 
     async def _start_session(self, session: BashSession, generation: int, closed: str) -> int:
