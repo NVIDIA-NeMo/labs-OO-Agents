@@ -14,6 +14,8 @@ import struct
 import wave
 import zlib
 
+from nooa.unifiedllm.media_inputs import explicitly_rejected as explicitly_rejected
+
 from ._video_fixture import video_fixture
 
 
@@ -194,45 +196,6 @@ def reply_failure_reason(kind, record):
     else:
         cause = "Generated attachment or output settings were missing from the observed request"
     return f"{cause}; {kind} support was not confirmed"
-
-
-def explicitly_rejected(exc, kind):
-    """Only a media-specific provider rejection, not a generic HTTP 400."""
-    status = getattr(exc, "_connect_http_status", getattr(exc, "status_code", None))
-    if status not in {400, 415, 422}:
-        return False
-    body = getattr(exc, "body", None)
-    error = body.get("error", body) if isinstance(body, dict) else {}
-    param = error.get("param") if isinstance(error, dict) else None
-    text = (
-        str(error.get("message", str(exc))).lower() if isinstance(error, dict) else str(exc).lower()
-    )
-    if isinstance(param, str) and param.split(".")[0] in {
-        "model",
-        "include",
-        "store",
-        "max_tokens",
-        "max_output_tokens",
-        "api_key",
-    }:
-        return False
-    # Match a statement about the media/input itself. A media-looking model
-    # name plus an unrelated 'invalid' parameter is not explicit rejection.
-    names = {
-        "image": r"images?|vision inputs?",
-        "audio": r"audio|wav",
-        "video": r"videos?",
-        "pdf": r"pdfs?|documents?|files?",
-    }[kind]
-    noun = rf"(?:{names})(?: (?:input|content|format|type|data|url|attachment|processing)s?)?"
-    return bool(
-        re.search(
-            rf"\b{noun}\b (?:is |are |was |were )?(?:not supported|unsupported|not allowed|rejected|invalid)\b",
-            text,
-        )
-        or re.search(rf"\b(?:unsupported|invalid|rejected) {noun}\b(?![-\w])", text)
-        or re.search(rf"\b(?:does not|doesn't|cannot) (?:support|accept|process) {noun}\b", text)
-    )
 
 
 def media_on_wire(kind, probe_body, wire):
