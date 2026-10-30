@@ -56,8 +56,9 @@ from typing import IO, Annotated, Any
 
 from nooa import hidden
 from nooa.agentdoc import spec
+from nooa.runtime.harness_metrics import get_harness_metrics
 from nooa.tools import BashSession
-from nooa_atom.agent.work_manager import _progress_sink, describe, job_dir
+from nooa_atom.agent.work_manager import _progress_sink, current_name, describe, job_dir
 from nooa_atom.agent.work_progress import _ShellProgress
 
 __all__ = ["CommandResult", "Shell", "ShellOwner", "default_cwd", "shell_owner"]
@@ -280,6 +281,31 @@ def _timeout_note(timeout: float) -> str:
     )
 
 
+# Seconds a command may wait for its turn before its result says what it waited for.
+_QUEUE_NOTE_SECONDS = 5.0
+_BLOCKER_CHARS = 80
+
+
+def _blocker(command: str | None, job: str | None) -> str:
+    """The command running in a Shell, as a note names it: `cmd` (job name)."""
+    flat = " ".join((command or "a command").split())
+    if len(flat) > _BLOCKER_CHARS:
+        flat = flat[: _BLOCKER_CHARS - 1] + "…"
+    return f"`{flat}`" + (f" (job {job})" if job else "")
+
+
+def _queued_note(blocker: str, waited: float, ran: bool) -> str:
+    """What a command queued behind a running one waited for, and how to avoid it."""
+    if ran:
+        head = f"waited {waited:.0f} s for its turn behind {blocker} in this Shell"
+    else:
+        head = (
+            f"did not run: still queued after {waited:g} s behind {blocker}, "
+            "still running in this Shell"
+        )
+    return f"[{head}; a Shell runs one command at a time: use another Shell() for other commands]"
+
+
 def _check_timeout(value: Any) -> float:
     """``value`` as a command deadline: a non-bool int or float, finite and positive."""
     if isinstance(value, bool) or not isinstance(value, int | float):
@@ -351,6 +377,7 @@ class Shell:
 
     Reuse ``sh``: FIFO commands preserve cwd, variables, options and traps.
     A new Shell starts fresh in the workspace; bash starts on first use.
+    One command at a time: give a long job its own Shell (``log = Shell()``).
 
     ``timeout`` defaults to 600 s. Timeout returns 124 with ``timed_out=True``
     and a note in stderr on how to go on. Timeout/cancel skips remaining
@@ -398,6 +425,8 @@ class Shell:
         # Shell state as last confirmed by bash itself (never guessed from config).
         self._confirmed_cwd: str | None = None
         self._busy: str | None = None  # the command running now
+        self._busy_job: str | None = None  # the job it runs in (None: a direct run)
+        self._queued = 0  # commands waiting for their turn behind it
         self._lost = False  # restarted since the last command: state was lost
         # The user's shell options (of "euxvp", p: pipefail) and whether a user
         # USR1 trap is set, as bash last reported them (see ``_wrap``).
@@ -421,7 +450,8 @@ class Shell:
             return "not started" if self._confirmed_cwd is None else "closed"
         lost = " · restarted, variables lost" if self._lost else ""
         if self._busy is not None:
-            return f"running $ {self._busy} · was in {self._confirmed_cwd}{lost}"
+            queued = f" · {self._queued} queued behind it" if self._queued else ""
+            return f"running $ {self._busy} · was in {self._confirmed_cwd}{lost}{queued}"
         return f"idle · in {self._confirmed_cwd}{lost}"
 
     def _directory(self) -> str:
@@ -434,25 +464,56 @@ class Shell:
     ) -> CommandResult:
         """Run one command in this object's bash (started on first use); state carries over.
 
-        ``stdin``: its input (else none); ``timeout``: deadline, seconds from its start.
+        ``stdin``: its input (else none); ``timeout``: deadline, seconds from its start
+        (queued behind a job: from the call; 124 unrun).
         """
         timeout = _check_timeout(timeout)
         describe(f"$ {command}")
         await self._closed()
         generation = self._generation
-        async with self._lock:
+        note = ""
+        if self._lock.locked() and self._busy is not None:  # FIFO: wait behind it
+            blocker = _blocker(self._busy, self._busy_job)
+            get_harness_metrics().shell_queued()
+            describe(f"$ {command} · queued behind {blocker}")
+            loop = asyncio.get_running_loop()
+            queued_at = loop.time()
+            # Behind a job (often a never-ending tail): the deadline covers the wait.
+            # Behind a direct run the deadline still counts from its own start.
+            limit = timeout if self._busy_job is not None else None
+            self._queued += 1
+            try:
+                await asyncio.wait_for(self._lock.acquire(), limit)
+            except TimeoutError:
+                if self._generation != generation:
+                    raise RuntimeError(_CLOSED_BEFORE) from None
+                stderr = _queued_note(blocker, timeout, ran=False)
+                return CommandResult(124, True, "", stderr, self._confirmed_cwd or "")
+            finally:
+                self._queued -= 1
+            waited = loop.time() - queued_at
+            if waited >= _QUEUE_NOTE_SECONDS:
+                note = _queued_note(blocker, waited, ran=True)
+        else:
+            await self._lock.acquire()
+        try:
             if self._generation != generation:
                 raise RuntimeError(_CLOSED_BEFORE)
             if self._session is None:
                 await self._start(generation)
-            self._busy = command
+            self._busy, self._busy_job = command, current_name()
             try:
-                return await self._send_locked(command, stdin, timeout, generation)
+                result = await self._send_locked(command, stdin, timeout, generation)
             finally:
-                self._busy = None
+                self._busy = self._busy_job = None
                 session = self._session
                 if session is not None:
                     self._confirmed_cwd = str(session.cwd)  # bash reports it after each command
+        finally:
+            self._lock.release()
+        if note:
+            result.stderr = f"{result.stderr}\n{note}" if result.stderr else note
+        return result
 
     async def send(self, command: str) -> CommandResult:
         """A launched Shell's request (``job.send(command)``): ``run`` with its default timeout."""

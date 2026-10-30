@@ -144,6 +144,8 @@ class HarnessMetrics(BaseModel):
     return_result_invalid_retries: list[str] = Field(default_factory=list)
     # NeedInput(explanation=...) accepted (NeedInput used to reject the extra field)
     need_input_explanations: int = 0
+    # A Shell command queued behind another still running in the same Shell
+    shell_queued_behind_running: int = 0
     # Waiting on the person (user_messages) rejected; the role whose turn did it
     waiting_on_person_rejections: list[str] = Field(default_factory=list)
     # LLM-facing queue reads that timed out mid-cell (channel name)
@@ -324,6 +326,10 @@ class HarnessMetrics(BaseModel):
     def need_input_explanation(self) -> None:
         """NeedInput(explanation=...) was accepted as a status line."""
         self.need_input_explanations += 1
+
+    def shell_queued(self) -> None:
+        """A Shell command was queued behind another still running in the same Shell."""
+        self.shell_queued_behind_running += 1
 
     # Error Recovery
     def validation_error(self, error_type: str, message: str) -> None:
@@ -811,6 +817,12 @@ _SPAN_SCHEMA: tuple[SchemaEntry, ...] = (
         "NeedInput(explanation=) accepted",
         "Return Value Handling",
         lambda m: m.need_input_explanations,
+    ),
+    SchemaEntry(
+        "harness.shell_queued_behind_running.count",
+        "Shell commands queued behind a running one",
+        "Tool Usage",
+        lambda m: m.shell_queued_behind_running,
     ),
     SchemaEntry(
         "harness.waiting_on_person_rejected.count",
