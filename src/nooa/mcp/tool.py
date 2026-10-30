@@ -154,7 +154,8 @@ def _create_method_from_schema(
         input_schema: Raw JSON schema dictionary (must have "type": "object" and "properties")
         required: Set of required parameter names from JSON Schema
         mcp_tool_class: The MCPTool class (for type annotation)
-        output_schema: The tool's output schema; when set, the method returns ``dict[str, Any]``
+        output_schema: The tool's output schema; when set (and not a ``{"result": ...}``
+            wrapper, whose text may be returned instead), the method returns ``dict[str, Any]``
 
     Returns:
         An async function with proper type annotations and constraint documentation.
@@ -435,7 +436,9 @@ Args:
 
     # Set annotations
     func.__annotations__ = {
-        "return": dict[str, Any] if output_schema else Any,
+        # A ``{"result": ...}`` wrapper schema may come back as its text (see
+        # ``_wraps_text``), so only other object schemas promise a dict.
+        "return": dict[str, Any] if output_schema and not _wrapper_schema(output_schema) else Any,
         **{name: annotations[name] for name in param_names},
     }
 
@@ -783,6 +786,12 @@ def _tool_input_schema(tool: Any) -> dict[str, Any]:
         if isinstance(schema, dict):
             return schema
     return {}
+
+
+def _wrapper_schema(schema: dict[str, Any]) -> bool:
+    """Whether an output schema is FastMCP's ``{"result": ...}`` wrapper of a non-object value."""
+    properties = schema.get("properties")
+    return isinstance(properties, dict) and set(properties) == {"result"}
 
 
 def _wraps_text(structured: dict[str, Any], result: Any) -> bool:
