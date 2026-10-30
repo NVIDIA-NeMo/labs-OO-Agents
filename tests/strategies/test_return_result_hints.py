@@ -37,3 +37,15 @@ def test_call_hint_names_each_model_with_its_required_fields():
     )
     assert return_call_hint(int) is None
     assert return_call_hint(Done | int) is None
+
+
+def test_call_hint_for_a_direct_tool_call_labels_code_and_gives_json():
+    assert return_call_hint(Scored, "execute_python") == (
+        "In execute_python code, call it as return_result(Scored(value=...)). "
+        'As a direct return_result tool call, pass JSON arguments: {"result": {"value": ...}}.'
+    )
+    assert return_call_hint(Done | NeedInput, "execute_python") == (
+        "In execute_python code, call it as one of: return_result(Done(explanation=...)), "
+        "return_result(NeedInput(question=...)). As a direct return_result tool call, pass "
+        'JSON arguments: {"result": {"explanation": ...}} or {"result": {"question": ...}}.'
+    )
