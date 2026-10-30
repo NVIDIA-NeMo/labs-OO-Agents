@@ -146,15 +146,21 @@ RESULT = (
 # Totals raised on the rebase onto dev/atom 060f59e66 (2026-10-29), whose own
 # prompt additions came along: totals 21,045 / 21,240 / 21,408 / 21,543; system
 # limits unchanged. Limits: measured totals plus about 2%, rounded up to the next 100.
+# Raised for the exact-output rule (2026-10-30, friction PR part 3, user-approved:
+# prompt budget is not a constraint): the class doc and the interactive role say an
+# exact value or format is the whole message. Measured system / total: handle
+# 20,202 / 21,227, handle_batch 20,321 / 21,346, handle_work 20,489 / 21,514,
+# handle_orchestrate 20,624 / 21,649.
+# Limits: measured values plus about 2%, rounded up to the next 100.
 LIMITS = {
-    (ATOM, "handle"): (20_100, 21_500),
-    (ATOM, "handle_batch"): (20_300, 21_700),
+    (ATOM, "handle"): (20_700, 21_500),
+    (ATOM, "handle_batch"): (20_800, 21_700),
     (ATOM, "handle_work"): (20_500, 21_900),
-    (ATOM, "handle_orchestrate"): (20_600, 22_000),
+    (ATOM, "handle_orchestrate"): (21_100, 22_000),
 }
 # The bench guard's system-prompt ceiling; every agent stays under it.
 # Raised from 20,000 for the Done(message=...) guidance (2026-10-29, see above).
-BENCH_SYSTEM_LIMIT = 20_700
+BENCH_SYSTEM_LIMIT = 21_200
 
 # Separate CHAR/JSON-size guards, not token counts or a full provider-wire payload.
 # Effective restriction guidance grows default tool descriptions 2,069 -> 2,839;
@@ -314,8 +320,10 @@ async def test_prompts_make_done_message_the_reply(spec, method, tmp_path, sessi
     assert 'Done(message="your reply", explanation="short status")' in rendered
     assert "Waiting(explanation=..., on=[names], message=...)" in rendered
     assert (
-        "``message`` and ``question`` are shown as your reply; ``explanation`` is a short "
-        "status line, not the reply; use ``self.message()`` for notes while you work."
+        "``message`` and ``question`` are shown as your reply; when the request asks for an "
+        "exact value or format, ``message`` is exactly that, with nothing added. "
+        "``explanation`` is a short status line, not the reply; use ``self.message()`` for "
+        "notes while you work."
     ) in rendered
     assert (
         "Replies and notes go to the user, or to your parent if you are a subagent; unattended, "

@@ -527,8 +527,9 @@ class AtomAgent(AtomAgentBase):
     ``NeedInput(question=...)`` only when someone can answer, or
     ``Waiting(explanation=..., on=[names], message=...)`` for live work: jobs or
     registered queue producers. ``message`` and ``question`` are shown as your
-    reply; ``explanation`` is a short status line, not the reply; use
-    ``self.message()`` for notes while you work. Replies and notes go to the
+    reply; when the request asks for an exact value or format, ``message`` is
+    exactly that, with nothing added. ``explanation`` is a short status line,
+    not the reply; use ``self.message()`` for notes while you work. Replies and notes go to the
     user, or to your parent if you are a subagent; unattended, only your result
     is read. The ``role`` block says who reads your result and how to end.
     """
