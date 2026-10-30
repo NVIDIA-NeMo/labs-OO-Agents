@@ -10,6 +10,7 @@ from typing import Annotated, Any, Literal
 
 from nooa.agentdoc import doc as agentdoc
 from nooa.agentdoc import hidden, spec
+from nooa.agentdoc._visibility import is_hidden_method
 from nooa.events import Notification
 from nooa.skill import Skill, TextSkill, slash_command
 from nooa.skill_registry import SkillRegistry
@@ -64,7 +65,7 @@ class SkillEntry:
         if self.kind == "mcp" and self.state in ("active", "connected"):
             # The call form is otherwise invisible: attached servers are hidden
             # from doc(self).
-            state += f"; call: await self.{attr_name(self.name)}.<tool>(...)"
+            state += f"; call: await self.{_call_attr(self.name, self.key)}.<tool>(...)"
         text = f"{self.name} ({self.kind}, {state}): {self.description}"
         return text if len(text) <= 160 else text[:159] + "…"
 
@@ -76,9 +77,18 @@ def _public_methods(obj: Any) -> list[str]:
         if cls in (Skill, TextSkill, object):
             break
         for name, value in cls.__dict__.items():
-            if not name.startswith("_") and callable(value):
+            if not name.startswith("_") and callable(value) and not is_hidden_method(value):
                 names.add(name)
     return sorted(names)
+
+
+def _call_attr(name: str, key: str) -> str:
+    """The agent attribute a server is called on: a client one (``mcp.<x>``) is ``self.<x>``.
+
+    ``name`` is only the shown name, which is the key itself when another
+    skill has the leaf.
+    """
+    return attr_name(_leaf(key) if key.startswith("mcp.") else name)
 
 
 def _first_line(text: str | None) -> str:
@@ -149,7 +159,10 @@ class SkillManager(Skill):
         shown = min(limit, _TOOL_MATCHES_SHOWN)
         for _, _, tool, entry in tools[:shown]:
             kind = "MCP tool" if entry.kind == "mcp" else "method"
-            lines.append(f"{entry.name} has {tool} ({kind}: self.{attr_name(entry.name)}.{tool})")
+            call = (
+                _call_attr(entry.name, entry.key) if entry.kind == "mcp" else attr_name(entry.name)
+            )
+            lines.append(f"{entry.name} has {tool} ({kind}: self.{call}.{tool})")
         if len(tools) > shown:
             lines.append(f"... {len(tools) - shown} more tools; narrow the query")
         return "\n".join(lines)
@@ -244,7 +257,7 @@ class SkillManager(Skill):
         for name, kind, key in self._index():
             if self._is_active(kind, key):
                 active.append(
-                    f"{name} (mcp: await self.{attr_name(name)}.<tool>(...))"
+                    f"{name} (mcp: await self.{_call_attr(name, key)}.<tool>(...))"
                     if kind == "mcp"
                     else name
                 )
@@ -287,8 +300,15 @@ class SkillManager(Skill):
         for key in parent.registry.loaded():
             if not key.startswith("mcp."):
                 continue
+            tool = parent.registry[key]
+            if hasattr(tool, "attach"):
+                # Registering it here would detach it from the parent's agent.
+                warnings.append(
+                    f"MCP server {_leaf(key)!r} was not shared: it is bound to the parent agent"
+                )
+                continue
             try:
-                self.registry.register(key, parent.registry[key])
+                self.registry.register(key, tool)
                 if key in parent.registry.activated():
                     self.registry.activate([_literal(key)])
             except (KeyError, ValueError) as exc:
