@@ -37,6 +37,7 @@ import math
 import os
 import re
 import shlex
+import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Annotated, Any
@@ -551,6 +552,9 @@ _CLOSEST_MAX_FILE_LINES = 20_000  # bound the search work; larger files get no c
 _CLOSEST_MAX_OLD_CHARS = 8_000
 _CLOSEST_MIN_RATIO = 0.6
 _CLOSEST_DIFF_ROWS = 8
+# ``ratio()`` can be quadratic on near-identical long lines; the search runs
+# on the event loop, so past this many seconds the optional hint is skipped.
+_CLOSEST_MAX_SECONDS = 0.25
 
 
 @hidden
@@ -582,10 +586,14 @@ def _closest_region_lines(content: str, old: str) -> list[str]:
     best_ratio, best_start = 0.0, -1
     matcher = difflib.SequenceMatcher(None, autojunk=False)
     matcher.set_seq2(wanted)
+    deadline = time.monotonic() + _CLOSEST_MAX_SECONDS
     for start in range(max(1, len(file_lines) - size + 1)):
-        matcher.set_seq1("\n".join(file_lines[start : start + size]))
+        window = "\n".join(file_lines[start : start + size])
+        matcher.set_seq1(window)
         if matcher.real_quick_ratio() <= best_ratio or matcher.quick_ratio() <= best_ratio:
             continue
+        if time.monotonic() > deadline:
+            return []  # too costly for an optional hint
         ratio = matcher.ratio()
         if ratio > best_ratio:
             best_ratio, best_start = ratio, start
