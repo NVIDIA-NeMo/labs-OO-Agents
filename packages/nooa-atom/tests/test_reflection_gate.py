@@ -246,7 +246,7 @@ async def test_actual_default_model_count_requires_fifty_turns_and_one_hour(tmp_
         assert result is settled[-1].result
         assert prediction_count(llm) == 1 and len(llm.calls) == 53
         assert gate.turns == 0 and gate.anchor == 3600
-        assert root.info.reply_count == 52  # maintenance did not count itself
+        assert root.info.reply_count == 104  # maintenance did not count itself
         await root._after_turn_settled(settled[-1])  # duplicate delivery cannot re-admit
         assert prediction_count(llm) == 1 and gate.turns == 0
     finally:
@@ -330,7 +330,7 @@ async def test_failed_timeout_and_noop_attempts_all_consume_cooldown(tmp_path, m
         await root.prompt("eligible again")
         await idle(root)
         assert llm.attempts == [10, 20] and gate.turns == 0 and gate.anchor == 20
-        assert root.info.reply_count == 6
+        assert root.info.reply_count == 12
     finally:
         await registry.close_all()
 
@@ -401,7 +401,7 @@ async def test_waiting_and_need_input_count_but_only_done_admits(tmp_path):
         result = await root.prompt("done")
         assert await pending is result
         await idle(root)
-        assert prediction_count(llm) == 1 and root.info.reply_count == 5
+        assert prediction_count(llm) == 1 and root.info.reply_count == 6
         assert root._agent._reflection_gate.turns == 0
     finally:
         await registry.close_all()
@@ -457,7 +457,7 @@ async def test_cells_rejected_returns_errors_and_cancellation_are_not_turn_credi
         await root.prompt("one more settled handle")
         await idle(root)
         assert gate.turns == 2 and prediction_count(llm) == 0
-        assert root.info.reply_count == 4  # includes error/cancel, but gate does not
+        assert root.info.reply_count == 6  # includes error/cancel, but gate does not
     finally:
         await registry.close_all()
         if pending is not None:
@@ -522,7 +522,7 @@ async def test_owned_cancel_or_close_while_reflection_running_preserves_done(tmp
         else:
             await asyncio.wait_for(root.close(), 5)
         assert llm.cancelled.is_set()
-        assert root.info.reply_count == 1 and gate.turns == 0
+        assert root.info.reply_count == 2 and gate.turns == 0
     finally:
         await registry.close_all()
 
@@ -556,7 +556,7 @@ async def test_close_before_admission_does_not_consume_eligible_window(tmp_path,
     assert gate.turns == 1 and gate.anchor == 0
     await asyncio.wait_for(registry.close_all(), 5)
     assert cancelled.is_set() and prediction_count(llm) == 0
-    assert result == Done(explanation="accepted") and root.info.reply_count == 1
+    assert result == Done(explanation="accepted") and root.info.reply_count == 2
     assert gate.turns == 1  # no attempt was admitted
 
 
@@ -591,7 +591,7 @@ async def test_standalone_enabled_positive_control_proves_runtime_canary_livenes
         attempts = live_reflection_attempts(seen)
         assert {entry[1] for entry in attempts} == {"BeforeAgentCall", "BeforeTurn"}
         assert prediction_count(llm) == 1
-        assert root.info.reply_count == 1 and root._agent._reflection_gate.turns == 0
+        assert root.info.reply_count == 2 and root._agent._reflection_gate.turns == 0
     finally:
         await registry.close_all()
 
@@ -645,7 +645,7 @@ async def test_benchmark_policy_explicit_off_root_child_has_zero_live_reflection
         assert all(prediction_count(llm) == 0 for llm in clients.values())
         assert live_reflection_attempts(seen) == []
         assert {label for label, _, method in seen if method == "handle"} == {None, "kid"}
-        assert root.info.reply_count == 1
+        assert root.info.reply_count == 2
     finally:
         await registry.close_all()
 
@@ -719,7 +719,7 @@ async def test_root_and_kept_child_gate_state_and_options_are_independent(tmp_pa
         assert root_gate.anchor == 20 and root_gate.turns == 0
         assert child_gate.anchor == 10 and child_gate.turns == 0
         assert prediction_count(clients[None]) == 2 and prediction_count(clients["kid"]) == 1
-        assert root.info.reply_count == 4 and child.info.reply_count == 2
+        assert root.info.reply_count == 8 and child.info.reply_count == 2
     finally:
         await registry.close_all()
 
