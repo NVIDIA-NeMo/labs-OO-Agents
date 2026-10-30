@@ -2903,6 +2903,24 @@ class TestCapabilityAwareFixHints:
         assert "Fix: use `httpx.AsyncClient`" in message
         assert "or curl: run the command with `await self.shell.run" in message
 
+    @pytest.mark.parametrize("agent", ["with_shell", None])
+    def test_network_hint_omits_httpx_when_it_is_restricted(self, agent):
+        from nooa.runtime.restrictions import DEFAULT_BLOCKED_MODULES, RESTRICTED_MODULES
+
+        context = ValidationContext(
+            agent=self._WithShell() if agent else None,
+            blocked_modules=DEFAULT_BLOCKED_MODULES,
+            restricted_imports=RESTRICTED_MODULES,
+        )
+        with pytest.raises(ValidationError) as exc_info:
+            UnifiedCodeValidator().validate("import socket", context)
+        message = str(exc_info.value)
+        assert "httpx" not in message
+        if agent:
+            assert "Fix: curl: run the command with `await self.shell.run" in message
+        else:
+            assert "Fix:" not in message
+
     @pytest.mark.parametrize("agent", [None, _WithoutShell()])
     @pytest.mark.parametrize("code", ["import subprocess", "import socket"])
     def test_no_shell_hint_without_shell_capability(self, code, agent):
