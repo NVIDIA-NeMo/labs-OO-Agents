@@ -136,6 +136,18 @@ class GymEpisode:
 _current_invocation: ContextVar[str] = ContextVar("nooa_gym_invocation", default="root")
 
 
+class _PolicySlot:
+    """One admitted ``acall``: counts against the budget until a response under 400 lands."""
+
+    __slots__ = ("answered",)
+
+    def __init__(self) -> None:
+        self.answered = False
+
+
+_current_slot: ContextVar[_PolicySlot | None] = ContextVar("nooa_gym_policy_slot", default=None)
+
+
 class _RecordingClient(ResponsesClient):
     """NOOA's Responses client plus Gym's per-rollout budget and header, with wire capture."""
 
@@ -166,6 +178,10 @@ class _RecordingClient(ResponsesClient):
         self._context_window_override = context_window
         self._replay_reasoning = replay_reasoning
         self._pending: dict[int, ModelCallRecord] = {}
+        # Admitted calls still waiting for a successful response. Root and child sessions
+        # share this client and call it concurrently, so admission must count them.
+        self._slots: set[_PolicySlot] = set()
+        self._slot_of: dict[int, _PolicySlot] = {}
         self._episode_policy_guard: Any = None
         self._required_episode_policy: Any = None
         self._http.httpx_async.event_hooks = {
@@ -241,13 +257,19 @@ class _RecordingClient(ResponsesClient):
         )
         self._pending[id(request)] = record
         self._records.append(record)
+        slot = _current_slot.get()
+        if slot is not None:
+            self._slot_of[id(request)] = slot
 
     async def _on_response(self, response: httpx.Response) -> None:
         record = self._pending.pop(id(response.request), None)
+        slot = self._slot_of.pop(id(response.request), None)
         if record is None:
             return
         await response.aread()
         record.status_code = response.status_code
+        if slot is not None and response.status_code < 400:
+            slot.answered = True  # counted by its record from here on
         record.completed_at = time.time()
         try:
             record.response = response.json()
@@ -258,12 +280,22 @@ class _RecordingClient(ResponsesClient):
         self, messages: Any, tools: Any = None, output_model: Any = None, **kwargs: Any
     ) -> Any:
         self._check_episode_policy(output_model)  # before budget checks/serialization/inference
+        # Admit synchronously, before the first await: a concurrent root or child call
+        # must see this one, which gets its status only when its response arrives.
         used = sum(1 for r in self._records if r.status_code is not None and r.status_code < 400)
+        used += sum(1 for slot in self._slots if not slot.answered)
         if self._max_policy_calls is not None and used >= self._max_policy_calls:
             raise PolicyCallBudgetExceeded(
                 f"policy call budget of {self._max_policy_calls} exhausted"
             )
-        response = await super().acall(messages, tools, output_model, **kwargs)
+        slot = _PolicySlot()
+        self._slots.add(slot)
+        token = _current_slot.set(slot)
+        try:
+            response = await super().acall(messages, tools, output_model, **kwargs)
+        finally:
+            _current_slot.reset(token)
+            self._slots.discard(slot)
         if response.finish_reason == "length" and response.tool_calls:
             # Never execute a tool call that was cut off mid-generation.
             raise OutputTokenLimitExceeded(

@@ -515,6 +515,37 @@ async def test_run_gym_episode_policy_budget_is_a_gradable_stop():
     assert len(log) == 1
 
 
+async def test_recording_client_budget_counts_calls_in_flight():
+    """Concurrent root and child calls at the limit: one goes out, the other is refused."""
+    log: list[dict] = []
+    server, task, port = await _serve(_responses_app(log))
+    try:
+        records: list = []
+        client = _RecordingClient(
+            "openai/gym-policy",
+            api_base=f"http://127.0.0.1:{port}/ng-rollout/r1/v1",
+            api_key="nemo-gym",
+            max_policy_calls=1,
+            records=records,
+        )
+        outcomes = await asyncio.gather(
+            client.acall([{"role": "user", "content": "root"}]),
+            client.acall([{"role": "user", "content": "child"}]),
+            return_exceptions=True,
+        )
+        refused = [o for o in outcomes if isinstance(o, PolicyCallBudgetExceeded)]
+        assert len(refused) == 1 and not any(
+            isinstance(o, BaseException) and o not in refused for o in outcomes
+        )
+        assert len(log) == 1 and len(records) == 1 and records[0].status_code == 200
+        assert not client._slots and not client._slot_of
+        with pytest.raises(PolicyCallBudgetExceeded):
+            await client.acall([{"role": "user", "content": "again"}])
+    finally:
+        server.should_exit = True
+        await task
+
+
 def _reasoning_app(log: list[dict]) -> FastAPI:
     """First turn: a reasoning item plus a shell call; second turn: the final message."""
     app = FastAPI()
