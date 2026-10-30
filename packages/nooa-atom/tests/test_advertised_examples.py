@@ -92,10 +92,13 @@ async def test_skills_block_examples_run(agent):
     rendered = agent.skills.status()
     calls = _calls(rendered)
     assert any(call.startswith("await self.skills.activate(") for call in calls), rendered
-    assert len(calls) == 4, calls
+    assert len(calls) == 3, calls
+    assert "self.skills.read" not in rendered
+    assert "print(self.skills.doc('name'))" in rendered
     owner = _owner()
     for call in calls:
         await _run(call, owner)
+    await _run("print(self.skills.doc('name'))", owner)
 
 
 @pytest.mark.parametrize("with_comment", [False, True])

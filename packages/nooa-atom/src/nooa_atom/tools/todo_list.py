@@ -35,6 +35,7 @@ _DESCRIPTION_CHARS = 2_500
 _NOTE_CHARS = 400
 _NOTES_SHOWN = 8
 _ROWS_SHOWN = 15
+_TITLE_MATCHES_SHOWN = 5
 _DONE_SHOWN = 4
 _STATUS_CHARS = 8_000
 
@@ -109,7 +110,7 @@ def _one_line(text: str, limit: int) -> str:
 
 @snapshotable
 class TodoList(Skill):
-    """Your plan for multi-step work. Activate the item you work on: its description and notes show in todo_status."""
+    """Your plan: activate the item you work on to show its description and notes in the todo_status context block."""
 
     __nosnapshot__ = False  # Override Skill's __nosnapshot__ = True
     context_block = ("todo_status", "self.todo.status()")
@@ -142,21 +143,32 @@ class TodoList(Skill):
         m._order.append(todo.id)
         return todo
 
-    def get(self, todo: Todo | str) -> Todo:
-        """The item with this id (ids are shown in todo_status)."""
-        return self._held()._todos[self._id(todo)]
+    def get(self, id_or_title: str) -> Todo:
+        """Look up an exact ID or unique exact title. IDs win; use an ID for ambiguous titles.
+
+        IDs are shown in todo_status. Otherwise explicit strings match current titles
+        across open and done items, with no trimming or fuzzy matching (including
+        empty/whitespace titles). Missing or ambiguous titles raise ValueError.
+        """
+        # Legacy positional Todo/int references remain ID-only, not part of
+        # the advertised string lookup contract. The old todo= keyword is gone.
+        todo_id = self._id(id_or_title)
+        return self._held()._todos[todo_id]
 
     def delete(self, todo: Todo | str) -> None:
-        """Remove an item from the plan."""
-        self._held().remove(self._id(todo))
+        """Remove a Todo, exact ID or unique exact title."""
+        todo_id = self._id(todo)
+        self._held().remove(todo_id)
 
     def activate(self, todo: Todo | str) -> Todo:
-        """Make it the item you work on."""
-        return self._held().activate(self._id(todo))
+        """Activate a Todo, exact ID or unique exact title."""
+        todo_id = self._id(todo)
+        return self._held().activate(todo_id)
 
     def complete(self, todo: Todo | str | None = None) -> None:
-        """Mark it done; without an argument, the active item."""
-        self._held().complete(self._target(todo, "complete"))
+        """Complete a Todo, exact ID or unique exact title; default: the active item."""
+        todo_id = self._target(todo, "complete")
+        self._held().complete(todo_id)
 
     # ── hidden: earlier calls and the manager's own ──
 
@@ -176,7 +188,7 @@ class TodoList(Skill):
             body, target = text, None
         else:
             body, target = self._legacy_order(text, todo)
-        return self.get(self._target(target, "comment")).comment(str(body))
+        return self.get(self._target(target, "comment", allow_title=False)).comment(str(body))
 
     @hidden
     def from_dict(self, data: dict) -> None:
@@ -283,12 +295,23 @@ class TodoList(Skill):
             return str(todo)
         return todo
 
-    def _id(self, todo: Any) -> str:
-        m = self._held()
+    def _id(self, todo: Any, *, allow_title: bool = True) -> str:
+        # Resolve before _held() converts legacy items, so failures cannot mutate the list.
+        m = self._manager
         todo_id = m._todo_id(self._coerce(todo))
-        if todo_id not in m._todos:
-            raise ValueError(f"no item {todo_id!r}; ids are shown in todo_status")
-        return todo_id
+        if todo_id in m._todos:
+            return todo_id
+        # Only explicit strings get a title fallback, never objects or coerced int IDs.
+        if allow_title and isinstance(todo, str):
+            matches = [key for key, item in m._todos.items() if item.title == todo]
+            if len(matches) == 1:
+                return matches[0]
+            if matches:
+                shown = ", ".join(repr(key) for key in matches[:_TITLE_MATCHES_SHOWN])
+                if len(matches) > _TITLE_MATCHES_SHOWN:
+                    shown += f", +{len(matches) - _TITLE_MATCHES_SHOWN} more"
+                raise ValueError(f"ambiguous item title {todo!r}; use an id: {shown}")
+        raise ValueError(f"no item {todo_id!r}; ids are shown in todo_status")
 
     def _known(self, value: Any) -> bool:
         value = self._coerce(value)
@@ -311,9 +334,9 @@ class TodoList(Skill):
             return second, first  # comment(id, text)
         return first, second
 
-    def _target(self, todo: Any, verb: str) -> str:
+    def _target(self, todo: Any, verb: str, *, allow_title: bool = True) -> str:
         if todo is not None:
-            return self._id(todo)
+            return self._id(todo, allow_title=allow_title)
         m = self._held()
         active = m.active()
         if active is not None:

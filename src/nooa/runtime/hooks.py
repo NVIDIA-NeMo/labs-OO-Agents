@@ -326,6 +326,31 @@ class InstrumentationHooks(Protocol):
         ...
 
 
+def call_on_llm_call(**kwargs: Any) -> None:
+    """Notify the installed hooks of one finished LLM call (success or failure).
+
+    ``on_llm_call`` is an optional hook, outside :class:`InstrumentationHooks`
+    so existing implementations stay conforming: hooks that do not define it
+    are skipped. It is a point-in-time observation after the call returns,
+    like ``on_messages_built``, called with ``agent``, ``method_name``,
+    ``generation_id``, ``start_time_ns``/``end_time_ns`` (``time.time_ns()``),
+    ``response`` (the ``LLMResponse``, or ``None`` on failure),
+    ``exception_type`` (class name on failure), ``turn_number``, ``strategy``
+    and ``llm_client``.
+    """
+    hooks = get_hooks()
+    callback = getattr(hooks, "on_llm_call", None) if hooks else None
+    if callback is None:
+        return
+    t0 = time.perf_counter()
+    try:
+        callback(**kwargs)
+    except (Exception, asyncio.CancelledError):
+        logger.warning("Hook on_llm_call failed", exc_info=True)
+    finally:
+        _record_tracing_overhead(time.perf_counter() - t0)
+
+
 # Global hooks storage using context variable
 # This allows different hooks per async context (e.g., testing)
 _instrumentation_hooks_var: ContextVar[InstrumentationHooks | None] = ContextVar(
@@ -667,6 +692,16 @@ class CompositeInstrumentationHooks:
                 hook.on_messages_built(**callback_kwargs)
             except (Exception, asyncio.CancelledError):
                 logger.warning("Hook on_messages_built failed", exc_info=True)
+
+    def on_llm_call(self, **kwargs: Any) -> None:
+        for hook in self.hooks:
+            callback = getattr(hook, "on_llm_call", None)
+            if callback is None:
+                continue
+            try:
+                callback(**kwargs)
+            except (Exception, asyncio.CancelledError):
+                logger.warning("Hook on_llm_call failed", exc_info=True)
 
 
 def compose_hooks(*hooks: InstrumentationHooks | None) -> InstrumentationHooks | None:

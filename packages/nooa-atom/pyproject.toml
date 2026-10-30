@@ -29,6 +29,44 @@ atom = "nooa_atom.acp.cli:command"
 # `nooa-atom[ast]` installs still resolve.
 ast = []
 
+# Explicit benchmark runtime profile; normal Atom installs do not acquire this bundle.
+# Pins include the reviewed library closure and optional native OTLP capability.
+# Benchmarks keep live OTLP disabled unless their protocol explicitly enables it.
+benchmark = [
+    "nooa-bench",
+    "beautifulsoup4==4.15.0",
+    "contourpy==1.4.0",
+    "cycler==0.12.1",
+    "fonttools==4.67.0",
+    "googleapis-common-protos==1.75.5",
+    "html5lib==1.1",
+    "icalendar==7.2.2",
+    "iniconfig==2.3.1",
+    "kiwisolver==1.5.1",
+    "matplotlib==3.11.2",
+    "numpy==2.5.4",
+    "opentelemetry-exporter-otlp-proto-common==1.45.1",
+    "opentelemetry-exporter-otlp-proto-http==1.45.1",
+    "opentelemetry-proto==1.45.1",
+    "packaging==26.3",
+    "pandas==3.0.6",
+    "pillow==13.0.0",
+    "pluggy==1.7.0",
+    "protobuf==7.36.2",
+    "pygments==2.21.0",
+    "pyoxigraph==0.5.9",
+    "pyparsing==3.3.3",
+    "pytest==9.1.1",
+    "python-dateutil==2.9.0.post0",
+    "rdflib==7.6.0",
+    "scipy==1.18.1",
+    "six==1.17.0",
+    "soupsieve==2.9.2",
+    "typing-extensions==4.16.0",
+    "tzdata==2026.5",
+    "webencodings==0.6.1",
+]
+
 [project.urls]
 Homepage = "https://github.com/NVIDIA-NeMo/labs-OO-Agents"
 Repository = "https://github.com/NVIDIA-NeMo/labs-OO-Agents"
@@ -36,6 +74,7 @@ Issues = "https://github.com/NVIDIA-NeMo/labs-OO-Agents/issues"
 
 [tool.uv.sources]
 nooa = { workspace = true }
+nooa-bench = { workspace = true }
 
 [build-system]
 requires = ["hatchling>=1.26.0", "uv-dynamic-versioning>=0.14.0"]

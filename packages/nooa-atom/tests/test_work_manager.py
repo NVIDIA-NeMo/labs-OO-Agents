@@ -6,6 +6,7 @@ import ast
 import asyncio
 import contextlib
 import gc
+import inspect
 from pathlib import Path
 
 import pytest
@@ -401,6 +402,24 @@ async def test_name_validation_and_bad_work(setup):
         manager.launch(42)
 
 
+async def test_launch_errors_name_the_fix(setup):
+    manager, _ = setup
+    work = asyncio.sleep(0)
+    with pytest.raises(TypeError, match=r"takes no timeout.*sh\.run\(cmd, timeout=600\)"):
+        manager.launch(work, name="tests", timeout=600)  # type: ignore[call-arg]
+    assert work.cr_frame is None  # closed, no "never awaited" warning
+    with pytest.raises(TypeError, match="unexpected keyword argument.*: cwd"):
+        manager.launch(asyncio.sleep(0), cwd="/")  # type: ignore[call-arg]
+    with pytest.raises(ValueError, match="'run_tests'"):
+        manager.launch(asyncio.sleep(0), name="run tests")
+    with pytest.raises(ValueError, match="'run-tests'"):
+        manager.launch(asyncio.sleep(0), name="run-tests.")  # hint keeps the hyphen
+    with pytest.raises(ValueError, match="'job_2nd'"):
+        manager.launch(asyncio.sleep(0), name="2nd")
+    # The catch-all only improves the error: the documented signature has no **kwargs.
+    assert "unexpected" not in str(inspect.signature(WorkManager.launch))
+
+
 async def test_scratch_retention_and_owned_cleanup(tmp_path):
     channel = QueueManager().queue("jobs")
     manager = WorkManager(channel, scratch=tmp_path, keep=2)
@@ -434,6 +453,37 @@ async def test_scratch_retention_and_owned_cleanup(tmp_path):
     assert (
         roots == []
     )  # the manager's own root is gone; the swapped path inside it was not followed
+
+
+async def test_records_keep_launch_info_and_the_latest_summary(tmp_path):
+    saved: list[list[dict]] = []
+    manager = WorkManager(
+        QueueManager().queue("jobs"),
+        scratch=tmp_path,
+        launch_info=lambda work, kind: {"tag": "12", "what": kind, "empty": "", "long": "x" * 500},
+    )
+    manager._on_change = lambda: saved.append(manager.records())
+    started = asyncio.Event()
+
+    async def work() -> None:
+        describe("$ pytest -q · cwd /repo")
+        started.set()
+        await asyncio.sleep(3600)
+
+    job = manager.launch(work(), name="tests")
+    await started.wait()
+    [record] = saved[-1]  # describe() saved the summary at once
+    assert record == {
+        "id": 1,
+        "name": "tests",
+        "kind": "await",
+        "tag": "12",
+        "what": "await",
+        "long": "x" * 79 + "…",
+        "summary": "$ pytest -q · cwd /repo",
+    }
+    await job.cancel()
+    await manager.aclose()
 
 
 async def test_aclose_cancels_everything(tmp_path):

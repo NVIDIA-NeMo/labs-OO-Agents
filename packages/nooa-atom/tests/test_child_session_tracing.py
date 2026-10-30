@@ -196,6 +196,52 @@ async def test_a_delegated_child_is_its_own_agent_under_the_delegate_call(
     assert under.attributes.get("session.id") == root.id
 
 
+async def test_each_sessions_llm_calls_are_llm_call_spans_in_that_sessions_turns(
+    spans, atom_registry, atom_options, atom_models
+):
+    """Orchestrate shape: a root delegates to a child; each LLM call is one ``llm_call`` span.
+
+    The child's calls sit under the child's own generation (so under the
+    delegate call, in the root's trace and trace session) and carry the
+    child's ``nooa.atom.session.*`` attributes; the emitted tool-call id is
+    the one on the cell it ran.
+    """
+    atom_models.scripts[None] = [
+        cell(
+            "done = await self.delegate('fix', 'fix it', name='fix')\n"
+            "return_result(Done(explanation='ok'))"
+        )
+    ]
+    atom_models.scripts["fix"] = [cell("x = 1"), cell(CHILD_RESULT)]
+    root, outcome = await _run_root(atom_registry, atom_options)
+    assert outcome == Done(explanation="ok")
+    finished = spans.get_finished_spans()
+    by_id = {s.context.span_id: s for s in finished}
+    [child] = atom_registry.children(root.id)
+    child_calls = [s for s in _of_session(finished, "fix") if s.name == "llm_call"]
+    root_calls = [
+        s for s in finished if s.name == "llm_call" and s.attributes.get(SESSION_NAME_ATTR) is None
+    ]
+    assert len(root_calls) == 1 and len(child_calls) == 2
+    under = _cell_span(finished, "self.delegate('fix'")
+    for span in child_calls:
+        generation = by_id[span.parent.span_id]
+        assert generation.name == "generation"
+        assert generation.attributes.get(SESSION_ID_ATTR) == child.id
+        assert span.attributes[SESSION_ID_ATTR] == child.id
+        assert span.attributes[PARENT_ID_ATTR] == root.id
+        assert span.attributes["session.id"] == root.id
+        assert span.attributes["agent.name"] == "fix"
+        assert span.context.trace_id == under.context.trace_id
+        assert under.context.span_id in _ancestors(span, by_id)
+        assert tuple(span.attributes["nooa.llm.tool_calls.names"]) == ("python_cell",)
+    assert [s.attributes["nooa.llm.turn_index"] for s in child_calls] == [1, 2]
+    # The emitted tool call is the cell that ran: same tool_call id on both spans.
+    first_cell = _cell_span(finished, "x = 1")
+    [emitted] = child_calls[0].attributes["nooa.llm.tool_calls.ids"]
+    assert first_cell.attributes.get("tool_call.id") == emitted
+
+
 async def test_a_kept_childs_follow_up_turn_stays_in_the_roots_trace(
     spans, atom_registry, atom_options, atom_models
 ):

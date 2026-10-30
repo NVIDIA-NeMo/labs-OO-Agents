@@ -3,10 +3,12 @@
 """Names and paths of a session's background work: its children and jobs.
 
 A session has one namespace of live names, shared by its running jobs and
-its open children. A name follows Python identifier rules
-(``name.isidentifier()``, not a keyword). The top session is ``/root``; a
-child's or job's path is its parent's path, ``/``, and its name:
-``/root/tests``, ``/root/review_pr_462/verifier``.
+its open children. A name starts with a letter or ``_``, then has letters,
+digits, ``_`` or ``-`` (``tests``, ``review-pr``, ``ci_check``), and is not a
+Python keyword. ``/`` (path separator), ``#`` (request suffix, ``sh#3``),
+``.`` and spaces are refused, and names are never rewritten. The top session
+is ``/root``; a child's or job's path is its parent's path, ``/``, and its
+name: ``/root/tests``, ``/root/review-pr/verifier``.
 
 A name may not be one ``Waiting(on=[...])`` reads as a channel or as the
 person (``RESERVED_NAMES``), nor the name of a channel the agent's queue
@@ -36,8 +38,17 @@ RESERVED_NAMES = frozenset(
 
 
 def is_valid_name(name: Any) -> bool:
-    """Whether ``name`` can name a child or a job: an identifier that is not a keyword."""
-    return isinstance(name, str) and name.isidentifier() and not keyword.iskeyword(name)
+    """Whether ``name`` can name a child or a job.
+
+    A letter or ``_``, then letters, digits, ``_`` or ``-``; not a keyword.
+    ``agent/work_manager.py`` repeats this rule (it imports no other nooa module).
+    """
+    return (
+        isinstance(name, str)
+        and not name.startswith("-")
+        and name.replace("-", "_").isidentifier()
+        and not keyword.iskeyword(name)
+    )
 
 
 def check_name(name: Any, what: str, channels: Iterable[str] = ()) -> str:
@@ -48,9 +59,9 @@ def check_name(name: Any, what: str, channels: Iterable[str] = ()) -> str:
     """
     if not is_valid_name(name):
         raise ValueError(
-            f"{what} name {name!r} is not valid: use a Python identifier such as "
-            "'tests' or 'review_pr_462' (letters, digits and _, not starting with a "
-            "digit, not a keyword)"
+            f"{what} name {name!r} is not valid: use a name such as 'tests', "
+            "'review-pr' or 'ci_check' (a letter or _, then letters, digits, _ or -; "
+            "not a keyword; no spaces, '/', '#' or '.')"
         )
     if name in RESERVED_NAMES or name in set(channels):
         raise ValueError(

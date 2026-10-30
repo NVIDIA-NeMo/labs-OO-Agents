@@ -1047,6 +1047,32 @@ async def test_a_done_message_also_sent_with_message_is_delivered_once(
     assert _admitted_delegates(atom_registry, root.id) == ["ChildMessage", "ChildResult"]
 
 
+async def test_a_childs_explanation_is_not_sent_as_a_reply(
+    atom_registry, atom_options, atom_models
+):
+    """The root's explanation fallback is not a child's: its Done reaches the parent once."""
+    from nooa.interactive import AgentMessage
+
+    atom_models.scripts[None] = [
+        _wait_then("await self.spawn('kid', 'work', name='kid')"),
+        done("got it"),
+    ]
+    atom_models.scripts["kid"] = [
+        cell(
+            "return_result(Done(explanation='kid status', result=TaskResult("
+            "solution_description='s', evidence='e', how_to_verify='h')))"
+        )
+    ]
+    root = await atom_registry.create(atom_options)
+    await asyncio.wait_for(root.prompt("go"), TIMEOUT)
+    assert _admitted_delegates(atom_registry, root.id) == ["ChildResult"]
+    [kid] = [s for s in atom_registry.sessions.values() if s.parent_id == root.id]
+    assert not [e for e in kid._agent.event_manager.values() if isinstance(e, AgentMessage)]
+    rows = atom_registry.store.load_rows(root.id, frozenset({"ItemAdmitted"}))
+    [admitted] = [raw for _t, raw in rows if raw.get("channel") == "delegates"]
+    assert "kid status" in json.dumps(admitted)
+
+
 async def test_a_result_message_handled_late_is_not_relayed(registry, root_options):
     """The marker is on the event itself, so deferred handling cannot misroute it."""
     from nooa_atom.session.items import AgentEventUpdate

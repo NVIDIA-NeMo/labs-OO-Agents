@@ -297,6 +297,107 @@ async def test_text_only_retry_preserves_response_and_uses_python_cell():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["default", "empty", "custom"])
+async def test_python_cell_describes_effective_restrictions_once_and_matches_validators(mode):
+    import ast
+    import asyncio
+    import os
+    import time
+
+    from nooa.runtime.code_validator import (
+        BlockingCallValidator,
+        SecurityValidator,
+        ValidationContext,
+    )
+    from nooa.runtime.restrictions import RestrictionsConfig
+
+    options = {"restricted_imports": frozenset()}
+    if mode == "empty":
+        options.update(blocked_modules=frozenset(), blocked_calls={})
+    elif mode == "custom":
+        options.update(
+            blocked_modules=frozenset({"math"}),
+            restricted_imports=frozenset({"json"}),
+            blocked_calls={"os": frozenset({"getcwd"}), "time": frozenset()},
+        )
+    restrictions = RestrictionsConfig(**options)
+    cell_strategy = CodeActV2(config=CodeActConfig(prefill=None, restrictions=restrictions))
+    llm = FakeLLMClient([_response("return_result(42)")])
+
+    class TestAgent(Agent, llm=llm):
+        @strategy(cell_strategy)
+        async def answer(self) -> int:
+            """Return an integer."""
+            ...
+
+    agent = TestAgent()
+    try:
+        assert await agent.answer() == 42
+    finally:
+        await agent.aclose()
+    [tool] = llm.calls[0].tools
+    assert tool.name == "python_cell"
+    description = tool.description
+    assert description.count(cell_strategy._restrictions_text()) == 1
+    messages = "\n".join(str(m.get("content", "")) for m in llm.calls[0].messages)
+    assert cell_strategy._restrictions_text() not in messages
+    for atom_only in ("self.jobs", "self.shell", "Subagent", "Shell"):
+        assert atom_only not in description
+    assert "literal dunder names" in description and "`.__dict__`" in description
+    assert "public agent attributes" in description and "shared classes" in description
+    assert "Scheduling blocking work as a task does not offload it" in description
+    if mode == "empty":
+        assert "Blocked imports:" not in description
+        assert "Blocked calls by module" not in description
+        assert "asyncio.run" not in description and "loop.run_until_complete" not in description
+    elif mode == "custom":
+        assert "Blocked imports: `json`, `math`" in description
+        assert "Blocked calls by module (functions/methods): os: getcwd\n" in description
+        assert "time: " not in description and "`subprocess`" not in description
+    else:
+        assert "`subprocess`" in description and "`urllib.request`" in description
+        assert (
+            "asyncio: run, run_coroutine_threadsafe, run_forever, run_until_complete" in description
+        )
+        assert "time: sleep" in description
+        assert "asyncio.run_until_complete" not in description
+
+    # Parse only: these samples are never executed. The same effective config drives both checks.
+    context = ValidationContext(
+        blocked_modules=restrictions.blocked_modules,
+        restricted_imports=restrictions.restricted_imports,
+        exec_globals={"os": os, "time": time, "asyncio": asyncio},
+    )
+    samples = {
+        "import subprocess": mode == "default",
+        "import math": mode == "custom",
+        "import json": mode == "custom",
+        "os.getcwd()": mode == "custom",
+        "time.sleep(1)": mode == "default",
+        "asyncio.run(coro)": mode == "default",
+    }
+    for code, blocked in samples.items():
+        tree = ast.parse(code)
+        issues = SecurityValidator().validate(tree, context)
+        issues += BlockingCallValidator(restrictions).validate(tree, context)
+        assert bool(issues) is blocked, (mode, code, issues)
+
+
+def test_restriction_docs_use_captured_config_not_later_global_overrides(monkeypatch):
+    from nooa.runtime import restrictions as module
+
+    monkeypatch.setattr(module, "_global_restricted_imports", frozenset({"json"}))
+    config = CodeActConfig(
+        restrictions=module.RestrictionsConfig(blocked_modules=frozenset(), blocked_calls={})
+    )
+    cell_strategy = CodeActV2(config=config)
+    monkeypatch.setattr(module, "_global_restricted_imports", frozenset({"math"}))
+    assert "Blocked imports: `json`\n" in cell_strategy._restrictions_text()
+    assert "`math`" not in cell_strategy._restrictions_text()
+    assert cell_strategy._restrictions_text() == CodeActStrategy(config=config)._restrictions_text()
+
+
+@pytest.mark.asyncio
 async def test_explicit_return_completes_with_only_python_cell_tool():
     fake_llm = FakeLLMClient(scripted_responses=[_response("return 42")])
 

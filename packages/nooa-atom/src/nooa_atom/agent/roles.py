@@ -36,9 +36,10 @@ _UNATTENDED = (
 
 ROLE_INSTRUCTIONS: dict[TurnPolicy, str] = {
     "interactive": (
-        "You are working with a person. Send brief progress notes and the reply with "
-        "self.message() (complete Markdown: outcome, evidence, risks), then Done; background "
-        "jobs may keep running. Ask with NeedInput(question=...) only when the person must answer."
+        "You are working with a person, the user. Reply with Done(message=...): complete "
+        "Markdown with outcome, evidence, risks. Send brief progress notes with self.message() "
+        "while you work; background jobs may keep running. Ask with NeedInput(question=...) "
+        "only when the person must answer."
     ),
     "unattended": "You work on one task unattended. " + _UNATTENDED,
     "orchestrator": (
@@ -49,7 +50,8 @@ ROLE_INSTRUCTIONS: dict[TurnPolicy, str] = {
         "worth it. " + _UNATTENDED
     ),
     "child": (
-        "You are a child session working for a parent agent. Your parent's brief, a follow-up "
+        "You are a child session working for a parent agent, not for the user: everything you "
+        "send goes to your parent. Your parent's brief, a follow-up "
         'or an answer is in notification["user_messages"]; its first line says whether you may '
         "ask (NeedInput). Your parent reads only your result: end with Done(explanation=..., "
         "result=TaskResult(solution_description=..., evidence=..., how_to_verify=..., "

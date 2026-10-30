@@ -393,7 +393,7 @@ class AgentVars:
 
     Use for variables that need to survive across turns and across
     sessions but aren't tied to a specific todo. (For per-todo state,
-    use ``self.todo.<id>.v`` — same shape, narrower scope.)
+    use ``self.todo.get(id).v`` — same shape, narrower scope.)
 
     Values are snapshot-backed: assigning something that can't be
     snapshot-serialized (a live client, socket, callable, ...) logs a
@@ -541,8 +541,7 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
 
     @property
     def v(self) -> AgentVars:
-        """Attribute-access proxy for ``self.vars`` — the agent's
-        persistent variable dict.
+        """Durable facts: write ``self.v.key = value``, read ``self.v.key``, delete ``del self.v.key``. Store serializable values.
 
         Use for state that should survive across turns and sessions
         but isn't tied to a specific todo. Snapshot-backed via

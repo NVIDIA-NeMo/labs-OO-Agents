@@ -98,6 +98,7 @@ class CodeActV2(CodeActStrategy):
             "# Python cell context",
             "# Already in scope inside python_cell(); state persists across cells.",
             "# Use these names directly; do not re-import or re-define them.",
+            "# Import anything else you need (os, re, json...).",
             "# Use print(doc(name)) for details about any type or function.",
             "",
             *code,
@@ -201,6 +202,8 @@ class CodeActV2(CodeActStrategy):
 
         def python_cell_state() -> dict[str, dict[str, str]]:
             """Return the complete name-to-type inventory for this call's cell state."""
+            if getattr(call, "execution_namespace", None) is not None:
+                return call.execution_namespace.inventory()
             return self._cell_state(call)
 
         builtins["python_cell_state"] = python_cell_state

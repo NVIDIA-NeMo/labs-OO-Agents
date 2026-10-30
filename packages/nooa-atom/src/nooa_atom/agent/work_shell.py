@@ -21,11 +21,19 @@ the Shells started under it; a launched Shell closes with its job. Inside a
 harness's ``preserve_background_services()`` scope, closing ends bash only:
 that external harness owns (and must clean up) the background processes.
 
-A command's stdout and stderr are read through pipes into files in the job's
-scratch directory, each up to an output limit (past it, bytes are counted
-but not kept, and the summary says so); outside a job they are not kept. A
-``CommandResult`` carries a bounded summary of each stream and the file path
-when the summary was cut.
+A command's stdout and stderr are read through pipes into files, each up to
+an output limit (past it, bytes are counted but not kept, and the summary says
+so): in the job's scratch directory when launched, else in the Shell's own
+output directory. A ``CommandResult`` carries a bounded summary of each stream
+and the file path when the summary was cut (short output keeps no file).
+
+Retention of those files: a job's are removed when the job is pruned or its
+manager closes. A direct ``run``'s are removed when that Shell closes
+(``aclose``, ``async with`` exit) or, for a Shell started under an owner, when
+the owner closes: under an owner they outlive a dropped Shell (``r = await
+Shell().run(...)`` in a cell keeps ``r.stdout_path`` until the session ends).
+A Shell with no owner that is dropped unclosed keeps them while any result
+naming them is alive.
 """
 
 from __future__ import annotations
@@ -37,6 +45,7 @@ import itertools
 import math
 import os
 import shlex
+import shutil
 import signal
 import sys
 import tempfile
@@ -48,7 +57,8 @@ from typing import IO, Annotated, Any
 from nooa import hidden
 from nooa.agentdoc import spec
 from nooa.tools import BashSession
-from nooa_atom.agent.work_manager import describe, job_dir
+from nooa_atom.agent.work_manager import _progress_sink, describe, job_dir
+from nooa_atom.agent.work_progress import _ShellProgress
 
 __all__ = ["CommandResult", "Shell", "ShellOwner", "default_cwd", "shell_owner"]
 
@@ -100,18 +110,17 @@ _CLOSED_DURING = "the shell was closed while this command ran; the command was s
 
 @dataclass
 class CommandResult:
-    """One command's outcome: exit code, output, and the shell's directory after it.
+    """One command's outcome: exit code, output, and bash's directory after it.
 
-    ``stdout`` and ``stderr`` are whole up to 10 kB, else head and tail
-    around a marker; ``stdout_path``/``stderr_path`` then name the file with
-    the full output (kept while the job is listed). ``cwd`` is the shell's
-    directory after the command, as bash reported it (a ``cd`` lasts).
+    ``stdout``/``stderr``: whole up to 10 kB, else head+tail around a marker;
+    ``*_path`` then names the capture (up to ``max_output``, default 64 MiB),
+    kept while the job is listed (direct ``run``: until its Shell/session closes).
     """
 
     returncode: int
     timed_out: bool
     # Shown cut to 2,000 characters in notifications and pprint (display only):
-    # the full summary stays on the object, the full output in the *_path files.
+    # the full summary stays on the object; *_path files retain up to max_output.
     stdout: Annotated[str, spec(max_string=2000)]
     stderr: Annotated[str, spec(max_string=2000)]
     cwd: str
@@ -129,6 +138,7 @@ class _Capture:
         self.written = 0
         self.total = 0
         self.tail = bytearray()
+        self.progress: Any = None  # a managed job's preview stream (work_progress)
 
     def feed(self, chunk: bytes) -> None:
         self.total += len(chunk)
@@ -144,6 +154,10 @@ class _Capture:
         with contextlib.suppress(Exception):
             while chunk := await stream.read(_CHUNK_BYTES):
                 self.feed(chunk)
+                if self.progress is not None:
+                    self.progress.feed(chunk)
+            if self.progress is not None:
+                self.progress.feed(b"", final=True)
 
     def summary(self) -> tuple[str, str | None]:
         """The stream's text, or its head and tail around a marker; and the path if cut."""
@@ -183,6 +197,10 @@ def _result(code: int, timed_out: bool, out: _Capture, err: _Capture, cwd: str) 
     stdout, stdout_path = out.summary()
     stderr, stderr_path = err.summary()
     return CommandResult(code, timed_out, stdout, stderr, cwd, stdout_path, stderr_path)
+
+
+def _release(_directory: object) -> None:
+    """Nothing: a finalizer that only held ``_directory`` until its result went."""
 
 
 def _start_time(pid: int) -> str | None:
@@ -276,6 +294,17 @@ class ShellOwner:
     def __init__(self) -> None:
         self._shells: weakref.WeakSet[Shell] = weakref.WeakSet()
         self._closed = False
+        # Direct runs' output files of its Shells: they outlive a dropped Shell
+        # and go when the owner closes.
+        self._output: tempfile.TemporaryDirectory[str] | None = None
+
+    def _output_dir(self) -> Path | None:
+        """A new directory for one Shell's direct-run output (None once closed)."""
+        if self._closed:
+            return None
+        if self._output is None:
+            self._output = tempfile.TemporaryDirectory(prefix="nooa-shells-")
+        return Path(tempfile.mkdtemp(prefix="shell-", dir=self._output.name))
 
     def adopt(self, shell: Shell) -> None:
         if self._closed:  # closing is terminal: no bash starts under a closed owner
@@ -291,6 +320,9 @@ class ShellOwner:
         shells = list(self._shells)
         self._shells.clear()
         results = await asyncio.gather(*(s.aclose() for s in shells), return_exceptions=True)
+        output, self._output = self._output, None
+        if output is not None:  # also the output of Shells dropped unclosed
+            output.cleanup()
         errors = [r for r in results if isinstance(r, BaseException)]
         if errors:
             raise errors[0]
@@ -303,32 +335,27 @@ shell_owner: contextvars.ContextVar[ShellOwner | None] = contextvars.ContextVar(
 
 
 class Shell:
-    """One persistent bash per ``Shell`` object: ``sh = Shell()``; ``await sh.run("cd src")``.
+    """Persistent bash::
 
-    The same object keeps its bash between commands: cd, exports and
-    unexported variables carry over; another ``Shell()`` is a separate bash.
-    Nothing starts until the first command. Commands run one at a time, in
-    order. ``Shell().run(cmd)`` on a new object is a fresh shell whose state
-    ends with it. ``cwd`` defaults to the workspace; ``run``'s ``timeout``
-    (seconds) bounds that command, which then ends with ``returncode`` 124 and
-    ``timed_out=True`` (bash and its state are kept).
+        sh = Shell()
+        r = await sh.run("pytest -q", timeout=600)
+        print(r.returncode, r.stdout)
 
-    Launched, it is a job: ``job = self.jobs.launch(sh, name="sh")``; each
-    ``job.send("make")`` is a request job whose result is a ``CommandResult``,
-    like ``sh.run`` (default timeout; else launch ``sh.run(cmd, timeout=60)``).
-    A timeout or cancel stops the whole command (the rest of it is skipped)
-    and keeps the shell's state.
-    When that cannot be done safely (a builtin loop that will not stop, or the
-    user's own USR1 trap) bash restarts; under ``set -e`` the stopped command
-    ends bash. Either way the result says the state was lost. Cancelling the
-    job closes its bash. Options (``set -euxo pipefail``) and traps persist;
-    ``exit N`` ends bash with status N, and the next command starts a new one.
+    Reuse ``sh``: FIFO commands preserve cwd, variables, options and traps.
+    A new Shell starts fresh in the workspace; bash starts on first use.
 
-    Closing ends bash and its background processes (under a harness's
-    ``preserve_background_services()`` scope, bash only; the harness cleans
-    up): ``await sh.aclose()``, ``async with Shell() as sh:``, or when the
-    object is dropped. An agent session closes its own Shells when it ends;
-    keep ``sh`` for as long as a background server must run.
+    Timeout returns 124 with ``timed_out=True``. Timeout/cancel skips remaining
+    commands, usually retaining state. Unstoppable builtins or a USR1 trap may
+    force a restart. ``set -e`` or ``exit N`` can end bash; the next command starts
+    fresh. Other options persist; results report lost state.
+
+    Completion-only unless launched with ``progress=Throttle(...)``; the final
+    CommandResult supersedes unread ShellProgress items.
+
+    Close: ``await sh.aclose()``, ``async with Shell()``, drop it or cancel its
+    job; the session closes it too. Closing ends bash and its background
+    processes (under ``preserve_background_services()`` only bash). Keep ``sh``
+    while a background server must run. A closed Shell restarts on next use.
     """
 
     __nosnapshot__ = True  # a live bash is not data
@@ -350,6 +377,11 @@ class Shell:
         self._closing: asyncio.Task[None] | None = None  # the cleanup every closer awaits
         self._bash: tuple[int, str | None] | None = None  # pid and start time of bash
         self._own_dir: tempfile.TemporaryDirectory[str] | None = None
+        self._owner: ShellOwner | None = None  # who adopted it at its last start
+        # Direct runs' capture files: a directory in the owner's (removed by
+        # aclose or the owner), else the Shell's own (aclose, or garbage once
+        # neither the Shell nor a result naming it is alive).
+        self._output: Path | tempfile.TemporaryDirectory[str] | None = None
         self._lingering: set[asyncio.Task[None]] = set()
         self._count = itertools.count(1)
         self._note = ""
@@ -393,8 +425,7 @@ class Shell:
     ) -> CommandResult:
         """Run one command in this object's bash (started on first use); state carries over.
 
-        ``stdin`` is the command's input (else it reads nothing); ``timeout``
-        is its deadline in seconds (finite, positive) from when it starts.
+        ``stdin``: its input (else none); ``timeout``: deadline, seconds from its start.
         """
         timeout = _check_timeout(timeout)
         describe(f"$ {command}")
@@ -423,6 +454,7 @@ class Shell:
         owner = shell_owner.get()
         if owner is not None:  # before bash exists: the owner's close also ends this start
             owner.adopt(self)
+        self._owner = owner
         self._starting = True
         try:
             session = BashSession(cwd=self._directory())
@@ -493,11 +525,7 @@ class Shell:
         await self.aclose()
 
     async def aclose(self) -> None:
-        """End bash, its background processes (see the class doc) and scratch files.
-
-        Safe to repeat; concurrent calls wait for one cleanup. A later ``run``
-        starts a new bash.
-        """
+        """End bash, its background processes (see the class doc) and scratch files; repeatable."""
         # Never waits for the lock: the running command is stopped by closing its
         # bash, queued commands are refused, and a start (first use or an
         # interrupt's restart) is cancelled, so no bash comes back for them. One
@@ -512,8 +540,9 @@ class Shell:
             session, self._session = self._session, None
             pumps, self._lingering = self._lingering, set()
             own_dir, self._own_dir = self._own_dir, None
+            output, self._output = self._output, None
             closing = self._closing = asyncio.ensure_future(
-                self._cleanup(start, session, pumps, own_dir)
+                self._cleanup(start, session, pumps, own_dir, output)
             )
         await asyncio.shield(closing)
 
@@ -523,6 +552,7 @@ class Shell:
         session: BashSession | None,
         pumps: set[asyncio.Task[None]],
         own_dir: tempfile.TemporaryDirectory[str] | None,
+        output: Path | tempfile.TemporaryDirectory[str] | None = None,
     ) -> None:
         for pump in pumps:
             pump.cancel()
@@ -533,6 +563,10 @@ class Shell:
             await session.close()
         if own_dir is not None:
             own_dir.cleanup()
+        if isinstance(output, Path):
+            shutil.rmtree(output, ignore_errors=True)
+        elif output is not None:
+            output.cleanup()
 
     async def _closed(self) -> None:
         """Wait for a close under way to finish (its outcome is the closers')."""
@@ -549,6 +583,28 @@ class Shell:
     def _bash_alive(self) -> bool:
         return self._bash is not None and _start_time(self._bash[0]) == self._bash[1]
 
+    def _output_path(self) -> Path:
+        """Where a direct run's captures go (see ``_output``), made on first use."""
+        if self._output is None:
+            owned = self._owner._output_dir() if self._owner is not None else None
+            self._output = owned or tempfile.TemporaryDirectory(prefix="nooa-shell-out-")
+        output = self._output
+        return output if isinstance(output, Path) else Path(output.name)
+
+    def _retain(self, result: CommandResult, out: _Capture, err: _Capture) -> None:
+        """Keep a direct run's cut captures; remove the files of uncut streams."""
+        for capture, path in ((out, result.stdout_path), (err, result.stderr_path)):
+            if path is None and capture.path:
+                with contextlib.suppress(OSError):
+                    os.unlink(capture.path)  # short: whole in the summary
+        output = self._output
+        if isinstance(output, tempfile.TemporaryDirectory) and (
+            result.stdout_path or result.stderr_path
+        ):
+            # No owner: the result holds the directory, so dropping the Shell
+            # unclosed does not remove files a live result names.
+            weakref.finalize(result, _release, output)
+
     async def _send_locked(
         self, command: str, stdin: str | None, timeout: float, generation: int
     ) -> CommandResult:
@@ -563,7 +619,7 @@ class Shell:
                 self._own_dir = tempfile.TemporaryDirectory(prefix="nooa-shell-")
             directory = Path(self._own_dir.name)
         stem = f"cmd-{next(self._count)}"
-        out, err = _captures(kept, stem, self._max_output)
+        out, err = _captures(kept or self._output_path(), stem, self._max_output)
         fifos = [directory / f"{stem}.out.fifo", directory / f"{stem}.err.fifo"]
         source = "/dev/null"
         if stdin is not None:  # a file, written before the command starts
@@ -577,7 +633,12 @@ class Shell:
         opened: list[tuple[asyncio.StreamReader, asyncio.BaseTransport, int]] = []
         write_fds: set[int] = set()
         pumps: list[tuple[asyncio.Task[None], asyncio.BaseTransport, _Capture]] = []
+        progress = None
         try:
+            sink = _progress_sink()
+            if sink is not None:  # a managed job: previews follow its Throttle (None: quiet)
+                progress = _ShellProgress(sink, sink.policy)
+                out.progress, err.progress = progress.stdout, progress.stderr
             for fifo in fifos[:2]:
                 opened.append(await _open_fifo(fifo))
                 write_fds.add(opened[-1][2])
@@ -593,6 +654,8 @@ class Shell:
             inner = asyncio.ensure_future(
                 session.run_with_timeout_flag(wrapped, timeout + _BACKSTOP_SECONDS)
             )
+            if progress is not None:
+                progress.live = lambda: not inner.done() and self._generation == generation
             restart_notes: list[str] | None = None
             try:
                 try:
@@ -600,6 +663,8 @@ class Shell:
                         asyncio.shield(inner), timeout
                     )
                 except TimeoutError:
+                    if progress is not None:
+                        progress.close()
                     restarted = await self._interrupt(inner, before, session, generation)
                     self._check_open(generation)
                     if restarted:
@@ -609,6 +674,8 @@ class Shell:
                         stray_out, stray_err, _, _ = inner.result()
                     code, timed_out = 124, True
             except asyncio.CancelledError:
+                if progress is not None:
+                    progress.close()
                 if await self._interrupt(inner, before, session, generation):
                     raise asyncio.CancelledError(self._note) from None
                 raise
@@ -616,6 +683,8 @@ class Shell:
                 self._check_open(generation)  # closed: say so, not how the close broke it
                 raise
             finally:
+                if progress is not None:
+                    progress.close()  # terminal, not EOF: background writers may keep pipes open
                 _close_fds(write_fds)  # bash's ends close with the group: then EOF
             self._check_open(generation)
             await self._settle([pump for pump, _, _ in pumps])
@@ -630,7 +699,11 @@ class Shell:
             else:  # restarted at the deadline: this result says so
                 notes = restart_notes
             result = _result(code, timed_out, out, err, str(session.cwd))
+            if kept is None:
+                self._retain(result, out, err)
         finally:
+            if progress is not None:
+                progress.close()
             _close_fds(write_fds)
             for pump, transport, capture in pumps:
                 if pump.done():

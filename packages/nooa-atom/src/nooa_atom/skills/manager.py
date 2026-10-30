@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Annotated, Any, Literal
 
 from nooa.agentdoc import doc as agentdoc
-from nooa.agentdoc import hidden
+from nooa.agentdoc import hidden, spec
 from nooa.events import Notification
 from nooa.skill import Skill, TextSkill, slash_command
 from nooa.skill_registry import SkillRegistry
@@ -30,7 +30,7 @@ _DESCRIPTION_WIDTH = 100
 class SkillEntry:
     """One skill of any kind, as search and the host controls show it.
 
-    ``name`` is what the model passes to ``activate``, ``read`` and ``doc``:
+    ``name`` is what the model passes to ``activate`` and ``doc``:
     the agent attribute of a code skill, the id of a text skill, the name of
     an MCP server. ``key`` is the name the skill is registered under
     (``nemo.shell``, ``cmd.review``, ``mcp.<client server>``, or the MCP
@@ -59,15 +59,15 @@ def _first_line(text: str | None) -> str:
 
 
 class SkillManager(Skill):
-    """Find, turn on and read skills: code skills, text skills and MCP servers.
+    """Find, activate and inspect code/text skills and MCP servers.
 
     ``search(query)`` finds skills of every kind by name and description.
     ``await activate([...])`` turns skills on: a code skill is loaded and its
     object is ``self.<name>``; an MCP server is connected and its tools are
     methods of ``self.<server>``; a text skill's instructions arrive on the
-    ``system_messages`` channel at the start of your next turn (``read(name)``
-    returns them now). ``doc(name)`` describes one skill, including an MCP
-    server's tools. An MCP server may first need the person's approval or
+    ``system_messages`` channel at the start of your next turn. Use
+    ``print(self.skills.doc(name))`` for full text instructions, code APIs or
+    MCP tools now. An MCP server may first need the person's approval or
     sign-in; ``activate`` says so, and you get a notice when it connects.
     """
 
@@ -145,6 +145,7 @@ class SkillManager(Skill):
                     lines.append(f"{entry.name}: inactive")
         return "\n".join(lines)
 
+    @hidden
     def read(self, name: str) -> str:
         """The instructions of the text skill ``name``, as text."""
         entry = self._one(name)
@@ -157,7 +158,7 @@ class SkillManager(Skill):
         return (type(skill).__doc__ or "").split("\n---\n", 1)[-1].strip()
 
     def doc(self, name: str) -> str:
-        """The full description of one skill of any kind, with an MCP server's tools.
+        """Return full text instructions, code APIs or MCP tools as str; use print(self.skills.doc(name)).
 
         An unconnected MCP skill returns a connection-status message instead of its tools.
         """
@@ -209,10 +210,9 @@ class SkillManager(Skill):
             order = [label for label in _KIND_LABELS.values() if label in rest_kinds]
             lines.append(
                 f"{rest} more ({', '.join(order)}): self.skills.search('query') (sync); "
-                "self.skills.doc('name') (sync) for one skill's full docs "
-                "(an unconnected MCP skill returns its connection status); "
-                "await self.skills.activate(['name']) (async); "
-                "self.skills.read('name') (sync) for text skills"
+                "print(self.skills.doc('name')) for full instructions/APIs "
+                "(unconnected MCP: connection status); "
+                "await self.skills.activate(['name']) (async)"
             )
         return "\n".join(lines)
 
@@ -481,7 +481,7 @@ class SkillManager(Skill):
             channel.put(self.doc(entry.name))
             return (
                 f"{entry.name}: its instructions arrive on the system_messages channel in "
-                f"your next turn; self.skills.read({entry.name!r}) returns them now"
+                f"your next turn; print(self.skills.doc({entry.name!r})) shows them now"
             )
         if entry.kind == "mcp" and not entry.key.startswith("mcp."):
             return await self._connect(entry)
@@ -523,3 +523,7 @@ def _leaf(key: str) -> str:
 def _literal(name: str) -> str:
     """``name`` as a glob that matches only itself."""
     return "".join({"[": "[[]", "*": "[*]", "?": "[?]"}.get(c, c) for c in name)
+
+
+# This inherited implementation directory is not the registry's discovery roots.
+spec(SkillManager, "source_dir", hidden=True)

@@ -56,6 +56,11 @@ class FileWrite:
     ``__str__`` — the agent already knows the text it asked for.
     """
 
+    path: str
+    message: str
+    diff: str
+    new_text: str
+
     def __init__(self, path: str, message: str, diff: str = "", new_text: str = ""):
         self.path = path
         self.message = message

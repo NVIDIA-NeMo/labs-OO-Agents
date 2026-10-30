@@ -117,6 +117,26 @@ def is_hidden_method(func: Any) -> bool:
     return False
 
 
+def explicit_field_visibility(obj: Any, name: str) -> bool | None:
+    """The explicit ``spec(..., name, hidden=...)`` value in force for *obj*, or None.
+
+    Same resolution as :func:`is_hidden_field`'s overrides: an instance's own
+    declaration first, then the class MRO (leaf to base), most-derived wins.
+    """
+    from nooa.agentdoc._metadata import get_field_metadata
+
+    if not isinstance(obj, type):
+        own = get_field_metadata(obj, name).get("hidden")
+        if own is not None:
+            return own
+        obj = type(obj)
+    for klass in obj.__mro__:
+        declared = get_field_metadata(klass, name).get("hidden")
+        if declared is not None:
+            return declared
+    return None
+
+
 def is_hidden_field(cls: Any, name: str) -> bool:
     """Check if a field is hidden via Annotated[T, hidden] or spec() imperative annotation.
 

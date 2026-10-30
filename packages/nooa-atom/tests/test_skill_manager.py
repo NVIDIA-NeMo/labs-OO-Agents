@@ -31,10 +31,8 @@ _PROXY_VARIABLES = (
     "all_proxy",
 )
 BLOCK_TAIL = (
-    "self.skills.search('query') (sync); self.skills.doc('name') (sync) for one skill's full "
-    "docs (an unconnected MCP skill returns its connection status); "
-    "await self.skills.activate(['name']) (async); "
-    "self.skills.read('name') (sync) for text skills"
+    "self.skills.search('query') (sync); print(self.skills.doc('name')) for full instructions/APIs "
+    "(unconnected MCP: connection status); await self.skills.activate(['name']) (async)"
 )
 
 
@@ -112,6 +110,32 @@ async def test_self_skills_is_the_skill_manager(agent):
     assert not hasattr(agent, "mcp")
 
 
+@pytest.mark.parametrize("concise", [False, True])
+async def test_manager_hides_internal_read_and_source_dir_only(agent, concise, tmp_path):
+    from nooa.agentdoc import doc
+
+    for target in (SkillManager, agent.skills):
+        rendered = doc(target, concise=concise)
+        assert "source_dir" not in rendered
+        assert "def read(" not in rendered
+        assert "def doc(self, name: str) -> str" in rendered
+    assert agent.skills.source_dir is not None  # functionality stays available to host code
+    assert agent.skills.read("review") in agent.skills.doc("review")
+    skill = agent.skills.registry["cmd.review"]
+    assert skill.source_dir == tmp_path / "skills" / "review"
+    assert "source_dir" in doc(skill) and "def read_file(" in doc(skill)
+    (skill.source_dir / "guide.txt").write_text("local guide")
+    assert skill.read_file("guide.txt") == "local guide"
+    extra = tmp_path / "extra_skills"
+    (extra / "second").mkdir(parents=True)
+    (extra / "second" / "SKILL.md").write_text(
+        "---\nname: second\ndescription: Second skill\n---\nSecond full instructions.\n"
+    )
+    agent.skills.discover_skills_dirs([extra])
+    assert "Second full instructions." in agent.skills.doc("second")
+    assert "Read the diff, then list defects" in agent.skills.doc("review")
+
+
 async def test_the_block_names_active_skills_and_counts_the_rest(agent):
     assert agent.skills.status() == (
         "Active: libwriting, methodwriting, repo, shell, todo\n"
@@ -167,6 +191,8 @@ async def test_a_name_that_matches_nothing_is_reported(agent):
 async def test_activating_a_text_skill_sends_its_doc_to_the_system_messages_channel(agent):
     result = await agent.skills.activate(["review"])
     assert "system_messages" in result
+    assert "print(self.skills.doc('review'))" in result
+    assert "self.skills.read" not in result
     channel = agent.queue_manager.get_channel("system_messages")
     [item] = channel.drain()
     assert item == agent.skills.doc("review")
@@ -184,6 +210,8 @@ async def test_doc_describes_each_kind(agent, installed):
     assert "def greet(self, name: str) -> str" in agent.skills.doc("greeter")
     review = agent.skills.doc("review")
     assert review.startswith("review (text skill): Review a change for defects")
+    assert "Instructions:\nRead the diff, then list defects by severity." in review
+    assert "self.review.read_file(path)" in review
     probe = agent.skills.doc("probe")
     assert "probe (mcp, available)" in probe and "not connected" in probe
     with pytest.raises(KeyError, match="nope"):

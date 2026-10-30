@@ -1004,6 +1004,47 @@ class OpenInferenceHooks:
         span.set_attribute(SpanAttributes.INPUT_MIME_TYPE, OpenInferenceMimeTypeValues.TEXT.value)
         span.end(end_time=time.time_ns())
 
+    def on_llm_call(
+        self,
+        agent: Any,
+        method_name: str,
+        generation_id: str,
+        start_time_ns: int,
+        end_time_ns: int,
+        response: Any = None,
+        exception_type: str | None = None,
+        **kwargs: Any,
+    ) -> None:
+        """Record one LLM round-trip as an ``llm_call`` span under its generation.
+
+        Metadata only (no prompt or completion text), so it is cheap and safe to
+        ship from every run. The provider-level ``litellm`` span, when the
+        OpenInference instrumentor is active, stays the LLM-kind span with the
+        messages; this one is CHAIN so OpenInference backends do not count the call
+        twice. The span is not made current: the provider span keeps its parent.
+        """
+        parent_span = _get_active_spans().get(generation_id) if generation_id else None
+        parent_context = trace.set_span_in_context(parent_span) if parent_span else None
+        span = self.tracer.start_span("llm_call", context=parent_context, start_time=start_time_ns)
+        attrs = _llm_call_attributes(
+            agent=agent,
+            method_name=method_name,
+            generation_id=generation_id,
+            response=response,
+            exception_type=exception_type,
+            latency_ms=max(0, end_time_ns - start_time_ns) / 1e6,
+            parent_attributes=getattr(parent_span, "attributes", None) or {},
+            **kwargs,
+        )
+        for key, value in attrs.items():
+            with contextlib.suppress(Exception):
+                span.set_attribute(key, value)
+        if exception_type:
+            span.set_status(Status(StatusCode.ERROR, exception_type))
+        else:
+            span.set_status(Status(StatusCode.OK))
+        span.end(end_time=end_time_ns)
+
     def _find_current_call_id(self) -> str | None:
         """Find the current agent call_id from active spans."""
         active = _get_active_spans()
@@ -1146,3 +1187,106 @@ class OpenInferenceHooks:
             span.set_attribute(ToolCallAttributes.TOOL_CALL_ID, tool_call_id)
             span.set_attribute(ToolCallAttributes.TOOL_CALL_FUNCTION_NAME, function_name)
             span.set_attribute(ToolCallAttributes.TOOL_CALL_FUNCTION_ARGUMENTS_JSON, arguments_json)
+
+
+# Reasoning levels that mean "no reasoning requested".
+_REASONING_OFF_LEVELS = frozenset({"off", "none", "disabled", "false"})
+# Bound on per-span list attributes (tool-call names/ids) to keep spans small.
+_LLM_CALL_MAX_TOOL_CALLS = 32
+
+
+def _llm_call_attributes(
+    *,
+    agent: Any,
+    method_name: str,
+    generation_id: str,
+    response: Any,
+    exception_type: str | None,
+    latency_ms: float,
+    parent_attributes: Any,
+    turn_number: int | None = None,
+    strategy: str | None = None,
+    llm_client: Any = None,
+    **_: Any,
+) -> dict[str, Any]:
+    """Attributes of an ``llm_call`` span: OpenInference/GenAI names, no message text."""
+    attrs: dict[str, Any] = {
+        SpanAttributes.OPENINFERENCE_SPAN_KIND: SpanKind.CHAIN,
+        "agent.name": agent_trace_name(agent),
+        "agent.method": method_name,
+        "gen_ai.operation.name": "chat",
+        "nooa.llm.latency_ms": round(latency_ms, 3),
+        "nooa.llm.success": exception_type is None,
+    }
+    if generation_id:
+        attrs["generation.id"] = generation_id
+    call_id = parent_attributes.get("agent.call_id") if parent_attributes else None
+    if call_id:
+        attrs["agent.call_id"] = call_id
+    if isinstance(turn_number, int) and turn_number > 0:
+        attrs["nooa.llm.turn_index"] = turn_number
+    if strategy:
+        attrs["generation.strategy"] = strategy
+
+    model = getattr(llm_client, "model", None) or getattr(response, "model_name", None)
+    if model:
+        attrs[SpanAttributes.LLM_MODEL_NAME] = str(model)
+        attrs["gen_ai.request.model"] = str(model)
+    raw_model = getattr(getattr(response, "raw_response", None), "model", None)
+    if isinstance(raw_model, str) and raw_model:
+        attrs["gen_ai.response.model"] = raw_model
+
+    level = getattr(llm_client, "reasoning_level", None)
+    attrs["nooa.llm.reasoning.level"] = str(level) if level is not None else "default"
+    if exception_type:
+        attrs["error.type"] = exception_type
+        if level is not None:
+            attrs["nooa.llm.reasoning.enabled"] = str(level).lower() not in _REASONING_OFF_LEVELS
+        return attrs
+
+    finish_reason = getattr(response, "finish_reason", None)
+    if finish_reason:
+        attrs["nooa.llm.finish_reason"] = str(finish_reason)
+        attrs["gen_ai.response.finish_reasons"] = [str(finish_reason)]
+
+    usage = getattr(response, "usage", None)
+    reasoning_tokens = 0
+    attrs["nooa.llm.usage_reported"] = usage is not None
+    if usage is not None:
+        reasoning_tokens = int(getattr(usage, "reasoning_tokens", 0) or 0)
+        token_attrs = {
+            SpanAttributes.LLM_TOKEN_COUNT_PROMPT: usage.input_tokens,
+            SpanAttributes.LLM_TOKEN_COUNT_COMPLETION: usage.output_tokens,
+            SpanAttributes.LLM_TOKEN_COUNT_TOTAL: usage.total_tokens,
+            "llm.token_count.prompt_details.cache_read": usage.cached_input_tokens,
+            "llm.token_count.prompt_details.cache_write": usage.cache_write_input_tokens,
+            "llm.token_count.completion_details.reasoning": reasoning_tokens,
+            "gen_ai.usage.input_tokens": usage.input_tokens,
+            "gen_ai.usage.output_tokens": usage.output_tokens,
+        }
+        for key, value in token_attrs.items():
+            attrs[key] = int(value or 0)
+        if usage.cost_usd:
+            attrs["llm.cost.total"] = float(usage.cost_usd)
+
+    reasoning = getattr(response, "reasoning", None)
+    attrs["nooa.llm.reasoning.chars"] = len(reasoning) if isinstance(reasoning, str) else 0
+    produced = bool(reasoning) or reasoning_tokens > 0
+    attrs["nooa.llm.reasoning.present"] = produced
+    if level is not None:
+        attrs["nooa.llm.reasoning.enabled"] = (
+            str(level).lower() not in _REASONING_OFF_LEVELS or produced
+        )
+    else:
+        # Provider default: report what the response shows.
+        attrs["nooa.llm.reasoning.enabled"] = produced
+
+    content = getattr(response, "content", None)
+    attrs["nooa.llm.output.chars"] = len(content) if isinstance(content, str) else 0
+    tool_calls = list(getattr(response, "tool_calls", None) or ())
+    attrs["nooa.llm.tool_calls.count"] = len(tool_calls)
+    if tool_calls:
+        shown = tool_calls[:_LLM_CALL_MAX_TOOL_CALLS]
+        attrs["nooa.llm.tool_calls.names"] = [str(getattr(c, "name", "")) for c in shown]
+        attrs["nooa.llm.tool_calls.ids"] = [str(getattr(c, "id", "") or "") for c in shown]
+    return attrs

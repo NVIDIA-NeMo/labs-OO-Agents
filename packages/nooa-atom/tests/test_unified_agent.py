@@ -92,6 +92,37 @@ async def test_one_shot_subagent_returns_its_task_result_and_notes_are_job_items
     assert "CHILD-PROMPT: fix it" in _prompt(models, "fix")
     assert "One-shot task" in _prompt(models, "fix")
     assert len(models.llms[None].calls) == 2  # the note's turn ran
+    for name in (None, "fix"):
+        call = models.llms[name].calls[0]
+        rendered = "\n".join(str(m.get("content", "")) for m in call.messages)
+        self_doc = rendered.split("<self>", 1)[1].split("</self>", 1)[0]
+        assert "write ``self.v.key = value``" in self_doc
+        assert "read ``self.v.key``" in self_doc
+        assert "delete ``del self.v.key``" in self_doc
+        assert "Store serializable values" in self_doc
+        assert "get(self, id_or_title: str) -> Todo" in rendered
+        assert "Return API documentation as str; display with print(doc(obj))" in rendered
+        assert "Print (return None): max_length=items/container" in rendered
+        assert "def read(self, name: str)" not in rendered
+        [tool] = call.tools
+        assert tool.name == "python_cell"
+        assert tool.description.count("Blocked imports:") == 1
+        assert tool.description.count("Blocked calls by module") == 1
+        assert "`subprocess`" in tool.description and "literal dunder names" in tool.description
+        assert "Run commands with `await sh.run(cmd)` on a `Shell()`" in tool.description
+        assert "self.shell" not in tool.description and "self.delegate" not in tool.description
+        assert "Blocked imports:" not in rendered  # guidance is tool-local, not another block
+
+    # Atom retains a hidden legacy shell for internal file/repo tools; never recommend it.
+    from nooa.runtime.code_validator import UnifiedCodeValidator, ValidationContext, ValidationError
+    from nooa.runtime.restrictions import DEFAULT_BLOCKED_MODULES
+
+    with pytest.raises(ValidationError) as error:
+        UnifiedCodeValidator().validate(
+            "import subprocess",
+            ValidationContext(agent=root._agent, blocked_modules=DEFAULT_BLOCKED_MODULES),
+        )
+    assert "self.shell" not in str(error.value)
     assert _delegates_empty(root)
     [child] = registry.children(root.id)
     assert (child.name, child.turn_method, child.retained, child.agent) == (
@@ -384,7 +415,11 @@ async def test_interactive_done_may_leave_background_work(registry, options, mod
     root = await registry.create(options)
     assert await asyncio.wait_for(root.prompt("go"), TIMEOUT) == Done(explanation="left running")
     assert [j.name for j in root._agent.jobs.running()] == ["nap"]
-    assert root._agent._work_records == [{"id": 1, "name": "nap", "kind": "await"}]
+    [record] = root._agent._work_records
+    tag = record.pop("tag")
+    assert record == {"id": 1, "name": "nap", "kind": "await", "what": "coroutine"}
+    launched = root._agent.event_manager[tag]  # the cell that launched it, code and all
+    assert "name='nap'" in launched.arguments["code"]
     status = root._agent._status()
     assert "Running:" in status and "nap · " in status
 
@@ -431,7 +466,7 @@ async def test_first_call_offers_one_work_vocabulary(
     await asyncio.wait_for(root.prompt("hello"), TIMEOUT)
     call = models.llms[None].calls[0]
     tools = "\n".join(str(getattr(tool, "description", tool)) for tool in call.tools or ())
-    assert "Run commands and child agents as `self.jobs` work" in tools
+    assert "Run commands with `await sh.run(cmd)` on a `Shell()`" in tools
     messages = "\n".join(str(m.get("content", "")) for m in call.messages)
     rendered = messages + "\n" + tools  # what the model reads: the messages and the tool
     prefix = str(call.messages[0].get("content", ""))
@@ -455,13 +490,20 @@ async def test_first_call_offers_one_work_vocabulary(
         'notification["jobs"]',
         "<status ",
         ROLE_INSTRUCTIONS[MODES[method]],
-        "# Work: everything that runs is a job on self.jobs.",
+        "# Work: self.jobs is for background work.",
         "documented in the python_cell_tools block",
         "class SkillManager",
         "def status(self) -> str:",
         "async def message(self, item",  # Job.message
-        "Names must be valid Python identifiers;",
-        "<python_cell_state>\nCell locals: notification (dict)\n</python_cell_state>",
+        "Names: letters, digits, ``_`` or ``-``;",
+        "class Throttle:",
+        "progress=Throttle(seconds=5)",
+        "<python_cell_state>\nRetained Python names: none; omitted: 0\n</python_cell_state>",
+        "<python_cell_lifetime>",
+        "Other generated methods are call-local.",
+        "registered queue producers",
+        'r = await sh.run("cd src && make", timeout=600)',
+        "Import anything else you need",
     ):
         assert wanted in rendered, wanted
     for legacy in (
@@ -485,7 +527,8 @@ async def test_first_call_offers_one_work_vocabulary(
         "nobody reads ``self.message()``",
         "ActivityShellTools",
         "DepthLimitError",
-        "producers",
+        "def producers(",
+        "class Producer",
         "<queues ",
         "def running(",
         "def records(",
@@ -498,6 +541,9 @@ async def test_first_call_offers_one_work_vocabulary(
         "async def send(self, command",  # adapters' send(): the manager's protocol
         "async def send(self, task",
         "async def message(self, text",  # Subagent's: the model uses Job.message
+        "await self.jobs.launch(sh.run",  # commands are awaited directly
+        "rename_session",  # the host's title request names it
+        'on=["mesh"]',
     ):
         assert legacy not in rendered, legacy
     for other, text in ROLE_INSTRUCTIONS.items():
@@ -509,7 +555,7 @@ async def test_first_call_offers_one_work_vocabulary(
     start = messages.index("<system_prompt")
     system_prompt = messages[start : messages.index("</system_prompt>", start)]
     assert "Shell().run(" not in system_prompt and "python_cell_tools block" in system_prompt
-    assert messages.count("# Work: everything that runs is a job on self.jobs.") == 1
+    assert messages.count("# Work: self.jobs is for background work.") == 1
     question = rendered[rendered.index("class Question") :]
     question = question[: question.index("\n@dataclass") if "\n@dataclass" in question else 400]
     assert "id:" not in question
@@ -596,19 +642,92 @@ async def test_after_restore_reports_lost_jobs_once(tmp_path):
     try:
         job = agent.jobs.launch(asyncio.sleep(30), name="nap")
         records = list(agent._work_records)
-        assert records == [{"id": 1, "name": "nap", "kind": "await"}]
+        assert records == [{"id": 1, "name": "nap", "kind": "await", "what": "coroutine"}]
         await job.cancel()
         assert agent._work_records == []
         agent._work_records = records  # as a snapshot taken while it ran restores it
         agent.after_restore()
         [event] = agent._jobs_in.snapshot()
         assert (event.name, event.kind) == ("nap", "failed")
-        assert event.value.startswith("lost:")
+        assert event.value == (  # launched outside a cell: no cell pointer
+            "lost: the session restarted while it ran (coroutine). Relaunch if still needed."
+        )
         agent.after_restore()
         assert agent._jobs_in.qsize() == 1
         assert "status" in agent.context and "queues" not in agent.context
     finally:
         await agent.aclose()
+
+
+async def test_lost_notice_names_the_launching_cell_and_shell_command(tmp_path):
+    from nooa.strategies import codeact
+
+    agent = await _agent(tmp_path)
+    try:
+        token = codeact._current_cell.set((agent, "23221"))  # as inside cell 23221
+        try:
+            job = agent.jobs.launch(Shell(tmp_path).run("sleep 5 # " + "x" * 300), name="tests")
+            other = codeact._current_cell.set((object(), "7"))  # another agent's cell
+            try:
+                nap = agent.jobs.launch(asyncio.sleep(30), name="nap")
+            finally:
+                codeact._current_cell.reset(other)
+        finally:
+            codeact._current_cell.reset(token)
+        for _ in range(100):
+            if "cwd" in job.summary:
+                break
+            await asyncio.sleep(0.02)
+        records = list(agent._work_records)
+        assert [r.get("tag") for r in records] == ["23221", None]
+        assert records[0]["what"] == "shell command" and "cwd" in records[0]["summary"]
+        await job.cancel()
+        await nap.cancel()
+        agent._work_records = records
+        agent.after_restore()
+        tests, nap_event = agent._jobs_in.snapshot()
+        assert tests.value.startswith(
+            "lost: the session restarted while it ran (shell command launched in cell 23221: "
+            'self.events["23221"]; $ sleep 5 # xxx'
+        )
+        assert f"… in {tmp_path.resolve()}). Relaunch if still needed." in tests.value
+        assert len(tests.value) < 400
+        assert nap_event.value == (
+            "lost: the session restarted while it ran (coroutine). Relaunch if still needed."
+        )
+    finally:
+        await agent.aclose()
+
+
+def test_lost_notice_for_subagent_todo_and_bounds():
+    from nooa_atom.agent.agent import _lost_notice, _work_label
+    from nooa_atom.agent.work_subagent import Subagent
+    from nooa_atom.tools.todo_list import Todo
+
+    work = Subagent("fix").run(Todo(id="4861f9a3", title="t"))
+    try:
+        assert _work_label(work, "await") == {"what": "subagent", "todo": "4861f9a3"}
+    finally:
+        work.close()
+    text = Subagent("fix").run("plain text")
+    try:
+        assert _work_label(text, "await") == {"what": "subagent"}
+    finally:
+        text.close()
+    assert _work_label(Shell(), "resource") == {"what": "shell resource"}
+    notice = _lost_notice({"name": "fix", "kind": "await", "what": "subagent", "todo": "4861f9a3"})
+    assert "(subagent; todo 4861f9a3)" in notice
+    # Legacy records (id/name/kind only) and junk stay short; odd tags are dropped.
+    assert "(iterator)" in _lost_notice({"id": 1, "name": "x", "kind": "iter"})
+    huge = _lost_notice(
+        {"what": "w" * 500, "tag": "1); drop", "todo": "t" * 500, "summary": "s" * 9999}
+    )
+    assert "self.events" not in huge and len(huge) < 320
+    shell = _lost_notice({"what": "shell command", "summary": "$ pytest -q · cwd /repo"})
+    assert shell == (
+        "lost: the session restarted while it ran (shell command; $ pytest -q in /repo). "
+        "Relaunch if still needed."
+    )
 
 
 def test_public_atom_agent_hides_the_base_surface():

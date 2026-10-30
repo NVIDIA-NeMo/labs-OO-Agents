@@ -69,9 +69,83 @@ async def test_long_output_bounded_with_retained_file(manager):
     assert not Path(r.stdout_path).exists()
 
 
-async def test_one_shot_without_manager_keeps_no_file():
-    r = await Shell().run("seq 1 100000")
-    assert r.stdout_path is None and "full output not kept" in r.stdout
+async def test_direct_run_keeps_long_output_until_aclose(tmp_path):
+    sh = Shell(tmp_path)
+    out = "".join(f"line {i:05d} " + "x" * 18 + "\n" for i in range(1200))  # ~36 KB
+    cmd = f"cat {tmp_path / 'o'}; cat {tmp_path / 'o'} >&2"
+    (tmp_path / "o").write_text(out)
+    r = await sh.run(cmd)
+    for text, path in ((r.stdout, r.stdout_path), (r.stderr, r.stderr_path)):
+        assert len(text) < 11_000 and f"bytes omitted; full output: {path}]" in text
+        assert text.startswith("line 00000 ") and text.endswith("line 01199 " + "x" * 18 + "\n")
+        assert path and Path(path).read_text() == out
+    short = await sh.run("echo hi")
+    assert (short.stdout, short.stdout_path, short.stderr_path) == ("hi\n", None, None)
+    assert sorted(p.name for p in Path(r.stdout_path).parent.iterdir()) == [
+        "cmd-1.stderr",
+        "cmd-1.stdout",
+    ]  # short output keeps no file
+    await sh.aclose()
+    assert not Path(r.stdout_path).exists() and not Path(r.stderr_path).exists()
+
+
+async def test_direct_run_output_limit_marker():
+    sh = Shell(max_output=1000)
+    r = await sh.run("head -c 30000 /dev/zero | tr '\\0' a")
+    assert r.stdout_path and Path(r.stdout_path).stat().st_size == 1000
+    assert f"over the 1,000-byte output limit: {r.stdout_path} holds only the first" in r.stdout
+    await sh.aclose()
+    assert not Path(r.stdout_path).exists()
+
+
+async def test_dropped_unowned_shell_keeps_files_while_the_result_lives():
+    import gc
+
+    r = await Shell().run("seq 1 100000")  # the temporary Shell is dropped
+    gc.collect()
+    path = Path(r.stdout_path)
+    assert path.read_text().count("\n") == 100000
+    del r
+    gc.collect()
+    assert not path.exists()
+
+
+async def test_dropped_owned_shell_keeps_files_until_the_owner_closes():
+    import gc
+
+    from nooa_atom.agent.work_shell import ShellOwner, shell_owner
+
+    owner = ShellOwner()
+    token = shell_owner.set(owner)
+    try:
+        r = await Shell().run("seq 1 100000")  # a cell's one-liner
+        pid = int((await Shell().run("echo $$")).stdout)
+    finally:
+        shell_owner.reset(token)
+    gc.collect()
+    await until_dead(pid)  # the dropped Shells ended their bash
+    path = Path(r.stdout_path)
+    del r
+    gc.collect()  # neither the Shell nor the result is needed: the owner keeps it
+    assert path.read_text().count("\n") == 100000
+    await owner.aclose()
+    assert not path.exists()
+
+
+async def test_owned_shell_aclose_removes_its_files():
+    from nooa_atom.agent.work_shell import ShellOwner, shell_owner
+
+    owner = ShellOwner()
+    token = shell_owner.set(owner)
+    try:
+        sh = Shell()
+        r = await sh.run("seq 1 100000")
+    finally:
+        shell_owner.reset(token)
+    assert Path(r.stdout_path).exists()
+    await sh.aclose()
+    assert not Path(r.stdout_path).exists()
+    await owner.aclose()
 
 
 async def test_one_shot_cancel_kills_process_group(manager, tmp_path):
@@ -609,8 +683,10 @@ def test_timeout_is_a_run_parameter_not_shell_configuration():
     # The docs keep a raw Shell (sh) apart from its Job: a Job has no run().
     docs = (Shell.__doc__ or "") + (inspect.getmodule(Shell).__doc__ or "")
     assert "sh = self.jobs.launch(" not in docs and "sh = manager.launch(" not in docs
-    assert 'job = self.jobs.launch(sh, name="sh")' in docs
-    assert "sh.run(cmd, timeout=60)" in docs
+    assert "sh = Shell()" in docs
+    assert 'r = await sh.run("pytest -q", timeout=600)' in docs  # direct, with the deadline
+    run_docs = inspect.getdoc(Shell.run)
+    assert "timeout" in run_docs and "deadline" in run_docs
 
 
 async def test_the_documented_launched_shell_and_timed_run_variant(manager, tmp_path):
