@@ -647,10 +647,11 @@ class AtomAgent(AtomAgentBase):
             raise ValueError(f"unknown policy {policy!r}")
         self._turn_policy = policy
         if policy == "child":
-            # Nothing arrives from the parent while this turn runs: it waits for the turn.
+            # A parent's answer to NeedInput comes as a new turn; only notes
+            # (``Subagent.message()``) arrive mid-turn.
             self.user_messages.timeout_hint = (
-                "Your parent sends nothing while this turn runs: it waits for the turn to end. "
-                + _CHILD_ASKS
+                "An answer from your parent comes only after this turn ends (as a new turn); "
+                "a note it sends with message() can still arrive now. " + _CHILD_ASKS
             )
         text = instructions.strip() if isinstance(instructions, str) else ""
         self._role_instructions = text or None

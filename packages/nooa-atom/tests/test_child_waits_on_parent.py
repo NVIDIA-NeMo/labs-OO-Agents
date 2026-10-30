@@ -100,9 +100,8 @@ async def test_a_kept_child_waiting_on_its_parent_is_told_to_ask(
     assert "Waiting on 'user_messages', but your parent is not a job." in rejected
     assert HINT in rejected
     timeout = _rendered(models, "review", 2)
-    assert (
-        "Your parent sends nothing while this turn runs: it waits for the turn to end." in timeout
-    )
+    assert "An answer from your parent comes only after this turn ends (as a new turn)" in timeout
+    assert "a note it sends with message() can still arrive now" in timeout
     assert HINT in timeout
 
     merged: dict = {}
