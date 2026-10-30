@@ -737,9 +737,20 @@ class MCPServers:
         and its definition when this workspace view lacks one (an in-memory
         ``register``). No connection is opened and none is closed:
         ``disconnect`` and ``aclose`` only detach them from this agent.
+        Nothing is shared when the approval scopes (workspaces) differ, and a
+        server is not shared when this view defines it differently.
         """
         warnings = []
+        if parent._connected and self._approval_scope() != parent._approval_scope():
+            return [
+                f"MCP servers {', '.join(sorted(parent._connected))} were not shared: "
+                "the parent approved them for another workspace"
+            ]
         for name, tool in parent._connected.items():
+            mismatch = self._definition_mismatch(parent, name)
+            if mismatch:
+                warnings.append(f"MCP server {name!r} was not shared: {mismatch}")
+                continue
             try:
                 self._attach(name, tool)
             except ValueError as exc:
@@ -766,6 +777,20 @@ class MCPServers:
             self._detach(name)
         await asyncio.gather(*tasks, return_exceptions=True)
         return matched
+
+    def _definition_mismatch(self, parent: MCPServers, name: str) -> str | None:
+        """Why this view's definition of ``name`` differs from ``parent``'s, else None."""
+        try:
+            own = self.approval_request(name)
+        except (KeyError, ValueError):
+            return None  # not defined here: the parent's definition is copied
+        try:
+            theirs = parent.approval_request(name)
+        except (KeyError, ValueError):
+            return "it is defined here but not in the parent"
+        if own != theirs:  # fingerprint, transport, target and bindings
+            return "it is defined differently here"
+        return None
 
     def activate(self, patterns: list[str]) -> list[str]:
         """Make connected servers matching ``patterns`` active; return them."""
