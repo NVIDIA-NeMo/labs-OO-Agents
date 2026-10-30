@@ -158,6 +158,54 @@ async def test_either_steer_method_is_accepted_from_any_client(make_adapter, wor
     }
 
 
+@pytest.mark.parametrize(
+    "client_info,method,answered_before_the_turn_ends",
+    [(POOL_1, "poolside/session_steer", True), (POOL_2, "pool/session_steer", False)],
+)
+async def test_only_pool_2_waits_for_the_steers_turn_to_end(
+    make_adapter, workspace, client, client_info, method, answered_before_the_turn_ends
+):
+    """Pool 2 drops a steer answered before it sees the input event; Pool 1 needs the early answer."""
+    started, block = fresh_events()
+    models = ScriptedModels(
+        {None: [cell(BLOCKING_CELL), reply("First."), cell(BLOCKING_CELL), reply("Second.")]}
+    )
+    adapter = await make_adapter(models, client_info=client_info)
+    session_id = await _new(adapter, workspace)
+    prompt = asyncio.create_task(adapter.prompt(session_id, [text_block("first")]))
+    await asyncio.wait_for(started.wait(), TIMEOUT)
+    steer = await _steer(adapter, method, session_id, "queued second", "steer-7")
+    # The first cell already waits on the old events; the steer's turn gets these.
+    second_started, second_block = fresh_events()
+    block.set()
+    await asyncio.wait_for(second_started.wait(), TIMEOUT)
+    await adapter._bridges[session_id].flush()
+    assert any(
+        meta.get(f"{method.split('/')[0]}/clientInputId") == "steer-7"
+        for meta in _input_events(client, session_id)
+    )
+    if answered_before_the_turn_ends:
+        assert await asyncio.wait_for(steer, TIMEOUT) == {"inputId": "steer-7"}
+    else:
+        await asyncio.sleep(0.05)
+        assert not steer.done()
+    second_block.set()
+    assert await asyncio.wait_for(steer, TIMEOUT) == {"inputId": "steer-7"}
+    assert (await asyncio.wait_for(prompt, TIMEOUT)).stop_reason == "end_turn"
+
+
+async def test_a_pool_2_steer_no_turn_took_is_answered_on_stop(make_adapter, workspace, client):
+    started, _block = fresh_events()
+    adapter = await make_adapter(ScriptedModels({None: [cell(BLOCKING_CELL)]}), client_info=POOL_2)
+    session_id = await _new(adapter, workspace)
+    prompt = asyncio.create_task(adapter.prompt(session_id, [text_block("first")]))
+    await asyncio.wait_for(started.wait(), TIMEOUT)
+    steer = await _steer(adapter, "pool/session_steer", session_id, "never mind", "steer-1")
+    await adapter.cancel(session_id)
+    assert await asyncio.wait_for(steer, TIMEOUT) == {"inputId": "steer-1"}
+    assert (await asyncio.wait_for(prompt, TIMEOUT)).stop_reason == "cancelled"
+
+
 async def test_pool_2_steer_checks_its_params(make_adapter, workspace):
     adapter = await make_adapter(ScriptedModels(), client_info=POOL_2)
     session_id = await _new(adapter, workspace)

@@ -6,6 +6,12 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- `nooa-atom`: a Pool 2 steer (`_pool/session_steer`) is answered when the
+  turn that took it ends (or when it is withdrawn), not as soon as its
+  `pool/clientInputId` input event is sent. Pool 2 handles the answer apart
+  from the event and, when the answer came first, dropped the steer: the agent
+  got the message but Pool never showed it in the conversation. Pool 1's
+  `_poolside/session_steer` is answered as before.
 - `nooa-atom`: AtomAgent drops the core `<events_api>` guidance block (added on
   main for agents that expose `self.events`). `self.events` stays exposed, and
   Atom's `context_usage` block already names `self.events.collapse(...)` and

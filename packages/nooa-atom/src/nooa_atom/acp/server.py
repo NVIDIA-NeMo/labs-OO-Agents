@@ -614,6 +614,12 @@ class AtomACPAgent:
         sends when a turn takes the message. The answer follows that event,
         as Pool's own agent answers; it also goes out when the message is
         withdrawn or its turn ends without it.
+
+        Pool 2 (``_pool/session_steer``) waits longer: its call returns when
+        the session is done with the message, so the answer waits for the
+        outcome of the turn that took it. Pool 2 handles the answer apart from
+        the input event, and drops a steer it was answered for before it saw
+        the event, so the message never shows in its conversation.
         """
         session_id, input_id = params.get("sessionId"), params.get("inputId")
         if not isinstance(session_id, str) or not isinstance(input_id, str):
@@ -655,6 +661,9 @@ class AtomACPAgent:
             # Request cancellation does not withdraw its admitted input; it may
             # be consumed later and still needs its original client-ID event.
             bridge.release_client_input_waiter(receipt.item_id, keep_pending=request_cancelled)
+        if dialect is POOL_DIALECT:
+            with suppress(Exception):
+                await session.outcome(receipt.item_id)
         return {"inputId": input_id}
 
     def _revoke_inject(self, params: dict[str, Any]) -> dict[str, Any]:
