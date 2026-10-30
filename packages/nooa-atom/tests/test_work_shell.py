@@ -495,7 +495,8 @@ async def test_coroutine_job_summary_uses_cwd_when_command_starts(manager, tmp_p
 
             second = manager.launch(queued_run(), name="probe")
             await asyncio.wait_for(queued.wait(), 5)
-            assert second.summary == "$ pwd"  # no guessed directory while queued
+            # No guessed directory while queued; it names what it waits behind.
+            assert second.summary == "$ pwd · queued behind `cd sub` (job change_directory)"
             release[0].set()
             await first
             await asyncio.wait_for(started[1].wait(), 5)
@@ -1118,3 +1119,44 @@ async def test_a_python_script_runs_on_stdin_without_nested_quotes(tmp_path):
     assert r.stdout == 'double single triple\nends with "\n'
     r = await Shell(tmp_path).run("bash -s", stdin='echo "it\'s $((1 + 2))"\n')
     assert (r.returncode, r.stdout) == (0, "it's 3\n")
+
+
+async def test_a_command_queued_behind_a_job_times_out_naming_it(manager, tmp_path):
+    from nooa.runtime.harness_metrics import harness_metrics_session
+
+    with harness_metrics_session() as metrics:
+        sh = Shell(tmp_path)
+        log = manager.launch(sh.run("sleep 30; echo never", timeout=60), name="log")
+        async with asyncio.timeout(10):
+            while "running" not in sh.summary():
+                await asyncio.sleep(0.02)
+        poll = asyncio.ensure_future(sh.run("echo polled", timeout=0.5))
+        await asyncio.sleep(0.1)
+        assert "1 queued behind it" in sh.summary()
+        result = await asyncio.wait_for(poll, 10)
+        assert (result.returncode, result.timed_out, result.stdout) == (124, True, "")
+        assert (
+            "did not run" in result.stderr and "`sleep 30; echo never` (job log)" in result.stderr
+        )
+        assert "use another Shell()" in result.stderr
+        attrs = metrics.to_span_attributes()
+        assert attrs["harness.shell_queued_behind_running.count"] == 1
+        await log.cancel()
+        after = await asyncio.wait_for(sh.run("echo next", timeout=10), 20)
+        assert after.stdout == "next\n"  # the queued command never ran; the Shell goes on
+        await sh.aclose()
+
+
+async def test_a_long_wait_behind_a_direct_run_is_noted_on_the_result(tmp_path, monkeypatch):
+    import nooa_atom.agent.work_shell as work_shell
+
+    monkeypatch.setattr(work_shell, "_QUEUE_NOTE_SECONDS", 0.2)
+    async with Shell(tmp_path) as sh:
+        first, second = await asyncio.wait_for(
+            asyncio.gather(sh.run("sleep 0.6; echo first"), sh.run("echo second", timeout=0.3)),
+            20,
+        )
+        # Behind a direct run the deadline still counts from its own start: it ran.
+        assert (first.stdout, second.stdout, second.timed_out) == ("first\n", "second\n", False)
+        assert "waited" in second.stderr and "`sleep 0.6; echo first`" in second.stderr
+        assert "(job" not in second.stderr
