@@ -1010,7 +1010,7 @@ class Session:
                 usage=usage,
             )
         )
-        self.info.reply_count += 1  # as the store counts it
+        self.info.reply_count += 1  # as the store counts it, with each agent message
         waiting = self._waiting + consumed
         if kind != "waiting":
             for item_id in waiting:
@@ -1428,6 +1428,10 @@ class Session:
             return
         if isinstance(event, LLMResponse):
             self._count_usage(event)
+        if isinstance(event, AgentMessage):
+            # Each recorded message counts as a reply, as the store seeds it
+            # on load, so live and reloaded counts (and question ids) agree.
+            self.info.reply_count += 1
         if isinstance(event, AgentMessage) and self.info.status == "running":
             self._turn_messages.add(event.content)
             self._replied = True

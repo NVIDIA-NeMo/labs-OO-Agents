@@ -301,7 +301,7 @@ async def test_reflection_failure_rejection_budget_keeps_original_done(tmp_path,
         accepted = await root.prompt("go")
         assert accepted == Done(explanation="original")
         await wait_idle(root)
-        assert root.last_outcome_kind == "done" and root.info.reply_count == 1
+        assert root.last_outcome_kind == "done" and root.info.reply_count == 2
         assert root._agent._handle_namespace.globals["scratch"] == 42
         assert len(llm.calls) == 2
         assert not list(root._agent.events.query(type="Summary"))
@@ -338,7 +338,7 @@ async def test_reflection_timeout_is_owned_and_original_receipt_precedes_it(tmp_
         assert root._agent.turns.running  # maintenance, not another user turn
         await wait_idle(root)
         assert cancelled.is_set()
-        assert root.info.reply_count == 1 and len(llm.calls) == 1
+        assert root.info.reply_count == 2 and len(llm.calls) == 1
         assert root._agent._handle_namespace.globals["scratch"] == 42
     finally:
         await registry.close_all()
@@ -367,7 +367,7 @@ async def test_close_during_reflection_cancels_awaits_without_second_settlement(
     assert await root.prompt("go") == Done(explanation="delivered")
     await asyncio.wait_for(entered.wait(), 2)
     await asyncio.wait_for(registry.close_all(), 5)
-    assert cancelled.is_set() and root.info.reply_count == 1
+    assert cancelled.is_set() and root.info.reply_count == 2
     assert root._agent._handle_namespace is None
 
 
@@ -648,7 +648,7 @@ async def test_rejected_done_is_not_a_reflection_boundary(tmp_path):
         assert len(llm.calls) == 3
         assert llm.calls[0].output_model is None and llm.calls[1].output_model is None
         assert llm.calls[2].output_model.__name__ == "DoneReflectionPlan"
-        assert root.info.reply_count == 1
+        assert root.info.reply_count == 2
         assert "scratch" not in root._agent._handle_namespace.globals
     finally:
         await registry.close_all()
@@ -695,7 +695,7 @@ async def test_every_reflection_effect_requires_frozen_evidence_and_provenance(
         assert await root.prompt("go") == Done(explanation="accepted")
         await wait_idle(root)
         assert backends == ["SQLiteEventBackend"]
-        assert root.info.reply_count == 1 and len(llm.calls) == 1
+        assert root.info.reply_count == 2 and len(llm.calls) == 1
         assert root._agent._handle_namespace.globals["scratch"] == 42
         assert root._agent.context.get("done_reflection_notes") is None
         assert not list(root._agent.events.query(type="Summary"))
@@ -722,7 +722,7 @@ async def test_notes_only_cleanup_only_and_noop_stale_plans(tmp_path, monkeypatc
     try:
         result = await root.prompt("go")
         await wait_idle(root)
-        assert result == Done(explanation="accepted") and root.info.reply_count == 1
+        assert result == Done(explanation="accepted") and root.info.reply_count == 2
         assert root._agent._handle_namespace.globals["scratch"] == 42
         assert root._agent.context.get("done_reflection_notes") is None
         assert not list(root._agent.events.query(type="Summary"))
@@ -752,7 +752,7 @@ async def test_summary_observer_newer_notes_are_not_overwritten(tmp_path, monkey
     try:
         assert await root.prompt("go") == Done(explanation="accepted")
         await wait_idle(root)
-        assert root.info.reply_count == 1 and len(llm.calls) == 1
+        assert root.info.reply_count == 2 and len(llm.calls) == 1
         assert len(observed) == 1
         assert root._agent.context["done_reflection_notes"] == "NEWER NOTES"
         assert "scratch" not in root._agent._handle_namespace.globals

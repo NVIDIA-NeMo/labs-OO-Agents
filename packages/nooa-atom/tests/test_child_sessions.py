@@ -1388,6 +1388,33 @@ async def test_a_question_keeps_its_id_after_a_reload_when_the_child_sent_messag
         await fresh.close_all()
 
 
+async def test_the_live_reply_count_matches_the_count_after_a_reload(
+    atom_options, atom_models, sessions_dir
+):
+    # Two progress messages and one ended turn: three replies, live and reloaded.
+    registry = SessionRegistry(SessionStore(sessions_dir), agent_factory=atom_models)
+    root = await registry.create(atom_options)
+    atom_models.scripts["chatty"] = [
+        cell("self.message('looking around')\nself.message('found two branches')"),
+        work_done("looked"),
+    ]
+    ref = await root._agent.session.delegate("chatty", "look", kept=True, name="chatty")
+    await root._agent.session.wait_child(ref.id)
+    live = registry.sessions[ref.id].info.reply_count
+    root_live = root.info.reply_count
+    await registry.close_all()
+    assert live == 3
+
+    fresh = SessionRegistry(SessionStore(sessions_dir), agent_factory=AtomModels())
+    try:
+        loaded = await fresh.load(root.id)
+        child = await fresh.load(ref.id)
+        assert child.info.reply_count == live
+        assert loaded.info.reply_count == root_live
+    finally:
+        await fresh.close_all()
+
+
 async def test_answered_and_closed_children_leave_no_registry_entries(
     atom_options, atom_models, sessions_dir
 ):
