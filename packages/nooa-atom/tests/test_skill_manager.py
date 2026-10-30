@@ -507,6 +507,23 @@ def test_share_from_keeps_an_attachable_client_skill_with_its_parent(tmp_path):
     assert getattr(bound, "_agent", None) is parent and "mcp.bound" not in child.skills.loaded()
 
 
+def test_share_from_keeps_a_childs_skill_at_the_same_attribute(tmp_path):
+    class Client:
+        """MCP server 'greeter' (a client-provided one)."""
+
+        async def ping(self) -> str:
+            return "pong"
+
+    parent = AtomAgentBase(llm=FakeLLMClient(), cwd=tmp_path)
+    child = AtomAgentBase(llm=FakeLLMClient(), cwd=tmp_path)
+    parent.skills.register("mcp.greeter", Client())
+    own = Greeter()
+    child.skills.register("tools.greeter", own)
+    warnings = child.skills.share_from(parent.skills)
+    assert warnings == ["MCP server 'greeter' was not shared: self.greeter is already in use here"]
+    assert child.greeter is own and "mcp.greeter" not in child.skills.loaded()
+
+
 async def test_search_matches_a_connected_mcp_servers_tools(agent):
     approve(agent, "probe")
     await agent.skills.activate(["probe"])

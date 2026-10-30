@@ -307,6 +307,14 @@ class SkillManager(Skill):
                     f"MCP server {_leaf(key)!r} was not shared: it is bound to the parent agent"
                 )
                 continue
+            attr = _leaf(key)
+            held = getattr(self._owner, attr, None)
+            if held is not None and held is not tool:
+                # Registering would replace the child's own skill at self.<attr>.
+                warnings.append(
+                    f"MCP server {attr!r} was not shared: self.{attr} is already in use here"
+                )
+                continue
             try:
                 self.registry.register(key, tool)
                 if key in parent.registry.activated():
