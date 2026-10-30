@@ -226,6 +226,18 @@ class TaskResult(BaseModel):
         ),
     )
 
+    def __getattr__(self, name: str) -> Any:
+        try:
+            return super().__getattr__(name)  # type: ignore[misc]  # pydantic's private attrs
+        except AttributeError:
+            if name.startswith("_"):
+                raise
+            fields = ", ".join(type(self).model_fields)
+            raise AttributeError(
+                f"TaskResult has no attribute {name!r}; its fields are {fields}. "
+                "A finished task has no status: read solution_description and evidence."
+            ) from None
+
 
 ONE_SHOT_QUESTION: Annotated[str, hidden] = (
     "Your parent can't answer a one-shot worker: decide, state your assumptions in "
