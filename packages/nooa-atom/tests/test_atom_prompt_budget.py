@@ -175,6 +175,12 @@ RESULT = (
 # triple-quote rule (about 210). Measured system / total: handle 21,676 / 22,701,
 # handle_batch 21,795 / 22,820, handle_work 21,963 / 22,988, handle_orchestrate
 # 22,098 / 23,123. Limits: measured values plus about 2%, rounded up to the next 100.
+# Re-measured for the PR512 live-names line (2026-10-30, friction PR, user decision):
+# python_cell_lifetime opens with "All your live Python names are listed in the
+# python_cell_state block; anything not listed there does not exist in this
+# session." (199 characters, every row). Measured system / total: handle 21,875 /
+# 22,900, handle_batch 21,994 / 23,019, handle_work 22,162 / 23,187,
+# handle_orchestrate 22,297 / 23,322. Within the limits, so they stay.
 LIMITS = {
     (ATOM, "handle"): (22_200, 23_200),
     (ATOM, "handle_batch"): (22_300, 23_300),
@@ -187,6 +193,11 @@ LIMITS = {
 # lowered to 22,300 when self.jobs.tail was dropped (2026-10-30), then raised to
 # 22,600 for the PR512 small fixes (2026-10-30, see above; handle_orchestrate 22,098).
 BENCH_SYSTEM_LIMIT = 22_600
+# The one line every agent (root and child) gets in python_cell_lifetime.
+LIVE_NAMES_LINE = (
+    "All your live Python names are listed in the python_cell_state block; "
+    "anything not listed there does not exist in this session."
+)
 
 # Separate CHAR/JSON-size guards, not token counts or a full provider-wire payload.
 # Effective restriction guidance grows default tool descriptions 2,069 -> 2,839;
@@ -300,6 +311,7 @@ async def test_first_call_prompt_stays_within_budget(spec, method, tmp_path, ses
     assert "<python_cell_lifetime>" in rendered
     assert "job.output / JobEvent.output" in rendered
     assert "Cell variables survive Done, Waiting and NeedInput" in rendered
+    assert LIVE_NAMES_LINE in rendered
     assert "cell locals last one method call" not in rendered
     assert sizes["system"] <= system_limit
     assert sizes["messages"] <= total_limit

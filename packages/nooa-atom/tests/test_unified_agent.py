@@ -23,6 +23,10 @@ from nooa.storage.snapshot_vars import SnapshotVars
 
 UNIFIED = "nooa_atom.agent:AtomAgent"
 TIMEOUT = 60
+LIVE_NAMES_LINE = (
+    "All your live Python names are listed in the python_cell_state block; "
+    "anything not listed there does not exist in this session."
+)
 
 WORK_RESULT = (
     "return_result(Done(explanation='{e}', result=TaskResult(solution_description='s', "
@@ -104,6 +108,9 @@ async def test_one_shot_subagent_returns_its_task_result_and_notes_are_job_items
         assert "Return API documentation as str; display with print(doc(obj))" in rendered
         assert "Print (return None): max_length=items/container" in rendered
         assert "def read(self, name: str)" not in rendered
+        # Root and child: the same pointer, to the block the cell names are in.
+        assert LIVE_NAMES_LINE in rendered
+        assert "<python_cell_state>\nRetained Python names:" in rendered
         [tool] = call.tools
         assert tool.name == "python_cell"
         assert tool.description.count("Blocked imports:") == 1
@@ -504,6 +511,7 @@ async def test_first_call_offers_one_work_vocabulary(
         "progress=Throttle(seconds=5)",
         "<python_cell_state>\nRetained Python names: none; omitted: 0\n</python_cell_state>",
         "<python_cell_lifetime>",
+        LIVE_NAMES_LINE,
         "Other generated methods are call-local.",
         "registered queue producers",
         'r = await sh.run("cd src && make", timeout=600)',
@@ -1227,3 +1235,43 @@ async def test_the_cell_state_block_is_one_line(tmp_path):
         await strategy.python_cell_state_context(SimpleNamespace(current_call=empty))
         == "Cell locals: none"
     )
+
+
+async def test_a_name_error_points_at_python_cell_state_and_is_counted(
+    registry, options, models, monkeypatch
+):
+    """A child's ``sh`` is not its parent's: the error says where live names are."""
+    from nooa.runtime.harness_metrics import HarnessMetrics
+
+    flushed: list[dict] = []
+    real_flush = HarnessMetrics.flush_to_span
+
+    def flush(self):
+        flushed.append(self.to_span_attributes())
+        real_flush(self)
+
+    monkeypatch.setattr(HarnessMetrics, "flush_to_span", flush)
+    models.scripts[None] = [
+        cell("r = await sh.run('true')"),
+        cell("print(results)"),
+        cell("return_result(Done(explanation='ok'))"),
+    ]
+    root = await registry.create(options)
+    await asyncio.wait_for(root.prompt("go"), TIMEOUT)
+
+    def seen(call):
+        messages = models.llms[None].calls[call].messages
+        return "\n".join(str(m.get("content", "")) for m in messages)
+
+    after_sh = seen(1)
+    assert "name 'sh' is not defined" in after_sh
+    assert (
+        "Live names are listed in the python_cell_state block; anything not listed "
+        "there does not exist in this session. Create it first, e.g. `sh = Shell()`."
+    ) in after_sh
+    after_results = seen(2)
+    assert "name 'results' is not defined" in after_results
+    assert after_results.count("Create it first") == after_sh.count("Create it first")
+    [attrs] = [a for a in flushed if "harness.name_error_hint.count" in a]
+    assert attrs["harness.name_error_hint.count"] == 2
+    assert attrs["harness.name_error_hint.names"] == ["sh", "results"]
