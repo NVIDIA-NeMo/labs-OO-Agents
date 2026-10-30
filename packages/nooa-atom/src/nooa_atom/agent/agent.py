@@ -148,8 +148,8 @@ def _name_error_hint(error: BaseException, formatted: str) -> str | None:
             return None
         name = match.group("name")
     hint = (
-        "Live names are listed in the python_cell_state block; anything not listed "
-        "there does not exist in this session."
+        "Live names are listed in the python_cell_state block (it may omit some); "
+        "python_cell_state() lists all of them. A name in neither does not exist in this session."
     )
     if name == "sh":
         hint += " Create it first, e.g. `sh = Shell()`."
@@ -741,8 +741,8 @@ class AtomAgent(AtomAgentBase):
         )
         self.context.pop("experimental_namespace", None)  # replace an earlier snapshot's block
         self.context["python_cell_lifetime"] = Context(
-            "All your live Python names are listed in the python_cell_state block; "
-            "anything not listed there does not exist in this session. "
+            'Your live Python names are in the python_cell_state block ("omitted: N" counts '
+            "the rest); python_cell_state() lists all of them: check it before recreating a name. "
             "Cell variables survive Done, Waiting and NeedInput in this live session. "
             "Other generated methods are call-local. "
             "Restart loses these names, not self.v. No automatic expiry. "
