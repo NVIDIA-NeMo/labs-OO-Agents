@@ -21,6 +21,7 @@ interface, or this agent's spike spelling
 
 from __future__ import annotations
 
+import os
 from typing import Annotated, Any, ClassVar
 
 # Cells see this module's names: the model builds Done/TaskResult/Todo, Shell and
@@ -117,6 +118,14 @@ class _AgentJobs(WorkManager):
                 work.close()
             raise ValueError(f"{name!r} names a channel or the person; pick another job name")
         return super().launch(work, name=name, progress=progress, **unexpected)
+
+    def _resolve_path(self, path: Any) -> Any:
+        """``tail`` paths: relative ones are from the agent's workspace."""
+        base = getattr(self._agent, "cwd", None)
+        full = os.path.expanduser(os.fspath(path))
+        if base is not None and not os.path.isabs(full):
+            full = os.path.join(str(base), full)
+        return super()._resolve_path(full)
 
 
 # CodeActV2's python_cell description names the legacy delegation method.
@@ -468,6 +477,9 @@ sh = Shell()  # make one; bash starts on first use
 r = await sh.run("cd src && make", timeout=600)  # wait for it
 job = self.jobs.launch(sh.run("make"), name="build", progress=Throttle(seconds=5))  # background
 job.set_progress(None)  # quiet again
+self.jobs.after(120, name="t")  # timer: a delay counts from now: subtract time you have already spent
+self.jobs.every(60, name="poll")  # tick items
+self.jobs.tail("app.log", name="log")  # new lines
 self.jobs.launch(sh.run("pytest -q"), name="tests")
 job = self.jobs.launch(Shell(), name="sh")
 r = await job.send("make")
@@ -598,6 +610,9 @@ class AtomAgent(AtomAgentBase):
         self._role_instructions = text or None
         # The legacy JobsApi never started anything; drop it and its cancel hint.
         self.queue_manager._cancel_hints.pop("jobs", None)
+        # Core's ``self.producers`` (QueueManager.spawn helpers) is not Atom's:
+        # its timers and tails are ``self.jobs.after/every/tail``.
+        self.__dict__.pop("producers", None)
         self._work_records = []
         self.jobs = _AgentJobs(
             self,
@@ -954,7 +969,7 @@ class AtomAgent(AtomAgentBase):
         raise TypeError(_ONE_TURN_METHOD)
 
 
-for _name in ("shell", "delegates", "producers", "system_messages", "cwd"):
+for _name in ("shell", "delegates", "system_messages", "cwd"):
     spec(AtomAgent, _name, hidden=True)
 spec(AtomAgent, "jobs", description="Run and track work: see WorkManager")
 # Host-facing members of the work types stay out of the model's docs.

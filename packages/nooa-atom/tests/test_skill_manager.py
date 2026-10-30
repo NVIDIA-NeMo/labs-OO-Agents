@@ -376,3 +376,38 @@ async def test_read_of_a_non_text_skill_names_the_working_doc_call(agent):
     assert "print(self.skills.doc('probe'))" in message
     assert "use doc('probe')" not in message
     assert agent.skills.doc("probe").startswith("probe")
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "timer",
+        "schedule",
+        "cron",
+        "remind",
+        "later",
+        "after",
+        "every",
+        "periodic",
+        "monitor",
+        "watch",
+        "tail",
+        "follow",
+        "Schedule a reading in 120 s",
+    ],
+)
+async def test_search_for_timers_and_tails_points_to_self_jobs(agent, query):
+    found = agent.skills.search(query)
+    assert "No skills match" not in found
+    first = found.splitlines()[0]
+    assert first.startswith("self.jobs (built in, no skill needed):")
+    for call in ("self.jobs.after(", "self.jobs.every(", "self.jobs.tail("):
+        assert call in first
+    assert "a delay counts from now: subtract time you have already spent" in first
+
+
+async def test_search_hint_comes_before_matching_skills(agent):
+    assert agent.skills.search("greet later").splitlines() == [
+        agent.skills.search("later"),
+        "greeter (code, available): Greet people by name.",
+    ]
