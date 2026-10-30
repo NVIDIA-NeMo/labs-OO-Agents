@@ -54,6 +54,7 @@ from nooa.events import (
     SystemPrompt,
 )
 from nooa.llm_types import LLMUsage
+from nooa.runtime.cell_deadline import run_with_deadline
 from nooa.runtime.context_vars import (
     _current_event_format_var,
     _in_exec_middleware,
@@ -1879,7 +1880,7 @@ class ActorRuntime:
                     if timeout is None:
                         result_value = await run_owned_cell()
                     else:
-                        result_value = await asyncio.wait_for(run_owned_cell(), timeout=timeout)
+                        result_value = await run_with_deadline(run_owned_cell(), timeout)
                     if has_explicit_return or (implicit_return_added and result_value is not None):
                         returned_value = result_value
                 elif wrap_in_function:
@@ -1943,13 +1944,7 @@ class ActorRuntime:
                     coro = exec_globals["__repl_wrapper__"]()
                     with agent_async_safety_context():
                         if timeout is not None:
-                            try:
-                                result_value = await asyncio.wait_for(coro, timeout=timeout)
-                            except TimeoutError:
-                                raise TimeoutError(
-                                    f"Code execution timed out after {timeout} seconds. "
-                                    "Check for infinite loops or blocking operations."
-                                ) from None
+                            result_value = await run_with_deadline(coro, timeout)
                         else:
                             result_value = await coro
 
@@ -2049,13 +2044,7 @@ class ActorRuntime:
                             coro = exec_globals["__wrapper__"]()
                             with agent_async_safety_context():
                                 if timeout is not None:
-                                    try:
-                                        await asyncio.wait_for(coro, timeout=timeout)
-                                    except TimeoutError:
-                                        raise TimeoutError(
-                                            f"Code execution timed out after {timeout} seconds. "
-                                            "Check for infinite loops or blocking operations."
-                                        ) from None
+                                    await run_with_deadline(coro, timeout)
                                 else:
                                     await coro
                         else:

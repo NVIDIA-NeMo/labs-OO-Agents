@@ -148,6 +148,8 @@ class HarnessMetrics(BaseModel):
     shell_queued_behind_running: int = 0
     # A Shell command awaited in a cell refused: the Shell runs a launched job's command
     shell_busy_rejected: int = 0
+    # A one-shot child awaited in a cell handed to self.jobs at the cell deadline (not closed)
+    child_detached_at_deadline: int = 0
     # Waiting on the person (user_messages) rejected; the role whose turn did it
     waiting_on_person_rejections: list[str] = Field(default_factory=list)
     # LLM-facing queue reads that timed out mid-cell (channel name)
@@ -336,6 +338,10 @@ class HarnessMetrics(BaseModel):
     def shell_busy(self) -> None:
         """A Shell command awaited in a cell was refused behind a launched job's command."""
         self.shell_busy_rejected += 1
+
+    def child_detached(self) -> None:
+        """A child awaited in a cell outlived the cell deadline as a job instead of being closed."""
+        self.child_detached_at_deadline += 1
 
     # Error Recovery
     def validation_error(self, error_type: str, message: str) -> None:
@@ -835,6 +841,12 @@ _SPAN_SCHEMA: tuple[SchemaEntry, ...] = (
         "Shell commands refused behind a background job",
         "Tool Usage",
         lambda m: m.shell_busy_rejected,
+    ),
+    SchemaEntry(
+        "harness.child_detached_at_deadline.count",
+        "Children awaited in a cell kept running as jobs at the cell deadline",
+        "Tool Usage",
+        lambda m: m.child_detached_at_deadline,
     ),
     SchemaEntry(
         "harness.waiting_on_person_rejected.count",

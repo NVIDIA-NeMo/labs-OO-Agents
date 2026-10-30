@@ -7,6 +7,8 @@ until it is used, inside a session's turn (it binds to that session then).
 
 - ``await Subagent().run(todo)``: a one-shot worker. It cannot ask
   questions; its ``TaskResult`` is the result, and it closes after it.
+  Cancelling the await closes it, except the cell deadline: then it runs
+  on as a job named after the child, and the timeout error says so.
 - ``rev = manager.launch(Subagent(), name="review")``: a kept child.
   ``rev.send(todo)`` returns a request whose result is the child's
   ``TaskResult``, or a ``Question`` it asks; answer with the next
@@ -30,7 +32,10 @@ from dataclasses import dataclass
 from typing import Any
 
 from nooa import hidden
+from nooa.runtime.cell_deadline import deadline_cancel
+from nooa.runtime.harness_metrics import get_harness_metrics
 from nooa.tools import Todo as _AnyTodo
+from nooa_atom.agent import work_manager as _work_manager
 from nooa_atom.agent.work_manager import current_name, describe, emitter
 from nooa_atom.session.items import ChildFailed, ChildQuestion, ChildResult, TaskResult
 from nooa_atom.session.names import is_valid_name
@@ -75,6 +80,7 @@ class _Route:
         self.asking: Question | None = None
         self.drop_failure = False  # the failure of a turn its own request cancelled
         self.closed_reason: str | None = None
+        self.adopted = False  # a detached job's body has taken the outcome over
 
     def expect(self, post: Callable[[Any], None], *, armed: bool = True) -> asyncio.Future[Any]:
         """Arm the next outcome before the child can deliver it (``armed=False``: its turn's)."""
@@ -228,11 +234,16 @@ class Subagent:
         future = route.expect(emitter())
         ref = await _start(port, self, task, brief, route, name=name, kept=False)
         try:
-            item = await future
+            # Shielded: a cancel must leave the outcome pending for a detached job.
+            item = await asyncio.shield(future)
         except asyncio.CancelledError:
-            route.closed_reason = f"subagent {name} was cancelled"
-            with contextlib.suppress(Exception):
-                await asyncio.shield(port.close_child(ref.id))
+            # The cell deadline (only it) hands the child over to self.jobs, alive.
+            deadline = deadline_cancel() if current_name() is None else None
+            if deadline is None or not _detach(port, route, future, ref, name, deadline):
+                future.cancel()  # nobody takes the outcome now
+                route.closed_reason = f"subagent {name} was cancelled"
+                with contextlib.suppress(Exception):
+                    await asyncio.shield(port.close_child(ref.id))
             raise
         return _value(item, name)
 
@@ -352,6 +363,86 @@ class Subagent:
             stopped = False
         if not stopped:
             route.drop_failure = False
+
+
+def _detach(
+    port: Any, route: _Route, future: asyncio.Future[Any], ref: Any, name: str, deadline: Any
+) -> bool:
+    """A one-shot child awaited by a cell at its deadline: run on as a job; False if it cannot."""
+    session = getattr(port, "_session", None)
+    jobs = getattr(getattr(session, "_agent", None), "jobs", None)
+    if jobs is None or future.done():
+        return False
+    for n in range(1, 100):
+        job_name = name if n == 1 else f"{name}_{n}"
+        work = _adopted(port, route, future, ref, name)
+        try:
+            job = jobs.launch(work, name=job_name)
+        except ValueError:  # the name is taken (a running job, a channel): try the next
+            continue
+        except Exception:  # a closed work manager: the child closes as before
+            return False
+        break
+    else:
+        return False
+    task = job._task
+    if task is not None:  # cancelled before it ran, its body never closes the child
+        task.add_done_callback(lambda _: _close_unstarted(port, route, future, ref, name))
+    get_harness_metrics().child_detached()
+    deadline.note(
+        f"child {name} is still running as job {job.name}: "
+        f'Waiting(on=["{job.name}"]) for its result, '
+        f'or await self.jobs.get("{job.name}").cancel().'
+    )
+    return True
+
+
+async def _adopted(
+    port: Any, route: _Route, future: asyncio.Future[Any], ref: Any, name: str
+) -> Any:
+    """The rest of ``Subagent.run`` as a job: the child's result, or closed when cancelled."""
+    route.adopted = True
+    describe(f"subagent {name}: detached at the cell deadline")
+    route.post = route.idle_post = emitter()  # its notes are this job's items now
+    try:
+        item = await future
+    except asyncio.CancelledError:
+        route.closed_reason = f"subagent {name} was cancelled"
+        with contextlib.suppress(Exception):
+            await asyncio.shield(port.close_child(ref.id))
+        raise
+    return _value(item, name)
+
+
+def _note_running_job(job: Any) -> None:
+    """A cell's await of a running job ended by the deadline: the job runs on; say so."""
+    deadline = deadline_cancel()
+    if deadline is not None:
+        deadline.note(
+            f"job {job.name} is still running: "
+            f'Waiting(on=["{job.name}"]) for its result, '
+            f'or await self.jobs.get("{job.name}").cancel().'
+        )
+
+
+_work_manager.wait_cancelled_hook = _note_running_job
+
+_closing: set[asyncio.Task[Any]] = set()
+
+
+def _close_unstarted(
+    port: Any, route: _Route, future: asyncio.Future[Any], ref: Any, name: str
+) -> None:
+    """A detached job cancelled before its first step: close its child all the same."""
+    if route.adopted:
+        return
+    route.closed_reason = f"subagent {name} was cancelled"
+    future.cancel()
+    with contextlib.suppress(RuntimeError):  # no running loop: the session closes it
+        task = asyncio.get_running_loop().create_task(port.close_child(ref.id))
+        _closing.add(task)
+        task.add_done_callback(_closing.discard)
+        task.add_done_callback(lambda t: t.cancelled() or t.exception())
 
 
 def _child_name(port: Any, job_name: str | None) -> str:
