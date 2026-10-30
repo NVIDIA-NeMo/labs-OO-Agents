@@ -486,6 +486,9 @@ _CONTEXT: Annotated[dict[str, Any], hidden] = {
     "self": Context(expr="doc(type(self), concise=True)", prefix=True),
 }
 _NOTIFICATION: Annotated[Any, hidden] = spec(max_string=50_000, max_length=100, max_depth=10)
+# An invalid return_result value is a cell error the model retries on; the
+# turn fails only after this many in one turn (other errors keep max_retries).
+_MAX_RESULT_RETRIES: Annotated[int, hidden] = 10
 _REMOVED: Annotated[str, hidden] = (
     "{} is not part of this agent: run a child with Subagent "
     '(await Subagent().run(todo), or self.jobs.launch(Subagent(), name="..."))'
@@ -936,7 +939,13 @@ class AtomAgent(AtomAgentBase):
 
     @hidden
     @strategy(
-        AtomCodeAct(config=CodeActConfig(cell_timeout=1800.0, postconditions=[require_role])),
+        AtomCodeAct(
+            config=CodeActConfig(
+                cell_timeout=1800.0,
+                max_result_retries=_MAX_RESULT_RETRIES,
+                postconditions=[require_role],
+            )
+        ),
         context=_CONTEXT,
     )
     async def handle(

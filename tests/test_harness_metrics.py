@@ -210,6 +210,21 @@ class TestRecording:
         assert m.exec_errors[0].code_preview == "df.head()"
 
     # Code Validation
+    def test_return_result_keyword_alias(self):
+        m = HarnessMetrics()
+        m.return_result_keyword_alias("value")
+        attrs = m.to_span_attributes()
+        assert attrs["harness.return_result_keyword_alias.count"] == 1
+        assert attrs["harness.return_result_keyword_alias.keywords"] == ["value"]
+
+    def test_return_result_invalid(self):
+        m = HarnessMetrics()
+        m.return_result_invalid("ValidationError")
+        m.return_result_invalid("InvariantError")
+        attrs = m.to_span_attributes()
+        assert attrs["harness.return_result_invalid.count"] == 2
+        assert attrs["harness.return_result_invalid.types"] == ["ValidationError", "InvariantError"]
+
     def test_missing_await(self):
         m = HarnessMetrics()
         m.missing_await("analyze")

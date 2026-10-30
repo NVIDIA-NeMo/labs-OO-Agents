@@ -19,6 +19,54 @@ from nooa.config.truncation_config import DEFAULT_TRUNCATION_CONFIG, TruncationC
 from nooa.strategy_validation import InvariantError
 
 
+def _return_type_members(return_type: Any) -> tuple[Any, ...]:
+    """The members of a union return type, or the type itself."""
+    import types
+    import typing
+
+    origin = typing.get_origin(return_type)
+    if origin is typing.Union or origin is types.UnionType:
+        return tuple(a for a in typing.get_args(return_type) if a is not type(None))
+    return (return_type,)
+
+
+def return_type_field_names(return_type: Any) -> set[str]:
+    """Field names of a model/TypedDict return type (all union members together)."""
+    names: set[str] = set()
+    for member in _return_type_members(return_type):
+        fields = getattr(member, "model_fields", None)
+        if isinstance(fields, dict):
+            names.update(fields)
+        elif isinstance(member, type) and issubclass(member, dict):
+            names.update(inspect.get_annotations(member))
+    return names
+
+
+def return_call_hint(return_type: Any) -> str | None:
+    """Name the call that returns a model return type, e.g. ``return_result(Done(...))``.
+
+    Only for return types whose members are all Pydantic models: other types
+    already get an example from the formatter.
+    """
+    forms = []
+    for member in _return_type_members(return_type):
+        fields = getattr(member, "model_fields", None)
+        if not isinstance(member, type) or not isinstance(fields, dict):
+            return None
+        required = [
+            name
+            for name, info in fields.items()
+            if info.is_required() and not is_hidden_field(member, name)
+        ]
+        args = ", ".join(f"{name}=..." for name in required)
+        forms.append(f"return_result({member.__name__}({args}))")
+    if not forms:
+        return None
+    if len(forms) == 1:
+        return f"Call it as {forms[0]}."
+    return f"Call it as one of: {', '.join(forms)}."
+
+
 def format_validation_error(
     error: Exception,
     return_type: Any,
