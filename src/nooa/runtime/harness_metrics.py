@@ -144,6 +144,10 @@ class HarnessMetrics(BaseModel):
     return_result_invalid_retries: list[str] = Field(default_factory=list)
     # NeedInput(explanation=...) accepted (NeedInput used to reject the extra field)
     need_input_explanations: int = 0
+    # Waiting on the person (user_messages) rejected; the role whose turn did it
+    waiting_on_person_rejections: list[str] = Field(default_factory=list)
+    # LLM-facing queue reads that timed out mid-cell (channel name)
+    queue_read_timeouts: list[str] = Field(default_factory=list)
 
     # ── Error Recovery ──
     validation_errors: list[ErrorRecord] = Field(default_factory=list)
@@ -307,6 +311,14 @@ class HarnessMetrics(BaseModel):
     def return_result_invalid(self, error_type: str) -> None:
         """An invalid return_result value went back to the model as a retryable error."""
         self._append(self.return_result_invalid_retries, error_type)
+
+    def waiting_on_person_rejected(self, role: str) -> None:
+        """Waiting(on=["user_messages"]) was rejected with what to do instead."""
+        self._append(self.waiting_on_person_rejections, role)
+
+    def queue_read_timeout(self, channel: str) -> None:
+        """A cell's ``await self.<channel>.get()`` timed out with nothing queued."""
+        self._append(self.queue_read_timeouts, channel)
 
     def need_input_explanation(self) -> None:
         """NeedInput(explanation=...) was accepted as a status line."""
@@ -794,6 +806,32 @@ _SPAN_SCHEMA: tuple[SchemaEntry, ...] = (
         "NeedInput(explanation=) accepted",
         "Return Value Handling",
         lambda m: m.need_input_explanations,
+    ),
+    SchemaEntry(
+        "harness.waiting_on_person_rejected.count",
+        "Waiting on user_messages rejected",
+        "Return Value Handling",
+        lambda m: len(m.waiting_on_person_rejections),
+    ),
+    SchemaEntry(
+        "harness.waiting_on_person_rejected.roles",
+        "Roles that waited on the person",
+        "Return Value Handling",
+        lambda m: m.waiting_on_person_rejections,
+        True,
+    ),
+    SchemaEntry(
+        "harness.queue_read_timeout.count",
+        "Queue reads timed out mid-cell",
+        "Return Value Handling",
+        lambda m: len(m.queue_read_timeouts),
+    ),
+    SchemaEntry(
+        "harness.queue_read_timeout.channels",
+        "Timed-out queue channels",
+        "Return Value Handling",
+        lambda m: m.queue_read_timeouts,
+        True,
     ),
     # Error Recovery
     SchemaEntry(

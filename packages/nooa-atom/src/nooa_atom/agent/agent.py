@@ -49,6 +49,7 @@ with hidden:
     from nooa.interactive import InteractiveAgent, require_task_result
     from nooa.runtime.capture_scope import CaptureScope
     from nooa.runtime.channels import ChannelReader
+    from nooa.runtime.harness_metrics import get_harness_metrics
     from nooa.runtime.pprint import pprint as runtime_pprint
     from nooa.storage.markers import nosnapshot
     from nooa.strategies.codeact import current_cell_tag
@@ -282,10 +283,16 @@ def _check_waiting(agent: Any, result: Any, *, fix: str) -> None:
     if not unmet:
         return
     reasons = []
+    policy = getattr(agent, "_turn_policy", "interactive")
     for name in unmet:
         job = agent.jobs.get(name) if isinstance(name, str) else None
         if name in PERSON_NAMES:
-            reasons.append(f"Waiting on {name!r}, but the person is not a job.")
+            get_harness_metrics().waiting_on_person_rejected(policy)
+            if policy == "child":
+                reasons.append(f"Waiting on {name!r}, but your parent is not a job.")
+                fix = _CHILD_ASKS
+            else:
+                reasons.append(f"Waiting on {name!r}, but the person is not a job.")
         elif job is not None and job.status == "running":
             reasons.append(
                 f"{name!r} is an idle resource: nothing arrives until you send it work "
@@ -335,6 +342,11 @@ def require_settled_work(agent: Any, result: Any, call: Any) -> None:
         )
 
 
+_CHILD_ASKS: Annotated[str, hidden] = (
+    "If you need input, return NeedInput(question=...): your parent answers with send "
+    "(a one-shot task cannot ask: decide and say so in the report). If you are done, "
+    "return Done(explanation=..., result=TaskResult(...))."
+)
 _NO_ONE_TO_ASK: Annotated[str, hidden] = (
     "Nobody can answer questions in an unattended task: decide, state your assumptions in the "
     "TaskResult report, and return Done (or Waiting while launched work runs)."
@@ -600,6 +612,12 @@ class AtomAgent(AtomAgentBase):
         if policy not in ("interactive", "unattended", "orchestrator", "child"):
             raise ValueError(f"unknown policy {policy!r}")
         self._turn_policy = policy
+        if policy == "child":
+            # Nothing arrives from the parent while this turn runs: it waits for the turn.
+            self.user_messages.timeout_hint = (
+                "Your parent sends nothing while this turn runs: it waits for the turn to end. "
+                + _CHILD_ASKS
+            )
         text = instructions.strip() if isinstance(instructions, str) else ""
         self._role_instructions = text or None
         # The legacy JobsApi never started anything; drop it and its cancel hint.
