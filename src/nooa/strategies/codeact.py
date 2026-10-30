@@ -67,7 +67,11 @@ from nooa.runtime.harness_metrics import get_harness_metrics
 from nooa.runtime.hooks import call_after_hook, call_before_hook
 from nooa.runtime.sandbox.errors import SandboxExecutionError
 from nooa.strategies.base import RuntimeServices, build_sampling_kwargs
-from nooa.strategies.codeact_errors import format_validation_error
+from nooa.strategies.codeact_errors import (
+    format_validation_error,
+    return_call_hint,
+    return_type_field_names,
+)
 from nooa.strategies.composite import CompositeStrategy
 from nooa.strategies.generated_code import (
     ExecutionNamespaceBuilder,
@@ -307,6 +311,7 @@ class CodeActSession:
     event_manager: Any  # EventManager reference for Out[n] access
     iteration: int = 0
     error_count: int = 0
+    result_error_count: int = 0  # invalid return_result values (max_result_retries)
     consecutive_api_errors: int = 0
     consecutive_text_only: int = 0
     length_recoveries: int = 0  # Cut-off (finish_reason=length) replies nudged so far
@@ -2393,21 +2398,44 @@ Standard Python builtins and agent instance (`self`) are available."""
             json.JSONDecodeError,
         ) as e:
             exception = e
-            get_harness_metrics().validation_error(type(e).__name__, str(e)[:500])
-            session.record_error()
+            metrics = get_harness_metrics()
+            metrics.validation_error(type(e).__name__, str(e)[:500])
             # Pass actual value for better "Got: {...}" error messages
             actual_value = normalized_args.get("result") if normalized_args else None
             error_msg = format_validation_error(
                 e, return_type, actual_value, runtime.truncation_config
             )
+            if not isinstance(e, InvariantError):
+                call_hint = return_call_hint(return_type)
+                if call_hint:
+                    error_msg = f"{error_msg}\n{call_hint}"
             logger.debug(f"[CODEACT] return_result validation failed: {e}")
 
-            if session.is_exhausted():
+            limit = self.config.max_result_retries
+            if limit is None:
+                session.record_error()
+                attempts, budget, exhausted = (
+                    session.error_count,
+                    session.max_retries,
+                    session.is_exhausted(),
+                )
+            else:
+                session.result_error_count += 1
+                attempts, budget = session.result_error_count, limit
+                exhausted = attempts >= limit
+            if exhausted:
                 raise GenerationError(
-                    f"return_result validation failed after {session.max_retries} attempts.\n"
+                    f"return_result validation failed after {attempts} attempts.\n"
                     f"Last error:\n{error_msg}"
                 ) from e
 
+            # Offered back to the model as a cell error it can retry on.
+            metrics.return_result_invalid(type(e).__name__)
+            if limit is not None:
+                error_msg = (
+                    f"{error_msg}\nThe turn goes on: fix the value and call return_result "
+                    f"again (attempt {attempts} of {budget})."
+                )
             return (None, error_msg)
 
         except BaseException as error:
@@ -3573,9 +3601,20 @@ Standard Python builtins and agent instance (`self`) are available."""
                     raise _ReturnResultSignal(result=result)
                 # Single positional argument - treat as the 'result' field
                 raise _ReturnResultSignal(result={"result": list(args)[0]})
-            else:
-                # Keyword arguments - pass as-is
-                raise _ReturnResultSignal(result=kwargs)
+            if len(kwargs) == 1:
+                [keyword] = kwargs
+                # return_result(value=x) / return_result(result=x) mean
+                # return_result(x) unless the return type has that field.
+                if (
+                    keyword in ("value", "result")
+                    and call.return_type is not None
+                    and call.return_type is not type(None)
+                    and keyword not in return_type_field_names(call.return_type)
+                ):
+                    get_harness_metrics().return_result_keyword_alias(keyword)
+                    raise _ReturnResultSignal(result={"result": kwargs[keyword]})
+            # Keyword arguments - pass as-is
+            raise _ReturnResultSignal(result=kwargs)
 
         # Start with module context (imports, type definitions)
         agent_module = inspect.getmodule(type(runtime.agent))
