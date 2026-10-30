@@ -137,6 +137,14 @@ class SkillWriting(Skill):
         # 5. Test
         await self.libs.run_tests("stats")
 
+    ## Where libraries are saved, and later sessions
+
+    Each library is a package directory ``self.libs.path(name)`` in the
+    project's libs directory (``<workspace>/.nooa/libs``), kept on disk
+    across sessions. A later session in the same workspace loads every
+    library there at start: it is ``self.<lib_name>`` with nothing to
+    import or activate. ``await self.libs.list()`` names them.
+
     ## Discovery
 
         await self.libs.list()       # all library names
