@@ -467,7 +467,20 @@ def client_from_config(
         "drop_params": config.get("drop_params", True),
     }
 
-    if "api_base" not in overrides and (api_base := config.get("api_base")):
+    # api_base and base_url are two spellings of the same endpoint. An override
+    # of None counts as no override: clearing the configured endpoint would send
+    # requests and credentials to the provider's default endpoint. A non-None
+    # override of either spelling replaces every spelling the entry configures
+    # (set below), so the owned SDK client never binds the old endpoint.
+    overrides = {
+        key: value
+        for key, value in overrides.items()
+        if not (key in ("api_base", "base_url") and value is None)
+    }
+    endpoint_override = next(
+        (overrides[key] for key in ("api_base", "base_url") if key in overrides), None
+    )
+    if endpoint_override is None and (api_base := config.get("api_base")):
         params["api_base"] = api_base
 
     # Only resolve the registry's api_key_env when the caller hasn't
@@ -486,6 +499,9 @@ def client_from_config(
     for key in (
         "temperature",
         "top_p",
+        "timeout",
+        "base_url",
+        "custom_llm_provider",
         "max_tokens",
         "reasoning",
         "reasoning_effort",
@@ -500,8 +516,14 @@ def client_from_config(
         "cache_breakpoint",
         "media_inputs",
     ):
+        if key == "base_url" and endpoint_override is not None:
+            continue
         if key in config and key not in overrides:
             params[key] = config[key]
+    if endpoint_override is not None:
+        for alias in ("api_base", "base_url"):
+            if alias in config:
+                params[alias] = endpoint_override
 
     # Registry aliases can centrally tune or disable the clients' default endpoint
     # retry behavior. ``retry_config: false`` means a single attempt for every
@@ -541,6 +563,37 @@ def client_from_config(
                 name,
             )
 
+    # A context_window belongs to one route. If an override changes the model,
+    # endpoint, client type, provider, client object or credentials, drop the
+    # entry's window: it may not hold for the new route. Passing api_key where
+    # the entry used api_key_env counts as a credential change even if the
+    # values match. A context_window passed in the overrides is always kept.
+    from nooa.unifiedllm.route_identity import same_context_route
+
+    # Compare only settings that reach the client. A completion or responses
+    # entry may carry an ``endpoint`` key (the decision-route spelling) that
+    # client_from_config does not forward; including it would make every such
+    # entry look like a changed route and drop its context_window.
+    original_route = {
+        **{key: value for key, value in config.items() if key != "endpoint"},
+        "api_key": params.get("api_key"),
+    }
+    effective_route = {
+        **params,
+        **overrides,
+        "api_key_env": config.get("api_key_env") if "api_key" not in overrides else None,
+    }
+    same_route = same_context_route(
+        model,
+        original_route,
+        config.get("client_type", "completion"),
+        effective_route.get("model", model),
+        effective_route,
+        selected_client_type,
+    )
+    if not same_route:
+        config.pop("context_window", None)
+
     params.update(overrides)
     if config and "media_inputs" not in params and name not in _warned_text_only:
         _warned_text_only.add(name)
@@ -557,5 +610,8 @@ def client_from_config(
         if selected_client_type == "responses"
         else CompletionClient(**params)
     )
-    client._registry_config = config  # For context_window lookup
+    # Keep the entry's settings on the client so later context-window lookups
+    # can check they still describe the client's actual route.
+    client._registry_config = config
+    client._registry_context_route = (client.model, dict(client.config), selected_client_type)
     return client

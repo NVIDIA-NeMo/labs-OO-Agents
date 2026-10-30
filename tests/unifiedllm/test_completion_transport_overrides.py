@@ -6,8 +6,28 @@ import httpx
 import pytest
 from litellm.llms.openai.openai import OpenAIChatCompletion
 
-from nooa.unifiedllm import CompletionClient
+from nooa.unifiedllm import CompletionClient, ResponsesClient, registry
 from nooa.unifiedllm.unifiedllm import _ClientHttp
+
+
+def _chat_response(request: httpx.Request) -> httpx.Response:
+    return httpx.Response(
+        200,
+        json={
+            "id": "chatcmpl-test",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "opaque-model",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "done"},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 1, "total_tokens": 11},
+        },
+    )
 
 
 @pytest.mark.asyncio
@@ -104,3 +124,147 @@ async def test_completion_uses_per_call_route_without_changing_defaults(
         ]
     finally:
         await client.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("is_async", [False, True])
+@pytest.mark.parametrize("factory", ["direct", "registry"])
+async def test_base_url_provider_and_timeout_reach_owned_transport(monkeypatch, is_async, factory):
+    requests: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return _chat_response(request)
+
+    transport = httpx.MockTransport(respond)
+    monkeypatch.setattr(
+        _ClientHttp,
+        "_httpx_hardening",
+        staticmethod(lambda: {"transport": transport, "trust_env": False}),
+    )
+
+    def no_default_pool(**kwargs):
+        raise AssertionError("A declared base_url/custom_llm_provider must use the owned pool")
+
+    monkeypatch.setattr(
+        OpenAIChatCompletion, "_get_sync_http_client", staticmethod(no_default_pool)
+    )
+    monkeypatch.setattr(
+        OpenAIChatCompletion, "_get_async_http_client", staticmethod(no_default_pool)
+    )
+    route = {
+        "base_url": "https://gateway.example/v1",
+        "custom_llm_provider": "openai",
+        "timeout": 7.5,
+    }
+    if factory == "registry":
+        entry = {"model_name": "opaque-model", "retry_config": False, **route}
+        client = registry.client_from_config("gateway", entry, api_key="gateway-key")
+    else:
+        client = CompletionClient("opaque-model", api_key="gateway-key", **route)
+    try:
+        assert {key: client.config[key] for key in route} == route
+        assert client._http is not None
+        # The owned SDK client must target the declared gateway, not be skipped.
+        sdk_client = client._completion_http_client(client.config, is_async=is_async, max_retries=0)
+        assert sdk_client is not None
+        assert str(sdk_client.base_url) == "https://gateway.example/v1/"
+        owned_pool = client._http.httpx_async if is_async else client._http.httpx_sync
+        assert sdk_client._client is owned_pool
+        messages = [{"role": "user", "content": "Hello"}]
+        result = await client.acall(messages) if is_async else client.call(messages)
+        assert result.content == "done"
+        assert [str(request.url) for request in requests] == [
+            "https://gateway.example/v1/chat/completions"
+        ]
+        assert requests[0].headers["Authorization"] == "Bearer gateway-key"
+        assert requests[0].extensions["timeout"]["read"] == 7.5
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.parametrize(
+    ("configured", "override"),
+    [("api_base", "base_url"), ("base_url", "api_base")],
+)
+def test_endpoint_override_replaces_both_configured_aliases(configured, override):
+    """Overriding either endpoint spelling must not leave the other configured one."""
+    raw = {
+        "model_name": "opaque-model",
+        "retry_config": False,
+        configured: "https://old.example/v1",
+    }
+    client = registry.client_from_config(
+        "gateway", raw, api_key="key", **{override: "https://new.example/v1"}
+    )
+    assert client.config[configured] == "https://new.example/v1"
+    assert client.config[override] == "https://new.example/v1"
+    sdk_client = client._completion_http_client(client.config, is_async=False, max_retries=0)
+    if sdk_client is not None:
+        assert str(sdk_client.base_url) == "https://new.example/v1/"
+
+
+def test_unforwarded_endpoint_key_keeps_context_window():
+    """A completion entry's ``endpoint`` key is not sent, so it must not count as a route change."""
+    raw = {
+        "model_name": "openai/opaque-model",
+        "api_base": "https://gateway.example/v1",
+        "endpoint": "https://gateway.example/v1/decisions",
+        "context_window": 8192,
+        "retry_config": False,
+    }
+    client = registry.client_from_config("gateway", raw)
+    assert client.context_window == 8192
+
+
+@pytest.mark.parametrize("client_class", [CompletionClient, ResponsesClient])
+@pytest.mark.parametrize(
+    ("configured", "override"), [("base_url", "api_base"), ("api_base", "base_url")]
+)
+def test_per_call_endpoint_override_replaces_the_other_spelling(client_class, configured, override):
+    """A per-call api_base or base_url must replace the client's endpoint, whichever spelling."""
+    client = client_class(
+        "openai/opaque-model", api_key="key", **{configured: "https://old.example/v1"}
+    )
+    params = client._prepare_call_config({override: "https://new.example/v1"})
+    assert params[override] == "https://new.example/v1"
+    # The configured spelling is replaced too, never left pointing at the old URL.
+    assert params[configured] == "https://new.example/v1"
+    # Without an override the configured endpoint is kept.
+    assert client._prepare_call_config({})[configured] == "https://old.example/v1"
+
+
+@pytest.mark.parametrize("client_class", [CompletionClient, ResponsesClient])
+@pytest.mark.parametrize("configured", ["api_base", "base_url"])
+@pytest.mark.parametrize("override", ["api_base", "base_url"])
+def test_none_endpoint_override_keeps_the_configured_endpoint(client_class, configured, override):
+    """``api_base=None`` must not clear the endpoint and fall back to the provider default."""
+    client = client_class(
+        "openai/opaque-model", api_key="key", **{configured: "https://gateway.example/v1"}
+    )
+    params = client._prepare_call_config({override: None})
+    assert params[configured] == "https://gateway.example/v1"
+    assert params.get("api_base") or params.get("base_url")
+
+
+@pytest.mark.parametrize("configured", ["api_base", "base_url"])
+@pytest.mark.parametrize("override", ["api_base", "base_url"])
+def test_registry_none_endpoint_override_keeps_the_configured_endpoint(configured, override):
+    raw = {
+        "model_name": "opaque-model",
+        "retry_config": False,
+        configured: "https://gateway.example/v1",
+    }
+    client = registry.client_from_config("gateway", raw, api_key="key", **{override: None})
+    assert client.config[configured] == "https://gateway.example/v1"
+
+
+def test_same_endpoint_override_keeps_media_permissions():
+    """Overriding with the configured URL is not a route change, so media stays enabled."""
+    url = "https://gateway.example/v1"
+    client = CompletionClient(
+        "openai/opaque-model", api_key="key", api_base=url, base_url=url, media_inputs=["image"]
+    )
+    params = client._prepare_call_config({"api_base": url})
+    assert params["base_url"] == url
+    assert client._request_media_inputs(params) == ("image",)

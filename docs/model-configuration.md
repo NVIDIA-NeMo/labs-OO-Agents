@@ -210,7 +210,14 @@ configured for those formats can send them again. See the
 [media guide](media.md#text-only-requests-and-replay).
 
 To let a model receive it, add the kind to its entry, for example
-`media_inputs: [video]`, and keep any kinds already listed.
+`media_inputs: [video]`, and keep any kinds already listed. Only add kinds the
+request interface implements: native Anthropic Messages and Responses send
+image and PDF inputs, not audio or video. Chat sends `input_audio` and
+`video_url` extensions, but the selected backend may still reject them.
+Clients make text-only calls as before, but an enabled audio or video
+attachment on Anthropic Messages or Responses is rejected locally before any
+HTTP request; disabled attachments are filtered out first. Original history is
+not rewritten.
 
 Connect can test media for you with generated samples. See
 [Connect media setup](model-connect.md#choose-media-inputs-during-setup).
