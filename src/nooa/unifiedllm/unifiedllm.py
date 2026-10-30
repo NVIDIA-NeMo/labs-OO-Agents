@@ -42,7 +42,7 @@ from nooa.unifiedllm.media_inputs import (
 )
 
 from . import replay_state, response_parts
-from .admission import _current_admission_controller
+from .admission import _current_admission_controller, _run_admitted_attempt
 from .errors import EmptyContentError
 from .http_config import HttpConfig
 from .limits import REPLY_CAP_KEYS, ContextLimits
@@ -1626,14 +1626,8 @@ async def _run_async_provider_call[T](
     if permit is None:
         return await _await_provider_task(asyncio.create_task(call()), request_timeout)
 
-    async def run_and_release() -> T:
-        try:
-            return await call()
-        finally:
-            permit.release()
-
     try:
-        task = asyncio.create_task(run_and_release())
+        task = asyncio.create_task(_run_admitted_attempt(call, permit))
     except BaseException:
         permit.release()
         raise

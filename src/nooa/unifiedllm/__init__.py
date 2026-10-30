@@ -18,6 +18,7 @@ from nooa.unifiedllm.admission import (
     AdmissionPermit,
     AdmissionTimeoutError,
     AdmissionUnavailableError,
+    CooldownAdmissionPermit,
 )
 from nooa.unifiedllm.broker_admission import (
     AdmissionBroker,
@@ -98,6 +99,7 @@ __all__ = [
     "BrokerAdmissionConfig",
     "BrokerAdmissionController",
     "BrokerAdmissionSnapshot",
+    "CooldownAdmissionPermit",
     # HTTP config
     "HttpConfig",
     # Retry utilities
