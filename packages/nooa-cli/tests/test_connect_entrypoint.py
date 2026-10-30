@@ -48,7 +48,8 @@ def test_connect_plan_uses_library_without_http():
         ],
     )
     assert result.exit_code == 0, result.output
-    report = json.loads(result.output)
+    # Stage JSON is the stdout contract; result.output also holds stderr notices.
+    report = json.loads(result.stdout)
     assert report["stage"] == "plan"
     assert report["ok"] is True
 
@@ -58,7 +59,22 @@ def test_connect_usage_error_preserves_exit_code():
     assert result.exit_code == 2
 
 
-def test_connect_failed_stage_preserves_exit_code(monkeypatch):
+ROUTING_STAGE_ARGS = [
+    "example",
+    "--stage",
+    "routing",
+    "--api-style",
+    "chat",
+    "--endpoint",
+    "https://models.example/v1",
+    "--api-key-env",
+    "",
+    "--as",
+    "local",
+]
+
+
+def _deny_http(monkeypatch):
     import httpx
 
     from tests.unifiedllm.connect.connect_http import mock_http
@@ -66,21 +82,36 @@ def test_connect_failed_stage_preserves_exit_code(monkeypatch):
     mock_http(
         monkeypatch, lambda request: httpx.Response(401, json={"error": {"message": "denied"}})
     )
-    result = CliRunner().invoke(
-        command,
-        [
-            "example",
-            "--stage",
-            "routing",
-            "--api-style",
-            "chat",
-            "--endpoint",
-            "https://models.example/v1",
-            "--api-key-env",
-            "",
-            "--as",
-            "local",
-        ],
-    )
+
+
+def test_connect_failed_stage_preserves_exit_code(monkeypatch):
+    _deny_http(monkeypatch)
+    result = CliRunner().invoke(command, ROUTING_STAGE_ARGS)
     assert result.exit_code == 1, result.output
-    assert json.loads(result.output)["ok"] is False
+    assert json.loads(result.stdout)["ok"] is False
+
+
+def test_connect_stage_json_survives_stderr_tracing_notice(monkeypatch):
+    """An unreachable OTLP_ENDPOINT prints a stderr notice mid-stage; stdout stays JSON.
+
+    Model checks auto-enable tracing, which probes OTLP_ENDPOINT (2 s timeout) and
+    prints "... is not reachable — tracing disabled." to stderr when the probe
+    fails. CliRunner's ``output`` mixes that line into the stage JSON, so a slow
+    probe under load made the test above flaky when OTLP_ENDPOINT was set (e.g.
+    loaded from a parent ``.env``). Force the probe to fail here.
+    """
+    import nooa.agent
+    import nooa.tracing as tracing
+
+    _deny_http(monkeypatch)
+    monkeypatch.setenv("OTLP_ENDPOINT", "http://127.0.0.1:9/v1/traces")
+    monkeypatch.setattr(nooa.agent, "_auto_tracing_attempted", False)
+    monkeypatch.setattr(tracing, "_enabled", False)
+    monkeypatch.setattr(tracing, "_probe_failed", False)
+    monkeypatch.setattr(tracing, "resolve_otlp_endpoint", lambda *args, **kwargs: None)
+
+    result = CliRunner().invoke(command, ROUTING_STAGE_ARGS)
+
+    assert result.exit_code == 1, result.output
+    assert "is not reachable" in result.stderr
+    assert json.loads(result.stdout)["ok"] is False
