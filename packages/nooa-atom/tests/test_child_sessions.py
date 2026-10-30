@@ -1473,3 +1473,43 @@ async def test_wait_after_answering_a_queued_question_returns_the_next_outcome(
         assert delegates.qsize() == 0  # the answered question was withdrawn
     finally:
         block.set()
+
+
+async def test_a_failed_answer_leaves_the_question_pending(
+    atom_registry, atom_options, atom_models, monkeypatch
+):
+    # The question is cleared only once the answer is admitted: when the
+    # child refuses the message, the question and its unread copy remain.
+    root = await atom_registry.create(atom_options)
+    atom_models.scripts["asker"] = [cell(ASK), work_done("used main")]
+    started, block = fresh_events()
+    atom_models.llms[None]._response_queue.append(cell(BLOCKING))
+    await root.submit("block")
+    await asyncio.wait_for(started.wait(), TIMEOUT)
+    port = root._agent.session
+    delegates = root._agent.queue_manager.get_channel("delegates")
+    try:
+        ref = await port.delegate("asker", "do it", kept=True, name="asker")
+        await until(lambda: delegates.qsize() == 1, TIMEOUT)
+        question = port.pending_question(ref.id)
+        assert question is not None
+        child = atom_registry.sessions[ref.id]
+
+        async def refuse(*args, **kwargs):
+            raise RuntimeError("admission failed")
+
+        monkeypatch.setattr(child, "steer", refuse)
+        monkeypatch.setattr(child, "submit", refuse)
+        with pytest.raises(RuntimeError, match="admission failed"):
+            await port.send_child(ref.id, "main", channel="user_messages")
+        with pytest.raises(RuntimeError, match="admission failed"):
+            await port.send_child(ref.id, "main", channel="user_messages", steer=False)
+        assert port.pending_question(ref.id) == question
+        assert delegates.qsize() == 1  # the unread copy is still queued
+        monkeypatch.undo()
+        await port.send_child(ref.id, "main", channel="user_messages")
+        result = await asyncio.wait_for(port.wait_child(ref.id), TIMEOUT)
+        assert result.done.explanation == "used main"
+        assert port.pending_question(ref.id) is None
+    finally:
+        block.set()
