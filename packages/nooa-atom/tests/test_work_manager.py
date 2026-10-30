@@ -956,6 +956,21 @@ async def test_unread_ticks_merge_into_one(setup):
     await job.cancel()
 
 
+async def test_every_late_wake_up_yields_the_latest_due_tick(monkeypatch):
+    # The first sleep wakes 0.35 s in although only 0.1 s was asked for:
+    # three ticks are due by then, so the timer says 3, not 1.
+    clock = [100.0]
+
+    async def late_sleep(seconds):
+        clock[0] += 0.35 if clock[0] == 100.0 else seconds
+
+    monkeypatch.setattr(work_manager.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(work_manager.asyncio, "sleep", late_sleep)
+    ticks = work_manager._every(0.1)
+    assert [await anext(ticks), await anext(ticks)] == [3, 4]
+    await ticks.aclose()
+
+
 async def test_every_can_be_read_with_async_for(setup):
     manager, _ = setup
     job = manager.every(0.01)
