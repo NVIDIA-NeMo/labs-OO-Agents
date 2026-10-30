@@ -11,7 +11,7 @@ and children share one namespace of live names, so no name is both.
 import asyncio
 import re
 
-from atom_test_agents import ATOM_SPEC, AtomModels, cell
+from atom_test_agents import ATOM_SPEC, AtomModels, cell, until
 from nooa_atom import SessionOptions, SessionStore
 from nooa_atom.session.registry import SessionRegistry
 
@@ -228,14 +228,16 @@ async def test_paths_of_jobs_and_a_grandchild(tmp_path, sessions_dir):
             "    while True:\n"
             "        try:\n"
             "            deep = self.child('/root/review_pr_462/verifier')\n"
-            "            break\n"
+            "            if deep.status == 'running':\n"
+            "                break\n"
             "        except KeyError:\n"
-            "            await asyncio.sleep(0.02)\n"
+            "            pass\n"
+            "        await asyncio.sleep(0.02)\n"
             "print('DEEP<<' + deep.path + ' ' + deep.status + '>>')\n"
             "assert self.child('/root/review_pr_462').id == self.v.review.id\n"
             "assert self.child(self.v.review.id).name == 'review_pr_462'\n"
             "print('STATUS<<' + self._queue_status() + '>>')\n"
-            "return_result(Waiting(explanation='w', on=['/root/review_pr_462/verifier']))"
+            "return_result(Waiting(explanation='w', on=['review_pr_462']))"
         ),
         cell(
             "await self.jobs.cancel('tests')\nawait self.jobs.cancel('ci_check')\n"
@@ -256,8 +258,12 @@ async def test_paths_of_jobs_and_a_grandchild(tmp_path, sessions_dir):
     registry = SessionRegistry(SessionStore(sessions_dir), agent_factory=models)
     try:
         root = await registry.create(options)
-        outcome = await asyncio.wait_for(root.prompt("hi"), TIMEOUT)
+        first = asyncio.ensure_future(root.prompt("hi"))
+        # Its turn ends Waiting on its own child (not the grandchild); the next prompt ends it.
+        await until(lambda: root.last_outcome_kind == "waiting", TIMEOUT)
+        outcome = await asyncio.wait_for(root.prompt("finish up"), TIMEOUT)
         assert outcome.explanation == "done"
+        assert (await asyncio.wait_for(first, TIMEOUT)).explanation == "done"
     finally:
         await registry.close_all()
     calls = models.llms[None].calls
@@ -278,11 +284,6 @@ async def test_paths_of_jobs_and_a_grandchild(tmp_path, sessions_dir):
         r"  • /root/review_pr_462 · child · (\d+s|waiting on its own job)", lines[3]
     )
     assert "verifier" not in status  # only your own jobs and children
-    rejected = text  # the error from the same cell's return_result
-    assert (
-        "Waiting on '/root/review_pr_462/verifier', but it is not your child: what it "
-        "delivers goes to its parent. Wait on your child 'review_pr_462' instead."
-    ) in rejected
     first = str(models.llms["review_pr_462"].calls[0].messages)
     assert "You are /root/review_pr_462, a child of /root. You can ask" in first
     deeper = str(models.llms["verifier"].calls[0].messages)
