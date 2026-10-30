@@ -227,6 +227,29 @@ class SkillManager(Skill):
         self.mcp = servers
 
     @hidden
+    def share_from(self, parent: SkillManager) -> list[str]:
+        """Use ``parent``'s connected MCP servers here too; return warnings.
+
+        For a child session: the client-provided servers (``mcp.<name>``)
+        and the configured servers ``parent`` has connected get the same
+        tool objects here (no new connection), active where they are active
+        in ``parent``. Closing this manager detaches them and closes nothing.
+        """
+        warnings: list[str] = []
+        for key in parent.registry.loaded():
+            if not key.startswith("mcp."):
+                continue
+            try:
+                self.registry.register(key, parent.registry[key])
+                if key in parent.registry.activated():
+                    self.registry.activate([_literal(key)])
+            except (KeyError, ValueError) as exc:
+                warnings.append(f"MCP server {_leaf(key)!r} was not shared: {exc}")
+        if self.mcp is not None and parent.mcp is not None:
+            warnings.extend(self.mcp.share_from(parent.mcp))
+        return warnings
+
+    @hidden
     def after_restore(self) -> None:
         """Drop restored context blocks that need an attribute this agent lacks; say so.
 

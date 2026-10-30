@@ -730,6 +730,28 @@ class MCPServers:
             self._forgetting_urls.discard(url)
         return sorted(affected)
 
+    def share_from(self, parent: MCPServers) -> list[str]:
+        """Attach the servers ``parent`` connected (a parent session's); return warnings.
+
+        Each gets ``parent``'s tool object, active where it is active there,
+        and its definition when this workspace view lacks one (an in-memory
+        ``register``). No connection is opened and none is closed:
+        ``disconnect`` and ``aclose`` only detach them from this agent.
+        """
+        warnings = []
+        for name, tool in parent._connected.items():
+            try:
+                self._attach(name, tool)
+            except ValueError as exc:
+                warnings.append(f"MCP server {name!r} was not shared: {exc}")
+                continue
+            if name not in self._servers and name in parent._servers:
+                self._servers[name] = copy.deepcopy(parent._servers[name])
+                self._registered_server_names.add(name)
+            if name in parent._activated:
+                self._activated.add(name)
+        return warnings
+
     async def disconnect(self, patterns: list[str]) -> list[str]:
         """Detach connected servers matching ``patterns``; stop waiting sign-ins."""
         names = set(self._connected) | set(self._signins)

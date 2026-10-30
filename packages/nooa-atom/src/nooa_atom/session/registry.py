@@ -229,6 +229,7 @@ class SessionRegistry:
             session = await self._build(options, handle)
             if parent is not None:
                 trace_under_caller(session)
+                await self._inherit_tools(session, parent)
             if prepare is not None:
                 await prepare(session)
             for channel, item in initial_items:
@@ -252,6 +253,12 @@ class SessionRegistry:
                 )
             )
         return session
+
+    @staticmethod
+    async def _inherit_tools(child: Session, parent: Session) -> None:
+        """Give a child its parent's connected tools (MCP servers), shared, not reconnected."""
+        for warning in await child.inherit_tools(parent):
+            logger.warning("Session %s: %s", child.id, warning)
 
     def _reserve(self, session_id: str) -> asyncio.Future[Session | None]:
         reservation: asyncio.Future[Session | None] = asyncio.get_running_loop().create_future()
@@ -1000,6 +1007,9 @@ class SessionRegistry:
                 info.name = self.child_name(info)
             session = await self._build(self._stored_options(info, overrides), handle, restore=True)
             session.name = session.info.name = info.name
+            live_parent = self.sessions.get(session.parent_id) if session.parent_id else None
+            if live_parent is not None:
+                await self._inherit_tools(session, live_parent)
             if prepare is not None:
                 await prepare(session)
             elif session.parent_id in self.sessions:
