@@ -198,5 +198,5 @@ class MemoryConfig(BaseModel, frozen=True):
     observability: ObservabilityConfig = ObservabilityConfig()
 
     def merge_with(self, **overrides: object) -> MemoryConfig:
-        """Return a copy with top-level fields overridden."""
-        return self.model_copy(update=overrides)
+        """Return a validated copy with top-level fields overridden."""
+        return type(self).model_validate({**self.model_dump(), **overrides})
