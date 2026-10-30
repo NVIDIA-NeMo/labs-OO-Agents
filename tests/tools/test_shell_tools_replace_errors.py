@@ -829,3 +829,19 @@ async def test_a_stale_match_says_where_the_text_moved(shell, tmp_path):
         await shell.replace_match(match, "b = 20\nc = 30\n")
     assert "The captured text is now closest to lines 4-5 (100% similar)" in str(error.value)
     assert path.read_text() == "# header\n# more\na = 1\nb = 2\nc = 3\n"
+
+
+def test_closest_region_search_gives_up_on_costly_near_identical_lines():
+    """200 near-identical 8,000-character lines once took ~25 s of ratio() calls."""
+    import random
+    import time
+
+    from nooa.tools.shell_tools import _closest_region_lines
+
+    rng = random.Random(0)
+    base = "".join(rng.choice("abcdefgh") for _ in range(7_990))
+    content = "\n".join(base[: i * 30] + "X" + base[i * 30 + 1 :] for i in range(200))
+    old = base[:4_000] + "Q" + base[4_001:]
+    started = time.monotonic()
+    assert _closest_region_lines(content, old) == []
+    assert time.monotonic() - started < 3
