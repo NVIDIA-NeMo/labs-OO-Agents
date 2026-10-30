@@ -974,9 +974,11 @@ Standard Python builtins and agent instance (`self`) are available."""
                 except ReasoningReplayError:
                     turn_state.is_final = True
                     raise
-                except BlockSyntaxError as e:
-                    self._handle_block_syntax_error(e, session, runtime)
-                    continue
+                except BlockSyntaxError:
+                    # Context APIs reject invalid expressions when they are set, so
+                    # one reaching assembly is a declaration bug that retries repeat.
+                    turn_state.is_final = True
+                    raise
 
                 except Exception as e:
                     # LLM API errors (rate limits, connection errors, timeouts, etc.)
@@ -1729,48 +1731,6 @@ Standard Python builtins and agent instance (`self`) are available."""
                 return _ToolCallsResult()
 
         return None
-
-    @staticmethod
-    def _handle_block_syntax_error(
-        e: BlockSyntaxError,
-        session: "CodeActSession",
-        runtime: RuntimeServices,
-    ) -> None:
-        """Handle a BlockSyntaxError raised during generate().
-
-        The LLM created a context block with invalid Python syntax.
-        This is recoverable — remove the bad block, add error feedback
-        so the LLM can fix it, and record an iteration (not an error
-        retry, since retrying with the bad block would just fail again).
-        """
-        get_harness_metrics().block_syntax_error(f"block '{e.key}': {e.original_error}")
-        logger.warning(f"[CODEACT] Block syntax error in block '{e.key}': {e.original_error}")
-
-        # Remove the bad block so subsequent attempts can proceed
-        try:
-            _ctx = getattr(runtime, "context", None)
-            if _ctx is not None:
-                _ctx.remove(e.key)
-                logger.debug(f"[CODEACT] Removed bad block '{e.key}' from context")
-        except Exception as remove_err:
-            logger.debug(f"[CODEACT] Could not remove block '{e.key}': {remove_err}")
-
-        # Add helpful error feedback for the LLM
-        _field = getattr(e, "field", "expr")
-        error_msg = (
-            f"Error: Block '{e.key}' has invalid Python syntax.\n"
-            f"The {_field} parameter must be a valid Python expression.\n"
-            f"  Invalid {_field}: {e.expr[:100]}{'...' if len(e.expr) > 100 else ''}\n"
-            f"  Error: {e.original_error}\n\n"
-            f"To fix this, use context.set() with value= for static content:\n"
-            f'  context.set("{e.key}", value="your content here")\n'
-            f"Or use a valid Python expression:\n"
-            f'  context.set("{e.key}", expr="self.my_variable")'
-        )
-        runtime.event_manager.add(Error(content=error_msg))
-
-        # Record as an iteration (not error) since this is fixable feedback
-        session.record_iteration()
 
     async def _handle_execute_python(
         self,

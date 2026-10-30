@@ -138,7 +138,7 @@ class DecisionContextView(ContextView[Agent]):
                 yield Block(key=key, content=await evaluate_value(value, agent, call))
 ```
 
-`collect_skill_blocks` iterates active skills and evaluates their declared `context_block`, with `self` bound to the agent, without registering it in `self.context`. It skips disabled, explicitly declared, and protected keys before evaluation. The view chooses whether to include these blocks and where to place them. Other views may use skill state or documentation directly.
+`collect_skill_blocks` iterates active skills and materializes their declared `context_block = (key, Context(...))`, evaluating expressions with `self` bound to the skill, without registering it in `self.context`. `Context` validates the expression when the skill class is defined; `prefix=True` marks the block cacheable as for agent blocks. It skips disabled, explicitly declared, and protected keys before evaluation. The view chooses whether to include these blocks and where to place them. Other views may use skill state or documentation directly.
 
 Registry skills participate when active; directly attached public skills are active by default. Hidden and inactive skills contribute nothing in the default views.
 

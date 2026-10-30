@@ -13,6 +13,7 @@ from importlib.metadata import entry_points
 from pathlib import Path
 from typing import Any, Literal
 
+from nooa.context_blocks.models import Context
 from nooa.skill import Skill, TextSkill
 
 logger = logging.getLogger(__name__)
@@ -206,7 +207,7 @@ class SkillRegistry(Skill):
 
     __agentdoc_skip__ = True
     __nosnapshot__ = True
-    context_block = ("skills", "self.skills.status()")
+    context_block = ("skills", Context(expr="self.status()"))
 
     def __init__(self, agent: Any) -> None:
         self._agent = agent

@@ -69,7 +69,13 @@ class InventoryAgent(Agent):
 
 
 class DefaultInventoryPolicy(Skill):
-    context_block = ("inventory_policy", "self.inventory_policy_text()")
+    context_block = ("inventory_policy", Context(expr="self.text()"))
+
+    def text(self) -> str:
+        return (
+            "Policy SKILL_DENY_MISSING: can_fulfill is false when any requested "
+            "item has quantity zero; include each such item in missing."
+        )
 
 
 class DefaultInventoryAgent(Agent):
@@ -78,12 +84,6 @@ class DefaultInventoryAgent(Agent):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.context["inventory_state"] = Context(expr="self.inventory_state()")
-
-    def inventory_policy_text(self) -> str:
-        return (
-            "Policy SKILL_DENY_MISSING: can_fulfill is false when any requested "
-            "item has quantity zero; include each such item in missing."
-        )
 
     def inventory_state(self) -> dict[str, int]:
         return {"apple": 3, "orange": 0}
