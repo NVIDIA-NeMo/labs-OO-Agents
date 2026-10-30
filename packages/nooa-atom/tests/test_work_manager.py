@@ -884,3 +884,163 @@ async def test_work_that_swallows_cancel_ends_done_without_notice(setup):
     await job.cancel()
     assert job.status == "done" and await job == "finished anyway"
     assert channel.snapshot() == []  # cancelled by its owner: no event
+
+
+# ---- built-in work: after / every / tail ------------------------------------------
+
+
+async def _event(channel, timeout: float = 5.0):
+    return await asyncio.wait_for(channel.get(), timeout)
+
+
+async def test_after_delivers_done_after_the_delay(setup):
+    manager, channel = setup
+    loop = asyncio.get_running_loop()
+    start = loop.time()
+    job = manager.after(0.2, name="reading")
+    assert job.name == "reading" and job.status == "running"
+    assert "timer: 0.2 s" in job.summary
+    event = await _event(channel)
+    elapsed = loop.time() - start
+    assert (event.name, event.kind, event.value) == ("reading", "done", None)
+    assert 0.18 <= elapsed < 2.0
+    assert job.status == "done"
+
+
+async def test_after_can_be_awaited_and_cancelled(setup):
+    manager, channel = setup
+    assert await manager.after(0) is None
+    job = manager.after(30, name="later")
+    await job.cancel()
+    assert job.status == "cancelled"
+    await settle()
+    assert channel.qsize() == 0  # the owner cancelled it: no event
+
+
+async def test_timers_follow_the_launch_name_rules(setup):
+    manager, _ = setup
+    with pytest.raises(ValueError, match="not valid"):
+        manager.after(1, name="bad name")
+    manager.after(30, name="t")
+    with pytest.raises(ValueError, match="is running"):
+        manager.every(1, name="t")
+    with pytest.raises(ValueError, match="is running"):
+        manager.tail("x.log", name="t")
+    for bad in (-1, float("nan"), float("inf")):
+        with pytest.raises(ValueError):
+            manager.after(bad)
+    with pytest.raises(ValueError):
+        manager.every(0)
+    with pytest.raises(TypeError):
+        manager.after("120")
+    with pytest.raises(TypeError):
+        manager.every(True)
+
+
+async def test_every_ticks_until_cancelled(setup):
+    manager, channel = setup
+    job = manager.every(0.05, name="poll")
+    first = await _event(channel)
+    second = await _event(channel)
+    assert (first.kind, first.value, second.value) == ("item", 1, 2)
+    await job.cancel()
+    await settle()
+    assert job.status == "cancelled" and channel.qsize() == 0
+
+
+async def test_unread_ticks_merge_into_one(setup):
+    manager, channel = setup
+    job = manager.every(0.02, name="poll")
+    await asyncio.sleep(0.3)  # about 15 ticks, nobody reading
+    assert channel.qsize() == 1
+    event = await _event(channel)
+    assert event.value >= 5 and event.dropped == event.value - 1
+    await job.cancel()
+
+
+async def test_every_can_be_read_with_async_for(setup):
+    manager, _ = setup
+    job = manager.every(0.01)
+    seen = []
+    async for tick in job:
+        seen.append(tick)
+        if len(seen) == 3:
+            break
+    assert seen == [1, 2, 3]
+    await job.cancel()
+
+
+async def _lines(channel, n: int) -> list:
+    return [(await _event(channel)).value for _ in range(n)]
+
+
+async def test_tail_starts_at_the_end_and_holds_partial_lines(setup, tmp_path):
+    manager, channel = setup
+    log = tmp_path / "app.log"
+    log.write_bytes(b"old\n")
+    job = manager.tail(log, name="log")
+    assert "tail" in job.summary
+    with log.open("ab") as fh:
+        fh.write(b"one\r\ntwo\npar")
+    assert await _lines(channel, 2) == ["one", "two"]
+    await asyncio.sleep(0.4)
+    assert channel.qsize() == 0  # an unfinished line waits for its newline
+    with log.open("ab") as fh:
+        fh.write(b"tial \xc3")  # a character split across writes
+    await asyncio.sleep(0.4)
+    with log.open("ab") as fh:
+        fh.write(b"\xa9 \xff\n")
+    assert await _lines(channel, 1) == ["partial \u00e9 \ufffd"]
+    await job.cancel()
+    assert job.status == "cancelled"
+
+
+async def test_tail_follows_truncation_and_rotation(setup, tmp_path):
+    manager, channel = setup
+    log = tmp_path / "out.log"
+    log.write_text("a long first line\nanother old line\n")
+    job = manager.tail(str(log), name="log")
+    log.write_text("new\n")  # truncated and rewritten, as `cmd > out.log` does
+    assert await _lines(channel, 1) == ["new"]
+    with log.open("a") as fh:
+        fh.write("unfinished")
+    await asyncio.sleep(0.4)
+    log.rename(tmp_path / "out.log.1")  # rotated: a new file takes its name
+    log.write_text("fresh\n")
+    assert await _lines(channel, 2) == ["unfinished", "fresh"]
+    await job.cancel()
+
+
+async def test_tail_waits_for_a_missing_file_and_reads_it_from_the_start(setup, tmp_path):
+    manager, channel = setup
+    log = tmp_path / "later.log"
+    job = manager.tail(log, name="log")
+    await asyncio.sleep(0.1)
+    log.write_text("first\n")
+    assert await _lines(channel, 1) == ["first"]
+    await job.cancel()
+    with pytest.raises(IsADirectoryError):
+        manager.tail(tmp_path)
+
+
+async def test_tail_cuts_long_lines_into_pieces_without_empty_ones(setup, tmp_path, monkeypatch):
+    monkeypatch.setattr(work_manager, "_TAIL_PIECE", 8)
+    manager, channel = setup
+    log = tmp_path / "long.log"
+    log.write_text("")
+    job = manager.tail(log)
+    with log.open("ab") as fh:
+        fh.write(b"abcdefgh12345678\nend\n")
+    assert await _lines(channel, 3) == ["abcdefgh", "12345678", "end"]
+    await job.cancel()
+
+
+async def test_tail_relative_paths_use_the_process_directory(setup, tmp_path, monkeypatch):
+    manager, channel = setup
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "rel.log").write_text("")
+    job = manager.tail("rel.log")
+    with (tmp_path / "rel.log").open("a") as fh:
+        fh.write("x\n")
+    assert await _lines(channel, 1) == ["x"]
+    await job.cancel()

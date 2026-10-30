@@ -157,15 +157,22 @@ RESULT = (
 # the timeout. Measured system / total: handle 20,298 / 21,323, handle_batch
 # 20,417 / 21,442, handle_work 20,585 / 21,610, handle_orchestrate 20,720 / 21,745.
 # Limits: measured values plus about 2%, rounded up to the next 100.
+# Raised for self.jobs.after/every/tail (2026-10-30, friction PR: producer features
+# into self.jobs, user-approved): the WorkManager doc and the work examples show the
+# timer, ticks and file tail with the "a delay counts from now" clause. Measured
+# system / total: handle 21,553 / 22,578, handle_batch 21,672 / 22,697, handle_work
+# 21,840 / 22,865, handle_orchestrate 21,975 / 23,000.
+# Limits: measured values plus about 2%, rounded up to the next 100.
 LIMITS = {
-    (ATOM, "handle"): (20_700, 21_500),
-    (ATOM, "handle_batch"): (20_800, 21_700),
-    (ATOM, "handle_work"): (21_000, 21_900),
-    (ATOM, "handle_orchestrate"): (21_100, 22_000),
+    (ATOM, "handle"): (22_000, 23_100),
+    (ATOM, "handle_batch"): (22_200, 23_200),
+    (ATOM, "handle_work"): (22_300, 23_400),
+    (ATOM, "handle_orchestrate"): (22_500, 23_500),
 }
 # The bench guard's system-prompt ceiling; every agent stays under it.
-# Raised from 20,000 for the Done(message=...) guidance (2026-10-29, see above).
-BENCH_SYSTEM_LIMIT = 21_200
+# Raised from 20,000 for the Done(message=...) guidance (2026-10-29, see above),
+# then from 21,200 for self.jobs.after/every/tail (2026-10-30).
+BENCH_SYSTEM_LIMIT = 22_600
 
 # Separate CHAR/JSON-size guards, not token counts or a full provider-wire payload.
 # Effective restriction guidance grows default tool descriptions 2,069 -> 2,839;

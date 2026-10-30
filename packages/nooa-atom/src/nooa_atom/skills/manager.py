@@ -25,6 +25,19 @@ Kind = Literal["code", "text", "mcp"]
 _KIND_LABELS = {"code": "code", "text": "text", "mcp": "MCP"}
 _DESCRIPTION_WIDTH = 100
 
+# Timers, ticks and file tails are built into ``self.jobs``, not skills: a search
+# for them points there instead of answering "No skills match".
+_WORK_WORDS = frozenset(
+    "timer timers schedule scheduler scheduled cron remind reminder later after every "
+    "periodic periodically monitor watch tail follow delay sleep wait".split()
+)
+_BUILT_IN_WORK = (
+    "self.jobs (built in, no skill needed): self.jobs.after(seconds, name=...) timer "
+    "(a delay counts from now: subtract time you have already spent), "
+    "self.jobs.every(seconds, name=...) ticks, self.jobs.tail(path, name=...) new lines "
+    "of a file; watch a command: self.jobs.launch(sh.run(cmd), progress=Throttle(seconds=5))"
+)
+
 
 @dataclass(frozen=True)
 class SkillEntry:
@@ -95,6 +108,7 @@ class SkillManager(Skill):
         Names that match come first. Searching loads nothing.
         """
         words = [word for word in query.lower().split() if word]
+        hint = [_BUILT_IN_WORK] if any(w.strip(".,;:!?\"'()") in _WORK_WORDS for w in words) else []
         scored = []
         for entry in self.entries():
             name = entry.name.lower()
@@ -103,9 +117,9 @@ class SkillManager(Skill):
             if hits:
                 scored.append((-sum(word in name for word in words), -hits, entry.name, entry))
         if not scored:
-            return f"No skills match {query!r}."
+            return hint[0] if hint else f"No skills match {query!r}."
         scored.sort(key=lambda item: item[:3])
-        lines = [entry.line() for *_, entry in scored[:limit]]
+        lines = hint + [entry.line() for *_, entry in scored[:limit]]
         if len(scored) > limit:
             lines.append(f"... {len(scored) - limit} more; narrow the query or raise limit")
         return "\n".join(lines)
