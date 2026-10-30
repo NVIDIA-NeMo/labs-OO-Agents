@@ -245,11 +245,22 @@ def test_a_tool_with_an_output_schema_is_annotated_as_returning_a_dict():
         tools=[
             Tool(name="typed", inputSchema={"type": "object"}, outputSchema={"type": "object"}),
             Tool(name="plain", inputSchema={"type": "object"}),
+            # FastMCP's wrapper of ``-> str``: the call returns the text, not a dict.
+            Tool(
+                name="wrapped",
+                inputSchema={"type": "object"},
+                outputSchema={
+                    "type": "object",
+                    "properties": {"result": {"type": "string"}},
+                    "required": ["result"],
+                },
+            ),
         ]
     )
     tool = _create_tool_instance("srv", _OneResultClient(None), tools)
     assert type(tool).typed.__annotations__["return"] == dict[str, Any]
     assert type(tool).plain.__annotations__["return"] is Any
+    assert type(tool).wrapped.__annotations__["return"] is Any
     assert "MCPToolError is raised" in type(tool).__doc__
     assert "report failure in its result" in type(tool).__doc__
 
