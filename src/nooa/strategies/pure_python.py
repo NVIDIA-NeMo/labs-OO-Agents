@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Any, get_type_hints
 
 from pydantic import ValidationError as PydanticValidationError
 
-from nooa.context_blocks import ResultStatus
+from nooa.context_blocks import ContextAssemblyError, ResultStatus
 from nooa.decorators import strategy
 from nooa.errors import GenerationError, XMLFormatError
 from nooa.events import (
@@ -307,7 +307,7 @@ class PurePythonStrategy(CompositeStrategy):
                 generate_event_id: str | None = None
                 try:
                     code, generate_event_id = await self._generate_code(runtime, session)
-                except ReasoningReplayError as e:
+                except (ContextAssemblyError, ReasoningReplayError) as e:
                     turn_final = True
                     turn_exception = type(e).__name__
                     raise

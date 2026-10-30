@@ -23,7 +23,7 @@ from uuid import uuid4
 
 from nooa.agentdoc import FileBackedTruncatingStringIO, TruncatingStringIO
 from nooa.agentdoc.introspect import methods, variables
-from nooa.context_blocks import render_context
+from nooa.context_blocks import ContextAssemblyError, render_context
 from nooa.context_blocks.scoped import _scoped_blocks_var
 
 if TYPE_CHECKING:
@@ -3239,7 +3239,14 @@ class ActorRuntime:
         view = _current_context_view_var.get()
         if view is None:
             view = self._select_context_view(method, strategy=strategy)
-        return await collect_context_items(view, self.agent, call)
+        try:
+            return await collect_context_items(view, self.agent, call)
+        except ContextAssemblyError:
+            raise
+        except Exception as exc:
+            raise ContextAssemblyError(
+                f"{type(view).__name__}.assemble() failed: {type(exc).__name__}: {exc}"
+            ) from exc
 
     def _update_context_limits(self, llm_client: Any, params: dict[str, Any]):
         """Refresh budgets before dynamic context is rendered or a call is sent."""
@@ -3339,19 +3346,30 @@ class ActorRuntime:
             for block in blocks
         )
 
-        with hm.timer("time_render_context"):
-            result = render_context(
-                blocks,
-                block_formatter=self.agent.render_config.block_formatter,
-                provider_formatter=self.agent.render_config.provider_formatter,
-                context_limit=effective_context_limit,
-                context_format=tc.context_block_format,
-                event_format=tc.event_format,
-                event_format_resolver=self._event_format_for_event,
-                model_context_window=ctx_window,
-                reserved_output_tokens=reserved_output,
-                context_blocks_dropped=context_blocks_dropped,
-            )
+        try:
+            with hm.timer("time_render_context"):
+                result = render_context(
+                    blocks,
+                    block_formatter=self.agent.render_config.block_formatter,
+                    provider_formatter=self.agent.render_config.provider_formatter,
+                    context_limit=effective_context_limit,
+                    context_format=tc.context_block_format,
+                    event_format=tc.event_format,
+                    event_format_resolver=self._event_format_for_event,
+                    model_context_window=ctx_window,
+                    reserved_output_tokens=reserved_output,
+                    context_blocks_dropped=context_blocks_dropped,
+                )
+        except ContextAssemblyError:
+            raise
+        except Exception as exc:
+            from nooa.unifiedllm.errors import ReasoningReplayError
+
+            if isinstance(exc, ReasoningReplayError):
+                raise
+            raise ContextAssemblyError(
+                f"Rendering assembled context failed: {type(exc).__name__}: {exc}"
+            ) from exc
 
         # ``render_context`` is a framework-agnostic leaf and does not touch the
         # runtime's metrics. The runtime owns ``HarnessMetrics``, so it

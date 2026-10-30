@@ -26,7 +26,12 @@ from nooa._logging import enable_logging  # noqa: E402
 from nooa._visible import visible  # noqa: E402
 from nooa.agent import Agent  # noqa: E402
 from nooa.agentdoc import hidden, spec  # noqa: E402
-from nooa.context_blocks import Context, ContextWindowStats, DynamicContext  # noqa: E402
+from nooa.context_blocks import (  # noqa: E402
+    Context,
+    ContextAssemblyError,
+    ContextWindowStats,
+    DynamicContext,
+)
 from nooa.context_view import (  # noqa: E402
     Block,
     CacheBoundary,
@@ -163,6 +168,7 @@ __all__ = [
     # Types
     "ContextWindowStats",  # Re-exported from context_blocks
     "Context",  # Re-exported from context_blocks
+    "ContextAssemblyError",  # Re-exported from context_blocks
     "DynamicContext",  # Re-exported from context_blocks (deprecated, use Context)
     "Block",
     "CacheBoundary",

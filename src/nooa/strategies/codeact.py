@@ -42,7 +42,7 @@ from pydantic import ValidationError as PydanticValidationError
 from nooa.agentdoc._structured import format_type as _format_type
 from nooa.context_blocks import EventBase, ResultStatus, ToolCallEvent, ToolResult
 from nooa.context_blocks.events import CODEACT_INLINE_RETURN
-from nooa.context_blocks.exceptions import BlockSyntaxError
+from nooa.context_blocks.exceptions import ContextAssemblyError
 from nooa.decorators import strategy
 from nooa.errors import GenerationError, LoopDetectedError
 from nooa.events import (
@@ -974,9 +974,8 @@ Standard Python builtins and agent instance (`self`) are available."""
                 except ReasoningReplayError:
                     turn_state.is_final = True
                     raise
-                except BlockSyntaxError:
-                    # Context APIs reject invalid expressions when they are set, so
-                    # one reaching assembly is a declaration bug that retries repeat.
+                except ContextAssemblyError:
+                    # Assembly is deterministic local code; retrying repeats the failure.
                     turn_state.is_final = True
                     raise
 
