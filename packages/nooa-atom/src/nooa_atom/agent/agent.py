@@ -124,8 +124,9 @@ _LEGACY_TOOL_HINT: Annotated[str, hidden] = (
     "If `self` exposes delegation, inspect its documentation with `print(doc(self.delegate))`."
 )
 _TOOL_HINT: Annotated[str, hidden] = (
-    "Run commands with `await sh.run(cmd)` on a `Shell()`; background work and child "
-    "agents go on `self.jobs`, documented in the python_cell_tools block."
+    "Run commands with `sh = Shell()` then `r = await sh.run(cmd, timeout=600)`; "
+    "background work and child agents go on `self.jobs`, documented in the "
+    "python_cell_tools block."
 )
 
 
@@ -504,7 +505,7 @@ class AtomAgent(AtomAgentBase):
     item you work on, append findings and checks to its ``comments``, complete
     it), and ``self.v`` keeps
     durable facts across restarts (handle locals last this live session). Run a
-    command with ``r = await sh.run(cmd, timeout=600)`` on a ``Shell()``;
+    command with ``sh = Shell()`` then ``r = await sh.run(cmd, timeout=600)``;
     ``self.jobs`` is only for work that runs while you do other things (builds,
     servers, subagents; see the python_cell_tools block). Search inside the
     repository, never ``/``. Prefer ``rg`` to search for text and ``rg --files``
