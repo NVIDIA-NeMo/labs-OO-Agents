@@ -87,6 +87,50 @@ def test_explicit_unhide_is_honored():
     assert "secret: str" in doc(Unhidden)
 
 
+def test_inherited_explicit_unhide_is_honored():
+    class UnhiddenBase(Parent):
+        pass
+
+    class Inherits(UnhiddenBase):
+        pass
+
+    class Rehidden(UnhiddenBase):
+        pass
+
+    spec(UnhiddenBase, "secret", hidden=False)
+    spec(Rehidden, "secret", hidden=True)  # the most-derived declaration wins
+    assert "secret: str" in doc(UnhiddenBase)
+    assert "secret: str" in doc(Inherits) and "secret: str" in doc(Inherits())
+    assert "secret" not in doc(Rehidden)
+
+
+def test_inherited_explicit_unhide_on_plain_and_dataclass_accessors():
+    import dataclasses
+
+    class PlainBase:
+        @property
+        @hidden
+        def secret(self) -> str:
+            raise AssertionError("not evaluated")
+
+    @dataclasses.dataclass
+    class DataBase:
+        stored: int = 1
+
+        @property
+        @hidden
+        def secret(self) -> str:
+            raise AssertionError("not evaluated")
+
+    for base in (PlainBase, DataBase):
+        spec(base, "secret", hidden=False)
+        child = type(f"{base.__name__}Child", (base,), {})
+        if dataclasses.is_dataclass(base):
+            child = dataclasses.dataclass(child)
+        assert "secret: str" in doc(base)
+        assert "secret: str" in doc(child), base.__name__
+
+
 def test_mixin_accessor_after_base_model_is_documented():
     class Mixin:
         @property

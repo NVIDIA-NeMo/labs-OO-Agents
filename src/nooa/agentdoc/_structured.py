@@ -620,8 +620,7 @@ def _extract_pydantic_properties(obj: type, seen_names: set[str]) -> list[FieldI
     """Document accessors without making them serialized model fields."""
     from pydantic import BaseModel
 
-    from nooa.agentdoc._metadata import get_field_metadata
-    from nooa.agentdoc._visibility import is_hidden_field
+    from nooa.agentdoc._visibility import explicit_field_visibility, is_hidden_field
 
     fields = []
     # Derived definitions win, including non-property overrides. BaseModel's
@@ -635,7 +634,8 @@ def _extract_pydantic_properties(obj: type, seen_names: set[str]) -> list[FieldI
                 continue
             if not isinstance(value, (property, functools.cached_property)):
                 continue
-            explicitly_unhidden = get_field_metadata(obj, name).get("hidden") is False
+            # An unhide declared on a base class holds for its subclasses too.
+            explicitly_unhidden = explicit_field_visibility(obj, name) is False
             getter = value.fget if isinstance(value, property) else value.func
             if not explicitly_unhidden and (
                 is_hidden_field(obj, name)
@@ -688,8 +688,7 @@ def _extract_dataclass_fields(obj: type) -> list[FieldInfo]:
         )
 
     # Also extract @property and @cached_property descriptors (same as _extract_plain_class_fields step 4)
-    from nooa.agentdoc._metadata import get_field_metadata
-    from nooa.agentdoc._visibility import is_hidden_field
+    from nooa.agentdoc._visibility import explicit_field_visibility, is_hidden_field
 
     seen_names = {f.name for f in fields}
     for klass in reversed(obj.__mro__):
@@ -702,7 +701,7 @@ def _extract_dataclass_fields(obj: type) -> list[FieldInfo]:
                 continue
             if name in seen_names:
                 continue
-            explicitly_unhidden = get_field_metadata(obj, name).get("hidden") is False
+            explicitly_unhidden = explicit_field_visibility(obj, name) is False
             if not explicitly_unhidden:
                 if is_hidden_field(obj, name):
                     continue
@@ -1115,8 +1114,7 @@ def _extract_plain_class_fields(obj: type) -> list[FieldInfo]:
             seen_names.add(field.name)
 
     # 4. Extract @property and @cached_property descriptors across the MRO
-    from nooa.agentdoc._metadata import get_field_metadata
-    from nooa.agentdoc._visibility import is_hidden_field
+    from nooa.agentdoc._visibility import explicit_field_visibility, is_hidden_field
 
     for klass in reversed(obj.__mro__):
         if klass is object:
@@ -1130,7 +1128,8 @@ def _extract_plain_class_fields(obj: type) -> list[FieldInfo]:
                 continue
             # spec(hidden=False) explicitly unhides — overrides @hidden markers.
             # spec(hidden=True) and annotation-based hiding are checked via is_hidden_field.
-            explicitly_unhidden = get_field_metadata(obj, name).get("hidden") is False
+            # An unhide declared on a base class holds for its subclasses too.
+            explicitly_unhidden = explicit_field_visibility(obj, name) is False
             if not explicitly_unhidden:
                 if is_hidden_field(obj, name):
                     continue
