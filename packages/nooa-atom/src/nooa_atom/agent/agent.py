@@ -990,6 +990,11 @@ class AtomAgent(AtomAgentBase):
 for _name in ("shell", "delegates", "system_messages", "cwd"):
     spec(AtomAgent, _name, hidden=True)
 spec(AtomAgent, "jobs", description="Run and track work: see WorkManager")
+spec(
+    AtomAgent,
+    "libs",
+    description="Reusable libraries, saved in .nooa/libs; later sessions get each as self.<name>",
+)
 # Host-facing members of the work types stay out of the model's docs.
 for _cls, _members in (
     (WorkManager, ("keep", "max_items", "max_requests")),
