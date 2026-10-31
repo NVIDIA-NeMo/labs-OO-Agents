@@ -1,0 +1,346 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+"""TextStream, SpillTarget and merge: bounded memory, UTF-8 cuts, spill files, deltas."""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+import pytest
+
+from nooa.snapshot import Spill, SpillTarget, Text, TextStream, merge, render_output
+
+
+def _stream(unit: str = "bytes", head: int = 4, tail: int = 4, **kwargs) -> TextStream:
+    return TextStream(unit=unit, head=head, tail=tail, **kwargs)  # type: ignore[arg-type]
+
+
+# --- chars -----------------------------------------------------------------------
+
+
+def test_chars_complete_until_head_plus_tail() -> None:
+    stream = _stream("chars")
+    stream.write("abcd")
+    stream.write("efgh")
+
+    assert stream.snapshot() == Text("abcdefgh", "", 8, "chars", True, None)
+
+
+def test_chars_keep_head_and_rolling_tail() -> None:
+    stream = _stream("chars")
+    for piece in ("abc", "defg", "hij", "klmnop"):
+        stream.write(piece)
+
+    text = stream.close()
+
+    assert text == Text("abcd", "mnop", 16, "chars", False, "max_length", omitted=8)
+    assert render_output(text) == "abcd\n[... 8 chars omitted; full output not kept]\nmnop"
+
+
+def test_memory_stays_bounded_with_huge_writes() -> None:
+    stream = _stream("chars", head=10, tail=10)
+    for _ in range(100):
+        stream.write("x" * 100_000)
+
+    assert stream._head_len == 10 and stream._tail_len == 10
+    assert sum(len(chunk) for chunk in stream._tail_chars) == 10
+    assert stream.snapshot().length == 10_000_000
+
+
+def test_tail_only_stream() -> None:
+    stream = _stream("chars", head=0, tail=3)
+    stream.write("abcdef")
+
+    text = stream.snapshot()
+    assert (text.head, text.tail, text.omitted) == ("", "def", 3)
+    assert render_output(text) == "[... 3 chars omitted; full output not kept]\ndef"
+
+
+def test_chars_stream_decodes_bytes_incrementally() -> None:
+    stream = _stream("chars", head=10, tail=10)
+    data = "é😀".encode()
+    for byte in data:
+        stream.write(bytes([byte]))
+
+    assert stream.close() == Text("é😀", "", 2, "chars", True, None)
+
+
+# --- bytes and UTF-8 cut points ------------------------------------------------------
+
+
+@pytest.mark.parametrize(("char", "size"), [("é", 2), ("€", 3), ("😀", 4)])
+def test_bytes_head_and_tail_cut_on_code_points(char: str, size: int) -> None:
+    head_limit = size + 1  # one byte into the second code point
+    stream = TextStream(unit="bytes", head=head_limit, tail=head_limit)
+    stream.write((char * 10).encode())
+
+    text = stream.close()
+
+    assert text.head == char  # the split code point moves to the omitted part
+    assert text.tail == char
+    assert text.length == 10 * size
+    assert text.omitted == 10 * size - 2 * size
+    assert text.replaced == 0
+
+
+def test_four_byte_code_point_written_one_byte_at_a_time() -> None:
+    stream = TextStream(unit="bytes", head=2, tail=2)
+    for byte in "😀😀".encode():
+        stream.write(bytes([byte]))
+
+    text = stream.close()
+    # Neither 2-byte window can hold a whole 4-byte code point.
+    assert (text.head, text.tail, text.omitted, text.replaced) == ("", "", 8, 0)
+
+
+def test_invalid_bytes_count_replacements() -> None:
+    stream = TextStream(unit="bytes", head=100, tail=100)
+    stream.write(b"ok\xff\xfeend")
+    stream.write("\ufffd".encode())  # a genuine replacement character is not counted
+
+    text = stream.close()
+    assert text.head == "ok\ufffd\ufffdend\ufffd"
+    assert text.replaced == 2
+
+
+def test_bytes_stream_render_output_uses_bytes() -> None:
+    stream = TextStream(unit="bytes", head=2, tail=2)
+    stream.write(b"x" * 1_234_567)
+
+    assert render_output(stream.close()) == (
+        "xx\n[... 1,234,563 bytes omitted; full output not kept]\nxx"
+    )
+
+
+def test_write_after_close_is_refused() -> None:
+    stream = _stream()
+    stream.close()
+    with pytest.raises(ValueError):
+        stream.write(b"x")
+
+
+def test_invalid_arguments() -> None:
+    with pytest.raises(ValueError):
+        TextStream(unit="lines", head=1, tail=1)  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        TextStream(unit="chars", head=-1, tail=1)
+
+
+# --- spilling ----------------------------------------------------------------------
+
+
+def test_spill_file_holds_everything(tmp_path: Path) -> None:
+    path = tmp_path / "out.log"
+    stream = TextStream(unit="bytes", head=3, tail=3, spill=SpillTarget(path=str(path)))
+    stream.write(b"0123456789")
+    running = stream.snapshot()
+    stream.write(b"abcdef")
+
+    text = stream.close()
+
+    assert path.read_bytes() == b"0123456789abcdef"
+    assert running.full == Spill(str(path), 10, 10)
+    assert text.full == Spill(str(path), 16, 16)
+    assert text.reason == "max_length"
+    assert render_output(text) == f"012\n[... 10 bytes omitted; full output: {path}]\ndef"
+
+
+def test_spill_max_bytes_cuts_the_file(tmp_path: Path) -> None:
+    path = tmp_path / "out.log"
+    stream = TextStream(
+        unit="bytes", head=2, tail=2, spill=SpillTarget(path=str(path), max_bytes=5)
+    )
+    stream.write(b"0123456789" * 1000)
+
+    text = stream.close()
+
+    assert path.read_bytes() == b"01234"
+    assert text.full == Spill(str(path), 5, 10_000)
+    assert text.full.cut
+    assert text.reason == "file_limit"
+    assert render_output(text) == (
+        f"01\n[... 9,996 bytes omitted; {path} holds the first 5 of 10,000 bytes]\n89"
+    )
+
+
+def test_chars_stream_spills_utf8(tmp_path: Path) -> None:
+    path = tmp_path / "out.txt"
+    stream = TextStream(unit="chars", head=1, tail=1, spill=SpillTarget(path=str(path)))
+    stream.write("é€😀")
+
+    text = stream.close()
+
+    assert path.read_text(encoding="utf-8") == "é€😀"
+    assert text.full == Spill(str(path), 9, 9)
+    assert text.length == 3 and text.omitted == 1
+
+
+def test_uncut_stream_deletes_its_spill_file(tmp_path: Path) -> None:
+    path = tmp_path / "out.log"
+    stream = TextStream(unit="bytes", head=10, tail=10, spill=SpillTarget(path=str(path)))
+    stream.write(b"small")
+
+    text = stream.close()
+
+    assert not path.exists()
+    assert text.full is None and text.complete
+
+
+def test_always_keeps_the_spill_file(tmp_path: Path) -> None:
+    path = tmp_path / "out.log"
+    stream = TextStream(
+        unit="bytes", head=10, tail=10, spill=SpillTarget(path=str(path), always=True)
+    )
+    stream.write(b"small")
+
+    text = stream.close()
+
+    assert path.read_bytes() == b"small"
+    assert text.full == Spill(str(path), 5, 5)
+    assert render_output(text) == "small"
+
+
+def test_temp_spill_file_by_default() -> None:
+    stream = TextStream(unit="bytes", head=1, tail=1, spill=SpillTarget())
+    stream.write(b"abcdef")
+
+    text = stream.close()
+
+    assert text.full is not None
+    try:
+        assert Path(text.full.path).read_bytes() == b"abcdef"
+    finally:
+        os.unlink(text.full.path)
+
+
+def test_spill_open_failure_falls_back_to_memory(tmp_path: Path) -> None:
+    missing = tmp_path / "no" / "such" / "dir" / "out.log"
+    stream = TextStream(unit="bytes", head=2, tail=2, spill=SpillTarget(path=str(missing)))
+    stream.write(b"abcdefgh")
+
+    text = stream.close()
+
+    assert text.full is None
+    assert text.reason == "not_kept"
+    assert render_output(text) == "ab\n[... 4 bytes omitted; full output not kept]\ngh"
+
+
+def test_spill_write_failure_falls_back_to_memory(tmp_path: Path) -> None:
+    path = tmp_path / "out.log"
+    stream = TextStream(unit="bytes", head=2, tail=2, spill=SpillTarget(path=str(path)))
+
+    class Broken:
+        def write(self, data: bytes) -> int:
+            raise OSError("disk full")
+
+        def close(self) -> None:
+            pass
+
+    stream._file = Broken()  # type: ignore[assignment]
+    stream.write(b"abcdefgh")
+
+    text = stream.close()
+    assert text.full is None and text.reason == "not_kept"
+    assert not path.exists()  # the partial file is removed
+    assert (text.head, text.tail, text.length) == ("ab", "gh", 8)
+
+
+# --- since / merge -----------------------------------------------------------------
+
+
+def test_since_returns_deltas_with_correct_lengths() -> None:
+    stream = TextStream(unit="chars", head=4, tail=4)
+    stream.write("abc")
+    first, mark = stream.since()
+    stream.write("defgh")
+    second, mark = stream.since(mark)
+    stream.write("x" * 100 + "yz")
+    third, mark = stream.since(mark)
+
+    assert first == Text("abc", "", 3, "chars", True, None)
+    assert second == Text("defgh", "", 5, "chars", True, None)
+    assert third.length == 102 and third.tail == "xxyz" and third.head == ""
+    assert third.omitted == 98
+    assert mark == 110
+    nothing, same = stream.since(mark)
+    assert nothing == Text("", "", 0, "chars", True, None) and same == mark
+
+
+def test_since_stops_before_an_incomplete_code_point() -> None:
+    stream = TextStream(unit="bytes", head=16, tail=16)
+    data = "a😀".encode()
+    stream.write(data[:3])  # "a" and half of the emoji
+    first, mark = stream.since()
+    stream.write(data[3:])
+    second, mark = stream.since(mark)
+
+    assert (first.head, first.length, mark) == ("a😀"[:1], 1, 5)
+    assert (second.head, second.length, second.replaced) == ("😀", 4, 0)
+
+
+def test_merge_keeps_length_and_bounds() -> None:
+    a = Text("abcdef", "", 6, "chars", True, None)
+    b = Text("gh", "yz", 40, "chars", False, "max_length", omitted=36)
+
+    merged = merge(a, b, head=3, tail=3)
+
+    assert merged.length == 46
+    assert (merged.head, merged.tail) == ("abc", "yz")  # b's own gap stops the tail
+    assert merged.omitted == 46 - 3 - 2
+    assert not merged.complete
+
+
+def test_merge_of_small_complete_deltas_is_complete() -> None:
+    a = Text("ab", "", 2, "chars", True, None)
+    b = Text("cd", "", 2, "chars", True, None)
+
+    assert merge(a, b, head=2, tail=2) == Text("abcd", "", 4, "chars", True, None)
+
+
+def test_merge_cuts_complete_deltas_that_are_too_long() -> None:
+    a = Text("abcde", "", 5, "chars", True, None)
+    b = Text("fghij", "", 5, "chars", True, None)
+
+    merged = merge(a, b, head=2, tail=3)
+
+    assert (merged.head, merged.tail, merged.length, merged.omitted) == ("ab", "hij", 10, 5)
+    assert render_output(merged) == "ab\n[... 5 chars omitted; full output not kept]\nhij"
+
+
+def test_merge_of_since_deltas_matches_the_stream_length() -> None:
+    stream = TextStream(unit="bytes", head=8, tail=8)
+    merged: Text | None = None
+    mark = 0
+    for chunk in (b"abc", "é€".encode() * 20, b"xyz" * 50, "😀".encode()):
+        stream.write(chunk)
+        delta, mark = stream.since(mark)
+        merged = delta if merged is None else merge(merged, delta, head=8, tail=8)
+
+    assert merged is not None
+    assert merged.length == stream.snapshot().length
+    assert len(merged.head.encode()) <= 8 and len(merged.tail.encode()) <= 8
+    assert merged.tail.endswith("😀")
+    assert merged.omitted == merged.length - len(merged.head.encode()) - len(merged.tail.encode())
+
+
+def test_merge_bytes_cuts_on_code_points() -> None:
+    a = Text("😀😀", "", 8, "bytes", True, None)
+    b = Text("😀😀", "", 8, "bytes", True, None)
+
+    merged = merge(a, b, head=5, tail=7)
+
+    assert (merged.head, merged.tail) == ("😀", "😀")
+    assert merged.omitted == 8
+
+
+def test_merge_rejects_mixed_units() -> None:
+    with pytest.raises(ValueError):
+        merge(Text("", "", 0, "chars", True, None), Text("", "", 0, "bytes", True, None), 1, 1)
+
+
+def test_context_manager_closes() -> None:
+    with TextStream(unit="chars", head=1, tail=1) as stream:
+        stream.write("abc")
+    with pytest.raises(ValueError):
+        stream.write("d")

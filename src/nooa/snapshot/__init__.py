@@ -33,9 +33,11 @@ from nooa.snapshot._model import (
     Unavailable,
 )
 from nooa.snapshot._render import preview_attributes, render_json, render_output, render_python
+from nooa.snapshot._stream import DEFAULT_SPILL_BYTES, SpillTarget, TextStream, merge
 
 __all__ = [
     "DEFAULT_LIMITS",
+    "DEFAULT_SPILL_BYTES",
     "REASONS",
     "Key",
     "Limits",
@@ -49,10 +51,13 @@ __all__ = [
     "Sequence",
     "Snapshot",
     "Spill",
+    "SpillTarget",
     "Text",
+    "TextStream",
     "Unavailable",
     "capture",
     "capture_fields",
+    "merge",
     "preview_attributes",
     "render_json",
     "render_output",
