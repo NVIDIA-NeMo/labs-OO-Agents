@@ -187,6 +187,8 @@ class HarnessMetrics(BaseModel):
     # ── Media Recovery (from unifiedllm via callback) ──
     # A provider rejected an attachment; retried with a note in its place (kind)
     media_rejected_retries: list[str] = Field(default_factory=list)
+    media_image_limit_collapses: list[int] = Field(default_factory=list)  # limit M per recovery
+    media_image_limit_events_collapsed: int = 0
 
     # ── Code Execution ──
     exec_python_total: int = 0
@@ -421,6 +423,12 @@ class HarnessMetrics(BaseModel):
             self.llm_queue_wait.record(float(wait_s))
 
     # Media recovery (dispatched from unifiedllm callback)
+    def media_image_limit_collapsed(self, limit: int, events: int) -> None:
+        """The request's images exceeded the provider limit ``limit``; ``events`` were collapsed."""
+        if len(self.media_image_limit_collapses) < _MAX_LIST_ITEMS:
+            self.media_image_limit_collapses.append(int(limit))
+        self.media_image_limit_events_collapsed += int(events)
+
     def record_media_rejected_retry(self, kind: Any) -> None:
         """The provider rejected an attachment; the request was retried without it."""
         self._append(self.media_rejected_retries, str(kind or "unknown"))
@@ -1074,6 +1082,25 @@ _SPAN_SCHEMA: tuple[SchemaEntry, ...] = (
         lambda m: m.llm_queue_wait,
     ),
     # Media Recovery
+    SchemaEntry(
+        "harness.media_image_limit_collapsed.count",
+        "Image-limit recoveries (oldest images collapsed)",
+        "LLM",
+        lambda m: len(m.media_image_limit_collapses),
+    ),
+    SchemaEntry(
+        "harness.media_image_limit_collapsed.limits",
+        "Provider image limits hit",
+        "LLM",
+        lambda m: m.media_image_limit_collapses,
+        True,
+    ),
+    SchemaEntry(
+        "harness.media_image_limit_collapsed.events",
+        "Image events collapsed for the image limit",
+        "LLM",
+        lambda m: m.media_image_limit_events_collapsed,
+    ),
     SchemaEntry(
         "harness.media_rejected_retry.count",
         "Rejected attachments retried without them",
