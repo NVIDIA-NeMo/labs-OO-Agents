@@ -82,6 +82,17 @@ class TestRecording:
         m.text_to_synthetic()
         assert m.text_to_synthetic_count == 2
 
+    def test_tool_call_skipped_and_text_only_tool_markup(self):
+        m = HarnessMetrics()
+        m.tool_call_skipped(2)
+        m.tool_call_skipped()
+        m.text_only_tool_markup()
+        assert m.tool_call_skipped_count == 3
+        assert m.text_only_tool_markup_count == 1
+        attrs = m.to_span_attributes()
+        assert attrs["harness.tool_call_skipped.count"] == 3
+        assert attrs["harness.text_only_tool_markup.count"] == 1
+
     def test_empty_response(self):
         m = HarnessMetrics()
         m.empty_response()
