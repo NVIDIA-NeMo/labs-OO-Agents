@@ -265,10 +265,13 @@ def _safe_dict(owner: Any, raw: Any, state: _State) -> dict[str, Any] | None:
     cached = state.namespaces.get(marker)
     if cached is not None and cached[0] is owner:
         return cached[1]
+    # The pairs are taken in one C-level step (no key is hashed or compared)
+    # before the loop: a live namespace such as ``sys.modules`` may change
+    # while it runs (an import in another thread). ``dict.copy`` is avoided.
     if type(raw) is MappingProxyType:
-        items: Iterable[tuple[Any, Any]] = raw.items()  # a class namespace: a native dict
+        items: Iterable[tuple[Any, Any]] = list(raw.items())  # a class namespace: a native dict
     elif type(raw) is dict:
-        items = dict.items(raw)
+        items = list(dict.items(raw))
     else:
         return None
     safe: dict[str, Any] | None = {}

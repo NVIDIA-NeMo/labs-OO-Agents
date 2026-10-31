@@ -791,6 +791,38 @@ def test_class_namespace_foreign_key_is_never_compared() -> None:
     assert isinstance(snapshot, Opaque)  # an unreadable namespace fails closed
 
 
+def test_safe_dict_survives_a_namespace_changing_during_the_key_check() -> None:
+    from nooa.snapshot import _capture
+
+    namespace = {f"k{index}": index for index in range(8)}
+    code = _capture._safe_dict.__code__
+    mutations: list[int] = []
+
+    def local(frame: Any, event: str, arg: Any) -> Any:
+        # Like an import in another thread: the dict grows while the key loop
+        # runs (``key`` is bound once the loop has started).
+        if event == "line" and "key" in frame.f_locals and len(mutations) < 4:
+            namespace[f"added{len(mutations)}"] = 0
+            mutations.append(1)
+        return local
+
+    def tracer(frame: Any, event: str, arg: Any) -> Any:
+        return local if event == "call" and frame.f_code is code else None
+
+    previous = sys.gettrace()
+    sys.settrace(tracer)
+    try:
+        checked = _capture._safe_dict(
+            namespace, namespace, _capture._State(_capture.DEFAULT_LIMITS)
+        )
+    finally:
+        sys.settrace(previous)
+
+    assert len(mutations) == 4  # the dict did change while ``_safe_dict`` ran
+    assert checked is not None
+    assert {f"k{index}" for index in range(8)} <= set(checked)
+
+
 def test_module_namespace_foreign_key_is_never_compared(monkeypatch) -> None:
     import types
 
