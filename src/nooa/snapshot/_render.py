@@ -260,11 +260,41 @@ class OutputRenderer(PythonRenderer):
         return _output_text(text)
 
 
-class _RenderPython:
-    """``render_python(snapshot)``, with ``render_python.register(kind)`` for per-kind hooks."""
+class _TextRender:
+    """A text renderer entry point: ``render(snapshot)`` plus its own hook registry.
 
-    def __init__(self) -> None:
-        self._hooks = _Hooks("render_python")
+    ``render_python`` and ``render_output`` are instances of the two tiny
+    subclasses below; they differ only in the renderer class a hook gets (and
+    their docstrings). Each has an independent registry. Hooks format nodes
+    that ``capture`` already bounded: there is no output-length cap here (see
+    *Extension contract* in ``docs/snapshot-model.md``).
+    """
+
+    _renderer: type[PythonRenderer] = PythonRenderer
+
+    def __init__(self, name: str) -> None:
+        self._hooks = _Hooks(name)
+
+    def __call__(self, snapshot: Snapshot) -> str:
+        return self._renderer(self._hooks).render(snapshot)
+
+    def register(self, kind: str, function: TextHook | None = None) -> Any:
+        """Register ``hook(node: Object, r) -> str`` for objects of ``kind``.
+
+        ``r`` is this renderer's ``PythonRenderer`` / ``OutputRenderer``. Use as
+        ``@render_python.register("numpy.ndarray")`` or ``register(kind, hook)``;
+        registering again replaces it. A hook that raises or returns a non-``str``
+        falls back to the generic notation.
+        """
+        return self._hooks.register(kind, function)
+
+    def unregister(self, kind: str) -> None:
+        """Remove the hook for ``kind`` (no-op when absent)."""
+        self._hooks.unregister(kind)
+
+
+class _RenderPython(_TextRender):
+    """``render_python(snapshot)``, with ``render_python.register(kind)`` for per-kind hooks."""
 
     def __call__(self, snapshot: Snapshot) -> str:
         """``snapshot`` in agentdoc's ``pformat`` / CodeAct prefill notation, on one line.
@@ -276,26 +306,13 @@ class _RenderPython:
         whose ``kind`` has a hook renders through it; a hook that raises or
         returns a non-``str`` falls back to the generic notation.
         """
-        return PythonRenderer(self._hooks).render(snapshot)
-
-    def register(self, kind: str, function: TextHook | None = None) -> Any:
-        """Register ``hook(node: Object, r: PythonRenderer) -> str`` for objects of ``kind``.
-
-        Use as ``@render_python.register("numpy.ndarray")`` or
-        ``render_python.register(kind, hook)``; registering again replaces it.
-        """
-        return self._hooks.register(kind, function)
-
-    def unregister(self, kind: str) -> None:
-        """Remove the hook for ``kind`` (no-op when absent)."""
-        self._hooks.unregister(kind)
+        return super().__call__(snapshot)
 
 
-class _RenderOutput:
+class _RenderOutput(_TextRender):
     """``render_output(snapshot)``, with ``render_output.register(kind)`` for per-kind hooks."""
 
-    def __init__(self) -> None:
-        self._hooks = _Hooks("render_output")
+    _renderer = OutputRenderer
 
     def __call__(self, snapshot: Snapshot) -> str:
         """``snapshot`` as the model sees command output.
@@ -311,19 +328,11 @@ class _RenderOutput:
         the output notation. An ``Object`` whose ``kind`` has a hook renders
         through it; a hook that raises falls back to the generic notation.
         """
-        return OutputRenderer(self._hooks).render(snapshot)
-
-    def register(self, kind: str, function: TextHook | None = None) -> Any:
-        """Register ``hook(node: Object, r: OutputRenderer) -> str`` for objects of ``kind``."""
-        return self._hooks.register(kind, function)
-
-    def unregister(self, kind: str) -> None:
-        """Remove the hook for ``kind`` (no-op when absent)."""
-        self._hooks.unregister(kind)
+        return super().__call__(snapshot)
 
 
-render_python = _RenderPython()
-render_output = _RenderOutput()
+render_python = _RenderPython("render_python")
+render_output = _RenderOutput("render_output")
 
 
 # --- JSON notation (trace previews) ---------------------------------------------------
