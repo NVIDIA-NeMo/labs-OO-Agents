@@ -207,6 +207,7 @@ class HarnessMetrics(BaseModel):
     name_error_hints: list[str] = Field(default_factory=list)
     mcp_tool_name_hints: list[str] = Field(default_factory=list)
     module_not_found_hints: list[str] = Field(default_factory=list)
+    mcp_result_errors: list[str] = Field(default_factory=list)
     return_result_tool_aliases: int = 0  # provider return_result calls taken as the cell builtin
     infinite_loops_detected: int = 0
     return_types_redefined: list[str] = Field(default_factory=list)
@@ -519,6 +520,13 @@ class HarnessMetrics(BaseModel):
         """A provider-tool ``return_result(value=...)`` call was taken as the cell builtin."""
         del python_tool
         self.return_result_tool_aliases += 1
+
+    def mcp_result_error(self, call: str) -> None:
+        """An MCP tool returned a structured result with an ``error`` field (not isError).
+
+        ``call`` is ``<server>.<tool>``; the tool docs say to check for this.
+        """
+        self._append(self.mcp_result_errors, call)
 
     def module_not_found_hint(self, module: str) -> None:
         """A cell's ModuleNotFoundError got the pointer to the task's python3 behind a Shell."""
@@ -1246,6 +1254,19 @@ _SPAN_SCHEMA: tuple[SchemaEntry, ...] = (
         "Hinted MCP tools as <server>.<tool>",
         "Code Validation",
         lambda m: m.mcp_tool_name_hints,
+        True,
+    ),
+    SchemaEntry(
+        "harness.mcp_result_error.count",
+        "MCP results reporting failure in an 'error' field",
+        "Code Validation",
+        lambda m: len(m.mcp_result_errors),
+    ),
+    SchemaEntry(
+        "harness.mcp_result_error.calls",
+        "MCP tools whose result had an 'error' field, as <server>.<tool>",
+        "Code Validation",
+        lambda m: m.mcp_result_errors,
         True,
     ),
     SchemaEntry(

@@ -181,6 +181,28 @@ class _OneResultClient:
 
 
 @pytest.mark.asyncio
+async def test_a_structured_error_field_is_returned_and_counted():
+    """Failure in the result (not isError): returned as is, counted for harness metrics."""
+    from mcp.types import CallToolResult, ListToolsResult, TextContent, Tool
+
+    from nooa.mcp.tool import _create_tool_instance
+    from nooa.runtime.harness_metrics import harness_metrics_session
+
+    payload = {"error": "order not found"}
+    result = CallToolResult(
+        content=[TextContent(type="text", text='{"error": "order not found"}')],
+        structuredContent=payload,
+    )
+    tools = ListToolsResult(
+        tools=[Tool(name="lookup", inputSchema={"type": "object"}, outputSchema={"type": "object"})]
+    )
+    tool = _create_tool_instance("hcb", _OneResultClient(result), tools)
+    with harness_metrics_session() as metrics:
+        assert await tool.lookup() == payload
+    assert metrics.to_span_attributes()["harness.mcp_result_error.calls"] == ["hcb.lookup"]
+
+
+@pytest.mark.asyncio
 async def test_an_error_result_raises_mcp_tool_error_with_the_servers_message():
     from nooa.mcp import MCPToolError
 

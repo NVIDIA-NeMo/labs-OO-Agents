@@ -125,6 +125,13 @@ def _value_to_ast_node(value: Any) -> ast.expr:
     return ast.parse(repr(value), mode="eval").body
 
 
+# Repeated on each tool method: models read a tool's doc, not its server class's (HCB F01).
+_RESULT_FAILURE_LINE = (
+    "A tool can also report failure in its result (e.g. an 'error' field): "
+    "check the value before going on."
+)
+
+
 def _create_method_from_schema(
     tool_name: str,
     method_name: str,
@@ -286,6 +293,8 @@ def _create_method_from_schema(
 
     docstring = f"""
 {description}
+
+{_RESULT_FAILURE_LINE}
 
 Args:
     {"\n".join(param_docs)}
@@ -693,6 +702,10 @@ class MCPTool:
 
         if isinstance(structured, dict) and not _wraps_text(structured, result):
             # The tool's typed result; its text content is a serialized copy.
+            if structured.get("error"):  # failure in the result, not isError
+                from nooa.runtime.harness_metrics import get_harness_metrics
+
+                get_harness_metrics().mcp_result_error(f"{self._server_name}.{tool_name}")
             return structured
 
         if hasattr(result, "content") and result.content:
