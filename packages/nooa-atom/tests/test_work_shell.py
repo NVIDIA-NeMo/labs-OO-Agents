@@ -631,6 +631,34 @@ async def test_nonzero_statuses_are_reported_as_is(tmp_path):
         assert (await sh.run("echo back")).stdout == "back\n"
 
 
+async def test_a_restarted_shell_whose_kept_cwd_is_gone_starts_where_it_started(tmp_path):
+    """TB 13-0: bash died in a removed clone; the new bash must not start there."""
+    from nooa.runtime.harness_metrics import harness_metrics_session
+
+    gone = tmp_path / "clone"
+    gone.mkdir()
+    with harness_metrics_session() as metrics:
+        async with Shell(tmp_path) as sh:
+            await sh.run(f"cd {gone}")
+            r = await sh.run(f"rm -rf {gone}; exit 3")
+            assert r.returncode == 3 and "bash ended during this command" in r.stderr
+            r = await sh.run("pwd")
+            assert (r.returncode, r.stdout) == (0, f"{tmp_path.resolve()}\n")
+            assert (
+                f"[the shell's kept cwd {gone.resolve()} no longer exists: the new bash "
+                f"started in {tmp_path.resolve()}]"
+            ) in r.stderr
+            assert r.cwd == str(tmp_path.resolve()) and sh.current_dir == r.cwd
+            r = await sh.run("pwd")  # once: the next command just runs
+            assert r.stderr == ""
+            # A live bash in a removed directory is left as it is (no restart).
+            await sh.run(f"mkdir {gone} && cd {gone} && rmdir {gone}")
+            assert "no longer exists" not in (await sh.run("true")).stderr
+    assert metrics.shell_cwd_fallbacks == [f"{gone.resolve()} -> {tmp_path.resolve()}"]
+    attrs = metrics.to_span_attributes()
+    assert attrs["harness.shell_cwd_fallback.count"] == 1
+
+
 async def test_nounset_and_pipefail(tmp_path):
     async with Shell(tmp_path) as sh:
         await sh.run("set -u -o pipefail")

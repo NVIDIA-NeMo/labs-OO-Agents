@@ -723,6 +723,9 @@ class Shell:
             statusfile = directory / f"{stem}.status"
             fifos.append(statusfile)  # removed with the FIFOs
             wrapped = self._wrap(command, pidfile, statusfile, source, fifos[0], fifos[1])
+            # A dead bash restarts in its kept cwd (BashSession resets on the next
+            # command): if that directory is gone, start where this Shell started.
+            cwd_note = "" if self._bash and self._bash_alive() else self._fallback_cwd(session)
             # Earlier background jobs of this bash: an interrupt never signals them.
             before = _descendants(self._bash[0]) if self._bash and self._bash_alive() else {}
             # Our own deadline (the session's is a backstop): a timeout stops the
@@ -774,6 +777,8 @@ class Shell:
                 notes = self._check_bash(pidfile, code, timed_out, ended)
             else:  # restarted at the deadline: this result says so
                 notes = restart_notes
+            if cwd_note:
+                notes.insert(0, cwd_note)
             if timed_out:
                 notes.append(_timeout_note(timeout))
             result = _result(code, timed_out, out, err, str(session.cwd))
@@ -915,6 +920,26 @@ class Shell:
             )
         return notes
 
+    def _fallback_cwd(self, session: BashSession) -> str:
+        """Before bash (re)starts: move a kept cwd that no longer exists; the note, or "".
+
+        The fallback is this Shell's starting directory, else the workspace,
+        else the process's cwd (the first that exists); counted in harness metrics.
+        """
+        kept = str(session.cwd)
+        if os.path.isdir(kept):
+            return ""
+        candidates = (self._directory(), default_cwd.get(), os.getcwd())
+        fallback = next((c for c in candidates if c and os.path.isdir(c)), None)
+        if fallback is None:
+            return ""
+        session._cwd = Path(fallback).resolve()  # where BashSession starts bash next
+        self._confirmed_cwd = str(session.cwd)
+        get_harness_metrics().shell_cwd_fallback(f"{kept} -> {session.cwd}")
+        return (
+            f"[the shell's kept cwd {kept} no longer exists: the new bash started in {session.cwd}]"
+        )
+
     def _check_open(self, generation: int) -> None:
         if self._generation != generation:
             raise _closed_error(_CLOSED_DURING)
@@ -953,6 +978,7 @@ class Shell:
         await session.close()
         if self._generation != generation:  # closed while that close ran
             return None
+        cwd_note = self._fallback_cwd(session)
         pid = await self._start_session(session, generation, _CLOSED_DURING)  # keeps the cwd
         self._bash, self._lost = (pid, _start_time(pid)), True
         self._reset_tracked()
@@ -960,6 +986,8 @@ class Shell:
             "[the shell restarted: an interrupted command did not stop; "
             "cwd kept, environment and shell variables lost]"
         )
+        if cwd_note:
+            self._note += "\n" + cwd_note
         return True
 
     def _running_bash(self) -> int | None:
