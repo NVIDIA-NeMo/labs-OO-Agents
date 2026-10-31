@@ -207,6 +207,7 @@ class HarnessMetrics(BaseModel):
     name_error_hints: list[str] = Field(default_factory=list)
     mcp_tool_name_hints: list[str] = Field(default_factory=list)
     module_not_found_hints: list[str] = Field(default_factory=list)
+    return_result_tool_aliases: int = 0  # provider return_result calls taken as the cell builtin
     infinite_loops_detected: int = 0
     return_types_redefined: list[str] = Field(default_factory=list)
 
@@ -513,6 +514,11 @@ class HarnessMetrics(BaseModel):
         ``call`` is ``<server>.<tool>``.
         """
         self._append(self.mcp_tool_name_hints, call)
+
+    def return_result_tool_alias(self, python_tool: str = "") -> None:
+        """A provider-tool ``return_result(value=...)`` call was taken as the cell builtin."""
+        del python_tool
+        self.return_result_tool_aliases += 1
 
     def module_not_found_hint(self, module: str) -> None:
         """A cell's ModuleNotFoundError got the pointer to the task's python3 behind a Shell."""
@@ -1241,6 +1247,12 @@ _SPAN_SCHEMA: tuple[SchemaEntry, ...] = (
         "Code Validation",
         lambda m: m.mcp_tool_name_hints,
         True,
+    ),
+    SchemaEntry(
+        "harness.return_result_tool_alias.count",
+        "Provider return_result calls taken as the cell builtin",
+        "Code Validation",
+        lambda m: m.return_result_tool_aliases,
     ),
     SchemaEntry(
         "harness.module_not_found_hint.count",

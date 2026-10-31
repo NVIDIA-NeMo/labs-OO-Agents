@@ -1402,6 +1402,20 @@ Standard Python builtins and agent instance (`self`) are available."""
             "agent's APIs."
         )
 
+    @staticmethod
+    def _return_result_alias(args: dict[str, Any]) -> dict[str, Any] | None:
+        """The ``{"result": value}`` of a provider ``return_result`` call, if it has one value.
+
+        Only for strategies whose sole tool is the Python cell: one ``value``
+        (the builtin's parameter name) or ``result`` argument. Anything else
+        (no argument, several fields) still gets the unknown-tool feedback.
+        """
+        if len(args) == 1:
+            [(key, value)] = args.items()
+            if key in ("value", "result"):
+                return {"result": value}
+        return None
+
     def _unknown_tool_feedback(
         self, tool_name: str, args: dict[str, Any], runtime: RuntimeServices
     ) -> str:
@@ -1771,8 +1785,15 @@ Standard Python builtins and agent instance (`self`) are available."""
                 # Task completed via inline return_result()
                 return _ToolCallsResult(completed=True, final_value=result[1])
 
-        elif tool_call.name == "return_result" and self._supports_return_result():
+        elif tool_call.name == "return_result" and (
+            self._supports_return_result() or self._return_result_alias(args) is not None
+        ):
             # Return the final result
+            if not self._supports_return_result():
+                # Some models (Nemotron, GLM) call the cell builtin as a provider
+                # tool: take its value as return_result(value) inside a cell would.
+                args = self._return_result_alias(args) or {}
+                get_harness_metrics().return_result_tool_alias(self._python_tool_name())
             try:
                 validated, error_msg = self._handle_return_result(
                     runtime, args, return_type, session, call, via_tool=True
