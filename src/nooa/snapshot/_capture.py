@@ -57,7 +57,7 @@ from nooa.snapshot._model import (
     Unavailable,
 )
 
-__all__ = ["DEFAULT_LIMITS", "Limits", "Out", "capture", "capture_fields"]
+__all__ = ["DEFAULT_LIMITS", "Deferred", "Limits", "Out", "capture", "capture_fields"]
 
 _JSON_KWARGS: dict[str, Any] = {
     "ensure_ascii": True,
@@ -913,43 +913,197 @@ def _object_fields(
     path: str,
     state: _State,
     kind: str | None = None,
-    reuse: Callable[[Any], _Built | None] | None = None,
-    reuse_cap: int = 0,
+    resolve: Callable[[Any], _Built | _Deferred | None] | None = None,
+    reserves: list[tuple[int, int]] | None = None,
 ) -> _Built:
     """Emit the selected (name, value) fields of an object; ``None`` entries fail closed.
 
-    ``reuse(child)``: an already built node for ``child`` (an ``Out`` passing
-    its own nodes as field values). Its size is credited back to the box, up
-    to ``reuse_cap``, since it was charged when it was built.
+    ``resolve(child)``: an already built node for ``child`` (an ``Out``
+    passing its own nodes as field values), or a ``_Deferred`` part to build
+    in the field's slot. A prebuilt node larger than its slot is shrunk to
+    fit it.
+
+    ``reserves[i]``: (chars, nodes) held back while field ``i`` is built so
+    that every later field still fits its minimal fallback.
     """
     box = _Container(max_size)
     fields: list[tuple[str, Snapshot]] = []
-    for entry in selected:
+    for index, entry in enumerate(selected):
         if entry is None:
             return _closed(type_name, module)
         name, child = entry
-        prebuilt = reuse(child) if reuse is not None else None
-        if prebuilt is not None:
-            box.max_size = max(box.max_size, min(reuse_cap, box.max_size + prebuilt.size))
+        resolved = resolve(child) if resolve is not None else None
+        prebuilt = resolved if type(resolved) is _Built else None
+        deferred = resolved if type(resolved) is _Deferred else None
         overhead = _key_overhead(name, box)
         if overhead is None:
             box.stop("max_length")
             break
-        available = box.room(overhead)
-        if available < 1:
+        held_chars, held_nodes = (
+            reserves[index] if reserves is not None and index < len(reserves) else (0, 0)
+        )
+        room = box.room(overhead)
+        if room < 1:
             box.stop("max_length")
             break
-        if prebuilt is None:
-            built = _build(child, available, depth + 1, pointer_child(path, name), state)
-        elif prebuilt.size <= available:
-            built = prebuilt
-        else:
-            built = _Built(Unavailable("max_length"), fallback_json("", available)[1])
+        # Never hold back so much that this field loses its own minimal value.
+        available = max(
+            min(room, _min_size(child if deferred is None else deferred)), room - held_chars
+        )
+        held_nodes = min(held_nodes, max(0, state.nodes_left - 1))
+        state.nodes_left -= held_nodes
+        try:
+            if deferred is not None:
+                built = deferred.build(available)
+            elif prebuilt is None:
+                built = _build(child, available, depth + 1, pointer_child(path, name), state)
+            else:
+                built = _shrink(prebuilt, available)
+        finally:
+            state.nodes_left += held_nodes
         fields.append((name, built.node))
         box.commit(overhead, built.size)
     complete = box.reason is None
     node = Object(type_name, tuple(fields), complete, box.reason, module, kind)
     return _Built(node, box.size)
+
+
+# --- fitting a built node into a smaller slot ---------------------------------------
+
+
+def _node_size(node: Snapshot, max_size: int) -> int:
+    """The size the builder charges for ``node`` (an upper bound of its JSON encoding)."""
+    node_type = type(node)
+    if node_type is Text:
+        text = cast(Text, node)
+        return _string_cost(text.head, text.tail)
+    if node_type is Scalar:
+        scalar = cast(Scalar, node).value
+        if type(scalar) is bytes:
+            return len(dumps(decode_counted(scalar)[0]))
+        return len(dumps(scalar))
+    if node_type is Sequence:
+        sequence = cast(Sequence, node)
+        children = sequence.items + sequence.tail
+        return 2 + sum(_node_size(c, max_size) for c in children) + 2 * max(0, len(children) - 1)
+    if node_type is Mapping or node_type is Object:
+        if node_type is Mapping:
+            mapping = cast(Mapping, node)
+            entries: tuple[tuple[Any, Snapshot], ...] = mapping.items + mapping.tail
+        else:
+            entries = cast(Object, node).fields
+        size = 2 + 2 * max(0, len(entries) - 1)
+        for key, child in entries:
+            json_key = _key_json(key)
+            size += len(dumps(json_key if json_key is not None else "")) + 2
+            size += _node_size(child, max_size)
+        return size
+    if node_type is Opaque:
+        opaque = cast(Opaque, node)
+        fallback_type = opaque.type_name if opaque.module == "builtins" else ""
+        return opaque_json(opaque.type_name, fallback_type, max(max_size, 1))[1]
+    if node_type is Unavailable:
+        return fallback_json(cast(Unavailable, node).type_name, max(max_size, 1))[1]
+    return 2  # Ref
+
+
+def _cut_reason(node: Any) -> Reason:
+    return node.reason if not node.complete and node.reason is not None else "max_length"
+
+
+def _shrink(built: _Built, max_size: int) -> _Built:
+    """``built`` fitted to ``max_size``: trailing items dropped, text cut, marked incomplete.
+
+    A node that cannot be made smaller (a scalar, a too-small slot) becomes
+    its type-oriented fallback. Fitting nodes are returned unchanged.
+    """
+    if built.size <= max_size:
+        return built
+    node = built.node
+    node_type = type(node)
+    if max_size < 2:
+        names = {Text: "str", Sequence: "list", Mapping: "dict", Object: "dict", Ref: "dict"}
+        name = names.get(node_type, "")
+        if node_type is Unavailable or node_type is Opaque:
+            name = cast(Any, node).type_name
+        elif node_type is Scalar:
+            name = _builtin_name(cast(Scalar, node).value)
+        return _Built(Unavailable("max_length", name), fallback_json(name, max_size)[1])
+    if node_type is Text:
+        text = cast(Text, node)
+        low, high = 0, len(text.head)
+        while low < high:
+            midpoint = (low + high + 1) // 2
+            if _string_cost(text.head[:midpoint], "") <= max_size:
+                low = midpoint
+            else:
+                high = midpoint - 1
+        head = text.head[:low]
+        kept_units = len(head) if text.unit == "chars" else len(head.encode("utf-8"))
+        omitted = max(0, text.length - kept_units)
+        cut = dataclasses.replace(
+            text, head=head, tail="", complete=False, reason=_cut_reason(text), omitted=omitted
+        )
+        return _Built(cut, _string_cost(head, ""))
+    if node_type is Sequence or node_type is Mapping or node_type is Object:
+        if node_type is Object:
+            children: tuple[Any, ...] = cast(Object, node).fields
+        else:
+            # The tail goes first: kept tail items must stay the last ones.
+            children = cast(Any, node).items
+        size = 2
+        kept: list[Any] = []
+        for child in children:
+            separator = 2 if kept else 0
+            if node_type is Sequence:
+                overhead, child_node = 0, child
+            else:
+                key, child_node = child
+                json_key = _key_json(key)
+                overhead = len(dumps(json_key if json_key is not None else "")) + 2
+            available = max_size - size - separator - overhead
+            if available < 1:
+                break
+            fitted = _shrink(_Built(child_node, _node_size(child_node, available)), available)
+            kept.append(fitted.node if node_type is Sequence else (child[0], fitted.node))
+            size += separator + overhead + fitted.size
+            if fitted.node is not child_node:
+                break  # this child was cut: the rest does not fit
+        reason = _cut_reason(node)
+        if node_type is Object:
+            shrunk: Snapshot = dataclasses.replace(
+                cast(Object, node), fields=tuple(kept), complete=False, reason=reason
+            )
+        else:
+            shrunk = dataclasses.replace(
+                cast(Any, node), items=tuple(kept), tail=(), complete=False, reason=reason
+            )
+        return _Built(shrunk, size)
+    if node_type is Opaque:
+        opaque = cast(Opaque, node)
+        fallback_type = opaque.type_name if opaque.module == "builtins" else ""
+        return _Built(opaque, opaque_json(opaque.type_name, fallback_type, max_size)[1])
+    if node_type is Unavailable:
+        return _Built(node, fallback_json(cast(Unavailable, node).type_name, max_size)[1])
+    if node_type is Scalar:
+        name = _builtin_name(cast(Scalar, node).value)
+        return _Built(Unavailable("max_length", name), fallback_json(name, max_size)[1])
+    return _Built(node, 2)  # Ref: always 2
+
+
+def _min_size(child: Any) -> int:
+    """The size of the minimal type-oriented fallback a field value can always keep."""
+    if type(child) is _Deferred:
+        return child.min_size
+    child_type = type(child)
+    if child_type in (Text, Sequence, Mapping, Object, Ref, Opaque):
+        return 2
+    if child_type is Scalar:
+        return len(dumps(fallback_candidates(_builtin_name(child.value))[0]))
+    if child_type is Unavailable:
+        return len(dumps(fallback_candidates(child.type_name)[0]))
+    name = _builtin_name(child)
+    return len(dumps(fallback_candidates(name)[0])) if name else 2
 
 
 _STOP = object()
@@ -1139,19 +1293,56 @@ def _build_dataclass(
 CaptureFunction = Callable[[Any, "Out"], Snapshot]
 
 
+_OBJECT_MIN_NODES = 16
+"""Nodes held back for a later field that captures a non-built-in value."""
+
+
+class _Deferred:
+    """A part an ``Out`` builds only when its slot is known (see ``Out``)."""
+
+    __slots__ = ("_build", "_out", "built", "min_nodes", "min_size")
+
+    def __init__(
+        self, out: Out, build: Callable[[int], _Built], min_size: int, min_nodes: int = 1
+    ) -> None:
+        self._out = out
+        self._build = build
+        self.min_size = min_size
+        self.min_nodes = min_nodes
+        self.built: _Built | None = None
+
+    def build(self, max_size: int) -> _Built:
+        """Build once, within ``max_size``; a second use reuses (and fits) the first node."""
+        if self.built is None:
+            self.built = self._build(max_size)
+            self._out._built.append(self.built)  # charged by the parent that uses it
+            return self.built
+        return _shrink(self.built, max_size)
+
+
+Deferred = _Deferred
+"""What ``out.capture``, ``out.sequence`` and ``out.mapping`` return: a part built later."""
+
+
 class Out:
     """What a registered capture function builds its snapshot with.
 
-    Every method charges the capture's shared budget and returns a node; the
-    function returns one node built by its own ``Out``. ``capture(child)``
-    delegates a value; ``sequence``, ``mapping`` and ``object`` pull children
-    lazily from an iterable and stop at the budget without consuming the rest.
+    ``capture(child)``, ``sequence(items)`` and ``mapping(items)`` return
+    deferred parts: nothing is built (and no item is pulled) until the part
+    takes its slot, as a field value of ``object(...)`` or as the function's
+    return value. ``object`` builds its fields in order: its own wrapper and
+    the minimal fallback of every later field are reserved first, so a greedy
+    field (a long ``sequence``) gets what is left instead of starving its
+    siblings. ``object`` builds at once and returns an ``Object``; used as a
+    field of another ``object`` it is shrunk to fit its slot (trailing fields
+    dropped, marked incomplete). The function returns one part or node built
+    by its own ``Out``; it always fits the value's slot of the shared budget
+    (node work is charged to the shared ``max_nodes`` as it happens).
     """
 
     def __init__(self, value: Any, max_size: int, depth: int, path: str, state: _State) -> None:
         self._value = value
         self._max_size = max_size
-        self._remaining = max_size
         self._depth = depth
         self._path = path
         self._state = state
@@ -1159,13 +1350,16 @@ class Out:
         self._index = 0
 
     def _keep(self, built: _Built) -> Snapshot:
-        self._remaining = max(0, self._remaining - built.size)
         self._built.append(built)
         return built.node
 
-    def _size_of(self, node: Any) -> int | None:
-        built = self._prebuilt(node)
-        return None if built is None else built.size
+    def _finish(self, result: Any) -> _Built | None:
+        """The function's result as a build record of this ``out`` (None: not ours)."""
+        if type(result) is _Deferred:
+            if result._out is not self:
+                return None
+            return result.build(self._max_size)
+        return self._prebuilt(result)
 
     def _prebuilt(self, node: Any) -> _Built | None:
         """The build record of ``node`` when this ``out`` built it (identity only)."""
@@ -1174,30 +1368,48 @@ class Out:
                 return built
         return None
 
-    def capture(self, child: Any, key: str | int | None = None) -> Snapshot:
-        """Capture ``child`` as this value's snapshot (or a part of it), at the same depth."""
+    def _resolve(self, child: Any) -> _Built | _Deferred | None:
+        if type(child) is _Deferred:
+            return child if child._out is self else None
+        return self._prebuilt(child)
+
+    def capture(self, child: Any, key: str | int | None = None) -> Deferred:
+        """``child`` captured as this value's snapshot (or a part of it), at the same depth."""
         if key is None:
             key = self._index
             self._index += 1
         path = pointer_child(self._path, str(key))
-        if self._remaining < 1:
-            return self._keep(_Built(Unavailable("max_length", _builtin_name(child)), 1))
-        return self._keep(_build(child, self._remaining, self._depth, path, self._state))
+
+        def build(max_size: int) -> _Built:
+            if max_size < 1:
+                return _Built(Unavailable("max_length", _builtin_name(child)), 1)
+            return _build(child, max_size, self._depth, path, self._state)
+
+        # A non-built-in value needs node work for its MRO and a few fields.
+        min_nodes = 1 if _builtin_name(child) else _OBJECT_MIN_NODES
+        return _Deferred(self, build, _min_size(child), min_nodes)
+
+    def _empty(self, node_type: Any, type_name: str, length: int | None, max_size: int) -> _Built:
+        reason: Reason = "max_depth" if self._depth >= self._state.max_depth else "max_length"
+        if max_size < 2:
+            name = "list" if node_type is Sequence else "dict"
+            return _Built(Unavailable(reason, name), 1)
+        return _Built(node_type(type_name, length, (), False, reason), 2)
 
     def sequence(
         self, items: Iterable[Any], *, length: int | None = None, type_name: str = "list"
-    ) -> Sequence:
-        """A sequence of ``items`` (pulled one at a time), cut like a list."""
+    ) -> Deferred:
+        """A sequence of ``items`` (pulled one at a time when built), cut like a list."""
         state = self._state
-        if self._depth >= state.max_depth or self._remaining < 2:
-            reason: Reason = "max_depth" if self._depth >= state.max_depth else "max_length"
-            return cast(
-                Sequence, self._keep(_Built(Sequence(type_name, length, (), False, reason), 2))
+
+        def build(max_size: int) -> _Built:
+            if self._depth >= state.max_depth or max_size < 2:
+                return self._empty(Sequence, type_name, length, max_size)
+            return _sequence_from(
+                items, length, type_name, max_size, self._depth, self._path, state
             )
-        built = _sequence_from(
-            items, length, type_name, self._remaining, self._depth, self._path, state
-        )
-        return cast(Sequence, self._keep(built))
+
+        return _Deferred(self, build, 2)
 
     def mapping(
         self,
@@ -1205,19 +1417,19 @@ class Out:
         *,
         length: int | None = None,
         type_name: str = "dict",
-    ) -> Mapping:
+    ) -> Deferred:
         """A mapping of ``(key, value)`` pairs; keys must be exact built-in scalars."""
         state = self._state
-        if self._depth >= state.max_depth or self._remaining < 2:
-            reason: Reason = "max_depth" if self._depth >= state.max_depth else "max_length"
-            return cast(
-                Mapping, self._keep(_Built(Mapping(type_name, length, (), False, reason), 2))
+
+        def build(max_size: int) -> _Built:
+            if self._depth >= state.max_depth or max_size < 2:
+                return self._empty(Mapping, type_name, length, max_size)
+            head_n = state.limits.max_items
+            return _mapping_from(
+                items, length, type_name, max_size, self._depth, self._path, state, head_n
             )
-        head_n = state.limits.max_items
-        built = _mapping_from(
-            items, length, type_name, self._remaining, self._depth, self._path, state, head_n
-        )
-        return cast(Mapping, self._keep(built))
+
+        return _Deferred(self, build, 2)
 
     def object(
         self,
@@ -1228,27 +1440,34 @@ class Out:
     ) -> Object:
         """An object with these ``(name, value)`` fields (names must be ``str``).
 
-        ``fields`` may also be a plain ``dict`` (its items, in order); a value
-        may be a node this ``out`` already built. ``kind`` is the rendering
-        key stored on the node (``Object.kind``) for per-kind render hooks.
+        ``fields`` may also be a plain ``dict`` (its items, in order). A value
+        may be a part or node this ``out`` built (``out.capture(...)``, ...):
+        parts are built in field order, each leaving room for the minimal
+        fallback of every later field (for a ``dict``, ``list`` or ``tuple``;
+        other iterables are pulled lazily, without reservation). ``kind`` is
+        the rendering key stored on the node (``Object.kind``) for per-kind
+        render hooks.
         """
         if kind is not None and type(kind) is not str:
             raise TypeError(f"Object kind must be a str, got {type(kind).__name__}")
-        pairs: Iterable[tuple[str, Any]]
+        pairs: Iterable[Any]
+        known: list[Any] | None = None
         if isinstance(fields, dict):
             # A dict subclass's own ``items`` is not trusted: read it as a plain dict.
-            pairs = list(dict.items(cast(dict[str, Any], fields)))
-        else:
-            pairs = fields
+            known = list(dict.items(cast(dict[str, Any], fields)))
+        elif type(fields) is list or type(fields) is tuple:
+            known = list(cast(Any, fields))
+        pairs = known if known is not None else fields
         state = self._state
         name = (
             type_name if type_name is not None else _bounded_type_name(self._value, _MAX_TYPE_NAME)
         )
         module = _module_name(type(self._value))
-        if self._depth >= state.max_depth or self._remaining < 2:
+        if self._depth >= state.max_depth or self._max_size < 2:
             reason: Reason = "max_depth" if self._depth >= state.max_depth else "max_length"
             empty = Object(name, (), False, reason, module, kind)
             return cast(Object, self._keep(_Built(empty, 2)))
+        reserves = _field_reserves(known) if known is not None else None
         stopped: list[Reason] = []
 
         def selected() -> typing.Iterator[tuple[str, Any] | None]:
@@ -1266,19 +1485,39 @@ class Out:
             name,
             module,
             selected(),
-            self._remaining,
+            self._max_size,
             self._depth,
             self._path,
             state,
             kind,
-            reuse=self._prebuilt,
-            reuse_cap=self._max_size,
+            resolve=self._resolve,
+            reserves=reserves,
         )
         return cast(Object, self._keep(_with_stop(built, stopped)))
 
     def opaque(self) -> Opaque:
         """This value as ``Opaque`` (what an unregistered type becomes)."""
-        return cast(Opaque, self._keep(_opaque(self._value, max(self._remaining, 1))))
+        return cast(Opaque, self._keep(_opaque(self._value, max(self._max_size, 1))))
+
+
+def _field_reserves(pairs: list[tuple[Any, Any]]) -> list[tuple[int, int]]:
+    """Per field: the (chars, nodes) every later field needs for its minimal fallback."""
+    needs: list[tuple[int, int]] = []
+    for entry in pairs:
+        if type(entry) is not tuple or len(entry) != 2 or type(entry[0]) is not str:
+            break  # the object fails closed or stops here
+        name, child = entry
+        # separator + "name": + minimal value; one node for the field, some for its value.
+        nodes = 1 + (child.min_nodes if type(child) is _Deferred else 1)
+        needs.append((2 + len(dumps(name)) + 2 + _min_size(child), nodes))
+    reserves: list[tuple[int, int]] = []
+    chars = nodes = 0
+    for need_chars, need_nodes in reversed(needs):
+        reserves.append((chars, nodes))
+        chars += need_chars
+        nodes += need_nodes
+    reserves.reverse()
+    return reserves
 
 
 _TYPE_MODULE = type.__dict__["__module__"]
@@ -1365,19 +1604,17 @@ def _build_registered(
     if ref is not None:
         return _Built(ref, 2)
     out = Out(value, max_size, depth, path, state)
-    node: Any = None
-    size: int | None = None
+    result: _Built | None = None
     try:
-        node = function(value, out)
-        size = out._size_of(node)
+        result = out._finish(function(value, out))
     except Exception:
-        size = None
+        result = None
     finally:
         state.active.pop(id(value), None)
-    if node is None or size is None or size > max_size:
+    if result is None or result.size > max_size:
         failed = Unavailable("error", _bounded_type_name(value, _MAX_TYPE_NAME))
         return _Built(failed, fallback_json("", max_size)[1])
-    return _Built(node, size)
+    return result
 
 
 # --- the walk --------------------------------------------------------------------

@@ -514,3 +514,197 @@ def test_ndarray_like_failing_hook_falls_back(lazy, hooks) -> None:
 
     snapshot = capture(_FakeNdarray([1.0], (1,)))
     assert render_python(snapshot) == "ndarray(shape=(1,), dtype='float64', sample=[1.0])"
+
+
+class _LazyNdarray(_FakeNdarray):
+    """A huge ndarray-like value whose ``flat`` is generated, never materialized."""
+
+    def __init__(self, size: int) -> None:
+        super().__init__([], (size // 1000, 1000))
+        self._size = size
+
+    @property
+    def flat(self) -> Iterator[float]:
+        for value in range(self._size):
+            self.pulled += 1
+            yield float(value)
+
+
+_LazyNdarray.__module__ = "fakenumpy_7c1e"
+_LazyNdarray.__qualname__ = "ndarray"
+
+
+@pytest.mark.parametrize("limits", [Limits(max_chars=400), Limits(max_chars=5_000), Limits()])
+@pytest.mark.parametrize("size", [10**6, 10**9])
+def test_ndarray_like_large_keeps_shape_and_dtype(lazy, hooks, limits, size) -> None:
+    lazy("fakenumpy_7c1e", "ndarray", capture_ndarray)
+    hooks(render_python, "numpy.ndarray", render_ndarray)
+    array = _LazyNdarray(size)
+
+    snapshot = capture(array, limits)
+
+    assert isinstance(snapshot, Object) and snapshot.kind == "numpy.ndarray"
+    assert [name for name, _node in snapshot.fields] == ["shape", "dtype", "sample"]
+    shape, dtype, sample = (snapshot.field(name) for name in ("shape", "dtype", "sample"))
+    assert shape == Sequence("tuple", 2, (Scalar(size // 1000), Scalar(1000)), True, None)
+    assert dtype == Text("float64", "", 7, "chars", True, None)
+    assert isinstance(sample, Sequence) and not sample.complete
+    expected = "max_nodes" if limits.max_chars == 50_000 else "max_length"
+    assert sample.reason == expected
+    assert 0 < len(sample.items) and array.pulled <= limits.max_nodes
+    rendered = render_python(snapshot)
+    assert rendered.startswith("array(") and f"shape=({size // 1000}, 1000)" in rendered
+    text = render_json(snapshot, max_chars=limits.max_chars)
+    assert len(text) <= limits.max_chars
+    assert json.loads(text)["shape"] == [size // 1000, 1000]
+
+
+# --- sibling reservation, shrinking and nesting ----------------------------------------
+
+
+def test_greedy_first_field_does_not_starve_later_fields(lazy) -> None:
+    def build(value: Any, out: Out) -> Snapshot:
+        return out.object(
+            {
+                "sample": out.sequence(range(10**9)),
+                "name": out.capture("abc"),
+                "count": out.capture(7),
+                "plain": [1, 2],
+            }
+        )
+
+    lazy(FAKE_MODULE, "Greedy", build)
+    for limits in (Limits(max_chars=120), Limits(max_chars=2_000), Limits(max_nodes=50)):
+        snapshot = capture(_named("Greedy")(), limits)
+        assert isinstance(snapshot, Object)
+        assert [name for name, _node in snapshot.fields] == ["sample", "name", "count", "plain"]
+        sample = snapshot.field("sample")
+        assert isinstance(sample, Sequence) and not sample.complete and sample.items
+        # Later fields keep at least their type-oriented fallback.
+        assert isinstance(snapshot.field("name"), Text)
+        assert isinstance(snapshot.field("count"), (Scalar, Unavailable))
+        assert isinstance(snapshot.field("plain"), Sequence)
+        text = render_json(snapshot, max_chars=limits.max_chars)
+        assert len(text) <= limits.max_chars
+        assert set(json.loads(text)) == {"sample", "name", "count", "plain"}
+
+
+def test_fields_that_fit_are_kept_whole_in_order(lazy) -> None:
+    def build(value: Any, out: Out) -> Snapshot:
+        return out.object(
+            [("a", out.capture("x" * 20)), ("rest", out.sequence(iter(range(10**6))))]
+        )
+
+    lazy(FAKE_MODULE, "Ordered", build)
+    snapshot = capture(_named("Ordered")(), Limits(max_chars=100))
+    assert isinstance(snapshot, Object)
+    assert snapshot.field("a") == Text("x" * 20, "", 20, "chars", True, None)
+    rest = snapshot.field("rest")
+    assert isinstance(rest, Sequence) and rest.reason == "max_length" and rest.items
+    assert len(render_json(snapshot, max_chars=100)) <= 100
+
+
+def test_prebuilt_node_is_shrunk_not_unavailable(lazy) -> None:
+    def build(value: Any, out: Out) -> Snapshot:
+        inner = out.object({"a": "z" * 400, "b": "never"})  # takes the whole budget
+        return out.object({"first": out.capture("y" * 100), "inner": inner})
+
+    lazy(FAKE_MODULE, "Shrink", build)
+    snapshot = capture(_named("Shrink")(), Limits(max_chars=300))
+    assert isinstance(snapshot, Object)
+    assert snapshot.field("first") == Text("y" * 100, "", 100, "chars", True, None)
+    inner = snapshot.field("inner")
+    assert isinstance(inner, Object) and not inner.complete and inner.reason == "max_length"
+    assert [name for name, _node in inner.fields] == ["a"]
+    cut = inner.field("a")
+    assert isinstance(cut, Text) and not cut.complete and cut.head.startswith("zzz")
+    assert cut.omitted == 400 - len(cut.head)
+    text = render_json(snapshot, max_chars=300)
+    assert len(text) <= 300 and json.loads(text)["inner"]["a"].startswith("zzz")
+
+
+def test_part_used_twice_is_shrunk_the_second_time(lazy) -> None:
+    def build(value: Any, out: Out) -> Snapshot:
+        big = out.capture("z" * 500)
+        return out.object({"big": big, "again": big})
+
+    lazy(FAKE_MODULE, "Twice", build)
+    snapshot = capture(_named("Twice")(), Limits(max_chars=300))
+    assert isinstance(snapshot, Object)
+    big, again = snapshot.field("big"), snapshot.field("again")
+    assert isinstance(big, Text) and isinstance(again, Text)
+    assert not big.complete and big.reason == "max_length"
+    assert again.head == "" and not again.complete  # only its reserved fallback was left
+    assert len(render_json(snapshot, max_chars=300)) <= 300
+
+
+def test_shrunk_sequence_drops_its_tail_first(lazy) -> None:
+    def build(value: Any, out: Out) -> Snapshot:
+        numbers = out.object({"n": list(range(200))})
+        return out.object({"label": out.capture("w" * 40), "numbers": numbers})
+
+    lazy(FAKE_MODULE, "Tail", build)
+    snapshot = capture(_named("Tail")(), Limits(max_chars=200, max_items=20, tail_share=0.5))
+    assert isinstance(snapshot, Object)
+    numbers = snapshot.field("numbers")
+    assert isinstance(numbers, Object)
+    n = numbers.field("n")
+    assert isinstance(n, Sequence) and not n.complete and n.length == 200
+    assert n.items[0] == Scalar(0)
+    assert len(render_json(snapshot, max_chars=200)) <= 200
+
+
+def test_nested_registered_objects_keep_their_fields(lazy) -> None:
+    lazy("fakenumpy_7c1e", "ndarray", capture_ndarray)
+
+    def build(value: Any, out: Out) -> Snapshot:
+        return out.object(
+            {
+                "values": out.capture(_LazyNdarray(10**9)),
+                "index": out.capture(_LazyNdarray(10**6)),
+                "name": out.capture("frame"),
+            },
+            kind="fake.frame",
+        )
+
+    lazy(FAKE_MODULE, "Frame", build)
+    for limits in (Limits(max_chars=400), Limits(max_chars=5_000), Limits()):
+        snapshot = capture(_named("Frame")(), limits)
+        assert isinstance(snapshot, Object)
+        assert [name for name, _node in snapshot.fields] == ["values", "index", "name"]
+        values = snapshot.field("values")
+        assert isinstance(values, Object)
+        assert values.field("shape") == Sequence(
+            "tuple", 2, (Scalar(10**6), Scalar(1000)), True, None
+        )
+        assert values.field("dtype") is not None and values.field("sample") is not None
+        # "values" took the node budget: "index" may be left with its fallback.
+        assert isinstance(snapshot.field("index"), (Object, Opaque))
+        assert isinstance(snapshot.field("name"), Text)
+        text = render_json(snapshot, max_chars=limits.max_chars)
+        assert len(text) <= limits.max_chars
+        json.loads(text)
+
+
+@pytest.mark.parametrize("max_chars", [4, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610])
+def test_parts_never_exceed_the_budget(lazy, max_chars) -> None:
+    lazy("fakenumpy_7c1e", "ndarray", capture_ndarray)
+
+    def build(value: Any, out: Out) -> Snapshot:
+        inner = out.object({"s": "q" * 300, "l": list(range(50))})
+        return out.object(
+            {
+                "seq": out.sequence(iter(range(10**6))),
+                "map": out.mapping((str(i), "v" * i) for i in range(1_000)),
+                "arr": out.capture(_LazyNdarray(10**6)),
+                "inner": inner,
+                "s": out.capture("x" * 1_000),
+            }
+        )
+
+    lazy(FAKE_MODULE, "Budget", build)
+    snapshot = capture([_named("Budget")()], Limits(max_chars=max_chars))
+    text = render_json(snapshot, max_chars=max_chars)
+    assert len(text) <= max_chars
+    json.loads(text)
+    assert snapshot == capture([_named("Budget")()], Limits(max_chars=max_chars))  # deterministic

@@ -17,7 +17,14 @@ output), ``render_python`` (agentdoc's prefill notation), ``render_json`` and
 ``preview_attributes`` (trace previews). See ``docs/snapshot-model.md``.
 """
 
-from nooa.snapshot._capture import DEFAULT_LIMITS, Limits, Out, capture, capture_fields
+from nooa.snapshot._capture import (
+    DEFAULT_LIMITS,
+    Deferred,
+    Limits,
+    Out,
+    capture,
+    capture_fields,
+)
 from nooa.snapshot._model import (
     REASONS,
     Key,
@@ -47,6 +54,7 @@ from nooa.snapshot._stream import DEFAULT_SPILL_BYTES, SpillTarget, TextStream, 
 __all__ = [
     "DEFAULT_LIMITS",
     "DEFAULT_SPILL_BYTES",
+    "Deferred",
     "JsonRenderer",
     "REASONS",
     "Key",
