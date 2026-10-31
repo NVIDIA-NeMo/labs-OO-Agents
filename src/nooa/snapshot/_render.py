@@ -25,11 +25,13 @@ import sys
 from collections.abc import Callable
 from typing import Any
 
-from nooa.snapshot._capture import (
+from nooa.snapshot._codec import (
+    decode_counted,
     dumps,
     fallback_candidates,
     fallback_json,
     fit_string,
+    json_key,
     opaque_json,
     pointer_child,
 )
@@ -384,19 +386,6 @@ class _Report:
         self.reasons |= other.reasons
 
 
-def _json_key(key: Any) -> str | None:
-    """The JSON object key a snapshot key becomes, as ``json.dumps`` converts it."""
-    if type(key) is str:
-        return key
-    if key is None:
-        return "null"
-    if type(key) is bool:
-        return "true" if key else "false"
-    if type(key) is int or type(key) is float:
-        return repr(key)
-    return None
-
-
 def _placeholder(node: Snapshot) -> Any:
     """The minimal value of a wrapper entry's own type (#342's ``trace_fields``)."""
     node_type = type(node)
@@ -449,19 +438,19 @@ def _json_entries(
     output: dict[str, Any] = {}
     size = 2
     for key, child in entries:
-        json_key = _json_key(key)
-        if json_key is None or json_key in output:
+        key_text = json_key(key, live=False)  # a detached snapshot key
+        if key_text is None or key_text in output:
             return output, size, "opaque"
         separator = 2 if output else 0
         remaining = max_size - size - separator
-        if len(json_key) + 2 > remaining:
+        if len(key_text) + 2 > remaining:
             return output, size, "max_length"
-        overhead = len(dumps(json_key)) + 2
+        overhead = len(dumps(key_text)) + 2
         available = remaining - overhead
         if available < 1:
             return output, size, "max_length"
-        value, child_size = _json(child, available, pointer_child(path, json_key), report)
-        output[json_key] = value
+        value, child_size = _json(child, available, pointer_child(path, key_text), report)
+        output[key_text] = value
         size += separator + overhead + child_size
     return output, size, None
 
@@ -538,7 +527,7 @@ def _json(node: Snapshot, max_size: int, path: str, report: _Report) -> tuple[An
         if node_type is Text:
             text: str = node.head  # type: ignore[union-attr]
         else:
-            text = bytes(node.value).decode("utf-8", errors="replace")  # type: ignore[union-attr,arg-type]
+            text = decode_counted(node.value)[0]  # type: ignore[union-attr,arg-type]
         value, size = fit_string(text, max_size)
         if type(value) is not str or len(value) < len(text):
             report.incomplete(path, "max_length")

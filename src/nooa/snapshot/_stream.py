@@ -21,7 +21,13 @@ import tempfile
 from dataclasses import dataclass
 from typing import IO, Literal
 
-from nooa.snapshot._capture import decode_counted, safe_start
+from nooa.snapshot._codec import (
+    REPLACEMENT,
+    REPLACEMENT_BYTES,
+    complete_prefix,
+    decode_counted,
+    safe_start,
+)
 from nooa.snapshot._model import Reason, Spill, Text
 
 __all__ = ["DEFAULT_SPILL_BYTES", "SpillTarget", "TextStream", "merge"]
@@ -43,30 +49,6 @@ class SpillTarget:
     path: str | None = None
     max_bytes: int = DEFAULT_SPILL_BYTES
     always: bool = False
-
-
-def complete_prefix(data: bytes | bytearray) -> int:
-    """Length of ``data`` without a trailing, incomplete UTF-8 sequence."""
-    size = len(data)
-    index = size - 1
-    continuation = 0
-    while index >= 0 and continuation < 4 and data[index] & 0xC0 == 0x80:
-        index -= 1
-        continuation += 1
-    if index < 0 or continuation >= 4:
-        return size  # not a sequence that more bytes could complete
-    lead = data[index]
-    if lead < 0x80:
-        need = 1
-    elif lead >> 5 == 0b110:
-        need = 2
-    elif lead >> 4 == 0b1110:
-        need = 3
-    elif lead >> 3 == 0b11110:
-        need = 4
-    else:
-        return size
-    return index if size - index < need else size
 
 
 class TextStream:
@@ -197,7 +179,7 @@ class TextStream:
             # earlier write (the 2-byte carry cannot hold a whole one).
             joined = self._carry + raw
             self._carry = joined[-2:]
-            self._replaced += decoded.count("\ufffd") - joined.count(_REPLACEMENT_BYTES)
+            self._replaced += decoded.count(REPLACEMENT) - joined.count(REPLACEMENT_BYTES)
             data = decoded
         else:
             # A str chunk is a boundary: bytes before it can't complete with
@@ -205,7 +187,7 @@ class TextStream:
             pending = self._decoder.decode(b"", final=True)
             self._carry = b""
             if pending:
-                self._replaced += pending.count(_REPLACEMENT)
+                self._replaced += pending.count(REPLACEMENT)
                 data = pending + data
         if self._file is not None:
             self._spill(_encode(data))
@@ -388,7 +370,7 @@ class TextStream:
         if self.unit == "chars":
             rest = self._decoder.decode(b"", final=True)
             if rest:
-                self._replaced += rest.count("\ufffd")
+                self._replaced += rest.count(REPLACEMENT)
                 self._write_chars(rest)
                 self._spill(rest.encode("utf-8"))
         file, self._file = self._file, None
@@ -411,9 +393,6 @@ class TextStream:
     def __exit__(self, *exc: object) -> None:
         self.close()
 
-
-_REPLACEMENT = "\ufffd"
-_REPLACEMENT_BYTES = _REPLACEMENT.encode()
 
 _REMEMBERED_MARKS = 16
 """How many recent ``since()`` marks a chars stream keeps its replacement count for."""
@@ -441,7 +420,7 @@ def _replacement_width(text: str, units: int) -> int:
     exact; when all its U+FFFD are of the same width (one invalid byte each,
     or genuine) that width is known. Mixed widths count 3, an upper bound.
     """
-    count = text.count(_REPLACEMENT)
+    count = text.count(REPLACEMENT)
     if not count:
         return 3
     rest = units - (_units(text, "bytes") - 3 * count)
@@ -461,7 +440,7 @@ def _take(text: str, budget: int, unit: str, width: int, *, back: bool) -> tuple
     used = 0
     count = 0
     for char in reversed(text) if back else text:
-        cost = width if char == _REPLACEMENT else _units(char, unit)
+        cost = width if char == REPLACEMENT else _units(char, unit)
         if used + cost > budget:
             break
         used += cost
@@ -486,7 +465,7 @@ def _kept_pieces(text: Text) -> list[tuple[str, int]]:
     tail_units = _units(text.tail, unit)
     if unit == "bytes" and text.replaced:
         kept = text.length if text.complete else max(0, text.length - text.omitted)
-        if _REPLACEMENT in text.tail and _REPLACEMENT not in text.head:
+        if REPLACEMENT in text.tail and REPLACEMENT not in text.head:
             tail_units = max(0, kept - head_units)
         else:
             head_units = max(0, kept - tail_units)
@@ -532,7 +511,7 @@ def merge(a: Text, b: Text, head: int, tail: int) -> Text:
     def kept_replaced(kept_text: str) -> int:
         # Bytes: replacements in what is kept (as a bytes ``Text`` counts them);
         # chars: the window's count, as ``since()`` reports it.
-        return min(replaced, kept_text.count(_REPLACEMENT)) if unit == "bytes" else replaced
+        return min(replaced, kept_text.count(REPLACEMENT)) if unit == "bytes" else replaced
 
     if not gaps and known <= head + tail:
         joined = "".join(piece[0] for piece in pieces if isinstance(piece, tuple))

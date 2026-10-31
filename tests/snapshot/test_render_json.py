@@ -113,6 +113,18 @@ def test_render_json_non_string_keys_follow_json() -> None:
     }
 
 
+def test_key_policies_capture_refuses_what_rendering_converts() -> None:
+    huge = 1 << 200
+    # Capture reads live keys: a huge int or a non-finite float key stops the mapping.
+    for key in (huge, math.inf, math.nan):
+        snapshot = capture({"a": 1, key: 2})
+        assert isinstance(snapshot, Mapping) and snapshot.reason == "opaque"
+        assert snapshot.items == (("a", Scalar(1)),)
+    # Rendering reads detached keys: they convert as they are.
+    detached = Mapping("dict", 2, ((huge, Scalar(1)), (1.5, Scalar(2))), True, None)
+    assert json.loads(render_json(detached, max_chars=200)) == {str(huge): 1, "1.5": 2}
+
+
 def test_render_json_colliding_keys_stop_the_mapping() -> None:
     snapshot = capture({1: "a", "1": "b"})
 
