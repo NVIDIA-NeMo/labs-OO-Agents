@@ -13,7 +13,9 @@
 hook registry (``render_python.register("numpy.ndarray")``): an ``Object``
 whose ``kind`` has a hook renders through it, its children through the
 renderer ``r`` the hook is given. A missing or failing hook means generic
-rendering; rendering never fails because of a hook.
+rendering; rendering never fails because of a hook. Only ``render_json``
+bounds its output (``max_chars``); the text renderers format what ``capture``
+kept (*Extension contract* in ``docs/snapshot-model.md``).
 """
 
 from __future__ import annotations
@@ -166,7 +168,9 @@ class PythonRenderer:
 
     Children rendered through ``r`` use the renderer's own notation and cut
     markers (and their own hooks). ``r.generic(node)`` renders a node without
-    its hook.
+    its hook. There is no output-length limit: the nodes were bounded by
+    ``capture``, and the string a hook returns is not checked for length
+    (*Extension contract* in ``docs/snapshot-model.md``).
     """
 
     def __init__(self, hooks: _Hooks) -> None:
@@ -469,6 +473,7 @@ class JsonRenderer:
     output must be valid JSON whose canonical encoding fits it, otherwise the
     node is rendered generically. ``r.render`` returns a child's JSON text
     fitted to ``max_chars`` (at most ``r.max_chars``), with the usual cuts.
+    See *Extension contract* in ``docs/snapshot-model.md``.
     """
 
     def __init__(self, max_chars: int, path: str, report: _Report) -> None:

@@ -1643,14 +1643,18 @@ class Out:
     ``capture(child)``, ``sequence(items)`` and ``mapping(items)`` return
     deferred parts: nothing is built (and no item is pulled) until the part
     takes its slot, as a field value of ``object(...)`` or as the function's
-    return value. ``object`` builds its fields in order: its own wrapper and
-    the minimal fallback of every later field are reserved first, so a greedy
-    field (a long ``sequence``) gets what is left instead of starving its
-    siblings. ``object`` builds at once and returns an ``Object``; used as a
-    field of another ``object`` it is shrunk to fit its slot (trailing fields
-    dropped, marked incomplete). The function returns one part or node built
-    by its own ``Out``; it always fits the value's slot of the shared budget
-    (node work is charged to the shared ``max_nodes`` as it happens).
+    return value. Parts are opaque: pass them on unchanged. ``object`` builds
+    its fields in order: its own wrapper and the minimal fallback of every
+    later field are reserved first (for a ``dict``, ``list`` or ``tuple`` of
+    fields, and only while the slot fits them: a field is never held below its
+    own minimum), so a greedy field (a long ``sequence``) gets what is left.
+    ``object`` builds at once, in this value's slot, and returns an ``Object``;
+    used as a field of another ``object`` it is shrunk to fit its slot
+    (trailing fields dropped, marked incomplete). The function returns one
+    part or node built by its own ``Out``; it always fits the value's slot of
+    the shared budget (node work is charged to the shared ``max_nodes`` as it
+    happens). When each part is built and which budget it uses: *Extension
+    contract* in ``docs/snapshot-model.md``.
     """
 
     def __init__(self, value: Any, max_size: int, depth: int, path: str, state: _State) -> None:
@@ -1770,9 +1774,10 @@ class Out:
         may be a part or node this ``out`` built (``out.capture(...)``, ...):
         parts are built in field order, each leaving room for the minimal
         fallback of every later field (for a ``dict``, ``list`` or ``tuple``;
-        other iterables are pulled lazily, without reservation). ``kind`` is
-        the rendering key stored on the node (``Object.kind``) for per-kind
-        render hooks.
+        other iterables are pulled lazily, without reservation; see *Extension
+        contract* in ``docs/snapshot-model.md`` for where reservation stops).
+        ``kind`` is the rendering key stored on the node (``Object.kind``) for
+        per-kind render hooks.
         """
         if kind is not None:
             kind = _metadata(kind, "Object kind")
