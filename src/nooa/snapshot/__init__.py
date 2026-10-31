@@ -1,0 +1,49 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+"""One snapshot model for values, output streams and spilled files.
+
+A snapshot is a small, detached tree (``Scalar``, ``Text``, ``Sequence``,
+``Mapping``, ``Object``, ``Opaque``, ``Unavailable``, ``Ref``) in which every
+node says whether it is complete and, if not, why. Two producers build it:
+
+- ``capture(value, limits)`` for finished Python values (no user code runs on
+  types it does not know; ``capture.register(T)`` extends it);
+- ``TextStream`` for output that arrives over time (head, rolling tail,
+  counter and an optional spill file).
+
+Renderers turn it into what a consumer shows: ``render_output`` (command
+output), ``render_python`` (agentdoc's prefill notation), ``render_json`` and
+``preview_attributes`` (trace previews). See ``docs/snapshot-model.md``.
+"""
+
+from nooa.snapshot._model import (
+    REASONS,
+    Key,
+    Mapping,
+    Object,
+    Opaque,
+    Reason,
+    Ref,
+    Scalar,
+    Sequence,
+    Snapshot,
+    Spill,
+    Text,
+    Unavailable,
+)
+
+__all__ = [
+    "REASONS",
+    "Key",
+    "Mapping",
+    "Object",
+    "Opaque",
+    "Reason",
+    "Ref",
+    "Scalar",
+    "Sequence",
+    "Snapshot",
+    "Spill",
+    "Text",
+    "Unavailable",
+]
