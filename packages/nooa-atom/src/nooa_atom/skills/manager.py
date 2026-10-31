@@ -26,6 +26,7 @@ Kind = Literal["code", "text", "mcp"]
 _KIND_LABELS = {"code": "code", "text": "text", "mcp": "MCP"}
 _DESCRIPTION_WIDTH = 100
 _TOOL_MATCHES_SHOWN = 10  # tool/method-name matches a search lists
+_MCP_SERVERS_SHOWN = 8  # connected servers the MCP line names
 
 # Timers and ticks are built into ``self.jobs``, and a file tail is a Shell command,
 # not skills: a search for them points there instead of answering "No skills match".
@@ -80,6 +81,11 @@ def _public_methods(obj: Any) -> list[str]:
             if not name.startswith("_") and callable(value) and not is_hidden_method(value):
                 names.add(name)
     return sorted(names)
+
+
+def _server_tools(tool: Any) -> list[str]:
+    """A server object's tools: an MCP tool object's, else a client object's public methods."""
+    return tool_names(tool) or _public_methods(tool)
 
 
 def _call_attr(name: str, key: str) -> str:
@@ -354,6 +360,61 @@ class SkillManager(Skill):
                 "at start are connected again; find the others with self.skills.search() and "
                 "turn them on with self.skills.activate()."
             )
+
+    @hidden
+    def connected_mcp(self) -> list[tuple[str, str, Any]]:
+        """``(server, attribute, tool object)`` of every MCP server callable here now.
+
+        A client server (``mcp.<x>``, also one shared from a parent) is
+        ``self.<x>`` once registered; a configured one is ``self.<server>``
+        once connected, active or not. Sorted by attribute.
+        """
+        found: dict[str, tuple[str, str, Any]] = {}
+        for key in self.registry.loaded():
+            if key.startswith("mcp."):
+                attr = _call_attr(key, key)
+                found.setdefault(attr, (_leaf(key), attr, self.registry[key]))
+        if self.mcp is not None:
+            for name in self.mcp.connected():
+                attr = attr_name(name)
+                found.setdefault(attr, (name, attr, self.mcp.tool(name)))
+        return [found[attr] for attr in sorted(found)]
+
+    @hidden
+    def mcp_line(self) -> str:
+        """One line naming the connected MCP servers and the call form; "" when none.
+
+        Tool names are not listed: ``print(doc(self.<server>))`` lists them.
+        """
+        servers = self.connected_mcp()
+        if not servers:
+            return ""
+
+        def named(attr: str, tool: Any) -> str:
+            count = len(_server_tools(tool))
+            return (
+                f"self.{attr} ({count} tool{'s' if count != 1 else ''})"
+                if count
+                else f"self.{attr}"
+            )
+
+        shown = [named(attr, tool) for _, attr, tool in servers[:_MCP_SERVERS_SHOWN]]
+        more = len(servers) - _MCP_SERVERS_SHOWN
+        if more > 0:
+            shown.append(f"+{more} more: self.skills.search('query')")
+        target = f"self.{servers[0][1]}" if len(servers) == 1 else "self.<server>"
+        return (
+            f"MCP servers (connected, no activation needed): {', '.join(shown)}; "
+            f"list tools: print(doc({target})); call: await {target}.<tool>(...)"
+        )
+
+    @hidden
+    def mcp_tool_server(self, name: str) -> str | None:
+        """The attribute of a connected MCP server that has the tool ``name``, else None."""
+        for _, attr, tool in self.connected_mcp():
+            if name in _server_tools(tool):
+                return attr
+        return None
 
     @hidden
     def entries(self) -> list[SkillEntry]:
