@@ -1891,9 +1891,14 @@ class _Registry:
         self.entries: list[tuple[type[Any], CaptureFunction]] = []
         # (module, qualname) -> function; keys are exact ``str`` pairs only.
         self.lazy: dict[tuple[str, str], CaptureFunction] = {}
-        # id(cls) -> (weak reference to cls, lazy function or None). Keyed by
-        # ``id`` and checked by identity, so a class is never hashed or compared.
-        self._resolved: dict[int, tuple[weakref.ref[type[Any]], CaptureFunction | None]] = {}
+        # id(cls) -> (weak reference to cls, its raw (module, qualname) then,
+        # lazy function or None). Keyed by ``id`` and checked by identity, so
+        # a class is never hashed or compared; the name is compared too, as a
+        # class can legally be renamed (``__module__`` / ``__qualname__``).
+        self._resolved: dict[
+            int,
+            tuple[weakref.ref[type[Any]], tuple[str, str] | None, CaptureFunction | None],
+        ] = {}
 
     def changed(self) -> None:
         """Forget cached lazy resolutions (a registration was added or removed)."""
@@ -1903,10 +1908,11 @@ class _Registry:
         if not self.lazy:
             return None
         marker = id(cls)
-        cached = self._resolved.get(marker)
-        if cached is not None and cached[0]() is cls:
-            return cached[1]
         name = _raw_qualified_name(cls, state)
+        cached = self._resolved.get(marker)
+        # Exact ``str`` pairs (or None): comparing them runs no user code.
+        if cached is not None and cached[0]() is cls and cached[1] == name:
+            return cached[2]
         function = self.lazy.get(name) if name is not None else None
         resolved = self._resolved
 
@@ -1919,7 +1925,7 @@ class _Registry:
             reference = weakref.ref(cls, forget)
         except TypeError:
             return function  # not weakly referenceable: resolve without caching
-        resolved[marker] = (reference, function)
+        resolved[marker] = (reference, name, function)
         return function
 
     def find(self, mro: tuple[type[Any], ...], state: _State) -> tuple[int, CaptureFunction] | None:

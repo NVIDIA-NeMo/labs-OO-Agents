@@ -772,3 +772,22 @@ def test_out_rejects_non_str_metadata(eager, build) -> None:
     eager(Value, lambda value, out: build(out))
 
     assert capture(Value()) == Unavailable("error", "Value")
+
+
+# --- review findings: lazy renames
+
+
+def test_lazy_dispatch_follows_a_class_rename(lazy) -> None:
+    class Target:
+        pass
+
+    Target.__module__ = "before_rename"
+    Target.__qualname__ = "Target"
+    lazy("after_rename", "Target", lambda value, out: out.object({"ok": True}))
+
+    assert isinstance(capture(Target()), Opaque)  # caches the miss
+    Target.__module__ = "after_rename"
+    renamed = capture(Target())
+    assert isinstance(renamed, Object) and renamed.fields == (("ok", Scalar(True)),)
+    Target.__qualname__ = "Other"
+    assert isinstance(capture(Target()), Opaque)  # a cached hit is not kept either

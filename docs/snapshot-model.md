@@ -121,7 +121,7 @@ def capture_ndarray(array, out):
 ```
 
 - `register_lazy(module, qualname)` records the name only. It never imports the module. `capture.register_lazy(module, qualname, function)` is the non-decorator form, and `capture.unregister_lazy(module, qualname)` removes it.
-- At capture time, the dispatcher walks the value's raw MRO (`type.__dict__["__mro__"]`). For each class it reads `__module__` and `__qualname__` through `type`'s own descriptors (the class's native storage), without metaclass hooks. The nearest class that matches an eager registration (`capture.register(T)`) or a lazy one (`register_lazy`) wins. At the same class, the eager one wins.
+- At capture time, the dispatcher walks the value's raw MRO (`type.__dict__["__mro__"]`). For each class it reads `__module__` and `__qualname__` through `type`'s own descriptors (the class's native storage), without metaclass hooks. The nearest class that matches an eager registration (`capture.register(T)`) or a lazy one (`register_lazy`) wins. At the same class, the eager one wins. The match is cached per class but checked against the class's current raw name, so renaming a class (assigning `__module__` or `__qualname__`) takes effect at the next capture.
 - Resolved lazy matches are cached by class identity (keyed by `id`, checked through a weak reference, dropped when the class dies, cleared when a registration changes), never by hashing the class, so a custom metaclass `__hash__`/`__eq__` can't run.
 - A value whose class is not registered stays `Opaque`, exactly as before.
 - The registered function is trusted extension code, as in the proposal. It builds children only through `out`, so the shared budget holds. An exception becomes `Unavailable`.
