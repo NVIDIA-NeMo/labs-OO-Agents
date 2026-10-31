@@ -280,7 +280,7 @@ def test_default_kind_is_none_and_must_be_a_string(eager) -> None:
     assert capture(Plain()) == Unavailable("error", "Plain")
 
 
-def test_prebuilt_node_too_large_for_its_slot_is_cut(lazy) -> None:
+def test_part_too_large_for_its_slot_is_cut(lazy) -> None:
     def build(value: Any, out: Out) -> Snapshot:
         big = out.capture("z" * 500)
         return out.object({"big": big, "more": "w" * 500})
@@ -554,7 +554,7 @@ def test_ndarray_like_large_keeps_shape_and_dtype(lazy, hooks, limits, size) -> 
     assert json.loads(text)["shape"] == [size // 1000, 1000]
 
 
-# --- sibling reservation, shrinking and nesting ----------------------------------------
+# --- sibling reservation, single-use parts and nesting ----------------------------------------
 
 
 def test_greedy_first_field_does_not_starve_later_fields(lazy) -> None:
@@ -599,32 +599,73 @@ def test_fields_that_fit_are_kept_whole_in_order(lazy) -> None:
     assert len(render_json(snapshot, max_chars=100)) <= 100
 
 
-def test_prebuilt_node_is_shrunk_not_unavailable(lazy) -> None:
+def test_nested_object_is_built_in_its_slot(lazy) -> None:
     def build(value: Any, out: Out) -> Snapshot:
-        inner = out.object({"a": "z" * 400, "b": "never"})  # takes the whole budget
+        inner = out.object({"a": "z" * 400, "b": "never"})  # nothing is built yet
         return out.object({"first": out.capture("y" * 100), "inner": inner})
 
-    lazy(FAKE_MODULE, "Shrink", build)
-    snapshot = capture(_named("Shrink")(), Limits(max_chars=300))
+    lazy(FAKE_MODULE, "Nested", build)
+    snapshot = capture(_named("Nested")(), Limits(max_chars=300))
     assert isinstance(snapshot, Object)
     assert snapshot.field("first") == Text("y" * 100, "", 100, "chars", True, None)
     inner = snapshot.field("inner")
-    assert isinstance(inner, Object) and not inner.complete and inner.reason == "max_length"
-    assert [name for name, _node in inner.fields] == ["a"]
+    # Built in what "first" left, with its own sibling reservation: "b" keeps its fallback.
+    assert isinstance(inner, Object) and [name for name, _node in inner.fields] == ["a", "b"]
     cut = inner.field("a")
     assert isinstance(cut, Text) and not cut.complete and cut.head.startswith("zzz")
     assert cut.omitted == 400 - len(cut.head)
+    assert inner.field("b") == Text("", "", 5, "chars", False, "max_length", omitted=5)
     text = render_json(snapshot, max_chars=300)
     assert len(text) <= 300 and json.loads(text)["inner"]["a"].startswith("zzz")
 
 
-def test_part_used_twice_is_shrunk_the_second_time(lazy) -> None:
+def test_object_part_is_deferred_until_its_slot(lazy) -> None:
+    pulled: list[str] = []
+
+    def fields() -> Iterator[tuple[str, Any]]:
+        pulled.append("x")
+        yield "x", 1
+
     def build(value: Any, out: Out) -> Snapshot:
+        inner = out.object(fields())
+        assert pulled == []  # out.object builds nothing when called
+        return out.object({"inner": inner})
+
+    lazy(FAKE_MODULE, "Later", build)
+    snapshot = capture(_named("Later")())
+    assert isinstance(snapshot, Object) and pulled == ["x"]
+    assert snapshot.field("inner") == Object("Later", (("x", Scalar(1)),), True, None, FAKE_MODULE)
+
+
+def test_nested_object_part_takes_its_slot_depth(lazy) -> None:
+    lazy(FAKE_MODULE, "Deep", lambda value, out: out.object({"inner": out.object({"x": 1})}))
+
+    snapshot = capture(_named("Deep")(), Limits(max_depth=1))
+    assert isinstance(snapshot, Object)
+    inner = snapshot.field("inner")
+    assert isinstance(inner, Object) and inner.fields == () and inner.reason == "max_depth"
+
+
+def test_part_used_twice_is_an_error(lazy) -> None:
+    def twice(value: Any, out: Out) -> Snapshot:
         big = out.capture("z" * 500)
         return out.object({"big": big, "again": big})
 
-    lazy(FAKE_MODULE, "Twice", build)
-    snapshot = capture(_named("Twice")(), Limits(max_chars=300))
+    def in_a_sequence(value: Any, out: Out) -> Snapshot:
+        part = out.object({"a": 1})
+        return out.sequence([part, part])
+
+    def two_calls(value: Any, out: Out) -> Snapshot:
+        return out.object({"big": out.capture("z" * 500), "again": out.capture("z" * 500)})
+
+    lazy(FAKE_MODULE, "Twice", twice)
+    lazy(FAKE_MODULE, "Items", in_a_sequence)
+    lazy(FAKE_MODULE, "TwoCalls", two_calls)
+    # A second use raises ValueError in the capture; the value becomes ``error``.
+    assert capture(_named("Twice")(), Limits(max_chars=300)) == Unavailable("error", "Twice")
+    assert capture(_named("Items")()) == Unavailable("error", "Items")
+    # Two placements: two parts, each built and budgeted in its own slot.
+    snapshot = capture(_named("TwoCalls")(), Limits(max_chars=300))
     assert isinstance(snapshot, Object)
     big, again = snapshot.field("big"), snapshot.field("again")
     assert isinstance(big, Text) and isinstance(again, Text)
@@ -633,7 +674,29 @@ def test_part_used_twice_is_shrunk_the_second_time(lazy) -> None:
     assert len(render_json(snapshot, max_chars=300)) <= 300
 
 
-def test_shrunk_sequence_drops_its_tail_first(lazy) -> None:
+def test_part_used_twice_raises_a_clear_error(lazy) -> None:
+    errors: list[BaseException] = []
+
+    def build(value: Any, out: Out) -> Snapshot:
+        part = out.capture(1)
+        root = out.object({"a": part})
+        # Build the tree here (as capture would) to see the error itself.
+        from nooa.snapshot import _capture
+
+        state = _capture._State(Limits())
+        try:
+            _capture._build_slot(part, 10, 1, "/a", state, out)
+            _capture._build_slot(part, 10, 1, "/b", state, out)
+        except ValueError as error:
+            errors.append(error)
+        return root
+
+    lazy(FAKE_MODULE, "Clear", build)
+    capture(_named("Clear")())
+    assert len(errors) == 1 and "one slot only" in str(errors[0])
+
+
+def test_nested_object_sequence_keeps_its_head_and_tail(lazy) -> None:
     def build(value: Any, out: Out) -> Snapshot:
         numbers = out.object({"n": list(range(200))})
         return out.object({"label": out.capture("w" * 40), "numbers": numbers})
@@ -645,7 +708,8 @@ def test_shrunk_sequence_drops_its_tail_first(lazy) -> None:
     assert isinstance(numbers, Object)
     n = numbers.field("n")
     assert isinstance(n, Sequence) and not n.complete and n.length == 200
-    assert n.items[0] == Scalar(0)
+    # Captured in its own slot: a real head and tail split, not a shrunk prefix.
+    assert n.items[0] == Scalar(0) and n.tail and n.tail[-1] == Scalar(199)
     assert len(render_json(snapshot, max_chars=200)) <= 200
 
 
