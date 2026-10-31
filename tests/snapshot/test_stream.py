@@ -246,7 +246,127 @@ def test_spill_write_failure_falls_back_to_memory(tmp_path: Path) -> None:
     assert (text.head, text.tail, text.length) == ("ab", "gh", 8)
 
 
+def test_chars_lone_surrogate_without_spill_does_not_raise() -> None:
+    stream = _stream("chars", head=10, tail=10)
+    stream.write("a\ud800b")
+
+    assert stream.close() == Text("a\ud800b", "", 3, "chars", True, None)
+
+
+def test_chars_lone_surrogate_spills_backslash_escaped(tmp_path: Path) -> None:
+    path = tmp_path / "out.log"
+    spill = SpillTarget(path=str(path), always=True)
+    stream = TextStream(unit="chars", head=10, tail=10, spill=spill)
+    stream.write("a\ud800b")
+
+    text = stream.close()
+    assert text.head == "a\ud800b" and text.full is not None
+    assert path.read_bytes() == b"a\\ud800b" and text.full.kept == len(b"a\\ud800b")
+
+
+def test_bytes_stream_accepts_str_with_lone_surrogate() -> None:
+    stream = _stream("bytes", head=20, tail=20)
+    stream.write("a\ud800b")
+
+    assert stream.close().head == "a\\ud800b"
+
+
+def test_running_snapshot_and_since_match_the_file_on_disk(tmp_path: Path) -> None:
+    path = tmp_path / "out.log"
+    spill = SpillTarget(path=str(path), always=True)
+    stream = TextStream(unit="bytes", head=10, tail=10, spill=spill)
+    stream.write(b"y" * 100)
+
+    text = stream.snapshot()
+    assert text.full is not None and text.full.kept == 100 == os.path.getsize(path)
+    stream.write(b"z" * 7)
+    delta, _ = stream.since(100)
+    assert delta.length == 7 and os.path.getsize(path) == 107
+    stream.close()
+
+
+def test_spill_flush_failure_falls_back_to_memory(tmp_path: Path) -> None:
+    path = tmp_path / "out.log"
+    stream = TextStream(unit="bytes", head=2, tail=2, spill=SpillTarget(path=str(path)))
+    stream.write(b"abcdefgh")
+    real = stream._file
+    assert real is not None
+
+    class Broken:
+        def write(self, data: bytes) -> int:
+            return real.write(data)
+
+        def flush(self) -> None:
+            raise OSError("disk full")
+
+        def close(self) -> None:
+            real.close()
+
+    stream._file = Broken()  # type: ignore[assignment]
+
+    text = stream.snapshot()
+    assert text.full is None and text.reason == "not_kept"
+    assert not path.exists()  # handled like a write failure
+    assert (text.head, text.tail, text.length) == ("ab", "gh", 8)
+
+
+def test_text_reads_do_not_rebind_the_writer_buffers() -> None:
+    stream = _stream("chars", head=4, tail=4)
+    for piece in ("ab", "cd", "ef", "gh", "ij"):
+        stream.write(piece)
+    head, tail = stream._head_chars, stream._tail_chars
+    pieces = (list(head), list(tail))
+
+    stream.snapshot()
+    stream.since(3)
+
+    assert stream._head_chars is head and stream._tail_chars is tail
+    assert (list(head), list(tail)) == pieces
+
+
 # --- since / merge -----------------------------------------------------------------
+
+
+def test_since_replaced_counts_only_the_window_for_chars() -> None:
+    stream = _stream("chars", head=100, tail=100)
+    stream.write(b"\xff")
+    first, mark = stream.since(0)
+    stream.write("ok")
+    second, mark2 = stream.since(mark)
+    stream.write(b"\xfe\xfd")
+    third, _ = stream.since(mark2)
+
+    assert (first.replaced, second.replaced, third.replaced) == (1, 0, 2)
+    assert merge(first, second, 100, 100).replaced == 1
+    assert merge(merge(first, second, 100, 100), third, 100, 100).replaced == 3
+    assert stream.snapshot().replaced == 3
+
+
+def test_since_replaced_for_an_unremembered_mark_never_over_reports() -> None:
+    stream = _stream("chars", head=100, tail=100)
+    stream.write("a")
+    stream.write(b"\xff")
+    stream.write("b")
+
+    assert stream.since(0)[0].replaced == 1  # the whole stream: the cumulative count
+    # Mark 1 was never returned; the nearest remembered mark after it is 3,
+    # so the window's count is a lower bound (the U+FFFD at 1 isn't counted).
+    assert stream.since(1)[0].replaced == 0
+    stream.write(b"\xff")
+    assert stream.since(1)[0].replaced == 1  # counted since mark 3
+    assert stream.since(3)[0].replaced == 1  # remembered: exact
+
+
+def test_since_remembers_only_recent_marks() -> None:
+    stream = _stream("chars", head=10, tail=10)
+    marks = []
+    for _ in range(40):
+        stream.write(b"\xff")
+        marks.append(stream.since(marks[-1] if marks else 0)[1])
+
+    assert len(stream._replaced_at) <= 16
+    stream.write(b"\xff")
+    assert stream.since(marks[-1])[0].replaced == 1
 
 
 def test_since_returns_deltas_with_correct_lengths() -> None:

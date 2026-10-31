@@ -75,6 +75,11 @@ class TextStream:
     ``unit="bytes"``: ``write`` takes bytes (``str`` is encoded as UTF-8);
     ``unit="chars"``: it takes ``str`` (``bytes`` are decoded as UTF-8). Memory
     stays at ``head + tail`` units plus the chunk being written.
+
+    Threads: one writer. ``snapshot()`` and ``since()`` only read memory (and
+    flush the spill file), but they are not synchronised with ``write``:
+    call them from the writer's thread, or have the caller serialise them
+    with writes. There is no lock (PR 1).
     """
 
     def __init__(
@@ -104,6 +109,8 @@ class TextStream:
         self._tail_len = 0
         self._decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         self._replaced = 0  # replacements while decoding bytes written to a chars stream
+        # Recent marks since() returned, with ``_replaced`` at each (chars streams).
+        self._replaced_at: collections.OrderedDict[int, int] = collections.OrderedDict()
         self._closed: Text | None = None
         self._file: IO[bytes] | None = None
         self._path: str | None = None
@@ -155,6 +162,17 @@ class TextStream:
             return
         self._kept += len(part)
 
+    def _flush(self) -> None:
+        """Push buffered spill bytes to the file, so it holds what ``Spill.kept`` says."""
+        file = self._file
+        if file is None:
+            return
+        try:
+            file.flush()
+        except OSError:
+            _log.warning("could not flush the spill file; keeping memory only", exc_info=True)
+            self._fail()
+
     # --- writing ----------------------------------------------------------
 
     def write(self, data: str | bytes | bytearray) -> None:
@@ -162,11 +180,7 @@ class TextStream:
         if self._closed is not None:
             raise ValueError("write to a closed TextStream")
         if self.unit == "bytes":
-            raw = (
-                data.encode("utf-8", errors="surrogateescape")
-                if isinstance(data, str)
-                else bytes(data)
-            )
+            raw = _encode(data) if isinstance(data, str) else bytes(data)
             self._spill(raw)
             self._write_bytes(raw)
             return
@@ -174,7 +188,8 @@ class TextStream:
             decoded = self._decoder.decode(bytes(data))
             self._replaced += decoded.count("\ufffd") - bytes(data).count(b"\xef\xbf\xbd")
             data = decoded
-        self._spill(data.encode("utf-8", errors="surrogateescape"))
+        if self._file is not None:
+            self._spill(_encode(data))
         self._write_chars(data)
 
     def _write_bytes(self, data: bytes) -> None:
@@ -237,8 +252,11 @@ class TextStream:
             return "file_limit"
         return "max_length"
 
-    def _text(self, start: int, end: int) -> Text:
-        """What memory holds of units ``[start, end)``, as a ``Text``."""
+    def _text(self, start: int, end: int, replaced: int | None = None) -> Text:
+        """What memory holds of units ``[start, end)``, as a ``Text`` (reads only).
+
+        ``replaced``: a chars stream's replacements in the window (default: all).
+        """
         held_head, held_tail = self._memory()
         tail_from = self._total - held_tail
         length = max(0, end - start)
@@ -268,16 +286,15 @@ class TextStream:
                 replaced_head + replaced_tail,
                 omitted,
             )
+        if replaced is None:
+            replaced = self._replaced
+        # Join without storing back: a read never rebinds the writer's state.
         head_all = "".join(self._head_chars)
         tail_all = "".join(self._tail_chars)
-        self._head_chars = [head_all] if head_all else []
-        self._tail_chars = collections.deque([tail_all] if tail_all else [])
         head, tail = head_all[head_slice], tail_all[tail_slice]
         gap = length - len(head) - len(tail)
         if gap <= 0:
-            return Text(
-                head + tail, "", length, "chars", True, None, self._full(False), self._replaced
-            )
+            return Text(head + tail, "", length, "chars", True, None, self._full(False), replaced)
         return Text(
             head,
             tail,
@@ -286,7 +303,7 @@ class TextStream:
             False,
             self._reason(),
             self._full(True),
-            self._replaced,
+            replaced,
             gap,
         )
 
@@ -294,6 +311,7 @@ class TextStream:
         """The whole stream so far (the final ``Text`` once closed)."""
         if self._closed is not None:
             return self._closed
+        self._flush()
         return self._text(0, self._total)
 
     def _safe_total(self) -> int:
@@ -312,13 +330,38 @@ class TextStream:
 
         Bounded like the stream: what memory no longer holds is omitted. A
         byte stream's mark stops before an incomplete UTF-8 sequence.
+
+        ``replaced`` counts the window only. A byte stream decodes the window
+        itself; a chars stream remembers its count at the last
+        ``_REMEMBERED_MARKS`` marks returned here. For an older or foreign
+        mark it reports the count since the nearest remembered mark after it
+        (0 if none): a lower bound, never more than the window holds.
         """
         if self._closed is not None:
             end = self._total
         else:
+            self._flush()
             end = self._safe_total()
         mark = min(max(0, mark), end)
-        return self._text(mark, end), end
+        if self.unit == "bytes":
+            return self._text(mark, end), end
+        text = self._text(mark, end, self._replaced - self._replaced_before(mark))
+        remembered = self._replaced_at
+        remembered[end] = self._replaced
+        remembered.move_to_end(end)
+        while len(remembered) > _REMEMBERED_MARKS:
+            remembered.popitem(last=False)
+        return text, end
+
+    def _replaced_before(self, mark: int) -> int:
+        """Replacements before ``mark`` (an upper bound when it isn't remembered)."""
+        if mark == 0:
+            return 0
+        known = self._replaced_at.get(mark)
+        if known is not None:
+            return known
+        later = [count for at, count in self._replaced_at.items() if at >= mark]
+        return min(later) if later else self._replaced
 
     def close(self) -> Text:
         """The final ``Text``; closes the spill file (deleting it if nothing was cut)."""
@@ -349,6 +392,18 @@ class TextStream:
 
     def __exit__(self, *exc: object) -> None:
         self.close()
+
+
+_REMEMBERED_MARKS = 16
+"""How many recent ``since()`` marks a chars stream keeps its replacement count for."""
+
+
+def _encode(text: str) -> bytes:
+    """UTF-8 for the file: raw bytes for surrogate escapes, else ``\\udXXX`` text."""
+    try:
+        return text.encode("utf-8", errors="surrogateescape")
+    except UnicodeEncodeError:
+        return text.encode("utf-8", errors="backslashreplace")
 
 
 # --- merging deltas ----------------------------------------------------------------
