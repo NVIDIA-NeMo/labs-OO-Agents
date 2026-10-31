@@ -36,10 +36,60 @@ def rejected_media_notice(kind: str) -> str:
     return f"[{subject} was removed here because the model provider could not read it.]"
 
 
+# "Too many images: 7 (max 5)" (GLM 5.3 hub) and generic phrasings of a
+# per-request image count limit. The number captured is the limit M.
+_IMAGE_LIMIT_RES = (
+    re.compile(r"too many images\b.{0,40}?\b(?:max(?:imum)?|limit)\D{0,12}(\d+)"),
+    re.compile(
+        r"\b(?:at most|maximum of|max(?:imum)?(?: number of)?|up to|no more than|limit of)"
+        r"\s*:?\s*(\d+)\s*(?:images?|image inputs?|image_url)\b"
+    ),
+    re.compile(
+        r"\b(?:images?|image inputs?) (?:per request |count |number )?"
+        r"(?:limit|maximum|max)\s*(?:is|of|=|:)?\s*(\d+)\b"
+    ),
+    re.compile(r"\bexceeds? the (?:maximum|max|limit) of (\d+) images?\b"),
+)
+
+
+def image_limit(exc: BaseException) -> int | None:
+    """The per-request image limit M a provider rejection names, else None.
+
+    Not a rejection of one image: the request carried more images than the
+    model takes (``Too many images: 7 (max 5)``). Looks through the
+    exception's body message and its cause chain.
+    """
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        body = getattr(cur, "body", None)
+        error = body.get("error", body) if isinstance(body, dict) else None
+        texts = [str(cur)]
+        if isinstance(error, dict) and error.get("message"):
+            texts.append(str(error["message"]))
+        for text in texts:
+            lowered = text.lower()
+            if "image" not in lowered:
+                continue
+            for pattern in _IMAGE_LIMIT_RES:
+                match = pattern.search(lowered)
+                if match:
+                    return int(match.group(1))
+        cur = cur.__cause__ or cur.__context__
+    return None
+
+
 def explicitly_rejected(exc, kind):
-    """Only a media-specific provider rejection, not a generic HTTP 400."""
+    """Only a media-specific provider rejection, not a generic HTTP 400.
+
+    A per-request image limit (``image_limit``) is not a rejection of one
+    image: the runtime collapses the oldest images instead.
+    """
     status = getattr(exc, "_connect_http_status", getattr(exc, "status_code", None))
     if status not in {400, 415, 422}:
+        return False
+    if image_limit(exc) is not None:
         return False
     body = getattr(exc, "body", None)
     error = body.get("error", body) if isinstance(body, dict) else {}
