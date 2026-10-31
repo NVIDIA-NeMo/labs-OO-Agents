@@ -124,6 +124,8 @@ class HarnessMetrics(BaseModel):
     text_only_loop_aborts_count: int = 0
     loop_guard_nudges_count: int = 0
     loop_guard_stops_count: int = 0
+    tool_call_skipped_count: int = 0
+    text_only_tool_markup_count: int = 0
     empty_response_count: int = 0
     gpt4o_double_quote_fix_count: int = 0
     gpt4o_double_quote_fix_previews: list[str] = Field(default_factory=list)
@@ -256,6 +258,14 @@ class HarnessMetrics(BaseModel):
 
     def loop_guard_stop(self) -> None:
         self.loop_guard_stops_count += 1
+
+    def tool_call_skipped(self, count: int = 1) -> None:
+        """Record calls of a response not run because an earlier one failed or finished."""
+        self.tool_call_skipped_count += count
+
+    def text_only_tool_markup(self) -> None:
+        """Record a text-only reply that contained a tool call written as text."""
+        self.text_only_tool_markup_count += 1
 
     def empty_response(self) -> None:
         self.empty_response_count += 1
@@ -644,6 +654,18 @@ _SPAN_SCHEMA: tuple[SchemaEntry, ...] = (
         "Loop-guard stops",
         "Response Format Fixups",
         lambda m: m.loop_guard_stops_count,
+    ),
+    SchemaEntry(
+        "harness.tool_call_skipped.count",
+        "Tool calls not run after an earlier call failed or finished",
+        "Response Format Fixups",
+        lambda m: m.tool_call_skipped_count,
+    ),
+    SchemaEntry(
+        "harness.text_only_tool_markup.count",
+        "Text-only replies with a tool call written as text",
+        "Response Format Fixups",
+        lambda m: m.text_only_tool_markup_count,
     ),
     SchemaEntry(
         "harness.empty_response.count",
