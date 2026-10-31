@@ -2,12 +2,15 @@
 # SPDX-License-Identifier: Apache-2.0
 """Unit tests for FileBackedTruncatingStringIO."""
 
+import json
 import os
 import tempfile
+import threading
+import time
 
 import pytest
 
-from nooa.agentdoc._truncating_stream import FileBackedTruncatingStringIO
+from nooa.agentdoc._truncating_stream import CaptureStats, FileBackedTruncatingStringIO
 
 
 @pytest.fixture
@@ -282,3 +285,173 @@ class TestFileBackedExport:
         from nooa.agentdoc import FileBackedTruncatingStringIO as FB
 
         assert FB is FileBackedTruncatingStringIO
+
+
+class TestFileBackedBytes:
+    """write_bytes: byte-exact file, incrementally decoded view."""
+
+    def test_bytes_go_to_file_unchanged_and_to_the_view(self, tmp_path):
+        data = b"ok \xff\xfe raw\n" + "é🚀".encode()
+        with FileBackedTruncatingStringIO(limit=100, path=tmp_path / "o.log") as buf:
+            assert buf.write_bytes(data) == len(data)
+        assert (tmp_path / "o.log").read_bytes() == data
+        assert buf.getvalue() == data.decode("utf-8", errors="replace")
+        assert buf.bytes_written == len(data)
+
+    def test_multibyte_split_across_chunks_decodes(self, tmp_path):
+        data = "aé世🚀z".encode()
+        buf = FileBackedTruncatingStringIO(limit=100, path=tmp_path / "o.log")
+        for i in range(len(data)):  # one byte at a time: every character is split
+            buf.write_bytes(data[i : i + 1])
+        assert buf.getvalue() == "aé世🚀z"
+        buf.close()
+        assert (tmp_path / "o.log").read_bytes() == data
+
+    def test_close_flushes_an_incomplete_trailing_character(self, tmp_path):
+        buf = FileBackedTruncatingStringIO(limit=100, path=tmp_path / "o.log")
+        buf.write_bytes(b"x" + "é".encode()[:1])
+        assert buf.getvalue() == "x"
+        buf.close()
+        assert buf.getvalue() == "x\ufffd"
+        buf.close()  # idempotent: no second replacement character
+        assert buf.getvalue() == "x\ufffd"
+
+    def test_bytes_over_the_limit_cut_the_view_and_name_the_file(self, tmp_path):
+        data = b"".join(b"line %06d\n" % i for i in range(2_000))
+        buf = FileBackedTruncatingStringIO(limit=1_000, path=tmp_path / "o.log")
+        for i in range(0, len(data), 333):
+            buf.write_bytes(data[i : i + 333])
+        buf.close()
+        value = buf.getvalue()
+        assert value.startswith("<truncated-output>")
+        assert str(tmp_path / "o.log") in value
+        assert "line 000000" in value and "line 001999" in value
+        assert (tmp_path / "o.log").read_bytes() == data
+
+
+class TestFileBackedCap:
+    """max_file_bytes: the file holds exactly the first N bytes."""
+
+    def test_cap_keeps_first_bytes_and_counts_the_rest(self, tmp_path):
+        buf = FileBackedTruncatingStringIO(limit=10, path=tmp_path / "o", max_file_bytes=25)
+        buf.write_bytes(b"a" * 20)
+        buf.write("b" * 20)
+        buf.close()
+        assert (tmp_path / "o").read_bytes() == b"a" * 20 + b"b" * 5
+        assert buf.file_bytes == 25
+        assert buf.file_bytes_dropped == 15
+        value = buf.getvalue()
+        assert "The file is incomplete: it holds the first 25 bytes; 15 more bytes" in value
+
+    def test_negative_cap_is_refused(self):
+        with pytest.raises(ValueError):
+            FileBackedTruncatingStringIO(max_file_bytes=-1)
+
+
+class TestFileBackedNotice:
+    """notice=: the caller phrases how to read the file."""
+
+    def test_template_gets_the_stats_fields_and_quoted_path(self, tmp_path):
+        path = tmp_path / "o.log"
+        buf = FileBackedTruncatingStringIO(
+            limit=10,
+            path=path,
+            notice="Read it: open({quoted_path}) ({dropped_chars:,} chars cut of {chars_written:,})",
+        )
+        buf.write("x" * 1_100)
+        value = buf.getvalue()
+        assert f"Read it: open({json.dumps(str(path))}) (1,090 chars cut of 1,100)\n" in value
+        assert "full untruncated output" not in value
+        buf.cleanup()
+
+    def test_callable_gets_the_stats(self, tmp_path):
+        seen = []
+        buf = FileBackedTruncatingStringIO(
+            limit=10, path=tmp_path / "o", notice=lambda s: seen.append(s) or f"at {s.path}"
+        )
+        buf.write("x" * 100)
+        assert f"at {tmp_path / 'o'}\n" in buf.getvalue()
+        assert seen[0].truncated and seen[0].dropped_chars == 90
+        buf.cleanup()
+
+    def test_default_notice_stays_generic(self, small_buf):
+        small_buf.write("x" * 100)
+        assert f"is in: {small_buf.path}\nRead that file" in small_buf.getvalue()
+
+    def test_no_notice_without_truncation(self, tmp_path):
+        buf = FileBackedTruncatingStringIO(limit=100, path=tmp_path / "o", notice="X {path}")
+        buf.write("short")
+        assert buf.getvalue() == "short"
+        buf.cleanup()
+
+
+class TestFileBackedStatsAndLifecycle:
+    def test_stats(self, tmp_path):
+        buf = FileBackedTruncatingStringIO(limit=10, path=tmp_path / "o")
+        buf.write("é" * 30)
+        stats = buf.stats
+        assert stats == CaptureStats(
+            path=str(tmp_path / "o"),
+            chars_written=30,
+            bytes_written=60,
+            file_bytes=60,
+            file_bytes_dropped=0,
+            truncated=True,
+            dropped_chars=20,
+        )
+        buf.cleanup()
+
+    def test_path_is_none_after_cleanup_but_file_path_stays(self, tmp_path):
+        buf = FileBackedTruncatingStringIO(limit=10, path=tmp_path / "o")
+        buf.write("x" * 100)
+        buf.cleanup()
+        assert buf.path is None
+        assert buf.file_path == str(tmp_path / "o")
+        assert not (tmp_path / "o").exists()
+        assert "not recoverable" in buf.getvalue()  # the notice no longer names a gone file
+
+    def test_with_closes_and_keeps_the_file(self, tmp_path):
+        with FileBackedTruncatingStringIO(limit=10, path=tmp_path / "o") as buf:
+            buf.write("hello")
+        assert (tmp_path / "o").read_text() == "hello"
+        buf.write("more")  # after close: view only, the file is not reopened
+        assert (tmp_path / "o").read_text() == "hello"
+        assert buf.getvalue() == "hellomore"
+
+    def test_writes_after_cleanup_do_not_recreate_the_file(self, tmp_path):
+        buf = FileBackedTruncatingStringIO(limit=10, path=tmp_path / "o")
+        buf.cleanup()
+        buf.write_bytes(b"late")
+        assert not (tmp_path / "o").exists()
+
+
+class TestFileBackedConcurrencyAndCost:
+    def test_threads_write_while_another_reads(self, tmp_path):
+        buf = FileBackedTruncatingStringIO(limit=1_000, path=tmp_path / "o")
+        chunk = b"0123456789" * 10
+
+        def writer():
+            for _ in range(500):
+                buf.write_bytes(chunk)
+
+        threads = [threading.Thread(target=writer) for _ in range(4)]
+        for th in threads:
+            th.start()
+        while any(th.is_alive() for th in threads):
+            buf.getvalue()
+        for th in threads:
+            th.join()
+        buf.close()
+        assert buf.bytes_written == buf.file_bytes == 4 * 500 * len(chunk)
+        assert (tmp_path / "o").read_bytes() == chunk * 2_000
+
+    def test_many_small_writes_at_a_1_mib_limit_stay_linear(self, tmp_path):
+        buf = FileBackedTruncatingStringIO(limit=1 << 20, path=tmp_path / "o")
+        start = time.perf_counter()
+        for _ in range(200_000):  # 2 MB in 10-byte writes, half of it into the head
+            buf.write_bytes(b"abcdefghi\n")
+        value = buf.getvalue()
+        elapsed = time.perf_counter() - start
+        buf.cleanup()
+        assert value.startswith("<truncated-output>")
+        assert elapsed < 10  # quadratic head copies took minutes here
