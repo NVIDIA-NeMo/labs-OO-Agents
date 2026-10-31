@@ -4,6 +4,7 @@
 
 import asyncio
 import contextlib
+import json
 import os
 from pathlib import Path
 
@@ -60,11 +61,24 @@ async def test_one_shot_timeout(manager):
     assert "self.jobs.launch(sh.run(cmd, timeout=...), name=...)]" in r.stderr
 
 
+NOTICE = "Full output: await self.files.read({})"
+
+
+def cut_notice(path: str, total: int) -> str:
+    """The first lines of a text cut at 1 MiB (256 Ki head, 768 Ki tail characters)."""
+    return (
+        "<truncated-output>\n"
+        f"Output too large ({total:,} chars). Showing first 262,144 and last 786,432 chars.\n"
+        + NOTICE.format(json.dumps(path))
+        + "\n\n"
+    )
+
+
 async def test_long_output_bounded_with_retained_file(manager):
-    r = await manager.launch(Shell().run("seq 1 200000"))
-    assert len(r.stdout) < 11_000 and "bytes omitted; full output:" in r.stdout
-    assert r.stdout.startswith("1\n2\n") and r.stdout.endswith("199999\n200000\n")
-    assert r.stdout_path and Path(r.stdout_path).read_text().count("\n") == 200000
+    r = await manager.launch(Shell().run("seq 1 200000"))  # 1,288,895 bytes
+    assert r.stdout_path and r.stdout.startswith(cut_notice(r.stdout_path, 1_288_895) + "1\n2\n")
+    assert len(r.stdout) < 1_049_000 and r.stdout.endswith("199999\n200000\n\n</truncated-output>")
+    assert Path(r.stdout_path).read_text().count("\n") == 200000
     # Kept after the result was consumed; removed with the manager.
     await asyncio.sleep(0)
     assert Path(r.stdout_path).exists()
@@ -72,16 +86,52 @@ async def test_long_output_bounded_with_retained_file(manager):
     assert not Path(r.stdout_path).exists()
 
 
+async def test_output_up_to_1_mib_is_whole_in_the_result(tmp_path):
+    out = "".join(f"line {i:05d} " + "y" * 25 + "\n" for i in range(2500))  # 92,500 bytes
+    (tmp_path / "o").write_text(out)
+    r = await Shell(tmp_path).run(f"cat {tmp_path / 'o'}")
+    assert len(out.encode()) == 92_500 and r.stdout == out
+    assert len(r.stdout.splitlines()) == 2500 and r.stdout_path is None
+    exact = "z" * (1024 * 1024 - 1) + "\n"  # exactly 1 MiB: still whole
+    (tmp_path / "o").write_text(exact)
+    r = await Shell(tmp_path).run(f"cat {tmp_path / 'o'}")
+    assert r.stdout == exact and r.stdout_path is None
+
+
+async def test_multibyte_text_split_across_reads_stays_whole(tmp_path):
+    # 3-byte characters: the 64 KiB reads split many of them.
+    out = "".join(f"{i:04d} 漢字テスト🚀\n" for i in range(9000))  # ~230 KB
+    (tmp_path / "o").write_text(out)
+    r = await Shell(tmp_path).run(f"cat {tmp_path / 'o'}")
+    assert r.stdout == out and "\ufffd" not in r.stdout
+    big = out * 12  # > 1 Mi characters: cut, the file byte-exact
+    (tmp_path / "o").write_text(big)
+    r = await Shell(tmp_path).run(f"cat {tmp_path / 'o'}")
+    assert r.stdout_path and Path(r.stdout_path).read_bytes() == big.encode()
+    assert "\ufffd" not in r.stdout
+
+
+async def test_one_line_over_the_limit_is_cut_and_kept_byte_exact(tmp_path):
+    data = bytes(range(256)) * 8192  # 2 MiB without a newline, invalid UTF-8 included
+    (tmp_path / "o").write_bytes(data)
+    r = await Shell(tmp_path).run(f"cat {tmp_path / 'o'}")
+    assert r.stdout_path and Path(r.stdout_path).read_bytes() == data
+    assert (
+        r.stdout.startswith("<truncated-output>\n")
+        and NOTICE.format(json.dumps(r.stdout_path)) in r.stdout.split("\n", 3)[2]
+    )
+
+
 async def test_direct_run_keeps_long_output_until_aclose(tmp_path):
     sh = Shell(tmp_path)
-    out = "".join(f"line {i:05d} " + "x" * 18 + "\n" for i in range(1200))  # ~36 KB
+    out = "".join(f"line {i:05d} " + "x" * 18 + "\n" for i in range(40_000))  # 1.2 MB
     cmd = f"cat {tmp_path / 'o'}; cat {tmp_path / 'o'} >&2"
     (tmp_path / "o").write_text(out)
     r = await sh.run(cmd)
     for text, path in ((r.stdout, r.stdout_path), (r.stderr, r.stderr_path)):
-        assert len(text) < 11_000 and f"bytes omitted; full output: {path}]" in text
-        assert text.startswith("line 00000 ") and text.endswith("line 01199 " + "x" * 18 + "\n")
-        assert path and Path(path).read_text() == out
+        assert path and text.startswith(cut_notice(path, 1_200_000) + "line 00000 ")
+        assert text.endswith("line 39999 " + "x" * 18 + "\n\n</truncated-output>")
+        assert Path(path).read_text() == out
     short = await sh.run("echo hi")
     assert (short.stdout, short.stdout_path, short.stderr_path) == ("hi\n", None, None)
     assert sorted(p.name for p in Path(r.stdout_path).parent.iterdir()) == [
@@ -94,9 +144,12 @@ async def test_direct_run_keeps_long_output_until_aclose(tmp_path):
 
 async def test_direct_run_output_limit_marker():
     sh = Shell(max_output=1000)
-    r = await sh.run("head -c 30000 /dev/zero | tr '\\0' a")
+    r = await sh.run("head -c 2000000 /dev/zero | tr '\\0' a")
     assert r.stdout_path and Path(r.stdout_path).stat().st_size == 1000
-    assert f"over the 1,000-byte output limit: {r.stdout_path} holds only the first" in r.stdout
+    assert (
+        NOTICE.format(json.dumps(r.stdout_path)) + "\nThe file is incomplete: it holds the first "
+        "1,000 bytes; 1,999,000 more bytes were over its 1,000-byte limit.\n"
+    ) in r.stdout
     await sh.aclose()
     assert not Path(r.stdout_path).exists()
 
@@ -104,10 +157,10 @@ async def test_direct_run_output_limit_marker():
 async def test_dropped_unowned_shell_keeps_files_while_the_result_lives():
     import gc
 
-    r = await Shell().run("seq 1 100000")  # the temporary Shell is dropped
+    r = await Shell().run("seq 1 300000")  # the temporary Shell is dropped
     gc.collect()
     path = Path(r.stdout_path)
-    assert path.read_text().count("\n") == 100000
+    assert path.read_text().count("\n") == 300000
     del r
     gc.collect()
     assert not path.exists()
@@ -121,7 +174,7 @@ async def test_dropped_owned_shell_keeps_files_until_the_owner_closes():
     owner = ShellOwner()
     token = shell_owner.set(owner)
     try:
-        r = await Shell().run("seq 1 100000")  # a cell's one-liner
+        r = await Shell().run("seq 1 300000")  # a cell's one-liner
         pid = int((await Shell().run("echo $$")).stdout)
     finally:
         shell_owner.reset(token)
@@ -130,7 +183,7 @@ async def test_dropped_owned_shell_keeps_files_until_the_owner_closes():
     path = Path(r.stdout_path)
     del r
     gc.collect()  # neither the Shell nor the result is needed: the owner keeps it
-    assert path.read_text().count("\n") == 100000
+    assert path.read_text().count("\n") == 300000
     await owner.aclose()
     assert not path.exists()
 
@@ -142,7 +195,7 @@ async def test_owned_shell_aclose_removes_its_files():
     token = shell_owner.set(owner)
     try:
         sh = Shell()
-        r = await sh.run("seq 1 100000")
+        r = await sh.run("seq 1 300000")
     finally:
         shell_owner.reset(token)
     assert Path(r.stdout_path).exists()
@@ -319,12 +372,13 @@ async def test_same_shell_cannot_be_entered_twice(manager, tmp_path):
 
 
 async def test_output_limit_is_enforced_while_writing(manager, tmp_path):
-    r = await manager.launch(Shell(max_output=1000).run("head -c 100000 /dev/zero | tr '\\0' a"))
+    cmd = "head -c 2000000 /dev/zero | tr '\\0' a"
+    r = await manager.launch(Shell(max_output=1000).run(cmd))
     assert Path(r.stdout_path).stat().st_size == 1000
-    assert "over the 1,000-byte output limit" in r.stdout and "first 1,000 of 100,000" in r.stdout
-    assert r.stdout.endswith("a" * 100)  # the tail is still shown
+    assert "it holds the first 1,000 bytes; 1,999,000 more bytes were over" in r.stdout
+    assert r.stdout.endswith("a" * 100 + "\n</truncated-output>")  # the tail is still shown
     sh = manager.launch(Shell(tmp_path, max_output=1000), name="sh")
-    r = await sh.send("head -c 50000 /dev/zero | tr '\\0' b; echo done >&2")
+    r = await sh.send("head -c 2000000 /dev/zero | tr '\\0' b; echo done >&2")
     assert Path(r.stdout_path).stat().st_size == 1000 and r.stderr == "done\n"
     r = await manager.launch(Shell(max_output=10_000).run("yes", timeout=1))
     assert r.timed_out and Path(r.stdout_path).stat().st_size == 10_000

@@ -316,6 +316,28 @@ class AtomCodeAct(CodeActV2):
         return super()._build_builtins(runtime, call)
 
 
+# How a cut cell print names its file (CaptureConfig.file_notice template).
+_CELL_NOTICE = "Full output: await self.files.read({quoted_path})"
+
+
+@hidden
+def _file_backed_cells(truncation: Any, owner: work_shell.ShellOwner) -> Any:
+    """``truncation`` with file-backed cell prints: full text in the session's directory.
+
+    The cell print limits stay as configured (e.g. 50,000 / 2,000 characters);
+    past them the text names its file. The files go when the session's
+    ``ShellOwner`` closes, with its Shells' output.
+    """
+    capture = truncation.capture.model_copy(
+        update={
+            "file_backed": True,
+            "file_dir": owner.cell_output_dir(),
+            "file_notice": _CELL_NOTICE,
+        }
+    )
+    return truncation.model_copy(update={"capture": capture})
+
+
 # ---- turn conditions ---------------------------------------------------------
 
 
@@ -712,6 +734,7 @@ class AtomAgent(AtomAgentBase):
             capture_factory=lambda: CaptureScope(self.runtime.truncation_config),
         )
         self._shells = work_shell.ShellOwner()
+        self._truncation = _file_backed_cells(self._truncation, self._shells)
         self.files = Files(self.shell)
         # Atom's own to-do list: membership on the list, content on each item.
         self._install_todo_list()
