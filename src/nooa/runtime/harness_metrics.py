@@ -197,6 +197,7 @@ class HarnessMetrics(BaseModel):
     shell_variant: str = ""  # which self.shell implementation is active (bake-off tag)
     shell_failures: list[ErrorRecord] = Field(default_factory=list)
     shell_deaths: list[ErrorRecord] = Field(default_factory=list)
+    shell_cwd_fallbacks: list[str] = Field(default_factory=list)
     repo_failures: list[ErrorRecord] = Field(default_factory=list)
     tool_avoidance: list[str] = Field(default_factory=list)
 
@@ -455,6 +456,13 @@ class HarnessMetrics(BaseModel):
                 code_preview=_truncate(code_preview, _MAX_CODE_PREVIEW_CHARS),
             ),
         )
+
+    def shell_cwd_fallback(self, detail: str) -> None:
+        """A restarted Shell's kept cwd was gone; bash started in its starting directory.
+
+        ``detail`` is ``<gone> -> <fallback>``.
+        """
+        self._append(self.shell_cwd_fallbacks, detail)
 
     def shell_death(self, context: str, diagnostics: str) -> None:
         """Record a bash process death event with diagnostics."""
@@ -1127,6 +1135,19 @@ _SPAN_SCHEMA: tuple[SchemaEntry, ...] = (
         "Shell death diagnostics",
         "Tool Usage",
         lambda m: [e.message for e in m.shell_deaths],
+        True,
+    ),
+    SchemaEntry(
+        "harness.shell_cwd_fallback.count",
+        "Restarted Shells whose kept cwd was gone",
+        "Tool Usage",
+        lambda m: len(m.shell_cwd_fallbacks),
+    ),
+    SchemaEntry(
+        "harness.shell_cwd_fallback.details",
+        "Gone cwd -> fallback directory",
+        "Tool Usage",
+        lambda m: m.shell_cwd_fallbacks,
         True,
     ),
     SchemaEntry(
