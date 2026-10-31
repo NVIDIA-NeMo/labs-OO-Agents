@@ -21,6 +21,7 @@ import asyncio
 import inspect
 import json
 import logging
+import re
 import types
 import typing
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
@@ -166,6 +167,49 @@ def retry_text_only_response(context: TextOnlyResponseContext) -> TextOnlyRespon
     return TextOnlyResponseAction.retry(_text_only_correction(context))
 
 
+# Tool-call syntax a model wrote as text (often inside <think>), which the
+# provider did not parse into a real tool call: Hermes/Qwen-style
+# <tool_call>/<function=...>/<parameter=...>, GLM's <arg_key>/<arg_value>,
+# Anthropic-style <invoke>, and a JSON {"name": ..., "arguments": ...} object.
+_TOOL_CALL_MARKUP = re.compile(
+    r"</?tool_call>|<function=|<parameter=|</?arg_(?:key|value)>|<invoke\b"
+    r'|\{\s*"name"\s*:\s*"[^"]*"\s*,\s*"(?:arguments|parameters)"\s*:'
+)
+
+TEXT_ONLY_TOOL_MARKUP_NOTE = (
+    "Your reply contained a tool call written as text (inside <think>, or as "
+    "XML/markup), so it was not run. Tool calls only run when sent as real tool "
+    "calls, after your reasoning."
+)
+
+
+def text_only_tool_call_markup(text: str | None) -> str | None:
+    """Return the first tool-call markup written as text in *text*, else ``None``.
+
+    Used when a reply has no real tool call: the model may have written one
+    as text (for example inside ``<think>``) that the provider did not parse.
+    Detection only; the recovered call is never executed.
+    """
+    if not text:
+        return None
+    match = _TOOL_CALL_MARKUP.search(text)
+    return match.group(0) if match else None
+
+
+def text_only_tool_markup_note(context: TextOnlyResponseContext) -> str:
+    """The note that leads a text-only correction ("" if no tool-call markup).
+
+    Looks at the reply's content and reasoning; records
+    ``harness.text_only_tool_markup.count`` when markup is found.
+    """
+    reasoning = getattr(context.response, "reasoning", None)
+    for text in (context.content, reasoning if isinstance(reasoning, str) else None):
+        if text_only_tool_call_markup(text) is not None:
+            get_harness_metrics().text_only_tool_markup()
+            return TEXT_ONLY_TOOL_MARKUP_NOTE + " "
+    return ""
+
+
 def _text_only_correction(
     context: TextOnlyResponseContext,
     validation_error: str | None = None,
@@ -175,6 +219,7 @@ def _text_only_correction(
     )
     return Error(
         content=(
+            f"{text_only_tool_markup_note(context)}"
             "Your last reply was plain text with no tool call. It was preserved, "
             "but a bare message cannot end the turn or run code. "
             f"To finish `{context.call.method_name}`, call `return_result(value)`. "
@@ -1410,15 +1455,18 @@ Standard Python builtins and agent instance (`self`) are available."""
 
         # Process each tool call in order, stopping at the first error.
         # If one cell fails, subsequent cells likely depend on its output
-        # and would cascade into confusing errors.
-        for tool_call in tool_calls:
+        # and would cascade into confusing errors. The calls after it still
+        # get a "Not executed" result (see _skip_remaining_tool_calls).
+        for index, tool_call in enumerate(tool_calls):
             guard = session.loop_guard
             if guard is None:
                 result = await self._process_one_tool_call(
                     tool_call, runtime, builtins, session, call, return_type, llm_response_id
                 )
                 if result is not None:
-                    return result
+                    return self._skip_remaining_tool_calls(
+                        result, tool_calls, index, runtime, llm_response_id
+                    )
                 continue
 
             action, parsed_args = self._loop_guard_action(tool_call)
@@ -1426,19 +1474,72 @@ Standard Python builtins and agent instance (`self`) are available."""
                 guard, action, parsed_args, tool_call, runtime, llm_response_id
             )
             if blocked is not None:
-                return blocked
+                return self._skip_remaining_tool_calls(
+                    blocked, tool_calls, index, runtime, llm_response_id
+                )
             first_new = len(runtime.event_manager.keys())
             result = await self._process_one_tool_call(
                 tool_call, runtime, builtins, session, call, return_type, llm_response_id
             )
             if result is not None and result.completed:
-                return result
+                return self._skip_remaining_tool_calls(
+                    result, tool_calls, index, runtime, llm_response_id
+                )
             self._loop_guard_after(guard, action, parsed_args, tool_call, runtime, first_new)
             if result is not None:
-                return result
+                return self._skip_remaining_tool_calls(
+                    result, tool_calls, index, runtime, llm_response_id
+                )
 
         # All tool calls processed without completion or error-break
         return _ToolCallsResult()
+
+    @staticmethod
+    def _skip_remaining_tool_calls(
+        result: _ToolCallsResult,
+        tool_calls: list[Any],
+        index: int,
+        runtime: RuntimeServices,
+        llm_response_id: str | None,
+    ) -> _ToolCallsResult:
+        """Give each call after ``tool_calls[index]`` a "Not executed" result.
+
+        The turn stops at the first failed or finishing call. Without a result
+        for every call of a response, the message builder omits that whole
+        assistant tool-call turn from replay, and the model is never told the
+        later calls did not run. Returns ``result`` unchanged.
+        """
+        remaining = tool_calls[index + 1 :]
+        if not remaining:
+            return result
+        if result.completed:
+            content = "Not executed: an earlier call in this response already finished the turn."
+        else:
+            content = (
+                f"Not executed: an earlier call in this response "
+                f"({tool_calls[index].name} call {index + 1}) failed, so nothing after it ran."
+            )
+        for skipped in remaining:
+            try:
+                args: Any = json.loads(skipped.arguments)
+            except (TypeError, ValueError):
+                args = {}
+            runtime.event_manager.add(
+                ToolCallEvent(
+                    tool_call_id=skipped.id,
+                    name=skipped.name,
+                    arguments=args if isinstance(args, dict) else {},
+                    llm_response_id=llm_response_id,
+                    result=ToolResult(
+                        tool_call_id=skipped.id,
+                        content=content,
+                        result_status=ResultStatus.ERROR,
+                    ),
+                )
+            )
+        get_harness_metrics().tool_call_skipped(len(remaining))
+        logger.debug("[CODEACT] Skipped %d tool call(s) after call %d", len(remaining), index + 1)
+        return result
 
     def _loop_guard_action(self, tool_call: Any) -> tuple[str, Any]:
         """Fingerprint a tool call from its raw arguments, valid JSON or not."""
