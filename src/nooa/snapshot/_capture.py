@@ -594,8 +594,12 @@ def _sequence_from(
     state: _State,
     *,
     tail_source: Callable[[int], list[Any]] | None = None,
+    resolve: Callable[[Any], _Built | _Deferred | None] | None = None,
 ) -> _Built:
-    """Kept items of a sequence: a head (and a tail when known), under the shared budget."""
+    """Kept items of a sequence: a head (and a tail when known), under the shared budget.
+
+    ``resolve``: as for ``_object_fields`` (an ``Out``'s own parts as items).
+    """
     limits = state.limits
     box = _Container(max_size)
     head_n: int | None = None
@@ -613,7 +617,9 @@ def _sequence_from(
         if available < 1:
             box.stop("max_length")
             return False
-        built = _build(child, available, depth + 1, pointer_child(path, str(index)), state)
+        built = _build_slot(
+            child, available, depth + 1, pointer_child(path, str(index)), state, resolve
+        )
         out.append(built.node)
         box.commit(0, built.size)
         return True
@@ -690,6 +696,7 @@ def _mapping_from(
     state: _State,
     head_n: int | None,
     tail_items: list[tuple[Any, Any]] | None = None,
+    resolve: Callable[[Any], _Built | _Deferred | None] | None = None,
 ) -> _Built:
     box = _Container(max_size)
 
@@ -712,7 +719,9 @@ def _mapping_from(
         if available < 1:
             box.stop("max_length")
             return False
-        built = _build(child, available, depth + 1, pointer_child(path, json_key), state)
+        built = _build_slot(
+            child, available, depth + 1, pointer_child(path, json_key), state, resolve
+        )
         out.append((cast(Key, key), built.node))
         box.commit(overhead, built.size)
         return True
@@ -1029,6 +1038,23 @@ def _declaring_module(
     return None
 
 
+def _build_slot(
+    child: Any,
+    max_size: int,
+    depth: int,
+    path: str,
+    state: _State,
+    resolve: Callable[[Any], _Built | _Deferred | None] | None,
+) -> _Built:
+    """``child`` in a container slot: an ``Out``'s own part or node, else captured."""
+    resolved = resolve(child) if resolve is not None else None
+    if type(resolved) is _Deferred:
+        return resolved.build(max_size, depth, path)
+    if type(resolved) is _Built:
+        return _shrink(resolved, max_size)
+    return _build(child, max_size, depth, path, state)
+
+
 # --- Pydantic models and dataclasses ---------------------------------------------
 
 
@@ -1121,7 +1147,7 @@ def _object_fields(
         state.nodes_left -= held_nodes
         try:
             if deferred is not None:
-                built = deferred.build(available)
+                built = deferred.build(available, depth + 1, pointer_child(path, name))
             elif prebuilt is None:
                 built = _build(child, available, depth + 1, pointer_child(path, name), state)
             else:
@@ -1474,7 +1500,11 @@ class _Deferred:
     __slots__ = ("_build", "_out", "built", "min_nodes", "min_size")
 
     def __init__(
-        self, out: Out, build: Callable[[int], _Built], min_size: int, min_nodes: int = 1
+        self,
+        out: Out,
+        build: Callable[[int, int, str], _Built],
+        min_size: int,
+        min_nodes: int = 1,
     ) -> None:
         self._out = out
         self._build = build
@@ -1482,10 +1512,13 @@ class _Deferred:
         self.min_nodes = min_nodes
         self.built: _Built | None = None
 
-    def build(self, max_size: int) -> _Built:
-        """Build once, within ``max_size``; a second use reuses (and fits) the first node."""
+    def build(self, max_size: int, depth: int, path: str) -> _Built:
+        """Build once in a slot at ``depth`` / ``path``, within ``max_size``.
+
+        A second use reuses (and fits) the first node.
+        """
         if self.built is None:
-            self.built = self._build(max_size)
+            self.built = self._build(max_size, depth, path)
             self._out._built.append(self.built)  # charged by the parent that uses it
             return self.built
         return _shrink(self.built, max_size)
@@ -1518,7 +1551,6 @@ class Out:
         self._path = path
         self._state = state
         self._built: list[_Built] = []
-        self._index = 0
 
     def _keep(self, built: _Built) -> Snapshot:
         self._built.append(built)
@@ -1529,7 +1561,7 @@ class Out:
         if type(result) is _Deferred:
             if result._out is not self:
                 return None
-            return result.build(self._max_size)
+            return result.build(self._max_size, self._depth, self._path)
         return self._prebuilt(result)
 
     def _prebuilt(self, node: Any) -> _Built | None:
@@ -1544,24 +1576,26 @@ class Out:
             return child if child._out is self else None
         return self._prebuilt(child)
 
-    def capture(self, child: Any, key: str | int | None = None) -> Deferred:
-        """``child`` captured as this value's snapshot (or a part of it), at the same depth."""
-        if key is None:
-            key = self._index
-            self._index += 1
-        path = pointer_child(self._path, str(key))
+    def capture(self, child: Any) -> Deferred:
+        """``child`` captured as this value's snapshot or a part of it.
 
-        def build(max_size: int) -> _Built:
+        It is built in the slot it takes: returned, at this value's depth and
+        path; as a field, item or value, one level deeper, under that name.
+        """
+
+        def build(max_size: int, depth: int, path: str) -> _Built:
             if max_size < 1:
                 return _Built(Unavailable("max_length", _builtin_name(child)), 1)
-            return _build(child, max_size, self._depth, path, self._state)
+            return _build(child, max_size, depth, path, self._state)
 
         # A non-built-in value needs node work for its MRO and a few fields.
         min_nodes = 1 if _builtin_name(child) else _OBJECT_MIN_NODES
         return _Deferred(self, build, _min_size(child), min_nodes)
 
-    def _empty(self, node_type: Any, type_name: str, length: int | None, max_size: int) -> _Built:
-        reason: Reason = "max_depth" if self._depth >= self._state.max_depth else "max_length"
+    def _empty(
+        self, node_type: Any, type_name: str, length: int | None, max_size: int, depth: int
+    ) -> _Built:
+        reason: Reason = "max_depth" if depth >= self._state.max_depth else "max_length"
         if max_size < 2:
             name = "list" if node_type is Sequence else "dict"
             return _Built(Unavailable(reason, name), 1)
@@ -1573,11 +1607,11 @@ class Out:
         """A sequence of ``items`` (pulled one at a time when built), cut like a list."""
         state = self._state
 
-        def build(max_size: int) -> _Built:
-            if self._depth >= state.max_depth or max_size < 2:
-                return self._empty(Sequence, type_name, length, max_size)
+        def build(max_size: int, depth: int, path: str) -> _Built:
+            if depth >= state.max_depth or max_size < 2:
+                return self._empty(Sequence, type_name, length, max_size, depth)
             return _sequence_from(
-                items, length, type_name, max_size, self._depth, self._path, state
+                items, length, type_name, max_size, depth, path, state, resolve=self._resolve
             )
 
         return _Deferred(self, build, 2)
@@ -1592,12 +1626,20 @@ class Out:
         """A mapping of ``(key, value)`` pairs; keys must be exact built-in scalars."""
         state = self._state
 
-        def build(max_size: int) -> _Built:
-            if self._depth >= state.max_depth or max_size < 2:
-                return self._empty(Mapping, type_name, length, max_size)
+        def build(max_size: int, depth: int, path: str) -> _Built:
+            if depth >= state.max_depth or max_size < 2:
+                return self._empty(Mapping, type_name, length, max_size, depth)
             head_n = state.limits.max_items
             return _mapping_from(
-                items, length, type_name, max_size, self._depth, self._path, state, head_n
+                items,
+                length,
+                type_name,
+                max_size,
+                depth,
+                path,
+                state,
+                head_n,
+                resolve=self._resolve,
             )
 
         return _Deferred(self, build, 2)

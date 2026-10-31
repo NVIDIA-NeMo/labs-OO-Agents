@@ -604,6 +604,74 @@ def test_registered_self_reference_is_a_cycle(registry) -> None:
     assert snapshot.fields == (("me", Ref("", "object")),)
 
 
+class _Node:
+    def __init__(self, left: Any = None) -> None:
+        self.left = left
+
+
+def _node_depth(node: Any) -> int:
+    children = [child for _, child in getattr(node, "fields", ())]
+    children += list(getattr(node, "items", ()))
+    children = [child[1] if isinstance(child, tuple) else child for child in children]
+    return max([0] + [1 + _node_depth(child) for child in children])
+
+
+def test_registered_recursive_type_respects_max_depth(registry) -> None:
+    registry(_Node, lambda n, out: out.object({"left": out.capture(n.left)}, type_name="Node"))
+    chain = None
+    for _ in range(30):
+        chain = _Node(chain)
+
+    snapshot = capture(chain, Limits(max_depth=3))
+
+    assert _node_depth(snapshot) == 3
+    deepest = snapshot
+    for _ in range(3):
+        assert isinstance(deepest, Object)
+        deepest = deepest.fields[0][1]
+    assert isinstance(deepest, Object)
+    assert deepest.fields == () and deepest.reason == "max_depth"
+
+
+def test_registered_parts_in_sequences_and_mappings_get_their_slot(registry) -> None:
+    registry(
+        _Node,
+        lambda n, out: out.object(
+            {
+                "items": out.sequence([out.capture(n.left)]),
+                "by_key": out.mapping([("k", out.capture(n.left))]),
+            },
+            type_name="Node",
+        ),
+    )
+    chain = None
+    for _ in range(10):
+        chain = _Node(chain)
+
+    snapshot = capture(chain, Limits(max_depth=4))
+
+    assert _node_depth(snapshot) <= 4
+    assert isinstance(snapshot, Object)
+    items = snapshot.fields[0][1]
+    assert isinstance(items, Sequence) and isinstance(items.items[0], Object)
+
+
+def test_registered_cycle_ref_ids_use_field_paths(registry) -> None:
+    registry(_Node, lambda n, out: out.object({"left": out.capture(n.left)}, type_name="Node"))
+    a = _Node()
+    b = _Node(a)
+    a.left = b
+    holder = _Node(a)
+
+    snapshot = capture(holder)
+
+    node = snapshot
+    for _ in range(3):
+        assert isinstance(node, Object)
+        node = node.fields[0][1]
+    assert node == Ref("/left", "object")
+
+
 def test_register_needs_a_type() -> None:
     with pytest.raises(TypeError):
         capture.register("Animal")  # type: ignore[arg-type]
