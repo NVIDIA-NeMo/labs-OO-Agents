@@ -435,26 +435,26 @@ class _Piece:
     source: int  # 0: ``a``, 1: ``b``
 
 
-def _cut(piece: _Piece, budget: int, unit: str, *, back: bool, limit: int) -> tuple[int, int, int]:
+def _cut(piece: _Piece, budget: int, unit: str, *, back: bool, limit: int) -> tuple[int, int]:
     """The longest prefix (``back``: suffix) of ``piece`` within ``budget`` original units.
 
-    Returns (characters kept, at most ``limit``; their units' upper bound;
-    lower bound). Chars and bytes without U+FFFD are exact. A bytes piece
-    knows its total units (``units``) but not each U+FFFD's width (1 to 3
-    original bytes): the bounds follow from the total and from what the
-    rest of the piece holds, and are equal when the part keeps none or all
-    of the piece's U+FFFD, or when all of them have one width.
+    Returns (characters kept, at most ``limit``; an upper bound of their
+    units). Chars and bytes without U+FFFD are exact. A bytes piece knows its
+    total units (``units``) but not each U+FFFD's width (1 to 3 original
+    bytes): the bound follows from the total and from what the rest of the
+    piece holds, and is exact when the part keeps none or all of the
+    piece's U+FFFD, or when all of them have one width.
     """
     if budget <= 0 or limit <= 0:
-        return 0, 0, 0
+        return 0, 0
     text = piece.text
     if unit == "chars":
         kept = min(budget, limit, len(text))
-        return kept, kept, kept
+        return kept, kept
     count = text.count(REPLACEMENT)
     other = _units(text, unit) - 3 * count  # bytes of the characters that are not U+FFFD
     other_part = count_part = 0
-    best = (0, 0, 0)
+    best = (0, 0)
     for kept, char in enumerate(reversed(text) if back else text, 1):
         if kept > limit:
             break
@@ -466,8 +466,7 @@ def _cut(piece: _Piece, budget: int, unit: str, *, back: bool, limit: int) -> tu
         high = min(other_part + 3 * count_part, piece.units - rest_other - rest_count)
         if high > budget:
             break
-        low = max(other_part + count_part, piece.units - rest_other - 3 * rest_count)
-        best = (kept, high, max(0, min(low, high)))
+        best = (kept, high)
     return best
 
 
@@ -541,7 +540,7 @@ def merge(a: Text, b: Text, head: int, tail: int) -> Text:
             index += 1
             continue
         cut_at = index
-        cut_chars, used, _low = _cut(piece, room, unit, back=False, limit=len(piece.text))
+        cut_chars, used = _cut(piece, room, unit, back=False, limit=len(piece.text))
         head_parts.append(piece.text[:cut_chars])
         kept.append((piece, piece.text[:cut_chars]))
         head_kept += used
@@ -562,7 +561,7 @@ def merge(a: Text, b: Text, head: int, tail: int) -> Text:
             last -= 1
             continue
         limit = len(piece.text) - (cut_chars if last == cut_at else 0)
-        chars, used, _low = _cut(piece, room, unit, back=True, limit=limit)
+        chars, used = _cut(piece, room, unit, back=True, limit=limit)
         part = piece.text[len(piece.text) - chars :]
         tail_parts.insert(0, part)
         kept.append((piece, part))

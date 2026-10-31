@@ -303,7 +303,7 @@ class _RenderPython(_TextRender):
     """``render_python(snapshot)``, with ``render_python.register(kind)`` for per-kind hooks."""
 
     def __call__(self, snapshot: Snapshot) -> str:
-        """``snapshot`` in agentdoc's ``pformat`` / CodeAct prefill notation, on one line.
+        """``snapshot`` in agentdoc's ``pformat`` / CodeAct prefill notation, not column-wrapped.
 
         Complete values are Python literals; cut ones use the slice-keys markers
         ``str(len=N, [:h]='...', [-t:]='...')``, ``list(len=N, [:h]=[...], [-t:]=[...])``

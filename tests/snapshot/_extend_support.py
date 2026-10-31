@@ -7,7 +7,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from typing import Any
 
-from nooa.snapshot import Object, Out, PythonRenderer, Snapshot
+from nooa.snapshot import Object, Out, PythonRenderer
 
 FAKE_MODULE = "fakelib_not_installed_7c1e"
 
@@ -47,7 +47,7 @@ _FakeNdarray.__module__ = "fakenumpy_7c1e"
 _FakeNdarray.__qualname__ = "ndarray"
 
 
-def capture_ndarray(array: Any, out: Out) -> Snapshot:
+def capture_ndarray(array: Any, out: Out):
     return out.object(
         {
             "shape": out.capture(array.shape),

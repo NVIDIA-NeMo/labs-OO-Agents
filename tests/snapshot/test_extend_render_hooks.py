@@ -65,18 +65,25 @@ def test_render_python_hook_children_keep_notation(hooks) -> None:
     assert render_python(node) == "T(str(len=10, [:2]='ab', [-2:]='ij'))"
 
 
-def test_render_python_raising_or_non_str_hook_is_generic(hooks) -> None:
-    def broken(node: Object, r: PythonRenderer) -> str:
-        raise RuntimeError("boom")
+def _raises(node: Object, r: Any) -> str:
+    raise RuntimeError("boom")
 
-    hooks(render_python, KIND, broken)
-    assert render_python(_thing(a=1)) == "Thing(a=1)"
 
-    hooks(render_python, KIND, lambda node, r: None)
-    assert render_python(_thing(a=1)) == "Thing(a=1)"
-
-    hooks(render_python, KIND, lambda node, r: r.render(node))  # recursion: generic
-    assert render_python(_thing(a=1)) == "Thing(a=1)"
+@pytest.mark.parametrize("renderer", [render_python, render_output], ids=["python", "output"])
+@pytest.mark.parametrize(
+    "bad",
+    [
+        _raises,
+        lambda node, r: None,  # not a str
+        lambda node, r: 42,  # not a str
+        lambda node, r: r.render(node),  # recursion on its own node
+    ],
+    ids=["raises", "none", "int", "recursion"],
+)
+def test_bad_text_hook_falls_back_to_generic(hooks, renderer, bad) -> None:
+    # The text renderers share their hook contract: a bad hook means generic rendering.
+    hooks(renderer, KIND, bad)
+    assert renderer(_thing(a=1)) == "Thing(a=1)"
 
 
 def test_no_hook_for_kind_is_generic() -> None:
@@ -102,12 +109,9 @@ def test_render_output_hook_uses_output_notation(hooks) -> None:
     assert render_python(node) == "Log(text=bytes(len=1000, [:4]=b'head', [-4:]=b'tail'))"
 
 
-def test_render_output_text_is_unchanged_and_raising_hook_is_generic(hooks) -> None:
+def test_render_output_text_is_unchanged() -> None:
     text = Text("a", "b", 10, "chars", False, "max_length", omitted=8)
     assert render_output(text) == "a\n[... 8 chars omitted; full output not kept]\nb"
-
-    hooks(render_output, KIND, lambda node, r: 1 / 0)
-    assert render_output(_thing(a="x")) == "Thing(a=x)"
 
 
 def _projection(**entries: Snapshot) -> Mapping:

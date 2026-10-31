@@ -95,7 +95,8 @@ class Text:
 
     ``length`` is the size of the original in ``unit``; ``omitted`` the units
     left out between ``head`` and ``tail`` (0 when complete). ``replaced``
-    counts replacement characters that decoding introduced (``unit == "bytes"``).
+    counts replacement characters that decoding introduced (in bytes, or in bytes
+    written to a chars ``TextStream``).
 
     ``head_units`` / ``tail_units``: the original units ``head`` and ``tail``
     stand for. A bytes ``Text`` needs them: a U+FFFD that decoding introduced

@@ -23,7 +23,6 @@ from nooa.snapshot import (
     Ref,
     Scalar,
     Sequence,
-    Snapshot,
     Text,
     Unavailable,
     capture,
@@ -572,7 +571,7 @@ def registry():
 
 
 def test_registered_function_builds_through_out(registry) -> None:
-    def animal(value: Animal, out: Out) -> Snapshot:
+    def animal(value: Animal, out: Out):
         return out.object([("name", value.name)])
 
     registry(Animal, animal)
@@ -606,7 +605,7 @@ def test_registration_overrides_pydantic_view_for_subclass(registry) -> None:
 
 
 def test_exception_in_registered_function_is_unavailable(registry) -> None:
-    def broken(value: Any, out: Out) -> Snapshot:
+    def broken(value: Any, out: Out):
         raise RuntimeError("boom")
 
     registry(Animal, broken)

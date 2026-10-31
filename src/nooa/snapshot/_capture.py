@@ -34,7 +34,6 @@ import math
 import sys
 import types
 import typing
-import weakref
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -1061,7 +1060,6 @@ def _copy_storage(obj_dict: Any, state: _State) -> dict[str, Any] | None:
 
 
 def _object_fields(
-    value: Any,
     type_name: str,
     module: str,
     selected: Iterable[tuple[str, Any] | None],
@@ -1197,7 +1195,7 @@ def _build_pydantic(
                     continue
                 yield name, dict.__getitem__(storage, name)
 
-        built = _object_fields(value, type_name, module, selected(), max_size, depth, path, state)
+        built = _object_fields(type_name, module, selected(), max_size, depth, path, state)
         return _with_stop(built, stopped)
     finally:
         state.active.pop(id(value), None)
@@ -1316,7 +1314,7 @@ def _build_dataclass(
                 if slot is not _STOP:
                     yield name, slot
 
-        built = _object_fields(value, type_name, module, selected(), max_size, depth, path, state)
+        built = _object_fields(type_name, module, selected(), max_size, depth, path, state)
         return _with_stop(built, stopped)
     finally:
         state.active.pop(id(value), None)
@@ -1324,7 +1322,8 @@ def _build_dataclass(
 
 # --- registry --------------------------------------------------------------------
 
-CaptureFunction = Callable[[Any, "Out"], Snapshot]
+CaptureFunction = Callable[[Any, "Out"], "_Deferred"]
+"""``function(value, out)`` returns one part of its ``out`` (an opaque part, not a node)."""
 
 
 _OBJECT_MIN_NODES = 16
@@ -1408,7 +1407,7 @@ def _length(value: Any) -> int | None:
 class Out:
     """What a registered capture function builds its snapshot with.
 
-    Every method returns a deferred part: nothing is built (and no item is
+    Every method returns a deferred part: no child is built (and no item is
     pulled) until the part takes its slot, as a field value of
     ``object(...)``, an item of ``sequence(...)``, a value of ``mapping(...)``
     or the function's return value. So the function returns one tree of
@@ -1416,7 +1415,9 @@ class Out:
     budget, its depth and path). Parts are opaque: pass them on unchanged.
     A part is single-use: a second use raises ``ValueError`` (the value then
     becomes ``Unavailable("error")``); call the method again for a second
-    placement. ``object`` builds its fields in order: its own wrapper and the
+    placement. Only ``object``'s known field list (a ``dict``, ``list`` or
+    ``tuple``) is copied, and its reservation prepared, when it is called.
+    ``object`` builds its fields in order: its own wrapper and the
     minimal fallback of every later field are reserved first (for a ``dict``,
     ``list`` or ``tuple`` of fields, and only while the slot fits them: a
     field is never held below its own minimum), so a greedy field (a long
@@ -1586,7 +1587,6 @@ class Out:
                     yield field_name, child
 
             built = _object_fields(
-                self._value,
                 name,
                 module,
                 selected(),
@@ -1672,42 +1672,17 @@ class _Registry:
         self.entries: list[tuple[type[Any], CaptureFunction]] = []
         # (module, qualname) -> function; keys are exact ``str`` pairs only.
         self.lazy: dict[tuple[str, str], CaptureFunction] = {}
-        # id(cls) -> (weak reference to cls, its raw (module, qualname) then,
-        # lazy function or None). Keyed by ``id`` and checked by identity, so
-        # a class is never hashed or compared; the name is compared too, as a
-        # class can legally be renamed (``__module__`` / ``__qualname__``).
-        self._resolved: dict[
-            int,
-            tuple[weakref.ref[type[Any]], tuple[str, str] | None, CaptureFunction | None],
-        ] = {}
-
-    def changed(self) -> None:
-        """Forget cached lazy resolutions (a registration was added or removed)."""
-        self._resolved.clear()
 
     def _lazy_for(self, cls: type[Any], state: _State) -> CaptureFunction | None:
+        """The lazy registration for ``cls``'s current raw name (never the class itself).
+
+        The name is read on every lookup (a class can be renamed), and a dict
+        lookup of an exact ``str`` pair runs no user code: nothing is cached.
+        """
         if not self.lazy:
             return None
-        marker = id(cls)
         name = _raw_qualified_name(cls, state)
-        cached = self._resolved.get(marker)
-        # Exact ``str`` pairs (or None): comparing them runs no user code.
-        if cached is not None and cached[0]() is cls and cached[1] == name:
-            return cached[2]
-        function = self.lazy.get(name) if name is not None else None
-        resolved = self._resolved
-
-        def forget(_ref: Any, marker: int = marker) -> None:
-            entry = resolved.get(marker)
-            if entry is not None and entry[0] is _ref:
-                del resolved[marker]
-
-        try:
-            reference = weakref.ref(cls, forget)
-        except TypeError:
-            return function  # not weakly referenceable: resolve without caching
-        resolved[marker] = (reference, name, function)
-        return function
+        return self.lazy.get(name) if name is not None else None
 
     def find(self, mro: tuple[type[Any], ...], state: _State) -> tuple[int, CaptureFunction] | None:
         """The registration nearest in ``mro`` (identity comparisons only).
@@ -1847,7 +1822,7 @@ class _CaptureFunction:
         return _build(value, limits.max_chars, 0, "", state).node
 
     def register(self, cls: type[Any], function: CaptureFunction | None = None) -> Any:
-        """Register ``function(value, out) -> Snapshot`` for ``cls`` and its subclasses.
+        """Register ``function(value, out)``, returning one part of its out, for ``cls`` and subclasses.
 
         Use as ``@capture.register(T)`` or ``capture.register(T, function)``.
         The registration nearest in a value's MRO wins (over the built-in
@@ -1863,7 +1838,6 @@ class _CaptureFunction:
             entries = _REGISTRY.entries
             entries[:] = [entry for entry in entries if entry[0] is not cls]
             entries.append((cls, function))
-            _REGISTRY.changed()
             return function
 
         return add(function) if function is not None else add
@@ -1872,7 +1846,6 @@ class _CaptureFunction:
         """Remove the registration for exactly ``cls`` (no-op when absent)."""
         entries = _REGISTRY.entries
         entries[:] = [entry for entry in entries if entry[0] is not cls]
-        _REGISTRY.changed()
 
     def register_lazy(
         self, module: str, qualname: str, function: CaptureFunction | None = None
@@ -1894,7 +1867,6 @@ class _CaptureFunction:
 
         def add(function: CaptureFunction) -> CaptureFunction:
             _REGISTRY.lazy[key] = function
-            _REGISTRY.changed()
             return function
 
         return add(function) if function is not None else add
@@ -1902,7 +1874,6 @@ class _CaptureFunction:
     def unregister_lazy(self, module: str, qualname: str) -> None:
         """Remove the lazy registration for ``module`` / ``qualname`` (no-op when absent)."""
         _REGISTRY.lazy.pop((module, qualname), None)
-        _REGISTRY.changed()
 
 
 capture = _CaptureFunction()

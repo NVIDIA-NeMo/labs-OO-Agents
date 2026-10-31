@@ -14,7 +14,6 @@ from nooa.snapshot import (
     Opaque,
     Out,
     Scalar,
-    Snapshot,
     Text,
     capture,
     render_python,
@@ -40,7 +39,7 @@ def test_register_lazy_never_imports_the_module(lazy) -> None:
 
 def test_register_lazy_decorator_form() -> None:
     @capture.register_lazy(FAKE_MODULE, "Gadget")
-    def gadget(value: Any, out: Out) -> Snapshot:
+    def gadget(value: Any, out: Out):
         return out.capture(1)
 
     try:
@@ -101,7 +100,7 @@ def test_nearest_mro_wins_between_eager_and_lazy(lazy, eager) -> None:
     assert render_python(capture(LazyLeaf())) == "'eager-middle'"
 
     lazy(FAKE_MODULE, "LazyLeaf", lambda value, out: out.capture("lazy-leaf"))
-    assert render_python(capture(LazyLeaf())) == "'lazy-leaf'"  # cache invalidated
+    assert render_python(capture(LazyLeaf())) == "'lazy-leaf'"  # a new registration applies
 
 
 def test_eager_wins_over_lazy_at_the_same_class(lazy, eager) -> None:
@@ -112,21 +111,19 @@ def test_eager_wins_over_lazy_at_the_same_class(lazy, eager) -> None:
     assert render_python(capture(Both())) == "'eager'"
 
 
-def test_lazy_resolution_is_cached_by_identity_and_forgets_dead_classes(lazy) -> None:
+def test_lazy_registration_does_not_retain_matched_classes(lazy) -> None:
     import gc
+    import weakref
 
-    from nooa.snapshot import _capture
+    lazy(FAKE_MODULE, "Matched", lambda value, out: out.capture(1))
+    Matched = _named("Matched")
+    assert capture(Matched()) == Scalar(1)
+    assert capture(Matched()) == Scalar(1)  # matched again, by its current name
+    reference = weakref.ref(Matched)
 
-    lazy(FAKE_MODULE, "Cached", lambda value, out: out.capture(1))
-    Cached = _named("Cached")
-    assert capture(Cached()) == Scalar(1)
-    marker = id(Cached)
-    resolved = _capture._REGISTRY._resolved
-    assert marker in resolved and resolved[marker][0]() is Cached
-
-    del Cached
+    del Matched
     gc.collect()
-    assert marker not in resolved or resolved[marker][0]() is None
+    assert reference() is None
 
 
 class _Recording(type):

@@ -17,7 +17,6 @@ from nooa.snapshot import (
     Out,
     Scalar,
     Sequence,
-    Snapshot,
     Text,
     Unavailable,
     capture,
@@ -79,7 +78,7 @@ def test_default_kind_is_none_and_must_be_a_string(eager) -> None:
 
 
 def test_part_too_large_for_its_slot_is_cut(lazy) -> None:
-    def build(value: Any, out: Out) -> Snapshot:
+    def build(value: Any, out: Out):
         big = out.capture("z" * 500)
         return out.object({"big": big, "more": "w" * 500})
 
@@ -94,7 +93,7 @@ def test_part_too_large_for_its_slot_is_cut(lazy) -> None:
 
 
 def test_greedy_first_field_does_not_starve_later_fields(lazy) -> None:
-    def build(value: Any, out: Out) -> Snapshot:
+    def build(value: Any, out: Out):
         return out.object(
             {
                 "sample": out.sequence(range(10**9)),
@@ -121,7 +120,7 @@ def test_greedy_first_field_does_not_starve_later_fields(lazy) -> None:
 
 
 def test_fields_that_fit_are_kept_whole_in_order(lazy) -> None:
-    def build(value: Any, out: Out) -> Snapshot:
+    def build(value: Any, out: Out):
         return out.object(
             [("a", out.capture("x" * 20)), ("rest", out.sequence(iter(range(10**6))))]
         )
@@ -136,7 +135,7 @@ def test_fields_that_fit_are_kept_whole_in_order(lazy) -> None:
 
 
 def test_nested_object_is_built_in_its_slot(lazy) -> None:
-    def build(value: Any, out: Out) -> Snapshot:
+    def build(value: Any, out: Out):
         inner = out.object({"a": "z" * 400, "b": "never"})  # nothing is built yet
         return out.object({"first": out.capture("y" * 100), "inner": inner})
 
@@ -162,7 +161,7 @@ def test_object_part_is_deferred_until_its_slot(lazy) -> None:
         pulled.append("x")
         yield "x", 1
 
-    def build(value: Any, out: Out) -> Snapshot:
+    def build(value: Any, out: Out):
         inner = out.object(fields())
         assert pulled == []  # out.object builds nothing when called
         return out.object({"inner": inner})
@@ -183,15 +182,15 @@ def test_nested_object_part_takes_its_slot_depth(lazy) -> None:
 
 
 def test_part_used_twice_is_an_error(lazy) -> None:
-    def twice(value: Any, out: Out) -> Snapshot:
+    def twice(value: Any, out: Out):
         big = out.capture("z" * 500)
         return out.object({"big": big, "again": big})
 
-    def in_a_sequence(value: Any, out: Out) -> Snapshot:
+    def in_a_sequence(value: Any, out: Out):
         part = out.object({"a": 1})
         return out.sequence([part, part])
 
-    def two_calls(value: Any, out: Out) -> Snapshot:
+    def two_calls(value: Any, out: Out):
         return out.object({"big": out.capture("z" * 500), "again": out.capture("z" * 500)})
 
     lazy(FAKE_MODULE, "Twice", twice)
@@ -213,7 +212,7 @@ def test_part_used_twice_is_an_error(lazy) -> None:
 def test_part_used_twice_raises_a_clear_error(lazy) -> None:
     errors: list[BaseException] = []
 
-    def build(value: Any, out: Out) -> Snapshot:
+    def build(value: Any, out: Out):
         part = out.capture(1)
         root = out.object({"a": part})
         # Build the tree here (as capture would) to see the error itself.
@@ -233,7 +232,7 @@ def test_part_used_twice_raises_a_clear_error(lazy) -> None:
 
 
 def test_nested_object_sequence_keeps_its_head_and_tail(lazy) -> None:
-    def build(value: Any, out: Out) -> Snapshot:
+    def build(value: Any, out: Out):
         numbers = out.object({"n": list(range(200))})
         return out.object({"label": out.capture("w" * 40), "numbers": numbers})
 
@@ -252,7 +251,7 @@ def test_nested_object_sequence_keeps_its_head_and_tail(lazy) -> None:
 def test_nested_registered_objects_keep_their_fields(lazy) -> None:
     lazy("fakenumpy_7c1e", "ndarray", capture_ndarray)
 
-    def build(value: Any, out: Out) -> Snapshot:
+    def build(value: Any, out: Out):
         return out.object(
             {
                 "values": out.capture(_LazyNdarray(10**9)),
@@ -285,7 +284,7 @@ def test_nested_registered_objects_keep_their_fields(lazy) -> None:
 def test_parts_never_exceed_the_budget(lazy, max_chars) -> None:
     lazy("fakenumpy_7c1e", "ndarray", capture_ndarray)
 
-    def build(value: Any, out: Out) -> Snapshot:
+    def build(value: Any, out: Out):
         inner = out.object({"s": "q" * 300, "l": list(range(50))})
         return out.object(
             {
@@ -368,7 +367,7 @@ def test_out_metadata_is_copied_to_exact_str(eager) -> None:
     class Value:
         pass
 
-    def snapshot(value: Any, out: Out) -> Snapshot:
+    def snapshot(value: Any, out: Out):
         return out.object(
             {
                 "items": out.sequence([1], type_name=Name("deque")),
