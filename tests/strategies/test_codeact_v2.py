@@ -146,11 +146,56 @@ async def test_integer_collapse_succeeds_without_warning():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("key", ["value", "result"])
+async def test_provider_return_result_with_one_value_finishes_like_the_builtin(key, monkeypatch):
+    """Nemotron/GLM call return_result as a provider tool: take its value, validated."""
+    from nooa.runtime.harness_metrics import HarnessMetrics
+
+    flushed: list[dict] = []
+    real_flush = HarnessMetrics.flush_to_span
+
+    def flush(self):
+        flushed.append(self.to_span_attributes())
+        real_flush(self)
+
+    monkeypatch.setattr(HarnessMetrics, "flush_to_span", flush)
+    llm = FakeLLMClient(
+        scripted_responses=[
+            LLMResponse(
+                parts=(ToolCall(id="bad", name="return_result", arguments=json.dumps({key: "x"})),),
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(
+                parts=(ToolCall(id="ok", name="return_result", arguments=json.dumps({key: 42})),),
+                finish_reason="tool_calls",
+            ),
+        ]
+    )
+
+    class TestAgent(Agent, llm=llm):
+        @strategy(CodeActV2(config=CodeActConfig(prefill=None)))
+        async def answer(self) -> int:
+            """Return the answer."""
+            ...
+
+    agent = TestAgent()
+    try:
+        assert await agent.answer() == 42
+        rendered = str(llm.last_messages)
+        assert "Invalid result" in rendered  # the same validation and retry as the builtin
+        assert "Unknown tool" not in rendered
+        assert [tool.name for tool in llm.last_tools] == ["python_cell"]
+    finally:
+        await agent.aclose()
+    assert sum(a.get("harness.return_result_tool_alias.count", 0) for a in flushed) == 2
+
+
+@pytest.mark.asyncio
 async def test_provider_return_result_gets_single_tool_recovery_guidance():
     llm = FakeLLMClient(
         scripted_responses=[
             LLMResponse(
-                parts=(ToolCall(id="bad", name="return_result", arguments='{"result": 42}'),),
+                parts=(ToolCall(id="bad", name="return_result", arguments='{"a": 4, "b": 2}'),),
                 finish_reason="tool_calls",
             ),
             _response("return_result(42)", "fixed"),
