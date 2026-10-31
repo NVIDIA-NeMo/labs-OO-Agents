@@ -116,7 +116,7 @@ When each part is built, and what bounds it:
 |---|---|---|---|
 | `out.capture(v)`, `out.sequence(items)`, `out.mapping(items)`, `out.object(fields)`, `out.opaque()` | deferred: when the part takes its slot (a field of `out.object`, an item or value of `out.sequence` / `out.mapping`, or the function's return value); each part takes one slot only | the slot's share of the capture budget, one level deeper than its container (returned: the value's own slot) | capture `Limits`: `max_chars` (canonical JSON characters), shared `max_nodes`, `max_depth`, `max_items`, `max_string` (`out.opaque()`: `max_chars`) |
 | `render_python` / `render_output` hook | when the snapshot is rendered | **none**: these renderers have no length limit | none: the hook formats nodes that capture already bounded. Its return value is not checked for length; a hook is trusted code, and its output is as long as the string it builds |
-| `render_json` hook | when the snapshot is rendered | the node's `r.max_chars` | its text must parse as JSON and its canonical encoding must fit `r.max_chars`, otherwise the node renders generically |
+| `render_json` hook | when the snapshot is rendered | the node's `r.max_chars` | it returns detached data, a snapshot node, which `render_json` encodes in the node's place with its normal accounting (cut to `r.max_chars`, cuts reported at the projection's paths); a hook that raises, returns no node or a node that can't be encoded means generic rendering |
 
 A registered function so returns one tree of parts, and it is built top-down: every part, nested objects too, is built once, in its final slot. A part used a second time raises `ValueError`, and like any error in the function the value becomes `Unavailable("error")`; call the `out` method again for a second placement (two parts, built and budgeted separately).
 
@@ -170,7 +170,16 @@ def render_ndarray(node: Object, r: PythonRenderer) -> str:
 - A hook receives the node and the renderer `r`. It renders children only through `r`, so they keep the renderer's notation, cut markers and their own hooks. Nothing bounds the string a `render_python` / `render_output` hook returns (see [Extension contract](#extension-contract)): it formats nodes that capture already bounded, and it is trusted code.
 - No hook for a `kind`, or a hook that raises (or returns something other than a `str`): generic rendering (`ndarray(shape=…, dtype=…, sample=…)`). Rendering never fails. A hook that renders its own node through `r` gets the generic rendering for it.
 - `render_python` and `render_output` accept hooks (`render_python.register(kind)` as a decorator, `register(kind, hook)`, `unregister(kind)`). `render_output` also takes any node now: a `Text` renders in the output notation exactly as before; other nodes use the Python notation, with nested `Text` in the output notation.
-- `render_json` stays generic by default, so trace files remain plain and tool-readable. It accepts hooks too (`hook(node, r: JsonRenderer) -> str`, JSON text), but its output is still checked: the hook's text must parse as JSON (no `NaN`/`Infinity`) and its canonical encoding must fit the node's budget `r.max_chars`; otherwise the node renders generically, so the result is still valid and within `max_chars`. `r.render(child, max_chars=…, key=…)` returns a child's JSON fitted to the budget; `key` names it in the paths that `preview_attributes` reports, which uses the same hooks.
+- `render_json` stays generic by default, so trace files remain plain and tool-readable. It accepts hooks too, `hook(node, r: JsonRenderer) -> Snapshot`: the hook returns detached data, a snapshot node built from the node's fields and new nodes (not JSON text), and `render_json` encodes that projection in the node's place with its normal accounting. So it is cut to the node's budget `r.max_chars` like any node (data larger than the budget is cut, not refused), stays valid JSON, and its cuts are reported at the projection's own paths by `preview_attributes`, which uses the same hooks:
+
+  ```python
+  @render_json.register("numpy.ndarray")
+  def json_ndarray(node: Object, r: JsonRenderer) -> Snapshot:
+      fields = (("shape", node.field("shape")), ("values", node.field("sample")))
+      return Mapping("dict", 2, fields, True, None)   # {"shape": [...], "values": [...]}
+  ```
+
+  A hook that raises, returns anything but a node (JSON text, plain data) or a node that can't be encoded (`Scalar(float("nan"))`, a non-node child) gives the generic rendering. A projection that returns or embeds the hook's own node gets the generic rendering for that node; projections nest at most 64 deep, deeper ones render generically, so a hook that builds a fresh node of its own kind each time still ends.
 - `kind` is a plain string, so render hooks need no lazy mechanism.
 
 ### First users
@@ -189,7 +198,7 @@ Public API, all importable from `nooa.snapshot`:
 | `capture_fields(**fields, limits=...)` | #342's `trace_fields`: a framework wrapper whose every root field survives with its type |
 | `TextStream`, `SpillTarget`, `DEFAULT_SPILL_BYTES`, `merge` | output that arrives over time; `merge` joins unread deltas |
 | `render_output`, `render_python`, `render_json`, `preview_attributes` | the renderers; the first three take per-kind hooks (`.register(kind)`) |
-| `PythonRenderer`, `OutputRenderer`, `JsonRenderer` | the `r` a render hook gets: `r.render(child)` |
+| `PythonRenderer`, `OutputRenderer`, `JsonRenderer` | the `r` a render hook gets: `r.render(child)` for the text renderers, `r.max_chars` (the node's budget) for `render_json` |
 
 Details that the sections above leave open:
 

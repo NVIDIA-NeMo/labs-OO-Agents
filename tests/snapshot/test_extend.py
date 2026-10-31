@@ -15,6 +15,7 @@ import pytest
 from nooa.snapshot import (
     JsonRenderer,
     Limits,
+    Mapping,
     Object,
     Opaque,
     Out,
@@ -371,20 +372,26 @@ def test_render_output_text_is_unchanged_and_raising_hook_is_generic(hooks) -> N
     assert render_output(_thing(a="x")) == "Thing(a=x)"
 
 
+def _projection(**entries: Snapshot) -> Mapping:
+    """A ``render_json`` hook's detached data: a ``dict`` node of ``entries``."""
+    return Mapping("dict", len(entries), tuple(entries.items()), True, None)
+
+
 def test_render_json_hook(hooks) -> None:
-    def hook(node: Object, r: JsonRenderer) -> str:
-        return '{"thing": ' + r.render(node.fields[0][1], key="thing") + "}"
+    seen: list[Any] = []
+
+    def hook(node: Object, r: JsonRenderer) -> Snapshot:
+        seen.append(r)
+        return _projection(thing=node.fields[0][1])
 
     hooks(render_json, KIND, hook)
     out = render_json(Sequence("list", 1, (_thing(a=[1, 2]),), True, None), max_chars=100)
     assert json.loads(out) == [{"thing": [1, 2]}]
+    assert isinstance(seen[0], JsonRenderer) and seen[0].max_chars == 98  # the list's brackets
 
 
 def test_render_json_hook_children_are_cut_and_reported(hooks) -> None:
-    def hook(node: Object, r: JsonRenderer) -> str:
-        return '{"s": ' + r.render(node.fields[0][1], max_chars=r.max_chars - 8, key="s") + "}"
-
-    hooks(render_json, KIND, hook)
+    hooks(render_json, KIND, lambda node, r: _projection(s=node.fields[0][1]))
     node = _thing(s="x" * 1_000)
     text = render_json(node, max_chars=50)
 
@@ -395,15 +402,31 @@ def test_render_json_hook_children_are_cut_and_reported(hooks) -> None:
     assert attributes["nooa.output.preview.paths"] == ("/s",)
 
 
+def test_render_json_hook_projection_is_cut_to_the_budget(hooks) -> None:
+    # Detached data larger than the node's budget is cut like any node, not refused.
+    big = Text("x" * 5_000, "", 5_000, "chars", True, None)
+    hooks(render_json, KIND, lambda node, r: Sequence("list", 2, (big, big), True, None))
+    node = _thing(a=1)
+    for max_chars in (1, 5, 40, 1_000):
+        text = render_json(node, max_chars=max_chars)
+        assert len(text) <= max_chars
+        json.loads(text)
+    assert "/0" in preview_attributes("output", node, max_chars=40)["nooa.output.preview.paths"]
+
+
 @pytest.mark.parametrize(
     "bad",
     [
-        lambda node, r: "{not json",
-        lambda node, r: '{"a": NaN}',
-        lambda node, r: '"' + "x" * 5_000 + '"',  # valid JSON, too long
-        lambda node, r: 42,  # not a str
+        lambda node, r: '{"a": 1}',  # JSON text is not a node
+        lambda node, r: 42,  # not a node
+        lambda node, r: {"a": 1},  # plain data is not a node either
         lambda node, r: 1 / 0,  # raises
-        lambda node, r: r.render(node, max_chars=0),  # misuse of r raises
+        lambda node, r: Scalar(float("nan")),  # a node that can't be encoded
+        lambda node, r: Sequence(
+            "list", 1, (1,), True, None
+        ),  # a non-node child  # type: ignore[arg-type]
+        lambda node, r: Text(["x"], "", 1, "chars", True, None),  # type: ignore[arg-type]
+        lambda node, r: Sequence("list", 0, (), False, 3),  # type: ignore[arg-type]
     ],
 )
 def test_render_json_bad_hook_falls_back_to_generic(hooks, bad) -> None:
@@ -416,6 +439,10 @@ def test_render_json_bad_hook_falls_back_to_generic(hooks, bad) -> None:
         value = json.loads(text)
         assert type(value) is dict
         assert text == _generic_json(node, max_chars)
+        attributes = preview_attributes("output", node, max_chars=max_chars)
+        assert attributes == preview_attributes(
+            "output", dataclasses.replace(node, kind=None), max_chars=max_chars
+        )
 
 
 def _generic_json(node: Object, max_chars: int) -> str:
@@ -424,9 +451,24 @@ def _generic_json(node: Object, max_chars: int) -> str:
 
 
 def test_render_json_hook_recursing_on_its_node_is_generic(hooks) -> None:
-    hooks(render_json, KIND, lambda node, r: r.render(node))
+    hooks(render_json, KIND, lambda node, r: node)
     node = _thing(a=1)
     assert render_json(node, max_chars=100) == '{"a": 1}'
+
+    # Embedding its own node: that node renders generically inside the projection.
+    hooks(render_json, KIND, lambda node, r: _projection(wrapped=node))
+    assert render_json(node, max_chars=100) == '{"wrapped": {"a": 1}}'
+
+
+def test_render_json_hook_building_new_nodes_of_its_kind_stays_bounded(hooks) -> None:
+    # Each projection is a fresh node of the same kind: nesting stops, generically.
+    hooks(render_json, KIND, lambda node, r: dataclasses.replace(node, fields=(("n", node),)))
+    node = _thing(a=1)
+    for max_chars in (10, 1_000, 100_000):
+        text = render_json(node, max_chars=max_chars)
+        assert len(text) <= max_chars
+        json.loads(text)
+    assert preview_attributes("output", node)["nooa.output.preview.incomplete"] is False
 
 
 def test_trace_preview_runs_a_json_hook_once(hooks) -> None:
@@ -434,9 +476,9 @@ def test_trace_preview_runs_a_json_hook_once(hooks) -> None:
 
     calls: list[int] = []
 
-    def hook(node: Object, r: JsonRenderer) -> str:
+    def hook(node: Object, r: JsonRenderer) -> Snapshot:
         calls.append(1)
-        return '{"s": ' + r.render(node.fields[0][1], max_chars=r.max_chars - 8, key="s") + "}"
+        return _projection(s=node.fields[0][1])
 
     hooks(render_json, KIND, hook)
     spilled = Text("h", "", 9, "chars", False, "max_length", Spill("/tmp/full.txt", 9, 9), 0, 8)
