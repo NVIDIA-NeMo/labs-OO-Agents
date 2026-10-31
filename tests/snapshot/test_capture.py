@@ -30,6 +30,7 @@ from nooa.snapshot import (
     render_json,
     render_python,
 )
+from tests.snapshot import _annotation_aliases
 
 
 class Recorder:
@@ -324,15 +325,67 @@ def test_dataclass_class_level_spec_and_instance_override() -> None:
     assert render_python(capture(shown)) == "Box(value='v')"
 
 
-def test_dataclass_string_annotation_with_hidden_fails_closed() -> None:
+def test_dataclass_string_annotation_with_hidden_is_resolved() -> None:
     @dataclass
     class Later:  # PEP 563: the annotation is the string "Annotated[str, hidden]"
         token: Annotated[str, hidden]
+        name: str = "n"
 
     snapshot = capture(Later("t0ken"))
 
     assert isinstance(snapshot, Object)
-    assert snapshot.fields == () and snapshot.reason == "opaque"
+    assert [name for name, _ in snapshot.fields] == ["name"] and snapshot.complete
+
+
+@pytest.mark.parametrize(
+    "name", ["Literal", "AliasAnnotated", "AliasHidden", "Dotted", "SpecLiteral"]
+)
+def test_dataclass_string_annotation_aliases_are_hidden(name: str) -> None:
+    value = getattr(_annotation_aliases, name)()
+
+    rendered = render_json(capture(value), max_chars=2000)
+
+    assert "S-" not in rendered
+    assert json.loads(rendered)["ok"] == 1
+
+
+def test_dataclass_spec_hidden_false_literal_stays_visible() -> None:
+    snapshot = capture(_annotation_aliases.SpecLiteral())
+
+    assert isinstance(snapshot, Object) and snapshot.complete
+    assert [name for name, _ in snapshot.fields] == ["shown", "ok"]
+
+
+@pytest.mark.parametrize("name", ["SpecUnreadable", "UnknownMarker"])
+def test_dataclass_unreadable_string_marker_fails_closed_per_field(name: str) -> None:
+    snapshot = capture(getattr(_annotation_aliases, name)())
+
+    assert isinstance(snapshot, Object)
+    assert [field_name for field_name, _ in snapshot.fields] == ["ok"]
+    assert not snapshot.complete and snapshot.reason == "opaque"
+
+
+def test_dataclass_string_annotations_without_markers_capture() -> None:
+    snapshot = capture(_annotation_aliases.Visible(nested=[4]))
+
+    assert isinstance(snapshot, Object) and snapshot.complete
+    assert json.loads(render_json(snapshot, max_chars=2000)) == {
+        "xs": [1, 2],
+        "mapping": {},
+        "forward": None,
+        "constrained": 3,
+        "nested": [4],
+    }
+
+
+def test_dataclass_inherited_string_annotation_resolves_in_its_own_module() -> None:
+    @dataclass
+    class Child(_annotation_aliases.AliasAnnotated):  # A is not a name in this module
+        extra: str = "e"
+
+    rendered = render_json(capture(Child()), max_chars=2000)
+
+    assert json.loads(rendered) == {"ok": 1, "extra": "e"}
 
 
 # --- cycles and repeated references -----------------------------------------------------
