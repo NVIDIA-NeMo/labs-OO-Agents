@@ -113,16 +113,16 @@ Two hooks, one per step. Neither makes NOOA import or depend on the library.
 ```python
 @capture.register_lazy("numpy", "ndarray")
 def capture_ndarray(array, out):
-    return out.object("ndarray", {
+    return out.object({
         "shape": out.capture(array.shape),
         "dtype": out.capture(array.dtype.name),
         "sample": out.sequence(array.flat),   # stops at the shared budget
-    }, kind="numpy.ndarray")
+    }, type_name="ndarray", kind="numpy.ndarray")
 ```
 
-- `register_lazy(module, qualname)` records the name only. It never imports the module.
-- At capture time, the dispatcher walks the value's raw MRO (`type.__dict__["__mro__"]`). For each class it reads `__module__` and `__qualname__` from the raw class namespace, without metaclass hooks. The nearest class that matches an eager registration (`capture.register(T)`) or a lazy one (`register_lazy`) wins.
-- Resolved lazy matches are cached by class identity, never by hashing the class, so a custom metaclass `__hash__`/`__eq__` can't run.
+- `register_lazy(module, qualname)` records the name only. It never imports the module. `capture.register_lazy(module, qualname, function)` is the non-decorator form, and `capture.unregister_lazy(module, qualname)` removes it.
+- At capture time, the dispatcher walks the value's raw MRO (`type.__dict__["__mro__"]`). For each class it reads `__module__` and `__qualname__` through `type`'s own descriptors (the class's native storage), without metaclass hooks. The nearest class that matches an eager registration (`capture.register(T)`) or a lazy one (`register_lazy`) wins. At the same class, the eager one wins.
+- Resolved lazy matches are cached by class identity (keyed by `id`, checked through a weak reference, dropped when the class dies, cleared when a registration changes), never by hashing the class, so a custom metaclass `__hash__`/`__eq__` can't run.
 - A value whose class is not registered stays `Opaque`, exactly as before.
 - The registered function is trusted extension code, as in the proposal. It builds children only through `out`, so the shared budget holds. An exception becomes `Unavailable`.
 
@@ -134,9 +134,10 @@ Renderers work on detached snapshots, so a render hook can't receive the live ob
 @dataclass(frozen=True)
 class Object:
     type_name: str
-    fields: dict[str, Snapshot]
+    fields: tuple[tuple[str, Snapshot], ...]   # in order; node.field(name) looks one up
     complete: bool
-    reason: str | None = None
+    reason: str | None
+    module: str = ""
     kind: str | None = None       # rendering key set by the capture function, e.g. "numpy.ndarray"
 ```
 
@@ -145,14 +146,15 @@ Each renderer has its own registry, keyed by `kind`:
 ```python
 @render_python.register("numpy.ndarray")
 def render_ndarray(node: Object, r: PythonRenderer) -> str:
-    shape = r.render(node.fields["shape"])
-    sample = r.render(node.fields["sample"])
-    return f"array({sample}, shape={shape}, dtype={r.render(node.fields['dtype'])})"
+    shape = r.render(node.field("shape"))
+    sample = r.render(node.field("sample"))
+    return f"array({sample}, shape={shape}, dtype={r.render(node.field('dtype'))})"
 ```
 
 - A hook receives the node and the renderer `r`. It renders children only through `r`, so the renderer's own limits and cut-off notation still apply.
-- No hook for a `kind`, or a hook that raises: generic rendering (`ndarray(shape=…, dtype=…, sample=…)`). Rendering never fails.
-- `render_python` and `render_output` accept hooks. `render_json` stays generic by default, so trace files remain plain and tool-readable. It accepts hooks too, but its output is still checked against `max_chars` and validity.
+- No hook for a `kind`, or a hook that raises (or returns something other than a `str`): generic rendering (`ndarray(shape=…, dtype=…, sample=…)`). Rendering never fails. A hook that renders its own node through `r` gets the generic rendering for it.
+- `render_python` and `render_output` accept hooks (`render_python.register(kind)` as a decorator, `register(kind, hook)`, `unregister(kind)`). `render_output` also takes any node now: a `Text` renders in the output notation exactly as before; other nodes use the Python notation, with nested `Text` in the output notation.
+- `render_json` stays generic by default, so trace files remain plain and tool-readable. It accepts hooks too (`hook(node, r: JsonRenderer) -> str`, JSON text), but its output is still checked: the hook's text must parse as JSON (no `NaN`/`Infinity`) and its canonical encoding must fit the node's budget `r.max_chars`; otherwise the node renders generically, so the result is still valid and within `max_chars`. `r.render(child, max_chars=…, key=…)` returns a child's JSON fitted to the budget; `key` names it in the paths that `preview_attributes` reports, which uses the same hooks.
 - `kind` is a plain string, so render hooks need no lazy mechanism.
 
 ### First users
@@ -166,16 +168,18 @@ Public API, all importable from `nooa.snapshot`:
 | Name | What it is |
 |---|---|
 | `Scalar`, `Text`, `Sequence`, `Mapping`, `Object`, `Opaque`, `Unavailable`, `Ref`, `Spill` | the frozen snapshot nodes; `Snapshot` is their union, `Reason` the reason names |
-| `capture(value, limits=DEFAULT_LIMITS)`, `Limits` | a snapshot of a finished value; `capture.register(T)` / `capture.unregister(T)` extend it, a registered function gets `(value, out: Out)` |
+| `capture(value, limits=DEFAULT_LIMITS)`, `Limits` | a snapshot of a finished value; `capture.register(T)` / `capture.unregister(T)` and `capture.register_lazy(module, qualname)` / `capture.unregister_lazy(...)` extend it, a registered function gets `(value, out: Out)` |
 | `capture_fields(**fields, limits=...)` | #342's `trace_fields`: a framework wrapper whose every root field survives with its type |
 | `TextStream`, `SpillTarget`, `merge` | output that arrives over time; `merge` joins unread deltas |
-| `render_output`, `render_python`, `render_json`, `preview_attributes` | the renderers |
+| `render_output`, `render_python`, `render_json`, `preview_attributes` | the renderers; the first three take per-kind hooks (`.register(kind)`) |
+| `PythonRenderer`, `OutputRenderer`, `JsonRenderer` | the `r` a render hook gets: `r.render(child)` |
 
 Details that the sections above leave open:
 
 - **`Limits`** has `max_chars`, `max_nodes`, `max_depth` (#342's defaults: 50,000 / 2,000 / 16), `max_items` and `max_string` (`None`: only the shared budget) and `tail_share`, the part of a cut string or container kept from its end (0: a prefix, as in trace previews; 0.5: agentdoc's split).
 - **`max_chars` counts canonical JSON**, exactly as #342 does. So `render_json(capture(v, limits), max_chars=limits.max_chars)` gives #342's text and incomplete paths (checked against the original builder on random shapes). `render_json` also walks the snapshot with the same accounting, so it stays valid and within any smaller `max_chars`, and `preview_attributes(..., max_chars=...)` reports the cuts that rendering made.
 - **Nodes beyond the design's fields:** `Text.omitted` (the units left out between head and tail: for bytes it can't be derived from the decoded strings), `Sequence.tail` / `Mapping.tail` (items kept from the end), `Sequence.type_name` / `Mapping.type_name`, `Object.module`, `Unavailable.type_name` (picks #342's typed fallback), `Ref.kind`, and `Mapping.wrapper` (marks a `capture_fields` root). `Ref.id` is the JSON Pointer of the enclosing container that the cycle points back to. Repeated references that are not cycles are captured again each time, as in #342.
+- **`out.object(fields, *, type_name=None, kind=None)`** takes `(name, value)` pairs or a plain `dict`. A value may be a node the same `out` already built (as in the ndarray example): it is reused, not captured again, and its size is credited back so it is not charged twice. A reused node that no longer fits its slot becomes `Unavailable("max_length")`. A non-`str` `kind` is an error in the capture function, so the value becomes `Unavailable("error")`.
 - **Reason `error`** is added to the list. A registered function that raises, or that returns a node its `out` did not build, becomes `Unavailable("error")`.
 - **Dataclasses:** the declared fields come from the nearest `__dataclass_fields__` in raw class namespaces. Values come from the native `__dict__` getset descriptor or the slot member descriptors, never through properties. `_private` fields, `repr=False` fields, `ClassVar`/`InitVar` fields and hidden fields (`Annotated[..., hidden]`, `spec(hidden=True)`, `spec()` overrides on the class or instance) are left out. String annotations (PEP 563) are not evaluated: if one mentions `hidden` or `spec` inside `Annotated`, the whole object fails closed (an `Object` with no fields, reason `opaque`).
 - **Mapping keys** may be exact `str`, `int`, `float`, `bool` or `None`. `render_json` converts them the way `json.dumps` does, and stops the mapping at a key that would collide.

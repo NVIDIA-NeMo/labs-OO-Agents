@@ -7,7 +7,8 @@ A snapshot is a small, detached tree (``Scalar``, ``Text``, ``Sequence``,
 node says whether it is complete and, if not, why. Two producers build it:
 
 - ``capture(value, limits)`` for finished Python values (no user code runs on
-  types it does not know; ``capture.register(T)`` extends it);
+  types it does not know; ``capture.register(T)`` and, by name without
+  importing, ``capture.register_lazy(module, qualname)`` extend it);
 - ``TextStream`` for output that arrives over time (head, rolling tail,
   counter and an optional spill file).
 
@@ -32,12 +33,21 @@ from nooa.snapshot._model import (
     Text,
     Unavailable,
 )
-from nooa.snapshot._render import preview_attributes, render_json, render_output, render_python
+from nooa.snapshot._render import (
+    JsonRenderer,
+    OutputRenderer,
+    PythonRenderer,
+    preview_attributes,
+    render_json,
+    render_output,
+    render_python,
+)
 from nooa.snapshot._stream import DEFAULT_SPILL_BYTES, SpillTarget, TextStream, merge
 
 __all__ = [
     "DEFAULT_LIMITS",
     "DEFAULT_SPILL_BYTES",
+    "JsonRenderer",
     "REASONS",
     "Key",
     "Limits",
@@ -45,6 +55,8 @@ __all__ = [
     "Object",
     "Opaque",
     "Out",
+    "OutputRenderer",
+    "PythonRenderer",
     "Reason",
     "Ref",
     "Scalar",

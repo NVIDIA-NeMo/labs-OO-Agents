@@ -143,13 +143,26 @@ class Mapping:
 
 @dataclass(frozen=True)
 class Object:
-    """A Pydantic model, a dataclass or a registered type: its kept fields, in order."""
+    """A Pydantic model, a dataclass or a registered type: its kept fields, in order.
+
+    ``kind``: an optional rendering key set by a registered capture function
+    (``out.object(..., kind="numpy.ndarray")``); renderers look up per-kind
+    hooks by it (``render_python.register(kind)``).
+    """
 
     type_name: str
     fields: tuple[tuple[str, Snapshot], ...]
     complete: bool
     reason: Reason | None
     module: str = ""
+    kind: str | None = None
+
+    def field(self, name: str) -> Snapshot | None:
+        """The kept field called ``name``, or ``None`` when it was not kept."""
+        for field_name, node in self.fields:
+            if field_name == name:
+                return node
+        return None
 
 
 @dataclass(frozen=True)

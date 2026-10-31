@@ -32,6 +32,7 @@ import json
 import math
 import types
 import typing
+import weakref
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -911,14 +912,25 @@ def _object_fields(
     depth: int,
     path: str,
     state: _State,
+    kind: str | None = None,
+    reuse: Callable[[Any], _Built | None] | None = None,
+    reuse_cap: int = 0,
 ) -> _Built:
-    """Emit the selected (name, value) fields of an object; ``None`` entries fail closed."""
+    """Emit the selected (name, value) fields of an object; ``None`` entries fail closed.
+
+    ``reuse(child)``: an already built node for ``child`` (an ``Out`` passing
+    its own nodes as field values). Its size is credited back to the box, up
+    to ``reuse_cap``, since it was charged when it was built.
+    """
     box = _Container(max_size)
     fields: list[tuple[str, Snapshot]] = []
     for entry in selected:
         if entry is None:
             return _closed(type_name, module)
         name, child = entry
+        prebuilt = reuse(child) if reuse is not None else None
+        if prebuilt is not None:
+            box.max_size = max(box.max_size, min(reuse_cap, box.max_size + prebuilt.size))
         overhead = _key_overhead(name, box)
         if overhead is None:
             box.stop("max_length")
@@ -927,11 +939,17 @@ def _object_fields(
         if available < 1:
             box.stop("max_length")
             break
-        built = _build(child, available, depth + 1, pointer_child(path, name), state)
+        if prebuilt is None:
+            built = _build(child, available, depth + 1, pointer_child(path, name), state)
+        elif prebuilt.size <= available:
+            built = prebuilt
+        else:
+            built = _Built(Unavailable("max_length"), fallback_json("", available)[1])
         fields.append((name, built.node))
         box.commit(overhead, built.size)
     complete = box.reason is None
-    return _Built(Object(type_name, tuple(fields), complete, box.reason, module), box.size)
+    node = Object(type_name, tuple(fields), complete, box.reason, module, kind)
+    return _Built(node, box.size)
 
 
 _STOP = object()
@@ -1006,7 +1024,7 @@ def _build_pydantic(
 def _with_stop(built: _Built, stopped: list[Reason]) -> _Built:
     node = built.node
     if stopped and type(node) is Object and node.complete:
-        node = Object(node.type_name, node.fields, False, stopped[0], node.module)
+        node = dataclasses.replace(node, complete=False, reason=stopped[0])
     return _Built(node, built.size)
 
 
@@ -1132,6 +1150,7 @@ class Out:
 
     def __init__(self, value: Any, max_size: int, depth: int, path: str, state: _State) -> None:
         self._value = value
+        self._max_size = max_size
         self._remaining = max_size
         self._depth = depth
         self._path = path
@@ -1145,9 +1164,14 @@ class Out:
         return built.node
 
     def _size_of(self, node: Any) -> int | None:
+        built = self._prebuilt(node)
+        return None if built is None else built.size
+
+    def _prebuilt(self, node: Any) -> _Built | None:
+        """The build record of ``node`` when this ``out`` built it (identity only)."""
         for built in self._built:
             if built.node is node:
-                return built.size
+                return built
         return None
 
     def capture(self, child: Any, key: str | int | None = None) -> Snapshot:
@@ -1195,8 +1219,27 @@ class Out:
         )
         return cast(Mapping, self._keep(built))
 
-    def object(self, fields: Iterable[tuple[str, Any]], *, type_name: str | None = None) -> Object:
-        """An object with these ``(name, value)`` fields (names must be ``str``)."""
+    def object(
+        self,
+        fields: Iterable[tuple[str, Any]] | dict[str, Any],
+        *,
+        type_name: str | None = None,
+        kind: str | None = None,
+    ) -> Object:
+        """An object with these ``(name, value)`` fields (names must be ``str``).
+
+        ``fields`` may also be a plain ``dict`` (its items, in order); a value
+        may be a node this ``out`` already built. ``kind`` is the rendering
+        key stored on the node (``Object.kind``) for per-kind render hooks.
+        """
+        if kind is not None and type(kind) is not str:
+            raise TypeError(f"Object kind must be a str, got {type(kind).__name__}")
+        pairs: Iterable[tuple[str, Any]]
+        if isinstance(fields, dict):
+            # A dict subclass's own ``items`` is not trusted: read it as a plain dict.
+            pairs = list(dict.items(cast(dict[str, Any], fields)))
+        else:
+            pairs = fields
         state = self._state
         name = (
             type_name if type_name is not None else _bounded_type_name(self._value, _MAX_TYPE_NAME)
@@ -1204,11 +1247,12 @@ class Out:
         module = _module_name(type(self._value))
         if self._depth >= state.max_depth or self._remaining < 2:
             reason: Reason = "max_depth" if self._depth >= state.max_depth else "max_length"
-            return cast(Object, self._keep(_Built(Object(name, (), False, reason, module), 2)))
+            empty = Object(name, (), False, reason, module, kind)
+            return cast(Object, self._keep(_Built(empty, 2)))
         stopped: list[Reason] = []
 
         def selected() -> typing.Iterator[tuple[str, Any] | None]:
-            for field_name, child in fields:
+            for field_name, child in pairs:
                 if not state.take_node():
                     stopped.append("max_nodes")
                     return
@@ -1218,7 +1262,17 @@ class Out:
                 yield field_name, child
 
         built = _object_fields(
-            self._value, name, module, selected(), self._remaining, self._depth, self._path, state
+            self._value,
+            name,
+            module,
+            selected(),
+            self._remaining,
+            self._depth,
+            self._path,
+            state,
+            kind,
+            reuse=self._prebuilt,
+            reuse_cap=self._max_size,
         )
         return cast(Object, self._keep(_with_stop(built, stopped)))
 
@@ -1227,16 +1281,77 @@ class Out:
         return cast(Opaque, self._keep(_opaque(self._value, max(self._remaining, 1))))
 
 
+_TYPE_MODULE = type.__dict__["__module__"]
+_TYPE_QUALNAME = type.__dict__["__qualname__"]
+
+
+def _raw_qualified_name(cls: type[Any]) -> tuple[str, str] | None:
+    """``(__module__, __qualname__)`` read through ``type``'s own descriptors.
+
+    The getters of ``type`` read the class's native storage, so neither a
+    metaclass ``__getattribute__`` nor a class-level attribute can intercept
+    them. Non-``str`` values (possible for ``__module__``) give ``None``.
+    """
+    try:
+        module = _TYPE_MODULE.__get__(cls, type(cls))
+        qualname = _TYPE_QUALNAME.__get__(cls, type(cls))
+    except Exception:
+        return None
+    if type(module) is not str or type(qualname) is not str:
+        return None
+    return module, qualname
+
+
 class _Registry:
+    """Eager registrations (by class identity) and lazy ones (by qualified name)."""
+
     def __init__(self) -> None:
         self.entries: list[tuple[type[Any], CaptureFunction]] = []
+        # (module, qualname) -> function; keys are exact ``str`` pairs only.
+        self.lazy: dict[tuple[str, str], CaptureFunction] = {}
+        # id(cls) -> (weak reference to cls, lazy function or None). Keyed by
+        # ``id`` and checked by identity, so a class is never hashed or compared.
+        self._resolved: dict[int, tuple[weakref.ref[type[Any]], CaptureFunction | None]] = {}
+
+    def changed(self) -> None:
+        """Forget cached lazy resolutions (a registration was added or removed)."""
+        self._resolved.clear()
+
+    def _lazy_for(self, cls: type[Any]) -> CaptureFunction | None:
+        if not self.lazy:
+            return None
+        marker = id(cls)
+        cached = self._resolved.get(marker)
+        if cached is not None and cached[0]() is cls:
+            return cached[1]
+        name = _raw_qualified_name(cls)
+        function = self.lazy.get(name) if name is not None else None
+        resolved = self._resolved
+
+        def forget(_ref: Any, marker: int = marker) -> None:
+            entry = resolved.get(marker)
+            if entry is not None and entry[0] is _ref:
+                del resolved[marker]
+
+        try:
+            reference = weakref.ref(cls, forget)
+        except TypeError:
+            return function  # not weakly referenceable: resolve without caching
+        resolved[marker] = (reference, function)
+        return function
 
     def find(self, mro: tuple[type[Any], ...]) -> tuple[int, CaptureFunction] | None:
-        """The registration nearest in ``mro`` (identity comparisons only)."""
+        """The registration nearest in ``mro`` (identity comparisons only).
+
+        At one class an eager registration wins over a lazy one.
+        """
         for index, base in enumerate(mro):
             for registered, function in self.entries:
                 if registered is base:
                     return index, function
+            lazy = self._lazy_for(base)
+            if lazy is not None:
+                return index, lazy
         return None
 
 
@@ -1374,6 +1489,7 @@ class _CaptureFunction:
             entries = _REGISTRY.entries
             entries[:] = [entry for entry in entries if entry[0] is not cls]
             entries.append((cls, function))
+            _REGISTRY.changed()
             return function
 
         return add(function) if function is not None else add
@@ -1382,6 +1498,37 @@ class _CaptureFunction:
         """Remove the registration for exactly ``cls`` (no-op when absent)."""
         entries = _REGISTRY.entries
         entries[:] = [entry for entry in entries if entry[0] is not cls]
+        _REGISTRY.changed()
+
+    def register_lazy(
+        self, module: str, qualname: str, function: CaptureFunction | None = None
+    ) -> Any:
+        """Register ``function(value, out)`` for the class named ``module`` / ``qualname``.
+
+        Use as ``@capture.register_lazy("numpy", "ndarray")`` or
+        ``capture.register_lazy("numpy", "ndarray", function)``. Only the name
+        is recorded: the module is never imported, so a library NOOA does not
+        depend on can be supported. At capture time each class of the value's
+        raw MRO is matched by its native ``__module__`` and ``__qualname__``
+        (no metaclass hooks); the nearest class matching an eager
+        (``register``) or a lazy registration wins, and at the same class the
+        eager one. Registering the same name again replaces it.
+        """
+        if type(module) is not str or type(qualname) is not str or not module or not qualname:
+            raise TypeError("capture.register_lazy needs a module and a qualname (non-empty str)")
+        key = (module, qualname)
+
+        def add(function: CaptureFunction) -> CaptureFunction:
+            _REGISTRY.lazy[key] = function
+            _REGISTRY.changed()
+            return function
+
+        return add(function) if function is not None else add
+
+    def unregister_lazy(self, module: str, qualname: str) -> None:
+        """Remove the lazy registration for ``module`` / ``qualname`` (no-op when absent)."""
+        _REGISTRY.lazy.pop((module, qualname), None)
+        _REGISTRY.changed()
 
 
 capture = _CaptureFunction()
