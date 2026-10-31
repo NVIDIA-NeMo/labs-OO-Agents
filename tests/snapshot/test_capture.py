@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import sys
 from dataclasses import dataclass, field
 from typing import Annotated, Any, ClassVar
 
@@ -681,3 +682,91 @@ def test_out_opaque(registry) -> None:
     registry(Animal, lambda value, out: out.opaque())
 
     assert capture(Animal("a")) == Opaque(__name__, "Animal")
+
+
+# --- review findings: untrusted equality ------------------------------------
+
+
+def test_unknown_field_type_metaclass_eq_never_runs() -> None:
+    calls: list[str] = []
+
+    class Meta(type):
+        def __eq__(cls, other: object) -> bool:
+            calls.append("metaclass __eq__")
+            raise RuntimeError("untrusted metaclass equality executed")
+
+        __hash__ = type.__hash__
+
+    class Unknown(metaclass=Meta):
+        pass
+
+    @dataclass
+    class Holder:
+        value: object
+
+    snapshot = capture(Holder(Unknown()))
+
+    assert calls == []
+    assert isinstance(snapshot, Object)
+    assert isinstance(snapshot.field("value"), Opaque)
+
+
+class _CollidingKey:
+    """A namespace key whose hash collides with a name capture looks up."""
+
+    calls: ClassVar[list[object]] = []
+    armed: ClassVar[bool] = True
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    def __hash__(self) -> int:
+        return hash(self.name)
+
+    def __eq__(self, other: object) -> bool:
+        if not _CollidingKey.armed:
+            return False  # setting the test up
+        _CollidingKey.calls.append(other)
+        raise RuntimeError("untrusted __eq__ executed")
+
+
+def test_class_namespace_foreign_key_is_never_compared() -> None:
+    _CollidingKey.calls.clear()
+    with pytest.warns(RuntimeWarning):
+        unknown = type("Unknown", (), {_CollidingKey("__dataclass_fields__"): 1})
+
+    snapshot = capture(unknown())
+
+    assert _CollidingKey.calls == []
+    assert isinstance(snapshot, Opaque)  # an unreadable namespace fails closed
+
+
+def test_module_namespace_foreign_key_is_never_compared(monkeypatch) -> None:
+    import types
+
+    module = types.ModuleType("_snapshot_hostile_module")
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+
+    class Secret:
+        __module__ = module.__name__
+        ok: int = 1
+        token: Annotated[str, hidden] = "s3cret"  # a string annotation (PEP 563)
+
+    Secret = dataclass(Secret)  # noqa: N806
+    _CollidingKey.armed = False
+    try:
+        # First, so that a lookup of "Annotated" meets it before the real entry.
+        module.__dict__[_CollidingKey("Annotated")] = 1  # type: ignore[index]
+        module.__dict__["Annotated"] = Annotated
+    finally:
+        _CollidingKey.armed = True
+    module.__dict__["hidden"] = hidden
+    _CollidingKey.calls.clear()
+
+    snapshot = capture(Secret())
+
+    assert _CollidingKey.calls == []
+    assert isinstance(snapshot, Object)
+    assert snapshot.field("ok") == Scalar(1)
+    assert snapshot.field("token") is None  # can't be read safely: omitted
+    assert "s3cret" not in render_json(snapshot, max_chars=1000)

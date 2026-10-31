@@ -158,6 +158,8 @@ class _State:
         self.max_depth = limits.max_depth
         # id(container) -> (JSON Pointer, kind) of the containers being built.
         self.active: dict[int, tuple[str, Literal["sequence", "mapping", "object"]]] = {}
+        # id(owner) -> (owner, checked copy of its namespace or None); see ``_safe_dict``.
+        self.namespaces: dict[int, tuple[Any, dict[str, Any] | None]] = {}
 
     def take_node(self) -> bool:
         """Consume one inspection unit, returning false when exhausted."""
@@ -178,6 +180,8 @@ def pointer_child(path: str, component: str) -> str:
 
 def fallback_candidates(type_name: str) -> tuple[Any, ...]:
     """#342's type-oriented smallest JSON fallbacks, by built-in type name."""
+    if type(type_name) is not str:
+        return ("", 0)  # never compare a foreign object (its ``__eq__`` could run)
     if type_name == "str":
         return ("",)
     if type_name in ("list", "tuple"):
@@ -246,20 +250,56 @@ def _bounded_type_name(value: Any, max_chars: int) -> str:
     return name[:max_chars]
 
 
-def _raw_namespace(cls: type[Any]) -> MappingProxyType | None:
-    """Return a class's native mappingproxy without custom metaclass lookup."""
+def _safe_dict(owner: Any, raw: Any, state: _State) -> dict[str, Any] | None:
+    """A copy of the native namespace ``raw`` of ``owner`` if every key is an exact ``str``.
+
+    A dict lookup compares a stored key with ``==`` when the hashes match, so
+    a fixed-name lookup in a namespace holding a foreign key object (a class
+    built with ``type(name, bases, {key: ...})``, a module ``__dict__`` written
+    directly) would run that key's ``__eq__``. The keys are checked by type
+    first, without hashing or comparing any of them; one with another key
+    type gives ``None`` (fail closed). Later lookups read the checked copy,
+    which is kept for the rest of this capture (by ``owner`` identity).
+    """
+    marker = id(owner)
+    cached = state.namespaces.get(marker)
+    if cached is not None and cached[0] is owner:
+        return cached[1]
+    if type(raw) is MappingProxyType:
+        items: Iterable[tuple[Any, Any]] = raw.items()  # a class namespace: a native dict
+    elif type(raw) is dict:
+        items = dict.items(raw)
+    else:
+        return None
+    safe: dict[str, Any] | None = {}
+    for key, value in items:
+        if type(key) is not str:
+            safe = None
+            break
+        safe[key] = value
+    state.namespaces[marker] = (owner, safe)
+    return safe
+
+
+def _raw_namespace(cls: type[Any], state: _State) -> dict[str, Any] | None:
+    """A class's own namespace (no metaclass lookup), checked by ``_safe_dict``."""
+    cached = state.namespaces.get(id(cls))
+    if cached is not None and cached[0] is cls:
+        return cached[1]
     try:
         namespace = _TYPE_DICT.__get__(cls, type(cls))
     except Exception:
         return None
-    return namespace if type(namespace) is MappingProxyType else None
+    if type(namespace) is not MappingProxyType:
+        return None
+    return _safe_dict(cls, namespace, state)
 
 
-def _module_name(cls: type[Any]) -> str:
-    namespace = _raw_namespace(cls)
+def _module_name(cls: type[Any], state: _State) -> str:
+    namespace = _raw_namespace(cls, state)
     if namespace is None:
         return ""
-    module = namespace.get("__module__")
+    module = dict.get(namespace, "__module__")
     return module[:_MAX_TYPE_NAME] if type(module) is str else ""
 
 
@@ -276,7 +316,7 @@ def _safe_mro(value: Any, state: _State) -> tuple[type[Any], ...] | None:
     for base in mro:
         if not state.take_node():
             return None
-        if base is not object and _raw_namespace(base) is None:
+        if base is not object and _raw_namespace(base, state) is None:
             return None
         checked.append(base)
     return tuple(checked)
@@ -289,13 +329,13 @@ def _index_of(mro: tuple[type[Any], ...], target: type[Any]) -> int | None:
     return None
 
 
-def _dataclass_index(mro: tuple[type[Any], ...]) -> int | None:
+def _dataclass_index(mro: tuple[type[Any], ...], state: _State) -> int | None:
     """Index of the nearest class whose own namespace holds dataclass fields."""
     for index, base in enumerate(mro):
         if base is object:
             continue
-        namespace = _raw_namespace(base)
-        if namespace is not None and type(namespace.get("__dataclass_fields__")) is dict:
+        namespace = _raw_namespace(base, state)
+        if namespace is not None and type(dict.get(namespace, "__dataclass_fields__")) is dict:
             return index
     return None
 
@@ -479,12 +519,12 @@ def fit_string(value: str, max_size: int) -> tuple[Any, int]:
     return prefix, len(dumps(prefix))
 
 
-def _opaque(value: Any, max_size: int) -> _Built:
+def _opaque(value: Any, max_size: int, state: _State) -> _Built:
     """An ``Opaque`` node for an unsupported value, sized as its bounded label."""
     cls = type(value)
     name_budget = max(0, max_size - len(_OPAQUE_PREFIX) - len(_OPAQUE_SUFFIX) - 2)
     name = _bounded_type_name(value, name_budget)
-    module = _module_name(cls)
+    module = _module_name(cls, state)
     _label, size = opaque_json(name, _builtin_name(value), max_size)
     return _Built(Opaque(module, name), size)
 
@@ -802,10 +842,10 @@ def _visibility_overrides(
     for base in mro:
         if not state.take_node():
             return None
-        namespace = _raw_namespace(base)
+        namespace = _raw_namespace(base, state)
         if namespace is None:
             return None
-        if not read_map(namespace.get(_FIELD_METADATA_ATTR), overwrite=False):
+        if not read_map(dict.get(namespace, _FIELD_METADATA_ATTR), overwrite=False):
             return None
 
     if not read_map(dict.get(obj_dict, _FIELD_METADATA_ATTR), overwrite=True):
@@ -858,12 +898,13 @@ def _field_hidden(field_info: FieldInfo, state: _State) -> bool | None:
     return _metadata_hidden(metadata, state)
 
 
-def _module_namespace(name: Any) -> dict[str, Any] | None:
+def _module_namespace(name: Any, state: _State) -> dict[str, Any] | None:
     """A loaded module's raw ``__dict__`` (no import, no attribute hooks; None: unknown)."""
     if type(name) is not str:
         return None
-    module = dict.get(sys.modules, name)
-    return None if module is None else _module_namespace_of(module)
+    modules = _safe_dict(sys.modules, sys.modules, state)
+    module = dict.get(modules, name) if modules is not None else None
+    return None if module is None else _module_namespace_of(module, state)
 
 
 _UNRESOLVED = object()
@@ -876,34 +917,37 @@ def _resolve_name(expr: ast.expr, namespace: dict[str, Any], state: _State) -> A
     if type(expr) is ast.Name:
         found = dict.get(namespace, expr.id, _UNRESOLVED)
         if found is _UNRESOLVED:
-            found = dict.get(_BUILTINS, expr.id, _UNRESOLVED)
+            builtin_names = _safe_dict(_BUILTINS, _BUILTINS, state)
+            if builtin_names is not None:
+                found = dict.get(builtin_names, expr.id, _UNRESOLVED)
         return found
     if type(expr) is ast.Attribute:
         base = _resolve_name(expr.value, namespace, state)
         if base is _UNRESOLVED:
             return _UNRESOLVED
-        inner = _module_namespace_of(base)
+        inner = _module_namespace_of(base, state)
         if inner is None:
             return _UNRESOLVED  # only module attributes are read
         return dict.get(inner, expr.attr, _UNRESOLVED)
     return _UNRESOLVED
 
 
-def _module_namespace_of(value: Any) -> dict[str, Any] | None:
+def _module_namespace_of(value: Any, state: _State) -> dict[str, Any] | None:
+    """A module's raw ``__dict__``, checked by ``_safe_dict`` (None: not a module)."""
     try:
         namespace = _MODULE_DICT.__get__(value)
     except Exception:
         return None
-    return namespace if type(namespace) is dict else None
+    return _safe_dict(namespace, namespace, state) if type(namespace) is dict else None
 
 
 _BUILTINS: dict[str, Any] = builtins.__dict__
 
 
-def _is_annotated(value: Any) -> bool:
+def _is_annotated(value: Any, state: _State) -> bool:
     if value is typing.Annotated:
         return True
-    extensions = _module_namespace("typing_extensions")
+    extensions = _module_namespace("typing_extensions", state)
     return extensions is not None and value is dict.get(extensions, "Annotated", _UNRESOLVED)
 
 
@@ -951,7 +995,7 @@ def _parsed_annotation_hidden(
     if type(expr) is not ast.Subscript:
         return False
     head = _resolve_name(expr.value, namespace, state)
-    annotated: bool | None = None if head is _UNRESOLVED else _is_annotated(head)
+    annotated: bool | None = None if head is _UNRESOLVED else _is_annotated(head, state)
     if annotated is False:
         return False
     elements = expr.slice.elts if type(expr.slice) is ast.Tuple else [expr.slice]
@@ -1028,13 +1072,17 @@ def _declaring_module(
     for base in reversed(mro):
         if not state.take_node():
             return None
-        namespace = _raw_namespace(base)
+        namespace = _raw_namespace(base, state)
         if namespace is None:
             continue
-        fields = namespace.get("__dataclass_fields__")
-        if type(fields) is dict and dict.get(fields, name) is field:
-            qualified = _raw_qualified_name(base)
-            return _module_namespace(qualified[0]) if qualified is not None else None
+        fields = dict.get(namespace, "__dataclass_fields__")
+        if type(fields) is not dict:
+            continue
+        # ``fields`` is class data too: check its keys before a lookup by name.
+        checked = _safe_dict(fields, fields, state)
+        if checked is not None and dict.get(checked, name) is field:
+            qualified = _raw_qualified_name(base, state)
+            return _module_namespace(qualified[0], state) if qualified is not None else None
     return None
 
 
@@ -1063,7 +1111,7 @@ def _pydantic_fields(mro: tuple[type[Any], ...], state: _State) -> dict[str, Fie
     for base in mro:
         if not state.take_node():
             return None
-        namespace = _raw_namespace(base)
+        namespace = _raw_namespace(base, state)
         if namespace is None:
             return None
         # Pydantic stored the completed map directly as ``model_fields`` before
@@ -1071,7 +1119,7 @@ def _pydantic_fields(mro: tuple[type[Any], ...], state: _State) -> dict[str, Fie
         # neither layout invokes the metaclass descriptor exposed by newer
         # releases.
         for key in ("__pydantic_fields__", "model_fields"):
-            fields = namespace.get(key)
+            fields = dict.get(namespace, key)
             if fields is not None:
                 return fields if type(fields) is dict else None
     return None
@@ -1140,9 +1188,13 @@ def _object_fields(
             box.stop("max_length")
             break
         # Never hold back so much that this field loses its own minimal value.
-        available = max(
-            min(room, _min_size(child if deferred is None else deferred)), room - held_chars
-        )
+        if deferred is not None:
+            minimal = deferred.min_size
+        elif prebuilt is not None:
+            minimal = _node_min_size(prebuilt.node)
+        else:
+            minimal = _min_size(child)
+        available = max(min(room, minimal), room - held_chars)
         held_nodes = min(held_nodes, max(0, state.nodes_left - 1))
         state.nodes_left -= held_nodes
         try:
@@ -1204,6 +1256,15 @@ def _cut_reason(node: Any) -> Reason:
     return node.reason if not node.complete and node.reason is not None else "max_length"
 
 
+_NODE_FALLBACK_NAMES: tuple[tuple[type[Any], str], ...] = (
+    (Text, "str"),
+    (Sequence, "list"),
+    (Mapping, "dict"),
+    (Object, "dict"),
+    (Ref, "dict"),
+)
+
+
 def _shrink(built: _Built, max_size: int) -> _Built:
     """``built`` fitted to ``max_size``: trailing items dropped, text cut, marked incomplete.
 
@@ -1215,8 +1276,10 @@ def _shrink(built: _Built, max_size: int) -> _Built:
     node = built.node
     node_type = type(node)
     if max_size < 2:
-        names = {Text: "str", Sequence: "list", Mapping: "dict", Object: "dict", Ref: "dict"}
-        name = names.get(node_type, "")
+        name = ""
+        for known_type, known_name in _NODE_FALLBACK_NAMES:
+            if node_type is known_type:  # identity: no hashing or metaclass ``__eq__``
+                name = known_name
         if node_type is Unavailable or node_type is Opaque:
             name = cast(Any, node).type_name
         elif node_type is Scalar:
@@ -1285,18 +1348,26 @@ def _shrink(built: _Built, max_size: int) -> _Built:
 
 
 def _min_size(child: Any) -> int:
-    """The size of the minimal type-oriented fallback a field value can always keep."""
+    """The size of the minimal type-oriented fallback a captured value can always keep.
+
+    Only identity checks against exact built-in types: the type of an unknown
+    value is never compared, hashed or asked for attributes (a metaclass
+    ``__eq__`` must not run).
+    """
     if type(child) is _Deferred:
         return child.min_size
-    child_type = type(child)
-    if child_type in (Text, Sequence, Mapping, Object, Ref, Opaque):
-        return 2
-    if child_type is Scalar:
-        return len(dumps(fallback_candidates(_builtin_name(child.value))[0]))
-    if child_type is Unavailable:
-        return len(dumps(fallback_candidates(child.type_name)[0]))
     name = _builtin_name(child)
     return len(dumps(fallback_candidates(name)[0])) if name else 2
+
+
+def _node_min_size(node: Snapshot) -> int:
+    """The size of the minimal fallback ``_shrink`` can fit a node built here into."""
+    node_type = type(node)
+    if node_type is Scalar:
+        return len(dumps(fallback_candidates(_builtin_name(cast(Scalar, node).value))[0]))
+    if node_type is Unavailable:
+        return len(dumps(fallback_candidates(cast(Unavailable, node).type_name)[0]))
+    return 2  # Text, Sequence, Mapping, Object, Ref, Opaque
 
 
 _STOP = object()
@@ -1312,7 +1383,7 @@ def _build_pydantic(
 ) -> _Built:
     """Build a bounded declared/stored-field view of a Pydantic v2 model."""
     type_name = _bounded_type_name(value, _MAX_TYPE_NAME)
-    module = _module_name(type(value))
+    module = _module_name(type(value), state)
     if depth >= state.max_depth:
         return _Built(Object(type_name, (), False, "max_depth", module), 2)
     ref = _enter(value, path, "object", state)
@@ -1375,13 +1446,15 @@ def _with_stop(built: _Built, stopped: list[Reason]) -> _Built:
     return _Built(node, built.size)
 
 
-def _instance_storage(value: Any, mro: tuple[type[Any], ...]) -> dict[str, Any] | None | object:
+def _instance_storage(
+    value: Any, mro: tuple[type[Any], ...], state: _State
+) -> dict[str, Any] | None | object:
     """Raw ``__dict__`` through the native getset descriptor; ``{}`` for slotted classes."""
     for base in mro:
-        namespace = _raw_namespace(base) if base is not object else None
+        namespace = _raw_namespace(base, state) if base is not object else None
         if namespace is None:
             continue
-        descriptor = namespace.get("__dict__")
+        descriptor = dict.get(namespace, "__dict__")
         if descriptor is None:
             continue
         if type(descriptor) is not types.GetSetDescriptorType:
@@ -1393,13 +1466,13 @@ def _instance_storage(value: Any, mro: tuple[type[Any], ...]) -> dict[str, Any] 
     return {}
 
 
-def _slot_value(name: str, mro: tuple[type[Any], ...], value: Any) -> Any:
+def _slot_value(name: str, mro: tuple[type[Any], ...], value: Any, state: _State) -> Any:
     """A slotted field's value through its native member descriptor, else ``_STOP``."""
     for base in mro:
-        namespace = _raw_namespace(base) if base is not object else None
+        namespace = _raw_namespace(base, state) if base is not object else None
         if namespace is None:
             continue
-        descriptor = namespace.get(name)
+        descriptor = dict.get(namespace, name)
         if descriptor is None:
             continue
         if type(descriptor) is not types.MemberDescriptorType:
@@ -1422,17 +1495,17 @@ def _build_dataclass(
 ) -> _Built:
     """Declared fields of a dataclass (from the class), values from raw instance storage."""
     type_name = _bounded_type_name(value, _MAX_TYPE_NAME)
-    module = _module_name(type(value))
+    module = _module_name(type(value), state)
     if depth >= state.max_depth:
         return _Built(Object(type_name, (), False, "max_depth", module), 2)
     ref = _enter(value, path, "object", state)
     if ref is not None:
         return _Built(ref, 2)
     try:
-        raw = _instance_storage(value, mro)
+        raw = _instance_storage(value, mro, state)
         storage = _copy_storage(raw, state) if raw is not _STOP else None
-        namespace = _raw_namespace(carrier)
-        fields = namespace.get("__dataclass_fields__") if namespace is not None else None
+        namespace = _raw_namespace(carrier, state)
+        fields = dict.get(namespace, "__dataclass_fields__") if namespace is not None else None
         if storage is None or type(fields) is not dict:
             return _closed(type_name, module)
         overrides = _visibility_overrides(storage, mro, state)
@@ -1475,7 +1548,7 @@ def _build_dataclass(
                 if name in storage:
                     yield name, dict.__getitem__(storage, name)
                     continue
-                slot = _slot_value(name, mro, value)
+                slot = _slot_value(name, mro, value, state)
                 if slot is not _STOP:
                     yield name, slot
 
@@ -1526,6 +1599,34 @@ class _Deferred:
 
 Deferred = _Deferred
 """What ``out.capture``, ``out.sequence`` and ``out.mapping`` return: a part built later."""
+
+
+def _metadata(value: Any, what: str) -> str:
+    """``value`` as an exact built-in ``str`` (a ``str`` subclass is copied), else ``TypeError``.
+
+    Names, kinds and type names a registered function passes are kept in the
+    snapshot, which must hold no live object: a ``str`` subclass could carry
+    state and run its own ``__str__`` / ``__eq__`` when a renderer reads it.
+    """
+    value_type = type(value)
+    if value_type is str:
+        return value
+    try:
+        mro = _TYPE_MRO.__get__(value_type, type(value_type))
+    except Exception:
+        mro = ()
+    if type(mro) is tuple and any(base is str for base in mro):
+        return str.__str__(value)  # an exact copy; no method of the subclass runs
+    raise TypeError(f"{what} must be a str, got {_bounded_type_name(value, _MAX_TYPE_NAME)}")
+
+
+def _length(value: Any) -> int | None:
+    """A declared length as an exact non-negative ``int`` (or ``None``), else ``TypeError``."""
+    if value is None:
+        return None
+    if type(value) is not int or value < 0:
+        raise TypeError("length must be a non-negative int or None")
+    return value
 
 
 class Out:
@@ -1594,7 +1695,7 @@ class Out:
 
     def _empty(
         self, node_type: Any, type_name: str, length: int | None, max_size: int, depth: int
-    ) -> _Built:
+    ) -> _Built:  # type_name / length: checked by ``_metadata`` / ``_length``
         reason: Reason = "max_depth" if depth >= self._state.max_depth else "max_length"
         if max_size < 2:
             name = "list" if node_type is Sequence else "dict"
@@ -1605,6 +1706,8 @@ class Out:
         self, items: Iterable[Any], *, length: int | None = None, type_name: str = "list"
     ) -> Deferred:
         """A sequence of ``items`` (pulled one at a time when built), cut like a list."""
+        type_name = _metadata(type_name, "Sequence type_name")
+        length = _length(length)
         state = self._state
 
         def build(max_size: int, depth: int, path: str) -> _Built:
@@ -1624,6 +1727,8 @@ class Out:
         type_name: str = "dict",
     ) -> Deferred:
         """A mapping of ``(key, value)`` pairs; keys must be exact built-in scalars."""
+        type_name = _metadata(type_name, "Mapping type_name")
+        length = _length(length)
         state = self._state
 
         def build(max_size: int, depth: int, path: str) -> _Built:
@@ -1661,8 +1766,10 @@ class Out:
         the rendering key stored on the node (``Object.kind``) for per-kind
         render hooks.
         """
-        if kind is not None and type(kind) is not str:
-            raise TypeError(f"Object kind must be a str, got {type(kind).__name__}")
+        if kind is not None:
+            kind = _metadata(kind, "Object kind")
+        if type_name is not None:
+            type_name = _metadata(type_name, "Object type_name")
         pairs: Iterable[Any]
         known: list[Any] | None = None
         if isinstance(fields, dict):
@@ -1675,12 +1782,12 @@ class Out:
         name = (
             type_name if type_name is not None else _bounded_type_name(self._value, _MAX_TYPE_NAME)
         )
-        module = _module_name(type(self._value))
+        module = _module_name(type(self._value), state)
         if self._depth >= state.max_depth or self._max_size < 2:
             reason: Reason = "max_depth" if self._depth >= state.max_depth else "max_length"
             empty = Object(name, (), False, reason, module, kind)
             return cast(Object, self._keep(_Built(empty, 2)))
-        reserves = _field_reserves(known) if known is not None else None
+        reserves = _field_reserves(known, self._prebuilt) if known is not None else None
         stopped: list[Reason] = []
 
         def selected() -> typing.Iterator[tuple[str, Any] | None]:
@@ -1710,11 +1817,16 @@ class Out:
 
     def opaque(self) -> Opaque:
         """This value as ``Opaque`` (what an unregistered type becomes)."""
-        return cast(Opaque, self._keep(_opaque(self._value, max(self._max_size, 1))))
+        return cast(Opaque, self._keep(_opaque(self._value, max(self._max_size, 1), self._state)))
 
 
-def _field_reserves(pairs: list[tuple[Any, Any]]) -> list[tuple[int, int]]:
-    """Per field: the (chars, nodes) every later field needs for its minimal fallback."""
+def _field_reserves(
+    pairs: list[tuple[Any, Any]], prebuilt: Callable[[Any], _Built | None]
+) -> list[tuple[int, int]]:
+    """Per field: the (chars, nodes) every later field needs for its minimal fallback.
+
+    ``prebuilt(child)``: the build record when ``child`` is a node the ``Out`` built.
+    """
     needs: list[tuple[int, int]] = []
     for entry in pairs:
         if type(entry) is not tuple or len(entry) != 2 or type(entry[0]) is not str:
@@ -1722,7 +1834,9 @@ def _field_reserves(pairs: list[tuple[Any, Any]]) -> list[tuple[int, int]]:
         name, child = entry
         # separator + "name": + minimal value; one node for the field, some for its value.
         nodes = 1 + (child.min_nodes if type(child) is _Deferred else 1)
-        needs.append((2 + len(dumps(name)) + 2 + _min_size(child), nodes))
+        built = prebuilt(child) if type(child) is not _Deferred else None
+        minimal = _node_min_size(built.node) if built is not None else _min_size(child)
+        needs.append((2 + len(dumps(name)) + 2 + minimal, nodes))
     reserves: list[tuple[int, int]] = []
     chars = nodes = 0
     for need_chars, need_nodes in reversed(needs):
@@ -1737,13 +1851,17 @@ _TYPE_MODULE = type.__dict__["__module__"]
 _TYPE_QUALNAME = type.__dict__["__qualname__"]
 
 
-def _raw_qualified_name(cls: type[Any]) -> tuple[str, str] | None:
+def _raw_qualified_name(cls: type[Any], state: _State) -> tuple[str, str] | None:
     """``(__module__, __qualname__)`` read through ``type``'s own descriptors.
 
     The getters of ``type`` read the class's native storage, so neither a
     metaclass ``__getattribute__`` nor a class-level attribute can intercept
-    them. Non-``str`` values (possible for ``__module__``) give ``None``.
+    them. Non-``str`` values (possible for ``__module__``) give ``None``. The
+    ``__module__`` getter looks the name up in the class namespace, so that
+    namespace is checked first (``_raw_namespace``: exact ``str`` keys only).
     """
+    if _raw_namespace(cls, state) is None:
+        return None
     try:
         module = _TYPE_MODULE.__get__(cls, type(cls))
         qualname = _TYPE_QUALNAME.__get__(cls, type(cls))
@@ -1769,14 +1887,14 @@ class _Registry:
         """Forget cached lazy resolutions (a registration was added or removed)."""
         self._resolved.clear()
 
-    def _lazy_for(self, cls: type[Any]) -> CaptureFunction | None:
+    def _lazy_for(self, cls: type[Any], state: _State) -> CaptureFunction | None:
         if not self.lazy:
             return None
         marker = id(cls)
         cached = self._resolved.get(marker)
         if cached is not None and cached[0]() is cls:
             return cached[1]
-        name = _raw_qualified_name(cls)
+        name = _raw_qualified_name(cls, state)
         function = self.lazy.get(name) if name is not None else None
         resolved = self._resolved
 
@@ -1792,7 +1910,7 @@ class _Registry:
         resolved[marker] = (reference, function)
         return function
 
-    def find(self, mro: tuple[type[Any], ...]) -> tuple[int, CaptureFunction] | None:
+    def find(self, mro: tuple[type[Any], ...], state: _State) -> tuple[int, CaptureFunction] | None:
         """The registration nearest in ``mro`` (identity comparisons only).
 
         At one class an eager registration wins over a lazy one.
@@ -1801,7 +1919,7 @@ class _Registry:
             for registered, function in self.entries:
                 if registered is base:
                     return index, function
-            lazy = self._lazy_for(base)
+            lazy = self._lazy_for(base, state)
             if lazy is not None:
                 return index, lazy
         return None
@@ -1836,7 +1954,14 @@ def _build_registered(
 def _with_reason(built: _Built, reason: Reason) -> _Built:
     """A committed fallback node, saying why it was used."""
     node = built.node
-    if type(node) in (Text, Sequence, Mapping, Object, Unavailable):
+    node_type = type(node)
+    if (
+        node_type is Text
+        or node_type is Sequence
+        or node_type is Mapping
+        or node_type is Object
+        or node_type is Unavailable
+    ):
         node = dataclasses.replace(cast(Any, node), reason=reason)
     return _Built(node, built.size)
 
@@ -1889,10 +2014,10 @@ def _build(
 
     mro = _safe_mro(value, state)
     if mro is None:
-        return _opaque(value, max_size)
-    found = _REGISTRY.find(mro)
+        return _opaque(value, max_size, state)
+    found = _REGISTRY.find(mro, state)
     model_index = _index_of(mro, BaseModel)
-    dataclass_index = _dataclass_index(mro)
+    dataclass_index = _dataclass_index(mro, state)
     candidates = [
         (found[0], 0) if found is not None else None,
         (model_index, 1) if model_index is not None else None,
@@ -1900,7 +2025,7 @@ def _build(
     ]
     present = [candidate for candidate in candidates if candidate is not None]
     if not present:
-        return _opaque(value, max_size)
+        return _opaque(value, max_size, state)
     _index, kind = min(present)
     if max_size < 2:
         return committed_fallback or _fallback(value, "max_length", max_size)
@@ -2007,7 +2132,7 @@ def _field_placeholder(value: Any, state: _State) -> tuple[Any, Snapshot]:
     mro = _safe_mro(value, state)
     if mro is not None and _index_of(mro, BaseModel) is not None:
         name = _bounded_type_name(value, _MAX_TYPE_NAME)
-        return {}, Object(name, (), False, "max_length", _module_name(type(value)))
+        return {}, Object(name, (), False, "max_length", _module_name(type(value), state))
     return None, Unavailable("max_length", "NoneType")
 
 

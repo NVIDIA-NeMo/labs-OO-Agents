@@ -7,7 +7,7 @@ from __future__ import annotations
 import json
 import sys
 from collections.abc import Iterator
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -708,3 +708,67 @@ def test_parts_never_exceed_the_budget(lazy, max_chars) -> None:
     assert len(text) <= max_chars
     json.loads(text)
     assert snapshot == capture([_named("Budget")()], Limits(max_chars=max_chars))  # deterministic
+
+
+# --- review findings: detached metadata ------------------------------
+
+
+def test_out_metadata_is_copied_to_exact_str(eager) -> None:
+    calls: list[str] = []
+
+    class Name(str):
+        def __str__(self) -> str:
+            calls.append("str")
+            raise RuntimeError("live metadata __str__ executed")
+
+        def __eq__(self, other: object) -> bool:
+            calls.append("eq")
+            raise RuntimeError("live metadata __eq__ executed")
+
+        __hash__ = str.__hash__
+
+    class Value:
+        pass
+
+    def snapshot(value: Any, out: Out) -> Snapshot:
+        return out.object(
+            {
+                "items": out.sequence([1], type_name=Name("deque")),
+                "table": out.mapping([("k", 1)], type_name=Name("OrderedDict")),
+            },
+            type_name=Name("Value"),
+            kind=Name("demo.value"),
+        )
+
+    eager(Value, snapshot)
+    node = capture(Value())
+
+    assert isinstance(node, Object)
+    assert type(node.type_name) is str and node.type_name == "Value"
+    assert type(node.kind) is str and node.kind == "demo.value"
+    items, table = node.field("items"), node.field("table")
+    assert isinstance(items, Sequence) and type(items.type_name) is str
+    assert type(cast(Any, table).type_name) is str
+    render_python(node)
+    render_output(node)
+    render_json(node, max_chars=1000)
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda out: out.object({}, type_name=1),
+        lambda out: out.sequence([], type_name=b"list"),
+        lambda out: out.mapping([], type_name=None),
+        lambda out: out.sequence([], length=True),
+        lambda out: out.mapping([], length=-1),
+    ],
+)
+def test_out_rejects_non_str_metadata(eager, build) -> None:
+    class Value:
+        pass
+
+    eager(Value, lambda value, out: build(out))
+
+    assert capture(Value()) == Unavailable("error", "Value")
