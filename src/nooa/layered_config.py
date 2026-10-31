@@ -9,9 +9,11 @@ same precedence rules, and are discovered through the helpers here.
 
 Precedence (low → high, last wins):
 
-1. **Bundled defaults** — supplied by the caller as *prepend* paths
-   (e.g. the entry-point YAMLs for LLM config). Nothing is bundled for
-   settings or secrets.
+1. **Bundled defaults** — supplied by the caller as *prepend* paths:
+   the ``nooa.bundled_configs`` entry points for LLM config
+   (:func:`nooa.llm_config.bundled_config_paths`) and the
+   ``nooa.bundled_settings`` entry points for settings
+   (:func:`bundled_settings_paths`). Nothing is bundled for secrets.
 2. **User** — ``get_user_dir(filename)``
    (``~/.config/nooa/<filename>``).
 3. **Project** — ``get_project_dir(filename)``
@@ -43,12 +45,66 @@ from __future__ import annotations
 import logging
 import os
 from collections.abc import Iterable, Mapping
+from importlib import metadata
 from pathlib import Path
 from typing import Any
 
 from nooa.paths import get_project_dir, get_user_dir
 
 logger = logging.getLogger(__name__)
+
+
+BUNDLED_SETTINGS_ENTRY_POINT_GROUP = "nooa.bundled_settings"
+"""Entry-point group of the bundled-default ``settings.yaml`` files (lowest layer)."""
+
+
+def entry_point_paths(group: str) -> list[Path]:
+    """Return the paths the entry points of *group* name, in entry-point-name order.
+
+    Each entry point loads to a zero-argument callable returning
+    ``Path | str | None`` (the ``nooa.bundled_configs`` convention), or to
+    a ``Path`` / ``str`` itself. ``None`` (the resource can't be
+    materialised) is skipped, and so is an entry point that fails to load
+    or to run: it is third-party code, and one broken package must not take
+    down the rest.
+    """
+    out: list[Path] = []
+    try:
+        eps = metadata.entry_points(group=group)
+    except Exception:  # noqa: BLE001 — importlib.metadata can raise on broken installs
+        logger.warning("Failed to enumerate %s entry points", group, exc_info=True)
+        return out
+
+    for ep in sorted(eps, key=lambda e: e.name):
+        try:
+            value = ep.load()
+            path = value() if callable(value) else value
+        except Exception:  # noqa: BLE001 — third-party entry-point code, be defensive
+            logger.warning("%s entry-point %r failed to load", group, ep.name, exc_info=True)
+            continue
+        if path is None:
+            continue
+        if not isinstance(path, (str, os.PathLike)):
+            logger.warning("%s entry-point %r returned %r, not a path", group, ep.name, path)
+            continue
+        out.append(Path(path))
+    return out
+
+
+def bundled_settings_paths() -> list[Path]:
+    """Return the bundled-default ``settings.yaml`` paths, lowest priority first.
+
+    Packages register them in the ``nooa.bundled_settings`` entry-point
+    group, like ``nooa.bundled_configs`` for ``llm_config.yaml``::
+
+        # pyproject.toml
+        [project.entry-points."nooa.bundled_settings"]
+        nvidia = "nooa_atom_nvidia:get_default_settings_path"
+
+    The layer sits below the user settings: user, project and
+    ``NEMO_OO_SETTINGS`` files override it.
+    """
+    return entry_point_paths(BUNDLED_SETTINGS_ENTRY_POINT_GROUP)
 
 
 def _resolved_if_exists(path: Path) -> Path | None:
@@ -175,6 +231,7 @@ def load_layered_yaml(
     *,
     prepend: Iterable[Path] = (),
     project_dir: Path | None = None,
+    base: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Load and deep-merge every layer of *filename* into a single dict.
 
@@ -183,11 +240,14 @@ def load_layered_yaml(
     is skipped with a warning so one bad layer never takes down the rest.
 
     *prepend* supplies lowest-priority paths (e.g. entry-point bundled
-    defaults) just like :func:`layered_paths`; omit it for settings / secrets.
+    defaults) just like :func:`layered_paths` (:func:`bundled_settings_paths`
+    for settings; nothing for secrets). *base*, when given, is merged
+    under every layer, as if it were one more lowest-priority file (a caller
+    that preprocesses its bundled files passes their merged data here).
     """
     import yaml
 
-    merged: dict[str, Any] = {}
+    merged: dict[str, Any] = _deep_merge({}, base) if base else {}
     for path in layered_paths(
         filename,
         env_var,
@@ -210,4 +270,10 @@ def load_layered_yaml(
     return merged
 
 
-__all__ = ["layered_paths", "load_layered_yaml"]
+__all__ = [
+    "BUNDLED_SETTINGS_ENTRY_POINT_GROUP",
+    "bundled_settings_paths",
+    "entry_point_paths",
+    "layered_paths",
+    "load_layered_yaml",
+]
