@@ -415,9 +415,18 @@ async def _adopted(
 
 
 def _note_running_job(job: Any) -> None:
-    """A cell's await of a running job ended by the deadline: the job runs on; say so."""
+    """A cell's await of a running job ended by the deadline: the job runs on; say so.
+
+    A kept child's request (``await rev.send(...)``) counts as a child
+    detached at the deadline, like a one-shot ``Subagent.run``.
+    """
     deadline = deadline_cancel()
     if deadline is not None:
+        owner = getattr(job, "_owner", None)
+        if getattr(job, "_kind", None) == "request" and isinstance(
+            getattr(owner, "_work", None), Subagent
+        ):
+            get_harness_metrics().child_detached()
         deadline.note(
             f"job {job.name} is still running: "
             f'Waiting(on=["{job.name}"]) for its result, '

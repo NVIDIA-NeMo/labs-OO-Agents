@@ -220,4 +220,25 @@ async def test_an_awaited_request_job_survives_the_deadline_and_is_named(
     feedback = _prompt(models, None, 1)
     assert "job review#1 is still running" in feedback
     attrs = root_metrics[0].to_span_attributes()
+    # A kept child's request detached at the deadline counts like a one-shot child.
+    assert attrs["harness.child_detached_at_deadline.count"] == 1
+
+
+async def test_an_awaited_plain_job_at_the_deadline_is_not_a_detached_child(
+    registry, options, models, root_metrics
+):
+    models.scripts[None] = [
+        cell("job = self.jobs.launch(asyncio.sleep(1.5, 'SLEPT'), name='nap')\nawait job"),
+        cell("return_result(Waiting(explanation='nap runs', on=['nap']))"),
+        cell(
+            "[event] = notification['jobs']\n"
+            "assert (event.name, event.kind) == ('nap', 'done'), event\n"
+            "return_result(Done(explanation=event.value))"
+        ),
+    ]
+    root = await registry.create(options)
+    outcome = await asyncio.wait_for(root.prompt("go"), TIMEOUT)
+    assert outcome == Done(explanation="SLEPT")
+    assert "job nap is still running" in _prompt(models, None, 1)
+    attrs = root_metrics[0].to_span_attributes()
     assert "harness.child_detached_at_deadline.count" not in attrs
