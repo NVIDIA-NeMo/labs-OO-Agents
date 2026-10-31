@@ -21,11 +21,13 @@ the Shells started under it; a launched Shell closes with its job. Inside a
 harness's ``preserve_background_services()`` scope, closing ends bash only:
 that external harness owns (and must clean up) the background processes.
 
-A command's stdout and stderr are read through pipes into files, each up to
-an output limit (past it, bytes are counted but not kept, and the summary says
-so): in the job's scratch directory when launched, else in the Shell's own
-output directory. A ``CommandResult`` carries a bounded summary of each stream
-and the file path when the summary was cut (short output keeps no file).
+A command's stdout and stderr are read through pipes into files (core's
+``FileBackedTruncatingStringIO``), each byte-exact up to an output limit (past
+it, bytes are counted but not kept, and the text says so): in the job's scratch
+directory when launched, else in the Shell's own output directory. A
+``CommandResult`` carries each stream's text, whole up to 1 MiB (1,048,576
+characters), else its first quarter and last three quarters under a notice
+naming the file, plus the file path when cut (output that fits keeps no file).
 
 Retention of those files: a job's are removed when the job is pruned or its
 manager closes. A direct ``run``'s are removed when that Shell closes
@@ -52,10 +54,10 @@ import tempfile
 import weakref
 from dataclasses import dataclass
 from pathlib import Path
-from typing import IO, Annotated, Any
+from typing import Annotated, Any
 
 from nooa import hidden
-from nooa.agentdoc import spec
+from nooa.agentdoc import FileBackedTruncatingStringIO, spec
 from nooa.runtime.harness_metrics import get_harness_metrics
 from nooa.tools import BashSession
 from nooa_atom.agent.work_manager import _progress_sink, current_name, describe, job_dir
@@ -68,10 +70,12 @@ default_cwd: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 )
 """Where a ``Shell()`` without ``cwd`` starts (an agent sets its workspace); else the process's."""
 
-# A stream's summary: whole when at most this many bytes, else head and tail.
-_SUMMARY_BYTES = 10_000
-_HEAD_BYTES = 2_000
-_TAIL_BYTES = _SUMMARY_BYTES - _HEAD_BYTES
+# A stream's text in its CommandResult: whole up to this many characters, else
+# the first quarter and the last three quarters of it around a notice.
+_VIEW_CHARS = 1024 * 1024
+_VIEW_TAIL_CHARS = _VIEW_CHARS * 3 // 4
+# How a cut text names its file (FileBackedTruncatingStringIO notice template).
+_CUT_NOTICE = "Full output: await self.files.read({quoted_path})"
 # Bytes of each stream kept on disk per command, by default.
 _MAX_OUTPUT_BYTES = 64 * 1024 * 1024
 _CHUNK_BYTES = 64 * 1024
@@ -113,7 +117,7 @@ _CLOSED_DURING = "the shell was closed while this command ran; the command was s
 class CommandResult:
     """One command's outcome: exit code, output, and bash's directory after it.
 
-    ``stdout``/``stderr``: whole up to 10 kB, else head+tail around a marker;
+    ``stdout``/``stderr``: whole up to 1 MiB, else head+tail under a notice;
     ``*_path`` then names the capture (up to ``max_output``, default 64 MiB),
     kept while the job is listed (direct ``run``: until its Shell/session closes).
     """
@@ -121,7 +125,7 @@ class CommandResult:
     returncode: int
     timed_out: bool
     # Shown cut to 2,000 characters in notifications and pprint (display only):
-    # the full summary stays on the object; *_path files retain up to max_output.
+    # the full text stays on the object; *_path files retain up to max_output.
     stdout: Annotated[str, spec(max_string=2000)]
     stderr: Annotated[str, spec(max_string=2000)]
     cwd: str
@@ -130,26 +134,27 @@ class CommandResult:
 
 
 class _Capture:
-    """One stream into a file, up to ``limit`` bytes; the last bytes also in memory."""
+    """One stream: every byte into a file (up to ``limit``), a bounded text view in memory.
 
-    def __init__(self, path: str | None, limit: int) -> None:
+    Core's ``FileBackedTruncatingStringIO`` does the work: the file is
+    byte-exact (the first ``limit`` bytes), the view is decoded incrementally
+    (a character split across reads stays whole) and holds up to
+    ``_VIEW_CHARS``: whole, else head and tail under a notice naming the file.
+    """
+
+    def __init__(self, path: str, limit: int) -> None:
         self.path = path
-        self.limit = limit
-        self.file: IO[bytes] = open(path, "w+b") if path else tempfile.TemporaryFile()  # noqa: SIM115
-        self.written = 0
-        self.total = 0
-        self.tail = bytearray()
+        self.buffer = FileBackedTruncatingStringIO(
+            limit=_VIEW_CHARS,
+            tail_chars=_VIEW_TAIL_CHARS,
+            path=path,
+            max_file_bytes=limit,
+            notice=_CUT_NOTICE,
+        )
         self.progress: Any = None  # a managed job's preview stream (work_progress)
 
     def feed(self, chunk: bytes) -> None:
-        self.total += len(chunk)
-        room = self.limit - self.written
-        if room > 0:
-            part = chunk[:room]
-            self.file.write(part)
-            self.written += len(part)
-        self.tail += chunk
-        del self.tail[:-_TAIL_BYTES]
+        self.buffer.write_bytes(chunk)
 
     async def pump(self, stream: asyncio.StreamReader) -> None:
         with contextlib.suppress(Exception):
@@ -161,33 +166,23 @@ class _Capture:
                 self.progress.feed(b"", final=True)
 
     def summary(self) -> tuple[str, str | None]:
-        """The stream's text, or its head and tail around a marker; and the path if cut."""
-        self.file.flush()
-        self.file.seek(0)
-        if self.total <= _SUMMARY_BYTES:
-            return self.file.read(self.total).decode("utf-8", errors="replace"), None
-        head = self.file.read(_HEAD_BYTES).decode("utf-8", errors="replace")
-        tail = bytes(self.tail[-_TAIL_BYTES:]).decode("utf-8", errors="replace")
-        omitted = self.total - _HEAD_BYTES - len(self.tail[-_TAIL_BYTES:])
-        if self.total > self.written:
-            where = (
-                f"over the {self.limit:,}-byte output limit: {self.path} holds only the "
-                f"first {self.written:,} of {self.total:,} bytes"
-                if self.path
-                else f"over the output limit; output not kept ({self.total:,} bytes)"
-            )
-        else:
-            where = f"full output: {self.path}" if self.path else "full output not kept"
-        return f"{head}\n[... {omitted:,} bytes omitted; {where}]\n{tail}", self.path
+        """The stream's text (whole, or cut with a notice); and the file's path if cut."""
+        if self.buffer.was_truncated:
+            return self.buffer.getvalue(), self.buffer.path
+        self.buffer.close()  # complete: flushes a trailing partial character into the text
+        return self.buffer.getvalue(), None
 
     def close(self) -> None:
         with contextlib.suppress(Exception):
-            self.file.close()
+            self.buffer.close()
+
+    def discard(self) -> None:
+        """Remove the file (the text is whole in the result)."""
+        with contextlib.suppress(Exception):
+            self.buffer.cleanup()
 
 
-def _captures(directory: Path | None, stem: str, limit: int) -> tuple[_Capture, _Capture]:
-    if directory is None:
-        return _Capture(None, limit), _Capture(None, limit)
+def _captures(directory: Path, stem: str, limit: int) -> tuple[_Capture, _Capture]:
     return (
         _Capture(str(directory / f"{stem}.stdout"), limit),
         _Capture(str(directory / f"{stem}.stderr"), limit),
@@ -335,13 +330,24 @@ class ShellOwner:
         # and go when the owner closes.
         self._output: tempfile.TemporaryDirectory[str] | None = None
 
+    def _root(self) -> str:
+        if self._output is None:
+            self._output = tempfile.TemporaryDirectory(prefix="nooa-shells-")
+        return self._output.name
+
     def _output_dir(self) -> Path | None:
         """A new directory for one Shell's direct-run output (None once closed)."""
         if self._closed:
             return None
-        if self._output is None:
-            self._output = tempfile.TemporaryDirectory(prefix="nooa-shells-")
-        return Path(tempfile.mkdtemp(prefix="shell-", dir=self._output.name))
+        return Path(tempfile.mkdtemp(prefix="shell-", dir=self._root()))
+
+    def cell_output_dir(self) -> str:
+        """Where the session's cells keep their full printed output (``CaptureConfig.file_dir``).
+
+        Inside the owner's directory, so it goes when the owner closes; made on
+        first use by the capture.
+        """
+        return os.path.join(self._root(), "cells")
 
     def adopt(self, shell: Shell) -> None:
         if self._closed:  # closing is terminal: no bash starts under a closed owner
@@ -665,9 +671,8 @@ class Shell:
     def _retain(self, result: CommandResult, out: _Capture, err: _Capture) -> None:
         """Keep a direct run's cut captures; remove the files of uncut streams."""
         for capture, path in ((out, result.stdout_path), (err, result.stderr_path)):
-            if path is None and capture.path:
-                with contextlib.suppress(OSError):
-                    os.unlink(capture.path)  # short: whole in the summary
+            if path is None:
+                capture.discard()  # short: whole in the result
         output = self._output
         if isinstance(output, tempfile.TemporaryDirectory) and (
             result.stdout_path or result.stderr_path

@@ -15,6 +15,15 @@ from nooa_atom.session.store import SessionStore
 from nooa.interactive import Done
 
 
+@pytest.fixture
+def small_shell_view(monkeypatch):
+    """Cut Shell texts at 10,000 characters here (1 MiB by default), so 20 kB is long."""
+    from nooa_atom.agent import work_shell
+
+    monkeypatch.setattr(work_shell, "_VIEW_CHARS", 10_000)
+    monkeypatch.setattr(work_shell, "_VIEW_TAIL_CHARS", 7_500)
+
+
 def gated_command(name, workspace):
     gate = workspace / (name + ".gate")
     ready = workspace / (name + ".ready")
@@ -34,7 +43,8 @@ def capture_assertions(name):
         "assert result.returncode == 0 and not result.timed_out\n"
         f"assert Path(result.stdout_path).read_text() == {name!r} + 'O'*20000 + 'END'\n"
         "assert Path(result.stderr_path).read_text() == 'E'*20000\n"
-        "assert 'bytes omitted' in result.stdout and 'bytes omitted' in result.stderr\n"
+        "read = 'Full output: await self.files.read('\n"
+        "assert read in result.stdout and read in result.stderr\n"
     )
 
 
@@ -83,6 +93,7 @@ def done(report):
     )
 
 
+@pytest.mark.usefixtures("small_shell_view")
 @pytest.mark.parametrize("observation", ["await", "iterator", "throttled"])
 async def test_root_child_grandchild_complete_without_output_items_or_extra_turns(
     tmp_path, observation
@@ -136,6 +147,7 @@ async def test_root_child_grandchild_complete_without_output_items_or_extra_turn
         await registry.close_all()
 
 
+@pytest.mark.usefixtures("small_shell_view")
 async def test_waiting_receives_one_final_without_pre_exit_output_turns(tmp_path):
     models = AtomModels()
     models.scripts[None] = [
@@ -173,6 +185,7 @@ async def test_waiting_receives_one_final_without_pre_exit_output_turns(tmp_path
         await registry.close_all()
 
 
+@pytest.mark.usefixtures("small_shell_view")
 async def test_direct_one_liner_output_file_lives_until_the_session_closes(tmp_path):
     import gc
     from pathlib import Path
@@ -182,7 +195,7 @@ async def test_direct_one_liner_output_file_lives_until_the_session_closes(tmp_p
         cell(
             "r = await Shell().run('seq 1 100000')\n"  # the temporary Shell is dropped
             "self.v.out = r.stdout_path\n"
-            "assert 'bytes omitted; full output:' in r.stdout\n"
+            "assert 'Full output: await self.files.read(' in r.stdout\n"
             "del r\n"
             "return_result(Done(explanation='ran'))"
         )

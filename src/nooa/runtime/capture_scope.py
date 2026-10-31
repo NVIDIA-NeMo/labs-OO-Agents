@@ -14,6 +14,7 @@ import sys
 import threading
 from typing import Any
 
+from nooa.agentdoc import FileBackedTruncatingStringIO
 from nooa.runtime.media_capture import _media_buffer_var, _MediaBuffer
 from nooa.runtime.stream_wrappers import BlockedStdinWrapper, ContextVarStream, _block_stdin_var
 
@@ -65,17 +66,16 @@ class CaptureScope:
 
         self.active = True
         capture = self.config.capture
+        files = {
+            "file_backed": capture.file_backed,
+            "file_dir": capture.file_dir,
+            "file_notice": capture.file_notice,
+        }
         self.stdout = _TextLease(
-            self,
-            _make_capture_buffer(
-                limit=capture.max_stdout, tail_chars=capture.tail, file_backed=capture.file_backed
-            ),
+            self, _make_capture_buffer(limit=capture.max_stdout, tail_chars=capture.tail, **files)
         )
         self.stderr = _TextLease(
-            self,
-            _make_capture_buffer(
-                limit=capture.max_stderr, tail_chars=capture.tail, file_backed=capture.file_backed
-            ),
+            self, _make_capture_buffer(limit=capture.max_stderr, tail_chars=capture.tail, **files)
         )
         self.media = _MediaBuffer(
             max_attachments=self.config.media_capture.max_attachments_per_execution,
@@ -117,4 +117,8 @@ class CaptureScope:
             variable.reset(token)
         self._tokens.clear()
         for lease in (self.stdout, self.stderr):
-            lease.buffer.close()
+            buffer = lease.buffer
+            if isinstance(buffer, FileBackedTruncatingStringIO) and not buffer.was_truncated:
+                buffer.cleanup()  # whole in the result: no file to keep
+            else:
+                buffer.close()  # a cut text names its file: its directory's owner removes it
