@@ -204,6 +204,7 @@ class HarnessMetrics(BaseModel):
     missing_awaits_detected: list[str] = Field(default_factory=list)
     name_error_hints: list[str] = Field(default_factory=list)
     mcp_tool_name_hints: list[str] = Field(default_factory=list)
+    module_not_found_hints: list[str] = Field(default_factory=list)
     infinite_loops_detected: int = 0
     return_types_redefined: list[str] = Field(default_factory=list)
 
@@ -498,6 +499,10 @@ class HarnessMetrics(BaseModel):
         ``call`` is ``<server>.<tool>``.
         """
         self._append(self.mcp_tool_name_hints, call)
+
+    def module_not_found_hint(self, module: str) -> None:
+        """A cell's ModuleNotFoundError got the pointer to the task's python3 behind a Shell."""
+        self._append(self.module_not_found_hints, module)
 
     def infinite_loop(self) -> None:
         self.infinite_loops_detected += 1
@@ -1195,6 +1200,19 @@ _SPAN_SCHEMA: tuple[SchemaEntry, ...] = (
         "Hinted MCP tools as <server>.<tool>",
         "Code Validation",
         lambda m: m.mcp_tool_name_hints,
+        True,
+    ),
+    SchemaEntry(
+        "harness.module_not_found_hint.count",
+        "Cell ModuleNotFoundErrors pointed at the task's python3",
+        "Code Validation",
+        lambda m: len(m.module_not_found_hints),
+    ),
+    SchemaEntry(
+        "harness.module_not_found_hint.modules",
+        "Missing modules in hinted ModuleNotFoundErrors",
+        "Code Validation",
+        lambda m: m.module_not_found_hints,
         True,
     ),
     SchemaEntry(
