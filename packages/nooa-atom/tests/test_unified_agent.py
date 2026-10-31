@@ -23,6 +23,12 @@ from nooa.storage.snapshot_vars import SnapshotVars
 
 UNIFIED = "nooa_atom.agent:AtomAgent"
 TIMEOUT = 60
+# The python_cell tool description reaches every role (root, child, benchmark/gym).
+ENVIRONMENT_LINE = (
+    "python_cell runs in Atom's own Python (your thinking environment). The task's code, "
+    "packages and tests live in the task environment: run them through a Shell (e.g. "
+    "sh.run(\"python3 script.py\")); don't install task packages into Atom's Python."
+)
 LIVE_NAMES_LINE = (
     'Your live Python names are in the python_cell_state block ("omitted: N" counts '
     "the rest); python_cell_state() lists up to 20: check both and your context before recreating a name."
@@ -120,6 +126,7 @@ async def test_one_shot_subagent_returns_its_task_result_and_notes_are_job_items
             "Run commands with `sh = Shell()` then `r = await sh.run(cmd, timeout=600)`"
             in tool.description
         )
+        assert ENVIRONMENT_LINE in tool.description
         assert "self.shell" not in tool.description and "self.delegate" not in tool.description
         assert "Blocked imports:" not in rendered  # guidance is tool-local, not another block
 
@@ -478,6 +485,7 @@ async def test_first_call_offers_one_work_vocabulary(
     call = models.llms[None].calls[0]
     tools = "\n".join(str(getattr(tool, "description", tool)) for tool in call.tools or ())
     assert "Run commands with `sh = Shell()` then `r = await sh.run(cmd, timeout=600)`" in tools
+    assert ENVIRONMENT_LINE in tools
     messages = "\n".join(str(m.get("content", "")) for m in call.messages)
     rendered = messages + "\n" + tools  # what the model reads: the messages and the tool
     prefix = str(call.messages[0].get("content", ""))
@@ -1276,3 +1284,36 @@ async def test_a_name_error_points_at_python_cell_state_and_is_counted(
     [attrs] = [a for a in flushed if "harness.name_error_hint.count" in a]
     assert attrs["harness.name_error_hint.count"] == 2
     assert attrs["harness.name_error_hint.names"] == ["sh", "results"]
+
+
+async def test_a_module_not_found_error_points_at_the_task_python_and_is_counted(
+    registry, options, models, monkeypatch
+):
+    """A cell's import runs in Atom's Python; the task's python3 may have the package."""
+    from nooa.runtime.harness_metrics import HarnessMetrics
+
+    flushed: list[dict] = []
+    real_flush = HarnessMetrics.flush_to_span
+
+    def flush(self):
+        flushed.append(self.to_span_attributes())
+        real_flush(self)
+
+    monkeypatch.setattr(HarnessMetrics, "flush_to_span", flush)
+    models.scripts[None] = [
+        cell("import no_such_task_pkg_xyz.sub"),
+        cell("return_result(Done(explanation='ok'))"),
+    ]
+    root = await registry.create(options)
+    await asyncio.wait_for(root.prompt("go"), TIMEOUT)
+    seen = "\n".join(str(m.get("content", "")) for m in models.llms[None].calls[1].messages)
+    assert "No module named 'no_such_task_pkg_xyz'" in seen
+    assert (
+        "python_cell runs in Atom's own Python, not the task's; the task's python3 may have "
+        "no_such_task_pkg_xyz: check with "
+        "await sh.run(\"python3 -c 'import no_such_task_pkg_xyz'\")"
+    ) in seen
+    assert "Live names are listed" not in seen
+    [attrs] = [a for a in flushed if "harness.module_not_found_hint.count" in a]
+    assert attrs["harness.module_not_found_hint.count"] == 1
+    assert attrs["harness.module_not_found_hint.modules"] == ["no_such_task_pkg_xyz"]

@@ -256,6 +256,14 @@ class TestRecording:
         assert attrs["harness.mcp_tool_name_hint.count"] == 1
         assert attrs["harness.mcp_tool_name_hint.calls"] == ["hcb_resources.lookup_order"]
 
+    def test_module_not_found_hint(self):
+        m = HarnessMetrics()
+        m.module_not_found_hint("cv2")
+        assert m.module_not_found_hints == ["cv2"]
+        attrs = m.to_span_attributes()
+        assert attrs["harness.module_not_found_hint.count"] == 1
+        assert attrs["harness.module_not_found_hint.modules"] == ["cv2"]
+
     def test_infinite_loop(self):
         m = HarnessMetrics()
         m.infinite_loop()

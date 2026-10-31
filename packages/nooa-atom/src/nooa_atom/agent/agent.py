@@ -129,7 +129,10 @@ _LEGACY_TOOL_HINT: Annotated[str, hidden] = (
 _TOOL_HINT: Annotated[str, hidden] = (
     "Run commands with `sh = Shell()` then `r = await sh.run(cmd, timeout=600)`; "
     "background work and child agents go on `self.jobs`, documented in the "
-    "python_cell_tools block."
+    "python_cell_tools block. python_cell runs in Atom's own Python (your thinking "
+    "environment). The task's code, packages and tests live in the task environment: run them "
+    'through a Shell (e.g. sh.run("python3 script.py")); don\'t install task packages into '
+    "Atom's Python."
 )
 
 _NAME_ERROR_RE = re.compile(r"^NameError: name '(?P<name>\w+)' is not defined", re.MULTILINE)
@@ -155,6 +158,32 @@ def _name_error_hint(error: BaseException, formatted: str) -> str | None:
         hint += " Create it first, e.g. `sh = Shell()`."
     get_harness_metrics().name_error_hint(name)
     return hint
+
+
+_MODULE_NOT_FOUND_RE = re.compile(
+    r"^ModuleNotFoundError: No module named '(?P<name>[\w.]+)'", re.MULTILINE
+)
+
+
+def _module_not_found_hint(error: BaseException, formatted: str) -> str | None:
+    """The hint for a cell's ``No module named 'x'``; counted in harness metrics.
+
+    A cell runs in Atom's Python, which usually lacks the task's packages
+    (the task's ``python3`` often has them). The sandbox path reports the
+    error as text, so the formatted text is matched too.
+    """
+    name = getattr(error, "name", None) if type(error) is ModuleNotFoundError else None
+    if not isinstance(name, str) or not name:
+        match = _MODULE_NOT_FOUND_RE.search(formatted)
+        if match is None:
+            return None
+        name = match.group("name")
+    module = name.split(".", 1)[0]
+    get_harness_metrics().module_not_found_hint(name)
+    return (
+        "python_cell runs in Atom's own Python, not the task's; the task's python3 may have "
+        f"{module}: check with await sh.run(\"python3 -c 'import {module}'\")"
+    )
 
 
 _SELF_ATTRIBUTE_RE = re.compile(
@@ -288,9 +317,12 @@ class AtomCodeAct(CodeActV2):
         return line
 
     def _format_error(self, error: Exception, code: str | None = None, **kwargs: Any) -> str:
-        """Point a cell's NameError at the python_cell_state block (and ``sh = Shell()``)."""
+        """Point a cell's NameError at the python_cell_state block (and ``sh = Shell()``).
+
+        A ModuleNotFoundError points at the task's python3 behind a Shell.
+        """
         formatted = super()._format_error(error, code, **kwargs)
-        hint = _name_error_hint(error, formatted)
+        hint = _name_error_hint(error, formatted) or _module_not_found_hint(error, formatted)
         return f"{formatted}\n\n{hint}" if hint else formatted
 
     def _format_execution_error(self, runtime: Any, result: Any, code: str, **kwargs: Any) -> str:
