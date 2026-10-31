@@ -770,3 +770,40 @@ def test_module_namespace_foreign_key_is_never_compared(monkeypatch) -> None:
     assert snapshot.field("ok") == Scalar(1)
     assert snapshot.field("token") is None  # can't be read safely: omitted
     assert "s3cret" not in render_json(snapshot, max_chars=1000)
+
+
+# --- review findings: caps
+
+
+def test_bytes_capture_omits_a_code_point_beyond_max_string() -> None:
+    value = "\U0001f600x".encode()
+
+    snapshot = capture(value, Limits(max_string=1))
+
+    assert isinstance(snapshot, Text)
+    assert len((snapshot.head + snapshot.tail).encode()) <= 1
+    assert snapshot.omitted == len(value) and not snapshot.complete
+    two_byte = capture("\u00e9\u00e9".encode(), Limits(max_string=3))
+    assert isinstance(two_byte, Text) and two_byte.head == "\u00e9" and two_byte.omitted == 2
+
+
+def test_object_fields_obey_max_items() -> None:
+    @dataclass
+    class Data:
+        a: int = 1
+        b: int = 2
+        c: int = 3
+
+    class Model(BaseModel):
+        a: int = 1
+        b: int = 2
+
+    cut = capture(Data(), Limits(max_items=1))
+    assert isinstance(cut, Object)
+    assert cut.fields == (("a", Scalar(1)),)
+    assert not cut.complete and cut.reason == "max_items"
+    model = capture(Model(), Limits(max_items=1))
+    assert isinstance(model, Object) and [name for name, _ in model.fields] == ["a"]
+    assert model.reason == "max_items"
+    exact = capture(Data(), Limits(max_items=3))
+    assert isinstance(exact, Object) and exact.complete and len(exact.fields) == 3

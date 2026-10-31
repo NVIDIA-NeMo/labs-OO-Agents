@@ -387,16 +387,14 @@ def _cut_string(value: str, max_size: int, max_keep: int | None, limits: Limits)
 
 
 def safe_end(data: bytes | bytearray, end: int) -> int:
-    """``end`` moved back to a UTF-8 code point boundary (forward if that leaves nothing)."""
-    end = min(end, len(data))
-    cut = end
+    """``end`` moved back to a UTF-8 code point boundary (0 when the first one is cut).
+
+    A code point that does not fit whole is left out, never kept beyond
+    ``end`` (``max_string`` and the budget are upper bounds).
+    """
+    cut = min(end, len(data))
     while 0 < cut < len(data) and data[cut] & 0xC0 == 0x80:
         cut -= 1
-    if cut > 0 or end == len(data) or end == 0:
-        return cut
-    cut = end  # a code point longer than the kept part: keep it whole
-    while cut < len(data) and data[cut] & 0xC0 == 0x80:
-        cut += 1
     return cut
 
 
@@ -1166,12 +1164,20 @@ def _object_fields(
 
     ``reserves[i]``: (chars, nodes) held back while field ``i`` is built so
     that every later field still fits its minimal fallback.
+
+    ``Limits.max_items`` caps the fields kept, like the items of any container:
+    the first ones are kept (a field order is not a sequence end) and the
+    object is marked ``max_items`` when another field was left out.
     """
     box = _Container(max_size)
     fields: list[tuple[str, Snapshot]] = []
+    max_items = state.limits.max_items
     for index, entry in enumerate(selected):
         if entry is None:
             return _closed(type_name, module)
+        if max_items is not None and index >= max_items:
+            box.stop("max_items")
+            break
         name, child = entry
         resolved = resolve(child) if resolve is not None else None
         prebuilt = resolved if type(resolved) is _Built else None
@@ -1787,7 +1793,13 @@ class Out:
             reason: Reason = "max_depth" if self._depth >= state.max_depth else "max_length"
             empty = Object(name, (), False, reason, module, kind)
             return cast(Object, self._keep(_Built(empty, 2)))
-        reserves = _field_reserves(known, self._prebuilt) if known is not None else None
+        if known is not None and state.limits.max_items is not None:
+            known_fields = known[: state.limits.max_items]  # later fields are cut anyway
+        else:
+            known_fields = known
+        reserves = (
+            _field_reserves(known_fields, self._prebuilt) if known_fields is not None else None
+        )
         stopped: list[Reason] = []
 
         def selected() -> typing.Iterator[tuple[str, Any] | None]:
