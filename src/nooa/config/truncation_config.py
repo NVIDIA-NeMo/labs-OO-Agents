@@ -78,6 +78,27 @@ class CaptureConfig(BaseModel):
             ),
         ),
     ] = False
+    file_dir: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Directory for the file_backed capture files (created if missing). "
+                "None = the system temp directory. The files are not removed by the "
+                "runtime: the owner of this directory cleans it up."
+            ),
+        ),
+    ] = None
+    file_notice: Annotated[
+        str | None,
+        Field(
+            description=(
+                "How a cut file_backed capture names its file: a str.format template "
+                "over FileBackedTruncatingStringIO's CaptureStats fields plus "
+                "quoted_path (the path as a JSON string), e.g. "
+                "'Full output: read_file({quoted_path})'. None = a generic sentence."
+            ),
+        ),
+    ] = None
 
     @model_validator(mode="after")
     def _check(self) -> "CaptureConfig":

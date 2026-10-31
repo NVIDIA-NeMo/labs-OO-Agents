@@ -11,6 +11,7 @@ import io
 import linecache
 import logging
 import math
+import os
 import re as _re
 import time
 import tokenize
@@ -557,11 +558,27 @@ def _rewrite_never_awaited_warnings(text: str, agent: Any = None) -> str:
 
 
 def _make_capture_buffer(
-    limit: int, tail_chars: int | None, file_backed: bool
+    limit: int,
+    tail_chars: int | None,
+    file_backed: bool,
+    *,
+    file_dir: str | None = None,
+    file_notice: str | None = None,
 ) -> TruncatingStringIO:
-    """Create a stdout/stderr capture buffer, optionally file-backed."""
+    """Create a stdout/stderr capture buffer, optionally file-backed.
+
+    ``file_dir``/``file_notice``: ``CaptureConfig``'s (where the files go,
+    how a cut notice names them); only used when ``file_backed``.
+    """
     if file_backed:
-        return FileBackedTruncatingStringIO(limit=limit, tail_chars=tail_chars)
+        if file_dir is not None:
+            try:
+                os.makedirs(file_dir, exist_ok=True)
+            except OSError:
+                file_dir = None  # the system temp directory, rather than no file
+        return FileBackedTruncatingStringIO(
+            limit=limit, tail_chars=tail_chars, dir=file_dir, notice=file_notice
+        )
     return TruncatingStringIO(limit=limit, tail_chars=tail_chars)
 
 
@@ -1774,11 +1791,15 @@ class ActorRuntime:
                     limit=truncation_config.capture.max_stdout,
                     tail_chars=truncation_config.capture.tail,
                     file_backed=truncation_config.capture.file_backed,
+                    file_dir=truncation_config.capture.file_dir,
+                    file_notice=truncation_config.capture.file_notice,
                 )
                 stderr_buffer = _make_capture_buffer(
                     limit=truncation_config.capture.max_stderr,
                     tail_chars=truncation_config.capture.tail,
                     file_backed=truncation_config.capture.file_backed,
+                    file_dir=truncation_config.capture.file_dir,
+                    file_notice=truncation_config.capture.file_notice,
                 )
                 stdout_token = _stdout_buffer_var.set(stdout_buffer)
                 stderr_token = _stderr_buffer_var.set(stderr_buffer)
