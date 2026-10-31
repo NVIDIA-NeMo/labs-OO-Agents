@@ -157,6 +157,42 @@ def _name_error_hint(error: BaseException, formatted: str) -> str | None:
     return hint
 
 
+_SELF_ATTRIBUTE_RE = re.compile(
+    r"^AttributeError: '(?P<type>\w+)' object has no attribute '(?P<name>\w+)'", re.MULTILINE
+)
+
+
+def _mcp_tool_hint(agent: Any, error: BaseException, formatted: str) -> str | None:
+    """Name the MCP server of a tool called as a bare name or as ``self.<tool>``.
+
+    ``NameError`` for ``X`` or ``AttributeError`` for ``self.X`` (the agent's
+    own type), when ``X`` is a tool of a connected MCP server; counted in
+    harness metrics. The sandbox path reports the error as text, so the
+    formatted text is matched too.
+    """
+    skills = getattr(agent, "skills", None)
+    if not isinstance(skills, SkillManager):
+        return None
+    name = None
+    if type(error) is NameError:
+        name = getattr(error, "name", None)
+    elif type(error) is AttributeError:
+        if getattr(error, "obj", None) is agent:
+            name = getattr(error, "name", None)
+    if not isinstance(name, str):
+        match = _NAME_ERROR_RE.search(formatted)
+        if match is None:
+            match = _SELF_ATTRIBUTE_RE.search(formatted)
+            if match is None or match.group("type") != type(agent).__name__:
+                return None
+        name = match.group("name")
+    server = skills.mcp_tool_server(name)
+    if server is None:
+        return None
+    get_harness_metrics().mcp_tool_name_hint(f"{server}.{name}")
+    return f"`{name}` is a tool of MCP server {server}: await self.{server}.{name}(...)"
+
+
 @hidden
 class AtomCodeAct(CodeActV2):
     """CodeActV2 whose cells see this module's names, not the base module's legacy names.
@@ -256,6 +292,14 @@ class AtomCodeAct(CodeActV2):
         formatted = super()._format_error(error, code, **kwargs)
         hint = _name_error_hint(error, formatted)
         return f"{formatted}\n\n{hint}" if hint else formatted
+
+    def _format_execution_error(self, runtime: Any, result: Any, code: str, **kwargs: Any) -> str:
+        """Also name the MCP server of a tool the cell called as a bare name or ``self.<tool>``."""
+        formatted = super()._format_execution_error(runtime, result, code, **kwargs)
+        if result.error is None:
+            return formatted
+        hint = _mcp_tool_hint(getattr(runtime, "agent", None), result.error, formatted)
+        return f"{formatted}\n{hint}" if hint else formatted
 
     def _build_execute_python_tool(self) -> Any:
         tool = super()._build_execute_python_tool()
@@ -846,7 +890,11 @@ class AtomAgent(AtomAgentBase):
         status = self.queue_manager.status(more_work=running, idle=idle, read_hints=hints)
         if running or idle:
             status += "\nCancel: await self.jobs.get('<name>').cancel()"
-        return status
+        # Connected MCP servers are otherwise only in self.skills.status/search/doc:
+        # a model that never looks there does not find them.
+        skills = getattr(self, "skills", None)
+        line = skills.mcp_line() if isinstance(skills, SkillManager) else ""
+        return f"{line}\n{status}" if line else status
 
     # ---- legacy surface, hidden ------------------------------------------------
 
