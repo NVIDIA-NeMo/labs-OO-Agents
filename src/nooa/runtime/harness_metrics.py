@@ -203,6 +203,7 @@ class HarnessMetrics(BaseModel):
     # ── Code Validation ──
     missing_awaits_detected: list[str] = Field(default_factory=list)
     name_error_hints: list[str] = Field(default_factory=list)
+    mcp_tool_name_hints: list[str] = Field(default_factory=list)
     infinite_loops_detected: int = 0
     return_types_redefined: list[str] = Field(default_factory=list)
 
@@ -490,6 +491,13 @@ class HarnessMetrics(BaseModel):
     def name_error_hint(self, name: str) -> None:
         """A cell's NameError got the pointer to the python_cell_state block."""
         self._append(self.name_error_hints, name)
+
+    def mcp_tool_name_hint(self, call: str) -> None:
+        """A cell called an MCP tool bare or as ``self.<tool>``; the error named its server.
+
+        ``call`` is ``<server>.<tool>``.
+        """
+        self._append(self.mcp_tool_name_hints, call)
 
     def infinite_loop(self) -> None:
         self.infinite_loops_detected += 1
@@ -1174,6 +1182,19 @@ _SPAN_SCHEMA: tuple[SchemaEntry, ...] = (
         "Undefined names in hinted NameErrors",
         "Code Validation",
         lambda m: m.name_error_hints,
+        True,
+    ),
+    SchemaEntry(
+        "harness.mcp_tool_name_hint.count",
+        "MCP tools called bare or as self.<tool>, pointed at their server",
+        "Code Validation",
+        lambda m: len(m.mcp_tool_name_hints),
+    ),
+    SchemaEntry(
+        "harness.mcp_tool_name_hint.calls",
+        "Hinted MCP tools as <server>.<tool>",
+        "Code Validation",
+        lambda m: m.mcp_tool_name_hints,
         True,
     ),
     SchemaEntry(
