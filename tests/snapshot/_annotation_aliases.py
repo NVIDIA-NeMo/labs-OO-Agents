@@ -37,6 +37,13 @@ class AliasHidden:
 
 
 @dataclasses.dataclass
+class AliasBoth:
+    secret: A[str, H] = "S-alias-both"
+    call: A[str, spec(hidden=True)] = "S-alias-call"
+    ok: int = 1
+
+
+@dataclasses.dataclass
 class Dotted:
     secret: typing.Annotated[str, agentdoc.hidden] = "S-dotted"
     ok: int = 1

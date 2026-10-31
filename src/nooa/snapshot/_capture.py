@@ -1036,12 +1036,19 @@ def _annotation_hidden(
     ``Annotated`` subscript, metadata that can't be read safely (an unknown
     name, a ``spec(...)`` call without a literal ``hidden``) fails closed;
     unknown names elsewhere (``list[Foo]``, forward references) don't matter.
-    Without a namespace, or for a string that doesn't parse, one that
-    mentions ``hidden`` or ``spec`` inside ``Annotated`` fails closed.
+    Without a namespace (the declaring module is unloaded, renamed or
+    unreadable) the string is still parsed, its names resolved against
+    builtins only: an unresolved head with name or call metadata (an alias
+    such as ``A[str, H]``) is unknown and fails closed, while ``list[int]`` or
+    ``dict[str, Foo]`` stay visible. For a string that is too long or doesn't
+    parse, one that mentions ``hidden`` or ``spec`` inside ``Annotated``
+    fails closed.
     """
     if type(annotation) is str:
-        if namespace is None or len(annotation) > _MAX_ANNOTATION_CHARS:
+        if len(annotation) > _MAX_ANNOTATION_CHARS:
             return _textual_annotation_hidden(annotation)
+        if namespace is None:
+            namespace = {}
         try:
             tree = ast.parse(annotation, mode="eval")
         except (SyntaxError, ValueError, RecursionError, MemoryError):

@@ -389,6 +389,56 @@ def test_dataclass_inherited_string_annotation_resolves_in_its_own_module() -> N
     assert json.loads(rendered) == {"ok": 1, "extra": "e"}
 
 
+def _load_aliases_copy(name: str) -> Any:
+    """A fresh copy of ``_annotation_aliases`` under ``name`` (kept out of ``sys.modules``)."""
+    import importlib.util
+
+    loader_spec = importlib.util.spec_from_file_location(name, _annotation_aliases.__file__)
+    assert loader_spec is not None and loader_spec.loader is not None
+    module = importlib.util.module_from_spec(loader_spec)
+    sys.modules[name] = module
+    try:
+        loader_spec.loader.exec_module(module)
+    finally:
+        del sys.modules[name]  # e.g. a plugin loader that drops the module afterwards
+    return module
+
+
+def _assert_alias_fields_fail_closed(value: Any) -> None:
+    snapshot = capture(value)
+
+    assert "S-" not in render_json(snapshot, max_chars=2000)
+    assert isinstance(snapshot, Object)
+    assert [name for name, _ in snapshot.fields] == ["ok"]
+    assert not snapshot.complete and snapshot.reason == "opaque"
+
+
+def test_dataclass_alias_marker_in_a_module_not_in_sys_modules_fails_closed() -> None:
+    module = _load_aliases_copy("_snapshot_unloaded_aliases")
+    assert "_snapshot_unloaded_aliases" not in sys.modules
+
+    _assert_alias_fields_fail_closed(module.AliasBoth())
+
+
+def test_dataclass_alias_marker_with_a_reassigned_module_fails_closed() -> None:
+    module = _load_aliases_copy("_snapshot_renamed_aliases")
+    module.AliasBoth.__module__ = "_snapshot_no_such_module_anywhere"
+
+    _assert_alias_fields_fail_closed(module.AliasBoth())
+
+
+def test_dataclass_plain_annotations_without_a_module_stay_visible() -> None:
+    module = _load_aliases_copy("_snapshot_unloaded_visible")
+
+    snapshot = capture(module.Visible(nested=[4]))
+
+    # ``Annotated`` itself can't be resolved without the module, so a field
+    # with call metadata (``Field(gt=0)``) is unknown and fails closed.
+    assert isinstance(snapshot, Object)
+    assert [name for name, _ in snapshot.fields] == ["xs", "mapping", "forward", "nested"]
+    assert not snapshot.complete and snapshot.reason == "opaque"
+
+
 # --- cycles and repeated references -----------------------------------------------------
 
 
