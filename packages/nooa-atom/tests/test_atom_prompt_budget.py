@@ -183,18 +183,24 @@ RESULT = (
 # handle_orchestrate 22,297 / 23,322. Within the limits, so they stay. The line was
 # reworded (CodeRabbit: the block is bounded, so "anything not listed does not
 # exist" was wrong) to the python_cell_state() wording below; still within the limits.
+# Raised for python_cell's raw `text` argument (2026-10-31, user experiment): the
+# class doc's quoting advice points at `text` first for file contents and scripts.
+# Measured system / total: handle 22,301 / 23,326, handle_batch 22,420 / 23,445,
+# handle_work 22,588 / 23,613, handle_orchestrate 22,723 / 23,748. Limits: measured
+# values plus about 1%, rounded up to the next 100.
 LIMITS = {
-    (ATOM, "handle"): (22_200, 23_200),
-    (ATOM, "handle_batch"): (22_300, 23_300),
-    (ATOM, "handle_work"): (22_500, 23_500),
-    (ATOM, "handle_orchestrate"): (22_600, 23_600),
+    (ATOM, "handle"): (22_500, 23_500),
+    (ATOM, "handle_batch"): (22_600, 23_700),
+    (ATOM, "handle_work"): (22_800, 23_800),
+    (ATOM, "handle_orchestrate"): (23_000, 24_000),
 }
 # The bench guard's system-prompt ceiling; every agent stays under it.
 # Raised from 20,000 for the Done(message=...) guidance (2026-10-29, see above),
 # then from 21,200 to 22,600 for self.jobs.after/every/tail (2026-10-30), and
 # lowered to 22,300 when self.jobs.tail was dropped (2026-10-30), then raised to
 # 22,600 for the PR512 small fixes (2026-10-30, see above; handle_orchestrate 22,098).
-BENCH_SYSTEM_LIMIT = 22_600
+# Raised to 23,000 for python_cell's `text` argument (2026-10-31; handle_orchestrate 22,723).
+BENCH_SYSTEM_LIMIT = 23_000
 # The one line every agent (root and child) gets in python_cell_lifetime.
 LIVE_NAMES_LINE = (
     'Your live Python names are in the python_cell_state block ("omitted: N" counts '
@@ -206,10 +212,14 @@ LIVE_NAMES_LINE = (
 # canonical function-tool JSON 2,259 -> 3,032 (+773); schema JSON stays 79.
 # Raised to 3,150 for the task-vs-thinking-environment line (2026-10-31, user request;
 # descriptions 2,894 -> 3,136).
-TOOL_DESCRIPTION_CHAR_LIMIT = 3_150
-TOOL_SCHEMA_JSON_CHAR_LIMIT = 100
-# Raised to 3,350 with the description limit (2026-10-31; JSON 3,087 -> 3,331).
-TOOL_PAYLOAD_JSON_CHAR_LIMIT = 3_350
+# Raised to 3,300 for python_cell's raw `text` argument (2026-10-31, user experiment;
+# descriptions 3,136 -> 3,277: one sentence pointing file contents at `text`).
+TOOL_DESCRIPTION_CHAR_LIMIT = 3_300
+# Raised to 600 for the `text` property and its description (2026-10-31; 79 -> 558).
+TOOL_SCHEMA_JSON_CHAR_LIMIT = 600
+# Raised to 3,350 with the description limit (2026-10-31; JSON 3,087 -> 3,331), then
+# to 4,000 for the `text` argument (2026-10-31; JSON 3,331 -> 3,954).
+TOOL_PAYLOAD_JSON_CHAR_LIMIT = 4_000
 
 
 @pytest.fixture(autouse=True)
@@ -295,6 +305,10 @@ async def test_first_call_prompt_stays_within_budget(spec, method, tmp_path, ses
     sizes = _message_sizes(messages, workspace)
     descriptions = sum(len(tool.description) for tool in tools)
     schemas = [tool.get_parameter_schema() for tool in tools]
+    # Every role (user, batch/benchmark, child worker, orchestrator) gets the raw `text` argument.
+    [cell_schema] = schemas
+    assert cell_schema["required"] == ["code"]
+    assert cell_schema["properties"]["text"]["additionalProperties"] == {"type": "string"}
     schema_chars = len(json.dumps(schemas, sort_keys=True, separators=(",", ":")))
     payload = [
         {
@@ -452,6 +466,10 @@ def test_the_quoting_advice_keeps_triple_quotes_and_adds_quote_choice_and_stdin(
     from nooa_atom.agent.agent import AtomAgent
 
     text = " ".join(AtomAgent.__doc__.split())
+    # python_cell's raw `text` argument comes first for file contents and scripts.
+    assert text.index("python_cell's ``text`` argument first") < text.index(
+        "Write shell commands as triple-quoted strings"
+    )
     # The triple-quote rule stays (it cut SWE quoting errors 35 -> 9).
     assert "Write shell commands as triple-quoted strings (``sh.run('''...''')``)" in text
     assert (

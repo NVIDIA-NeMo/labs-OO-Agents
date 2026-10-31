@@ -660,6 +660,8 @@ class AtomAgent(AtomAgentBase):
     ``grep -r /``, ``du /``) can run until the timeout. Prefer ``rg`` to search
     for text and ``rg --files`` to list files: it's much faster than ``grep`` or
     ``find``. If ``rg`` isn't installed, use another tool.
+    Put file contents, scripts and patches in python_cell's ``text`` argument
+    first: the cell gets them verbatim as the dict ``text``, with no escaping.
     Write shell commands as triple-quoted strings (``sh.run('''...''')``) so
     quotes need no escaping, and pass file contents to ``self.files`` the same
     way, not as heredocs. Pick the quote style the text neither contains nor

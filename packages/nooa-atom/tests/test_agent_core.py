@@ -710,3 +710,45 @@ def test_host_reads_record_no_span(tmp_path):
     finally:
         set_hooks(previous)
     assert recorder.methods == ["probe"]
+
+
+@pytest.mark.parametrize("method", ["handle", "handle_batch", "handle_work"])
+async def test_an_atom_cell_gets_the_raw_text_argument_verbatim(tmp_path, method):
+    """User, benchmark (handle_batch) and child-worker turns bind python_cell's `text`."""
+    import json as _json
+
+    from nooa.unifiedllm import LLMResponse, ToolCall
+
+    texts = {"app.py": 'print("hi\\n")  # \'\'\' """ \\\\ \r\n\t🤖', "script": "echo 'a\"b'"}
+    code = (
+        "import pathlib\n"
+        f"for path, content in text.items():\n"
+        f"    (pathlib.Path({str(tmp_path)!r}) / path).write_bytes(content.encode())\n"
+        "return_result(Done(explanation='x', result=TaskResult("
+        "solution_description='a', evidence='b', how_to_verify='c')))"
+    )
+    llm = FakeLLMClient(
+        [
+            LLMResponse(
+                raw_response=None,
+                content="",
+                tool_calls=[
+                    ToolCall(
+                        id="call_1",
+                        name="python_cell",
+                        arguments=_json.dumps({"code": code, "text": texts}),
+                    )
+                ],
+                finish_reason="tool_calls",
+                assistant_message={"role": "assistant", "content": ""},
+            )
+        ],
+        strict_exhaustion=True,
+    )
+    agent = AtomAgentBase(llm=llm, cwd=tmp_path)
+    try:
+        await getattr(agent, method)({"user_messages": ["hi"]})
+    finally:
+        await agent.aclose()
+    for path, content in texts.items():
+        assert (tmp_path / path).read_bytes() == content.encode()

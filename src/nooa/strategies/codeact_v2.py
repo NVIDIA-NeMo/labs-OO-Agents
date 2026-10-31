@@ -11,6 +11,7 @@ from nooa.context_blocks import DynamicContext
 from nooa.decorators import strategy
 from nooa.events import Error
 from nooa.strategies.base import RuntimeServices
+from nooa.strategies.cell_text import PythonCellArguments
 from nooa.strategies.codeact import (
     CodeActStrategy,
     TextOnlyResponseAction,
@@ -219,6 +220,7 @@ class CodeActV2(CodeActStrategy):
     def _build_execute_python_tool(self) -> Any:
         """Build the sole provider tool, including its complete operating contract."""
         tool = super()._build_execute_python_tool()
+        tool.parameters_model = PythonCellArguments
         tool.description = f"""Execute one cell in the current method call's Python session.
 
 Parameters are pre-loaded as locals. Names defined in one cell remain available in
@@ -232,6 +234,9 @@ To finish, call `return_result(value)` inside the cell. It immediately submits a
 value matching the method's annotated return type. A bare final expression does not
 finish the task. In particular, a trailing string is not shown; use `print(text)`
 when you want to inspect prose before submitting it.
+
+Pass file contents, scripts and patches in the `text` argument (the cell gets the
+dict `text`, verbatim), not as string literals in `code`.
 
 Use Python for arithmetic, iteration, transforms, and batches rather than manually
 constructing large outputs. Define reusable helpers at the top of a cell. Existing
@@ -250,6 +255,9 @@ Restrictions (will throw):
     def _build_tools(self, return_type: Any, method_name: str) -> list[Any]:
         del return_type, method_name
         return [self._build_execute_python_tool()]
+
+    def _accepts_cell_text(self) -> bool:
+        return True
 
     def _supports_return_result(self) -> bool:
         return False

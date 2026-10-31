@@ -64,10 +64,17 @@ from nooa.events import (
     Task,
     TextOnlyReply,
 )
+from nooa.runtime.context_vars import _current_cell_text_var
 from nooa.runtime.harness_metrics import get_harness_metrics
 from nooa.runtime.hooks import call_after_hook, call_before_hook
 from nooa.runtime.sandbox.errors import SandboxExecutionError
 from nooa.strategies.base import RuntimeServices, build_sampling_kwargs
+from nooa.strategies.cell_text import (
+    BARE_STRING_NOTE,
+    CELL_TEXT_NAME,
+    CellText,
+    parse_cell_text,
+)
 from nooa.strategies.codeact_errors import (
     format_validation_error,
     return_call_hint,
@@ -1437,8 +1444,14 @@ Standard Python builtins and agent instance (`self`) are available."""
 
     def _empty_code_error(self, args: dict[str, Any]) -> str:
         """Explain an empty cell, naming misplaced argument keys when present."""
-        extra = sorted(str(k) for k in args if k != "code")
+        known = {"code", "text"} if self._accepts_cell_text() else {"code"}
+        extra = sorted(str(k) for k in args if k not in known)
         if "code" in args or not extra:
+            if "code" not in args and "text" in known and "text" in args:
+                return (
+                    "Execution error: empty code provided. `text` only passes data to "
+                    "the cell; put the Python that uses it in `code`."
+                )
             return "Execution error: empty code provided."
         return (
             f"Execution error: {self._python_tool_name()} takes a single `code` argument "
@@ -1446,6 +1459,39 @@ Standard Python builtins and agent instance (`self`) are available."""
             'Pass Python source as {"code": "..."}; inspect print(doc(self)) for the '
             "agent's APIs."
         )
+
+    def _bind_cell_text(self, args: dict[str, Any], session: CodeActSession) -> CellText:
+        """Validate the call's ``text`` and bind it as the cell variable ``text``.
+
+        Only when the Python tool accepts ``text``; otherwise (and when the call
+        has none, ``null`` or ``{}``) nothing is bound and an existing ``text``
+        stays as it is. The sandbox backend's namespace lives in its worker
+        process, so ``text`` is refused there with a clear error.
+        """
+        if not self._accepts_cell_text() or "text" not in args:
+            return CellText()
+        cell_text = parse_cell_text(args["text"])
+        if cell_text.value is None:
+            return cell_text
+        if session.execution_namespace is None and session.sandbox_executor is not None:
+            return CellText(
+                error=(
+                    "Execution error: the `text` argument is not supported on the sandbox "
+                    "execution backend; put the contents in `code`. Nothing ran."
+                )
+            )
+        session.session_locals[CELL_TEXT_NAME] = cell_text.value
+        if session.execution_namespace is not None:
+            # Listed in python_cell_state like a name the cell assigned.
+            session.execution_namespace.user_names.add(CELL_TEXT_NAME)
+        get_harness_metrics().cell_text_arg(
+            len(cell_text.value), cell_text.chars, bare_string=cell_text.bare_string
+        )
+        return cell_text
+
+    def _accepts_cell_text(self) -> bool:
+        """Whether the Python tool takes the raw ``text`` argument (CodeActV2's python_cell)."""
+        return False
 
     @staticmethod
     def _return_result_alias(args: dict[str, Any]) -> dict[str, Any] | None:
@@ -2102,6 +2148,33 @@ Standard Python builtins and agent instance (`self`) are available."""
             )
             return None
 
+        # python_cell's raw ``text``: validated, then bound verbatim as the dict
+        # ``text`` before the code runs. A call without it leaves the namespace alone.
+        cell_text = self._bind_cell_text(args, session)
+        if cell_text.error:
+            session.record_error()
+            runtime.event_manager.update(
+                tool_call_event_id,
+                result=ToolResult(
+                    tool_call_id=tool_call.id,
+                    content="status: error",
+                    result_status=ResultStatus.ERROR,
+                ),
+            )
+            runtime.event_manager.add(
+                PythonOutput(
+                    tool_call_id=tool_call.id,
+                    execution_count=execution_count,
+                    stdout="",
+                    stderr="",
+                    error=cell_text.error,
+                    value=None,
+                    explicit_return=False,
+                    execution_status=ResultStatus.ERROR,
+                )
+            )
+            return None
+
         # Install a stable protocol receipt BEFORE code execution. Nested agent
         # generations can observe this message, so its provider-visible content
         # must remain byte-identical after execution completes.
@@ -2118,12 +2191,16 @@ Standard Python builtins and agent instance (`self`) are available."""
         # Nested agent calls may add their events to the event manager during this execution
         with get_harness_metrics().timer("time_code_execution"):
             token = _current_cell.set((runtime.agent, tool_call_event_id))
+            text_token = _current_cell_text_var.set(cell_text.value)
             try:
                 result = await self._execute_code(
                     runtime, code, builtins, session, method_name, tool_call_id=tool_call.id
                 )
             finally:
+                _current_cell_text_var.reset(text_token)
                 _current_cell.reset(token)
+        if cell_text.bare_string:
+            result.stdout = f"{BARE_STRING_NOTE}\n{result.stdout}"
 
         # Determine final status
         final_status = ResultStatus.ERROR if result.error else ResultStatus.COMPLETE

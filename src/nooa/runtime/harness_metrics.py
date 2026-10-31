@@ -126,6 +126,12 @@ class HarnessMetrics(BaseModel):
     loop_guard_stops_count: int = 0
     tool_call_skipped_count: int = 0
     text_only_tool_markup_count: int = 0
+    # python_cell's raw ``text`` argument: calls that bound it, their entries
+    # and characters, and calls whose ``text`` arrived as a bare string.
+    cell_text_arg_count: int = 0
+    cell_text_arg_entries: int = 0
+    cell_text_arg_chars: int = 0
+    cell_text_arg_bare_string_count: int = 0
     empty_response_count: int = 0
     gpt4o_double_quote_fix_count: int = 0
     gpt4o_double_quote_fix_previews: list[str] = Field(default_factory=list)
@@ -295,6 +301,14 @@ class HarnessMetrics(BaseModel):
     def text_only_tool_markup(self) -> None:
         """Record a text-only reply that contained a tool call written as text."""
         self.text_only_tool_markup_count += 1
+
+    def cell_text_arg(self, entries: int, chars: int, *, bare_string: bool = False) -> None:
+        """Record a python_cell call that bound its raw ``text`` argument."""
+        self.cell_text_arg_count += 1
+        self.cell_text_arg_entries += entries
+        self.cell_text_arg_chars += chars
+        if bare_string:
+            self.cell_text_arg_bare_string_count += 1
 
     def empty_response(self) -> None:
         self.empty_response_count += 1
@@ -777,6 +791,30 @@ _SPAN_SCHEMA: tuple[SchemaEntry, ...] = (
         "Text-only replies with a tool call written as text",
         "Response Format Fixups",
         lambda m: m.text_only_tool_markup_count,
+    ),
+    SchemaEntry(
+        "harness.cell_text_arg.count",
+        "python_cell calls with a raw text argument",
+        "Response Format Fixups",
+        lambda m: m.cell_text_arg_count,
+    ),
+    SchemaEntry(
+        "harness.cell_text_arg.entries",
+        "Raw text entries passed to python_cell",
+        "Response Format Fixups",
+        lambda m: m.cell_text_arg_entries,
+    ),
+    SchemaEntry(
+        "harness.cell_text_arg.chars",
+        "Raw text characters passed to python_cell",
+        "Response Format Fixups",
+        lambda m: m.cell_text_arg_chars,
+    ),
+    SchemaEntry(
+        "harness.cell_text_arg.bare_string.count",
+        "python_cell text arguments sent as a bare string",
+        "Response Format Fixups",
+        lambda m: m.cell_text_arg_bare_string_count,
     ),
     SchemaEntry(
         "harness.empty_response.count",

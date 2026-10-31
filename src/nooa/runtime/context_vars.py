@@ -27,6 +27,13 @@ _in_exec_middleware: contextvars.ContextVar[frozenset[int]] = contextvars.Contex
     "in_exec_middleware", default=frozenset()
 )
 
+# The raw ``text`` dict of the python_cell call whose code is running, if it
+# had one. Set by CodeAct around a cell; the tracing hooks read it to record the
+# texts on the code_execution span.
+_current_cell_text_var: contextvars.ContextVar[dict[str, str] | None] = contextvars.ContextVar(
+    "current_cell_text", default=None
+)
+
 # Context variable for LLM inheritance from parent agent
 # When a subagent is instantiated within generated code, it can inherit the parent's LLM
 # if the subagent class was defined without an LLM (class MyAgent(Agent): ...)

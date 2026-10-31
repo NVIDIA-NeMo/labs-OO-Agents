@@ -117,6 +117,7 @@ class _OpenCard:
 
     kind: Literal["python", "terminal"]
     code: str = ""  # a Python card's full source
+    text: dict[str, str] | None = None  # the cell's raw ``text`` argument, if any
     wire_id: str | None = None  # concise cells replace the same rolling card
     output: str = ""  # what a terminal command has streamed so far
     note: str | None = None  # a terminal card's truncation note, kept at the top
@@ -185,9 +186,52 @@ def _fenced_code(text: str, language: str) -> str:
     return f"{fence}{language}\n{text}\n{fence}"
 
 
-def _python_content(code: str, output: str | None = None) -> list[ContentToolCallContent]:
-    """Render Python source and output as Markdown visible in ACP clients."""
+_MAX_CELL_TEXT_CHARS = 2_000  # shown per python_cell ``text`` entry
+_MAX_CELL_TEXT_ENTRIES = 20
+
+
+def _cell_text_arg(arguments: dict[str, Any]) -> dict[str, str] | None:
+    """A python_cell call's raw ``text`` argument as a name -> string dict, if it has one."""
+    raw = arguments.get("text")
+    if isinstance(raw, str):
+        return {"text": raw}
+    if not isinstance(raw, dict) or not raw:
+        return None
+    return {str(k): v if isinstance(v, str) else repr(v) for k, v in raw.items()}
+
+
+def _shown_cell_text(text: dict[str, str]) -> dict[str, str]:
+    """``text`` bounded for display: the first entries, each value cut with a note."""
+    shown: dict[str, str] = {}
+    for name, value in list(text.items())[:_MAX_CELL_TEXT_ENTRIES]:
+        if len(value) > _MAX_CELL_TEXT_CHARS:
+            value = (
+                value[:_MAX_CELL_TEXT_CHARS]
+                + f"\n… ({len(value) - _MAX_CELL_TEXT_CHARS:,} more characters)"
+            )
+        shown[name[:200]] = value
+    return shown
+
+
+def _python_raw_input(code: str, text: dict[str, str] | None) -> dict[str, Any]:
+    """A Python card's ``raw_input``: the code, plus its bounded ``text`` when it had one."""
+    return {"code": code, "text": _shown_cell_text(text)} if text else {"code": code}
+
+
+def _python_content(
+    code: str, output: str | None = None, text: dict[str, str] | None = None
+) -> list[ContentToolCallContent]:
+    """Render Python source, its raw ``text`` entries and output as Markdown for ACP clients."""
     content = [tool_content(text_block(_fenced_code(code, "python")))]
+    if text:
+        shown = _shown_cell_text(text)
+        omitted = len(text) - len(shown)
+        blocks = [
+            f"text[{name!r}]:\n{_fenced_code(value, 'text')}" for name, value in shown.items()
+        ]
+        if omitted:
+            blocks.append(f"(+{omitted} more text entries)")
+        content.append(tool_content(text_block("\n".join(blocks))))
     if output is not None:
         content.append(tool_content(text_block(_fenced_code(output, "text"))))
     return content
@@ -730,7 +774,7 @@ class ACPEventBridge:
                 update_tool_call(
                     slot.wire_id,
                     status="completed",
-                    content=_python_content(card.code, "Continued below."),
+                    content=_python_content(card.code, "Continued below.", card.text),
                 )
             )
             slot.wire_id = card.wire_id = f"concise-python-{uuid4()}"
@@ -740,8 +784,8 @@ class ACPEventBridge:
                     self._card_title(slot.key, card),
                     kind="other",
                     status="in_progress",
-                    content=_python_content(card.code),
-                    raw_input={"code": card.code},
+                    content=_python_content(card.code, text=card.text),
+                    raw_input=_python_raw_input(card.code, card.text),
                 )
             )
 
@@ -759,6 +803,7 @@ class ACPEventBridge:
         code = event.arguments.get("code", "")
         if not isinstance(code, str):
             code = repr(code)
+        text = _cell_text_arg(event.arguments)
         key = self._key(event.tool_call_id, source)
         repeated = key in self._rolling_seen
         self._rolling_seen.add(key)
@@ -779,7 +824,7 @@ class ACPEventBridge:
             else:
                 self._open.pop(slot.key, None)
                 slot.key = key
-            card = _OpenCard("python", code=code, wire_id=slot.wire_id)
+            card = _OpenCard("python", code=code, text=text, wire_id=slot.wire_id)
             self._open[key] = card
             title = self._card_title(key, card)
             if first:
@@ -788,20 +833,20 @@ class ACPEventBridge:
                     title,
                     kind="other",
                     status="in_progress",
-                    content=_python_content(code),
-                    raw_input={"code": code},
+                    content=_python_content(code, text=text),
+                    raw_input=_python_raw_input(code, text),
                 )
             else:
                 update = update_tool_call(
                     card.wire_id,
                     title=title,
                     status="in_progress",
-                    content=_python_content(code),
-                    raw_input={"code": code},
+                    content=_python_content(code, text=text),
+                    raw_input=_python_raw_input(code, text),
                 )
             self._enqueue(update)
             return
-        self._open[key] = _OpenCard("python", code=code)
+        self._open[key] = _OpenCard("python", code=code, text=text)
         self._enqueue(
             start_tool_call(
                 self._wire_id(key),
@@ -812,8 +857,8 @@ class ACPEventBridge:
                 # structured Markdown content, not a client-owned terminal.
                 kind="other",
                 status="in_progress",
-                content=_python_content(code),
-                raw_input={"code": code},
+                content=_python_content(code, text=text),
+                raw_input=_python_raw_input(code, text),
             )
         )
 
@@ -850,8 +895,8 @@ class ACPEventBridge:
                     card.wire_id or self._wire_id(key),
                     title=title,
                     status=status,
-                    content=_python_content(code, output),
-                    raw_input={"code": code},
+                    content=_python_content(code, output, card.text),
+                    raw_input=_python_raw_input(code, card.text),
                 )
             )
         if source is None:
