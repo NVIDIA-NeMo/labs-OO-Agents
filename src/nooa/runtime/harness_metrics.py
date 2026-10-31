@@ -198,6 +198,7 @@ class HarnessMetrics(BaseModel):
     shell_failures: list[ErrorRecord] = Field(default_factory=list)
     shell_deaths: list[ErrorRecord] = Field(default_factory=list)
     shell_cwd_fallbacks: list[str] = Field(default_factory=list)
+    shell_exit_hints: list[int] = Field(default_factory=list)
     repo_failures: list[ErrorRecord] = Field(default_factory=list)
     tool_avoidance: list[str] = Field(default_factory=list)
 
@@ -456,6 +457,11 @@ class HarnessMetrics(BaseModel):
                 code_preview=_truncate(code_preview, _MAX_CODE_PREVIEW_CHARS),
             ),
         )
+
+    def shell_exit_hint(self, code: int) -> None:
+        """A command ended its Shell's bash itself (``exit N``, errexit); the result said so."""
+        if len(self.shell_exit_hints) < _MAX_LIST_ITEMS:
+            self.shell_exit_hints.append(int(code))
 
     def shell_cwd_fallback(self, detail: str) -> None:
         """A restarted Shell's kept cwd was gone; bash started in its starting directory.
@@ -1135,6 +1141,19 @@ _SPAN_SCHEMA: tuple[SchemaEntry, ...] = (
         "Shell death diagnostics",
         "Tool Usage",
         lambda m: [e.message for e in m.shell_deaths],
+        True,
+    ),
+    SchemaEntry(
+        "harness.shell_exit_hint.count",
+        "Commands that ended their Shell's bash (exit/errexit)",
+        "Tool Usage",
+        lambda m: len(m.shell_exit_hints),
+    ),
+    SchemaEntry(
+        "harness.shell_exit_hint.codes",
+        "Exit statuses of commands that ended their Shell's bash",
+        "Tool Usage",
+        lambda m: m.shell_exit_hints,
         True,
     ),
     SchemaEntry(

@@ -345,7 +345,7 @@ async def test_bash_exit_is_reported_and_cancel_still_interrupts(manager, tmp_pa
     sh = manager.launch(shell, name="sh")
     await sh.send("export FOO=1")
     ended = await sh.send("exit 0")
-    assert "bash ended during this command" in ended.stderr
+    assert "this command ended the Shell's bash" in ended.stderr
     assert "restarted, variables lost" in sh.summary
     r = await sh.send('echo "FOO=$FOO"')
     assert r.stdout == "FOO=\n"
@@ -496,7 +496,7 @@ async def test_exit_ends_the_bash_and_says_so(tmp_path):
     async with Shell(tmp_path) as sh:
         await sh.run("export FOO=1; cd /")
         r = await sh.run("exit 3")
-        assert "bash ended during this command" in r.stderr
+        assert "this command ended the Shell's bash (exit 3)" in r.stderr
         r = await sh.run('echo "[$FOO] $PWD"')
         assert r.stdout == "[] /\n"  # a new bash: cwd kept, variables lost
 
@@ -614,9 +614,29 @@ async def test_set_e_persists_and_ordinary_commands_still_succeed(tmp_path):
         assert r.stdout == "on\n"  # the option is the user's, in force again
         r = await sh.run("false; echo never")  # errexit ends the shell, as in a terminal
         assert r.returncode == 1 and r.stdout == ""
-        assert "bash ended during this command (exit 1)" in r.stderr
+        assert "this command ended the Shell's bash (exit 1)" in r.stderr
         r = await sh.run('echo "[$X]"; case $- in *e*) echo on;; esac')
         assert (r.returncode, r.stdout) == (0, "[]\n")  # a new bash: options, variables gone
+
+
+async def test_a_commands_own_exit_says_how_to_keep_the_shell(tmp_path):
+    """SWE 8487795: the model's own `exit` ended bash; the result says what to do instead."""
+    from nooa.runtime.harness_metrics import harness_metrics_session
+
+    with harness_metrics_session() as metrics:
+        async with Shell(tmp_path) as sh:
+            r = await sh.run("exit 5")
+            assert r.returncode == 5
+            assert r.stderr == (
+                "[this command ended the Shell's bash (exit 5); the next command starts a "
+                "fresh bash (cwd kept; environment, variables, options and traps reset). "
+                "Use a subshell `( ... )` or a return code instead of exit.]"
+            )
+            r = await sh.run("set -e; false")  # errexit: the same note
+            assert "this command ended the Shell's bash (exit 1)" in r.stderr
+            assert (await sh.run("(exit 4)")).stderr == ""  # a subshell keeps bash
+    assert metrics.shell_exit_hints == [5, 1]
+    assert metrics.to_span_attributes()["harness.shell_exit_hint.count"] == 2
 
 
 async def test_nonzero_statuses_are_reported_as_is(tmp_path):
@@ -625,9 +645,9 @@ async def test_nonzero_statuses_are_reported_as_is(tmp_path):
         assert (await sh.run("(exit 7)")).returncode == 7
         assert (await sh.run("sh -c 'kill -TERM $$'")).returncode == 143
         r = await sh.run("exit 7")
-        assert r.returncode == 7 and "bash ended during this command (exit 7)" in r.stderr
+        assert r.returncode == 7 and "this command ended the Shell's bash (exit 7)" in r.stderr
         r = await sh.run("exit 0")
-        assert r.returncode == 0 and "bash ended during this command (exit 0)" in r.stderr
+        assert r.returncode == 0 and "this command ended the Shell's bash (exit 0)" in r.stderr
         assert (await sh.run("echo back")).stdout == "back\n"
 
 
@@ -641,7 +661,7 @@ async def test_a_restarted_shell_whose_kept_cwd_is_gone_starts_where_it_started(
         async with Shell(tmp_path) as sh:
             await sh.run(f"cd {gone}")
             r = await sh.run(f"rm -rf {gone}; exit 3")
-            assert r.returncode == 3 and "bash ended during this command" in r.stderr
+            assert r.returncode == 3 and "this command ended the Shell's bash" in r.stderr
             r = await sh.run("pwd")
             assert (r.returncode, r.stdout) == (0, f"{tmp_path.resolve()}\n")
             assert (
@@ -670,7 +690,7 @@ async def test_nounset_and_pipefail(tmp_path):
         assert (r.returncode, r.stdout) == (0, "ok")
         assert (await sh.run('echo "$Y"')).stdout == "2\n"
         r = await sh.run("echo $NOT_SET")  # nounset ends a non-interactive bash
-        assert r.returncode != 0 and "bash ended during this command" in r.stderr
+        assert r.returncode != 0 and "this command ended the Shell's bash" in r.stderr
 
 
 async def test_user_traps_persist_and_work(tmp_path):
