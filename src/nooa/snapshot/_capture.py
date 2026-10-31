@@ -60,7 +60,7 @@ from nooa.snapshot._model import (
     Unavailable,
 )
 
-__all__ = ["DEFAULT_LIMITS", "Deferred", "Limits", "Out", "capture", "capture_fields"]
+__all__ = ["DEFAULT_LIMITS", "Limits", "Out", "capture", "capture_fields"]
 
 _JSON_KWARGS: dict[str, Any] = {
     "ensure_ascii": True,
@@ -1574,7 +1574,13 @@ _OBJECT_MIN_NODES = 16
 
 
 class _Deferred:
-    """A part an ``Out`` builds only when its slot is known (see ``Out``)."""
+    """A part an ``Out`` builds only when its slot is known (see ``Out``).
+
+    Private: extension code only passes the part an ``out`` method returned on
+    (as a field, item or value of the same ``out``, or as its return value);
+    ``build``, ``built``, ``min_size`` and ``min_nodes`` are this module's
+    accounting, not an API.
+    """
 
     __slots__ = ("_build", "_out", "built", "min_nodes", "min_size")
 
@@ -1601,10 +1607,6 @@ class _Deferred:
             self._out._built.append(self.built)  # charged by the parent that uses it
             return self.built
         return _shrink(self.built, max_size)
-
-
-Deferred = _Deferred
-"""What ``out.capture``, ``out.sequence`` and ``out.mapping`` return: a part built later."""
 
 
 def _metadata(value: Any, what: str) -> str:
@@ -1683,7 +1685,7 @@ class Out:
             return child if child._out is self else None
         return self._prebuilt(child)
 
-    def capture(self, child: Any) -> Deferred:
+    def capture(self, child: Any) -> _Deferred:
         """``child`` captured as this value's snapshot or a part of it.
 
         It is built in the slot it takes: returned, at this value's depth and
@@ -1710,7 +1712,7 @@ class Out:
 
     def sequence(
         self, items: Iterable[Any], *, length: int | None = None, type_name: str = "list"
-    ) -> Deferred:
+    ) -> _Deferred:
         """A sequence of ``items`` (pulled one at a time when built), cut like a list."""
         type_name = _metadata(type_name, "Sequence type_name")
         length = _length(length)
@@ -1731,7 +1733,7 @@ class Out:
         *,
         length: int | None = None,
         type_name: str = "dict",
-    ) -> Deferred:
+    ) -> _Deferred:
         """A mapping of ``(key, value)`` pairs; keys must be exact built-in scalars."""
         type_name = _metadata(type_name, "Mapping type_name")
         length = _length(length)

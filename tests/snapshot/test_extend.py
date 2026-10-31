@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import sys
 from collections.abc import Iterator
@@ -417,14 +418,8 @@ def test_render_json_bad_hook_falls_back_to_generic(hooks, bad) -> None:
 
 
 def _generic_json(node: Object, max_chars: int) -> str:
-    from nooa.snapshot import _render
-
-    hooks = render_json._hooks.functions.copy()
-    render_json._hooks.functions.clear()
-    try:
-        return _render._render(node, max_chars)[0]
-    finally:
-        render_json._hooks.functions.update(hooks)
+    """``node`` as ``render_json`` renders it without its hook (the same node, no ``kind``)."""
+    return render_json(dataclasses.replace(node, kind=None), max_chars=max_chars)
 
 
 def test_render_json_hook_recursing_on_its_node_is_generic(hooks) -> None:
@@ -791,3 +786,11 @@ def test_lazy_dispatch_follows_a_class_rename(lazy) -> None:
     assert isinstance(renamed, Object) and renamed.fields == (("ok", Scalar(True)),)
     Target.__qualname__ = "Other"
     assert isinstance(capture(Target()), Opaque)  # a cached hit is not kept either
+
+
+def test_public_api_is_what_extension_authors_and_consumers_use() -> None:
+    import nooa.snapshot as snapshot
+
+    assert "Deferred" not in snapshot.__all__ and not hasattr(snapshot, "Deferred")
+    for name in snapshot.__all__:
+        assert getattr(snapshot, name) is not None

@@ -19,7 +19,6 @@ output), ``render_python`` (agentdoc's prefill notation), ``render_json`` and
 
 from nooa.snapshot._capture import (
     DEFAULT_LIMITS,
-    Deferred,
     Limits,
     Out,
     capture,
@@ -54,7 +53,6 @@ from nooa.snapshot._stream import DEFAULT_SPILL_BYTES, SpillTarget, TextStream, 
 __all__ = [
     "DEFAULT_LIMITS",
     "DEFAULT_SPILL_BYTES",
-    "Deferred",
     "JsonRenderer",
     "REASONS",
     "Key",
