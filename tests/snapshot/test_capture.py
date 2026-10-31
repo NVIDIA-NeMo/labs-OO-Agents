@@ -339,7 +339,17 @@ def test_dataclass_string_annotation_with_hidden_is_resolved() -> None:
 
 
 @pytest.mark.parametrize(
-    "name", ["Literal", "AliasAnnotated", "AliasHidden", "Dotted", "SpecLiteral"]
+    "name",
+    [
+        "Literal",
+        "AliasAnnotated",
+        "AliasHidden",
+        "Dotted",
+        "SpecLiteral",
+        "SpecInstance",
+        "WholeAlias",
+        "NestedWholeAlias",
+    ],
 )
 def test_dataclass_string_annotation_aliases_are_hidden(name: str) -> None:
     value = getattr(_annotation_aliases, name)()
@@ -357,7 +367,7 @@ def test_dataclass_spec_hidden_false_literal_stays_visible() -> None:
     assert [name for name, _ in snapshot.fields] == ["shown", "ok"]
 
 
-@pytest.mark.parametrize("name", ["SpecUnreadable", "UnknownMarker"])
+@pytest.mark.parametrize("name", ["SpecUnreadable", "SpecInstanceUnreadable", "UnknownMarker"])
 def test_dataclass_unreadable_string_marker_fails_closed_per_field(name: str) -> None:
     snapshot = capture(getattr(_annotation_aliases, name)())
 
@@ -376,6 +386,9 @@ def test_dataclass_string_annotations_without_markers_capture() -> None:
         "forward": None,
         "constrained": 3,
         "nested": [4],
+        "shown": "shown",
+        "documented": "doc",
+        "inner": [],
     }
 
 
@@ -418,6 +431,7 @@ def test_dataclass_alias_marker_in_a_module_not_in_sys_modules_fails_closed() ->
     assert "_snapshot_unloaded_aliases" not in sys.modules
 
     _assert_alias_fields_fail_closed(module.AliasBoth())
+    _assert_alias_fields_fail_closed(module.WholeAlias())  # ``Secret`` can't be resolved
 
 
 def test_dataclass_alias_marker_with_a_reassigned_module_fails_closed() -> None:
@@ -433,9 +447,10 @@ def test_dataclass_plain_annotations_without_a_module_stay_visible() -> None:
     snapshot = capture(module.Visible(nested=[4]))
 
     # ``Annotated`` itself can't be resolved without the module, so a field
-    # with call metadata (``Field(gt=0)``) is unknown and fails closed.
+    # with call or name metadata (``Field(gt=0)``, ``SHOW``) is unknown and
+    # fails closed, as is a bare name that could alias one (``Documented``).
     assert isinstance(snapshot, Object)
-    assert [name for name, _ in snapshot.fields] == ["xs", "mapping", "forward", "nested"]
+    assert [name for name, _ in snapshot.fields] == ["xs", "mapping", "forward", "nested", "inner"]
     assert not snapshot.complete and snapshot.reason == "opaque"
 
 

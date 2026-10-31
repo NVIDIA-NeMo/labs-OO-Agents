@@ -305,6 +305,49 @@ def test_parts_never_exceed_the_budget(lazy, max_chars) -> None:
     assert snapshot == capture([_named("Budget")()], Limits(max_chars=max_chars))  # deterministic
 
 
+# --- node work of deferred parts ------------------------------------------------------
+
+_CHILD_PARTS = {
+    "sequence": lambda out: out.sequence([]),
+    "mapping": lambda out: out.mapping([]),
+    "object": lambda out: out.object({}),
+    "opaque": lambda out: out.opaque(),
+    "capture": lambda out: out.capture(1),
+}
+
+
+@pytest.mark.parametrize("make", _CHILD_PARTS.values(), ids=list(_CHILD_PARTS))
+def test_every_deferred_part_is_one_node_of_the_shared_budget(lazy, make) -> None:
+    # The registered value takes 1 node and its MRO (class, object) 2; the root
+    # part shares the value's node, and each child part is one more.
+    lazy(FAKE_MODULE, "Parts", lambda value, out: out.sequence([make(out) for _ in range(100)]))
+    value = _named("Parts")()
+
+    starved = capture(value, Limits(max_nodes=20))
+    assert isinstance(starved, Sequence) and len(starved.items) == 17
+    assert not starved.complete and starved.reason == "max_nodes"
+
+    lazy(FAKE_MODULE, "Parts", lambda value, out: out.sequence([make(out) for _ in range(5)]))
+    assert capture(value, Limits(max_nodes=3 + 5)).complete  # not charged twice
+    short = capture(value, Limits(max_nodes=3 + 4))
+    assert isinstance(short, Sequence) and len(short.items) == 4 and short.reason == "max_nodes"
+
+
+def test_starved_object_field_parts_say_max_nodes(lazy) -> None:
+    # A field part with no node work left is its empty, typed fallback.
+    lazy(
+        FAKE_MODULE,
+        "Fields",
+        lambda value, out: out.object([(f"f{i}", out.sequence([1])) for i in range(50)]),
+    )
+    snapshot = capture(_named("Fields")(), Limits(max_nodes=30))
+
+    assert isinstance(snapshot, Object) and not snapshot.complete
+    assert len(snapshot.fields) < 50
+    reasons = {getattr(node, "reason", None) for _name, node in snapshot.fields}
+    assert reasons <= {None, "max_nodes"}
+
+
 # --- review findings: detached metadata ------------------------------
 
 

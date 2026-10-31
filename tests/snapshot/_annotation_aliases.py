@@ -16,6 +16,13 @@ from nooa.agentdoc import hidden, spec
 from nooa.agentdoc import hidden as H
 
 FLAG = True
+HIDE = spec(hidden=True)  # a marker object, not a call in the annotation
+SHOW = spec(hidden=False)
+BROKEN = spec(hidden=True)
+BROKEN.kwargs = {"hidden": "yes"}  # unreadable: not a bool
+Secret = Annotated[str, hidden]  # an alias of a whole outermost Annotated
+SpecSecret = Annotated[str, spec(hidden=True)]
+Documented = Annotated[str, "doc"]
 
 
 @dataclasses.dataclass
@@ -63,6 +70,31 @@ class SpecUnreadable:
 
 
 @dataclasses.dataclass
+class SpecInstance:
+    secret: Annotated[str, HIDE] = "S-spec-instance"
+    ok: int = 1
+
+
+@dataclasses.dataclass
+class SpecInstanceUnreadable:
+    secret: Annotated[str, BROKEN] = "S-spec-broken"
+    ok: int = 1
+
+
+@dataclasses.dataclass
+class WholeAlias:
+    secret: Secret = "S-whole-alias"
+    call: SpecSecret = "S-whole-spec"
+    ok: int = 1
+
+
+@dataclasses.dataclass
+class NestedWholeAlias:
+    secret: Annotated[Secret, "doc"] = "S-nested-alias"  # Annotated flattens
+    ok: int = 1
+
+
+@dataclasses.dataclass
 class UnknownMarker:
     secret: Annotated[str, not_defined_anywhere] = "S-unknown"  # noqa: F821
     ok: int = 1
@@ -75,3 +107,6 @@ class Visible:
     forward: Later | None = None  # noqa: F821
     constrained: Annotated[int, Field(gt=0), "doc"] = 3
     nested: list[Annotated[int, "doc"]] = dataclasses.field(default_factory=list)
+    shown: Annotated[str, SHOW] = "shown"
+    documented: Documented = "doc"
+    inner: list[Secret] = dataclasses.field(default_factory=list)  # not outermost

@@ -791,6 +791,8 @@ def _module_namespace(name: Any, state: _State) -> dict[str, Any] | None:
 
 
 _UNRESOLVED = object()
+_NO_NAMESPACE: dict[str, Any] = {}
+"""Names resolve against builtins only: the declaring module is unknown."""
 
 
 def _resolve_name(expr: ast.expr, namespace: dict[str, Any], state: _State) -> Any:
@@ -842,7 +844,9 @@ def _marker_expr_hidden(expr: ast.expr, namespace: dict[str, Any], state: _State
         found = _resolve_name(expr, namespace, state)
         if found is _UNRESOLVED:
             return None
-        return found is hidden
+        # ``hidden`` or a ``spec(...)`` marker object (``H = spec(hidden=True)``),
+        # read as resolved runtime metadata; foreign metadata is ignored.
+        return _metadata_hidden((found,), state)
     if type(expr) is ast.Call:
         function = _resolve_name(expr.func, namespace, state)
         if function is _UNRESOLVED:
@@ -875,6 +879,14 @@ def _parsed_annotation_hidden(
     """Mirror of the runtime rule: only an outermost ``Annotated`` (flattened) hides."""
     if not state.take_node():
         return None
+    if type(expr) is ast.Name or type(expr) is ast.Attribute:
+        # An alias of a whole ``Annotated`` type (``Secret = Annotated[str, hidden]``)
+        # is inspected as the runtime annotation would be; any other name is visible.
+        found = _resolve_name(expr, namespace, state)
+        if found is _UNRESOLVED:
+            # A forward reference; without the declaring module, possibly such an alias.
+            return None if namespace is _NO_NAMESPACE else False
+        return _alias_hidden(found, state)
     if type(expr) is not ast.Subscript:
         return False
     head = _resolve_name(expr.value, namespace, state)
@@ -886,7 +898,9 @@ def _parsed_annotation_hidden(
         return False
     found = False
     unknown = False
-    if type(elements[0]) is ast.Subscript:
+    first = type(elements[0])
+    if first is ast.Subscript or first is ast.Name or first is ast.Attribute:
+        # ``Annotated`` flattens: the metadata of a nested one (or an alias of one) counts.
         inner = _parsed_annotation_hidden(elements[0], namespace, state)
         unknown = inner is None
         found = inner is True
@@ -917,15 +931,18 @@ def _annotation_hidden(
     ``ast`` and their names (``Name`` or dotted module ``Attribute``) are looked
     up in ``namespace``, the raw ``__dict__`` of the module that declared the
     field, then in builtins. Resolved objects are compared by identity with
-    ``Annotated`` and the agentdoc ``hidden`` / ``spec`` markers. Inside an
-    ``Annotated`` subscript, metadata that can't be read safely (an unknown
-    name, a ``spec(...)`` call without a literal ``hidden``) fails closed;
-    unknown names elsewhere (``list[Foo]``, forward references) don't matter.
-    Without a namespace (the declaring module is unloaded, renamed or
+    ``Annotated`` and the agentdoc ``hidden`` / ``spec`` markers; a resolved
+    ``spec(...)`` marker object or an alias of a whole ``Annotated`` type
+    (``Secret = Annotated[str, hidden]``) is read like the runtime annotation,
+    through raw attributes only. Inside an ``Annotated`` subscript, metadata
+    that can't be read safely (an unknown name, a ``spec(...)`` call without a
+    literal ``hidden``, a marker object with a non-``bool`` ``hidden``) fails
+    closed; unknown names elsewhere (``list[Foo]``, forward references) don't
+    matter. Without a namespace (the declaring module is unloaded, renamed or
     unreadable) the string is still parsed, its names resolved against
     builtins only: an unresolved head with name or call metadata (an alias
-    such as ``A[str, H]``) is unknown and fails closed, while ``list[int]`` or
-    ``dict[str, Foo]`` stay visible. For a string that is too long or doesn't
+    such as ``A[str, H]``) or an unresolved bare name (``Secret``) is unknown
+    and fails closed, while ``list[int]`` or ``dict[str, Foo]`` stay visible. For a string that is too long or doesn't
     parse, one that mentions ``hidden`` or ``spec`` inside ``Annotated``
     fails closed.
     """
@@ -933,7 +950,7 @@ def _annotation_hidden(
         if len(annotation) > _MAX_ANNOTATION_CHARS:
             return _textual_annotation_hidden(annotation)
         if namespace is None:
-            namespace = {}
+            namespace = _NO_NAMESPACE
         try:
             tree = ast.parse(annotation, mode="eval")
         except (SyntaxError, ValueError, RecursionError, MemoryError):
@@ -942,6 +959,15 @@ def _annotation_hidden(
             return _parsed_annotation_hidden(tree.body, namespace, state)
         except RecursionError:
             return None
+    return _alias_hidden(annotation, state)
+
+
+def _alias_hidden(annotation: Any, state: _State) -> bool | None:
+    """Whether a resolved annotation is an ``Annotated`` whose raw metadata hides (None: unreadable).
+
+    Only an exact ``typing`` ``Annotated`` alias (type identity) is inspected,
+    through its raw ``__metadata__``; anything else is visible.
+    """
     if type(annotation) is not _ANNOTATED_ALIAS:
         return False
     try:
@@ -989,7 +1015,7 @@ def _build_slot(
     """``child`` in a container slot: built when it is a part of ``out``, else captured."""
     part = _part_of(child, out)
     if part is not None:
-        return part.build(max_size, depth, path)
+        return part.build(max_size, depth, path, state)
     return _build(child, max_size, depth, path, state)
 
 
@@ -1312,9 +1338,12 @@ class _Deferred:
     (as a field, item or value of the same ``out``, or as its return value);
     ``build``, ``min_size`` and ``min_nodes`` are this module's accounting,
     not an API. A part is single-use: it is built in at most one slot.
+
+    ``exhausted(max_size)``: the node this part becomes when no node work is
+    left for it; ``None`` for ``out.capture``, whose ``_build`` charges itself.
     """
 
-    __slots__ = ("_build", "_out", "_used", "min_nodes", "min_size")
+    __slots__ = ("_build", "_exhausted", "_out", "_used", "min_nodes", "min_size")
 
     def __init__(
         self,
@@ -1322,20 +1351,29 @@ class _Deferred:
         build: Callable[[int, int, str], _Built],
         min_size: int,
         min_nodes: int = 1,
+        exhausted: Callable[[int], _Built] | None = None,
     ) -> None:
         self._out = out
         self._build = build
+        self._exhausted = exhausted
         self._used = False
         self.min_size = min_size
         self.min_nodes = min_nodes
 
-    def build(self, max_size: int, depth: int, path: str) -> _Built:
-        """Build in a slot at ``depth`` / ``path``, within ``max_size``; a second use raises."""
+    def build(self, max_size: int, depth: int, path: str, state: _State | None = None) -> _Built:
+        """Build in a slot at ``depth`` / ``path``, within ``max_size``; a second use raises.
+
+        With ``state`` (a container's slot), a part built by its ``out`` is one
+        node of work of the shared budget; without (the value's own slot, the
+        registered value's node already taken by ``_build``) it is not charged.
+        """
         if self._used:
             raise ValueError(
                 "an out part takes one slot only: call the out method again for another"
             )
         self._used = True
+        if state is not None and self._exhausted is not None and not state.take_node():
+            return self._exhausted(max_size)
         return self._build(max_size, depth, path)
 
 
@@ -1418,9 +1456,16 @@ class Out:
         return _Deferred(self, build, _min_size(child), min_nodes)
 
     def _empty(
-        self, node_type: Any, type_name: str, length: int | None, max_size: int, depth: int
+        self,
+        node_type: Any,
+        type_name: str,
+        length: int | None,
+        max_size: int,
+        depth: int,
+        reason: Reason | None = None,
     ) -> _Built:  # type_name / length: checked by ``_metadata`` / ``_length``
-        reason: Reason = "max_depth" if depth >= self._state.max_depth else "max_length"
+        if reason is None:
+            reason = "max_depth" if depth >= self._state.max_depth else "max_length"
         if max_size < 2:
             name = "list" if node_type is Sequence else "dict"
             return _Built(Unavailable(reason, name), 1)
@@ -1439,7 +1484,10 @@ class Out:
                 return self._empty(Sequence, type_name, length, max_size, depth)
             return _sequence_from(items, length, type_name, max_size, depth, path, state, out=self)
 
-        return _Deferred(self, build, 2)
+        def exhausted(max_size: int) -> _Built:
+            return self._empty(Sequence, type_name, length, max_size, 0, "max_nodes")
+
+        return _Deferred(self, build, 2, exhausted=exhausted)
 
     def mapping(
         self,
@@ -1469,7 +1517,10 @@ class Out:
                 out=self,
             )
 
-        return _Deferred(self, build, 2)
+        def exhausted(max_size: int) -> _Built:
+            return self._empty(Mapping, type_name, length, max_size, 0, "max_nodes")
+
+        return _Deferred(self, build, 2, exhausted=exhausted)
 
     def object(
         self,
@@ -1514,12 +1565,14 @@ class Out:
             reserves, needed = _field_reserves(known if max_items is None else known[:max_items])
             min_nodes += needed
 
+        def empty(max_size: int, reason: Reason) -> _Built:
+            if max_size < 2:
+                return _Built(Unavailable(reason, "dict"), 1)
+            return _Built(Object(name, (), False, reason, module, kind), 2)
+
         def build(max_size: int, depth: int, path: str) -> _Built:
             if depth >= state.max_depth or max_size < 2:
-                reason: Reason = "max_depth" if depth >= state.max_depth else "max_length"
-                if max_size < 2:
-                    return _Built(Unavailable(reason, "dict"), 1)
-                return _Built(Object(name, (), False, reason, module, kind), 2)
+                return empty(max_size, "max_depth" if depth >= state.max_depth else "max_length")
             stopped: list[Reason] = []
 
             def selected() -> typing.Iterator[tuple[str, Any] | None]:
@@ -1547,7 +1600,9 @@ class Out:
             )
             return _with_stop(built, stopped)
 
-        return _Deferred(self, build, 2, min_nodes)
+        return _Deferred(
+            self, build, 2, min_nodes, exhausted=lambda max_size: empty(max_size, "max_nodes")
+        )
 
     def opaque(self) -> _Deferred:
         """This value as ``Opaque`` (what an unregistered type becomes)."""
@@ -1556,7 +1611,10 @@ class Out:
         def build(max_size: int, depth: int, path: str) -> _Built:
             return _opaque(self._value, max(max_size, 1), state)
 
-        return _Deferred(self, build, 2)
+        def exhausted(max_size: int) -> _Built:
+            return _fallback(self._value, "max_nodes", max_size)
+
+        return _Deferred(self, build, 2, exhausted=exhausted)
 
 
 def _field_reserves(pairs: list[tuple[Any, Any]]) -> tuple[list[tuple[int, int]], int]:
