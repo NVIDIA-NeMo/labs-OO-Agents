@@ -491,6 +491,35 @@ def test_genuine_replacement_split_across_writes_is_not_counted() -> None:
     assert text.head == "\ufffd\ufffd" and text.replaced == 1
 
 
+def test_str_write_ends_an_incomplete_byte_sequence() -> None:
+    stream = _stream("chars", head=10, tail=10)
+    stream.write(b"\xe2\x82")
+    stream.write("x")
+    stream.write(b"\xac")
+
+    text = stream.close()
+    assert text.head == "\ufffdx\ufffd" and text.replaced == 2
+
+
+def test_str_write_resets_the_genuine_replacement_carry() -> None:
+    stream = _stream("chars", head=10, tail=10)
+    stream.write(b"\xef\xbf")
+    stream.write("x")
+    stream.write(b"\xbd")
+
+    text = stream.close()
+    assert text.head == "\ufffdx\ufffd" and text.replaced == 2
+
+
+def test_close_after_a_final_str_keeps_the_order() -> None:
+    stream = _stream("chars", head=10, tail=10)
+    stream.write(b"a\xe2\x82")
+    stream.write("x")
+
+    text = stream.close()
+    assert text.head == "a\ufffdx" and text.replaced == 1
+
+
 def test_merge_counts_replaced_bytes_as_original_units() -> None:
     def closed(data: bytes) -> Text:
         stream = _stream("bytes", head=10, tail=10)

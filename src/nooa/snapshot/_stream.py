@@ -199,6 +199,14 @@ class TextStream:
             self._carry = joined[-2:]
             self._replaced += decoded.count("\ufffd") - joined.count(_REPLACEMENT_BYTES)
             data = decoded
+        else:
+            # A str chunk is a boundary: bytes before it can't complete with
+            # bytes after it. An incomplete sequence becomes U+FFFD first.
+            pending = self._decoder.decode(b"", final=True)
+            self._carry = b""
+            if pending:
+                self._replaced += pending.count(_REPLACEMENT)
+                data = pending + data
         if self._file is not None:
             self._spill(_encode(data))
         self._write_chars(data)
