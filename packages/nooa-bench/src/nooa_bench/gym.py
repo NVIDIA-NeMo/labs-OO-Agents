@@ -572,9 +572,15 @@ class _ToolHooks:
 
     # CodeAct runs model-authored code through these; record it like any other tool.
     def before_code_execution(self, *, code: str, execution_id: str, **kw: Any) -> Any:
+        from nooa.runtime.context_vars import _current_cell_text_var
+
+        arguments: dict[str, Any] = {"code": code}
+        cell_text = _current_cell_text_var.get()
+        if cell_text:  # python_cell's raw ``text`` argument, as the model sent it
+            arguments["text"] = dict(cell_text)
         return self.before_tool_execution(
             tool_name=str(kw.get("tool_name") or "python_cell"),
-            arguments={"code": code},
+            arguments=arguments,
             execution_id=execution_id,
             **kw,
         )

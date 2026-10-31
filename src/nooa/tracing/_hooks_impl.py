@@ -585,7 +585,19 @@ class OpenInferenceHooks:
         # OpenInference-standard input: JSON {"code": ...} is the single
         # canonical representation of the executed code (the legacy flat ``code``
         # attr is no longer emitted; ``code.length`` metadata is retained).
-        code_args_json = self._safe_json_value({"code": capped_code})
+        code_args: dict[str, Any] = {"code": capped_code}
+        # python_cell's raw ``text`` dict, when the call had one: each value is
+        # capped like code, and at most 50 entries are recorded.
+        from nooa.runtime.context_vars import _current_cell_text_var
+
+        cell_text = _current_cell_text_var.get()
+        if cell_text:
+            code_args["text"] = {
+                name[:200]: value[:10000] for name, value in list(cell_text.items())[:50]
+            }
+            span.set_attribute("code.text.count", len(cell_text))
+            span.set_attribute("code.text.chars", sum(len(v) for v in cell_text.values()))
+        code_args_json = self._safe_json_value(code_args)
         span.set_attribute(SpanAttributes.INPUT_VALUE, code_args_json)
         span.set_attribute(SpanAttributes.INPUT_MIME_TYPE, OpenInferenceMimeTypeValues.JSON.value)
         # Tool-call identity. No model tool-call id here, so fall back to

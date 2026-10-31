@@ -2797,3 +2797,43 @@ async def test_concise_message_during_a_running_cell_moves_its_card_below(tmp_pa
     assert start.raw_input == {"code": code}
     await bridge.close()
     await agent.aclose()
+
+
+async def test_the_python_card_shows_the_cell_text_argument_bounded(tmp_path):
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    client = _RecordingClient()
+    bridge = ACPEventBridge(_FakeSession(agent, "session-1"), client)  # type: ignore[arg-type]
+    long = 'q"\\' * 2000  # 6,000 characters
+    texts = {"app.py": 'print("hi")\n', "big.txt": long}
+    code = "for p, c in text.items(): await self.files.write_file(p, c)"
+
+    agent.event_manager.add(
+        ToolCallEvent(
+            tool_call_id="call-1", name="python_cell", arguments={"code": code, "text": texts}
+        )
+    )
+    agent.event_manager.add(
+        PythonOutput(
+            tool_call_id="call-1",
+            execution_status=ResultStatus.COMPLETE,
+            execution_count=1,
+            stdout="ok\n",
+        )
+    )
+    await bridge.flush()
+
+    started = next(u for _, u in client.updates if isinstance(u, ToolCallStart))
+    assert started.raw_input["code"] == code
+    assert started.raw_input["text"]["app.py"] == texts["app.py"]
+    shown_big = started.raw_input["text"]["big.txt"]
+    assert shown_big.startswith(long[:2000]) and "(4,000 more characters)" in shown_big
+    assert started.content is not None and len(started.content) == 2
+    shown = _content_text(cast(ContentToolCallContent, started.content[1]))
+    assert "text['app.py']:" in shown and 'print("hi")' in shown
+    assert "(4,000 more characters)" in shown
+    completed = next(u for _, u in client.updates if isinstance(u, ToolCallProgress))
+    assert completed.raw_input == started.raw_input
+    assert completed.content is not None and len(completed.content) == 3
+    assert _content_text(cast(ContentToolCallContent, completed.content[2])) == "```text\nok\n```"
+    await bridge.close()
+    await agent.aclose()
