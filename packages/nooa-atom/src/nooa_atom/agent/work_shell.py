@@ -768,13 +768,16 @@ class Shell:
             self._check_open(generation)
             await self._settle([pump for pump, _, _ in pumps])
             self._read_status(statusfile)
-            ended = False
+            ended = exited = False
             if code == -1:  # no status from bash: did it exit (`exit 7`, errexit)?
                 status = await self._exit_status(session)
                 if status is not None:
                     ended, code = True, status
+                    # Its own `exit N` or errexit, not a signal from outside.
+                    proc = getattr(session, "_process", None)
+                    exited = proc is not None and (proc.returncode or 0) >= 0
             if restart_notes is None:
-                notes = self._check_bash(pidfile, code, timed_out, ended)
+                notes = self._check_bash(pidfile, code, timed_out, ended, exited)
             else:  # restarted at the deadline: this result says so
                 notes = restart_notes
             if cwd_note:
@@ -889,8 +892,13 @@ class Shell:
                 asyncio.shield(asyncio.gather(*pumps, return_exceptions=True)), _DRAIN_SECONDS
             )
 
-    def _check_bash(self, pidfile: Path, code: int, timed_out: bool, ended: bool) -> list[str]:
-        """Notice a bash that was replaced before, or died during, this command."""
+    def _check_bash(
+        self, pidfile: Path, code: int, timed_out: bool, ended: bool, exited: bool = False
+    ) -> list[str]:
+        """Notice a bash that was replaced before, or died during, this command.
+
+        ``exited``: the command itself ended bash (``exit N`` or errexit).
+        """
         notes = []
         if self._note:
             notes.append(self._note)
@@ -913,6 +921,14 @@ class Shell:
             self._lost = True
             self._bash = None
             self._reset_tracked()
+            if exited:
+                get_harness_metrics().shell_exit_hint(code)
+                notes.append(
+                    f"[this command ended the Shell's bash (exit {code}); the next command "
+                    "starts a fresh bash (cwd kept; environment, variables, options and traps "
+                    "reset). Use a subshell `( ... )` or a return code instead of exit.]"
+                )
+                return notes
             status = f" (exit {code})" if ended else ""
             notes.append(
                 f"[bash ended during this command{status}; the next command starts a new "
