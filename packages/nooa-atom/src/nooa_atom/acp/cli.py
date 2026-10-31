@@ -14,7 +14,8 @@ The server runs in one of four roles:
   one end of a socket pair. Not for direct use.
 
 The router starts its workers by re-running the command that started it
-(``sys.orig_argv``) with the worker options added, so a worker is the same
+(``worker_command()``: ``sys.orig_argv`` with ``sys.executable`` as the
+interpreter) with the worker options added, so a worker is the same
 installation (or test script) with the same options.
 """
 
@@ -37,6 +38,23 @@ DEFAULT_PORT = 8765
 """The port ``--http`` listens on by default."""
 
 _acp_stdio: tuple[int, int] | None = None
+
+
+def worker_command() -> list[str]:
+    """The command that starts a worker: this process's command line, run by ``sys.executable``.
+
+    ``sys.orig_argv`` keeps the interpreter options (``-m``, ``-X``...) and the
+    script, but its first item is the interpreter as the operating system ran
+    it. On a macOS framework Python in a virtual environment (Homebrew
+    ``python@3.12`` under ``uvx``) that is the base ``Python.app``
+    interpreter, which does not see the environment's packages, so the worker
+    fails with ``No module named 'nooa_cli'``. ``sys.executable`` is the
+    environment's interpreter.
+    """
+    argv = list(sys.orig_argv)
+    if sys.executable and argv:
+        argv[0] = sys.executable
+    return argv
 
 
 def reserve_stdio_for_acp() -> tuple[int, int]:
@@ -357,7 +375,7 @@ def _run_router(
     if frame_log is not None:
         observers.append(frame_log)
     router = Router(
-        spawn=process_spawn(list(sys.orig_argv)),
+        spawn=process_spawn(worker_command()),
         sessions_dir=sessions_dir,
         observers=observers,
     )
@@ -392,7 +410,7 @@ def _run_http(options: HttpOptions, *, sessions_dir: Path | None) -> None:
         await serve_websocket(
             host=options.host,
             port=options.port,
-            spawn=process_spawn(list(sys.orig_argv)),
+            spawn=process_spawn(worker_command()),
             sessions_dir=sessions_dir,
             gate=Gate(token=options.token, allowed_origins=options.allowed_origins),
             stop=stop,
