@@ -466,10 +466,9 @@ def test_the_quoting_advice_keeps_triple_quotes_and_adds_quote_choice_and_stdin(
     from nooa_atom.agent.agent import AtomAgent
 
     text = " ".join(AtomAgent.__doc__.split())
-    # python_cell's raw `text` argument comes first for file contents and scripts.
-    assert text.index("python_cell's ``text`` argument first") < text.index(
-        "Write shell commands as triple-quoted strings"
-    )
+    # The raw `text` argument is described once, in the python_cell tool schema and
+    # description (2026-10-31: not repeated in the class doc).
+    assert "``text`` argument" not in text
     # The triple-quote rule stays (it cut SWE quoting errors 35 -> 9).
     assert "Write shell commands as triple-quoted strings (``sh.run('''...''')``)" in text
     assert (
