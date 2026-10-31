@@ -101,6 +101,30 @@ workspace `.nooa/`). The TUI and `nooa-acp` read `coding`; the first time
 Atom reads a settings file that has `coding` and no `atom`, it adds an `atom`
 copy, and the two sections change independently from then on.
 
+Settings layers, lowest priority first: bundled defaults, the user's
+`~/.config/nooa/settings.yaml`, the workspace's `.nooa/settings.yaml`, then
+the files `NEMO_OO_SETTINGS` names. A package supplies bundled defaults
+through the `nooa.bundled_settings` entry-point group, as
+`nooa.bundled_configs` does for `llm_config.yaml`: each entry point is a
+zero-argument callable returning the path of a settings YAML (or `None`),
+or the path itself.
+
+```toml
+[project.entry-points."nooa.bundled_settings"]
+nvidia = "nooa_atom_nvidia:get_default_settings_path"
+```
+
+Every higher layer overrides a bundled value, and `null` deletes it. Two
+lists are different: a user, workspace or `NEMO_OO_SETTINGS` value of
+`atom.active_skills` or `atom.additional_skills_dirs` *extends* the bundled
+list (bundled entries first, without duplicates) instead of replacing it.
+Among the user, workspace and environment layers a list still replaces the
+one below it. To turn off a bundled skill, list it in `atom.inactive_skills`
+(which wins over `active_skills`); setting the key to `null` drops all the
+bundled entries. A relative `additional_skills_dirs` entry in a bundled file
+is relative to that file's directory, so a package can ship skills beside
+it. `nooa config show` lists the bundled settings files.
+
 Status: pre-release. The package is part of the workspace but is not published
 yet, and its API may change until the hosts switch over to it. The ACP
 adapter and the benchmark host move onto it in later changes.
