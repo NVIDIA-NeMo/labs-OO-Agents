@@ -34,8 +34,8 @@ pytest.importorskip("opentelemetry.sdk.trace")
 TIMEOUT = 30
 
 CHILD_RESULT = (
-    "return_result(Done(explanation='fixed', result=TaskResult("
-    "solution_description='s', evidence='e', how_to_verify='h', report='REPORT')))"
+    "return Done(explanation='fixed', result=TaskResult("
+    "solution_description='s', evidence='e', how_to_verify='h', report='REPORT'))"
 )
 
 
@@ -169,7 +169,7 @@ async def test_a_delegated_child_is_its_own_agent_under_the_delegate_call(
 ):
     atom_models.scripts[None] = [
         cell(
-            "done = await self.delegate('fix', 'fix it', name='fix')\nreturn_result(Done(explanation='ok'))"
+            "done = await self.delegate('fix', 'fix it', name='fix')\nreturn Done(explanation='ok')"
         )
     ]
     atom_models.scripts["fix"] = [cell(CHILD_RESULT)]
@@ -208,8 +208,7 @@ async def test_each_sessions_llm_calls_are_llm_call_spans_in_that_sessions_turns
     """
     atom_models.scripts[None] = [
         cell(
-            "done = await self.delegate('fix', 'fix it', name='fix')\n"
-            "return_result(Done(explanation='ok'))"
+            "done = await self.delegate('fix', 'fix it', name='fix')\nreturn Done(explanation='ok')"
         )
     ]
     atom_models.scripts["fix"] = [cell("x = 1"), cell(CHILD_RESULT)]
@@ -248,14 +247,14 @@ async def test_a_kept_childs_follow_up_turn_stays_in_the_roots_trace(
     atom_models.scripts[None] = [
         cell(
             "self.v.ref = await self.spawn('kept', 'first task', name='kept')\n"
-            "return_result(Waiting(explanation='child working', on=['delegates']))"
+            "return Waiting(explanation='child working', on=['delegates'])"
         ),
         cell(
             "[item] = notification['delegates']\n"
             "await self.v.ref.send('follow-up')\n"
-            "return_result(Waiting(explanation='follow-up', on=['delegates']))"
+            "return Waiting(explanation='follow-up', on=['delegates'])"
         ),
-        cell("[item] = notification['delegates']\nreturn_result(Done(explanation='both'))"),
+        cell("[item] = notification['delegates']\nreturn Done(explanation='both')"),
     ]
     atom_models.scripts["kept"] = [cell(CHILD_RESULT), cell(CHILD_RESULT)]
     root, outcome = await _run_root(atom_registry, atom_options)
@@ -280,14 +279,14 @@ async def test_a_grandchild_nests_under_the_childs_delegate_call(
 ):
     atom_models.scripts[None] = [
         cell(
-            "done = await self.delegate('mid', 'go on', name='mid')\nreturn_result(Done(explanation='ok'))"
+            "done = await self.delegate('mid', 'go on', name='mid')\nreturn Done(explanation='ok')"
         )
     ]
     atom_models.scripts["mid"] = [
         cell(
             "done = await self.delegate('leaf', 'leaf work', name='leaf')\n"
-            "return_result(Done(explanation='mid', result=TaskResult("
-            "solution_description='s', evidence='e', how_to_verify='h', report='MID')))"
+            "return Done(explanation='mid', result=TaskResult("
+            "solution_description='s', evidence='e', how_to_verify='h', report='MID'))"
         )
     ]
     atom_models.scripts["leaf"] = [cell(CHILD_RESULT)]
@@ -319,7 +318,7 @@ async def test_an_ordinary_agent_called_in_a_childs_cell_keeps_its_class_name(
 ):
     atom_models.scripts[None] = [
         cell(
-            "done = await self.delegate('fix', 'fix it', name='fix')\nreturn_result(Done(explanation='ok'))"
+            "done = await self.delegate('fix', 'fix it', name='fix')\nreturn Done(explanation='ok')"
         )
     ]
     atom_models.scripts["fix"] = [
@@ -357,7 +356,7 @@ async def test_with_tracing_off_children_run_and_emit_no_spans(
         provider.add_span_processor(SimpleSpanProcessor(exporter))
     atom_models.scripts[None] = [
         cell(
-            "done = await self.delegate('fix', 'fix it', name='fix')\nreturn_result(Done(explanation='ok'))"
+            "done = await self.delegate('fix', 'fix it', name='fix')\nreturn Done(explanation='ok')"
         )
     ]
     atom_models.scripts["fix"] = [cell(CHILD_RESULT)]
@@ -375,7 +374,7 @@ async def test_without_nooa_tracing_children_still_run(
     monkeypatch.setitem(sys.modules, "nooa.tracing", None)
     atom_models.scripts[None] = [
         cell(
-            "done = await self.delegate('fix', 'fix it', name='fix')\nreturn_result(Done(explanation='ok'))"
+            "done = await self.delegate('fix', 'fix it', name='fix')\nreturn Done(explanation='ok')"
         )
     ]
     atom_models.scripts["fix"] = [cell(CHILD_RESULT)]
@@ -385,7 +384,7 @@ async def test_without_nooa_tracing_children_still_run(
 
 async def _root_and_closed_child(registry, options, models, spans, name="Kid"):
     # The root's later turns read the child's results on ``delegates``.
-    models.scripts[None] = [cell("return_result(Done(explanation='root'))")] * 3
+    models.scripts[None] = [cell("return Done(explanation='root')")] * 3
     models.scripts[name] = [cell(CHILD_RESULT)]
     root, _ = await _run_root(registry, options)
     child = await registry.create(root.options.inherit(name=name, kept=True), parent_id=root.id)

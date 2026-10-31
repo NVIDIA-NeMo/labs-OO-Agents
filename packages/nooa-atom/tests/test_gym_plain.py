@@ -15,9 +15,9 @@ from nooa.runtime.hooks import hooks_scope
 
 FINISH = (
     "open('hello.txt', 'w').write('hello gym')\n"
-    "return_result(Done(explanation='wrote the file', result=TaskResult("
+    "return Done(explanation='wrote the file', result=TaskResult("
     "solution_description='created hello.txt', evidence='file exists', "
-    "how_to_verify='cat hello.txt', report='done')))"
+    "how_to_verify='cat hello.txt', report='done'))"
 )
 
 

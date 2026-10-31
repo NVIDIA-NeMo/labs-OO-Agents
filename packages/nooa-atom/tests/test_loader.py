@@ -155,7 +155,7 @@ async def test_a_saved_experimental_session_loads_as_an_atom_agent(spec, tmp_pat
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     code = "self.todo.add('carry the plan over'); self.v.note = 'kept'\n" + (
-        "return_result(Done(explanation='saved'))"
+        "return Done(explanation='saved')"
     )
     llm = FakeLLMClient([python_cell(code, "c1")], strict_exhaustion=True)
     registry = SessionRegistry(SessionStore(sessions_dir), agent_factory=create_session_agent)

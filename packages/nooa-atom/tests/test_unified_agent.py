@@ -29,8 +29,8 @@ LIVE_NAMES_LINE = (
 )
 
 WORK_RESULT = (
-    "return_result(Done(explanation='{e}', result=TaskResult(solution_description='s', "
-    "evidence='e', how_to_verify='v', report='{r}')))"
+    "return Done(explanation='{e}', result=TaskResult(solution_description='s', "
+    "evidence='e', how_to_verify='v', report='{r}'))"
 )
 
 
@@ -77,14 +77,14 @@ async def test_one_shot_subagent_returns_its_task_result_and_notes_are_job_items
             "job = self.jobs.launch(Subagent('fix parser').run(todo), name='fix')\n"
             "result = await job\n"
             "assert isinstance(result, TaskResult)\n"
-            "return_result(Done(explanation=result.report))"
+            "return Done(explanation=result.report)"
         ),
         # The child's note was an item of the awaited job: it arrives as a JobEvent.
         cell(
             "[event] = notification['jobs']\n"
             "assert (event.name, event.kind, event.value) == ('fix', 'item', 'NOTE: halfway')\n"
             "assert 'delegates' not in notification\n"
-            "return_result(Done(explanation='saw the note'))"
+            "return Done(explanation='saw the note')"
         ),
     ]
     models.scripts["fix"] = [
@@ -157,7 +157,7 @@ async def test_kept_subagent_question_answer_and_follow_up(registry, options, mo
             "r2 = await rev.send('FOLLOW-UP')\n"
             "self.v.reports = [r1.report, r2.report]\n"
             "self.v.names = [j.name for j in self.jobs.list()]\n"
-            "return_result(Done(explanation='reviewed'))"
+            "return Done(explanation='reviewed')"
         )
     ]
     models.scripts["review"] = [
@@ -188,7 +188,7 @@ async def test_background_request_arrives_once_and_waiting_checks_targets(
         cell(
             "rev = self.jobs.launch(Subagent(), name='review')\n"
             "req = rev.send('TASK')\n"
-            "return_result(Waiting(explanation='review running', on=[req.name]))"
+            "return Waiting(explanation='review running', on=[req.name])"
         ),
         cell(
             "[event] = notification['jobs']\n"
@@ -196,7 +196,7 @@ async def test_background_request_arrives_once_and_waiting_checks_targets(
             "assert event.value.report == 'BG'\n"
             "assert self.jobs.get('review#1').result.report == 'BG'\n"
             # The resource is idle now: waiting on it would never end.
-            "return_result(Waiting(explanation='more?', on=['review']))"
+            "return Waiting(explanation='more?', on=['review'])"
         ),
         done("finished"),
     ]
@@ -216,7 +216,7 @@ async def test_a_failed_subagent_raises_in_the_cell(registry, options, models):
             "    await Subagent().run('doomed')\n"
             "except RuntimeError as exc:\n"
             "    self.v.error = str(exc)\n"
-            "return_result(Done(explanation='handled'))"
+            "return Done(explanation='handled')"
         )
     ]
     models.scripts["subagent"] = []  # the strict fake model fails the child's turn
@@ -248,7 +248,7 @@ async def test_cancelling_a_request_stops_the_childs_turn_and_it_takes_more_work
             "await Shell().run('rm started')\n"
             "r = await rev.send('AGAIN')\n"
             "self.v.report = r.report\n"
-            "return_result(Done(explanation='ok'))"
+            "return Done(explanation='ok')"
         )
     ]
     models.scripts["review"] = [cell(_SLOW_CHILD), work_done("again", report="AFTER-CANCEL")]
@@ -277,7 +277,7 @@ async def test_a_child_closed_under_a_request_fails_it(registry, options, models
             "    await self.jobs.get('review#2')\n"
             "except RuntimeError as exc:\n"
             "    self.v.again = str(exc)\n"
-            "return_result(Done(explanation='ok'))"
+            "return Done(explanation='ok')"
         )
     ]
     models.scripts["review"] = [cell(_SLOW_CHILD)]
@@ -301,7 +301,7 @@ async def test_cancelling_the_resource_closes_the_child_and_session_close_ends_w
             "await keep.send('T2')\n"
             "sh = self.jobs.launch(Shell(), name='sh')\n"
             "self.v.bash = int((await sh.send('echo $$')).stdout)\n"
-            "return_result(Done(explanation='ok'))"
+            "return Done(explanation='ok')"
         )
     ]
     models.scripts["review"] = [work_done(report="T1")]
@@ -331,7 +331,7 @@ async def test_a_shell_timeout_delivers_a_result_and_wakes_the_waiting_turn(
             "import inspect\n"
             "assert inspect.signature(Shell.run).parameters['timeout'].default == 600.0\n"
             "self.jobs.launch(Shell().run('sleep 30; echo never', timeout=0.5), name='slow')\n"
-            "return_result(Waiting(explanation='slow command running', on=['slow']))"
+            "return Waiting(explanation='slow command running', on=['slow'])"
         ),
         cell(
             "[event] = notification['jobs']\n"
@@ -340,7 +340,7 @@ async def test_a_shell_timeout_delivers_a_result_and_wakes_the_waiting_turn(
             "assert isinstance(r, CommandResult), r\n"
             "assert (r.returncode, r.timed_out, r.stdout) == (124, True, ''), r\n"
             "assert 'pass a larger timeout=' in r.stderr, r\n"
-            "return_result(Done(explanation='timed out as expected'))"
+            "return Done(explanation='timed out as expected')"
         ),
     ]
     root = await registry.create(options)
@@ -360,7 +360,7 @@ async def test_shell_starts_in_the_workspace(registry, options, models):
             "sh = self.jobs.launch(Shell(), name='sh')\n"
             "await sh.send('mkdir -p sub && cd sub')\n"
             "self.v.summary = self.jobs.get('sh').summary\n"
-            "return_result(Done(explanation='ok'))"
+            "return Done(explanation='ok')"
         )
     ]
     root = await registry.create(options)
@@ -382,7 +382,7 @@ async def test_session_close_ends_shells_its_cells_started(registry, options, mo
             "self.v.bg = int((await sh.run('sleep 300 & echo $!')).stdout)\n"
             "self.v.bash = int((await sh.run('echo $$')).stdout)\n"
             "self.v.seen = (await sh.run('echo $X $PWD')).stdout\n"
-            "return_result(Done(explanation='ok'))"
+            "return Done(explanation='ok')"
         )
     ]
     root = await registry.create(options)
@@ -420,7 +420,7 @@ async def test_interactive_done_may_leave_background_work(registry, options, mod
     models.scripts[None] = [
         cell(
             "self.jobs.launch(asyncio.sleep(30), name='nap')\n"
-            "return_result(Done(explanation='left running'))"
+            "return Done(explanation='left running')"
         )
     ]
     root = await registry.create(options)
@@ -468,9 +468,7 @@ async def test_first_call_offers_one_work_vocabulary(
     method, registry, options, models, _no_installed_skills
 ):
     code = (
-        "return_result(Done(explanation='x'))"
-        if method == "handle"
-        else WORK_RESULT.format(e="x", r="y")
+        "return Done(explanation='x')" if method == "handle" else WORK_RESULT.format(e="x", r="y")
     )
     models.scripts[None] = [cell(code)]
     root = await registry.create(options.model_copy(update={"turn_method": method}))
@@ -812,7 +810,7 @@ _SEE_ITEM = (
     "value = event.value\n"
     "self.v.item = value if isinstance(value, str) else getattr(value, 'report', None) or value.text\n"
     "self.v.item_type = type(value).__name__\n"
-    "return_result(Done(explanation='saw the item'))"
+    "return Done(explanation='saw the item')"
 )
 
 
@@ -826,7 +824,7 @@ async def test_a_note_reaches_the_running_turn_before_its_request_completes(
             "assert req.status == 'running'\n"
             "await Shell().run('touch go1')\n"
             "self.v.report = (await req).report\n"
-            "return_result(Done(explanation='ok'))"
+            "return Done(explanation='ok')"
         )
     ]
     models.scripts["review"] = [
@@ -853,7 +851,7 @@ async def test_a_note_that_misses_the_turn_starts_one_whose_result_is_an_item(
             "req = rev.send('TASK-1')\n" + _parent_wait(1) + "await rev.message('NOTE-SPILL')\n"
             "await Shell().run('touch go1')\n"
             "self.v.report = (await req).report\n"
-            "return_result(Done(explanation='ok'))"
+            "return Done(explanation='ok')"
         ),
         cell(_SEE_ITEM),
     ]
@@ -880,7 +878,7 @@ async def test_a_request_queued_behind_a_note_turn_gets_its_own_result(registry,
             "await asyncio.sleep(0.3)\n"
             "await Shell().run('touch go2')\n"
             "self.v.report = (await req).report\n"
-            "return_result(Done(explanation='ok'))"
+            "return Done(explanation='ok')"
         ),
         cell(_SEE_ITEM),
     ]
@@ -916,7 +914,7 @@ async def test_cancelling_a_queued_request_takes_its_input_back_and_spares_the_n
             "assert req.status == 'cancelled'\n"
             "await Shell().run('touch go2')\n"
             "self.v.report = (await rev.send('TASK-3')).report\n"
-            "return_result(Done(explanation='ok'))"
+            "return Done(explanation='ok')"
         ),
         cell(_SEE_ITEM),
     ]
@@ -966,7 +964,7 @@ async def test_note_lifecycle_errors_and_questions_are_answered_with_send(
             "except RuntimeError as exc:\n"
             "    errors.append(str(exc))\n"
             "self.v.errors = errors\n"
-            "return_result(Done(explanation='ok'))"
+            "return Done(explanation='ok')"
         )
     ]
     models.scripts["review"] = [
@@ -992,7 +990,7 @@ async def test_a_failed_note_turn_is_a_visible_item(registry, options, models):
             "rev = self.jobs.launch(Subagent(), name='review')\n"
             "await rev.send('TASK')\n"
             "await rev.message('NOTE-DOOM')\n"
-            "return_result(Done(explanation='ok'))"
+            "return Done(explanation='ok')"
         ),
         cell(_SEE_ITEM),
     ]
@@ -1023,7 +1021,7 @@ async def test_a_request_queued_behind_a_note_turn_that_asks_still_gets_its_resu
             "await Shell().run('touch go2')\n"
             "self.v.report = (await req).report\n"
             "self.v.summary = self.jobs.get('review').summary\n"
-            "return_result(Done(explanation='ok'))"
+            "return Done(explanation='ok')"
         ),
         cell(_SEE_ITEM),
     ]
@@ -1254,7 +1252,7 @@ async def test_a_name_error_points_at_python_cell_state_and_is_counted(
     models.scripts[None] = [
         cell("r = await sh.run('true')"),
         cell("print(results)"),
-        cell("return_result(Done(explanation='ok'))"),
+        cell("return Done(explanation='ok')"),
     ]
     root = await registry.create(options)
     await asyncio.wait_for(root.prompt("go"), TIMEOUT)

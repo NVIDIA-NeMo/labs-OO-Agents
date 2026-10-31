@@ -58,7 +58,7 @@ async def test_shell_quickstart_executes_as_written(tmp_path):
             cell(
                 code
                 + "\nassert r.returncode == 0, r.stdout\n"
-                + "return_result(Done(explanation=r.stdout.strip().splitlines()[-1]))"
+                + "return Done(explanation=r.stdout.strip().splitlines()[-1])"
             )
         ]
     )
@@ -83,8 +83,8 @@ async def test_mesh_wait_guidance_uses_a_real_registered_producer(tmp_path, prod
     finish = "assert notification['mesh'] == ['feedback']\n" if producer else ""
     llm = CellLLM(
         [
-            cell(setup + "return_result(Waiting(explanation='feedback', on=['mesh']))"),
-            cell(finish + "return_result(Done(explanation='done'))"),
+            cell(setup + "return Waiting(explanation='feedback', on=['mesh'])"),
+            cell(finish + "return Done(explanation='done')"),
         ]
     )
     registry = SessionRegistry(

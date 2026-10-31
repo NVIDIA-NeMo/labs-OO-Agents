@@ -35,8 +35,8 @@ async def test_notification_prefill_keeps_nested_task_middle(tmp_path, method):
     llm = FakeLLMClient(
         [
             python_cell(
-                "return_result(Done(explanation='finished', result=TaskResult("
-                "solution_description='a', evidence='b', how_to_verify='c')))",
+                "return Done(explanation='finished', result=TaskResult("
+                "solution_description='a', evidence='b', how_to_verify='c'))",
                 "done",
             )
         ],
@@ -65,7 +65,7 @@ async def test_notification_prefill_keeps_nested_task_middle(tmp_path, method):
 async def test_ordinary_input_prefill_still_truncates(tmp_path):
     marker = "PLAIN_MIDDLE_MUST_BE_TRUNCATED"
     text = "a" * 1500 + marker + "z" * 1500
-    llm = FakeLLMClient([python_cell("return_result(None)", "done")], strict_exhaustion=True)
+    llm = FakeLLMClient([python_cell("return None", "done")], strict_exhaustion=True)
     agent = PlainInputAgent(llm=llm, cwd=tmp_path)
     try:
         await agent.inspect_plain({"items": [text]})

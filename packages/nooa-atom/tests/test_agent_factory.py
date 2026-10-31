@@ -19,8 +19,8 @@ from nooa.unifiedllm import FakeLLMClient
 TIMEOUT = 30
 
 CHILD_RESULT = (
-    "return_result(Done(explanation='fixed', result=TaskResult("
-    "solution_description='a', evidence='b', how_to_verify='c', report='child report')))"
+    "return Done(explanation='fixed', result=TaskResult("
+    "solution_description='a', evidence='b', how_to_verify='c', report='child report'))"
 )
 
 _FORWARDING_AGENT = """\
@@ -264,7 +264,7 @@ async def test_a_child_with_another_model_gets_its_own_client(workspace, session
         [
             cell(
                 "done = await self.delegate('other', 'use the other model', model='other', name='other')\n"
-                "return_result(Done(explanation=done.result.report))"
+                "return Done(explanation=done.result.report)"
             )
         ]
     )

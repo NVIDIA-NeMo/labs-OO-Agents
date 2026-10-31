@@ -20,9 +20,9 @@ from nooa.runtime.hooks import hooks_scope
 
 FINISH = (
     "open('hello.txt', 'w').write('hello gym')\n"
-    "return_result(Done(explanation='wrote the file', result=TaskResult("
+    "return Done(explanation='wrote the file', result=TaskResult("
     "solution_description='created hello.txt', evidence='file exists', how_to_verify='cat hello.txt', "
-    "report='done')))"
+    "report='done'))"
 )
 
 
@@ -174,9 +174,7 @@ async def test_harness_removes_its_session_directory_when_solve_fails(tmp_path, 
 async def test_harness_refuses_a_done_without_a_task_result(tmp_path, monkeypatch):
     """Done.result may carry anything; only a TaskResult is a successful rollout for Gym."""
     monkeypatch.chdir(tmp_path)
-    llm = CellLLM(
-        [python_cell("return_result(Done(explanation='finished', result='done'))", "call-1")]
-    )
+    llm = CellLLM([python_cell("return Done(explanation='finished', result='done')", "call-1")])
     harness = _harness(
         llm, turn_method="handle_batch", workdir=tmp_path, sessions_dir=tmp_path / "s"
     )

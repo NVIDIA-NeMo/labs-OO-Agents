@@ -58,18 +58,18 @@ def llm_factory(alias, workspace) -> FakeLLMClient:
         script = [_cell("await asyncio.Event().wait()")]
     elif "--question" in sys.argv:
         script = [
-            _cell("return_result(NeedInput(question='Which branch?'))"),
-            _cell("self.message('Using the answer.')\nreturn_result(Done(explanation='answered'))"),
+            _cell("return NeedInput(question='Which branch?')"),
+            _cell("self.message('Using the answer.')\nreturn Done(explanation='answered')"),
         ]
     else:
         script = [
             _cell(
                 "self.message('NOOA ACP smoke test passed.')\n"
-                "return_result(Done(explanation='smoke test complete'))"
+                "return Done(explanation='smoke test complete')"
             )
         ]
     # A few spare turns, so tests that prompt again (or a re-queued item) finish.
-    script += [_cell("return_result(Done(explanation='again'))") for _ in range(5)]
+    script += [_cell("return Done(explanation='again')") for _ in range(5)]
     return FakeLLMClient(script)
 
 

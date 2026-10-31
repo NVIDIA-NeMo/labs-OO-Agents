@@ -90,7 +90,7 @@ def check_waiting_targets(agent: Any, result: Any, *, fix: str) -> None:
     delivers goes to its parent, so wait on that child. The person
     (``"user_messages"``) is never a valid target. Anything else raises
     ``WaitingTargetNotRunning``, which the strategy shows the model as the
-    error from its ``return_result`` cell; the turn then continues.
+    error from the cell that returned it; the turn then continues.
     """
     if not isinstance(result, Waiting):
         return

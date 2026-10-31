@@ -15,7 +15,7 @@ from nooa_atom import SessionOptions, SessionStore
 from nooa_atom.session.registry import SessionRegistry
 
 TIMEOUT = 30
-DONE = "return_result(Done(explanation='done'))"
+DONE = "return Done(explanation='done')"
 HINT = (
     "Waiting is only for running jobs or background agents. If the work is finished, "
     "return Done; if you need an answer from the person, return NeedInput."
@@ -64,7 +64,7 @@ async def test_waiting_on_mesh_is_accepted_while_the_mesh_pump_runs(tmp_path, se
         tmp_path,
         sessions_dir,
         [
-            cell(MESH_PUMP + "return_result(Waiting(explanation='w', on=['mesh']))"),
+            cell(MESH_PUMP + "return Waiting(explanation='w', on=['mesh'])"),
             cell("assert notification['mesh'] == ['hello from mesh']\n" + DONE),
         ],
     )
@@ -77,7 +77,7 @@ async def test_waiting_on_mesh_without_a_pump_is_rejected(tmp_path, sessions_dir
         tmp_path,
         sessions_dir,
         [
-            cell("return_result(Waiting(explanation='w', on=['mesh']))"),
+            cell("return Waiting(explanation='w', on=['mesh'])"),
             cell(DONE),
         ],
     )
@@ -94,7 +94,7 @@ async def test_waiting_on_the_person_is_rejected_with_the_done_or_need_input_hin
         tmp_path,
         sessions_dir,
         [
-            cell(MESH_PUMP + "return_result(Waiting(explanation='w', on=['user_messages']))"),
+            cell(MESH_PUMP + "return Waiting(explanation='w', on=['user_messages'])"),
             cell(DONE),
         ],
     )
@@ -113,7 +113,7 @@ async def test_waiting_on_delegates_is_accepted_with_a_running_child(tmp_path, s
         [
             cell(
                 "self.v.child = await self.spawn('Worker', 'fix it', name='worker')\n"
-                "return_result(Waiting(explanation='w', on=['delegates']))"
+                "return Waiting(explanation='w', on=['delegates'])"
             ),
             cell("[item] = notification['delegates']\n" + DONE),
         ],
@@ -121,8 +121,8 @@ async def test_waiting_on_delegates_is_accepted_with_a_running_child(tmp_path, s
             "worker": [
                 cell(
                     "await asyncio.sleep(0.2)\n"
-                    "return_result(Done(explanation='fixed', result=TaskResult("
-                    "solution_description='s', evidence='e', how_to_verify='h')))"
+                    "return Done(explanation='fixed', result=TaskResult("
+                    "solution_description='s', evidence='e', how_to_verify='h'))"
                 )
             ]
         },
@@ -135,7 +135,7 @@ async def test_waiting_on_delegates_without_a_child_is_rejected(tmp_path, sessio
     calls = await _run(
         tmp_path,
         sessions_dir,
-        [cell("return_result(Waiting(explanation='w', on=['delegates']))"), cell(DONE)],
+        [cell("return Waiting(explanation='w', on=['delegates'])"), cell(DONE)],
     )
     assert len(calls) == 2
     assert "Waiting on 'delegates', but no child is running" in calls[1]
@@ -154,7 +154,7 @@ async def test_a_finished_or_cancelled_job_is_rejected(tmp_path, sessions_dir):
                 "await asyncio.sleep(0.05)\n"
                 "assert done_job.state != 'running', done_job.state\n"
                 "self.queue_manager.get_channel('ci').flush()\n"
-                "return_result(Waiting(explanation='w', on=['ci']))"
+                "return Waiting(explanation='w', on=['ci'])"
             ),
             cell(
                 "self.queue_manager.queue('build')\n"
@@ -162,7 +162,7 @@ async def test_a_finished_or_cancelled_job_is_rejected(tmp_path, sessions_dir):
                 "label='build-1')\n"
                 "await job.cancel()\n"
                 "assert job.state != 'running', job.state\n"
-                "return_result(Waiting(explanation='w', on=['build']))"
+                "return Waiting(explanation='w', on=['build'])"
             ),
             cell(DONE),
         ],
@@ -179,7 +179,7 @@ async def test_waiting_on_jobs_without_a_running_job_is_rejected(tmp_path, sessi
     calls = await _run(
         tmp_path,
         sessions_dir,
-        [cell("return_result(Waiting(explanation='w', on=['jobs']))"), cell(DONE)],
+        [cell("return Waiting(explanation='w', on=['jobs'])"), cell(DONE)],
     )
     assert len(calls) == 2
     assert "Waiting on 'jobs', but no job is running and nothing is queued" in calls[1]
@@ -195,7 +195,7 @@ async def test_waiting_on_jobs_with_only_a_queue_manager_task_is_rejected(tmp_pa
             cell(
                 "self.queue_manager.queue('ci')\n"
                 "self.queue_manager.spawn(asyncio.sleep(0.3), channel='ci', label='ci-1')\n"
-                "return_result(Waiting(explanation='w', on=['jobs']))"
+                "return Waiting(explanation='w', on=['jobs'])"
             ),
             cell(DONE),
         ],
@@ -212,7 +212,7 @@ async def test_waiting_on_jobs_is_accepted_while_a_self_jobs_job_runs(tmp_path, 
         [
             cell(
                 "await self.jobs.run('sleep 0.3; echo hi', name='slow')\n"
-                "return_result(Waiting(explanation='w', on=['jobs']))"
+                "return Waiting(explanation='w', on=['jobs'])"
             ),
             cell("assert notification['jobs'][0].name == 'slow'\n" + DONE),
         ],
@@ -230,7 +230,7 @@ async def test_waiting_on_jobs_is_accepted_when_its_result_is_buffered(tmp_path,
                 "await self.jobs.run('echo hi', name='quick')\n"
                 "while self.jobs.get('quick').state == 'running':\n"
                 "    await asyncio.sleep(0.02)\n"
-                "return_result(Waiting(explanation='w', on=['jobs']))"
+                "return Waiting(explanation='w', on=['jobs'])"
             ),
             cell("assert notification['jobs'][0].name == 'quick'\n" + DONE),
         ],
@@ -253,7 +253,7 @@ async def test_waiting_on_a_finished_child_with_an_unread_result_is_accepted(
                 "async with asyncio.timeout(10):\n"
                 "    while not delegates.qsize() or self.v.child.status == 'running':\n"
                 "        await asyncio.sleep(0.02)\n"
-                "return_result(Waiting(explanation='w', on=['docs_reader']))"
+                "return Waiting(explanation='w', on=['docs_reader'])"
             ),
             cell(
                 "[item] = notification['delegates']\n"
@@ -263,8 +263,8 @@ async def test_waiting_on_a_finished_child_with_an_unread_result_is_accepted(
         {
             "docs_reader": [
                 cell(
-                    "return_result(Done(explanation='read', result=TaskResult("
-                    "solution_description='s', evidence='e', how_to_verify='h')))"
+                    "return Done(explanation='read', result=TaskResult("
+                    "solution_description='s', evidence='e', how_to_verify='h'))"
                 )
             ]
         },

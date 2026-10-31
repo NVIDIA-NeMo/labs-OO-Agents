@@ -77,8 +77,8 @@ _UNTIL_DONE = cell(
     "        self.v.note = event.value\n"
     "    else:\n"
     "        assert event.kind == 'done', event\n"
-    "        return_result(Done(explanation=event.value.report))\n"
-    "return_result(Waiting(explanation='child runs', on=['subagent']))"
+    "        return Done(explanation=event.value.report)\n"
+    "return Waiting(explanation='child runs', on=['subagent'])"
 )
 
 
@@ -94,11 +94,11 @@ async def test_a_child_awaited_at_the_deadline_runs_on_as_a_job_and_wakes_waitin
     registry, options, models, root_metrics
 ):
     models.scripts[None] = [
-        cell("r = await Subagent('slow').run('SLOW')\nreturn_result(Done(explanation='early'))"),
+        cell("r = await Subagent('slow').run('SLOW')\nreturn Done(explanation='early')"),
         cell(
             "job = self.jobs.get('subagent')\n"
             "assert job.status == 'running', job\n"
-            "return_result(Waiting(explanation='child runs', on=['subagent']))"
+            "return Waiting(explanation='child runs', on=['subagent'])"
         ),
         _UNTIL_DONE,
         _UNTIL_DONE,
@@ -124,12 +124,12 @@ async def test_a_detached_child_that_fails_arrives_as_failed(
 ):
     models.scripts[None] = [
         cell("await Subagent().run('SLOW')"),
-        cell("return_result(Waiting(explanation='child runs', on=['subagent']))"),
+        cell("return Waiting(explanation='child runs', on=['subagent'])"),
         cell(
             "[event] = notification['jobs']\n"
             "assert (event.name, event.kind) == ('subagent', 'failed'), event\n"
             "assert 'subagent subagent failed' in str(event.value), event\n"
-            "return_result(Done(explanation='failed as expected'))"
+            "return Done(explanation='failed as expected')"
         ),
     ]
     # Its second model call is unscripted: the strict fake model fails the child's turn.
@@ -156,7 +156,7 @@ async def test_cancelling_the_detached_job_closes_the_child(
         # A job, so the cancel is not itself bound by the short cell deadline.
         cell(
             "self.jobs.launch(self.jobs.get('subagent').cancel(), name='stop')\n"
-            "return_result(Done(explanation='cancelling'))"
+            "return Done(explanation='cancelling')"
         ),
     ]
     models.scripts["subagent"] = [cell(_SLOW_CHILD.format(s=30))]
@@ -170,7 +170,7 @@ async def test_cancelling_the_detached_job_closes_the_child(
 async def test_session_close_closes_a_detached_child(registry, options, models, root_metrics):
     models.scripts[None] = [
         cell("await Subagent().run('ONE')"),
-        cell("return_result(Done(explanation='left running'))"),
+        cell("return Done(explanation='left running')"),
     ]
     models.scripts["subagent"] = [cell(_SLOW_CHILD.format(s=30))]
     root = await registry.create(options)
@@ -206,11 +206,11 @@ async def test_an_awaited_request_job_survives_the_deadline_and_is_named(
 ):
     models.scripts[None] = [
         cell("rev = self.jobs.launch(Subagent(), name='review')\nawait rev.send('SLOW')"),
-        cell("return_result(Waiting(explanation='request runs', on=['review#1']))"),
+        cell("return Waiting(explanation='request runs', on=['review#1'])"),
         cell(
             "[event] = notification['jobs']\n"
             "assert (event.name, event.kind) == ('review#1', 'done'), event\n"
-            "return_result(Done(explanation=event.value.report))"
+            "return Done(explanation=event.value.report)"
         ),
     ]
     models.scripts["review"] = [cell(_SLOW_CHILD.format(s=1.5)), work_done(report="KEPT")]

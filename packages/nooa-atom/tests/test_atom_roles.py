@@ -23,8 +23,8 @@ from nooa.unifiedllm import FakeLLMClient
 
 TIMEOUT = 30
 WORK = (
-    "return_result(Done(explanation='done', result=TaskResult(solution_description='s', "
-    "evidence='e', how_to_verify='v', report='R')))"
+    "return Done(explanation='done', result=TaskResult(solution_description='s', "
+    "evidence='e', how_to_verify='v', report='R'))"
 )
 
 
@@ -115,7 +115,7 @@ async def test_the_role_block_is_the_same_prefix_on_every_turn(options):
 
 async def test_an_unattended_turn_may_not_ask(options):
     models = AtomModels()
-    models.scripts[None] = [cell("return_result(NeedInput(question='which one?'))"), cell(WORK)]
+    models.scripts[None] = [cell("return NeedInput(question='which one?')"), cell(WORK)]
     registry = SessionRegistry(SessionStore(options.sessions_dir), agent_factory=models)
     try:
         root = await registry.create(options.model_copy(update={"turn_method": "handle_batch"}))
@@ -129,7 +129,7 @@ async def test_an_unattended_turn_may_not_ask(options):
 
 async def test_an_orchestrator_done_needs_a_result(options):
     models = AtomModels()
-    models.scripts[None] = [cell("return_result(Done(explanation='done'))"), cell(WORK)]
+    models.scripts[None] = [cell("return Done(explanation='done')"), cell(WORK)]
     registry = SessionRegistry(SessionStore(options.sessions_dir), agent_factory=models)
     try:
         root = await registry.create(
@@ -145,7 +145,7 @@ async def test_an_orchestrator_done_needs_a_result(options):
 
 async def test_an_interactive_turn_may_ask(options):
     models = AtomModels()
-    models.scripts[None] = [cell("return_result(NeedInput(question='which one?'))")]
+    models.scripts[None] = [cell("return NeedInput(question='which one?')")]
     registry = SessionRegistry(SessionStore(options.sessions_dir), agent_factory=models)
     try:
         root = await registry.create(options)
@@ -162,12 +162,12 @@ async def test_a_one_shot_child_may_not_ask_and_must_report(options):
         cell(
             "job = self.jobs.launch(Subagent('check').run('look'), name='check')\n"
             "r = await job\n"
-            "return_result(Done(explanation=r.report))"
+            "return Done(explanation=r.report)"
         )
     ]
     models.scripts["check"] = [
-        cell("return_result(NeedInput(question='which?'))"),
-        cell("return_result(Done(explanation='no result'))"),
+        cell("return NeedInput(question='which?')"),
+        cell("return Done(explanation='no result')"),
         cell(WORK),
     ]
     registry = SessionRegistry(SessionStore(options.sessions_dir), agent_factory=models)

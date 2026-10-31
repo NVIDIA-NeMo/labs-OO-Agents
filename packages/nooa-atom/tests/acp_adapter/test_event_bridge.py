@@ -637,15 +637,13 @@ async def test_bare_expression_result_is_shown_not_reported_as_no_output(tmp_pat
     ids=["need_input", "done", "waiting", "done_with_message"],
 )
 async def test_a_turn_result_is_not_shown_as_out(tmp_path, value):
-    """``return_result(...)`` ends the turn; its value is not output for the card."""
+    """``return ...`` ends the turn; its value is not output for the card."""
     agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = _RecordingClient()
     bridge = ACPEventBridge(_FakeSession(agent, "session-1"), client)  # type: ignore[arg-type]
 
     agent.event_manager.add(
-        ToolCallEvent(
-            tool_call_id="t1", name="execute_python", arguments={"code": "return_result(x)"}
-        )
+        ToolCallEvent(tool_call_id="t1", name="execute_python", arguments={"code": "return x"})
     )
     agent.event_manager.add(
         PythonOutput(
@@ -807,14 +805,14 @@ def _messages(client: _RecordingClient) -> list[str]:
     ("code", "expected"),
     [
         (
-            "return_result(Done(explanation='Fixed parse(); tests pass.'))",
+            "return Done(explanation='Fixed parse(); tests pass.')",
             ["Fixed parse(); tests pass."],
         ),
         (
-            "return_result(Done(explanation='x', message='The answer is 42.'))",
+            "return Done(explanation='x', message='The answer is 42.')",
             ["The answer is 42."],
         ),
-        ("self.message('Here it is.')\nreturn_result(Done(explanation='x'))", ["Here it is."]),
+        ("self.message('Here it is.')\nreturn Done(explanation='x')", ["Here it is."]),
     ],
     ids=["explanation_only", "message", "noted"],
 )

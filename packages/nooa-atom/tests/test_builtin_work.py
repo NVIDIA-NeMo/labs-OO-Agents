@@ -9,7 +9,7 @@ from nooa_atom import SessionOptions, SessionStore
 from nooa_atom.session.registry import SessionRegistry
 
 TIMEOUT = 30
-DONE = "return_result(Done(explanation='done'))"
+DONE = "return Done(explanation='done')"
 
 
 async def _run(tmp_path, sessions_dir, cells):
@@ -47,7 +47,7 @@ async def test_after_wakes_a_waiting_turn(tmp_path, sessions_dir):
                 "import time\n"
                 "self.v.start = time.monotonic()\n"
                 "self.jobs.after(0.3, name='reading')\n"
-                "return_result(Waiting(explanation='w', on=['reading']))"
+                "return Waiting(explanation='w', on=['reading'])"
             ),
             cell(
                 "import time\n"
@@ -66,10 +66,7 @@ async def test_every_in_a_turn(tmp_path, sessions_dir):
         tmp_path,
         sessions_dir,
         [
-            cell(
-                "self.jobs.every(0.1, name='poll')\n"
-                "return_result(Waiting(explanation='w', on=['poll']))"
-            ),
+            cell("self.jobs.every(0.1, name='poll')\nreturn Waiting(explanation='w', on=['poll'])"),
             cell(
                 "assert notification['jobs'][0].kind == 'item'\n"
                 "await self.jobs.get('poll').cancel()\n" + DONE

@@ -55,9 +55,7 @@ async def test_a_greeting_turn_ends_done_with_a_message(atom_registry, atom_opti
 
 
 async def test_a_question_ends_the_turn_as_need_input(atom_registry, atom_options, atom_models):
-    atom_models.scripts[None] = [
-        cell("return_result(NeedInput(question='Which branch: main or dev?'))")
-    ]
+    atom_models.scripts[None] = [cell("return NeedInput(question='Which branch: main or dev?')")]
     root = await atom_registry.create(atom_options)
     outcome = await asyncio.wait_for(root.prompt("push it"), TIMEOUT)
     assert outcome == NeedInput(question="Which branch: main or dev?")
@@ -66,11 +64,11 @@ async def test_a_question_ends_the_turn_as_need_input(atom_registry, atom_option
 async def test_a_batch_turn_must_carry_a_task_result(atom_registry, atom_options, atom_models):
     """handle_batch's postcondition sends a Done without a result back to the model."""
     atom_models.scripts["worker"] = [
-        cell("return_result(Done(explanation='finished'))"),
+        cell("return Done(explanation='finished')"),
         cell(
             "result = TaskResult(solution_description='patched', evidence='tests pass', "
             "how_to_verify='pytest', report='patched the parser')\n"
-            "return_result(Done(explanation='finished', result=result))"
+            "return Done(explanation='finished', result=result)"
         ),
     ]
     options = atom_options.model_copy(update={"name": "worker", "turn_method": "handle_batch"})
@@ -84,7 +82,7 @@ async def test_a_batch_turn_must_carry_a_task_result(atom_registry, atom_options
     )
     second_call = str(atom_models.llms["worker"].calls[1].messages)
     assert "TaskResult" in second_call and "result" in second_call
-    assert "return_result validation error" in second_call
+    assert "return validation error" in second_call
 
 
 async def test_closing_the_session_closes_skills_and_shell_but_not_a_shared_llm(
@@ -122,7 +120,7 @@ async def test_the_model_sees_the_turn_types_but_not_the_port(
         cell(
             "ok = TaskResult(solution_description='a', evidence='b', how_to_verify='c')\n"
             "names = [ChildResult.__name__, ChildQuestion.__name__, ChildFailed.__name__]\n"
-            "return_result(Done(explanation=','.join(names) + ':' + ok.evidence))"
+            "return Done(explanation=','.join(names) + ':' + ok.evidence)"
         )
     ]
     root = await atom_registry.create(atom_options)
@@ -148,7 +146,7 @@ async def test_an_atom_session_round_trips_its_todos_without_skip_warnings(
             "todo = self.todo.add('Fix the parser')\n"
             "self.todo.comment(todo, 'found the off-by-one')\n"
             "self.v.note = 'kept'\n"
-            "return_result(Done(explanation='planned'))"
+            "return Done(explanation='planned')"
         )
     ]
     root = await atom_registry.create(atom_options)

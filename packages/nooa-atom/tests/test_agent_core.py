@@ -568,8 +568,8 @@ async def _first_call_messages(tmp_path, method: str) -> list[dict]:
     from atom_test_agents import python_cell
 
     code = (
-        "return_result(Done(explanation='x', result=TaskResult("
-        "solution_description='a', evidence='b', how_to_verify='c')))"
+        "return Done(explanation='x', result=TaskResult("
+        "solution_description='a', evidence='b', how_to_verify='c'))"
     )
     llm = FakeLLMClient([python_cell(code, "call_1")], strict_exhaustion=True)
     agent = AtomAgentBase(llm=llm, cwd=tmp_path)
@@ -603,8 +603,8 @@ async def test_atom_omits_the_core_events_block_but_keeps_events_usable(tmp_path
     from nooa.context_blocks.models import ContextWindowStats
 
     code = (
-        "return_result(Done(explanation='x', result=TaskResult("
-        "solution_description='a', evidence='b', how_to_verify='c')))"
+        "return Done(explanation='x', result=TaskResult("
+        "solution_description='a', evidence='b', how_to_verify='c'))"
     )
     llm = FakeLLMClient([python_cell(code, "call_1")], strict_exhaustion=True)
     agent = AtomAgentBase(llm=llm, cwd=tmp_path)
@@ -635,8 +635,8 @@ async def test_first_turn_has_the_events_guidance(tmp_path):
     from atom_test_agents import python_cell
 
     code = (
-        "return_result(Done(explanation='x', result=TaskResult("
-        "solution_description='a', evidence='b', how_to_verify='c')))"
+        "return Done(explanation='x', result=TaskResult("
+        "solution_description='a', evidence='b', how_to_verify='c'))"
     )
     llm = FakeLLMClient([python_cell(code, "call_1")], strict_exhaustion=True)
     agent = AtomAgentBase(llm=llm, cwd=tmp_path)

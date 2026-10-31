@@ -14,7 +14,7 @@ from nooa_atom.benchmark_policy import POLICY
 from nooa_bench.gym import GymEpisode, _RecordingClient
 from nooa_bench.gym_worker import main
 
-DONE = "return_result(Done(explanation='done', result=TaskResult(solution_description='s', evidence='e', how_to_verify='v', report='accepted')))"
+DONE = "return Done(explanation='done', result=TaskResult(solution_description='s', evidence='e', how_to_verify='v', report='accepted'))"
 
 
 class IgnoringHarness:
@@ -652,7 +652,7 @@ async def test_worker_rejects_real_unfinished_children_and_closes_them(
     elif state == "waiting":
         scripts.append(
             "self.jobs.launch(asyncio.sleep(3600), name='pending')\n"
-            "return_result(Waiting(explanation='work pending', on=['pending']))"
+            "return Waiting(explanation='work pending', on=['pending'])"
         )
     _, inputs, output = payload(tmp_path)
     await main(inputs, output)

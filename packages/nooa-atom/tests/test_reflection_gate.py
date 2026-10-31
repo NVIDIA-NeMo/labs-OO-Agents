@@ -183,7 +183,7 @@ async def idle(root):
 
 
 def done(text="accepted"):
-    return cell(f"return_result(Done(explanation={text!r}))")
+    return cell(f"return Done(explanation={text!r})")
 
 
 def prediction(content="{}"):
@@ -372,10 +372,10 @@ async def test_completion_time_does_not_move_attempt_anchor(tmp_path):
 
 async def test_waiting_and_need_input_count_but_only_done_admits(tmp_path):
     clock = Clock()
-    responses = [cell("return_result(NeedInput(question='q'))") for _ in range(3)]
+    responses = [cell("return NeedInput(question='q')") for _ in range(3)]
     responses += [
         cell(
-            "job=self.jobs.launch(asyncio.sleep(100), name='pending')\nreturn_result(Waiting(explanation='wait', on=['pending']))"
+            "job=self.jobs.launch(asyncio.sleep(100), name='pending')\nreturn Waiting(explanation='wait', on=['pending'])"
         ),
         done(),
         prediction(),
@@ -415,7 +415,7 @@ async def test_cells_rejected_returns_errors_and_cancellation_are_not_turn_credi
     clock = Clock()
     responses = [
         cell("intermediate=1"),
-        cell("return_result(explanation='')"),  # rejected; no settlement
+        cell("return {'explanation': ''}"),  # rejected; no settlement
         done(),
         cell("self.started.set()\nawait self.block.wait()"),
         done(),
@@ -596,7 +596,7 @@ async def test_standalone_enabled_positive_control_proves_runtime_canary_livenes
         await registry.close_all()
 
 
-_WORK_DONE = "return_result(Done(explanation='child', result=TaskResult(solution_description='s', evidence='e', how_to_verify='v', report='child')))"
+_WORK_DONE = "return Done(explanation='child', result=TaskResult(solution_description='s', evidence='e', how_to_verify='v', report='child'))"
 
 
 async def test_benchmark_policy_explicit_off_root_child_has_zero_live_reflection_attempts(tmp_path):
@@ -606,7 +606,7 @@ async def test_benchmark_policy_explicit_off_root_child_has_zero_live_reflection
         None: CellLLM(
             [
                 cell(
-                    "r=await self.jobs.launch(Subagent('child').run('go'), name='kid')\nassert r.report == 'child'\nreturn_result(Done(explanation='root'))"
+                    "r=await self.jobs.launch(Subagent('child').run('go'), name='kid')\nassert r.report == 'child'\nreturn Done(explanation='root')"
                 )
             ]
         ),
@@ -656,9 +656,9 @@ async def test_root_and_kept_child_gate_state_and_options_are_independent(tmp_pa
         None: CellLLM(
             [
                 cell(
-                    "child=self.jobs.launch(Subagent('child'), name='kid')\nr=await child.send('one')\nreturn_result(Done(explanation='one'))"
+                    "child=self.jobs.launch(Subagent('child'), name='kid')\nr=await child.send('one')\nreturn Done(explanation='one')"
                 ),
-                cell("r=await child.send('two')\nreturn_result(Done(explanation='two'))"),
+                cell("r=await child.send('two')\nreturn Done(explanation='two')"),
                 prediction(),
                 done("three"),
                 done("four"),
@@ -748,7 +748,7 @@ async def test_restart_rearms_without_monotonic_snapshot_and_load_uses_explicit_
                 agent_spec="nooa_atom.agent:AtomAgent",
                 llm=CellLLM(
                     [
-                        cell("self.v.fact='durable'\nreturn_result(Done(explanation='one'))"),
+                        cell("self.v.fact='durable'\nreturn Done(explanation='one')"),
                         done(),
                         prediction(),
                         done(),

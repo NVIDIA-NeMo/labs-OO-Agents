@@ -27,8 +27,8 @@ HINT = (
     "return Done(explanation=..., result=TaskResult(...))."
 )
 WORK_RESULT = (
-    "return_result(Done(explanation='e', result=TaskResult(solution_description='s', "
-    "evidence='e', how_to_verify='v', report={r!r})))"
+    "return Done(explanation='e', result=TaskResult(solution_description='s', "
+    "evidence='e', how_to_verify='v', report={r!r}))"
 )
 
 
@@ -78,12 +78,12 @@ async def test_a_kept_child_waiting_on_its_parent_is_told_to_ask(
             "q = await rev.send('REVIEW-TASK')\n"
             "assert isinstance(q, Question) and q.text == 'Which file?', q\n"
             "r = await rev.send('ANSWER-42')\n"
-            "return_result(Done(explanation=r.report))"
+            "return Done(explanation=r.report)"
         )
     ]
     models.scripts["review"] = [
         # The F03 deadlock shape: wait for the parent through user_messages.
-        cell("return_result(Waiting(explanation='need the file', on=['user_messages']))"),
+        cell("return Waiting(explanation='need the file', on=['user_messages'])"),
         cell(
             "try:\n"
             "    await self.user_messages.get(timeout=0.05)\n"
@@ -117,8 +117,8 @@ async def test_a_kept_child_waiting_on_its_parent_is_told_to_ask(
 
 async def test_the_root_keeps_its_own_hint(registry, options, models):
     models.scripts[None] = [
-        cell("return_result(Waiting(explanation='w', on=['user_messages']))"),
-        cell("return_result(Done(explanation='ok'))"),
+        cell("return Waiting(explanation='w', on=['user_messages'])"),
+        cell("return Done(explanation='ok')"),
     ]
     root = await registry.create(options)
     assert await asyncio.wait_for(root.prompt("hi"), TIMEOUT) == Done(explanation="ok")

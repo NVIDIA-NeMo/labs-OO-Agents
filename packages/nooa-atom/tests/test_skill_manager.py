@@ -360,7 +360,7 @@ async def test_an_old_snapshot_with_mcp_state_loads_and_the_agent_is_told(
     finally:
         await registry.close_all()
 
-    llm = FakeLLMClient([python_cell("return_result(Done(explanation='x'))", "c1")])
+    llm = FakeLLMClient([python_cell("return Done(explanation='x')", "c1")])
     fresh = SessionRegistry(SessionStore(sessions_dir), agent_factory=create_session_agent)
     try:
         loaded = await fresh.load(root.id, llm=llm)

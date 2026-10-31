@@ -37,10 +37,10 @@ async def test_kept_session_retains_names_across_done_and_need_input(tmp_path):
         tmp_path,
         [
             cell(
-                "counter=0\ndef bump():\n global counter\n counter+=1\n return counter\nreturn_result(Done(explanation=str(bump())))"
+                "counter=0\ndef bump():\n global counter\n counter+=1\n return counter\nreturn Done(explanation=str(bump()))"
             ),
-            cell("return_result(NeedInput(question=str(bump())))"),
-            cell("return_result(Done(explanation=str(counter)))"),
+            cell("return NeedInput(question=str(bump()))"),
+            cell("return Done(explanation=str(counter))"),
         ],
     )
     try:
@@ -90,7 +90,7 @@ async def worker():
     return notification['user_messages'][0]
 job = self.jobs.launch(worker(), name='late')
 print('cell A')
-return_result(Waiting(explanation='working', on=['late']))
+return Waiting(explanation='working', on=['late'])
 """),
             cell(r"""
 gate.set()
@@ -100,7 +100,7 @@ assert job.output.stdout.startswith('job stdout\n'), job.output.stdout
 assert job.output.stderr == 'job stderr', job.output.stderr
 assert len(job.output.images) == 1
 print('cell B')
-return_result(Done(explanation='B-finished'))
+return Done(explanation='B-finished')
 """),
         ],
     )
@@ -140,7 +140,7 @@ class Hostile:
 hostile = Hostile()
 """
                 + "\n".join(f"name_{i}=1" for i in range(50))
-                + "\nreturn_result(Done(explanation='ok'))"
+                + "\nreturn Done(explanation='ok')"
             )
         ]
     )
@@ -178,7 +178,7 @@ del resource
 shell = Shell()
 result = await self.jobs.launch(shell.run('printf shell-owned'), name='command')
 assert result.stdout == 'shell-owned'
-return_result(Done(explanation='ok'))
+return Done(explanation='ok')
 """)
         ],
     )
@@ -220,7 +220,7 @@ async def test_accepted_done_reflects_archives_and_drops_only_proposed_variable(
         tmp_path,
         [
             cell(
-                "scratch=42\nstable=7\ndef helper():\n return stable\nself.context['user_decision']='KEEP VERBATIM'\nprint('TOOL_EVIDENCE_' + str(1700 * 43))\nreturn_result(Done(explanation='accepted result'))"
+                "scratch=42\nstable=7\ndef helper():\n return stable\nself.context['user_decision']='KEEP VERBATIM'\nprint('TOOL_EVIDENCE_' + str(1700 * 43))\nreturn Done(explanation='accepted result')"
             ),
             reflection(
                 summary="Completed request; result accepted. Evidence is in the original cells.",
@@ -230,7 +230,7 @@ async def test_accepted_done_reflects_archives_and_drops_only_proposed_variable(
                 drop_names=["scratch"],
             ),
             cell(
-                "assert helper() == 7\nassert self.context['user_decision'] == 'KEEP VERBATIM'\ntry:\n scratch\nexcept NameError:\n return_result(NeedInput(question='retained helper works'))"
+                "assert helper() == 7\nassert self.context['user_decision'] == 'KEEP VERBATIM'\ntry:\n scratch\nexcept NameError:\n return NeedInput(question='retained helper works')"
             ),
         ],
         reflection=True,
@@ -292,7 +292,7 @@ async def test_reflection_failure_rejection_budget_keeps_original_done(tmp_path,
     registry, root, llm = await make_root(
         tmp_path,
         [
-            cell("scratch=42\nreturn_result(Done(explanation='original'))"),
+            cell("scratch=42\nreturn Done(explanation='original')"),
             reflection(**fields),
         ],
         reflection=True,
@@ -327,7 +327,7 @@ async def test_reflection_timeout_is_owned_and_original_receipt_precedes_it(tmp_
     registry, root, llm = await make_root(
         tmp_path,
         [
-            cell("scratch=42\nreturn_result(Done(explanation='original'))"),
+            cell("scratch=42\nreturn Done(explanation='original')"),
         ],
         reflection=True,
     )
@@ -360,7 +360,7 @@ async def test_close_during_reflection_cancels_awaits_without_second_settlement(
     registry, root, _ = await make_root(
         tmp_path,
         [
-            cell("return_result(Done(explanation='delivered'))"),
+            cell("return Done(explanation='delivered')"),
         ],
         reflection=True,
     )
@@ -393,7 +393,7 @@ async def test_stale_cleanup_and_context_plans_fail_safe(tmp_path, monkeypatch, 
     registry, root, _ = await make_root(
         tmp_path,
         [
-            cell("scratch=42\nreturn_result(Done(explanation='original'))"),
+            cell("scratch=42\nreturn Done(explanation='original')"),
         ],
         reflection=True,
     )
@@ -424,7 +424,7 @@ async def test_arrival_after_reflection_watermark_is_not_collapsed(tmp_path, mon
     registry, root, _ = await make_root(
         tmp_path,
         [
-            cell("scratch=42\nreturn_result(Done(explanation='original'))"),
+            cell("scratch=42\nreturn Done(explanation='original')"),
         ],
         reflection=True,
     )
@@ -444,9 +444,7 @@ async def test_namespace_nosnapshot_restart_notice_once_and_self_v_survives(tmp_
         cwd=tmp_path,
         llm=CellLLM(
             [
-                cell(
-                    "transient=object()\nself.v.fact='durable'\nreturn_result(Done(explanation='saved'))"
-                ),
+                cell("transient=object()\nself.v.fact='durable'\nreturn Done(explanation='saved')"),
             ]
         ),
     )
@@ -483,17 +481,17 @@ one = await child.send('first')
 two = await child.send('second')
 assert one.report == '22' and two.report == '23'
 assert parent_only == 11
-return_result(Done(explanation='isolated'))
+return Done(explanation='isolated')
 """)
             ]
         ),
         "kid": CellLLM(
             [
                 cell(
-                    "try:\n parent_only\nexcept NameError:\n pass\nelse:\n raise AssertionError('parent leaked')\nchild_only=22\nreturn_result(Done(explanation='child1', result=TaskResult(solution_description='s', evidence='e', how_to_verify='v', report=str(child_only))))"
+                    "try:\n parent_only\nexcept NameError:\n pass\nelse:\n raise AssertionError('parent leaked')\nchild_only=22\nreturn Done(explanation='child1', result=TaskResult(solution_description='s', evidence='e', how_to_verify='v', report=str(child_only)))"
                 ),
                 cell(
-                    "child_only+=1\nreturn_result(Done(explanation='child2', result=TaskResult(solution_description='s', evidence='e', how_to_verify='v', report=str(child_only))))"
+                    "child_only+=1\nreturn Done(explanation='child2', result=TaskResult(solution_description='s', evidence='e', how_to_verify='v', report=str(child_only)))"
                 ),
             ]
         ),
@@ -527,11 +525,11 @@ async def test_non_done_never_reflects_and_active_work_defers_deletion(tmp_path)
     registry, root, llm = await make_root(
         tmp_path,
         [
-            cell("return_result(NeedInput(question='q'))"),
+            cell("return NeedInput(question='q')"),
             cell(
-                "scratch=42\njob=self.jobs.launch(asyncio.sleep(100), name='live')\nreturn_result(Waiting(explanation='working', on=['live']))"
+                "scratch=42\njob=self.jobs.launch(asyncio.sleep(100), name='live')\nreturn Waiting(explanation='working', on=['live'])"
             ),
-            cell("return_result(Done(explanation='interactive done with live work'))"),
+            cell("return Done(explanation='interactive done with live work')"),
             reflection(summary="done", drop_names=["scratch"]),
         ],
         reflection=True,
@@ -562,7 +560,7 @@ async def test_reflection_can_summarize_context_without_dropping_bindings(tmp_pa
     registry, root, llm = await make_root(
         tmp_path,
         [
-            cell("return_result(Done(explanation='context only'))"),
+            cell("return Done(explanation='context only')"),
             reflection(summary="Completed context compacted", useful_findings="context only"),
         ],
         reflection=True,
@@ -593,7 +591,7 @@ async def worker():
     except RuntimeError:
         return notification['user_messages'][0]
 job=self.jobs.launch(worker(), name='between')
-return_result(Done(explanation='foreground done'))
+return Done(explanation='foreground done')
 """)
             ]
         ),
@@ -636,8 +634,8 @@ async def test_rejected_done_is_not_a_reflection_boundary(tmp_path):
     registry, root, llm = await make_root(
         tmp_path,
         [
-            cell("scratch=42\nreturn_result(explanation='')"),
-            cell("return_result(Done(explanation='accepted after correction'))"),
+            cell("scratch=42\nreturn {'explanation': ''}"),
+            cell("return Done(explanation='accepted after correction')"),
             reflection(summary="corrected result accepted", drop_names=["scratch"]),
         ],
         reflection=True,
@@ -688,7 +686,7 @@ async def test_every_reflection_effect_requires_frozen_evidence_and_provenance(
     monkeypatch.setattr(AtomAgent, "_reflect_done_plan", propose)
     registry, root, llm = await make_root(
         tmp_path,
-        [cell("scratch=42\nprint('OLD EVIDENCE')\nreturn_result(Done(explanation='accepted'))")],
+        [cell("scratch=42\nprint('OLD EVIDENCE')\nreturn Done(explanation='accepted')")],
         reflection=True,
     )
     try:
@@ -717,7 +715,7 @@ async def test_notes_only_cleanup_only_and_noop_stale_plans(tmp_path, monkeypatc
 
     monkeypatch.setattr(AtomAgent, "_reflect_done_plan", propose)
     registry, root, _ = await make_root(
-        tmp_path, [cell("scratch=42\nreturn_result(Done(explanation='accepted'))")], reflection=True
+        tmp_path, [cell("scratch=42\nreturn Done(explanation='accepted')")], reflection=True
     )
     try:
         result = await root.prompt("go")
@@ -747,7 +745,7 @@ async def test_summary_observer_newer_notes_are_not_overwritten(tmp_path, monkey
 
     monkeypatch.setattr(AtomAgent, "_reflect_done_plan", propose)
     registry, root, llm = await make_root(
-        tmp_path, [cell("scratch=42\nreturn_result(Done(explanation='accepted'))")], reflection=True
+        tmp_path, [cell("scratch=42\nreturn Done(explanation='accepted')")], reflection=True
     )
     try:
         assert await root.prompt("go") == Done(explanation="accepted")
@@ -807,7 +805,7 @@ async def test_registry_reload_uses_default_namespace_and_replaces_old_guidance(
             cell(
                 "transient=object()\nself.v.fact='durable'\n"
                 "self.context['experimental_namespace']='obsolete opt-in guidance'\n"
-                "return_result(Done(explanation='checkpointed'))"
+                "return Done(explanation='checkpointed')"
             )
         ],
     )
@@ -825,9 +823,9 @@ async def test_registry_reload_uses_default_namespace_and_replaces_old_guidance(
                 "try:\n transient\nexcept NameError:\n pass\n"
                 "else:\n raise AssertionError('live Python value was restored')\n"
                 "counter=40\ndef bump():\n global counter\n counter+=1\n return counter\n"
-                "return_result(Done(explanation=str(bump())))"
+                "return Done(explanation=str(bump()))"
             ),
-            cell("return_result(Done(explanation=str(bump())))"),
+            cell("return Done(explanation=str(bump()))"),
         ]
     )
     registry = SessionRegistry(store, agent_factory=create_session_agent)

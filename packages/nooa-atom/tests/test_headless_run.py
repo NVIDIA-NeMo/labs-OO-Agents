@@ -13,9 +13,9 @@ from nooa.unifiedllm import LLMResponse, LLMUsage
 TIMEOUT = 30
 
 RESULT = (
-    "return_result(Done(explanation='solved', result=TaskResult("
+    "return Done(explanation='solved', result=TaskResult("
     "solution_description='wrote hello.py', evidence='it printed hello', "
-    "how_to_verify='python hello.py', report='hello.py prints hello')))"
+    "how_to_verify='python hello.py', report='hello.py prints hello'))"
 )
 
 # A job that delivers on its own channel shortly after the turn ends. It is
@@ -23,13 +23,13 @@ RESULT = (
 WAIT_FOR_JOB = """\
 self.queue_manager.queue("test_jobs")
 self.queue_manager.spawn(asyncio.sleep(0.05, result="job finished"), channel="test_jobs")
-return_result(Waiting(explanation="job running", on=["test_jobs"]))
+return Waiting(explanation="job running", on=["test_jobs"])
 """
 
 WAIT_FOREVER = """\
 self.queue_manager.queue("test_jobs")
 self.queue_manager.spawn(asyncio.Event().wait(), channel="test_jobs")
-return_result(Waiting(explanation="job running", on=["test_jobs"]))
+return Waiting(explanation="job running", on=["test_jobs"])
 """
 
 

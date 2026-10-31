@@ -16,9 +16,9 @@ from nooa.interactive import Done
 TIMEOUT = 30
 
 CHILD_RESULT = (
-    "return_result(Done(explanation='fixed', result=TaskResult("
+    "return Done(explanation='fixed', result=TaskResult("
     "solution_description='patched parse()', evidence='tests pass', "
-    "how_to_verify='pytest tests/test_parser.py', report='REPORT: off-by-one fixed')))"
+    "how_to_verify='pytest tests/test_parser.py', report='REPORT: off-by-one fixed'))"
 )
 
 
@@ -52,7 +52,7 @@ async def test_delegate_returns_the_childs_done_with_its_task_result(
         cell(
             "done = await self.delegate('fix_parser', 'CHILD-PROMPT: fix the parser', name='fix_parser')\n"
             "self.v.result = done.result\n"
-            "return_result(Done(explanation=done.result.report))"
+            "return Done(explanation=done.result.report)"
         )
     ]
     atom_models.scripts["fix_parser"] = [cell(CHILD_RESULT)]
@@ -75,13 +75,13 @@ async def test_a_spawned_childs_result_arrives_on_delegates_and_wakes_the_parent
         cell(
             "ref = await self.spawn('review', 'review the diff', name='review')\n"
             "self.v.child = ref\n"
-            "return_result(Waiting(explanation='review running', on=['delegates']))"
+            "return Waiting(explanation='review running', on=['delegates'])"
         ),
         cell(
             "[item] = notification['delegates']\n"
             "assert isinstance(item, ChildResult)\n"
             "assert item.child.id == self.v.child.id\n"
-            "return_result(Done(explanation='review: ' + item.result.report))"
+            "return Done(explanation='review: ' + item.result.report)"
         ),
     ]
     atom_models.scripts["review"] = [cell(CHILD_RESULT)]
@@ -92,9 +92,9 @@ async def test_a_spawned_childs_result_arrives_on_delegates_and_wakes_the_parent
 
 
 CHILD_DICT_RESULT = (
-    "return_result(Done(explanation='fixed', result={"
+    "return Done(explanation='fixed', result={"
     "'solution_description': 'patched parse()', 'evidence': 'tests pass', "
-    "'how_to_verify': 'pytest tests/test_parser.py', 'report': 'REPORT: dict result'}))"
+    "'how_to_verify': 'pytest tests/test_parser.py', 'report': 'REPORT: dict result'})"
 )
 
 
@@ -104,11 +104,11 @@ async def test_a_spawned_childs_dict_result_arrives_as_a_task_result(
     atom_models.scripts[None] = [
         cell(
             "await self.spawn('review', 'review the diff', name='review')\n"
-            "return_result(Waiting(explanation='review running', on=['delegates']))"
+            "return Waiting(explanation='review running', on=['delegates'])"
         ),
         cell(
             "[item] = notification['delegates']\n"
-            "return_result(Done(explanation='review: ' + item.result.report))"
+            "return Done(explanation='review: ' + item.result.report)"
         ),
     ]
     atom_models.scripts["review"] = [cell(CHILD_DICT_RESULT)]
@@ -121,7 +121,7 @@ async def test_delegate_coerces_a_dict_result_too(atom_registry, atom_options, a
     atom_models.scripts[None] = [
         cell(
             "done = await self.delegate('fix_parser', 'fix the parser', name='fix_parser')\n"
-            "return_result(Done(explanation=done.result.report))"
+            "return Done(explanation=done.result.report)"
         )
     ]
     atom_models.scripts["fix_parser"] = [cell(CHILD_DICT_RESULT)]
@@ -156,7 +156,7 @@ async def test_a_todo_objective_goes_as_text_and_gets_the_report(
             "todo = self.todo.add('Fix the parser', description='parse() drops the last line')\n"
             "self.todo.comment(todo, 'suspect the loop bound')\n"
             "done = await self.delegate('parser', todo, name='parser')\n"
-            "return_result(Done(explanation=done.result.report))"
+            "return Done(explanation=done.result.report)"
         )
     ]
     atom_models.scripts["parser"] = [cell(CHILD_RESULT)]
@@ -192,7 +192,7 @@ async def test_a_failed_child_raises_in_the_parents_cell(atom_registry, atom_opt
             "try:\n"
             "    await self.delegate('broken', 'anything', name='broken')\n"
             "except ChildFailedError as exc:\n"
-            "    return_result(Done(explanation='child failed'))"
+            "    return Done(explanation='child failed')"
         )
     ]
     root = await atom_registry.create(atom_options)
@@ -206,7 +206,7 @@ async def test_rename_session_sets_the_title_through_the_port(
     atom_models.scripts[None] = [
         cell(
             "title = await self.rename_session('  \"Parser   fix\" ')\n"
-            "return_result(Done(explanation=title))"
+            "return Done(explanation=title)"
         )
     ]
     root = await atom_registry.create(atom_options)
@@ -227,7 +227,7 @@ async def test_a_title_request_submitted_by_the_host_is_recorded_and_answered(
             "[request] = notification['system_messages']\n"
             "assert request.startswith('[session-title]')\n"
             "await self.rename_session('Parser fix')\n"
-            "return_result(Done(explanation='titled'))"
+            "return Done(explanation='titled')"
         )
     ]
     root = await atom_registry.create(atom_options)

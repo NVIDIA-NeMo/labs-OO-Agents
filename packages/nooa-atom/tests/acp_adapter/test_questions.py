@@ -22,7 +22,7 @@ POOL = Implementation(name="pool", version="1.0.16")
 
 
 def _ask(question: str) -> object:
-    return cell(f"return_result(NeedInput(question={question!r}))")
+    return cell(f"return NeedInput(question={question!r})")
 
 
 async def _run(adapter, workspace, text="push it"):
@@ -60,8 +60,8 @@ async def test_a_questions_reason_follows_it(make_adapter, workspace, client):
         {
             None: [
                 cell(
-                    "return_result(NeedInput(question='Which branch: main or dev?', "
-                    "reason='Both have the fix.'))"
+                    "return NeedInput(question='Which branch: main or dev?', "
+                    "reason='Both have the fix.')"
                 )
             ]
         }
@@ -76,9 +76,7 @@ async def test_a_questions_reason_follows_it(make_adapter, workspace, client):
 async def test_a_done_message_reaches_the_client_before_the_prompt_answers(
     make_adapter, workspace, client
 ):
-    models = ScriptedModels(
-        {None: [cell("return_result(Done(explanation='x', message='All set.'))")]}
-    )
+    models = ScriptedModels({None: [cell("return Done(explanation='x', message='All set.')")]})
     adapter = await make_adapter(models)
     session_id, response = await _run(adapter, workspace)
     client.log.append(("response", "prompt", response))

@@ -20,12 +20,12 @@ async def test_nested_generated_method_has_independent_owner_and_del(tmp_path):
     llm = CellLLM(
         [
             cell(
-                "scratch=7\nanswer=await self.other()\nassert answer == 9 and scratch == 7\nreturn_result(Done(explanation='isolated'))"
+                "scratch=7\nanswer=await self.other()\nassert answer == 9 and scratch == 7\nreturn Done(explanation='isolated')"
             ),
             cell(
-                "try:\n scratch\nexcept NameError:\n pass\nelse:\n raise AssertionError('leaked')\nscratch=9\nanswer=scratch\ndel scratch\nreturn_result(answer)"
+                "try:\n scratch\nexcept NameError:\n pass\nelse:\n raise AssertionError('leaked')\nscratch=9\nanswer=scratch\ndel scratch\nreturn answer"
             ),
-            cell("assert scratch == 7\nreturn_result(Done(explanation='retained'))"),
+            cell("assert scratch == 7\nreturn Done(explanation='retained')"),
         ]
     )
     agent = NestedAtom(cwd=tmp_path, llm=llm)

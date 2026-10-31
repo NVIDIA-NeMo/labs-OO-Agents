@@ -78,8 +78,8 @@ async def hold_then_release(workspace, name, models, pending):
 
 def done(report):
     return (
-        "return_result(Done(explanation='completed', result=TaskResult("
-        f"solution_description='completion only', evidence='gate', how_to_verify='test', report={report!r})))"
+        "return Done(explanation='completed', result=TaskResult("
+        f"solution_description='completion only', evidence='gate', how_to_verify='test', report={report!r}))"
     )
 
 
@@ -141,7 +141,7 @@ async def test_waiting_receives_one_final_without_pre_exit_output_turns(tmp_path
     models.scripts[None] = [
         cell(
             f"self.jobs.launch(Shell().run({gated_command('root', tmp_path)!r}), name='shell')\n"
-            "return_result(Waiting(explanation='running', on=['shell']))"
+            "return Waiting(explanation='running', on=['shell'])"
         ),
         cell(
             "[event]=notification['jobs']\n"
@@ -150,7 +150,7 @@ async def test_waiting_receives_one_final_without_pre_exit_output_turns(tmp_path
             + capture_assertions("root")
             + "assert self.jobs.get('shell').status == 'done'\n"
             + "assert self.jobs.get('shell').progress_dropped == 0\n"
-            + "return_result(Done(explanation='observed only completion'))"
+            + "return Done(explanation='observed only completion')"
         ),
     ]
     registry = SessionRegistry(SessionStore(tmp_path / "sessions"), agent_factory=models)
@@ -184,7 +184,7 @@ async def test_direct_one_liner_output_file_lives_until_the_session_closes(tmp_p
             "self.v.out = r.stdout_path\n"
             "assert 'bytes omitted; full output:' in r.stdout\n"
             "del r\n"
-            "return_result(Done(explanation='ran'))"
+            "return Done(explanation='ran')"
         )
     ]
     registry = SessionRegistry(SessionStore(tmp_path / "sessions"), agent_factory=models)
@@ -219,9 +219,9 @@ WAIT_LOOP = (
     "if final:\n"
     "    assert final[0].value.stdout.endswith('END')\n"
     "    self.v.seen = seen\n"
-    "    return_result(Done(explanation='burst done'))\n"
+    "    return Done(explanation='burst done')\n"
     "else:\n"
-    "    return_result(Waiting(explanation='still running', on=['burst']))\n"
+    "    return Waiting(explanation='still running', on=['burst'])\n"
 )
 
 
@@ -232,7 +232,7 @@ async def test_noisy_burst_with_waiting_wakes_for_progress_at_most_once(tmp_path
             "seen = []\n"
             f"self.jobs.launch(Shell().run({burst_command(tmp_path)!r}), name='burst', "
             "progress=Throttle())\n"
-            "return_result(Waiting(explanation='running', on=['burst']))"
+            "return Waiting(explanation='running', on=['burst'])"
         ),
         *[cell(WAIT_LOOP) for _ in range(6)],
     ]

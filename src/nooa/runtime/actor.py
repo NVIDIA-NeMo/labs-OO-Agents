@@ -1875,14 +1875,25 @@ class ActorRuntime:
                         # may use this same task (e.g. positive timeouts on 3.13),
                         # so completion also checks the actual generation identity.
                         with execution_namespace.executing_cell(), agent_async_safety_context():
-                            return await execution_namespace.cell(code, cell_filename)
+                            return await execution_namespace.cell(
+                                code, cell_filename, mark_returns=True
+                            )
 
                     if timeout is None:
                         result_value = await run_owned_cell()
                     else:
                         result_value = await run_with_deadline(run_owned_cell(), timeout)
-                    if has_explicit_return or (implicit_return_added and result_value is not None):
-                        returned_value = result_value
+                    from nooa.runtime.execution_namespace import CellReturn
+
+                    # The owned compiler marks each executed top-level return, so a
+                    # cell whose return did not run (it fell off its end) has none.
+                    if isinstance(result_value, CellReturn):
+                        if not implicit_return_added:
+                            returned_value = result_value.value
+                        elif result_value.value is not None:
+                            returned_value = result_value.value
+                    else:
+                        has_explicit_return = False
                 elif wrap_in_function:
                     # REPL mode: wrap entire code in async function to capture return
                     # Use try/finally to capture locals regardless of how function exits

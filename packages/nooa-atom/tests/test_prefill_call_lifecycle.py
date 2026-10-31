@@ -31,8 +31,8 @@ async def test_repeated_session_prefills_use_current_call_and_keep_user_globals(
     monkeypatch.setattr(InspectInputsPrefill, "get_code", get_code)
     llm = CellLLM(
         [
-            cell("ordinary = ['retained']\nreturn_result(Done(explanation='first'))"),
-            cell("assert ordinary == ['retained']\nreturn_result(Done(explanation='second'))"),
+            cell("ordinary = ['retained']\nreturn Done(explanation='first')"),
+            cell("assert ordinary == ['retained']\nreturn Done(explanation='second')"),
         ]
     )
     made = []

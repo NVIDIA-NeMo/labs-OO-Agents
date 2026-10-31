@@ -28,8 +28,8 @@ from nooa.unifiedllm import FakeLLMClient
 
 ATOM = "nooa_atom.agent:AtomAgent"
 RESULT = (
-    "return_result(Done(explanation='x', result=TaskResult("
-    "solution_description='a', evidence='b', how_to_verify='c')))"
+    "return Done(explanation='x', result=TaskResult("
+    "solution_description='a', evidence='b', how_to_verify='c'))"
 )
 
 # (spec, turn method): (system prompt chars, all message chars)
@@ -183,6 +183,10 @@ RESULT = (
 # handle_orchestrate 22,297 / 23,322. Within the limits, so they stay. The line was
 # reworded (CodeRabbit: the block is bounded, so "anything not listed does not
 # exist" was wrong) to the python_cell_state() wording below; still within the limits.
+# Re-measured for the return-statement experiment (2026-10-30): Atom cells end the
+# turn with a top-level ``return``; the class doc, the runtime-helpers line and the
+# python_cell description no longer name return_result. 10 characters fewer in
+# every row (system and total). Within the limits, so they stay.
 LIMITS = {
     (ATOM, "handle"): (22_200, 23_200),
     (ATOM, "handle_batch"): (22_300, 23_300),
@@ -221,7 +225,7 @@ def _no_installed_skills(monkeypatch, tmp_path):
 
 async def _first_call(spec, method, tmp_path, sessions_dir):
     """Run one turn and return the first call's messages, workspace, and provider tools."""
-    code = RESULT if method != "handle" else "return_result(Done(explanation='x'))"
+    code = RESULT if method != "handle" else "return Done(explanation='x')"
     response = python_cell(code, "call_1")
     llm = FakeLLMClient([response], strict_exhaustion=True)
     workspace = tmp_path / "workspace"
@@ -423,7 +427,7 @@ async def test_installed_skills_are_counted_not_listed(monkeypatch, tmp_path, se
         lambda *, group: [*importlib.metadata.entry_points(group=group), *extra],
     )
     llm = FakeLLMClient(
-        [python_cell("return_result(Done(explanation='x'))", "call_1")], strict_exhaustion=True
+        [python_cell("return Done(explanation='x')", "call_1")], strict_exhaustion=True
     )
     workspace = tmp_path / "workspace"
     workspace.mkdir()

@@ -35,7 +35,7 @@ async def test_an_atom_cell_importing_subprocess_is_told_to_use_a_shell(tmp_path
     models.scripts[None] = [
         cell("import subprocess"),
         cell("import urllib.request"),
-        cell("return_result(Done(explanation='done'))"),
+        cell("return Done(explanation='done')"),
     ]
     workspace = tmp_path / "workspace"
     workspace.mkdir()

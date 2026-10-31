@@ -182,14 +182,14 @@ async def test_new_atom_sessions_and_their_subagents_use_the_public_atom_agent(
 ):
     models = AtomModels()
     work = (
-        "return_result(Done(explanation='done', result=TaskResult(solution_description='s', "
-        "evidence='e', how_to_verify='v', report='CHILD-REPORT')))"
+        "return Done(explanation='done', result=TaskResult(solution_description='s', "
+        "evidence='e', how_to_verify='v', report='CHILD-REPORT'))"
     )
     models.scripts[None] = [
         cell(
             "job = self.jobs.launch(Subagent('check').run('look around'), name='check')\n"
             "result = await job\n"
-            "return_result(Done(explanation=result.report))"
+            "return Done(explanation=result.report)"
         )
     ]
     models.scripts["check"] = [cell(work)]

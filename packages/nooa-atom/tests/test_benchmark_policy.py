@@ -18,7 +18,7 @@ from nooa_bench.gym import _current_invocation, _RecordingClient, _ToolHooks
 
 from nooa.runtime.hooks import hooks_scope
 
-DONE = "return_result(Done(explanation='done', result=TaskResult(solution_description='s', evidence='e', how_to_verify='v', report='accepted')))"
+DONE = "return Done(explanation='done', result=TaskResult(solution_description='s', evidence='e', how_to_verify='v', report='accepted'))"
 
 
 @pytest.fixture(autouse=True)

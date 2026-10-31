@@ -411,7 +411,7 @@ class JobsApi(Skill):
     arrives as ``JobUpdate`` items in ``notification["jobs"]``, each with ``.name``.
 
         await self.jobs.run("uv run pytest -q", name="tests", description="full run before pushing")
-        return_result(Waiting(explanation="tests running", on=["tests"]))
+        return Waiting(explanation="tests running", on=["tests"])
         # next turn: u = notification["jobs"][0]  -> JobUpdate with done=True
         # u.returncode, u.timed_out; u.stdout / u.stderr: the last 20,000 chars of each
 
@@ -963,7 +963,7 @@ class JobsApi(Skill):
         ``stdout``/``stderr``.
 
             await self.jobs.run("uv run pytest -q", name="tests", log_path="logs/tests.log")
-            return_result(Waiting(explanation="tests running", on=["tests"]))
+            return Waiting(explanation="tests running", on=["tests"])
         """
         # Every argument, the name and the log file are checked before _claim (in
         # _new_job), which stops the old job on replace=True.

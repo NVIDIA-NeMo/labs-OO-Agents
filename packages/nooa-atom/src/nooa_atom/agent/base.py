@@ -54,8 +54,15 @@ from nooa_atom.skills.manager import SkillManager
 from nooa_atom.tools.repo_tools import RepoTools
 
 with hidden:
+    import ast
+    import re
+
     from nooa.agents import TokenBudgetSummarizer
+    from nooa.events import Error
     from nooa.runtime.channels import Channel, ChannelReader
+    from nooa.runtime.harness_metrics import get_harness_metrics
+    from nooa.strategies.codeact import TextOnlyResponseAction
+    from nooa.strategies.template import TemplateStrategy
     from nooa_atom.agent.conditions import (
         require_result,
         require_running_wait,
@@ -86,6 +93,143 @@ __all__ = [
 # CodeActV2 replaces the framework context blocks with a concise self doc: the
 # ``state`` dump and the execution-context stub go, and the strategy adds its
 # own compact ``python_cell_state`` block.
+# Atom cells end the turn with a top-level ``return``; return_result is not
+# bound. These reword core CodeAct's model-facing text that names it.
+_CORE_FINISH_TEXT: Annotated[str, hidden] = (
+    "To finish, call `return_result(value)` inside the cell. It immediately submits a\n"
+    "value matching the method's annotated return type."
+)
+_FINISH_TEXT: Annotated[str, hidden] = (
+    "To finish, `return value` at the cell's top level (not inside a def). It\n"
+    "immediately submits a value matching the method's annotated return type."
+)
+_RETURN_HINT: Annotated[str, hidden] = "end the turn with `return Done(...)`"
+_COMPLETION_REWRITES: Annotated[tuple[tuple[re.Pattern[str], str], ...], hidden] = tuple(
+    (re.compile(pattern), replacement)
+    for pattern, replacement in (
+        (r"call return_result(?:\(\))? again", "return it again"),
+        (
+            r"with code `return_result\(value\)`; return_result is a Python builtin,",
+            "with a top-level `return value` in the code; `return` is Python,",
+        ),
+        (r"call return_result\((\w+)\)", r"`return \1`"),
+        (r"\bCall it as\b", "Write it as"),
+        (r"\bcall it as\b", "write it as"),
+        (r"return_result\(\) failed", "The returned value failed"),
+        (r"return_result\(result=\[\.\.\.\]\)", "The returned value"),
+        (r"return_result\(\) is missing required parameter", "The returned value is missing field"),
+        (r"return_result\((\w+)=\.\.\.\)", r"The returned value's \1"),
+        (r"return_result\(\)", "`return Done(...)`"),
+        # One level of nested parentheses: return_result(Done(...)) -> return Done(...).
+        (r"return_result\(((?:[^()]|\([^()]*\))+)\)", r"return \1"),
+        (r"return_result validation error", "return validation error"),
+        (r"(?<!`)\breturn_result\b(?!`)", "return"),
+    )
+)
+
+
+def _completion_text(text: str) -> str:
+    """Core text that names ``return_result``, reworded for a top-level ``return``."""
+    if "return_result" not in text:
+        return text
+    for pattern, replacement in _COMPLETION_REWRITES:
+        text = pattern.sub(replacement, text)
+    return text
+
+
+@hidden
+def _return_result_removed(*args: Any, **kwargs: Any) -> None:
+    """Atom's stand-in for core's return_result: a NameError that says what ends a turn."""
+    del args, kwargs
+    get_harness_metrics().return_result_call()
+    raise NameError(f"name 'return_result' is not defined: {_RETURN_HINT}", name="return_result")
+
+
+def _bare_return_line(code: str) -> int | None:
+    """The line of the cell's first top-level ``return`` with no value, if any."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return None  # the runtime reports it
+    pending: list[ast.AST] = list(tree.body)
+    while pending:
+        node = pending.pop(0)
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef | ast.Lambda):
+            continue
+        if isinstance(node, ast.Return) and node.value is None:
+            return node.lineno
+        pending.extend(ast.iter_child_nodes(node))
+    return None
+
+
+@hidden
+class AtomReturnCodeAct(CodeActV2):
+    """CodeActV2 whose cells end the call with a top-level ``return``, not ``return_result``.
+
+    The returned value is validated like ``return_result(value)`` (same
+    retries and metrics). It needs the owned execution namespace
+    (``_execution_namespace_for``), whose compiler marks executed returns.
+    """
+
+    def _build_execute_python_tool(self) -> Any:
+        tool = super()._build_execute_python_tool()
+        tool.description = tool.description.replace(_CORE_FINISH_TEXT, _FINISH_TEXT)
+        return tool
+
+    def _build_builtins(self, runtime: Any, call: Any) -> dict[str, Any]:
+        builtins = super()._build_builtins(runtime, call)
+        # A top-level ``return`` ends the turn; a call says so (and is counted).
+        builtins["return_result"] = _return_result_removed
+        return builtins
+
+    def _return_statement_completes(self) -> bool:
+        return True
+
+    def _always_available_builtins(self) -> tuple[str, ...]:
+        return tuple(
+            name for name in super()._always_available_builtins() if name != "return_result()"
+        )
+
+    def _mentions_completion(self, arguments: object) -> bool:
+        code = arguments.get("code") if isinstance(arguments, dict) else None
+        return isinstance(code, str) and "return" in code
+
+    def _completion_text(self, text: str) -> str:
+        return _completion_text(text)
+
+    async def _execute_code(self, runtime: Any, code: str, *args: Any, **kwargs: Any) -> Any:
+        """Refuse a cell with a bare top-level ``return`` before it runs: it names no result."""
+        line = _bare_return_line(code)
+        if line is None:
+            return await super()._execute_code(runtime, code, *args, **kwargs)
+        from nooa.events import ExecutionResult
+
+        error = SyntaxError(
+            f"a bare `return` (line {line}) gives the turn no result: return one, "
+            "e.g. `return Done(message=..., explanation=...)`"
+        )
+        return ExecutionResult(stdout="", error=error, defined_methods={})
+
+    @strategy(TemplateStrategy())
+    async def _tool_use_reminder(self, runtime: Any, reason: str) -> str:
+        """{reason} Call `python_cell(code)`. To finish, `return value` at the cell's top level."""
+        ...
+
+    @staticmethod
+    def _retry_text_only_response(context: Any) -> Any:
+        return TextOnlyResponseAction.retry(
+            Error(
+                content=(
+                    "Your last reply was plain text with no tool call. It was preserved, "
+                    "but a bare message cannot end the turn or run code. "
+                    f"To finish `{context.call.method_name}`, call `python_cell` with a "
+                    "top-level `return value` in the cell. To continue working, "
+                    "call `python_cell` with the next computation."
+                )
+            )
+        )
+
+
 _V2_CONTEXT: Annotated[dict[str, Any], hidden] = {
     "state": None,
     "execution_context": None,
@@ -139,11 +283,11 @@ class AtomAgentBase(InteractiveAgent):
     interactive turns, send brief progress notes and each answer (complete
     Markdown) with ``self.message()``.
 
-    End every turn with exactly one ``return_result(...)``: ``Done`` after
+    End every turn with exactly one top-level ``return``: ``Done`` after
     sending the reply with ``self.message()``::
 
         self.message("Fixed the off-by-one in `parse()`; its tests pass.")
-        return_result(Done(explanation="fixed parse() and ran its tests"))
+        return Done(explanation="fixed parse() and ran its tests")
 
     ``NeedInput(question=...)`` only when a person must answer (the host shows
     ``question``; don't also send it); ``Waiting(explanation=..., on=[...])``
@@ -642,6 +786,18 @@ class AtomAgentBase(InteractiveAgent):
         }
 
     @hidden
+    @no_trace
+    def _execution_namespace_for(self, call: Any) -> Any:
+        """Each method call gets its own owned namespace (locals last one call).
+
+        Its compiler marks a cell's executed top-level ``return``, which ends
+        the turn (``AtomReturnCodeAct``).
+        """
+        from nooa.runtime.execution_namespace import RUNTIME_NAMES, ExecutionNamespace
+
+        return ExecutionNamespace(reserved=RUNTIME_NAMES | frozenset(call.kwargs))
+
+    @hidden
     @strategy(PredictStrategy(PredictConfig(output_serialization="tool_call")))
     async def name_session(self, user_message: str) -> str:
         """Generate an ultra-short 2-5 word session title for the conversation
@@ -650,7 +806,9 @@ class AtomAgentBase(InteractiveAgent):
 
     @hidden
     @strategy(
-        CodeActV2(config=CodeActConfig(cell_timeout=1800.0, postconditions=[require_running_wait])),
+        AtomReturnCodeAct(
+            config=CodeActConfig(cell_timeout=1800.0, postconditions=[require_running_wait])
+        ),
         context=_V2_CONTEXT,
     )
     async def handle(
@@ -662,7 +820,7 @@ class AtomAgentBase(InteractiveAgent):
         """Handle one interactive turn: the newest request and anything else that arrived.
 
         Do all the work the request needs before ending the turn; run checks
-        rather than assume them. End with exactly one ``return_result(...)``
+        rather than assume them. End with exactly one top-level ``return``
         (``Done``, ``NeedInput`` or ``Waiting``) as your instructions describe.
 
         You are event-driven: queues shows running producers and pending
@@ -678,7 +836,7 @@ class AtomAgentBase(InteractiveAgent):
 
     @hidden
     @strategy(
-        CodeActV2(
+        AtomReturnCodeAct(
             config=CodeActConfig(
                 cell_timeout=1800.0,
                 postconditions=[require_result, require_running_wait_unattended],
@@ -701,7 +859,7 @@ class AtomAgentBase(InteractiveAgent):
 
         Do the task completely, verify it, then end with::
 
-            return_result(Done(
+            return Done(
                 explanation="fixed the parser bug",
                 result=TaskResult(
                     solution_description="What was done, including modified paths",
@@ -709,7 +867,7 @@ class AtomAgentBase(InteractiveAgent):
                     how_to_verify="How someone else can check it",
                     report="The full report for the requester",
                 ),
-            ))
+            )
 
         If something blocks you, still return ``Done`` with a ``TaskResult``
         that says what blocked you and what you tried. Return
@@ -720,7 +878,7 @@ class AtomAgentBase(InteractiveAgent):
 
     @hidden
     @strategy(
-        CodeActV2(
+        AtomReturnCodeAct(
             config=CodeActConfig(
                 cell_timeout=1800.0,
                 postconditions=[require_result, require_running_wait_unattended],
@@ -780,7 +938,7 @@ class AtomAgentBase(InteractiveAgent):
         Before ``Done``, leave the tree clean: no scratch files.
         Leave children open; the host closes them after grading.
 
-            return_result(Done(
+            return Done(
                 explanation="fixed the parser bug",
                 result=TaskResult(
                     solution_description="What was done, including modified paths",
@@ -788,7 +946,7 @@ class AtomAgentBase(InteractiveAgent):
                     how_to_verify="How someone else can check it",
                     report="The full report for the requester",
                 ),
-            ))
+            )
 
         If something blocks you, still return ``Done`` with a ``TaskResult``
         that says what blocked you and what was tried.
@@ -797,7 +955,9 @@ class AtomAgentBase(InteractiveAgent):
 
     @hidden
     @strategy(
-        CodeActV2(config=CodeActConfig(cell_timeout=1800.0, postconditions=[require_task_result])),
+        AtomReturnCodeAct(
+            config=CodeActConfig(cell_timeout=1800.0, postconditions=[require_task_result])
+        ),
         context=_V2_CONTEXT,
     )
     async def handle_work(
@@ -818,12 +978,12 @@ class AtomAgentBase(InteractiveAgent):
         Assume you are the only one editing this checkout, and leave it clean:
         remove scratch files before ``Done``.
 
-        End with exactly one ``return_result(...)``:
+        End with exactly one top-level ``return``:
 
         - ``Done`` with a ``TaskResult``, when the task is finished or blocked
           (then say what blocked you and what you tried)::
 
-              return_result(Done(
+              return Done(
                   explanation="fixed the parser bug",
                   result=TaskResult(
                       solution_description="What was done, including modified paths",
@@ -831,7 +991,7 @@ class AtomAgentBase(InteractiveAgent):
                       how_to_verify="How someone else can check it",
                       report="The full report for your parent",
                   ),
-              ))
+              )
 
         - ``NeedInput(question=...)`` only if you can ask and cannot go on
           without your parent's answer; it arrives as your next message.

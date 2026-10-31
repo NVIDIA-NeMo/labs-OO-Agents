@@ -20,8 +20,8 @@ from nooa.strategy_validation import InvariantError
 TIMEOUT = 30
 
 RESULT = (
-    "return_result(Done(explanation='verified', result=TaskResult("
-    "solution_description='s', evidence='e', how_to_verify='h', report='VERIFIED')))"
+    "return Done(explanation='verified', result=TaskResult("
+    "solution_description='s', evidence='e', how_to_verify='h', report='VERIFIED'))"
 )
 REJECTED = "WaitingTargetNotRunning"
 FIX = "Send a child work with `await child.send(...)`, spawn one, or finish with Done"
@@ -90,7 +90,7 @@ async def test_waiting_on_delegates_without_a_child_is_rejected(tmp_path, sessio
         tmp_path,
         sessions_dir,
         [
-            cell("return_result(Waiting(explanation='w', on=['delegates']))"),
+            cell("return Waiting(explanation='w', on=['delegates'])"),
             cell(RESULT),
         ],
     )
@@ -112,16 +112,16 @@ async def test_waiting_when_every_child_is_idle_with_nothing_pending_is_rejected
                 "await self.v.child.wait()\n"
                 "self.delegates.flush()\n"
                 "assert self.children()[0].status == 'retained'\n"
-                "return_result(Waiting(explanation='w', on=['delegates']))"
+                "return Waiting(explanation='w', on=['delegates'])"
             ),
-            cell("return_result(Waiting(explanation='w', on=['worker']))"),
+            cell("return Waiting(explanation='w', on=['worker'])"),
             cell(RESULT),
         ],
         {
             "worker": [
                 cell(
-                    "return_result(Done(explanation='did it', result=TaskResult("
-                    "solution_description='s', evidence='e', how_to_verify='h', report='did it')))"
+                    "return Done(explanation='did it', result=TaskResult("
+                    "solution_description='s', evidence='e', how_to_verify='h', report='did it'))"
                 )
             ]
         },
@@ -143,15 +143,15 @@ async def test_waiting_while_a_child_is_running_is_accepted(tmp_path, sessions_d
                 "        break\n"
                 "    await asyncio.sleep(0.01)\n"
                 "assert self.children()[0].status == 'running'\n"
-                "return_result(Waiting(explanation='w', on=['delegates', 'worker']))"
+                "return Waiting(explanation='w', on=['delegates', 'worker'])"
             ),
             cell("assert notification['delegates']\n" + RESULT),
         ],
         {
             "worker": [
                 cell(
-                    "await asyncio.sleep(0.3)\nreturn_result(Done(explanation='did it', result=TaskResult("
-                    "solution_description='s', evidence='e', how_to_verify='h', report='did it')))"
+                    "await asyncio.sleep(0.3)\nreturn Done(explanation='did it', result=TaskResult("
+                    "solution_description='s', evidence='e', how_to_verify='h', report='did it'))"
                 )
             ]
         },
@@ -173,15 +173,15 @@ async def test_waiting_on_a_buffered_result_is_accepted(tmp_path, sessions_dir):
                 "    await asyncio.sleep(0.01)\n"
                 "assert self.delegates.qsize() == 1\n"
                 "assert self.children()[0].status == 'retained'\n"
-                "return_result(Waiting(explanation='w', on=['delegates']))"
+                "return Waiting(explanation='w', on=['delegates'])"
             ),
             cell("[item] = notification['delegates']\n" + RESULT),
         ],
         {
             "worker": [
                 cell(
-                    "return_result(Done(explanation='did it', result=TaskResult("
-                    "solution_description='s', evidence='e', how_to_verify='h', report='did it')))"
+                    "return Done(explanation='did it', result=TaskResult("
+                    "solution_description='s', evidence='e', how_to_verify='h', report='did it'))"
                 )
             ]
         },
@@ -203,7 +203,7 @@ async def test_waiting_on_a_working_child_is_accepted(tmp_path, sessions_dir):
                 "        break\n"
                 "    await asyncio.sleep(0.01)\n"
                 "assert self.children()[0].status == 'working', self.children()[0].status\n"
-                "return_result(Waiting(explanation='w', on=['delegates', 'worker']))"
+                "return Waiting(explanation='w', on=['delegates', 'worker'])"
             ),
             cell("[item] = notification['delegates']\n" + RESULT),
         ],
@@ -213,12 +213,12 @@ async def test_waiting_on_a_working_child_is_accepted(tmp_path, sessions_dir):
                     "self.queue_manager.queue('ci')\n"
                     "self.queue_manager.spawn(asyncio.sleep(0.5, result='green'), "
                     "channel='ci', label='ci-1')\n"
-                    "return_result(Waiting(explanation='ci running', on=['ci']))"
+                    "return Waiting(explanation='ci running', on=['ci'])"
                 ),
                 cell(
                     "assert notification['ci'] == ['green']\n"
-                    "return_result(Done(explanation='did it', result=TaskResult("
-                    "solution_description='s', evidence='e', how_to_verify='h', report='did it')))"
+                    "return Done(explanation='did it', result=TaskResult("
+                    "solution_description='s', evidence='e', how_to_verify='h', report='did it'))"
                 ),
             ]
         },
@@ -240,19 +240,19 @@ async def test_waiting_right_after_sending_to_an_idle_retained_child_is_accepted
                 "await self.v.child.wait()\n"
                 "self.delegates.flush()\n"
                 "await self.v.child.send('FEEDBACK: one more case')\n"
-                f"return_result(Waiting(explanation='w', on=[{target!r}]))"
+                f"return Waiting(explanation='w', on=[{target!r}])"
             ),
             cell("[item] = notification['delegates']\n" + RESULT),
         ],
         {
             "worker": [
                 cell(
-                    "return_result(Done(explanation='did it', result=TaskResult("
-                    "solution_description='s', evidence='e', how_to_verify='h', report='did it')))"
+                    "return Done(explanation='did it', result=TaskResult("
+                    "solution_description='s', evidence='e', how_to_verify='h', report='did it'))"
                 ),
                 cell(
-                    "return_result(Done(explanation='did the case', result=TaskResult("
-                    "solution_description='s', evidence='e', how_to_verify='h', report='did the case')))"
+                    "return Done(explanation='did the case', result=TaskResult("
+                    "solution_description='s', evidence='e', how_to_verify='h', report='did the case'))"
                 ),
             ]
         },
@@ -270,23 +270,23 @@ async def test_waiting_on_a_child_by_id_is_checked(tmp_path, sessions_dir):
                 "self.v.child = await self.spawn('Worker', 'fix it', name='worker')\n"
                 "await self.v.child.wait()\n"
                 "self.delegates.flush()\n"
-                "return_result(Waiting(explanation='w', on=[self.v.child.id]))"
+                "return Waiting(explanation='w', on=[self.v.child.id])"
             ),
             cell(
                 "await self.v.child.send('more')\n"
-                "return_result(Waiting(explanation='w', on=[self.v.child.id]))"
+                "return Waiting(explanation='w', on=[self.v.child.id])"
             ),
             cell("[item] = notification['delegates']\n" + RESULT),
         ],
         {
             "worker": [
                 cell(
-                    "return_result(Done(explanation='did it', result=TaskResult("
-                    "solution_description='s', evidence='e', how_to_verify='h', report='did it')))"
+                    "return Done(explanation='did it', result=TaskResult("
+                    "solution_description='s', evidence='e', how_to_verify='h', report='did it'))"
                 ),
                 cell(
-                    "return_result(Done(explanation='did more', result=TaskResult("
-                    "solution_description='s', evidence='e', how_to_verify='h', report='did more')))"
+                    "return Done(explanation='did more', result=TaskResult("
+                    "solution_description='s', evidence='e', how_to_verify='h', report='did more'))"
                 ),
             ]
         },
@@ -301,13 +301,13 @@ async def test_waiting_on_jobs_needs_a_running_job(tmp_path, sessions_dir):
         tmp_path,
         sessions_dir,
         [
-            cell("return_result(Waiting(explanation='w', on=['jobs']))"),
-            cell("return_result(Waiting(explanation='w', on=['ci_42']))"),
+            cell("return Waiting(explanation='w', on=['jobs'])"),
+            cell("return Waiting(explanation='w', on=['ci_42'])"),
             cell(
                 "self.queue_manager.queue('ci')\n"
                 "self.queue_manager.spawn(asyncio.sleep(0.2, result='green'), "
                 "channel='ci', label='ci-42')\n"
-                "return_result(Waiting(explanation='w', on=['ci-42', 'ci']))"
+                "return Waiting(explanation='w', on=['ci-42', 'ci'])"
             ),
             cell("assert notification['ci'] == ['green']\n" + RESULT),
         ],
@@ -328,16 +328,16 @@ async def test_waiting_on_an_unknown_name_is_rejected_and_lists_what_is_running(
         [
             cell(
                 "self.v.child = await self.spawn('Worker', 'fix it', name='worker')\n"
-                "return_result(Waiting(explanation='w', on=['user_messages', 'ci', 'delegates']))"
+                "return Waiting(explanation='w', on=['user_messages', 'ci', 'delegates'])"
             ),
-            cell("return_result(Waiting(explanation='w', on=['delegates']))"),
+            cell("return Waiting(explanation='w', on=['delegates'])"),
             cell("[item] = notification['delegates']\n" + RESULT),
         ],
         {
             "worker": [
                 cell(
-                    "await asyncio.sleep(0.3)\nreturn_result(Done(explanation='did it', result=TaskResult("
-                    "solution_description='s', evidence='e', how_to_verify='h', report='did it')))"
+                    "await asyncio.sleep(0.3)\nreturn Done(explanation='did it', result=TaskResult("
+                    "solution_description='s', evidence='e', how_to_verify='h', report='did it'))"
                 )
             ]
         },

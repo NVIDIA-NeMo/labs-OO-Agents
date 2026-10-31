@@ -59,7 +59,12 @@ with hidden:
     from nooa.tools import TodoManager
     from nooa.tools.shell_tools import FileWrite, Match
     from nooa_atom.agent import work_shell
-    from nooa_atom.agent.base import AtomAgentBase, session_title_request  # noqa: F401
+    from nooa_atom.agent.base import (  # noqa: F401
+        _RETURN_HINT,
+        AtomAgentBase,
+        AtomReturnCodeAct,
+        session_title_request,
+    )
     from nooa_atom.agent.conditions import PERSON_NAMES, require_result
     from nooa_atom.agent.done_reflection import DoneReflectionPlan, reflect_accepted_done
     from nooa_atom.agent.reflection_gate import _ReflectionGate
@@ -147,6 +152,8 @@ def _name_error_hint(error: BaseException, formatted: str) -> str | None:
         if match is None:
             return None
         name = match.group("name")
+    if name == "return_result":  # counted where it was called
+        return None if _RETURN_HINT in formatted else f"Cells {_RETURN_HINT}."
     hint = (
         "Live names are listed in the python_cell_state block; python_cell_state() lists up to "
         "20 (both may omit some). Check both and your context before recreating a name."
@@ -158,7 +165,7 @@ def _name_error_hint(error: BaseException, formatted: str) -> str | None:
 
 
 @hidden
-class AtomCodeAct(CodeActV2):
+class AtomCodeAct(AtomReturnCodeAct):
     """CodeActV2 whose cells see this module's names, not the base module's legacy names.
 
     An ``AtomAgent`` subclass defined in another module (a ``file.py:Class``
@@ -530,7 +537,7 @@ _CONTEXT: Annotated[dict[str, Any], hidden] = {
     "self": Context(expr="doc(type(self), concise=True)", prefix=True),
 }
 _NOTIFICATION: Annotated[Any, hidden] = spec(max_string=50_000, max_length=100, max_depth=10)
-# An invalid return_result value is a cell error the model retries on; the
+# An invalid returned value is a cell error the model retries on; the
 # turn fails only after this many in one turn (other errors keep max_retries).
 _MAX_RESULT_RETRIES: Annotated[int, hidden] = 10
 _REMOVED: Annotated[str, hidden] = (
@@ -575,7 +582,7 @@ class AtomAgent(AtomAgentBase):
     ``notification`` maps a channel (``user_messages``, ``jobs``,
     ``system_messages``...) to new items; ``jobs`` holds the ``JobEvent``s of
     work nobody awaited. Never predict a pending job's result. End every
-    turn with exactly one ``return_result(...)``:
+    turn with exactly one top-level ``return`` of:
     ``Done(message="your reply", explanation="short status")``,
     ``NeedInput(question=...)`` only when someone can answer, or
     ``Waiting(explanation=..., on=[names], message=...)`` for live work: jobs or

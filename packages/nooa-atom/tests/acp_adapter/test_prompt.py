@@ -297,7 +297,7 @@ async def test_host_controls_answer_as_text(atom_adapter, workspace, client):
 _TRACE_CELL = (
     "from nooa.tracing import get_session\n"
     "self.message(str(get_session()))\n"
-    "return_result(Done(explanation='traced'))"
+    "return Done(explanation='traced')"
 )
 
 
@@ -322,7 +322,7 @@ async def test_each_session_is_its_own_trace_session(atom_adapter, workspace, cl
 _HOOKS_CELL = (
     "from nooa.runtime.hooks import get_hooks\n"
     "self.message(type(get_hooks()).__name__)\n"
-    "return_result(Done(explanation='hooked'))"
+    "return Done(explanation='hooked')"
 )
 
 
@@ -439,7 +439,7 @@ async def test_the_first_prompt_asks_the_agent_for_a_title(atom_adapter, workspa
             cell(
                 "await self.rename_session('Parser fix')\n"
                 "self.message('On it.')\n"
-                "return_result(Done(explanation='titled'))"
+                "return Done(explanation='titled')"
             ),
             reply("Second."),
         ]
@@ -767,7 +767,7 @@ async def test_a_pool_steer_the_running_turn_takes_is_done_with_it(make_adapter,
                 cell(BLOCKING_CELL),
                 cell(
                     "await self.queue_manager.get_channel('user_messages').get()\n"
-                    "return_result(NeedInput(question='Which branch?'))"
+                    "return NeedInput(question='Which branch?')"
                 ),
             ]
         }
@@ -795,7 +795,7 @@ async def test_a_pool_steers_question_ends_the_prompt_as_text(make_adapter, work
             None: [
                 cell(BLOCKING_CELL),
                 reply("First."),
-                cell("return_result(NeedInput(question='Name the release?'))"),
+                cell("return NeedInput(question='Name the release?')"),
             ]
         }
     )
@@ -905,7 +905,7 @@ async def test_a_question_waits_while_a_pool_steer_is_queued(make_adapter, works
         {
             None: [
                 cell(BLOCKING_CELL),
-                cell("return_result(NeedInput(question='Which branch?'))"),
+                cell("return NeedInput(question='Which branch?')"),
                 reply("Using main."),
             ]
         }
@@ -1051,7 +1051,7 @@ async def test_injected_buffered_steer_fallback_echoes_once_with_same_id(
     models = ScriptedModels(
         {
             None: [
-                cell(BLOCKING_CELL + "\nreturn_result(Done(explanation='first finished'))"),
+                cell(BLOCKING_CELL + "\nreturn Done(explanation='first finished')"),
                 reply("Handled fallback."),
             ]
         }
@@ -1093,7 +1093,7 @@ async def test_pool_steer_consumed_outcome_cannot_overtake_ack(
             None: [
                 cell(
                     BLOCKING_CELL
-                    + "\nextra = await self.user_messages.get()\nreturn_result(Done(explanation='read'))"
+                    + "\nextra = await self.user_messages.get()\nreturn Done(explanation='read')"
                 ),
             ]
         }

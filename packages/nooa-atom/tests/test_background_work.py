@@ -16,10 +16,10 @@ from nooa_atom import SessionOptions, SessionStore
 from nooa_atom.session.registry import SessionRegistry
 
 TIMEOUT = 30
-DONE = "return_result(Done(explanation='done'))"
+DONE = "return Done(explanation='done')"
 CHILD_DONE = (
-    "return_result(Done(explanation='ok', result=TaskResult("
-    "solution_description='s', evidence='e', how_to_verify='h')))"
+    "return Done(explanation='ok', result=TaskResult("
+    "solution_description='s', evidence='e', how_to_verify='h'))"
 )
 
 
@@ -97,12 +97,12 @@ async def test_waiting_on_a_child_name_or_a_job_name_is_accepted(tmp_path, sessi
         [
             cell(
                 "self.v.child = await self.spawn('Worker', 'work', name='worker')\n"
-                "return_result(Waiting(explanation='w', on=['worker']))"
+                "return Waiting(explanation='w', on=['worker'])"
             ),
             cell(
                 "assert notification['delegates']\n"
                 "await self.jobs.run('sleep 0.2', name='tests')\n"
-                "return_result(Waiting(explanation='w', on=['tests']))"
+                "return Waiting(explanation='w', on=['tests'])"
             ),
             cell("assert notification['jobs'][0].name == 'tests'\n" + DONE),
         ],
@@ -133,7 +133,7 @@ async def test_jobs_and_children_share_one_namespace_of_live_names(tmp_path, ses
                 "await self.jobs.run('true', name='lint')\n"  # free again once closed
                 "self.v.again = await self.spawn('Review it', 'review it', name='review')\n"
                 "print('PATHS<<' + self.v.again.path + ' ' + repr(self.v.again) + '>>')\n"
-                "return_result(Waiting(explanation='w', on=['review']))"
+                "return Waiting(explanation='w', on=['review'])"
             ),
             cell(DONE),
         ],
@@ -166,7 +166,7 @@ async def test_an_unknown_name_lists_what_is_running(tmp_path, sessions_dir):
             cell(
                 "await self.jobs.run('sleep 30', name='tests')\n"
                 "self.v.child = await self.spawn('Worker', 'work', name='worker')\n"
-                "return_result(Waiting(explanation='w', on=['lint']))"
+                "return Waiting(explanation='w', on=['lint'])"
             ),
             cell("await self.jobs.cancel('tests')\n" + DONE),
         ],
@@ -199,7 +199,7 @@ async def test_a_child_with_an_unread_question_says_so_until_it_is_read(tmp_path
             ),
             cell(DONE),
         ],
-        {"asker": [cell("return_result(NeedInput(question='Which branch?'))")]},
+        {"asker": [cell("return NeedInput(question='Which branch?')")]},
     )
     asked = calls[1].split("ASKED<<", 1)[1].split(">>", 1)[0]
     read = calls[1].split("READ<<", 1)[1].split(">>", 1)[0]
@@ -237,18 +237,18 @@ async def test_paths_of_jobs_and_a_grandchild(tmp_path, sessions_dir):
             "assert self.child('/root/review_pr_462').id == self.v.review.id\n"
             "assert self.child(self.v.review.id).name == 'review_pr_462'\n"
             "print('STATUS<<' + self._queue_status() + '>>')\n"
-            "return_result(Waiting(explanation='w', on=['review_pr_462']))"
+            "return Waiting(explanation='w', on=['review_pr_462'])"
         ),
         cell(
             "await self.jobs.cancel('tests')\nawait self.jobs.cancel('ci_check')\n"
-            "return_result(Done(explanation='done'))"
+            "return Done(explanation='done')"
         ),
     ]
     models.scripts[None] = root_cells
     models.scripts["review_pr_462"] = [
         cell(
             "self.v.verifier = await self.spawn('Verify the fix', 'verify it', name='verifier')\n"
-            "return_result(Waiting(explanation='w', on=['verifier']))"
+            "return Waiting(explanation='w', on=['verifier'])"
         )
     ]
     models.scripts["verifier"] = _slow_child(30)
@@ -330,7 +330,7 @@ async def test_the_queues_block_reads_unread_running_idle(tmp_path, sessions_dir
     ]
     models.scripts["verifier"] = _slow_child(30)
     models.scripts["pick_branch"] = [
-        cell("return_result(NeedInput(question='Which branch should I push to: main or dev?'))")
+        cell("return NeedInput(question='Which branch should I push to: main or dev?')")
     ]
     workspace = tmp_path / "workspace"
     workspace.mkdir()

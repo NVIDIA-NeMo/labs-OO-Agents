@@ -118,8 +118,8 @@ def options(tmp_path, sessions_dir):
 
 
 WORK_RESULT = (
-    "return_result(Done(explanation='reviewed', result=TaskResult(solution_description='s', "
-    "evidence='e', how_to_verify='v', report='R1')))"
+    "return Done(explanation='reviewed', result=TaskResult(solution_description='s', "
+    "evidence='e', how_to_verify='v', report='R1'))"
 )
 
 
@@ -142,13 +142,13 @@ async def test_hyphenated_shell_jobs_resources_children_and_waiting(sessions_dir
             "assert res.report == 'R1', res\n"
             "self.v.names = [j.name for j in self.jobs.list()]\n"
             "self.jobs.launch(Shell().run('sleep 0.3; echo built'), name='build-x')\n"
-            "return_result(Waiting(explanation='w', on=['build-x']))"
+            "return Waiting(explanation='w', on=['build-x'])"
         ),
         cell(
             "[event] = [e for e in notification['jobs'] if e.name == 'build-x']\n"
             "assert event.kind == 'done' and event.value.stdout == 'built\\n', event\n"
             "self.v.long = self.jobs.launch(asyncio.sleep(60), name='read-erc')\n"
-            "return_result(Done(explanation='done'))"
+            "return Done(explanation='done')"
         ),
     ]
     models.scripts["review-pr"] = [cell("assert 'REVIEW' in str(notification)\n" + WORK_RESULT)]

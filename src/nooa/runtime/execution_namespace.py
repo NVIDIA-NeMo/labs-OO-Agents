@@ -28,6 +28,7 @@ from uuid import uuid4
 _INTERNAL = "_nooa_ns_"
 _SOURCE = _INTERNAL + "source"
 _DELETE = _INTERNAL + "delete"
+_RETURN = _INTERNAL + "return"
 RUNTIME_NAMES = frozenset(
     {
         "self",
@@ -53,6 +54,45 @@ def _source_decorator(source: str):
         return function
 
     return attach
+
+
+class CellReturn:
+    """What a cell's executed top-level ``return`` hands back.
+
+    The compiler wraps every top-level ``return`` (not one in a nested
+    def/lambda/class) in this marker, so the runtime can tell a cell that ran
+    ``return x`` (even ``return None``) from one that fell off its end.
+    ``bare`` is a ``return`` with no value.
+    """
+
+    __slots__ = ("bare", "value")
+
+    def __init__(self, value: Any = None, bare: bool = False) -> None:
+        self.value = value
+        self.bare = bare
+
+
+def _cell_return(*value: Any) -> CellReturn:
+    return CellReturn(value[0]) if value else CellReturn(bare=True)
+
+
+class _TopLevelReturns(ast.NodeTransformer):
+    """Wrap the cell's own ``return`` statements; nested scopes keep theirs."""
+
+    def visit_FunctionDef(self, node):
+        return node
+
+    visit_AsyncFunctionDef = visit_FunctionDef
+    visit_ClassDef = visit_FunctionDef
+    visit_Lambda = visit_FunctionDef
+
+    def visit_Return(self, node):
+        call = ast.Call(
+            func=ast.Name(id=_RETURN, ctx=ast.Load()),
+            args=[] if node.value is None else [node.value],
+            keywords=[],
+        )
+        return ast.copy_location(ast.Return(value=ast.copy_location(call, node)), node)
 
 
 class _CellBindings(ast.NodeVisitor):
@@ -292,7 +332,9 @@ class CompiledCell:
     dependencies: frozenset[str]
 
 
-def compile_cell(source: str, filename: str, reserved: frozenset[str]) -> CompiledCell:
+def compile_cell(
+    source: str, filename: str, reserved: frozenset[str], *, mark_returns: bool = False
+) -> CompiledCell:
     """Compile once; definitions/defaults/decorators run only on cell execution."""
     name = _INTERNAL + "cell_" + uuid4().hex
     # Parse before wrapping: indenting source text changes multiline literals
@@ -333,6 +375,10 @@ def compile_cell(source: str, filename: str, reserved: frozenset[str]) -> Compil
     metadata = _SourceMetadata()
     wrapper.body = [metadata.visit(statement) for statement in wrapper.body]
     _GlobalDeletes().visit(wrapper)
+    if mark_returns:
+        # After the reserved-name check: the marker call names an internal global.
+        returns = _TopLevelReturns()
+        wrapper.body = [returns.visit(statement) for statement in wrapper.body]
     ast.fix_missing_locations(tree)
     return CompiledCell(
         compile(tree, filename, "exec", dont_inherit=True),
@@ -414,6 +460,7 @@ class ExecutionNamespace:
         self.globals["__builtins__"] = _RuntimeBuiltins(self)
         self.globals[_SOURCE] = _source_decorator
         self.globals[_DELETE] = self.delete_global
+        self.globals[_RETURN] = _cell_return
         self.framework: dict[str, Any] = {}
         self._framework_names: set[str] = set()
         self.deleted_names: set[str] = set()
@@ -641,8 +688,10 @@ class ExecutionNamespace:
             self._foreground = None
             _calls.reset(token)
 
-    def cell(self, source: str, filename: str = "<experimental-cell>"):
-        compiled = compile_cell(source, filename, self.reserved)
+    def cell(self, source: str, filename: str = "<experimental-cell>", *, mark_returns=False):
+        """Compile and start one cell; ``mark_returns``: an executed top-level
+        ``return x`` gives ``CellReturn(x)``, falling off the end gives ``None``."""
+        compiled = compile_cell(source, filename, self.reserved, mark_returns=mark_returns)
         # Publish only after successful compilation, but before execution so
         # runtime failures and retained tracebacks can still recover the source.
         entry = (len(source), None, source.splitlines(keepends=True), filename)

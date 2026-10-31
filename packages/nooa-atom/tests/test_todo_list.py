@@ -18,8 +18,8 @@ from nooa.tools.todo import Todo as CoreTodo
 UNIFIED = "nooa_atom.agent:AtomAgent"
 TIMEOUT = 60
 WORK_RESULT = (
-    "return_result(Done(explanation='{e}', result=TaskResult(solution_description='s', "
-    "evidence='e', how_to_verify='v', report='{r}')))"
+    "return Done(explanation='{e}', result=TaskResult(solution_description='s', "
+    "evidence='e', how_to_verify='v', report='{r}'))"
 )
 
 
@@ -493,7 +493,7 @@ async def test_unified_agent_shows_the_short_list_and_a_brief_arrives_active(
             "result = await self.jobs.launch(Subagent('fix parser').run(todo), name='fix')\n"
             "todo.comments.append('child reported: ' + result.report)\n"
             "self.todo.complete(todo)\n"
-            "return_result(Done(explanation=result.report))"
+            "return Done(explanation=result.report)"
         ),
     ]
     # The child's copy of its brief is already active: no id, no activate.
@@ -525,7 +525,7 @@ async def test_unified_agent_shows_the_short_list_and_a_brief_arrives_active(
 
 async def _saved(sessions_dir, options, models, build) -> str:
     """Save a session after ``build(agent)`` has filled its to-do list; return its id."""
-    models.scripts[None] = [cell("return_result(Done(explanation='ok'))")]
+    models.scripts[None] = [cell("return Done(explanation='ok')")]
     registry = SessionRegistry(SessionStore(sessions_dir), agent_factory=models)
     try:
         root = await registry.create(options)

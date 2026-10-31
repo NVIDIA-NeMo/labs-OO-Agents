@@ -54,7 +54,12 @@ async def test_completion_checks_actual_generation_for_every_engine_and_timeout(
             cell(
                 "saved=return_result\nvalue=await self.child.answer(saved, _strategy=self.child_strategy)\nassert value == -1, value"
             ),
-            cell("saved(Done(explanation=str(value)))"),  # same-call later-cell alias stays valid
+            # An Atom cell ends with ``return``: its return_result alias completes
+            # nothing, in a nested generation or later (NameError with the hint).
+            cell(
+                "try:\n saved(Done(explanation='alias'))\nexcept NameError:\n"
+                " return Done(explanation=str(value))"
+            ),
         ]
     )
     outer = AtomAgent(cwd=tmp_path, llm=outer_llm)
@@ -83,10 +88,8 @@ def fresh_class():
 async def test_newly_advertised_dynamic_class_is_available_in_default_session(tmp_path):
     llm = CellLLM(
         [
-            cell("return_result(Done(explanation='init'))"),
-            cell(
-                "assert isinstance(self.fresh, FreshSkill)\nreturn_result(Done(explanation='available'))"
-            ),
+            cell("return Done(explanation='init')"),
+            cell("assert isinstance(self.fresh, FreshSkill)\nreturn Done(explanation='available')"),
         ]
     )
     agent = AtomAgent(cwd=tmp_path, llm=llm)
@@ -105,14 +108,14 @@ async def test_newly_advertised_dynamic_class_is_available_in_default_session(tm
 async def test_provider_replacement_and_deactivation_preserve_alias_and_globals_identity(tmp_path):
     llm = CellLLM(
         [
-            cell("def lookup():\n return FreshSkill\nreturn_result(Done(explanation='defined'))"),
+            cell("def lookup():\n return FreshSkill\nreturn Done(explanation='defined')"),
             cell(
-                "alias=FreshSkill\nassert lookup() is type(self.fresh)\nreturn_result(Done(explanation='A'))"
+                "alias=FreshSkill\nassert lookup() is type(self.fresh)\nreturn Done(explanation='A')"
             ),
             cell(
-                "assert lookup() is type(self.fresh) and lookup() is not alias\nreturn_result(Done(explanation='B'))"
+                "assert lookup() is type(self.fresh) and lookup() is not alias\nreturn Done(explanation='B')"
             ),
-            cell("try:\n lookup()\nexcept NameError:\n return_result(Done(explanation='gone'))"),
+            cell("try:\n lookup()\nexcept NameError:\n return Done(explanation='gone')"),
         ]
     )
     agent = AtomAgent(cwd=tmp_path, llm=llm)
@@ -142,15 +145,10 @@ async def test_user_store_same_object_or_import_wins_on_replacement_and_removal(
     llm = CellLLM(
         [
             cell(
-                assignment
-                + "\ndef lookup():\n return FreshSkill\nreturn_result(Done(explanation='owned'))"
+                assignment + "\ndef lookup():\n return FreshSkill\nreturn Done(explanation='owned')"
             ),
-            cell(
-                "assert lookup() is FreshSkill\nreturn_result(Done(explanation='replaced provider'))"
-            ),
-            cell(
-                "assert lookup() is FreshSkill\nreturn_result(Done(explanation='removed provider'))"
-            ),
+            cell("assert lookup() is FreshSkill\nreturn Done(explanation='replaced provider')"),
+            cell("assert lookup() is FreshSkill\nreturn Done(explanation='removed provider')"),
         ]
     )
     agent = AtomAgent(cwd=tmp_path, llm=llm)
@@ -179,14 +177,10 @@ async def test_explicit_deletion_tombstone_prevents_reactivation_but_not_explici
     )
     llm = CellLLM(
         [
-            cell(initial + "\nreturn_result(Done(explanation='deleted'))"),
-            cell(
-                "try:\n FreshSkill\nexcept NameError:\n return_result(Done(explanation='still deleted'))"
-            ),
-            cell(
-                "FreshSkill=type(self.fresh)\nreturn_result(Done(explanation='explicitly rebound'))"
-            ),
-            cell("assert FreshSkill is restored\nreturn_result(Done(explanation='kept'))"),
+            cell(initial + "\nreturn Done(explanation='deleted')"),
+            cell("try:\n FreshSkill\nexcept NameError:\n return Done(explanation='still deleted')"),
+            cell("FreshSkill=type(self.fresh)\nreturn Done(explanation='explicitly rebound')"),
+            cell("assert FreshSkill is restored\nreturn Done(explanation='kept')"),
         ]
     )
     agent = AtomAgent(cwd=tmp_path, llm=llm)
@@ -225,7 +219,7 @@ async def test_dynamic_availability_updates_between_cells_of_one_handle(tmp_path
                 "alias=FreshSkill\nassert isinstance(self.fresh, FreshSkill)\nself.deactivate_fresh()"
             ),
             cell(
-                "try:\n FreshSkill\nexcept NameError:\n return_result(Done(explanation='gone in same call'))"
+                "try:\n FreshSkill\nexcept NameError:\n return Done(explanation='gone in same call')"
             ),
         ]
     )
@@ -253,7 +247,7 @@ class C:
             del __x
         inner()
 C.drop()
-return_result(Done(explanation='private deleted'))
+return Done(explanation='private deleted')
 """
     )
     second = (
@@ -261,9 +255,7 @@ return_result(Done(explanation='private deleted'))
         if raw_present
         else "try:\n __x\nexcept NameError:\n pass\nelse:\n raise AssertionError('unexpected raw binding')\n"
     )
-    second += (
-        "try:\n _C__x\nexcept NameError:\n return_result(Done(explanation='correct bindings'))"
-    )
+    second += "try:\n _C__x\nexcept NameError:\n return Done(explanation='correct bindings')"
     llm = CellLLM([cell(first), cell(second)])
     agent = AtomAgent(cwd=tmp_path, llm=llm)
     try:
@@ -309,8 +301,8 @@ self.capture(notification, self, print, pprint, show, return_result, python_cell
 """
     if name == "OrdinaryDynamic":
         checks += "assert isinstance(self.tool, OrdinaryDynamic)\n"
-    checks += "return_result(Done(explanation='runtime bindings win'))"
-    llm = CellLLM([cell("return_result(Done(explanation='init'))"), cell(checks)])
+    checks += "return Done(explanation='runtime bindings win')"
+    llm = CellLLM([cell("return Done(explanation='init')"), cell(checks)])
     agent = CapturingAtom(cwd=tmp_path, llm=llm, captures=captures)
     try:
         await agent.handle({"user_messages": ["one"]})
@@ -356,7 +348,7 @@ class ParameterCollisionAgent(Agent):
 
 
 async def test_current_call_parameters_keep_identity_and_are_not_provider_advertised():
-    llm = CellLLM([cell("assert payload is self.input_payload\nreturn_result(payload['token'])")])
+    llm = CellLLM([cell("assert payload is self.input_payload\nreturn payload['token']")])
     agent = ParameterCollisionAgent(llm=llm)
     agent.tool = type("payload", (), {"__module__": "dynamic_probe"})()
     agent.input_payload = {"token": "genuine input"}
@@ -371,7 +363,7 @@ async def test_shared_autoimport_fix_preserves_explicit_non_atom_user_binding():
     llm = CellLLM(
         [
             cell("print = 'explicit user binding'"),
-            cell("assert print == 'explicit user binding'\nreturn_result(7)"),
+            cell("assert print == 'explicit user binding'\nreturn 7"),
         ]
     )
     agent = LegacyChild(llm=llm)

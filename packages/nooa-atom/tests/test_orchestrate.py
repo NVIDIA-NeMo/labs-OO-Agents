@@ -39,15 +39,16 @@ UNCHANGED_PROMPTS = {
     # plus the regular progress-update guidance, and NeedInput as a plain-text
     # question (no options). Then the stable turn instructions moved into the
     # class doc: handle() keeps three sentences, and the locals paragraph left
-    # every turn method's doc.
-    "handle": "f4558376a3b74ecd3f6685a44b534581336a1e1ea701e3e71f55afac858d72ad",
-    "handle_batch": "9eef8eb5f2d8067d02c0eb742c4f6b8006ae8fff001130277e119a8510f6027d",
+    # every turn method's doc. Re-pinned for the return-statement experiment
+    # (2026-10-30): ``return_result(...)`` became a top-level ``return``.
+    "handle": "d68395c4d5820e9080db912d904b44f10c19cfe4411804c96efc3f7e4136e35e",
+    "handle_batch": "734b5ec3766f38c8f0f482afec11c6fccd9aac5cd3b73cb96b15b45aab11ee45",
 }
 
 RESULT = (
-    "return_result(Done(explanation='verified', result=TaskResult("
+    "return Done(explanation='verified', result=TaskResult("
     "solution_description='the worker fixed parse()', evidence='pytest passed', "
-    "how_to_verify='pytest', report='VERIFIED')))"
+    "how_to_verify='pytest', report='VERIFIED'))"
 )
 
 
@@ -87,7 +88,7 @@ async def test_handle_orchestrate_rejects_need_input(tmp_path):
     """Return-type validation turns a NeedInput into feedback the model sees."""
     llm = CellLLM(
         [
-            cell("return_result(NeedInput(question='which one: a or b?'))"),
+            cell("return NeedInput(question='which one: a or b?')"),
             cell(RESULT),
         ]
     )
@@ -96,7 +97,7 @@ async def test_handle_orchestrate_rejects_need_input(tmp_path):
         outcome = await agent.handle_orchestrate({"user_messages": ["fix it"]})
         assert outcome.result.report == "VERIFIED"
         feedback = str(llm.calls[1].messages)
-        assert "return_result validation error" in feedback
+        assert "return validation error" in feedback
         assert "Expected return type: nooa.interactive.Done | nooa.interactive.Waiting" in feedback
         assert "Got: NeedInput(question=" in feedback
     finally:
@@ -115,7 +116,7 @@ async def test_handle_orchestrate_is_hidden_from_the_model(tmp_path):
     """Hosts call it as a turn method; the model never sees it listed."""
     assert "handle_orchestrate" not in doc(AtomAgentBase, concise=True)
     assert "handle_orchestrate" not in doc(AtomAgentBase)
-    agent = AtomAgentBase(llm=CellLLM([cell("return_result(Done(explanation='x'))")]), cwd=tmp_path)
+    agent = AtomAgentBase(llm=CellLLM([cell("return Done(explanation='x')")]), cwd=tmp_path)
     try:
         await agent.handle({"user_messages": ["hi"]})
         call = agent.llm.calls[0]
@@ -187,14 +188,14 @@ async def test_an_orchestrating_root_leaves_children_open_for_the_host_to_close(
             "todo = self.todo.add('Fix parse()', description='Goal: fix it. Check: pytest')\n"
             "self.v.todo_id = todo.id\n"
             "self.v.child = await self.spawn('fix_parser', todo, name='fix_parser')\n"
-            "return_result(Waiting(explanation='worker running', on=['delegates']))"
+            "return Waiting(explanation='worker running', on=['delegates'])"
         ),
         cell(
             "[item] = notification['delegates']\n"
             "assert isinstance(item, ChildResult) and item.child.id == self.v.child.id\n"
             "self.todo.comment(self.v.todo_id, 'first try: ' + item.summary)\n"
             "await self.v.child.send('FEEDBACK: the empty-input case still fails')\n"
-            "return_result(Waiting(explanation='follow-up running', on=['delegates']))"
+            "return Waiting(explanation='follow-up running', on=['delegates'])"
         ),
         cell(
             "[item] = notification['delegates']\n"
@@ -205,12 +206,12 @@ async def test_an_orchestrating_root_leaves_children_open_for_the_host_to_close(
     ]
     models.scripts["fix_parser"] = [
         cell(
-            "return_result(Done(explanation='first try', result=TaskResult("
-            "solution_description='s', evidence='e', how_to_verify='h', report='first try')))"
+            "return Done(explanation='first try', result=TaskResult("
+            "solution_description='s', evidence='e', how_to_verify='h', report='first try'))"
         ),
         cell(
-            "return_result(Done(explanation='fixed the empty case', result=TaskResult("
-            "solution_description='s', evidence='e', how_to_verify='h', report='fixed the empty case')))"
+            "return Done(explanation='fixed the empty case', result=TaskResult("
+            "solution_description='s', evidence='e', how_to_verify='h', report='fixed the empty case'))"
         ),
     ]
     options = _options(tmp_path, sessions_dir, turn_method="handle_orchestrate")
@@ -250,8 +251,8 @@ async def test_an_orchestrating_root_leaves_children_open_for_the_host_to_close(
 async def test_an_orchestrating_roots_one_shot_children_run_handle_work(tmp_path, sessions_dir):
     """A delegate() worker runs handle_work, not handle_orchestrate: no recursion."""
     child_result = (
-        "return_result(Done(explanation='fixed', result=TaskResult("
-        "solution_description='s', evidence='e', how_to_verify='h', report='CHILD')))"
+        "return Done(explanation='fixed', result=TaskResult("
+        "solution_description='s', evidence='e', how_to_verify='h', report='CHILD'))"
     )
     models = AtomModels()
     models.scripts[None] = [

@@ -137,6 +137,8 @@ class HarnessMetrics(BaseModel):
 
     # ── Return Value Handling ──
     explicit_return_auto_completed: int = 0
+    # Cells that called return_result where a top-level ``return`` ends the turn.
+    return_result_called: int = 0
     implicit_return_transformed: int = 0
     # return_result(value=x)/(result=x) read as return_result(x); the keyword used
     return_result_keyword_aliases: list[str] = Field(default_factory=list)
@@ -307,6 +309,10 @@ class HarnessMetrics(BaseModel):
     # Return Value Handling
     def explicit_return_completed(self) -> None:
         self.explicit_return_auto_completed += 1
+
+    def return_result_call(self) -> None:
+        """A cell called return_result where it is not defined (a ``return`` ends the turn)."""
+        self.return_result_called += 1
 
     def implicit_return(self) -> None:
         self.implicit_return_transformed += 1
@@ -791,6 +797,12 @@ _SPAN_SCHEMA: tuple[SchemaEntry, ...] = (
         "Explicit return auto-completed",
         "Return Value Handling",
         lambda m: m.explicit_return_auto_completed,
+    ),
+    SchemaEntry(
+        "harness.return_result_called.count",
+        "return_result called where return ends the turn",
+        "Return Value Handling",
+        lambda m: m.return_result_called,
     ),
     SchemaEntry(
         "harness.implicit_return_transformed",

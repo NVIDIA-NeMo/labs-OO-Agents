@@ -119,14 +119,12 @@ def python_cell(code: str, call_id: str) -> LLMResponse:
 
 def reply(text: str, explanation: str = "answered", **kwargs: Any) -> LLMResponse:
     """A cell that sends ``text`` to the user and ends the turn with ``Done``."""
-    return cell(
-        f"self.message({text!r})\nreturn_result(Done(explanation={explanation!r}))", **kwargs
-    )
+    return cell(f"self.message({text!r})\nreturn Done(explanation={explanation!r})", **kwargs)
 
 
 def done(explanation: str = "done", **kwargs: Any) -> LLMResponse:
     """A cell that ends the turn with ``Done`` and nothing else."""
-    return cell(f"return_result(Done(explanation={explanation!r}))", **kwargs)
+    return cell(f"return Done(explanation={explanation!r})", **kwargs)
 
 
 def work_done(explanation: str = "done", report: str = "", **kwargs: Any) -> LLMResponse:
@@ -135,21 +133,21 @@ def work_done(explanation: str = "done", report: str = "", **kwargs: Any) -> LLM
 
 
 def work_result(explanation: str = "done", report: str = "") -> str:
-    """The ``return_result(...)`` line of a worker turn: ``Done`` with a ``TaskResult``."""
+    """The ``return ...`` line of a worker turn: ``Done`` with a ``TaskResult``."""
     return (
-        f"return_result(Done(explanation={explanation!r}, result=TaskResult("
-        f"solution_description='s', evidence='e', how_to_verify='v', report={report!r})))"
+        f"return Done(explanation={explanation!r}, result=TaskResult("
+        f"solution_description='s', evidence='e', how_to_verify='v', report={report!r}))"
     )
 
 
 def ask(question: str, **kwargs: Any) -> LLMResponse:
     """A cell that ends the turn with a ``NeedInput`` question."""
-    return cell(f"return_result(NeedInput(question={question!r}))", **kwargs)
+    return cell(f"return NeedInput(question={question!r})", **kwargs)
 
 
 def wait_on(*names: str) -> LLMResponse:
     """A cell that ends the turn with ``Waiting`` on the given names."""
-    return cell(f"return_result(Waiting(explanation='waiting', on={list(names)!r}))")
+    return cell(f"return Waiting(explanation='waiting', on={list(names)!r})")
 
 
 def fresh_events() -> tuple[asyncio.Event, asyncio.Event]:

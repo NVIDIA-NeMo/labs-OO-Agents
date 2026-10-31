@@ -803,6 +803,23 @@ Standard Python builtins and agent instance (`self`) are available."""
         """Whether return_result is accepted as a provider tool call."""
         return True
 
+    def _return_statement_completes(self) -> bool:
+        """Whether a cell's executed top-level ``return x`` ends the call like ``return_result(x)``.
+
+        ``True`` validates the value with the same retries as ``return_result``
+        (needs an owned execution namespace, whose compiler marks executed
+        returns). ``False`` keeps the legacy auto-completion of valid returns.
+        """
+        return False
+
+    def _mentions_completion(self, arguments: object) -> bool:
+        """Whether a Python-cell call's code tries to end the call (loop-guard hint)."""
+        return mentions_return_result(arguments)
+
+    def _completion_text(self, text: str) -> str:
+        """Model-facing text that names how a call ends; subclasses may reword it."""
+        return text
+
     def _available_tool_names(self) -> str:
         return "execute_python, return_result"
 
@@ -1418,7 +1435,7 @@ Standard Python builtins and agent instance (`self`) are available."""
         shown_name = tool_name if len(tool_name) <= 80 else tool_name[:77] + "..."
         header = f"Unknown tool `{shown_name}`. Available tools: {self._available_tool_names()}."
         if tool_name == "return_result" and not self._supports_return_result():
-            return (
+            return self._completion_text(
                 f"{header} To finish, call {python_tool} with code `return_result(value)`; "
                 "return_result is a Python builtin, not a provider tool."
             )
@@ -1567,8 +1584,9 @@ Standard Python builtins and agent instance (`self`) are available."""
             tool_call.name,
             repeats,
             outcome,
-            completion=mentions_return_result(parsed_args),
+            completion=self._mentions_completion(parsed_args),
         )
+        message = self._completion_text(message)
         runtime.event_manager.add(
             ToolCallEvent(
                 tool_call_id=tool_call.id,
@@ -1615,8 +1633,9 @@ Standard Python builtins and agent instance (`self`) are available."""
             tool_call.name,
             repeats,
             outcome,
-            completion=mentions_return_result(parsed_args),
+            completion=self._mentions_completion(parsed_args),
         )
+        message = self._completion_text(message)
         self._record_loop_guard(
             runtime,
             message,
@@ -2047,15 +2066,27 @@ Standard Python builtins and agent instance (`self`) are available."""
                 if original is not None and session.session_locals.get(name) is not original:
                     session.session_locals[name] = original
 
-        # Check if return_result() was called inline (signals task completion)
+        # Check if return_result() was called inline (signals task completion), or,
+        # for a strategy whose cells end the turn with ``return``, whether the cell
+        # executed a top-level return: that value is validated the same way.
+        completion: dict[str, Any] | None = None
         if result.signal and isinstance(result.signal, _ReturnResultSignal):
             logger.debug("[CODEACT] Detected inline return_result() call")
-
+            completion = result.signal.result
+        elif (
+            self._return_statement_completes()
+            and result.explicit_return
+            and result.has_return
+            and not result.error
+        ):
+            logger.debug("[CODEACT] Detected a top-level return statement")
+            completion = {"result": result.returned_value}
+        if completion is not None:
             # Validate the return_result (called inline within execute_python, not as separate tool)
             try:
                 validated, validation_error = self._handle_return_result(
                     runtime,
-                    result.signal.result,  # Extract the result dict from the signal
+                    completion,
                     return_type,
                     session,
                     call,
@@ -2089,10 +2120,11 @@ Standard Python builtins and agent instance (`self`) are available."""
             error_text = self._format_execution_error(runtime, result, code)
             stderr = result.stderr
             if validation_error:
+                label = self._completion_text("return_result validation error")
                 stderr = (
-                    f"{stderr}\nreturn_result validation error: {validation_error}"
+                    f"{stderr}\n{label}: {validation_error}"
                     if stderr
-                    else f"return_result validation error: {validation_error}"
+                    else f"{label}: {validation_error}"
                 )
 
             runtime.event_manager.add(
@@ -2112,6 +2144,8 @@ Standard Python builtins and agent instance (`self`) are available."""
             )
 
             if validation_error is None:
+                if result.signal is None:
+                    get_harness_metrics().explicit_return_completed()
                 # Success! Return special tuple to signal completion.
                 # Emit a synthetic return_result ToolCallEvent so the final
                 # answer appears in the trajectory (otherwise the inline
@@ -2443,7 +2477,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                     f"{error_msg}\nThe turn goes on: fix the value and call return_result "
                     f"again (attempt {attempts} of {budget})."
                 )
-            return (None, error_msg)
+            return (None, self._completion_text(error_msg))
 
         except BaseException as error:
             exception = error
