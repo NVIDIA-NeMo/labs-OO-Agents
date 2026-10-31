@@ -248,6 +248,14 @@ class TestRecording:
         m.missing_await("analyze")
         assert m.missing_awaits_detected == ["analyze"]
 
+    def test_mcp_tool_name_hint(self):
+        m = HarnessMetrics()
+        m.mcp_tool_name_hint("hcb_resources.lookup_order")
+        assert m.mcp_tool_name_hints == ["hcb_resources.lookup_order"]
+        attrs = {entry.key: entry.value_fn(m) for entry in get_span_schema()}
+        assert attrs["harness.mcp_tool_name_hint.count"] == 1
+        assert attrs["harness.mcp_tool_name_hint.calls"] == ["hcb_resources.lookup_order"]
+
     def test_infinite_loop(self):
         m = HarnessMetrics()
         m.infinite_loop()
