@@ -8,15 +8,21 @@ Two flavors:
 
 - :class:`TruncatingStringIO` — pure in-memory head/tail buffer (default).
 - :class:`FileBackedTruncatingStringIO` — same truncation, but also streams
-  all output to a temp file and includes the file path in the truncation
-  notice, so the full untruncated output remains retrievable.
+  all output (text, or raw bytes such as a process's output) to a file and
+  names the file in the truncation notice (caller-phrased via ``notice=``),
+  so the full untruncated output remains retrievable.
 """
 
+import codecs
 import collections
+import dataclasses
 import io
+import json
 import logging
 import os
 import tempfile
+import threading
+from collections.abc import Callable
 
 _log = logging.getLogger(__name__)
 
@@ -61,6 +67,7 @@ class TruncatingStringIO(io.StringIO):
         self._tail_chunks: collections.deque[str] = collections.deque()
         self._tail_chars = 0
         self._chars_written = 0
+        self._head_written = 0
 
     def write(self, s: str) -> int:
         """Write string, filling head then rolling tail."""
@@ -68,15 +75,18 @@ class TruncatingStringIO(io.StringIO):
         self._chars_written += n
 
         if not self._head_full:
-            current_head = len(super().getvalue())
-            remaining_head = self._head_limit - current_head
+            # A counter, not len(getvalue()): getvalue() copies the head, which
+            # made many small writes quadratic in the head size.
+            remaining_head = self._head_limit - self._head_written
 
             if n <= remaining_head:
                 super().write(s)
+                self._head_written += n
                 return n
 
             if remaining_head > 0:
                 super().write(s[:remaining_head])
+                self._head_written += remaining_head
             self._head_full = True
             overflow = s[remaining_head:]
             if overflow:
@@ -149,21 +159,64 @@ class TruncatingStringIO(io.StringIO):
         return self._chars_written
 
 
+@dataclasses.dataclass(frozen=True)
+class CaptureStats:
+    """What a :class:`FileBackedTruncatingStringIO` received and kept.
+
+    Also the fields of a ``notice`` template (``str.format`` keywords, plus
+    ``quoted_path``: the path as a JSON string literal).
+    """
+
+    path: str | None  # the file, or None when no file is kept (creation/write failed)
+    chars_written: int  # characters fed to the in-memory view (decoded bytes included)
+    bytes_written: int  # bytes received (text writes count their UTF-8 encoding)
+    file_bytes: int  # bytes in the file
+    file_bytes_dropped: int  # bytes past ``max_file_bytes``: counted, not written
+    truncated: bool  # the in-memory view is cut (``chars_written > limit``)
+    dropped_chars: int  # characters the cut view leaves out
+
+
 class FileBackedTruncatingStringIO(TruncatingStringIO):
-    """TruncatingStringIO that also writes full output to a temp file.
+    """TruncatingStringIO that also writes the full output to a file.
 
-    Behaves identically to :class:`TruncatingStringIO` for in-memory
-    head/tail truncation, but additionally streams all written content to a
-    temporary file on disk.  When truncated, ``getvalue()`` includes the
-    file path in the notice so the user can inspect the full output.
+    In memory it behaves like :class:`TruncatingStringIO` (head/tail view of
+    at most ``limit`` chars); everything written also goes to a file on disk:
+    a new temp file (``dir``/``prefix``/``suffix``), or ``path`` if given.
+    When the view is cut, ``getvalue()`` names the file in the notice.
 
-    File I/O errors are handled gracefully — if the temp file cannot be
-    created or written to, the stream falls back to pure in-memory behavior
-    (identical to the parent class).
+    Input:
 
-    The caller is responsible for cleanup via :meth:`cleanup` (which removes
-    the temp file) or :meth:`close` (which closes the file handle but leaves
-    the file on disk for later reference).
+    - ``write(text)`` — text (``sys.stdout`` style); the file gets its UTF-8.
+    - ``write_bytes(data)`` — raw bytes (e.g. a process's output): written to
+      the file unchanged (byte-exact), and decoded for the in-memory view
+      with an incremental UTF-8 decoder, so a character split across chunks
+      decodes correctly (invalid bytes become U+FFFD in the view only).
+      :meth:`close` flushes a trailing incomplete character into the view.
+
+    ``max_file_bytes`` caps the file: bytes past it are counted
+    (``file_bytes_dropped``) but not written; the file holds exactly the
+    first ``max_file_bytes`` bytes, and the notice says it is incomplete.
+
+    ``notice`` phrases where the full output is, in the cut view (default:
+    a generic "is in: <path>" sentence): a ``str.format`` template over the
+    :class:`CaptureStats` fields plus ``quoted_path``, e.g.
+    ``'Full output: read_file({quoted_path})'``, or a callable taking the
+    :class:`CaptureStats` and returning the text.
+
+    Lifecycle: the caller owns the file. :meth:`close` closes the handle and
+    keeps the file (the view stays readable); :meth:`cleanup` closes and
+    removes it. Both are idempotent; ``with`` closes on exit (keeps the
+    file). :attr:`path` and :attr:`stats` stay valid after either.
+
+    File I/O errors are handled gracefully: if the file cannot be created or
+    written, the stream carries on in memory only (``path`` is then None and
+    the notice says the middle is not recoverable).
+
+    Thread safety: writes, ``getvalue()``, ``stats`` and ``close()`` take an
+    internal lock, so a reader thread may write while another thread reads.
+
+    Cost: memory is bounded by ``limit`` chars; ``getvalue()`` copies the
+    head and joins the tail, O(limit) (a few ms at a 1 MiB limit).
     """
 
     def __init__(
@@ -174,51 +227,142 @@ class FileBackedTruncatingStringIO(TruncatingStringIO):
         dir: str | None = None,
         prefix: str = "nemo_output_",
         suffix: str = ".txt",
+        path: str | os.PathLike[str] | None = None,
+        max_file_bytes: int | None = None,
+        notice: str | Callable[[CaptureStats], str] | None = None,
     ):
+        # Set first: io.StringIO's finalizer calls close() even if __init__ raises.
+        self._lock = threading.RLock()
+        self._decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        self._file: io.BufferedWriter | None = None
         super().__init__(limit=limit, tail_chars=tail_chars)
+        if max_file_bytes is not None and max_file_bytes < 0:
+            raise ValueError("max_file_bytes must be >= 0")
+        self._notice = notice
+        self._max_file_bytes = max_file_bytes
+        self._bytes_written = 0
+        self._file_bytes = 0
+        self._file_dropped = 0
         self._file_failed = False
+        self._removed = False
         self._file_path: str | None = None
-        self._file: io.TextIOWrapper | None = None
         try:
-            fd, path = tempfile.mkstemp(dir=dir, prefix=prefix, suffix=suffix)
-            self._file = os.fdopen(fd, "w")
-            self._file_path = path
+            if path is not None:
+                self._file = open(path, "wb")  # noqa: SIM115 - closed in close()
+                self._file_path = os.fspath(path)
+            else:
+                fd, temp_path = tempfile.mkstemp(dir=dir, prefix=prefix, suffix=suffix)
+                self._file = os.fdopen(fd, "wb")
+                self._file_path = temp_path
         except OSError:
             _log.warning(
-                "Failed to create temp file for output capture; falling back to in-memory",
+                "Failed to create file for output capture; falling back to in-memory",
                 exc_info=True,
             )
             self._file_failed = True
 
+    # ---- input ------------------------------------------------------------
+
     def write(self, s: str) -> int:
-        """Write to both the temp file and the in-memory truncating buffer."""
-        if self._file is not None and not self._file_failed:
-            try:
-                self._file.write(s)
-                self._file.flush()
-            except OSError:
-                _log.warning("Failed to write to temp file; disabling file backing", exc_info=True)
-                self._file_failed = True
-        return super().write(s)
+        """Write text to the file (as UTF-8) and to the in-memory view."""
+        with self._lock:
+            data = s.encode("utf-8", errors="replace")
+            self._bytes_written += len(data)
+            self._write_file(data)
+            return super().write(s)
+
+    def write_bytes(self, data: bytes) -> int:
+        """Write raw bytes: unchanged to the file, decoded (incrementally) to the view."""
+        with self._lock:
+            self._bytes_written += len(data)
+            self._write_file(data)
+            text = self._decoder.decode(data)
+            if text:
+                super().write(text)
+            return len(data)
+
+    def _write_file(self, data: bytes) -> None:
+        """Append ``data`` to the file, up to ``max_file_bytes`` (the rest is counted)."""
+        if not data:
+            return
+        if self._file is None or self._file_failed or self._file.closed:
+            return
+        room = len(data)
+        if self._max_file_bytes is not None:
+            room = max(0, min(room, self._max_file_bytes - self._file_bytes))
+        self._file_dropped += len(data) - room
+        if not room:
+            return
+        try:
+            self._file.write(data if room == len(data) else data[:room])
+            self._file.flush()
+            self._file_bytes += room
+        except OSError:
+            _log.warning("Failed to write to file; disabling file backing", exc_info=True)
+            self._file_failed = True
+
+    # ---- output -----------------------------------------------------------
+
+    def getvalue(self) -> str:
+        """The view: all of it, or head and tail with a notice naming the file."""
+        with self._lock:
+            return super().getvalue()
+
+    def _output_path(self) -> str | None:
+        """Where the full output is: the file, unless it failed or was removed."""
+        if self._file_path and not self._file_failed and not self._removed:
+            return self._file_path
+        return None
+
+    def _stats(self, dropped_chars: int | None = None) -> CaptureStats:
+        if dropped_chars is None:
+            kept = self._head_written + self._tail_chars
+            dropped_chars = max(0, self._chars_written - kept) if self.was_truncated else 0
+        return CaptureStats(
+            path=self._output_path(),
+            chars_written=self._chars_written,
+            bytes_written=self._bytes_written,
+            file_bytes=self._file_bytes,
+            file_bytes_dropped=self._file_dropped,
+            truncated=self.was_truncated,
+            dropped_chars=dropped_chars,
+        )
+
+    def _where(self, stats: CaptureStats) -> str:
+        """The notice's lines on where the full output is (each ends in a newline)."""
+        if stats.path is None:
+            return f"The {stats.dropped_chars:,} chars in the middle are not recoverable.\n"
+        if self._notice is None:
+            text = (
+                f"The full untruncated output ({stats.chars_written:,} chars) is in: "
+                f"{stats.path}\n"
+                f"Read that file to see the {stats.dropped_chars:,} chars not shown here."
+            )
+        elif callable(self._notice):
+            text = self._notice(stats)
+        else:
+            text = self._notice.format(
+                quoted_path=json.dumps(stats.path), **dataclasses.asdict(stats)
+            )
+        text = text.rstrip("\n") + "\n"
+        if stats.file_bytes_dropped:
+            text += (
+                f"The file is incomplete: it holds the first {stats.file_bytes:,} bytes; "
+                f"{stats.file_bytes_dropped:,} more bytes were over its "
+                f"{self._max_file_bytes:,}-byte limit.\n"
+            )
+        return text
 
     def _format_truncation_notice(
         self, head: str, tail: str, total: int, head_chars: int, tail_chars: int, dropped: int
     ) -> str:
-        """Include the temp file path in the truncation notice."""
-        if self._file_path and not self._file_failed:
-            self._flush_file()
-            file_notice = (
-                f"The full untruncated output ({total:,} chars) is in: {self._file_path}\n"
-                f"Read that file to see the {dropped:,} chars not shown here.\n"
-            )
-        else:
-            file_notice = f"The {dropped:,} chars in the middle are not recoverable.\n"
-
+        """Name the file (in the caller's ``notice`` wording) in the truncation notice."""
+        self._flush_file()
         return (
             f"<truncated-output>\n"
             f"Output too large ({total:,} chars). "
             f"Showing first {head_chars:,} and last {tail_chars:,} chars.\n"
-            f"{file_notice}\n"
+            f"{self._where(self._stats(dropped))}\n"
             f"{head}\n\n"
             f"... {dropped:,} chars not shown ...\n\n"
             f"{tail}\n"
@@ -226,7 +370,7 @@ class FileBackedTruncatingStringIO(TruncatingStringIO):
         )
 
     def _flush_file(self) -> None:
-        """Flush the temp file, ignoring errors."""
+        """Flush the file, ignoring errors."""
         if self._file is not None and not self._file.closed:
             try:
                 self._file.flush()
@@ -234,28 +378,69 @@ class FileBackedTruncatingStringIO(TruncatingStringIO):
                 pass
 
     @property
+    def path(self) -> str | None:
+        """The file holding the full output; None if none is kept (failed or removed)."""
+        return self._output_path()
+
+    @property
     def file_path(self) -> str | None:
-        """Path to the temp file, or None if file creation failed."""
+        """The file's path as created (None if creation failed); see also :attr:`path`."""
         return self._file_path
 
-    def close(self) -> None:
-        """Close the temp file handle (file remains on disk).
+    @property
+    def stats(self) -> CaptureStats:
+        """Counts so far: chars and bytes received, file bytes, dropped bytes, truncated."""
+        with self._lock:
+            return self._stats()
 
-        Intentionally does NOT call ``super().close()`` — the underlying
-        ``io.StringIO`` must stay open so ``getvalue()`` remains usable
-        after the temp file handle is closed.
+    @property
+    def bytes_written(self) -> int:
+        """Bytes received (text writes count their UTF-8 encoding)."""
+        return self._bytes_written
+
+    @property
+    def file_bytes(self) -> int:
+        """Bytes in the file."""
+        return self._file_bytes
+
+    @property
+    def file_bytes_dropped(self) -> int:
+        """Bytes not written because of ``max_file_bytes``."""
+        return self._file_dropped
+
+    # ---- lifecycle --------------------------------------------------------
+
+    def __enter__(self) -> "FileBackedTruncatingStringIO":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
+    def close(self) -> None:
+        """Close the file handle (the file stays on disk); idempotent.
+
+        Flushes an incomplete trailing UTF-8 sequence from ``write_bytes``
+        into the view. Intentionally does NOT call ``super().close()`` — the
+        underlying ``io.StringIO`` must stay open so ``getvalue()`` remains
+        usable after the file handle is closed.
         """
-        if self._file is not None:
-            try:
-                self._file.close()
-            except OSError:
-                pass
+        with self._lock:
+            text = self._decoder.decode(b"", final=True)
+            if text:
+                TruncatingStringIO.write(self, text)
+            if self._file is not None and not self._file.closed:
+                try:
+                    self._file.close()
+                except OSError:
+                    pass
 
     def cleanup(self) -> None:
-        """Close the file handle and remove the temp file from disk."""
-        self.close()
-        if self._file_path is not None:
-            try:
-                os.unlink(self._file_path)
-            except OSError:
-                pass
+        """Close the file handle and remove the file from disk; idempotent."""
+        with self._lock:
+            self.close()
+            if self._file_path is not None and not self._removed:
+                self._removed = True
+                try:
+                    os.unlink(self._file_path)
+                except OSError:
+                    pass
