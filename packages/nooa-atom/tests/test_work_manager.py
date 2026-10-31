@@ -884,3 +884,100 @@ async def test_work_that_swallows_cancel_ends_done_without_notice(setup):
     await job.cancel()
     assert job.status == "done" and await job == "finished anyway"
     assert channel.snapshot() == []  # cancelled by its owner: no event
+
+
+# ---- built-in work: after / every -------------------------------------------------
+
+
+async def _event(channel, timeout: float = 5.0):
+    return await asyncio.wait_for(channel.get(), timeout)
+
+
+async def test_after_delivers_done_after_the_delay(setup):
+    manager, channel = setup
+    loop = asyncio.get_running_loop()
+    start = loop.time()
+    job = manager.after(0.2, name="reading")
+    assert job.name == "reading" and job.status == "running"
+    assert "timer: 0.2 s" in job.summary
+    event = await _event(channel)
+    elapsed = loop.time() - start
+    assert (event.name, event.kind, event.value) == ("reading", "done", None)
+    assert 0.18 <= elapsed < 2.0
+    assert job.status == "done"
+
+
+async def test_after_can_be_awaited_and_cancelled(setup):
+    manager, channel = setup
+    assert await manager.after(0) is None
+    job = manager.after(30, name="later")
+    await job.cancel()
+    assert job.status == "cancelled"
+    await settle()
+    assert channel.qsize() == 0  # the owner cancelled it: no event
+
+
+async def test_timers_follow_the_launch_name_rules(setup):
+    manager, _ = setup
+    with pytest.raises(ValueError, match="not valid"):
+        manager.after(1, name="bad name")
+    manager.after(30, name="t")
+    with pytest.raises(ValueError, match="is running"):
+        manager.every(1, name="t")
+    for bad in (-1, float("nan"), float("inf")):
+        with pytest.raises(ValueError):
+            manager.after(bad)
+    with pytest.raises(ValueError):
+        manager.every(0)
+    with pytest.raises(TypeError):
+        manager.after("120")
+    with pytest.raises(TypeError):
+        manager.every(True)
+
+
+async def test_every_ticks_until_cancelled(setup):
+    manager, channel = setup
+    job = manager.every(0.05, name="poll")
+    first = await _event(channel)
+    second = await _event(channel)
+    assert (first.kind, first.value, second.value) == ("item", 1, 2)
+    await job.cancel()
+    await settle()
+    assert job.status == "cancelled" and channel.qsize() == 0
+
+
+async def test_unread_ticks_merge_into_one(setup):
+    manager, channel = setup
+    job = manager.every(0.02, name="poll")
+    await asyncio.sleep(0.3)  # about 15 ticks, nobody reading
+    assert channel.qsize() == 1
+    event = await _event(channel)
+    assert event.value >= 5 and event.dropped == event.value - 1
+    await job.cancel()
+
+
+async def test_every_late_wake_up_yields_the_latest_due_tick(monkeypatch):
+    # The first sleep wakes 0.35 s in although only 0.1 s was asked for:
+    # three ticks are due by then, so the timer says 3, not 1.
+    clock = [100.0]
+
+    async def late_sleep(seconds):
+        clock[0] += 0.35 if clock[0] == 100.0 else seconds
+
+    monkeypatch.setattr(work_manager.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(work_manager.asyncio, "sleep", late_sleep)
+    ticks = work_manager._every(0.1)
+    assert [await anext(ticks), await anext(ticks)] == [3, 4]
+    await ticks.aclose()
+
+
+async def test_every_can_be_read_with_async_for(setup):
+    manager, _ = setup
+    job = manager.every(0.01)
+    seen = []
+    async for tick in job:
+        seen.append(tick)
+        if len(seen) == 3:
+            break
+    assert seen == [1, 2, 3]
+    await job.cancel()

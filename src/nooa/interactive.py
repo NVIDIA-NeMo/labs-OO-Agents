@@ -106,6 +106,16 @@ def _blank_to_none(value: str | None) -> str | None:
     return None if value is None else (value.strip() or None)
 
 
+def _accepted_need_input_explanation(value: str | None) -> str | None:
+    """Blank reads as unset; a set explanation is counted as an accepted fix-up."""
+    value = _blank_to_none(value)
+    if value is not None:
+        from nooa.runtime.harness_metrics import get_harness_metrics
+
+        get_harness_metrics().need_input_explanation()
+    return value
+
+
 class Done(BaseModel):
     """Turn result: the work for this turn is finished.
 
@@ -146,6 +156,8 @@ class NeedInput(BaseModel):
     ``self.message()``. The answer arrives as a plain ``str``; put any
     suggested answers in the question text. ``reason`` optionally says in
     one sentence why progress is not possible or not desirable without it.
+    ``explanation`` is an optional short status line, as on ``Done`` and
+    ``Waiting``; it is not shown as the question.
     """
 
     model_config = {"extra": "forbid"}
@@ -155,8 +167,10 @@ class NeedInput(BaseModel):
     reason: str | None = Field(
         default=None, description="Why progress is not possible or not desirable without it"
     )
+    explanation: str | None = Field(default=None, description="Short status line; not the question")
 
     _check_question = field_validator("question")(_non_blank)
+    _check_explanation = field_validator("explanation")(_accepted_need_input_explanation)
 
 
 class Waiting(BaseModel):
@@ -221,6 +235,18 @@ class TaskResult(BaseModel):
             "Leave empty when the task only asks for actions."
         ),
     )
+
+    def __getattr__(self, name: str) -> Any:
+        try:
+            return super().__getattr__(name)  # type: ignore[misc]  # pydantic's private attrs
+        except AttributeError:
+            if name.startswith("_"):
+                raise
+            fields = ", ".join(type(self).model_fields)
+            raise AttributeError(
+                f"TaskResult has no attribute {name!r}; its fields are {fields}. "
+                "A finished task has no status: read solution_description and evidence."
+            ) from None
 
 
 ONE_SHOT_QUESTION: Annotated[str, hidden] = (

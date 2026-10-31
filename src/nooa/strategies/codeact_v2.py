@@ -15,6 +15,7 @@ from nooa.strategies.codeact import (
     CodeActStrategy,
     TextOnlyResponseAction,
     TextOnlyResponseContext,
+    text_only_tool_markup_note,
 )
 from nooa.strategies.template import TemplateStrategy
 
@@ -273,6 +274,7 @@ Restrictions (will throw):
         return TextOnlyResponseAction.retry(
             Error(
                 content=(
+                    f"{text_only_tool_markup_note(context)}"
                     "Your last reply was plain text with no tool call. It was preserved, "
                     "but a bare message cannot end the turn or run code. "
                     f"To finish `{context.call.method_name}`, call `python_cell` with "

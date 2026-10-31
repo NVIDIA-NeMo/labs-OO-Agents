@@ -37,6 +37,7 @@ import math
 import os
 import re
 import shlex
+import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Annotated, Any
@@ -180,7 +181,7 @@ class StaleMatchError(ValueError):
 
     code = "STALE_MATCH"
 
-    def __init__(self, target: Match, current: str | None, reason: str):
+    def __init__(self, target: Match, current: str | None, reason: str, hint: str = ""):
         self.path = target.path
         self.resolved_path = target.resolved_path
         self.start = target.start
@@ -204,6 +205,8 @@ class StaleMatchError(ValueError):
                 message += (
                     "Diff preview truncated (capped at 20 lines and 2 KiB); not a complete diff."
                 )
+        if hint:
+            message += f"\n{hint}"
         super().__init__(message)
 
 
@@ -537,11 +540,100 @@ def _not_found_replace_message(path: str, resolved: Path, content: str, old: str
             f"The replacement text already appears in the file (starting on line {number}); "
             "this edit may already have been applied."
         )
+    lines.extend(_closest_region_lines(content, old))
     lines.append(
         "Earlier edits (including ones in the same cell) may already have changed this file: "
         "re-read it with read() and retry only the edits that are not yet applied."
     )
     return "\n".join(lines)
+
+
+_CLOSEST_MAX_FILE_LINES = 20_000  # bound the search work; larger files get no closest region
+_CLOSEST_MAX_OLD_CHARS = 8_000
+_CLOSEST_MIN_RATIO = 0.6
+_CLOSEST_DIFF_ROWS = 8
+# ``ratio()`` can be quadratic on near-identical long lines; the search runs
+# on the event loop, so past this many seconds the optional hint is skipped.
+_CLOSEST_MAX_SECONDS = 0.25
+
+
+@hidden
+def _closest_region_lines(content: str, old: str) -> list[str]:
+    """Where the file is most like ``old`` (difflib), and what differs, bounded.
+
+    Slides a window of ``old``'s line count over the file and keeps the most
+    similar one (at least 60%). Lists at most eight differing lines, each
+    escaped (tabs show as ``\\t``) and cut at 160 characters, and says when
+    a line differs only in whitespace. Empty when nothing is close.
+    """
+    import difflib
+
+    def excerpt(text: str) -> str:
+        return _replace_diagnostic_excerpt(text, 0, len(text), 0, 160)
+
+    old_lines = old.split("\n")
+    if old_lines and old_lines[-1] == "" and len(old_lines) > 1:
+        old_lines.pop()  # old ends with a newline
+    file_lines = content.split("\n")
+    if (
+        not old.strip()
+        or len(old) > _CLOSEST_MAX_OLD_CHARS
+        or len(file_lines) > _CLOSEST_MAX_FILE_LINES
+    ):
+        return []
+    size = len(old_lines)
+    wanted = "\n".join(old_lines)
+    best_ratio, best_start = 0.0, -1
+    matcher = difflib.SequenceMatcher(None, autojunk=False)
+    matcher.set_seq2(wanted)
+    deadline = time.monotonic() + _CLOSEST_MAX_SECONDS
+    for start in range(max(1, len(file_lines) - size + 1)):
+        window = "\n".join(file_lines[start : start + size])
+        matcher.set_seq1(window)
+        if matcher.real_quick_ratio() <= best_ratio or matcher.quick_ratio() <= best_ratio:
+            continue
+        if time.monotonic() > deadline:
+            return []  # too costly for an optional hint
+        ratio = matcher.ratio()
+        if ratio > best_ratio:
+            best_ratio, best_start = ratio, start
+    if best_start < 0 or best_ratio < _CLOSEST_MIN_RATIO:
+        return []
+    region = file_lines[best_start : best_start + size]
+    first, last = best_start + 1, best_start + len(region)
+    lines = [
+        f"Closest region: lines {first}-{last} ({best_ratio:.0%} similar). What differs "
+        "(file line: old text vs file):"
+    ]
+    rows: list[str] = []
+    ops = difflib.SequenceMatcher(None, old_lines, region, autojunk=False).get_opcodes()
+    for tag, i1, i2, j1, j2 in ops:
+        if tag == "equal":
+            continue
+        pairs = max(i2 - i1, j2 - j1)
+        for k in range(pairs):
+            o = old_lines[i1 + k] if i1 + k < i2 else None
+            f = region[j1 + k] if j1 + k < j2 else None
+            number = first + (j1 + k if f is not None else j2)
+            if o is not None and f is not None:
+                note = "  (whitespace only)" if o.split() == f.split() else ""
+                rows.append(f"  line {number}: old '{excerpt(o)}'")
+                rows.append(f"  {' ' * len(str(number))}       file '{excerpt(f)}'{note}")
+            elif o is not None:
+                rows.append(f"  near line {number}: old has '{excerpt(o)}'; the file does not")
+            else:
+                rows.append(f"  line {number}: file has '{excerpt(f)}'; old does not")
+    shown = rows[: _CLOSEST_DIFF_ROWS * 2]
+    lines.extend(shown)
+    if len(rows) > len(shown):
+        lines.append(f"  ... {len(rows) - len(shown)} more rows; read() the region")
+    if len(rows) == 0:
+        lines.append("  only line endings or trailing newlines differ")
+    lines.append(
+        f"To retry: read() lines {first}-{last} and copy old from it, "
+        "or replace_match() that Match."
+    )
+    return lines
 
 
 @hidden
@@ -1398,7 +1490,13 @@ class ShellTools(Skill):
             if target.end > len(all_lines):
                 raise StaleMatchError(target, current, "captured line range is out of bounds")
             if current != target.text:
-                raise StaleMatchError(target, current, "captured text no longer matches")
+                # Where the captured text is now, if it moved (the anchor is not relocated).
+                closest = _closest_region_lines(content, target.text)
+                hint = closest[0].split(". What differs", 1)[0] if closest else ""
+                if hint:
+                    hint = hint.replace("Closest region:", "The captured text is now closest to")
+                    hint += "; read() those lines for a fresh Match."
+                raise StaleMatchError(target, current, "captured text no longer matches", hint=hint)
 
         before = all_lines[: target.start - 1]
         after = all_lines[target.end :]

@@ -37,7 +37,8 @@ _UNATTENDED = (
 ROLE_INSTRUCTIONS: dict[TurnPolicy, str] = {
     "interactive": (
         "You are working with a person, the user. Reply with Done(message=...): complete "
-        "Markdown with outcome, evidence, risks. Send brief progress notes with self.message() "
+        "Markdown with outcome, evidence, risks (when asked for an exact value or format, "
+        "exactly that, with nothing added). Send brief progress notes with self.message() "
         "while you work; background jobs may keep running. Ask with NeedInput(question=...) "
         "only when the person must answer."
     ),

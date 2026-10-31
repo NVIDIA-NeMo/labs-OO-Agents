@@ -1010,7 +1010,7 @@ class Session:
                 usage=usage,
             )
         )
-        self.info.reply_count += 1  # as the store counts it
+        self.info.reply_count += 1  # as the store counts it, with each agent message
         waiting = self._waiting + consumed
         if kind != "waiting":
             for item_id in waiting:
@@ -1137,6 +1137,23 @@ class Session:
         if not callable(hook):
             return []
         return [str(warning) for warning in await hook()]
+
+    async def inherit_tools(self, parent: "Session") -> list[str]:
+        """Share ``parent``'s connected tools with this child; return warnings.
+
+        Awaits the agent's ``inherit_tools(parent_agent)`` hook if it has one
+        (the Atom agent shares the MCP servers its parent has connected,
+        client-provided and workspace-configured, as the same objects: no
+        new connection, and closing this child does not close them). The
+        registry calls it for a child before its first turn.
+        """
+        hook = getattr(self._agent, "inherit_tools", None)
+        if not callable(hook):
+            return []
+        result = hook(parent._agent)
+        if inspect.isawaitable(result):
+            result = await result
+        return [str(warning) for warning in result or ()]
 
     async def register_tools(self, tools: Mapping[str, Any]) -> dict[str, str]:
         """Register and activate each tool as an agent skill under its name.
@@ -1411,6 +1428,10 @@ class Session:
             return
         if isinstance(event, LLMResponse):
             self._count_usage(event)
+        if isinstance(event, AgentMessage):
+            # Each recorded message counts as a reply, as the store seeds it
+            # on load, so live and reloaded counts (and question ids) agree.
+            self.info.reply_count += 1
         if isinstance(event, AgentMessage) and self.info.status == "running":
             self._turn_messages.add(event.content)
             self._replied = True
@@ -1468,7 +1489,10 @@ def _outcome_data(outcome: Any, kind: OutcomeKind) -> tuple[dict[str, Any], str 
         except Exception:  # a result that is not data
             return {"explanation": outcome.explanation, "result": repr(result)}, None
     if kind == "need_input":
-        return {"question": outcome.question, "reason": outcome.reason}, None
+        data = {"question": outcome.question, "reason": outcome.reason}
+        if outcome.explanation:
+            data["explanation"] = outcome.explanation
+        return data, None
     if kind == "waiting":
         return outcome.model_dump(mode="json"), None
     if kind == "cancelled":

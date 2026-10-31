@@ -156,7 +156,11 @@ async def test_search_matches_names_and_descriptions_of_every_kind(agent):
     assert agent.skills.search("review") == (
         "review (text, available): Review a change for defects"
     )
-    assert agent.skills.search("greet people") == "greeter (code, available): Greet people by name."
+    assert agent.skills.search("greet people").splitlines() == [
+        "greeter (code, available): Greet people by name.",
+        # A loaded code skill's public methods are searched too.
+        "greeter has greet (method: self.greeter.greet)",
+    ]
     assert agent.skills.search("probe").startswith("probe (mcp, available): stdio MCP server")
     assert agent.skills.search("nothing-like-this") == "No skills match 'nothing-like-this'."
 
@@ -222,7 +226,11 @@ async def test_activating_an_mcp_server_connects_it_and_its_tools_are_methods(ag
     approve(agent, "probe")
     result = await agent.skills.activate(["probe"])
     assert result == "probe: active; its tools are methods of self.probe: probe"
-    assert agent.skills.status().splitlines()[0].endswith(", probe (mcp: self.probe)")
+    assert (
+        agent.skills.status()
+        .splitlines()[0]
+        .endswith(", probe (mcp: await self.probe.<tool>(...))")
+    )
     assert "async def probe(self, nonce: str)" in agent.skills.doc("probe")
     assert await agent.skills.deactivate(["probe"]) == "probe: inactive (still connected)"
     assert "probe" not in agent.skills.status().splitlines()[0]
@@ -263,7 +271,11 @@ async def test_a_server_that_needs_sign_in_sends_the_link_and_reports_back(
     finished = await control.run(["auth", "remote", pasted])
     assert finished.success, str(finished)
     assert "echo" in str(finished)
-    assert agent.skills.status().splitlines()[0].endswith(", remote (mcp: self.remote)")
+    assert (
+        agent.skills.status()
+        .splitlines()[0]
+        .endswith(", remote (mcp: await self.remote.<tool>(...))")
+    )
     notices = [
         event.description
         for event in agent.event_manager.values()
@@ -284,7 +296,11 @@ async def test_a_client_supplied_mcp_server_is_an_mcp_skill(agent):
     assert "remote (mcp, active; call: await self.remote.<tool>(...))" in agent.skills.search(
         "remote"
     )
-    assert agent.skills.status().splitlines()[0].endswith(", remote (mcp: self.remote)")
+    assert (
+        agent.skills.status()
+        .splitlines()[0]
+        .endswith(", remote (mcp: await self.remote.<tool>(...))")
+    )
 
 
 async def test_the_skills_control_lists_every_kind(agent, tmp_path):
@@ -364,3 +380,151 @@ async def test_read_of_a_non_text_skill_names_the_working_doc_call(agent):
     assert "print(self.skills.doc('probe'))" in message
     assert "use doc('probe')" not in message
     assert agent.skills.doc("probe").startswith("probe")
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "timer",
+        "schedule",
+        "cron",
+        "remind",
+        "later",
+        "after",
+        "every",
+        "periodic",
+        "monitor",
+        "watch",
+        "tail",
+        "follow",
+        "Schedule a reading in 120 s",
+    ],
+)
+async def test_search_for_timers_and_tails_points_to_self_jobs(agent, query):
+    found = agent.skills.search(query)
+    assert "No skills match" not in found
+    first = found.splitlines()[0]
+    assert first.startswith("self.jobs (built in, no skill needed):")
+    for call in (
+        "self.jobs.after(",
+        "self.jobs.every(",
+        'Shell().run("tail -F',
+        "progress=Throttle(",
+    ):
+        assert call in first
+    assert "own Shell" in first and "one command at a time" in first
+    assert "self.jobs.tail(" not in first
+    assert "a delay counts from now: subtract time you have already spent" in first
+
+
+async def test_search_hint_comes_before_matching_skills(agent):
+    assert agent.skills.search("greet later").splitlines() == [
+        agent.skills.search("later"),
+        "greeter (code, available): Greet people by name.",
+        "greeter has greet (method: self.greeter.greet)",
+    ]
+
+
+async def test_search_matches_mcp_tool_names_after_skills(agent):
+    class Resources:
+        """MCP server 'hcb_resources'."""
+
+        _tool_method_names = ("issue_parking_permit", "list_rooms", "permit_status")
+
+    agent.skills.register("mcp.hcb_resources", Resources())
+    await agent.skills.activate(["mcp.hcb_resources"])
+    # The skill line (its description lists the tools, cut at 100 characters)
+    # comes first, then each matching tool.
+    found = agent.skills.search("permit").splitlines()
+    assert found[0].startswith("hcb_resources (mcp, active")
+    assert found[1:] == [
+        "hcb_resources has issue_parking_permit (MCP tool: self.hcb_resources.issue_parking_permit)",
+        "hcb_resources has permit_status (MCP tool: self.hcb_resources.permit_status)",
+    ]
+    # Tool matches are bounded by the limit.
+    assert agent.skills.search("permit", limit=1).splitlines()[1:] == [
+        "hcb_resources has issue_parking_permit (MCP tool: self.hcb_resources.issue_parking_permit)",
+        "... 1 more tools; narrow the query",
+    ]
+    # Short words do not match tool names.
+    assert not any(" has " in line for line in agent.skills.search("is").splitlines())
+    # The self.jobs hint still comes first.
+    assert agent.skills.search("permit later").splitlines()[0].startswith("self.jobs (built in")
+
+
+async def test_a_client_server_shown_under_its_key_is_called_on_its_attribute(agent):
+    # A code skill already shows as "greeter", so the client server shows as
+    # "mcp.greeter"; SkillRegistry still attaches it as self.greeter.
+    class Server:
+        """MCP server 'greeter'."""
+
+        _tool_method_names = ("wave_hello",)
+
+    agent.skills.register("mcp.greeter", Server())
+    await agent.skills.activate(["mcp.greeter"])
+    assert agent.greeter is agent.skills.registry["mcp.greeter"]
+    found = agent.skills.search("wave")
+    assert "mcp.greeter has wave_hello (MCP tool: self.greeter.wave_hello)" in found
+    assert "self.mcp." not in found
+    assert "self.mcp." not in agent.skills.search("greeter")
+    assert "mcp.greeter (mcp: await self.greeter.<tool>(...))" in agent.skills.status()
+
+
+async def test_search_omits_hidden_methods_of_code_skills(agent):
+    from nooa.agentdoc import hidden
+
+    class Stash(Skill):
+        """Keep things."""
+
+        def stash_put(self, item: str) -> None:
+            """Keep ``item``."""
+
+        @hidden
+        def stash_restore(self, data: dict) -> None:
+            """Host-only: replace the state."""
+
+    agent.skills.register("tools.stash", Stash())
+    found = agent.skills.search("stash")
+    assert "stash has stash_put (method: self.stash.stash_put)" in found
+    assert "stash_restore" not in found
+    # The todo skill's restore hook (@hidden from_dict) is not advertised either.
+    assert "todo has from_dict" not in agent.skills.search("from_dict")
+
+
+def test_share_from_keeps_an_attachable_client_skill_with_its_parent(tmp_path):
+    class Bound(Skill):
+        """MCP server 'bound'."""
+
+        async def ping(self) -> str:
+            return "pong"
+
+    parent = AtomAgentBase(llm=FakeLLMClient(), cwd=tmp_path)
+    child = AtomAgentBase(llm=FakeLLMClient(), cwd=tmp_path)
+    bound = Bound()
+    parent.skills.register("mcp.bound", bound)
+    warnings = child.skills.share_from(parent.skills)
+    assert warnings == ["MCP server 'bound' was not shared: it is bound to the parent agent"]
+    assert getattr(bound, "_agent", None) is parent and "mcp.bound" not in child.skills.loaded()
+
+
+def test_share_from_keeps_a_childs_skill_at_the_same_attribute(tmp_path):
+    class Client:
+        """MCP server 'greeter' (a client-provided one)."""
+
+        async def ping(self) -> str:
+            return "pong"
+
+    parent = AtomAgentBase(llm=FakeLLMClient(), cwd=tmp_path)
+    child = AtomAgentBase(llm=FakeLLMClient(), cwd=tmp_path)
+    parent.skills.register("mcp.greeter", Client())
+    own = Greeter()
+    child.skills.register("tools.greeter", own)
+    warnings = child.skills.share_from(parent.skills)
+    assert warnings == ["MCP server 'greeter' was not shared: self.greeter is already in use here"]
+    assert child.greeter is own and "mcp.greeter" not in child.skills.loaded()
+
+
+async def test_search_matches_a_connected_mcp_servers_tools(agent):
+    approve(agent, "probe")
+    await agent.skills.activate(["probe"])
+    assert "probe has probe (MCP tool: self.probe.probe)" in agent.skills.search("probe")

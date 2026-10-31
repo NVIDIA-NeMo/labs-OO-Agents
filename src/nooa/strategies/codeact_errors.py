@@ -19,6 +19,64 @@ from nooa.config.truncation_config import DEFAULT_TRUNCATION_CONFIG, TruncationC
 from nooa.strategy_validation import InvariantError
 
 
+def _return_type_members(return_type: Any) -> tuple[Any, ...]:
+    """The members of a union return type, or the type itself."""
+    import types
+    import typing
+
+    origin = typing.get_origin(return_type)
+    if origin is typing.Union or origin is types.UnionType:
+        return tuple(a for a in typing.get_args(return_type) if a is not type(None))
+    return (return_type,)
+
+
+def return_type_field_names(return_type: Any) -> set[str]:
+    """Field names of a model/TypedDict return type (all union members together)."""
+    names: set[str] = set()
+    for member in _return_type_members(return_type):
+        fields = getattr(member, "model_fields", None)
+        if isinstance(fields, dict):
+            names.update(fields)
+        elif isinstance(member, type) and issubclass(member, dict):
+            names.update(inspect.get_annotations(member))
+    return names
+
+
+def return_call_hint(return_type: Any, python_tool: str | None = None) -> str | None:
+    """Name the call that returns a model return type, e.g. ``return_result(Done(...))``.
+
+    Only for return types whose members are all Pydantic models: other types
+    already get an example from the formatter. ``python_tool``: the failed
+    call was a direct ``return_result`` tool call, which takes JSON arguments;
+    the constructor form is then labelled as code for that Python tool, and a
+    JSON example follows.
+    """
+    forms = []
+    json_forms = []
+    for member in _return_type_members(return_type):
+        fields = getattr(member, "model_fields", None)
+        if not isinstance(member, type) or not isinstance(fields, dict):
+            return None
+        required = [
+            name
+            for name, info in fields.items()
+            if info.is_required() and not is_hidden_field(member, name)
+        ]
+        args = ", ".join(f"{name}=..." for name in required)
+        forms.append(f"return_result({member.__name__}({args}))")
+        fields_json = ", ".join(f'"{name}": ...' for name in required)
+        json_forms.append(f'{{"result": {{{fields_json}}}}}')
+    if not forms:
+        return None
+    call = forms[0] if len(forms) == 1 else f"one of: {', '.join(forms)}"
+    if python_tool is None:
+        return f"Call it as {call}."
+    return (
+        f"In {python_tool} code, call it as {call}. As a direct return_result tool call, "
+        f"pass JSON arguments: {' or '.join(json_forms)}."
+    )
+
+
 def format_validation_error(
     error: Exception,
     return_type: Any,

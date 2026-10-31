@@ -132,6 +132,13 @@ def test_need_input_reason_is_optional():
     assert asked.reason == "Pushing to the wrong one is hard to undo."
 
 
+def test_need_input_accepts_an_explanation_like_done_and_waiting():
+    asked = NeedInput(question="Which branch?", explanation="blocked on the branch")
+    assert asked.explanation == "blocked on the branch"
+    assert NeedInput(question="Which branch?", explanation=" ").explanation is None
+    assert NeedInput(question="Which branch?").explanation is None
+
+
 @pytest.mark.parametrize(
     "build",
     [

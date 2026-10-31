@@ -37,7 +37,9 @@ from nooa.unifiedllm.cache_policy import (
 from nooa.unifiedllm.media_inputs import (
     MediaInput,
     attachment_kind,
+    explicitly_rejected,
     filter_media_messages,
+    media_occurrences,
     validate_media_inputs,
 )
 
@@ -1269,6 +1271,9 @@ class UnifiedLLM(ABC):
             self._reasoning_config.settings(reasoning_level)
         self.reasoning_level = reasoning_level
         self.media_inputs = validate_media_inputs(media_inputs)
+        # Attachment occurrences the current connection rejected; reset when
+        # a request goes to another model or endpoint.
+        self._media_exclusions: tuple[tuple[Any, ...] | None, set[Any]] = (None, set())
         self.model = model
         self.config = config
         self._registry_config = None
@@ -1304,7 +1309,72 @@ class UnifiedLLM(ABC):
 
     def _prepare_media_messages(self, messages, call_config):
         enabled = self._request_media_inputs(call_config)
-        return filter_media_messages(messages, enabled)
+        return filter_media_messages(messages, enabled, self._rejected_media(call_config))
+
+    def _rejected_media(self, call_config: dict[str, Any]) -> set[Any]:
+        """Rejected attachment occurrences of this request's connection only."""
+        client = call_config.get("client")
+        connection = (
+            self._effective_model(call_config),
+            *(call_config.get(key) for key in ("api_base", "base_url", "custom_llm_provider")),
+            None if client is None else id(client),
+        )
+        exclusions = getattr(self, "_media_exclusions", (None, set()))
+        if exclusions[0] != connection:
+            # Another model or endpoint may read what this one could not.
+            exclusions = (connection, set())
+            self._media_exclusions = exclusions
+        return exclusions[1]
+
+    def _exclude_rejected_media(self, messages, kwargs: dict[str, Any], exc: Exception) -> bool:
+        """Exclude the newest sent attachment the provider explicitly rejected.
+
+        True means the request changed and may be retried; a generic error, or
+        one with nothing left to exclude, returns False.
+        """
+        try:
+            call_config = self._prepare_call_config(kwargs)
+        except Exception:
+            return False  # The request itself is invalid; re-raise the original error.
+        rejected = self._rejected_media(call_config)
+        sent = media_occurrences(messages, self._request_media_inputs(call_config))
+        for kind, key in reversed(sent):
+            if key not in rejected and explicitly_rejected(exc, kind):
+                rejected.add(key)
+                _record_llm_metric("media_rejected_retry", kind)
+                logger.warning(
+                    "Provider rejected an attached %s; retrying with a note in its place: %s",
+                    kind,
+                    str(exc)[:300],
+                )
+                return True
+        return False
+
+    def _media_recovery_attempts(self) -> int:
+        # Shares the endpoint retry budget: max_retries=0 (e.g. a connect
+        # probe, which must see the provider's own answer) disables it.
+        retry_config = getattr(self, "retry_config", None)
+        return max(0, retry_config.max_retries) if retry_config else 0
+
+    def _call_recovering_media(self, call_once, messages, kwargs):
+        """Retry a request without each attachment the provider explicitly rejects."""
+        for _ in range(self._media_recovery_attempts()):
+            try:
+                return call_once()
+            except Exception as exc:
+                if not self._exclude_rejected_media(messages, kwargs, exc):
+                    raise
+        return call_once()
+
+    async def _acall_recovering_media(self, call_once, messages, kwargs):
+        """Async ``_call_recovering_media``."""
+        for _ in range(self._media_recovery_attempts()):
+            try:
+                return await call_once()
+            except Exception as exc:
+                if not self._exclude_rejected_media(messages, kwargs, exc):
+                    raise
+        return await call_once()
 
     def get_context_limits(
         self, overrides: dict[str, Any] | None = None, *, fallback_reserve: int = 0
@@ -2021,6 +2091,18 @@ class CompletionClient(UnifiedLLM):
         output_model: type[BaseModel] | None = None,
         **kwargs,
     ) -> LLMResponse:
+        """Call the LLM; see ``_call_once``. Explicitly rejected media is retried as a note."""
+        return self._call_recovering_media(
+            lambda: self._call_once(messages, tools, output_model, **kwargs), messages, kwargs
+        )
+
+    def _call_once(
+        self,
+        messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
+        tools: list[Tool] | None = None,
+        output_model: type[BaseModel] | None = None,
+        **kwargs,
+    ) -> LLMResponse:
         """
         Sync version: Completion API uses standard message format, so no transformation needed.
         Messages are passed directly to the API.
@@ -2129,6 +2211,18 @@ class CompletionClient(UnifiedLLM):
         return self._response_from_chat(raw_response, state_scope, tools, output_model)
 
     async def acall(
+        self,
+        messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
+        tools: list[Tool] | None = None,
+        output_model: type[BaseModel] | None = None,
+        **kwargs,
+    ) -> LLMResponse:
+        """Async call; see ``_acall_once``. Explicitly rejected media is retried as a note."""
+        return await self._acall_recovering_media(
+            lambda: self._acall_once(messages, tools, output_model, **kwargs), messages, kwargs
+        )
+
+    async def _acall_once(
         self,
         messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
         tools: list[Tool] | None = None,
@@ -2442,6 +2536,18 @@ class ResponsesClient(UnifiedLLM):
         output_model: type[BaseModel] | None = None,
         **kwargs,
     ) -> LLMResponse:
+        """Call the LLM; see ``_call_once``. Explicitly rejected media is retried as a note."""
+        return self._call_recovering_media(
+            lambda: self._call_once(messages, tools, output_model, **kwargs), messages, kwargs
+        )
+
+    def _call_once(
+        self,
+        messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
+        tools: list[Tool] | None = None,
+        output_model: type[BaseModel] | None = None,
+        **kwargs,
+    ) -> LLMResponse:
         """
         Sync version: Call LLM and parse response.
 
@@ -2523,6 +2629,18 @@ class ResponsesClient(UnifiedLLM):
         )
 
     async def acall(
+        self,
+        messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
+        tools: list[Tool] | None = None,
+        output_model: type[BaseModel] | None = None,
+        **kwargs,
+    ) -> LLMResponse:
+        """Async call; see ``_acall_once``. Explicitly rejected media is retried as a note."""
+        return await self._acall_recovering_media(
+            lambda: self._acall_once(messages, tools, output_model, **kwargs), messages, kwargs
+        )
+
+    async def _acall_once(
         self,
         messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
         tools: list[Tool] | None = None,

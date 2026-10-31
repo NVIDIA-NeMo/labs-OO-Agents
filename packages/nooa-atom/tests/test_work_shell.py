@@ -4,6 +4,7 @@
 
 import asyncio
 import contextlib
+import json
 import os
 from pathlib import Path
 
@@ -55,13 +56,29 @@ async def test_one_shot_result_and_streams(manager, tmp_path):
 async def test_one_shot_timeout(manager):
     r = await manager.launch(Shell().run("sleep 30; echo never", timeout=0.3))
     assert (r.returncode, r.timed_out, r.stdout) == (124, True, "")
+    # The result says how to go on: a larger timeout=, or the background.
+    assert "[timed out after 0.3 s: pass a larger timeout= for a longer command" in r.stderr
+    assert "self.jobs.launch(sh.run(cmd, timeout=...), name=...)]" in r.stderr
+
+
+NOTICE = "Full output: await self.files.read({})"
+
+
+def cut_notice(path: str, total: int) -> str:
+    """The first lines of a text cut at 1 MiB (256 Ki head, 768 Ki tail characters)."""
+    return (
+        "<truncated-output>\n"
+        f"Output too large ({total:,} chars). Showing first 262,144 and last 786,432 chars.\n"
+        + NOTICE.format(json.dumps(path))
+        + "\n\n"
+    )
 
 
 async def test_long_output_bounded_with_retained_file(manager):
-    r = await manager.launch(Shell().run("seq 1 200000"))
-    assert len(r.stdout) < 11_000 and "bytes omitted; full output:" in r.stdout
-    assert r.stdout.startswith("1\n2\n") and r.stdout.endswith("199999\n200000\n")
-    assert r.stdout_path and Path(r.stdout_path).read_text().count("\n") == 200000
+    r = await manager.launch(Shell().run("seq 1 200000"))  # 1,288,895 bytes
+    assert r.stdout_path and r.stdout.startswith(cut_notice(r.stdout_path, 1_288_895) + "1\n2\n")
+    assert len(r.stdout) < 1_049_000 and r.stdout.endswith("199999\n200000\n\n</truncated-output>")
+    assert Path(r.stdout_path).read_text().count("\n") == 200000
     # Kept after the result was consumed; removed with the manager.
     await asyncio.sleep(0)
     assert Path(r.stdout_path).exists()
@@ -69,16 +86,52 @@ async def test_long_output_bounded_with_retained_file(manager):
     assert not Path(r.stdout_path).exists()
 
 
+async def test_output_up_to_1_mib_is_whole_in_the_result(tmp_path):
+    out = "".join(f"line {i:05d} " + "y" * 25 + "\n" for i in range(2500))  # 92,500 bytes
+    (tmp_path / "o").write_text(out)
+    r = await Shell(tmp_path).run(f"cat {tmp_path / 'o'}")
+    assert len(out.encode()) == 92_500 and r.stdout == out
+    assert len(r.stdout.splitlines()) == 2500 and r.stdout_path is None
+    exact = "z" * (1024 * 1024 - 1) + "\n"  # exactly 1 MiB: still whole
+    (tmp_path / "o").write_text(exact)
+    r = await Shell(tmp_path).run(f"cat {tmp_path / 'o'}")
+    assert r.stdout == exact and r.stdout_path is None
+
+
+async def test_multibyte_text_split_across_reads_stays_whole(tmp_path):
+    # 3-byte characters: the 64 KiB reads split many of them.
+    out = "".join(f"{i:04d} 漢字テスト🚀\n" for i in range(9000))  # ~230 KB
+    (tmp_path / "o").write_text(out)
+    r = await Shell(tmp_path).run(f"cat {tmp_path / 'o'}")
+    assert r.stdout == out and "\ufffd" not in r.stdout
+    big = out * 12  # > 1 Mi characters: cut, the file byte-exact
+    (tmp_path / "o").write_text(big)
+    r = await Shell(tmp_path).run(f"cat {tmp_path / 'o'}")
+    assert r.stdout_path and Path(r.stdout_path).read_bytes() == big.encode()
+    assert "\ufffd" not in r.stdout
+
+
+async def test_one_line_over_the_limit_is_cut_and_kept_byte_exact(tmp_path):
+    data = bytes(range(256)) * 8192  # 2 MiB without a newline, invalid UTF-8 included
+    (tmp_path / "o").write_bytes(data)
+    r = await Shell(tmp_path).run(f"cat {tmp_path / 'o'}")
+    assert r.stdout_path and Path(r.stdout_path).read_bytes() == data
+    assert (
+        r.stdout.startswith("<truncated-output>\n")
+        and NOTICE.format(json.dumps(r.stdout_path)) in r.stdout.split("\n", 3)[2]
+    )
+
+
 async def test_direct_run_keeps_long_output_until_aclose(tmp_path):
     sh = Shell(tmp_path)
-    out = "".join(f"line {i:05d} " + "x" * 18 + "\n" for i in range(1200))  # ~36 KB
+    out = "".join(f"line {i:05d} " + "x" * 18 + "\n" for i in range(40_000))  # 1.2 MB
     cmd = f"cat {tmp_path / 'o'}; cat {tmp_path / 'o'} >&2"
     (tmp_path / "o").write_text(out)
     r = await sh.run(cmd)
     for text, path in ((r.stdout, r.stdout_path), (r.stderr, r.stderr_path)):
-        assert len(text) < 11_000 and f"bytes omitted; full output: {path}]" in text
-        assert text.startswith("line 00000 ") and text.endswith("line 01199 " + "x" * 18 + "\n")
-        assert path and Path(path).read_text() == out
+        assert path and text.startswith(cut_notice(path, 1_200_000) + "line 00000 ")
+        assert text.endswith("line 39999 " + "x" * 18 + "\n\n</truncated-output>")
+        assert Path(path).read_text() == out
     short = await sh.run("echo hi")
     assert (short.stdout, short.stdout_path, short.stderr_path) == ("hi\n", None, None)
     assert sorted(p.name for p in Path(r.stdout_path).parent.iterdir()) == [
@@ -91,9 +144,12 @@ async def test_direct_run_keeps_long_output_until_aclose(tmp_path):
 
 async def test_direct_run_output_limit_marker():
     sh = Shell(max_output=1000)
-    r = await sh.run("head -c 30000 /dev/zero | tr '\\0' a")
+    r = await sh.run("head -c 2000000 /dev/zero | tr '\\0' a")
     assert r.stdout_path and Path(r.stdout_path).stat().st_size == 1000
-    assert f"over the 1,000-byte output limit: {r.stdout_path} holds only the first" in r.stdout
+    assert (
+        NOTICE.format(json.dumps(r.stdout_path)) + "\nThe file is incomplete: it holds the first "
+        "1,000 bytes; 1,999,000 more bytes were over its 1,000-byte limit.\n"
+    ) in r.stdout
     await sh.aclose()
     assert not Path(r.stdout_path).exists()
 
@@ -101,10 +157,10 @@ async def test_direct_run_output_limit_marker():
 async def test_dropped_unowned_shell_keeps_files_while_the_result_lives():
     import gc
 
-    r = await Shell().run("seq 1 100000")  # the temporary Shell is dropped
+    r = await Shell().run("seq 1 300000")  # the temporary Shell is dropped
     gc.collect()
     path = Path(r.stdout_path)
-    assert path.read_text().count("\n") == 100000
+    assert path.read_text().count("\n") == 300000
     del r
     gc.collect()
     assert not path.exists()
@@ -118,7 +174,7 @@ async def test_dropped_owned_shell_keeps_files_until_the_owner_closes():
     owner = ShellOwner()
     token = shell_owner.set(owner)
     try:
-        r = await Shell().run("seq 1 100000")  # a cell's one-liner
+        r = await Shell().run("seq 1 300000")  # a cell's one-liner
         pid = int((await Shell().run("echo $$")).stdout)
     finally:
         shell_owner.reset(token)
@@ -127,7 +183,7 @@ async def test_dropped_owned_shell_keeps_files_until_the_owner_closes():
     path = Path(r.stdout_path)
     del r
     gc.collect()  # neither the Shell nor the result is needed: the owner keeps it
-    assert path.read_text().count("\n") == 100000
+    assert path.read_text().count("\n") == 300000
     await owner.aclose()
     assert not path.exists()
 
@@ -139,7 +195,7 @@ async def test_owned_shell_aclose_removes_its_files():
     token = shell_owner.set(owner)
     try:
         sh = Shell()
-        r = await sh.run("seq 1 100000")
+        r = await sh.run("seq 1 300000")
     finally:
         shell_owner.reset(token)
     assert Path(r.stdout_path).exists()
@@ -289,7 +345,7 @@ async def test_bash_exit_is_reported_and_cancel_still_interrupts(manager, tmp_pa
     sh = manager.launch(shell, name="sh")
     await sh.send("export FOO=1")
     ended = await sh.send("exit 0")
-    assert "bash ended during this command" in ended.stderr
+    assert "this command ended the Shell's bash" in ended.stderr
     assert "restarted, variables lost" in sh.summary
     r = await sh.send('echo "FOO=$FOO"')
     assert r.stdout == "FOO=\n"
@@ -316,12 +372,13 @@ async def test_same_shell_cannot_be_entered_twice(manager, tmp_path):
 
 
 async def test_output_limit_is_enforced_while_writing(manager, tmp_path):
-    r = await manager.launch(Shell(max_output=1000).run("head -c 100000 /dev/zero | tr '\\0' a"))
+    cmd = "head -c 2000000 /dev/zero | tr '\\0' a"
+    r = await manager.launch(Shell(max_output=1000).run(cmd))
     assert Path(r.stdout_path).stat().st_size == 1000
-    assert "over the 1,000-byte output limit" in r.stdout and "first 1,000 of 100,000" in r.stdout
-    assert r.stdout.endswith("a" * 100)  # the tail is still shown
+    assert "it holds the first 1,000 bytes; 1,999,000 more bytes were over" in r.stdout
+    assert r.stdout.endswith("a" * 100 + "\n</truncated-output>")  # the tail is still shown
     sh = manager.launch(Shell(tmp_path, max_output=1000), name="sh")
-    r = await sh.send("head -c 50000 /dev/zero | tr '\\0' b; echo done >&2")
+    r = await sh.send("head -c 2000000 /dev/zero | tr '\\0' b; echo done >&2")
     assert Path(r.stdout_path).stat().st_size == 1000 and r.stderr == "done\n"
     r = await manager.launch(Shell(max_output=10_000).run("yes", timeout=1))
     assert r.timed_out and Path(r.stdout_path).stat().st_size == 10_000
@@ -439,7 +496,7 @@ async def test_exit_ends_the_bash_and_says_so(tmp_path):
     async with Shell(tmp_path) as sh:
         await sh.run("export FOO=1; cd /")
         r = await sh.run("exit 3")
-        assert "bash ended during this command" in r.stderr
+        assert "this command ended the Shell's bash (exit 3)" in r.stderr
         r = await sh.run('echo "[$FOO] $PWD"')
         assert r.stdout == "[] /\n"  # a new bash: cwd kept, variables lost
 
@@ -492,7 +549,8 @@ async def test_coroutine_job_summary_uses_cwd_when_command_starts(manager, tmp_p
 
             second = manager.launch(queued_run(), name="probe")
             await asyncio.wait_for(queued.wait(), 5)
-            assert second.summary == "$ pwd"  # no guessed directory while queued
+            # No guessed directory while queued; it names what it waits behind.
+            assert second.summary == "$ pwd · queued behind `cd sub` (job change_directory)"
             release[0].set()
             await first
             await asyncio.wait_for(started[1].wait(), 5)
@@ -556,9 +614,29 @@ async def test_set_e_persists_and_ordinary_commands_still_succeed(tmp_path):
         assert r.stdout == "on\n"  # the option is the user's, in force again
         r = await sh.run("false; echo never")  # errexit ends the shell, as in a terminal
         assert r.returncode == 1 and r.stdout == ""
-        assert "bash ended during this command (exit 1)" in r.stderr
+        assert "this command ended the Shell's bash (exit 1)" in r.stderr
         r = await sh.run('echo "[$X]"; case $- in *e*) echo on;; esac')
         assert (r.returncode, r.stdout) == (0, "[]\n")  # a new bash: options, variables gone
+
+
+async def test_a_commands_own_exit_says_how_to_keep_the_shell(tmp_path):
+    """SWE 8487795: the model's own `exit` ended bash; the result says what to do instead."""
+    from nooa.runtime.harness_metrics import harness_metrics_session
+
+    with harness_metrics_session() as metrics:
+        async with Shell(tmp_path) as sh:
+            r = await sh.run("exit 5")
+            assert r.returncode == 5
+            assert r.stderr == (
+                "[this command ended the Shell's bash (exit 5); the next command starts a "
+                "fresh bash (cwd kept; environment, variables, options and traps reset). "
+                "Use a subshell `( ... )` or a return code instead of exit.]"
+            )
+            r = await sh.run("set -e; false")  # errexit: the same note
+            assert "this command ended the Shell's bash (exit 1)" in r.stderr
+            assert (await sh.run("(exit 4)")).stderr == ""  # a subshell keeps bash
+    assert metrics.shell_exit_hints == [5, 1]
+    assert metrics.to_span_attributes()["harness.shell_exit_hint.count"] == 2
 
 
 async def test_nonzero_statuses_are_reported_as_is(tmp_path):
@@ -567,10 +645,38 @@ async def test_nonzero_statuses_are_reported_as_is(tmp_path):
         assert (await sh.run("(exit 7)")).returncode == 7
         assert (await sh.run("sh -c 'kill -TERM $$'")).returncode == 143
         r = await sh.run("exit 7")
-        assert r.returncode == 7 and "bash ended during this command (exit 7)" in r.stderr
+        assert r.returncode == 7 and "this command ended the Shell's bash (exit 7)" in r.stderr
         r = await sh.run("exit 0")
-        assert r.returncode == 0 and "bash ended during this command (exit 0)" in r.stderr
+        assert r.returncode == 0 and "this command ended the Shell's bash (exit 0)" in r.stderr
         assert (await sh.run("echo back")).stdout == "back\n"
+
+
+async def test_a_restarted_shell_whose_kept_cwd_is_gone_starts_where_it_started(tmp_path):
+    """TB 13-0: bash died in a removed clone; the new bash must not start there."""
+    from nooa.runtime.harness_metrics import harness_metrics_session
+
+    gone = tmp_path / "clone"
+    gone.mkdir()
+    with harness_metrics_session() as metrics:
+        async with Shell(tmp_path) as sh:
+            await sh.run(f"cd {gone}")
+            r = await sh.run(f"rm -rf {gone}; exit 3")
+            assert r.returncode == 3 and "this command ended the Shell's bash" in r.stderr
+            r = await sh.run("pwd")
+            assert (r.returncode, r.stdout) == (0, f"{tmp_path.resolve()}\n")
+            assert (
+                f"[the shell's kept cwd {gone.resolve()} no longer exists: the new bash "
+                f"started in {tmp_path.resolve()}]"
+            ) in r.stderr
+            assert r.cwd == str(tmp_path.resolve()) and sh.current_dir == r.cwd
+            r = await sh.run("pwd")  # once: the next command just runs
+            assert r.stderr == ""
+            # A live bash in a removed directory is left as it is (no restart).
+            await sh.run(f"mkdir {gone} && cd {gone} && rmdir {gone}")
+            assert "no longer exists" not in (await sh.run("true")).stderr
+    assert metrics.shell_cwd_fallbacks == [f"{gone.resolve()} -> {tmp_path.resolve()}"]
+    attrs = metrics.to_span_attributes()
+    assert attrs["harness.shell_cwd_fallback.count"] == 1
 
 
 async def test_nounset_and_pipefail(tmp_path):
@@ -584,7 +690,7 @@ async def test_nounset_and_pipefail(tmp_path):
         assert (r.returncode, r.stdout) == (0, "ok")
         assert (await sh.run('echo "$Y"')).stdout == "2\n"
         r = await sh.run("echo $NOT_SET")  # nounset ends a non-interactive bash
-        assert r.returncode != 0 and "bash ended during this command" in r.stderr
+        assert r.returncode != 0 and "this command ended the Shell's bash" in r.stderr
 
 
 async def test_user_traps_persist_and_work(tmp_path):
@@ -675,7 +781,7 @@ def test_timeout_is_a_run_parameter_not_shell_configuration():
 
     params = inspect.signature(Shell.run).parameters
     assert params["timeout"].kind is inspect.Parameter.KEYWORD_ONLY
-    assert params["timeout"].default == 1800.0  # omitted: 30 minutes
+    assert params["timeout"].default == 600.0  # omitted: 10 minutes
     assert "timeout" not in inspect.signature(Shell).parameters
     assert not hasattr(Shell(), "timeout")
     with pytest.raises(TypeError):
@@ -1105,3 +1211,115 @@ async def test_run_during_aclose_waits_and_keeps_its_scratch_files(tmp_path, gat
     finally:
         with contextlib.suppress(ProcessLookupError):
             os.kill(bg, 9)
+
+
+async def test_a_python_script_runs_on_stdin_without_nested_quotes(tmp_path):
+    # The prompt advice: sh.run("python3 -", stdin=script), and "bash -s" for bash.
+    script = 'print("double", \'single\', """triple""")\nprint(\'ends with "\')\n'
+    r = await Shell(tmp_path).run("python3 -", stdin=script)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == 'double single triple\nends with "\n'
+    r = await Shell(tmp_path).run("bash -s", stdin='echo "it\'s $((1 + 2))"\n')
+    assert (r.returncode, r.stdout) == (0, "it's 3\n")
+
+
+async def test_an_inline_command_behind_a_job_fails_at_once_naming_it(manager, tmp_path):
+    from nooa.runtime.harness_metrics import harness_metrics_session
+
+    with harness_metrics_session() as metrics:
+        sh = Shell(tmp_path)
+        log = manager.launch(sh.run("sleep 30; echo never", timeout=60), name="log")
+        async with asyncio.timeout(10):
+            while "running" not in sh.summary():
+                await asyncio.sleep(0.02)
+        # Awaited directly (not in a job): no queueing, an error at once.
+        with pytest.raises(RuntimeError) as caught:
+            await asyncio.wait_for(sh.run("echo polled", timeout=0.5), 2)
+        message = str(caught.value)
+        assert "busy running `sleep 30; echo never` (job log)" in message
+        assert "launched in the background" in message and "another Shell()" in message
+        attrs = metrics.to_span_attributes()
+        assert attrs["harness.shell_busy_rejected.count"] == 1
+        assert "harness.shell_queued_behind_running.count" not in attrs
+        assert log.status == "running"  # the job goes on
+        await log.cancel()
+        after = await asyncio.wait_for(sh.run("echo next", timeout=10), 20)
+        assert after.stdout == "next\n"  # the refused command never ran; the Shell goes on
+        await sh.aclose()
+
+
+async def test_an_inline_command_behind_a_job_starting_bash_fails_at_once(
+    manager, tmp_path, monkeypatch
+):
+    # The job holds the lock while bash first starts: still busy for a cell's run.
+    sh = Shell(tmp_path)
+    boot = Shell._boot
+    booting = asyncio.Event()
+
+    async def slow_boot(self, session):
+        booting.set()
+        await asyncio.sleep(0.5)
+        return await boot(self, session)
+
+    monkeypatch.setattr(Shell, "_boot", slow_boot)
+    log = manager.launch(sh.run("sleep 30", timeout=60), name="log")
+    await asyncio.wait_for(booting.wait(), 10)
+    with pytest.raises(RuntimeError) as caught:
+        await asyncio.wait_for(sh.run("echo polled", timeout=5), 2)
+    assert "busy running `sleep 30` (job log)" in str(caught.value)
+    await log.cancel()
+    await sh.aclose()
+
+
+async def test_a_job_behind_a_job_waits_and_its_timeout_counts_from_its_start(manager, tmp_path):
+    from nooa.runtime.harness_metrics import harness_metrics_session
+
+    with harness_metrics_session() as metrics:
+        async with Shell(tmp_path) as sh:
+            make = manager.launch(sh.run("sleep 1.5; echo make", timeout=10), name="make")
+            async with asyncio.timeout(10):
+                while "running" not in sh.summary():
+                    await asyncio.sleep(0.02)
+            test = manager.launch(sh.run("echo pytest", timeout=0.5), name="pytest")
+            async with asyncio.timeout(10):
+                while "1 queued behind it" not in sh.summary():
+                    await asyncio.sleep(0.02)
+            assert test.summary == "$ echo pytest · queued behind `sleep 1.5; echo make` (job make)"
+            first, second = await asyncio.wait_for(asyncio.gather(make, test), 20)
+            # Its 0.5 s deadline counts from its own start, not from the call: it ran.
+            assert (first.stdout, second.stdout) == ("make\n", "pytest\n")
+            assert (second.returncode, second.timed_out) == (0, False)
+            assert "waited" not in second.stderr  # under the 5 s note threshold
+        attrs = metrics.to_span_attributes()
+        assert attrs["harness.shell_queued_behind_running.count"] == 1
+        assert "harness.shell_busy_rejected.count" not in attrs
+
+
+async def test_a_long_wait_behind_a_job_is_noted_on_the_result(manager, tmp_path, monkeypatch):
+    import nooa_atom.agent.work_shell as work_shell
+
+    monkeypatch.setattr(work_shell, "_QUEUE_NOTE_SECONDS", 0.2)
+    async with Shell(tmp_path) as sh:
+        make = manager.launch(sh.run("sleep 0.6; echo make"), name="make")
+        async with asyncio.timeout(10):
+            while "running" not in sh.summary():
+                await asyncio.sleep(0.02)
+        test = manager.launch(sh.run("echo pytest", timeout=0.3), name="pytest")
+        _, second = await asyncio.wait_for(asyncio.gather(make, test), 20)
+        assert (second.stdout, second.timed_out) == ("pytest\n", False)
+        assert "waited" in second.stderr and "`sleep 0.6; echo make` (job make)" in second.stderr
+
+
+async def test_a_long_wait_behind_a_direct_run_is_noted_on_the_result(tmp_path, monkeypatch):
+    import nooa_atom.agent.work_shell as work_shell
+
+    monkeypatch.setattr(work_shell, "_QUEUE_NOTE_SECONDS", 0.2)
+    async with Shell(tmp_path) as sh:
+        first, second = await asyncio.wait_for(
+            asyncio.gather(sh.run("sleep 0.6; echo first"), sh.run("echo second", timeout=0.3)),
+            20,
+        )
+        # Behind a direct run the deadline still counts from its own start: it ran.
+        assert (first.stdout, second.stdout, second.timed_out) == ("first\n", "second\n", False)
+        assert "waited" in second.stderr and "`sleep 0.6; echo first`" in second.stderr
+        assert "(job" not in second.stderr

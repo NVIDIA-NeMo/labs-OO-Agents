@@ -11,6 +11,7 @@ import io
 import linecache
 import logging
 import math
+import os
 import re as _re
 import time
 import tokenize
@@ -54,6 +55,7 @@ from nooa.events import (
     SystemPrompt,
 )
 from nooa.llm_types import LLMUsage
+from nooa.runtime.cell_deadline import run_with_deadline
 from nooa.runtime.context_vars import (
     _current_event_format_var,
     _in_exec_middleware,
@@ -129,6 +131,7 @@ def _make_llm_metrics_bridge(hm: "HarnessMetrics") -> Callable[[str, Any], None]
         "reasoning_as_structured_output": lambda _: hm.record_reasoning_as_structured_output(),
         "token_usage": _handle_token_usage,
         "llm_queue": lambda detail: hm.record_llm_queue(detail),
+        "media_rejected_retry": lambda kind: hm.record_media_rejected_retry(kind),
     }
 
     def bridge(event: str, detail: Any = None) -> None:
@@ -215,6 +218,16 @@ _ARCHIVE_TARGET_UTILIZATION = 0.60
 # Cold-start chars→tokens ratio (~4 chars per token) used before any provider
 # response has calibrated _tokens_per_char from real usage.
 _DEFAULT_TOKENS_PER_CHAR = 0.25
+
+
+def _image_block_count(event: Any) -> int:
+    """The image content blocks (``image_url``) an event sends to the model."""
+    images = getattr(event, "images", None)
+    if not isinstance(images, list):
+        return 0
+    return sum(
+        1 for block in images if isinstance(block, dict) and block.get("type") == "image_url"
+    )
 
 
 def _collapse_oldest(
@@ -555,11 +568,27 @@ def _rewrite_never_awaited_warnings(text: str, agent: Any = None) -> str:
 
 
 def _make_capture_buffer(
-    limit: int, tail_chars: int | None, file_backed: bool
+    limit: int,
+    tail_chars: int | None,
+    file_backed: bool,
+    *,
+    file_dir: str | None = None,
+    file_notice: str | None = None,
 ) -> TruncatingStringIO:
-    """Create a stdout/stderr capture buffer, optionally file-backed."""
+    """Create a stdout/stderr capture buffer, optionally file-backed.
+
+    ``file_dir``/``file_notice``: ``CaptureConfig``'s (where the files go,
+    how a cut notice names them); only used when ``file_backed``.
+    """
     if file_backed:
-        return FileBackedTruncatingStringIO(limit=limit, tail_chars=tail_chars)
+        if file_dir is not None:
+            try:
+                os.makedirs(file_dir, exist_ok=True)
+            except OSError:
+                file_dir = None  # the system temp directory, rather than no file
+        return FileBackedTruncatingStringIO(
+            limit=limit, tail_chars=tail_chars, dir=file_dir, notice=file_notice
+        )
     return TruncatingStringIO(limit=limit, tail_chars=tail_chars)
 
 
@@ -818,6 +847,66 @@ class ActorRuntime:
             if isinstance(hm, HarnessMetrics):
                 hm.context_limits_events_collapsed += n_to_archive
                 hm.context_limits_tokens_archived += int(n_to_archive * avg_event_tok)
+
+    def _collapse_images_over_limit(self, limit: int) -> int:
+        """Keep the newest ``limit`` images in the active events; collapse older image events.
+
+        Each image-bearing event (a ``Task`` or ``PythonOutput`` with image
+        blocks) older than the newest ``limit`` images is collapsed on its
+        own, so its text survives in the summary and the original stays
+        readable at ``self.events["<tag>"]``. Returns the number collapsed.
+        """
+        em = self.event_manager
+        bearing: list[tuple[str, int]] = []
+        for tag in em.keys():
+            try:
+                event = em[tag]
+            except Exception:  # noqa: BLE001
+                continue
+            count = _image_block_count(event)
+            if count:
+                bearing.append((tag, count))
+        kept = 0
+        to_collapse: list[str] = []
+        for tag, count in reversed(bearing):
+            if kept + count <= limit:
+                kept += count
+            else:
+                to_collapse.append(tag)
+                kept = limit  # an older, smaller event must not slip in after a skipped one
+        collapsed = 0
+        for tag in reversed(to_collapse):
+            summary_text = (
+                f"[image collapsed (request image limit {limit}); "
+                f'original: self.events["{tag}"]; show it again: '
+                f'show(Image.from_url(self.events["{tag}"].images[0]["image_url"]["url"]))]'
+            )
+            try:
+                em.collapse(tag, tag, summary_text=summary_text)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("image-limit collapse failed for %s: %s", tag, exc)
+                continue
+            collapsed += 1
+        if collapsed:
+            get_harness_metrics().media_image_limit_collapsed(limit, collapsed)
+        return collapsed
+
+    def _recover_image_limit(self, exc: BaseException) -> bool:
+        """A provider's per-request image limit: remember it, collapse old images; True to retry."""
+        from nooa.unifiedllm.media_inputs import image_limit
+
+        limit = image_limit(exc)
+        if limit is None:
+            return False
+        self._request_image_limit = limit  # the session's later requests stay under it
+        if self._collapse_images_over_limit(limit) == 0:
+            return False  # nothing left to collapse: the same request would fail again
+        logger.warning(
+            "Provider image limit %d: collapsed older image events and retrying: %s",
+            limit,
+            str(exc)[:300],
+        )
+        return True
 
     @property
     def _agent_call_stack(self) -> tuple[str | None, ...]:
@@ -1137,6 +1226,10 @@ class ActorRuntime:
 
         from nooa.unifiedllm.limits import context_limits_for, reduced_reply_params
 
+        # A provider image limit learned earlier in this session: stay under it.
+        _image_limit = getattr(self, "_request_image_limit", None)
+        if _image_limit is not None:
+            self._collapse_images_over_limit(_image_limit)
         # Build messages from context + events (timers inside _build_messages).
         # No proactive clamping — recovery is error-driven. If the API rejects
         # with ContextWindowExceededError, the except handler archives events,
@@ -1265,9 +1358,30 @@ class ActorRuntime:
                     return ctx
 
                 _emit_llm_start()
+
+                async def _rebuild_middleware_messages() -> None:
+                    nonlocal _dynamic_context
+                    ctx.messages = await self._build_messages(
+                        self._current_method,
+                        call_args=self._current_call.args if self._current_call else (),
+                        call_kwargs=self._current_call.kwargs if self._current_call else {},
+                        tools=ctx.params.get("tools"),
+                        request_params=ctx.params,
+                        llm_client=ctx.client,
+                    )
+                    _dynamic_context = _snapshot_llm_request(
+                        self.event_manager, ctx.messages, current_generation_id or ""
+                    )
+
                 try:
                     try:
-                        ctx = await em.run_middleware("llm_call", ctx, _core_llm)
+                        try:
+                            ctx = await em.run_middleware("llm_call", ctx, _core_llm)
+                        except Exception as _img_exc:
+                            if not self._recover_image_limit(_img_exc):
+                                raise
+                            await _rebuild_middleware_messages()
+                            ctx = await em.run_middleware("llm_call", ctx, _core_llm)
                     except Exception as _cw_exc:
                         if not _is_context_window_error(_cw_exc):
                             raise
@@ -1345,12 +1459,33 @@ class ActorRuntime:
                 _emit_llm_start()
                 try:
                     try:
-                        response = await llm_client.acall(
-                            messages,
-                            tools=tools,
-                            output_model=output_model,
-                            **_kwargs,
-                        )
+                        try:
+                            response = await llm_client.acall(
+                                messages,
+                                tools=tools,
+                                output_model=output_model,
+                                **_kwargs,
+                            )
+                        except Exception as _img_exc:
+                            if not self._recover_image_limit(_img_exc):
+                                raise
+                            # Re-build after the collapse; the retry sends the newest images.
+                            messages = await self._build_messages(
+                                self._current_method,
+                                call_args=self._current_call.args if self._current_call else (),
+                                call_kwargs=self._current_call.kwargs if self._current_call else {},
+                                tools=tools,
+                                request_params=kwargs,
+                            )
+                            _dynamic_context = _snapshot_llm_request(
+                                self.event_manager, messages, current_generation_id or ""
+                            )
+                            response = await llm_client.acall(
+                                messages,
+                                tools=tools,
+                                output_model=output_model,
+                                **_kwargs,
+                            )
                     except Exception as _cw_exc:
                         if not _is_context_window_error(_cw_exc):
                             raise
@@ -1772,11 +1907,15 @@ class ActorRuntime:
                     limit=truncation_config.capture.max_stdout,
                     tail_chars=truncation_config.capture.tail,
                     file_backed=truncation_config.capture.file_backed,
+                    file_dir=truncation_config.capture.file_dir,
+                    file_notice=truncation_config.capture.file_notice,
                 )
                 stderr_buffer = _make_capture_buffer(
                     limit=truncation_config.capture.max_stderr,
                     tail_chars=truncation_config.capture.tail,
                     file_backed=truncation_config.capture.file_backed,
+                    file_dir=truncation_config.capture.file_dir,
+                    file_notice=truncation_config.capture.file_notice,
                 )
                 stdout_token = _stdout_buffer_var.set(stdout_buffer)
                 stderr_token = _stderr_buffer_var.set(stderr_buffer)
@@ -1878,7 +2017,7 @@ class ActorRuntime:
                     if timeout is None:
                         result_value = await run_owned_cell()
                     else:
-                        result_value = await asyncio.wait_for(run_owned_cell(), timeout=timeout)
+                        result_value = await run_with_deadline(run_owned_cell(), timeout)
                     if has_explicit_return or (implicit_return_added and result_value is not None):
                         returned_value = result_value
                 elif wrap_in_function:
@@ -1942,13 +2081,7 @@ class ActorRuntime:
                     coro = exec_globals["__repl_wrapper__"]()
                     with agent_async_safety_context():
                         if timeout is not None:
-                            try:
-                                result_value = await asyncio.wait_for(coro, timeout=timeout)
-                            except TimeoutError:
-                                raise TimeoutError(
-                                    f"Code execution timed out after {timeout} seconds. "
-                                    "Check for infinite loops or blocking operations."
-                                ) from None
+                            result_value = await run_with_deadline(coro, timeout)
                         else:
                             result_value = await coro
 
@@ -2048,13 +2181,7 @@ class ActorRuntime:
                             coro = exec_globals["__wrapper__"]()
                             with agent_async_safety_context():
                                 if timeout is not None:
-                                    try:
-                                        await asyncio.wait_for(coro, timeout=timeout)
-                                    except TimeoutError:
-                                        raise TimeoutError(
-                                            f"Code execution timed out after {timeout} seconds. "
-                                            "Check for infinite loops or blocking operations."
-                                        ) from None
+                                    await run_with_deadline(coro, timeout)
                                 else:
                                     await coro
                         else:

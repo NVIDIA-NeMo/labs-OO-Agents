@@ -21,6 +21,7 @@ interface, or this agent's spike spelling
 
 from __future__ import annotations
 
+import re
 from typing import Annotated, Any, ClassVar
 
 # Cells see this module's names: the model builds Done/TaskResult/Todo, Shell and
@@ -28,6 +29,7 @@ from typing import Annotated, Any, ClassVar
 from nooa import Context, hidden, strategy
 from nooa.agentdoc import doc, spec
 from nooa.interactive import Done, NeedInput, Waiting
+from nooa.runtime.harness_metrics import get_harness_metrics
 from nooa.strategies import CodeActV2, PredictStrategy  # noqa: F401
 from nooa_atom.agent.work_manager import Job, JobEvent, Throttle, WorkManager
 from nooa_atom.agent.work_shell import CommandResult, Shell
@@ -49,6 +51,7 @@ with hidden:
     from nooa.interactive import InteractiveAgent, require_task_result
     from nooa.runtime.capture_scope import CaptureScope
     from nooa.runtime.channels import ChannelReader
+    from nooa.runtime.harness_metrics import get_harness_metrics
     from nooa.runtime.pprint import pprint as runtime_pprint
     from nooa.storage.markers import nosnapshot
     from nooa.strategies.codeact import current_cell_tag
@@ -124,9 +127,99 @@ _LEGACY_TOOL_HINT: Annotated[str, hidden] = (
     "If `self` exposes delegation, inspect its documentation with `print(doc(self.delegate))`."
 )
 _TOOL_HINT: Annotated[str, hidden] = (
-    "Run commands with `await sh.run(cmd)` on a `Shell()`; background work and child "
-    "agents go on `self.jobs`, documented in the python_cell_tools block."
+    "Run commands with `sh = Shell()` then `r = await sh.run(cmd, timeout=600)`; "
+    "background work and child agents go on `self.jobs`, documented in the "
+    "python_cell_tools block. python_cell runs in Atom's own Python (your thinking "
+    "environment). The task's code, packages and tests live in the task environment: run them "
+    'through a Shell (e.g. sh.run("python3 script.py")); don\'t install task packages into '
+    "Atom's Python."
 )
+
+_NAME_ERROR_RE = re.compile(r"^NameError: name '(?P<name>\w+)' is not defined", re.MULTILINE)
+
+
+def _name_error_hint(error: BaseException, formatted: str) -> str | None:
+    """The hint for a cell's ``name 'x' is not defined``; counted in harness metrics.
+
+    The sandbox path reports the error as text, so the formatted text is
+    matched when the exception is not a plain ``NameError``.
+    """
+    name = getattr(error, "name", None) if type(error) is NameError else None
+    if not isinstance(name, str):
+        match = _NAME_ERROR_RE.search(formatted)
+        if match is None:
+            return None
+        name = match.group("name")
+    hint = (
+        "Live names are listed in the python_cell_state block; python_cell_state() lists up to "
+        "20 (both may omit some). Check both and your context before recreating a name."
+    )
+    if name == "sh":
+        hint += " Create it first, e.g. `sh = Shell()`."
+    get_harness_metrics().name_error_hint(name)
+    return hint
+
+
+_MODULE_NOT_FOUND_RE = re.compile(
+    r"^ModuleNotFoundError: No module named '(?P<name>[\w.]+)'", re.MULTILINE
+)
+
+
+def _module_not_found_hint(error: BaseException, formatted: str) -> str | None:
+    """The hint for a cell's ``No module named 'x'``; counted in harness metrics.
+
+    A cell runs in Atom's Python, which usually lacks the task's packages
+    (the task's ``python3`` often has them). The sandbox path reports the
+    error as text, so the formatted text is matched too.
+    """
+    name = getattr(error, "name", None) if type(error) is ModuleNotFoundError else None
+    if not isinstance(name, str) or not name:
+        match = _MODULE_NOT_FOUND_RE.search(formatted)
+        if match is None:
+            return None
+        name = match.group("name")
+    module = name.split(".", 1)[0]
+    get_harness_metrics().module_not_found_hint(name)
+    return (
+        "python_cell runs in Atom's own Python, not the task's; the task's python3 may have "
+        f"{module}: check with await sh.run(\"python3 -c 'import {module}'\")"
+    )
+
+
+_SELF_ATTRIBUTE_RE = re.compile(
+    r"^AttributeError: '(?P<type>\w+)' object has no attribute '(?P<name>\w+)'", re.MULTILINE
+)
+
+
+def _mcp_tool_hint(agent: Any, error: BaseException, formatted: str) -> str | None:
+    """Name the MCP server of a tool called as a bare name or as ``self.<tool>``.
+
+    ``NameError`` for ``X`` or ``AttributeError`` for ``self.X`` (the agent's
+    own type), when ``X`` is a tool of a connected MCP server; counted in
+    harness metrics. The sandbox path reports the error as text, so the
+    formatted text is matched too.
+    """
+    skills = getattr(agent, "skills", None)
+    if not isinstance(skills, SkillManager):
+        return None
+    name = None
+    if type(error) is NameError:
+        name = getattr(error, "name", None)
+    elif type(error) is AttributeError:
+        if getattr(error, "obj", None) is agent:
+            name = getattr(error, "name", None)
+    if not isinstance(name, str):
+        match = _NAME_ERROR_RE.search(formatted)
+        if match is None:
+            match = _SELF_ATTRIBUTE_RE.search(formatted)
+            if match is None or match.group("type") != type(agent).__name__:
+                return None
+        name = match.group("name")
+    server = skills.mcp_tool_server(name)
+    if server is None:
+        return None
+    get_harness_metrics().mcp_tool_name_hint(f"{server}.{name}")
+    return f"`{name}` is a tool of MCP server {server}: await self.{server}.{name}(...)"
 
 
 @hidden
@@ -223,6 +316,23 @@ class AtomCodeAct(CodeActV2):
             line += "; imports: " + listing(imports, more)
         return line
 
+    def _format_error(self, error: Exception, code: str | None = None, **kwargs: Any) -> str:
+        """Point a cell's NameError at the python_cell_state block (and ``sh = Shell()``).
+
+        A ModuleNotFoundError points at the task's python3 behind a Shell.
+        """
+        formatted = super()._format_error(error, code, **kwargs)
+        hint = _name_error_hint(error, formatted) or _module_not_found_hint(error, formatted)
+        return f"{formatted}\n\n{hint}" if hint else formatted
+
+    def _format_execution_error(self, runtime: Any, result: Any, code: str, **kwargs: Any) -> str:
+        """Also name the MCP server of a tool the cell called as a bare name or ``self.<tool>``."""
+        formatted = super()._format_execution_error(runtime, result, code, **kwargs)
+        if result.error is None:
+            return formatted
+        hint = _mcp_tool_hint(getattr(runtime, "agent", None), result.error, formatted)
+        return f"{formatted}\n{hint}" if hint else formatted
+
     def _build_execute_python_tool(self) -> Any:
         tool = super()._build_execute_python_tool()
         tool.description = tool.description.replace(_LEGACY_TOOL_HINT, _TOOL_HINT)
@@ -236,6 +346,28 @@ class AtomCodeAct(CodeActV2):
         if owner is not None:  # the session closes the Shells its cells start
             work_shell.shell_owner.set(owner)
         return super()._build_builtins(runtime, call)
+
+
+# How a cut cell print names its file (CaptureConfig.file_notice template).
+_CELL_NOTICE = "Full output: await self.files.read({quoted_path})"
+
+
+@hidden
+def _file_backed_cells(truncation: Any, owner: work_shell.ShellOwner) -> Any:
+    """``truncation`` with file-backed cell prints: full text in the session's directory.
+
+    The cell print limits stay as configured (e.g. 50,000 / 2,000 characters);
+    past them the text names its file. The files go when the session's
+    ``ShellOwner`` closes, with its Shells' output.
+    """
+    capture = truncation.capture.model_copy(
+        update={
+            "file_backed": True,
+            "file_dir": owner.cell_output_dir(),
+            "file_notice": _CELL_NOTICE,
+        }
+    )
+    return truncation.model_copy(update={"capture": capture})
 
 
 # ---- turn conditions ---------------------------------------------------------
@@ -281,10 +413,16 @@ def _check_waiting(agent: Any, result: Any, *, fix: str) -> None:
     if not unmet:
         return
     reasons = []
+    policy = getattr(agent, "_turn_policy", "interactive")
     for name in unmet:
         job = agent.jobs.get(name) if isinstance(name, str) else None
         if name in PERSON_NAMES:
-            reasons.append(f"Waiting on {name!r}, but the person is not a job.")
+            get_harness_metrics().waiting_on_person_rejected(policy)
+            if policy == "child":
+                reasons.append(f"Waiting on {name!r}, but your parent is not a job.")
+                fix = _CHILD_ASKS
+            else:
+                reasons.append(f"Waiting on {name!r}, but the person is not a job.")
         elif job is not None and job.status == "running":
             reasons.append(
                 f"{name!r} is an idle resource: nothing arrives until you send it work "
@@ -334,6 +472,11 @@ def require_settled_work(agent: Any, result: Any, call: Any) -> None:
         )
 
 
+_CHILD_ASKS: Annotated[str, hidden] = (
+    "If you need input, return NeedInput(question=...): your parent answers with send "
+    "(a one-shot task cannot ask: decide and say so in the report). If you are done, "
+    "return Done(explanation=..., result=TaskResult(...))."
+)
 _NO_ONE_TO_ASK: Annotated[str, hidden] = (
     "Nobody can answer questions in an unattended task: decide, state your assumptions in the "
     "TaskResult report, and return Done (or Waiting while launched work runs)."
@@ -467,6 +610,9 @@ sh = Shell()  # make one; bash starts on first use
 r = await sh.run("cd src && make", timeout=600)  # wait for it
 job = self.jobs.launch(sh.run("make"), name="build", progress=Throttle(seconds=5))  # background
 job.set_progress(None)  # quiet again
+self.jobs.after(120, name="t")  # timer: a delay counts from now: subtract time you have already spent
+self.jobs.every(60, name="poll")  # tick items
+self.jobs.launch(Shell().run("tail -F app.log", timeout=3600), name="log", progress=Throttle(seconds=5))  # own Shell: one command at a time
 self.jobs.launch(sh.run("pytest -q"), name="tests")
 job = self.jobs.launch(Shell(), name="sh")
 r = await job.send("make")
@@ -482,6 +628,9 @@ _CONTEXT: Annotated[dict[str, Any], hidden] = {
     "self": Context(expr="doc(type(self), concise=True)", prefix=True),
 }
 _NOTIFICATION: Annotated[Any, hidden] = spec(max_string=50_000, max_length=100, max_depth=10)
+# An invalid return_result value is a cell error the model retries on; the
+# turn fails only after this many in one turn (other errors keep max_retries).
+_MAX_RESULT_RETRIES: Annotated[int, hidden] = 10
 _REMOVED: Annotated[str, hidden] = (
     "{} is not part of this agent: run a child with Subagent "
     '(await Subagent().run(todo), or self.jobs.launch(Subagent(), name="..."))'
@@ -504,15 +653,18 @@ class AtomAgent(AtomAgentBase):
     item you work on, append findings and checks to its ``comments``, complete
     it), and ``self.v`` keeps
     durable facts across restarts (handle locals last this live session). Run a
-    command with ``r = await sh.run(cmd, timeout=600)`` on a ``Shell()``;
+    command with ``sh = Shell()`` then ``r = await sh.run(cmd, timeout=600)``;
     ``self.jobs`` is only for work that runs while you do other things (builds,
     servers, subagents; see the python_cell_tools block). Search inside the
-    repository, never ``/``. Prefer ``rg`` to search for text and ``rg --files``
-    to list files: it's much faster than ``grep`` or ``find``. If ``rg`` isn't
-    installed, use another tool.
+    repository, never ``/``: a scan of the whole filesystem (``find /``,
+    ``grep -r /``, ``du /``) can run until the timeout. Prefer ``rg`` to search
+    for text and ``rg --files`` to list files: it's much faster than ``grep`` or
+    ``find``. If ``rg`` isn't installed, use another tool.
     Write shell commands as triple-quoted strings (``sh.run('''...''')``) so
     quotes need no escaping, and pass file contents to ``self.files`` the same
-    way, not as heredocs.
+    way, not as heredocs. Pick the quote style the text neither contains nor
+    ends with (``'''`` when it has three double quotes or ends with ``"``). Run
+    a script on stdin, not in nested quotes: ``sh.run("python3 -", stdin=script)``.
 
     A subagent sees only its brief: a Todo whose description carries the
     requirements, constraints and acceptance checks. Verify what it reports;
@@ -526,8 +678,9 @@ class AtomAgent(AtomAgentBase):
     ``NeedInput(question=...)`` only when someone can answer, or
     ``Waiting(explanation=..., on=[names], message=...)`` for live work: jobs or
     registered queue producers. ``message`` and ``question`` are shown as your
-    reply; ``explanation`` is a short status line, not the reply; use
-    ``self.message()`` for notes while you work. Replies and notes go to the
+    reply; when the request asks for an exact value or format, ``message`` is
+    exactly that, with nothing added. ``explanation`` is a short status line,
+    not the reply; use ``self.message()`` for notes while you work. Replies and notes go to the
     user, or to your parent if you are a subagent; unattended, only your result
     is read. The ``role`` block says who reads your result and how to end.
     """
@@ -554,6 +707,8 @@ class AtomAgent(AtomAgentBase):
     _session_namespace_was_live: Annotated[bool, hidden]
     # The session runs every turn with this method, whatever its turn_method.
     turn_entry: ClassVar[str] = "handle"
+    # The fix hint of a blocked subprocess/os.system/network import or call.
+    _shell_run_hint: ClassVar[str] = "use a Shell: `sh = Shell()` then `r = await sh.run(cmd)`"
 
     def __init__(
         self,
@@ -589,10 +744,20 @@ class AtomAgent(AtomAgentBase):
         if policy not in ("interactive", "unattended", "orchestrator", "child"):
             raise ValueError(f"unknown policy {policy!r}")
         self._turn_policy = policy
+        if policy == "child":
+            # A parent's answer to NeedInput comes as a new turn; only notes
+            # (``Subagent.message()``) arrive mid-turn.
+            self.user_messages.timeout_hint = (
+                "An answer from your parent comes only after this turn ends (as a new turn); "
+                "a note it sends with message() can still arrive now. " + _CHILD_ASKS
+            )
         text = instructions.strip() if isinstance(instructions, str) else ""
         self._role_instructions = text or None
         # The legacy JobsApi never started anything; drop it and its cancel hint.
         self.queue_manager._cancel_hints.pop("jobs", None)
+        # Core's ``self.producers`` (QueueManager.spawn helpers) is not Atom's:
+        # its timers are ``self.jobs.after/every``; tails are ``tail -F`` in a Shell.
+        self.__dict__.pop("producers", None)
         self._work_records = []
         self.jobs = _AgentJobs(
             self,
@@ -601,6 +766,7 @@ class AtomAgent(AtomAgentBase):
             capture_factory=lambda: CaptureScope(self.runtime.truncation_config),
         )
         self._shells = work_shell.ShellOwner()
+        self._truncation = _file_backed_cells(self._truncation, self._shells)
         self.files = Files(self.shell)
         # Atom's own to-do list: membership on the list, content on each item.
         self._install_todo_list()
@@ -674,6 +840,8 @@ class AtomAgent(AtomAgentBase):
         )
         self.context.pop("experimental_namespace", None)  # replace an earlier snapshot's block
         self.context["python_cell_lifetime"] = Context(
+            'Your live Python names are in the python_cell_state block ("omitted: N" counts '
+            "the rest); python_cell_state() lists up to 20: check both and your context before recreating a name. "
             "Cell variables survive Done, Waiting and NeedInput in this live session. "
             "Other generated methods are call-local. "
             "Restart loses these names, not self.v. No automatic expiry. "
@@ -777,7 +945,11 @@ class AtomAgent(AtomAgentBase):
         status = self.queue_manager.status(more_work=running, idle=idle, read_hints=hints)
         if running or idle:
             status += "\nCancel: await self.jobs.get('<name>').cancel()"
-        return status
+        # Connected MCP servers are otherwise only in self.skills.status/search/doc:
+        # a model that never looks there does not find them.
+        skills = getattr(self, "skills", None)
+        line = skills.mcp_line() if isinstance(skills, SkillManager) else ""
+        return f"{line}\n{status}" if line else status
 
     # ---- legacy surface, hidden ------------------------------------------------
 
@@ -925,7 +1097,13 @@ class AtomAgent(AtomAgentBase):
 
     @hidden
     @strategy(
-        AtomCodeAct(config=CodeActConfig(cell_timeout=1800.0, postconditions=[require_role])),
+        AtomCodeAct(
+            config=CodeActConfig(
+                cell_timeout=1800.0,
+                max_result_retries=_MAX_RESULT_RETRIES,
+                postconditions=[require_role],
+            )
+        ),
         context=_CONTEXT,
     )
     async def handle(
@@ -949,9 +1127,14 @@ class AtomAgent(AtomAgentBase):
         raise TypeError(_ONE_TURN_METHOD)
 
 
-for _name in ("shell", "delegates", "producers", "system_messages", "cwd"):
+for _name in ("shell", "delegates", "system_messages", "cwd"):
     spec(AtomAgent, _name, hidden=True)
 spec(AtomAgent, "jobs", description="Run and track work: see WorkManager")
+spec(
+    AtomAgent,
+    "libs",
+    description="Reusable libraries, saved in .nooa/libs; later sessions get each as self.<name>",
+)
 # Host-facing members of the work types stay out of the model's docs.
 for _cls, _members in (
     (WorkManager, ("keep", "max_items", "max_requests")),

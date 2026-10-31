@@ -56,6 +56,14 @@ class PersistentVars:
             raise AttributeError(f"{key!r} is reserved by PersistentVars; use set({key!r}, value)")
         self._owner.vars[key] = value
 
+    def __getitem__(self, key: Any) -> Any:
+        raise TypeError(f"v is not subscriptable; read v.{key} or v.get({key!r})")
+
+    def __setitem__(self, key: Any, value: Any) -> None:
+        raise TypeError(
+            f"v does not support item assignment; write v.{key} = value or v.set({key!r}, value)"
+        )
+
     def __delattr__(self, key: str) -> None:
         if key.startswith("_") or any(key in cls.__dict__ for cls in type(self).__mro__):
             raise AttributeError(f"{key!r} is reserved by PersistentVars")

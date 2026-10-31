@@ -146,22 +146,70 @@ RESULT = (
 # Totals raised on the rebase onto dev/atom 060f59e66 (2026-10-29), whose own
 # prompt additions came along: totals 21,045 / 21,240 / 21,408 / 21,543; system
 # limits unchanged. Limits: measured totals plus about 2%, rounded up to the next 100.
+# Raised for the exact-output rule (2026-10-30, friction PR part 3, user-approved:
+# prompt budget is not a constraint): the class doc and the interactive role say an
+# exact value or format is the whole message. Measured system / total: handle
+# 20,202 / 21,227, handle_batch 20,321 / 21,346, handle_work 20,489 / 21,514,
+# handle_orchestrate 20,624 / 21,649.
+# Limits: measured values plus about 2%, rounded up to the next 100.
+# Raised for the filesystem-scan warning (2026-10-30, friction PR part 3,
+# user-approved): the class doc says a scan of the whole filesystem can run until
+# the timeout. Measured system / total: handle 20,298 / 21,323, handle_batch
+# 20,417 / 21,442, handle_work 20,585 / 21,610, handle_orchestrate 20,720 / 21,745.
+# Limits: measured values plus about 2%, rounded up to the next 100.
+# Raised for self.jobs.after/every/tail (2026-10-30, friction PR: producer features
+# into self.jobs, user-approved): the WorkManager doc and the work examples show the
+# timer, ticks and file tail with the "a delay counts from now" clause. Measured
+# system / total: handle 21,553 / 22,578, handle_batch 21,672 / 22,697, handle_work
+# 21,840 / 22,865, handle_orchestrate 21,975 / 23,000.
+# Limits: measured values plus about 2%, rounded up to the next 100.
+# Lowered when self.jobs.tail was dropped (2026-10-30, user decision: a Shell
+# running ``tail -F`` with a Throttle covers it): the docs show that idiom in one
+# line instead. Measured system / total: handle 21,247 / 22,272, handle_batch
+# 21,366 / 22,391, handle_work 21,534 / 22,559, handle_orchestrate 21,669 / 22,694.
+# Limits: measured values plus about 2%, rounded up to the next 100.
+# Raised for the PR512 small fixes (2026-10-30, friction PR, user-approved): the
+# libs attribute says where libraries are saved, the Subagent doc says awaiting a
+# request blocks until the child ends its turn (together about 220 characters),
+# and the class doc adds the quote-style and script-on-stdin advice next to the
+# triple-quote rule (about 210). Measured system / total: handle 21,676 / 22,701,
+# handle_batch 21,795 / 22,820, handle_work 21,963 / 22,988, handle_orchestrate
+# 22,098 / 23,123. Limits: measured values plus about 2%, rounded up to the next 100.
+# Re-measured for the PR512 live-names line (2026-10-30, friction PR, user decision):
+# python_cell_lifetime opens with "All your live Python names are listed in the
+# python_cell_state block; anything not listed there does not exist in this
+# session." (199 characters, every row). Measured system / total: handle 21,875 /
+# 22,900, handle_batch 21,994 / 23,019, handle_work 22,162 / 23,187,
+# handle_orchestrate 22,297 / 23,322. Within the limits, so they stay. The line was
+# reworded (CodeRabbit: the block is bounded, so "anything not listed does not
+# exist" was wrong) to the python_cell_state() wording below; still within the limits.
 LIMITS = {
-    (ATOM, "handle"): (20_100, 21_500),
-    (ATOM, "handle_batch"): (20_300, 21_700),
-    (ATOM, "handle_work"): (20_500, 21_900),
-    (ATOM, "handle_orchestrate"): (20_600, 22_000),
+    (ATOM, "handle"): (22_200, 23_200),
+    (ATOM, "handle_batch"): (22_300, 23_300),
+    (ATOM, "handle_work"): (22_500, 23_500),
+    (ATOM, "handle_orchestrate"): (22_600, 23_600),
 }
 # The bench guard's system-prompt ceiling; every agent stays under it.
-# Raised from 20,000 for the Done(message=...) guidance (2026-10-29, see above).
-BENCH_SYSTEM_LIMIT = 20_700
+# Raised from 20,000 for the Done(message=...) guidance (2026-10-29, see above),
+# then from 21,200 to 22,600 for self.jobs.after/every/tail (2026-10-30), and
+# lowered to 22,300 when self.jobs.tail was dropped (2026-10-30), then raised to
+# 22,600 for the PR512 small fixes (2026-10-30, see above; handle_orchestrate 22,098).
+BENCH_SYSTEM_LIMIT = 22_600
+# The one line every agent (root and child) gets in python_cell_lifetime.
+LIVE_NAMES_LINE = (
+    'Your live Python names are in the python_cell_state block ("omitted: N" counts '
+    "the rest); python_cell_state() lists up to 20: check both and your context before recreating a name."
+)
 
 # Separate CHAR/JSON-size guards, not token counts or a full provider-wire payload.
 # Effective restriction guidance grows default tool descriptions 2,069 -> 2,839;
 # canonical function-tool JSON 2,259 -> 3,032 (+773); schema JSON stays 79.
-TOOL_DESCRIPTION_CHAR_LIMIT = 2_900
+# Raised to 3,150 for the task-vs-thinking-environment line (2026-10-31, user request;
+# descriptions 2,894 -> 3,136).
+TOOL_DESCRIPTION_CHAR_LIMIT = 3_150
 TOOL_SCHEMA_JSON_CHAR_LIMIT = 100
-TOOL_PAYLOAD_JSON_CHAR_LIMIT = 3_100
+# Raised to 3,350 with the description limit (2026-10-31; JSON 3,087 -> 3,331).
+TOOL_PAYLOAD_JSON_CHAR_LIMIT = 3_350
 
 
 @pytest.fixture(autouse=True)
@@ -268,6 +316,7 @@ async def test_first_call_prompt_stays_within_budget(spec, method, tmp_path, ses
     assert "<python_cell_lifetime>" in rendered
     assert "job.output / JobEvent.output" in rendered
     assert "Cell variables survive Done, Waiting and NeedInput" in rendered
+    assert LIVE_NAMES_LINE in rendered
     assert "cell locals last one method call" not in rendered
     assert sizes["system"] <= system_limit
     assert sizes["messages"] <= total_limit
@@ -307,6 +356,18 @@ async def test_prompts_reply_to_a_child_question_with_send(spec, method, tmp_pat
 
 
 @pytest.mark.parametrize(("spec", "method"), list(LIMITS))
+async def test_prompts_warn_that_a_whole_filesystem_scan_can_hit_the_timeout(
+    spec, method, tmp_path, sessions_dir
+):
+    messages, _, _ = await _first_call(spec, method, tmp_path, sessions_dir)
+    rendered = " ".join("\n".join(str(m.get("content", "")) for m in messages).split())
+    assert (
+        "Search inside the repository, never ``/``: a scan of the whole filesystem "
+        "(``find /``, ``grep -r /``, ``du /``) can run until the timeout. Prefer ``rg``"
+    ) in rendered
+
+
+@pytest.mark.parametrize(("spec", "method"), list(LIMITS))
 async def test_prompts_make_done_message_the_reply(spec, method, tmp_path, sessions_dir):
     """Done(message=...) is the documented reply; the role says who receives it."""
     messages, _, _ = await _first_call(spec, method, tmp_path, sessions_dir)
@@ -314,8 +375,10 @@ async def test_prompts_make_done_message_the_reply(spec, method, tmp_path, sessi
     assert 'Done(message="your reply", explanation="short status")' in rendered
     assert "Waiting(explanation=..., on=[names], message=...)" in rendered
     assert (
-        "``message`` and ``question`` are shown as your reply; ``explanation`` is a short "
-        "status line, not the reply; use ``self.message()`` for notes while you work."
+        "``message`` and ``question`` are shown as your reply; when the request asks for an "
+        "exact value or format, ``message`` is exactly that, with nothing added. "
+        "``explanation`` is a short status line, not the reply; use ``self.message()`` for "
+        "notes while you work."
     ) in rendered
     assert (
         "Replies and notes go to the user, or to your parent if you are a subagent; unattended, "
@@ -383,3 +446,19 @@ async def test_installed_skills_are_counted_not_listed(monkeypatch, tmp_path, se
     for skill in extra:
         assert skill.description not in rendered
         assert skill.name.split(".")[-1] not in rendered
+
+
+def test_the_quoting_advice_keeps_triple_quotes_and_adds_quote_choice_and_stdin():
+    from nooa_atom.agent.agent import AtomAgent
+
+    text = " ".join(AtomAgent.__doc__.split())
+    # The triple-quote rule stays (it cut SWE quoting errors 35 -> 9).
+    assert "Write shell commands as triple-quoted strings (``sh.run('''...''')``)" in text
+    assert (
+        "Pick the quote style the text neither contains nor ends with (``'''`` when it "
+        'has three double quotes or ends with ``"``).' in text
+    )
+    assert (
+        'Run a script on stdin, not in nested quotes: ``sh.run("python3 -", stdin=script)``.'
+        in text
+    )

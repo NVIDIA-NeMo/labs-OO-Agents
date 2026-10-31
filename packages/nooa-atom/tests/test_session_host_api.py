@@ -245,6 +245,91 @@ async def test_register_tools_on_an_agent_without_skills(make_session):
     }
 
 
+class _SharedTool:
+    """An MCP tool object a parent holds; records a detach so a test sees a close."""
+
+    def __init__(self) -> None:
+        self.detached = 0
+
+    async def ping(self) -> str:
+        return "pong"
+
+    def detach(self) -> None:
+        self.detached += 1
+
+
+@pytest.mark.parametrize("kept", [False, True], ids=["one_shot", "kept"])
+async def test_children_share_the_parents_mcp_servers_and_closing_one_closes_nothing(
+    root_options, sessions_dir, tmp_path_factory, monkeypatch, kept
+):
+    """Client-provided (``mcp.<name>``) and connected configured servers reach every child."""
+    from nooa_atom.agent.factory import create_session_agent
+
+    monkeypatch.setenv("NEMO_OO_USER_DIR", str(tmp_path_factory.mktemp("user-config")))
+    registry = SessionRegistry(SessionStore(sessions_dir), agent_factory=create_session_agent)
+    client_tool, configured_tool = _Tool(), _SharedTool()
+    try:
+        options = root_options.model_copy(
+            update={"agent_spec": "nooa_atom.agent:AtomAgent", "llm": _fake_llm()}
+        )
+        root = await registry.create(options)
+        assert await root.register_tools({"mcp.hcb_resources": client_tool}) == {}
+        servers = root._agent.skills.mcp
+        servers.register("docs", url="https://docs.example/mcp")
+        servers._attach("docs", configured_tool)  # as connect() does
+        servers.activate(["docs"])
+
+        child = await registry.create(options.inherit(name="c", kept=kept), parent_id=root.id)
+        grandchild = await registry.create(
+            child.options.inherit(name="g", kept=kept), parent_id=child.id
+        )
+        for session in (child, grandchild):
+            agent = session._agent
+            assert agent.hcb_resources is client_tool
+            assert agent.docs is configured_tool
+            assert agent.skills.mcp.connected() == ["docs"]
+            status = agent.skills.status()
+            assert "hcb_resources (mcp: await self.hcb_resources.<tool>(...))" in status
+            assert "docs (mcp: await self.docs.<tool>(...))" in status
+            assert "call: await self.hcb_resources.<tool>(...)" in agent.skills.search(
+                "hcb_resources"
+            )
+
+        await registry.close(grandchild.id)
+        await registry.close(child.id)
+        assert configured_tool.detached == 0
+        assert root._agent.hcb_resources is client_tool
+        assert root._agent.docs is configured_tool
+        assert root._agent.skills.mcp.state("docs") == "active"
+        assert "mcp.hcb_resources" in root._agent.skills.activated()
+    finally:
+        await registry.close_all()
+
+
+async def test_a_child_loaded_under_a_live_parent_shares_its_mcp_servers(
+    root_options, sessions_dir, tmp_path_factory, monkeypatch
+):
+    from nooa_atom.agent.factory import create_session_agent
+
+    monkeypatch.setenv("NEMO_OO_USER_DIR", str(tmp_path_factory.mktemp("user-config")))
+    registry = SessionRegistry(SessionStore(sessions_dir), agent_factory=create_session_agent)
+    tool = _Tool()
+    try:
+        options = root_options.model_copy(
+            update={"agent_spec": "nooa_atom.agent:AtomAgent", "llm": _fake_llm()}
+        )
+        root = await registry.create(options)
+        await root.register_tools({"mcp.remote": tool})
+        child = await registry.create(options.inherit(name="c", kept=True), parent_id=root.id)
+        child_id = child.id
+        await child.close()
+        registry.sessions.pop(child_id, None)
+        loaded = await registry.load(child_id)
+        assert loaded._agent.remote is tool
+    finally:
+        await registry.close_all()
+
+
 async def test_the_atom_agent_connects_the_servers_its_workspace_remembers(
     root_options, sessions_dir, tmp_path_factory, monkeypatch
 ):

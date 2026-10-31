@@ -662,6 +662,9 @@ class ChannelReader[T]:
 
     def __init__(self, source: Channel[T]) -> None:
         self._source = source
+        # Owner-set sentence appended to a timeout error (e.g. what a child
+        # waiting on its parent should do instead); ``get()`` is unchanged.
+        self.timeout_hint: str | None = None
 
     @property
     def name(self) -> str:
@@ -680,8 +683,12 @@ class ChannelReader[T]:
             async with asyncio.timeout(timeout):
                 return await self._source.get()
         except TimeoutError as exc:
+            from nooa.runtime.harness_metrics import get_harness_metrics
+
+            get_harness_metrics().queue_read_timeout(self.name)
+            hint = f" {self.timeout_hint}" if self.timeout_hint else ""
             raise QueueReadTimeoutError(
-                f"Timed out after {timeout}s waiting for queue {self.name!r}. "
+                f"Timed out after {timeout}s waiting for queue {self.name!r}.{hint} "
                 "Use status() or qsize() to inspect queued items, or return "
                 "Waiting/NeedInput instead of blocking mid-cell. Pass "
                 "timeout=None only when an indefinite wait is intentional."

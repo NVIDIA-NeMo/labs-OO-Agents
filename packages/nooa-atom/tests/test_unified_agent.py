@@ -23,6 +23,16 @@ from nooa.storage.snapshot_vars import SnapshotVars
 
 UNIFIED = "nooa_atom.agent:AtomAgent"
 TIMEOUT = 60
+# The python_cell tool description reaches every role (root, child, benchmark/gym).
+ENVIRONMENT_LINE = (
+    "python_cell runs in Atom's own Python (your thinking environment). The task's code, "
+    "packages and tests live in the task environment: run them through a Shell (e.g. "
+    "sh.run(\"python3 script.py\")); don't install task packages into Atom's Python."
+)
+LIVE_NAMES_LINE = (
+    'Your live Python names are in the python_cell_state block ("omitted: N" counts '
+    "the rest); python_cell_state() lists up to 20: check both and your context before recreating a name."
+)
 
 WORK_RESULT = (
     "return_result(Done(explanation='{e}', result=TaskResult(solution_description='s', "
@@ -104,12 +114,19 @@ async def test_one_shot_subagent_returns_its_task_result_and_notes_are_job_items
         assert "Return API documentation as str; display with print(doc(obj))" in rendered
         assert "Print (return None): max_length=items/container" in rendered
         assert "def read(self, name: str)" not in rendered
+        # Root and child: the same pointer, to the block the cell names are in.
+        assert LIVE_NAMES_LINE in rendered
+        assert "<python_cell_state>\nRetained Python names:" in rendered
         [tool] = call.tools
         assert tool.name == "python_cell"
         assert tool.description.count("Blocked imports:") == 1
         assert tool.description.count("Blocked calls by module") == 1
         assert "`subprocess`" in tool.description and "literal dunder names" in tool.description
-        assert "Run commands with `await sh.run(cmd)` on a `Shell()`" in tool.description
+        assert (
+            "Run commands with `sh = Shell()` then `r = await sh.run(cmd, timeout=600)`"
+            in tool.description
+        )
+        assert ENVIRONMENT_LINE in tool.description
         assert "self.shell" not in tool.description and "self.delegate" not in tool.description
         assert "Blocked imports:" not in rendered  # guidance is tool-local, not another block
 
@@ -319,7 +336,7 @@ async def test_a_shell_timeout_delivers_a_result_and_wakes_the_waiting_turn(
     models.scripts[None] = [
         cell(
             "import inspect\n"
-            "assert inspect.signature(Shell.run).parameters['timeout'].default == 1800.0\n"
+            "assert inspect.signature(Shell.run).parameters['timeout'].default == 600.0\n"
             "self.jobs.launch(Shell().run('sleep 30; echo never', timeout=0.5), name='slow')\n"
             "return_result(Waiting(explanation='slow command running', on=['slow']))"
         ),
@@ -329,6 +346,7 @@ async def test_a_shell_timeout_delivers_a_result_and_wakes_the_waiting_turn(
             "r = event.value\n"
             "assert isinstance(r, CommandResult), r\n"
             "assert (r.returncode, r.timed_out, r.stdout) == (124, True, ''), r\n"
+            "assert 'pass a larger timeout=' in r.stderr, r\n"
             "return_result(Done(explanation='timed out as expected'))"
         ),
     ]
@@ -466,7 +484,8 @@ async def test_first_call_offers_one_work_vocabulary(
     await asyncio.wait_for(root.prompt("hello"), TIMEOUT)
     call = models.llms[None].calls[0]
     tools = "\n".join(str(getattr(tool, "description", tool)) for tool in call.tools or ())
-    assert "Run commands with `await sh.run(cmd)` on a `Shell()`" in tools
+    assert "Run commands with `sh = Shell()` then `r = await sh.run(cmd, timeout=600)`" in tools
+    assert ENVIRONMENT_LINE in tools
     messages = "\n".join(str(m.get("content", "")) for m in call.messages)
     rendered = messages + "\n" + tools  # what the model reads: the messages and the tool
     prefix = str(call.messages[0].get("content", ""))
@@ -500,6 +519,7 @@ async def test_first_call_offers_one_work_vocabulary(
         "progress=Throttle(seconds=5)",
         "<python_cell_state>\nRetained Python names: none; omitted: 0\n</python_cell_state>",
         "<python_cell_lifetime>",
+        LIVE_NAMES_LINE,
         "Other generated methods are call-local.",
         "registered queue producers",
         'r = await sh.run("cd src && make", timeout=600)',
@@ -1223,3 +1243,77 @@ async def test_the_cell_state_block_is_one_line(tmp_path):
         await strategy.python_cell_state_context(SimpleNamespace(current_call=empty))
         == "Cell locals: none"
     )
+
+
+async def test_a_name_error_points_at_python_cell_state_and_is_counted(
+    registry, options, models, monkeypatch
+):
+    """A child's ``sh`` is not its parent's: the error says where live names are."""
+    from nooa.runtime.harness_metrics import HarnessMetrics
+
+    flushed: list[dict] = []
+    real_flush = HarnessMetrics.flush_to_span
+
+    def flush(self):
+        flushed.append(self.to_span_attributes())
+        real_flush(self)
+
+    monkeypatch.setattr(HarnessMetrics, "flush_to_span", flush)
+    models.scripts[None] = [
+        cell("r = await sh.run('true')"),
+        cell("print(results)"),
+        cell("return_result(Done(explanation='ok'))"),
+    ]
+    root = await registry.create(options)
+    await asyncio.wait_for(root.prompt("go"), TIMEOUT)
+
+    def seen(call):
+        messages = models.llms[None].calls[call].messages
+        return "\n".join(str(m.get("content", "")) for m in messages)
+
+    after_sh = seen(1)
+    assert "name 'sh' is not defined" in after_sh
+    assert (
+        "Live names are listed in the python_cell_state block; python_cell_state() lists up to "
+        "20 (both may omit some). Check both and your context before recreating a name. "
+        "Create it first, e.g. `sh = Shell()`."
+    ) in after_sh
+    after_results = seen(2)
+    assert "name 'results' is not defined" in after_results
+    assert after_results.count("Create it first") == after_sh.count("Create it first")
+    [attrs] = [a for a in flushed if "harness.name_error_hint.count" in a]
+    assert attrs["harness.name_error_hint.count"] == 2
+    assert attrs["harness.name_error_hint.names"] == ["sh", "results"]
+
+
+async def test_a_module_not_found_error_points_at_the_task_python_and_is_counted(
+    registry, options, models, monkeypatch
+):
+    """A cell's import runs in Atom's Python; the task's python3 may have the package."""
+    from nooa.runtime.harness_metrics import HarnessMetrics
+
+    flushed: list[dict] = []
+    real_flush = HarnessMetrics.flush_to_span
+
+    def flush(self):
+        flushed.append(self.to_span_attributes())
+        real_flush(self)
+
+    monkeypatch.setattr(HarnessMetrics, "flush_to_span", flush)
+    models.scripts[None] = [
+        cell("import no_such_task_pkg_xyz.sub"),
+        cell("return_result(Done(explanation='ok'))"),
+    ]
+    root = await registry.create(options)
+    await asyncio.wait_for(root.prompt("go"), TIMEOUT)
+    seen = "\n".join(str(m.get("content", "")) for m in models.llms[None].calls[1].messages)
+    assert "No module named 'no_such_task_pkg_xyz'" in seen
+    assert (
+        "python_cell runs in Atom's own Python, not the task's; the task's python3 may have "
+        "no_such_task_pkg_xyz: check with "
+        "await sh.run(\"python3 -c 'import no_such_task_pkg_xyz'\")"
+    ) in seen
+    assert "Live names are listed" not in seen
+    [attrs] = [a for a in flushed if "harness.module_not_found_hint.count" in a]
+    assert attrs["harness.module_not_found_hint.count"] == 1
+    assert attrs["harness.module_not_found_hint.modules"] == ["no_such_task_pkg_xyz"]

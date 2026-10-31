@@ -325,10 +325,15 @@ class SessionPort:
         if channel != "user_messages":
             return await child.submit(as_data(item), channel=channel, source=source)
         # A message answers a pending question, as the turn it starts would.
-        self._registry.clear_question(self._session, child_id)
+        # Admit first: if steer/submit raises, the question (and its unread
+        # queued copy) stays for the parent's next wait. A turn the admission
+        # starts also ends the question (TurnStarted), so clearing is idempotent.
         if isinstance(item, str) and steer:
-            return await child.steer(item, source=source)
-        return await child.submit(as_data(item), channel=channel, source=source)
+            receipt = await child.steer(item, source=source)
+        else:
+            receipt = await child.submit(as_data(item), channel=channel, source=source)
+        self._registry.clear_question(self._session, child_id)
+        return receipt
 
     @hidden
     def withdraw_child(self, child_id: str, receipt: Receipt) -> bool:

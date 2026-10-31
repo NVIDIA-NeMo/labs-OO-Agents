@@ -284,12 +284,25 @@ Cancelling a final-result wait does not cancel the job; owner cancellation does
 stop the command. Timeout returns a `CommandResult` with return code 124 and
 `timed_out=True`.
 
-Final `stdout` and `stderr` summaries are whole up to 10 kB per stream, otherwise
-head and tail around a truncation marker. Whenever a summary is cut,
-`stdout_path` and `stderr_path` name capture files, for managed jobs and direct
-`await sh.run(...)` calls alike; short output keeps no file. Each file holds at
-most the Shell's `max_output` bytes per stream (64 MiB by default); the marker
-reports capture-limit truncation. Retention: a job's files are removed when the
+Final `stdout` and `stderr` texts are whole up to 1 MiB (1,048,576 characters)
+per stream, otherwise the first quarter and the last three quarters of that
+under a `<truncated-output>` notice whose third line is
+`Full output: await self.files.read("<path>")`. Capture is core's
+`FileBackedTruncatingStringIO`: the file is byte-exact, the text is decoded as
+UTF-8 incrementally (a character split across reads stays whole). Whenever a
+text is cut, `stdout_path` and `stderr_path` name the capture files, for managed
+jobs and direct `await sh.run(...)` calls alike; output that fits keeps no file.
+Each file holds at most the Shell's `max_output` bytes per stream (64 MiB by
+default, exactly the first bytes); past it the notice adds `The file is
+incomplete: it holds the first N bytes; M more bytes were over its N-byte
+limit.`
+
+Cell prints are file-backed too: Atom turns on `CaptureConfig.file_backed` in
+its own truncation config (the core default stays off). A cell's stdout over
+50,000 characters (stderr over 2,000) is cut as before, and its notice names the
+full text with `Full output: await self.files.read("<path>")`; the files live in
+the session's Shell directory and are removed when the session closes (a print
+that fits keeps no file). Retention: a job's files are removed when the
 job is pruned or the manager closes. A direct run's files are removed when that
 Shell closes (`aclose`, `async with` exit) or, for a Shell started under an
 owner (an Atom session owns the Shells its cells start), when the owner closes;

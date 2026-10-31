@@ -178,6 +178,8 @@ class MCPServers:
         self._token_path = token_path
         self._discovered_cache: tuple[tuple[Any, ...], list[str]] | None = None
         self._connected: dict[str, Any] = {}
+        # The approved definition each connected tool was opened with.
+        self._connected_requests: dict[str, MCPApprovalRequest] = {}
         self._activated: set[str] = set()
         self._connecting: set[str] = set()
         self._signins: dict[str, _PendingSignIn] = {}
@@ -627,6 +629,7 @@ class MCPServers:
                 "Review and approve the current configuration before connecting again."
             )
         self._attach(name, tool)
+        self._connected_requests[name] = request
         if activate:
             self._activated.add(name)
 
@@ -730,6 +733,41 @@ class MCPServers:
             self._forgetting_urls.discard(url)
         return sorted(affected)
 
+    def share_from(self, parent: MCPServers) -> list[str]:
+        """Attach the servers ``parent`` connected (a parent session's); return warnings.
+
+        Each gets ``parent``'s tool object, active where it is active there,
+        and its definition when this workspace view lacks one (an in-memory
+        ``register``). No connection is opened and none is closed:
+        ``disconnect`` and ``aclose`` only detach them from this agent.
+        Nothing is shared when the approval scopes (workspaces) differ, and a
+        server is not shared when this view defines it differently.
+        """
+        warnings = []
+        if parent._connected and self._approval_scope() != parent._approval_scope():
+            return [
+                f"MCP servers {', '.join(sorted(parent._connected))} were not shared: "
+                "the parent approved them for another workspace"
+            ]
+        for name, tool in parent._connected.items():
+            mismatch = self._definition_mismatch(parent, name)
+            if mismatch:
+                warnings.append(f"MCP server {name!r} was not shared: {mismatch}")
+                continue
+            try:
+                self._attach(name, tool)
+            except ValueError as exc:
+                warnings.append(f"MCP server {name!r} was not shared: {exc}")
+                continue
+            if name in parent._connected_requests:
+                self._connected_requests[name] = parent._connected_requests[name]
+            if name not in self._servers and name in parent._servers:
+                self._servers[name] = copy.deepcopy(parent._servers[name])
+                self._registered_server_names.add(name)
+            if name in parent._activated:
+                self._activated.add(name)
+        return warnings
+
     async def disconnect(self, patterns: list[str]) -> list[str]:
         """Detach connected servers matching ``patterns``; stop waiting sign-ins."""
         names = set(self._connected) | set(self._signins)
@@ -744,6 +782,28 @@ class MCPServers:
             self._detach(name)
         await asyncio.gather(*tasks, return_exceptions=True)
         return matched
+
+    def _definition_mismatch(self, parent: MCPServers, name: str) -> str | None:
+        """Why this view's definition of ``name`` differs from ``parent``'s, else None.
+
+        ``parent``'s side is the definition its tool was connected with (its
+        current configuration may have changed since), when that is known.
+        """
+        if name not in self.discovered():
+            return None  # not defined here: the parent's definition is copied
+        try:
+            own = self.approval_request(name)
+        except ValueError:
+            return "it is defined here with an invalid configuration"
+        theirs = parent._connected_requests.get(name)
+        if theirs is None:
+            try:
+                theirs = parent.approval_request(name)
+            except (KeyError, ValueError):
+                return "it is defined here but not in the parent"
+        if own != theirs:  # fingerprint, transport, target and bindings
+            return "it is defined differently here"
+        return None
 
     def activate(self, patterns: list[str]) -> list[str]:
         """Make connected servers matching ``patterns`` active; return them."""
@@ -839,6 +899,7 @@ class MCPServers:
     def _detach(self, name: str) -> None:
         self._activated.discard(name)
         self._connected.pop(name, None)
+        self._connected_requests.pop(name, None)
         attr = attr_name(name)
         if self.agent is not None and attr in vars(self.agent):
             delattr(self.agent, attr)

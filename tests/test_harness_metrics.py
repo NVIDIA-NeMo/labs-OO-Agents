@@ -82,6 +82,17 @@ class TestRecording:
         m.text_to_synthetic()
         assert m.text_to_synthetic_count == 2
 
+    def test_tool_call_skipped_and_text_only_tool_markup(self):
+        m = HarnessMetrics()
+        m.tool_call_skipped(2)
+        m.tool_call_skipped()
+        m.text_only_tool_markup()
+        assert m.tool_call_skipped_count == 3
+        assert m.text_only_tool_markup_count == 1
+        attrs = m.to_span_attributes()
+        assert attrs["harness.tool_call_skipped.count"] == 3
+        assert attrs["harness.text_only_tool_markup.count"] == 1
+
     def test_empty_response(self):
         m = HarnessMetrics()
         m.empty_response()
@@ -210,10 +221,64 @@ class TestRecording:
         assert m.exec_errors[0].code_preview == "df.head()"
 
     # Code Validation
+    def test_return_result_keyword_alias(self):
+        m = HarnessMetrics()
+        m.return_result_keyword_alias("value")
+        attrs = m.to_span_attributes()
+        assert attrs["harness.return_result_keyword_alias.count"] == 1
+        assert attrs["harness.return_result_keyword_alias.keywords"] == ["value"]
+
+    def test_return_result_invalid(self):
+        m = HarnessMetrics()
+        m.return_result_invalid("ValidationError")
+        m.return_result_invalid("InvariantError")
+        attrs = m.to_span_attributes()
+        assert attrs["harness.return_result_invalid.count"] == 2
+        assert attrs["harness.return_result_invalid.types"] == ["ValidationError", "InvariantError"]
+
+    def test_need_input_explanation_is_counted_when_set(self):
+        from nooa.interactive import NeedInput
+        from nooa.runtime.harness_metrics import harness_metrics_session
+
+        with harness_metrics_session() as m:
+            NeedInput(question="which?", explanation="  ")
+            NeedInput(question="which?")
+            assert m.to_span_attributes().get("harness.need_input_explanation.count") is None
+            NeedInput(question="which?", explanation="asking")
+            assert m.to_span_attributes()["harness.need_input_explanation.count"] == 1
+
+    def test_media_rejected_retry(self):
+        m = HarnessMetrics()
+        m.record_media_rejected_retry("image")
+        attrs = m.to_span_attributes()
+        assert attrs["harness.media_rejected_retry.count"] == 1
+        assert attrs["harness.media_rejected_retry.kinds"] == ["image"]
+
     def test_missing_await(self):
         m = HarnessMetrics()
         m.missing_await("analyze")
         assert m.missing_awaits_detected == ["analyze"]
+
+    def test_mcp_tool_name_hint(self):
+        m = HarnessMetrics()
+        m.mcp_tool_name_hint("hcb_resources.lookup_order")
+        assert m.mcp_tool_name_hints == ["hcb_resources.lookup_order"]
+        attrs = {entry.key: entry.value_fn(m) for entry in get_span_schema()}
+        assert attrs["harness.mcp_tool_name_hint.count"] == 1
+        assert attrs["harness.mcp_tool_name_hint.calls"] == ["hcb_resources.lookup_order"]
+
+    def test_return_result_tool_alias(self):
+        m = HarnessMetrics()
+        m.return_result_tool_alias("python_cell")
+        assert m.to_span_attributes()["harness.return_result_tool_alias.count"] == 1
+
+    def test_module_not_found_hint(self):
+        m = HarnessMetrics()
+        m.module_not_found_hint("cv2")
+        assert m.module_not_found_hints == ["cv2"]
+        attrs = m.to_span_attributes()
+        assert attrs["harness.module_not_found_hint.count"] == 1
+        assert attrs["harness.module_not_found_hint.modules"] == ["cv2"]
 
     def test_infinite_loop(self):
         m = HarnessMetrics()

@@ -152,6 +152,10 @@ _current: contextvars.ContextVar[Job | None] = contextvars.ContextVar(
 )
 
 
+wait_cancelled_hook: Callable[[Job], None] | None = None
+"""Told of a running job whose await outside any job was cancelled (the host sets it)."""
+
+
 def emit(item: Any) -> None:
     """Report a progress item from the running job (a no-op outside a job)."""
     job = _current.get()
@@ -398,6 +402,7 @@ class Job:
         self._reader_ref: weakref.ref[_Reader] | None = None  # weak: a dropped reader detaches
         self._unread: deque[JobEvent] = deque()  # its item events possibly still in the outbox
         self._dropped = 0  # carried into the next event
+        self._coalesce = False  # every(): an unread item is replaced by the next
         self.dropped = 0
         self._scratch: tuple[Path, int, int] | None = None
         # Resources.
@@ -784,6 +789,10 @@ class Job:
         if self._silent:
             return  # cancelled by its owner: nothing more is delivered
         outbox = self._manager._outbox
+        if self._coalesce and self._unread and outbox.remove(self._unread[-1]):
+            replaced = self._unread.pop()
+            self._dropped += 1 + replaced.dropped
+            self.dropped += 1
         while len(self._unread) >= self._manager.max_items:
             oldest = self._unread.popleft()
             if outbox.remove(oldest):
@@ -863,6 +872,11 @@ class Job:
                     # The outcome was handed to this await, which will not see it.
                     self._handoff.discard(future)
                     self._requeue()
+                hook = wait_cancelled_hook
+                if hook is not None and _current.get() is None and self._status == "running":
+                    # Only this await ends: the job runs on and delivers its event.
+                    with contextlib.suppress(Exception):
+                        hook(self)
                 raise
             self._handoff.discard(future)
             self._consumed = True
@@ -950,6 +964,43 @@ def _remove_owned(owned: tuple[Path, int, int] | None) -> None:
     shutil.rmtree(path, ignore_errors=True)  # does not follow symlinks inside
 
 
+# ---- built-in work: timers ------------------------------------------------------
+
+
+def _seconds(value: Any, *, zero_ok: bool) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(f"seconds must be a number, got {value!r}")
+    if not math.isfinite(value) or value < 0 or (value == 0 and not zero_ok):
+        need = "zero or more" if zero_ok else "more than zero"
+        raise ValueError(f"seconds must be finite and {need}, got {value!r}")
+    return float(value)
+
+
+def _clock(seconds_from_now: float) -> str:
+    return time.strftime("%H:%M:%S", time.localtime(time.time() + seconds_from_now))
+
+
+async def _after(seconds: float) -> None:
+    await asyncio.sleep(seconds)
+
+
+async def _every(seconds: float):
+    start = time.monotonic()
+    tick = 0
+    while True:
+        tick += 1
+        # Fixed schedule: no drift; a late wake-up skips the ticks it missed.
+        due = start + tick * seconds
+        now = time.monotonic()
+        if due < now:
+            tick = int((now - start) // seconds) + 1
+            due = start + tick * seconds
+        await asyncio.sleep(due - now)
+        # The wake-up itself may be late: yield the latest tick that is due.
+        tick = max(tick, int((time.monotonic() - start) // seconds))
+        yield tick
+
+
 class WorkManager:
     """``job = self.jobs.launch(work, name="tests")`` starts work without waiting.
 
@@ -959,6 +1010,10 @@ class WorkManager:
     else a JobEvent in the next turn's ``notification["jobs"]``. Jobs outlive
     turns: return ``Waiting(on=[name])`` while they run; cancel unneeded work.
     Names: letters, digits, ``_`` or ``-``; requests are ``<name>#1``, ``<name>#2``...
+    Built in, as launch(): ``after(s)`` timer; ``every(s)`` ticks.
+    A delay counts from now: subtract time you have already spent.
+    Watch a command or follow a file in its own Shell:
+    ``launch(Shell().run("tail -F app.log"), progress=Throttle(seconds=5))``.
     """
 
     __nosnapshot__ = True
@@ -1059,6 +1114,21 @@ class WorkManager:
                 work.close()
             raise
         return self._start(name, work, kind, progress)
+
+    def after(self, seconds: float, *, name: str | None = None) -> Job:
+        """Timer: its ``done`` event (result None) comes ``seconds`` from now."""
+        seconds = _seconds(seconds, zero_ok=True)
+        job = self.launch(_after(seconds), name=name)
+        job._summary = f"timer: {seconds:g} s, due {_clock(seconds)}"
+        return job
+
+    def every(self, seconds: float, *, name: str | None = None) -> Job:
+        """Items 1, 2, 3... every ``seconds`` until cancelled; one unread tick at most."""
+        seconds = _seconds(seconds, zero_ok=False)
+        job = self.launch(_every(seconds), name=name)
+        job._coalesce = True
+        job._summary = f"every {seconds:g} s"
+        return job
 
     def get(self, name: str) -> Job | None:
         """The newest job with this name (a running one, else the latest finished)."""
