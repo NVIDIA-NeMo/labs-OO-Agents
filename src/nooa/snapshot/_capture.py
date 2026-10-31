@@ -399,6 +399,8 @@ def _cut_bytes(value: bytes, max_size: int, max_keep: int | None, limits: Limits
         "max_length",
         replaced=replaced_head + replaced_tail,
         omitted=length - len(head_b) - len(tail_b),
+        head_units=len(head_b),
+        tail_units=len(tail_b),
     )
     return _Built(node, _string_cost(head, tail))
 

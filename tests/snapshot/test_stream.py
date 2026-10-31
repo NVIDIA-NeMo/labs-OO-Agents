@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import os
+import random
 from pathlib import Path
 
 import pytest
@@ -529,9 +530,131 @@ def test_merge_counts_replaced_bytes_as_original_units() -> None:
     invalid, plain = closed(b"\xff"), closed(b"x")
 
     merged = merge(invalid, plain, head=1, tail=1)
-    assert merged == Text("\ufffdx", "", 2, "bytes", True, None, replaced=1)
+    assert merged == Text(
+        "\ufffdx", "", 2, "bytes", True, None, replaced=1, head_units=2, tail_units=0
+    )
     cut = merge(closed(b"\xffab"), closed(b"cd\xfe"), head=1, tail=1)
     assert (cut.head, cut.tail, cut.omitted) == ("\ufffd", "\ufffd", 4)
     assert cut.replaced == 2
     dropped = merge(closed(b"\xffabc"), closed(b"de"), head=0, tail=2)
     assert (dropped.tail, dropped.omitted, dropped.replaced) == ("de", 4, 0)
+
+
+# --- merge: recorded original units (CodeRabbit 4432013584) -------------------------
+
+
+def test_merge_uses_recorded_units_for_genuine_and_decoded_replacements() -> None:
+    # Head: a genuine U+FFFD (3 bytes); tail: a decoding replacement of 1 byte.
+    stream = TextStream(unit="bytes", head=3, tail=1)
+    stream.write(b"\xef\xbf\xbdX\xff")
+    a = stream.snapshot()
+    assert (a.head, a.tail, a.omitted, a.replaced) == ("\ufffd", "\ufffd", 1, 1)
+    assert a.units() == (3, 1)
+    empty = TextStream(unit="bytes", head=3, tail=1).snapshot()
+
+    merged = merge(a, empty, head=1, tail=0)
+
+    # The genuine U+FFFD stands for 3 bytes: it does not fit a 1-byte head.
+    assert (merged.head, merged.tail, merged.omitted, merged.replaced) == ("", "", 5, 0)
+    assert merged.units() == (0, 0)
+    kept_genuine = merge(a, empty, head=3, tail=0)
+    assert (kept_genuine.head, kept_genuine.omitted) == ("\ufffd", 2)
+    assert kept_genuine.replaced == 0  # the kept U+FFFD is the genuine one
+    kept_replacement = merge(a, empty, head=0, tail=1)
+    assert (kept_replacement.tail, kept_replacement.omitted) == ("\ufffd", 4)
+    assert kept_replacement.replaced == 1
+
+
+def test_capture_of_bytes_records_units() -> None:
+    from nooa.snapshot import Limits, capture
+
+    node = capture(b"\xff" * 50 + b"\xef\xbf\xbd" * 50, Limits(max_string=20, tail_share=0.5))
+    assert isinstance(node, Text) and not node.complete
+    head_units, tail_units = node.units()
+    assert (node.head_units, node.tail_units) == (head_units, tail_units)
+    assert head_units == len(node.head)  # each \xff is one byte
+    assert tail_units == 3 * len(node.tail)  # each genuine U+FFFD is three
+    assert node.length == head_units + tail_units + node.omitted
+
+
+_FRAGMENTS = {
+    "valid": [b"a", b"z", "é".encode(), "€".encode(), "😀".encode()],
+    "genuine": [b"\xef\xbf\xbd"],
+    "single": [b"\xff", b"\x80", b"\xfe"],
+    "multi": [b"\xe2\x82", b"\xf0\x9f\x98", b"\xed\xa0", b"\xe2"],
+}
+
+
+def _random_bytes(rng: random.Random, kinds: list[str]) -> bytes:
+    pool = [fragment for kind in kinds for fragment in _FRAGMENTS[kind]]
+    return b"".join(rng.choice(pool) for _ in range(rng.randint(0, 12)))
+
+
+def _decode(data: bytes) -> tuple[str, int]:
+    text = data.decode("utf-8", errors="replace")
+    return text, text.count("\ufffd") - data.count(b"\xef\xbf\xbd")
+
+
+def _check(text: Text, data: bytes, head: int, tail: int, *, exact: bool) -> None:
+    """``text`` describes ``data`` within ``head``/``tail`` original bytes."""
+    head_units, tail_units = text.units()
+    assert (text.head_units, text.tail_units) == (head_units, tail_units)
+    assert text.length == len(data)
+    assert text.length == head_units + tail_units + text.omitted
+    if text.complete:
+        assert (text.head + text.tail, text.omitted) == (_decode(data)[0], 0)
+        assert text.replaced == _decode(data)[1]
+        return
+    assert head_units <= head and tail_units <= tail
+    # The fewest original bytes the kept strings can stand for: within the counts.
+    fewest_head = min(k for k in range(len(data) + 1) if _decode(data[:k])[0] == text.head)
+    fewest_tail = min(
+        k for k in range(len(data) + 1) if _decode(data[len(data) - k :])[0] == text.tail
+    )
+    assert fewest_head <= head_units and fewest_tail <= tail_units
+    assert fewest_head + fewest_tail + text.omitted <= len(data)
+    kept_head = _decode(data[:head_units]) if exact else _decode(data[:fewest_head])
+    kept_tail = _decode(data[len(data) - (tail_units if exact else fewest_tail) :])
+    if exact:
+        assert kept_head[0] == text.head and kept_tail[0] == text.tail
+        assert text.replaced == kept_head[1] + kept_tail[1]
+    else:
+        # Never counts a replacement it dropped.
+        assert text.replaced <= text.head.count("\ufffd") + text.tail.count("\ufffd")
+
+
+@pytest.mark.parametrize(
+    ("kinds", "exact_merge"),
+    [
+        (["valid", "genuine"], True),
+        (["valid", "single"], True),
+        (["valid", "multi"], False),
+        (["valid", "genuine", "single", "multi"], False),
+    ],
+)
+def test_bytes_units_hold_for_random_streams(kinds: list[str], exact_merge: bool) -> None:
+    rng = random.Random(f"units-{'-'.join(kinds)}")
+    for _ in range(400):
+        head, tail = rng.randint(0, 8), rng.randint(0, 8)
+        stream = TextStream(unit="bytes", head=head, tail=tail)
+        merge_head, merge_tail = rng.randint(0, 8), rng.randint(0, 8)
+        data = b""
+        mark = 0
+        merged: Text | None = None
+        merged_from = 0
+        for _chunk in range(rng.randint(1, 5)):
+            chunk = _random_bytes(rng, kinds)
+            data += chunk
+            stream.write(chunk)
+            delta, new_mark = stream.since(mark)
+            # since(): a window of whole code points, exact.
+            _check(delta, data[mark:new_mark], head, tail, exact=True)
+            if merged is None:
+                merged, merged_from = delta, mark
+            else:
+                merged = merge(merged, delta, merge_head, merge_tail)
+                _check(
+                    merged, data[merged_from:new_mark], merge_head, merge_tail, exact=exact_merge
+                )
+            mark = new_mark
+        _check(stream.snapshot(), data, head, tail, exact=True)

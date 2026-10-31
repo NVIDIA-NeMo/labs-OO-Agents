@@ -96,6 +96,13 @@ class Text:
     ``length`` is the size of the original in ``unit``; ``omitted`` the units
     left out between ``head`` and ``tail`` (0 when complete). ``replaced``
     counts replacement characters that decoding introduced (``unit == "bytes"``).
+
+    ``head_units`` / ``tail_units``: the original units ``head`` and ``tail``
+    stand for. A bytes ``Text`` needs them: a U+FFFD that decoding introduced
+    stands for 1 to 3 original bytes, a genuine one for 3, and both re-encode
+    to 3. ``TextStream``, ``capture`` and ``merge`` set them on every bytes
+    ``Text``; ``None`` (chars, or built by hand) derives them, see ``units()``.
+    For a ``Text`` they produce, ``length == head_units + tail_units + omitted``.
     """
 
     head: str
@@ -107,6 +114,28 @@ class Text:
     full: Spill | None = None
     replaced: int = 0
     omitted: int = 0
+    head_units: int | None = None
+    tail_units: int | None = None
+
+    def units(self) -> tuple[int, int]:
+        """The original units of ``head`` and ``tail``: the recorded counts, else derived.
+
+        Derived: ``len`` for chars, the UTF-8 length for bytes; a bytes
+        ``Text`` without a tail derives its head as everything kept
+        (``length - omitted``), which is exact.
+        """
+        head, tail = self.head_units, self.tail_units
+        if head is not None and tail is not None:
+            return head, tail
+        if self.unit == "chars":
+            derived_head, derived_tail = len(self.head), len(self.tail)
+        else:
+            derived_tail = len(self.tail.encode("utf-8", errors="surrogateescape"))
+            if self.tail or tail is not None:
+                derived_head = len(self.head.encode("utf-8", errors="surrogateescape"))
+            else:
+                derived_head = max(0, self.length - (0 if self.complete else self.omitted))
+        return (derived_head if head is None else head), (derived_tail if tail is None else tail)
 
 
 @dataclass(frozen=True)
