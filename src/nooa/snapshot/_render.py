@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import json
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import Any
 
 from nooa.snapshot._codec import (
@@ -347,11 +347,14 @@ render_output = _RenderOutput("render_output")
 class _Report:
     """Incomplete JSON Pointer paths (bounded, collapsing to the root) and reasons.
 
-    It also carries the render hooks of the walk (``None``: generic only).
+    It also carries the render hooks of the walk (``None``: generic only) and,
+    for ``preview_attributes``, the spill files found (``spills``; ``None``:
+    not collected), so that text and metadata come from one walk.
     """
 
-    def __init__(self, hooks: _Hooks | None = None) -> None:
+    def __init__(self, hooks: _Hooks | None = None, spills: list[str] | None = None) -> None:
         self.hooks = hooks
+        self.spills = spills
         self.active: list[int] = []  # ids of the nodes whose hook is running
         self.paths: list[str] = []
         self.path_chars = 0
@@ -374,8 +377,17 @@ class _Report:
         self.paths.append(path)
         self.path_chars += len(path)
 
+    def skipped(self, nodes: Iterable[Snapshot]) -> None:
+        """Nodes the walk does not render: only their spill files are collected."""
+        if self.spills is not None:
+            for node in nodes:
+                _spill_paths(node, self.spills)
+
     def child(self) -> _Report:
-        """A fresh report for a hook's attempt, merged only if the hook succeeds."""
+        """A fresh report for a hook's attempt, merged only if the hook succeeds.
+
+        It collects no spill files: those of the hooked node are its own fields'.
+        """
         child = _Report(self.hooks)
         child.active = self.active
         return child
@@ -384,6 +396,26 @@ class _Report:
         for path in other.paths:
             self.incomplete(path, None)
         self.reasons |= other.reasons
+
+
+def _spill_paths(node: Snapshot, found: list[str]) -> None:
+    node_type = type(node)
+    if node_type is Text:
+        assert isinstance(node, Text)
+        if node.full is not None and node.full.path not in found:
+            found.append(node.full.path)
+    elif node_type is Sequence:
+        assert isinstance(node, Sequence)
+        for child in node.items + node.tail:
+            _spill_paths(child, found)
+    elif node_type is Mapping:
+        assert isinstance(node, Mapping)
+        for _key, child in node.items + node.tail:
+            _spill_paths(child, found)
+    elif node_type is Object:
+        assert isinstance(node, Object)
+        for _name, child in node.fields:
+            _spill_paths(child, found)
 
 
 def _placeholder(node: Snapshot) -> Any:
@@ -437,21 +469,25 @@ def _json_entries(
 ) -> tuple[dict[str, Any], int, str | None]:
     output: dict[str, Any] = {}
     size = 2
-    for key, child in entries:
+    for index, (key, child) in enumerate(entries):
         key_text = json_key(key, live=False)  # a detached snapshot key
-        if key_text is None or key_text in output:
-            return output, size, "opaque"
         separator = 2 if output else 0
         remaining = max_size - size - separator
-        if len(key_text) + 2 > remaining:
-            return output, size, "max_length"
-        overhead = len(dumps(key_text)) + 2
-        available = remaining - overhead
-        if available < 1:
-            return output, size, "max_length"
-        value, child_size = _json(child, available, pointer_child(path, key_text), report)
-        output[key_text] = value
-        size += separator + overhead + child_size
+        if key_text is None or key_text in output:
+            stop = "opaque"
+        elif len(key_text) + 2 > remaining:
+            stop = "max_length"
+        else:
+            overhead = len(dumps(key_text)) + 2
+            available = remaining - overhead
+            if available >= 1:
+                value, child_size = _json(child, available, pointer_child(path, key_text), report)
+                output[key_text] = value
+                size += separator + overhead + child_size
+                continue
+            stop = "max_length"
+        report.skipped(child for _key, child in entries[index:])
+        return output, size, stop
     return output, size, None
 
 
@@ -522,12 +558,15 @@ def _json(node: Snapshot, max_size: int, path: str, report: _Report) -> tuple[An
         if hook is not None:
             hooked = _json_hooked(node, hook, max_size, path, report)  # type: ignore[arg-type]
             if hooked is not None:
+                report.skipped((node,))  # its spill files: the hook's output has none
                 return hooked
     if node_type is Text or (node_type is Scalar and type(node.value) is bytes):  # type: ignore[union-attr]
         if node_type is Text:
             text: str = node.head  # type: ignore[union-attr]
         else:
             text = decode_counted(node.value)[0]  # type: ignore[union-attr,arg-type]
+        if node_type is Text and report.spills is not None:
+            report.skipped((node,))
         value, size = fit_string(text, max_size)
         if type(value) is not str or len(value) < len(text):
             report.incomplete(path, "max_length")
@@ -544,6 +583,7 @@ def _json(node: Snapshot, max_size: int, path: str, report: _Report) -> tuple[An
     if node_type is Sequence or node_type is Mapping or node_type is Object or node_type is Ref:
         if max_size < 2:
             report.incomplete(path, getattr(node, "reason", None) or "max_length")
+            report.skipped((node,))
             name = "list" if node_type is Sequence else "dict"
             return fallback_json(name, max_size)
     if node_type is Sequence:
@@ -556,10 +596,12 @@ def _json(node: Snapshot, max_size: int, path: str, report: _Report) -> tuple[An
             available = max_size - size - separator
             if available < 1:
                 cut = True
+                report.skipped(node.items[index:])
                 break
             value, child_size = _json(child, available, pointer_child(path, str(index)), report)
             output.append(value)
             size += separator + child_size
+        report.skipped(node.tail)  # JSON shows the head only
         if cut:
             report.incomplete(path, "max_length")
         if not node.complete:
@@ -571,8 +613,11 @@ def _json(node: Snapshot, max_size: int, path: str, report: _Report) -> tuple[An
         if isinstance(node, Mapping) and node.wrapper:
             wrapped = _json_wrapper(entries, max_size, path, report)
             if wrapped is not None:
+                report.skipped(child for _key, child in node.tail)
                 return wrapped
         mapping, size, stop = _json_entries(entries, max_size, path, report)
+        if isinstance(node, Mapping):
+            report.skipped(child for _key, child in node.tail)
         if stop is not None:
             report.incomplete(path, stop)
         if not node.complete:
@@ -594,11 +639,12 @@ def _json(node: Snapshot, max_size: int, path: str, report: _Report) -> tuple[An
     raise TypeError(f"not a snapshot node: {node_type.__name__}")
 
 
-def _render(snapshot: Snapshot, max_chars: int) -> tuple[str, _Report]:
+def _render(snapshot: Snapshot, max_chars: int, *, spills: bool = False) -> tuple[str, _Report]:
+    """The JSON text and its report, from one walk (``spills``: collect spill files too)."""
     if max_chars < 1:
         raise ValueError("render_json max_chars must be at least 1")
     hooks = render_json._hooks
-    report = _Report(hooks if hooks.functions else None)
+    report = _Report(hooks if hooks.functions else None, [] if spills else None)
     value, size = _json(snapshot, max_chars, "", report)
     text = dumps(value)
     if len(text) != size or len(text) > max_chars:
@@ -640,24 +686,20 @@ class _RenderJson:
 render_json = _RenderJson()
 
 
-def _spill_paths(node: Snapshot, found: list[str]) -> None:
-    node_type = type(node)
-    if node_type is Text:
-        assert isinstance(node, Text)
-        if node.full is not None and node.full.path not in found:
-            found.append(node.full.path)
-    elif node_type is Sequence:
-        assert isinstance(node, Sequence)
-        for child in node.items + node.tail:
-            _spill_paths(child, found)
-    elif node_type is Mapping:
-        assert isinstance(node, Mapping)
-        for _key, child in node.items + node.tail:
-            _spill_paths(child, found)
-    elif node_type is Object:
-        assert isinstance(node, Object)
-        for _name, child in node.fields:
-            _spill_paths(child, found)
+def _attributes(direction: str, report: _Report) -> dict[str, Any]:
+    """The span attributes a report gives (no further walk of the snapshot)."""
+    prefix = f"nooa.{direction}.preview"
+    attributes: dict[str, Any] = {
+        f"{prefix}.version": PREVIEW_VERSION,
+        f"{prefix}.incomplete": bool(report.paths),
+    }
+    if report.paths:
+        attributes[f"{prefix}.paths"] = tuple(report.paths)
+    if report.reasons:
+        attributes[f"{prefix}.reasons"] = tuple(sorted(report.reasons))
+    if report.spills:
+        attributes[f"{prefix}.full_output"] = tuple(report.spills)
+    return attributes
 
 
 def preview_attributes(
@@ -671,18 +713,15 @@ def preview_attributes(
     ``.full_output`` lists spill files, when any. Pass the ``max_chars`` given
     to ``render_json`` so that cuts made while rendering are reported too.
     """
-    _text, report = _render(snapshot, sys.maxsize if max_chars is None else max_chars)
-    prefix = f"nooa.{direction}.preview"
-    attributes: dict[str, Any] = {
-        f"{prefix}.version": PREVIEW_VERSION,
-        f"{prefix}.incomplete": bool(report.paths),
-    }
-    if report.paths:
-        attributes[f"{prefix}.paths"] = tuple(report.paths)
-    if report.reasons:
-        attributes[f"{prefix}.reasons"] = tuple(sorted(report.reasons))
-    spills: list[str] = []
-    _spill_paths(snapshot, spills)
-    if spills:
-        attributes[f"{prefix}.full_output"] = tuple(spills)
-    return attributes
+    budget = sys.maxsize if max_chars is None else max_chars
+    return _attributes(direction, _render(snapshot, budget, spills=True)[1])
+
+
+def _preview(direction: str, snapshot: Snapshot, *, max_chars: int) -> tuple[str, dict[str, Any]]:
+    """``render_json`` text and ``preview_attributes`` from one walk (the trace path).
+
+    Equal to ``(render_json(snapshot, max_chars=m), preview_attributes(direction,
+    snapshot, max_chars=m))``, but each ``render_json`` hook runs once, not twice.
+    """
+    text, report = _render(snapshot, max_chars, spills=True)
+    return text, _attributes(direction, report)

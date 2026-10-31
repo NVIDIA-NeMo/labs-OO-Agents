@@ -21,6 +21,7 @@ from nooa import hidden, spec
 from nooa.snapshot import (
     DEFAULT_LIMITS,
     Limits,
+    _render,
     capture,
     capture_fields,
     preview_attributes,
@@ -35,8 +36,10 @@ class TraceJSON(NamedTuple):
 
 
 def _preview(snapshot: Any, limits: Limits) -> TraceJSON:
-    text = render_json(snapshot, max_chars=limits.max_chars)
-    attributes = preview_attributes("output", snapshot, max_chars=limits.max_chars)
+    # The trace path: text and attributes from one walk, equal to the two public calls.
+    text, attributes = _render._preview("output", snapshot, max_chars=limits.max_chars)
+    assert text == render_json(snapshot, max_chars=limits.max_chars)
+    assert attributes == preview_attributes("output", snapshot, max_chars=limits.max_chars)
     paths = attributes.get("nooa.output.preview.paths", ())
     assert attributes["nooa.output.preview.incomplete"] is bool(paths)
     return TraceJSON(text, paths)

@@ -23,6 +23,7 @@ from nooa.snapshot import (
     Scalar,
     Sequence,
     Snapshot,
+    Spill,
     Text,
     Unavailable,
     capture,
@@ -426,6 +427,28 @@ def test_render_json_hook_recursing_on_its_node_is_generic(hooks) -> None:
     hooks(render_json, KIND, lambda node, r: r.render(node))
     node = _thing(a=1)
     assert render_json(node, max_chars=100) == '{"a": 1}'
+
+
+def test_trace_preview_runs_a_json_hook_once(hooks) -> None:
+    from nooa.snapshot import _render
+
+    calls: list[int] = []
+
+    def hook(node: Object, r: JsonRenderer) -> str:
+        calls.append(1)
+        return '{"s": ' + r.render(node.fields[0][1], max_chars=r.max_chars - 8, key="s") + "}"
+
+    hooks(render_json, KIND, hook)
+    spilled = Text("h", "", 9, "chars", False, "max_length", Spill("/tmp/full.txt", 9, 9), 0, 8)
+    node = Sequence("list", 2, (_thing(s="x" * 1_000), spilled), True, None)
+
+    text, attributes = _render._preview("output", node, max_chars=60)
+    assert calls == [1]  # one walk: text and attributes come from the same hook call
+    assert text == render_json(node, max_chars=60)
+    assert attributes == preview_attributes("output", node, max_chars=60)
+    assert "/0/s" in attributes["nooa.output.preview.paths"]
+    assert attributes["nooa.output.preview.full_output"] == ("/tmp/full.txt",)
+    assert len(calls) == 3  # the two public calls each walk once
 
 
 # --- a realistic example: an ndarray-like class, no numpy ------------------------------
