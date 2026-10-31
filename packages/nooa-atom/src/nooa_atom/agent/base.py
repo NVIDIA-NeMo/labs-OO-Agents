@@ -100,8 +100,9 @@ _CORE_FINISH_TEXT: Annotated[str, hidden] = (
     "value matching the method's annotated return type."
 )
 _FINISH_TEXT: Annotated[str, hidden] = (
-    "To finish, `return value` at the cell's top level (not inside a def). It\n"
-    "immediately submits a value matching the method's annotated return type."
+    "To finish, write `return value` as code at the cell's top level (not in a def):\n"
+    "it submits a value matching the method's annotated return type. `Done(...)`\n"
+    "written in reply text does not finish."
 )
 _RETURN_HINT: Annotated[str, hidden] = "end the turn with `return Done(...)`"
 _COMPLETION_REWRITES: Annotated[tuple[tuple[re.Pattern[str], str], ...], hidden] = tuple(
@@ -283,7 +284,8 @@ class AtomAgentBase(InteractiveAgent):
     interactive turns, send brief progress notes and each answer (complete
     Markdown) with ``self.message()``.
 
-    End every turn with exactly one top-level ``return``: ``Done`` after
+    End every turn with a ``python_cell`` whose code has exactly one top-level
+    ``return`` (``Done(...)`` written in reply text does nothing): ``Done`` after
     sending the reply with ``self.message()``::
 
         self.message("Fixed the off-by-one in `parse()`; its tests pass.")

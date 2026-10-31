@@ -209,4 +209,5 @@ async def test_prompt_never_names_return_result(registry, options, models):
     tools = "\n".join(tool.description for tool in models.llms[None].last_tools)
     assert "return_result" not in rendered
     assert "return_result" not in tools
-    assert "To finish, `return value` at the cell's top level (not inside a def)." in tools
+    assert "To finish, write `return value` as code at the cell's top level" in tools
+    assert "written in reply text does not finish." in tools

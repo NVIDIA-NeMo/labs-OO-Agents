@@ -208,9 +208,11 @@ LIVE_NAMES_LINE = (
 # Separate CHAR/JSON-size guards, not token counts or a full provider-wire payload.
 # Effective restriction guidance grows default tool descriptions 2,069 -> 2,839;
 # canonical function-tool JSON 2,259 -> 3,032 (+773); schema JSON stays 79.
-TOOL_DESCRIPTION_CHAR_LIMIT = 2_900
+# 2026-10-31 (return experiment): the finish rule says `Done(...)` in reply text does
+# not finish (models wrote it as text); deliberate growth, limit 2,900 -> 3,000.
+TOOL_DESCRIPTION_CHAR_LIMIT = 3_000
 TOOL_SCHEMA_JSON_CHAR_LIMIT = 100
-TOOL_PAYLOAD_JSON_CHAR_LIMIT = 3_100
+TOOL_PAYLOAD_JSON_CHAR_LIMIT = 3_200  # 2026-10-31: see TOOL_DESCRIPTION_CHAR_LIMIT
 
 
 @pytest.fixture(autouse=True)
