@@ -464,3 +464,45 @@ def test_context_manager_closes() -> None:
         stream.write("abc")
     with pytest.raises(ValueError):
         stream.write("d")
+
+
+# --- review findings: short tails, split U+FFFD, merge units ------------------------
+
+
+@pytest.mark.parametrize("tail", [0, 1, 2])
+def test_since_mark_stops_before_an_incomplete_sequence_with_a_short_tail(tail: int) -> None:
+    stream = _stream("bytes", head=1, tail=tail)
+    stream.write(b"a\xf0\x9f\x98")
+
+    _delta, mark = stream.since()
+    assert mark == 1
+    stream.write(b"\x80b")
+    delta, mark = stream.since(mark)
+    assert mark == 6 and delta.length == 5
+
+
+def test_genuine_replacement_split_across_writes_is_not_counted() -> None:
+    stream = _stream("chars", head=10, tail=10)
+    stream.write(b"\xef")
+    stream.write(b"\xbf\xbd")
+    stream.write(b"\xff")
+
+    text = stream.close()
+    assert text.head == "\ufffd\ufffd" and text.replaced == 1
+
+
+def test_merge_counts_replaced_bytes_as_original_units() -> None:
+    def closed(data: bytes) -> Text:
+        stream = _stream("bytes", head=10, tail=10)
+        stream.write(data)
+        return stream.close()
+
+    invalid, plain = closed(b"\xff"), closed(b"x")
+
+    merged = merge(invalid, plain, head=1, tail=1)
+    assert merged == Text("\ufffdx", "", 2, "bytes", True, None, replaced=1)
+    cut = merge(closed(b"\xffab"), closed(b"cd\xfe"), head=1, tail=1)
+    assert (cut.head, cut.tail, cut.omitted) == ("\ufffd", "\ufffd", 4)
+    assert cut.replaced == 2
+    dropped = merge(closed(b"\xffabc"), closed(b"de"), head=0, tail=2)
+    assert (dropped.tail, dropped.omitted, dropped.replaced) == ("de", 4, 0)
