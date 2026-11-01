@@ -48,6 +48,40 @@ JSONL traces can be archived, imported into the viewer, or inspected by other
 OpenTelemetry-compatible tooling. Set a stable session ID when an evaluation
 harness must associate files with a particular task.
 
+### Journal calls from clients that bypass LiteLLM
+
+`exporters.journal_file(...)` and the live viewer's journal record each model
+call's messages through LiteLLM callbacks. A `UnifiedLLM` subclass that talks to
+its model server directly (for example Gym's policy client) records its calls
+with `journal_llm_call` once the response arrives:
+
+```python
+from nooa.tracing import journal_llm_call
+
+response = LLMResponse(parts=parts, usage=usage, model_name="gym-policy")
+journal_llm_call(
+    model="gym-policy",
+    messages=messages,             # the list acall() received, as is
+    response=response,             # None records a failed call's prompt
+    latency_ms=elapsed_ms,
+    extra={"response_id": raw.id}, # stored on the call record
+)
+```
+
+It writes to every installed journal sink (journal file, live viewer) and does
+nothing without one. The session defaults to the current trace session and the
+call is linked to the current span. Inside a NOOA turn it uses the context the
+runtime rendered for the call, so the record matches the LiteLLM path. It never
+raises.
+
+Use `exporters.journal_file` by itself for such runs. It keeps every span
+(LLM spans lose their message attributes) and adds the journal. Don't add
+`exporters.jsonl` next to it. The viewer doesn't dedupe span ids: when both
+copies end up in one imported file, every span shows up twice. When they stay
+in separate files, `nooa import-traces` imports `<session>.jsonl` and then
+skips `<session>.nooa.jsonl` because the session already exists, so the
+journal is lost.
+
 ## What appears in a trace
 
 All agent methods are traced by default, including regular Python methods and

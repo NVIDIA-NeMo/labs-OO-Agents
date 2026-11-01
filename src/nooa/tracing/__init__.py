@@ -53,6 +53,7 @@ from nooa.tracing import exporters as exporters_mod
 # export became event-subscriber-based; see
 # ``nooa.atif.install_atif`` / ``atif_scope``.
 from nooa.tracing._hooks_impl import OpenInferenceHooks, end_active_spans
+from nooa.tracing._journal_api import journal_llm_call
 from nooa.tracing._metadata import get_all_metadata
 from nooa.tracing._otlp_file_exporter import OtlpJsonFileExporter
 from nooa.tracing._otlp_http_exporter import OtlpJsonHttpExporter
@@ -621,6 +622,7 @@ __all__ = [
     "enable_tracing",
     "end_active_spans",
     "exporters",
+    "journal_llm_call",
     "probe_otlp_endpoint",
     "quiet_trace_target",
     "register_hooks_in_current_context",
