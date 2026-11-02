@@ -191,9 +191,9 @@ def _history_prefix_stable(prior_body, later_body, key):
 def _reasoning_values(response):
     """Yield the reasoning values in ``response`` that should be sent back next turn.
 
-    These are the reasoning text (split into the original summary blocks for
-    the Responses API) and the encrypted/signature fields in each part's
-    provider-specific data. The values are only compared with the next
+    These are the reasoning text of parts that carry provider data (split into
+    the original summary blocks for the Responses API) and the
+    encrypted/signature fields in each part's provider-specific data. The values are only compared with the next
     request, never stored.
     """
     from nooa._immutable_json import json_containers
@@ -218,7 +218,12 @@ def _reasoning_values(response):
 
     for part in response.parts:
         native = json_containers(part.native) if part.native else {}
-        if part.kind == "reasoning" and part.text:
+        # Readable reasoning with no provider field to carry it (Gemini through
+        # an OpenAI-compatible gateway returns text beside thought signatures)
+        # is not replay state: the runtime sends it back as plain text, and the
+        # signatures carry the model's reasoning. Only text the provider can
+        # receive back in a reasoning field is expected in the next request.
+        if part.kind == "reasoning" and part.text and native:
             # Responses API summaries are stored as one joined string but sent
             # back as separate blocks, so yield each block's text separately.
             summary = native.get("summary") if isinstance(native, dict) else None

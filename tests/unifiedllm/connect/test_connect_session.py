@@ -476,3 +476,43 @@ def test_retention_accepts_litellm_proxy_envelope_unwrapped_on_replay():
     assert not _replayed(envelope, ["gAAAA" + "y" * 64])
     assert not _replayed(envelope, ["short"])
     assert not _replayed(inner, [])
+
+
+@pytest.mark.asyncio
+async def test_retention_for_gemini_through_gateway_checks_thought_signatures(monkeypatch):
+    """Gemini via an OpenAI-compatible gateway returns readable reasoning beside thought
+    signatures. The signatures carry the reasoning state; the readable text has no
+    reasoning field to go back in, so it is not required on the follow-up request."""
+    sent = []
+
+    def handle(request):
+        body = json.loads(request.content)
+        sent.append(body)
+        data = response_body("chat")
+        message = data["choices"][0]["message"]
+        message["reasoning_content"] = "Readable Gemini thoughts"
+        message["thinking_blocks"] = [{"type": "thinking", "thinking": "Readable Gemini thoughts"}]
+        message["provider_specific_fields"] = {"thought_signatures": ["SIGNATURE-secret"]}
+        return httpx.Response(200, json=data)
+
+    mock_http(monkeypatch, handle)
+    proposal = connect.plan(
+        "test",
+        "gcp/google/gemini-3-flash-preview",
+        "chat",
+        "https://hub.test/v1",
+        "",
+        reply_tokens=2048,
+    )
+    updates = [
+        u
+        async for u in session_steps(
+            "test", proposal.entry, api_key="temporary-secret", budget_tokens=TOKEN_RESERVATION
+        )
+    ]
+    records = {u.name: u.outcome for u in updates if u.outcome["outcome"] != "running"}
+    assert "SIGNATURE-secret" in list(_wire_reasoning(sent[1]))
+    assert records["reasoning_retention"]["outcome"] == "confirmed"
+    assert records["reasoning_retention"]["state_retained"] is True
+    for secret in ("Readable Gemini thoughts", "SIGNATURE-secret"):
+        assert secret not in repr(records)
