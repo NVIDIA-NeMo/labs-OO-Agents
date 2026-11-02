@@ -581,3 +581,51 @@ def test_retry_policy_normalizes_factory_defaults_and_disabled_spellings():
         == disabled
     )
     assert disabled != omitted
+
+
+def _openai_unprefixed(temperature):
+    return connect.configure_entry(
+        {
+            "model_name": "gpt-4.1",
+            "api_base": "https://api.test/v1",
+            "api_key_env": "SYNTHETIC_KEY",
+            "api_style": "chat",
+            "temperature": temperature,
+            "extra_body": {"temperature": 0.5},
+        }
+    )
+
+
+async def test_unprefixed_openai_model_snapshot_matches_extra_body_dispatch(monkeypatch):
+    """An unprefixed model LiteLLM resolves to OpenAI gets OpenAI's extra_body precedence."""
+    from nooa.unifiedllm import registry
+
+    sent = []
+    mock_http(
+        monkeypatch,
+        lambda request: (
+            sent.append(json.loads(request.content))
+            or httpx.Response(200, json=response_body("chat"))
+        ),
+    )
+    entries = [_openai_unprefixed(0.1), _openai_unprefixed(0.9)]
+    for entry in entries:
+        c = registry.client_from_config("local", entry, api_key="fake")
+        try:
+            await c.acall([{"role": "user", "content": "hello"}])
+        finally:
+            await c.aclose()
+    assert len(sent) == 2 and sent[0] == sent[1] and sent[0]["temperature"] == 0.5
+    snapshots = [connect.effective_config_snapshot(entry) for entry in entries]
+    assert snapshots[0] == snapshots[1]
+    assert snapshots[0]["params"]["temperature"] == 0.5
+    assert "extra_body" not in snapshots[0]["params"]
+
+
+def test_unresolved_provider_snapshot_keeps_extra_body_nested():
+    """Models LiteLLM cannot resolve, and Anthropic, keep extra_body nested as before."""
+    for model in ("anthropic/claude-x", "unknown-local-model"):
+        entry = _openai_unprefixed(0.1) | {"model_name": model}
+        params = connect.effective_config_snapshot(entry)["params"]
+        assert params["extra_body"] == {"temperature": 0.5}
+        assert params["temperature"] == 0.1

@@ -68,8 +68,22 @@ def resolved_input_interface(
     """
     if client_type in {"responses", "decision"}:
         return client_type
+    provider = resolved_provider(model, config)
+    # LiteLLM cannot route some model strings; treat them as Chat, which is
+    # also how CompletionClient would try to send them.
+    return "chat" if provider is None else interface_for_provider(provider)
+
+
+def resolved_provider(model: str, config: Mapping[str, Any]) -> str | None:
+    """Return the LiteLLM provider a completion client for ``model`` sends to.
+
+    Resolved by ``litellm.get_llm_provider`` from the model, the endpoint
+    (``api_base`` or ``base_url``) and ``custom_llm_provider``, as when
+    sending; no network call or key lookup. Returns None when LiteLLM cannot
+    resolve the model.
+    """
     if not model:
-        return "chat"
+        return None
     import litellm
 
     try:
@@ -79,10 +93,8 @@ def resolved_input_interface(
             custom_llm_provider=config.get("custom_llm_provider"),
         )
     except Exception:
-        # LiteLLM raises for model strings it cannot route; treat them as Chat,
-        # which is also how CompletionClient would try to send them.
-        return "chat"
-    return interface_for_provider(provider)
+        return None
+    return provider
 
 
 def entry_input_interface(entry: Mapping[str, Any]) -> str:

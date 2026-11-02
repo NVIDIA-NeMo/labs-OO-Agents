@@ -128,6 +128,22 @@ def effective_route_scope(entry: dict) -> dict:
     )
 
 
+def _provider(entry):
+    """Return the LiteLLM provider that requests for ``entry`` are dispatched to.
+
+    Resolved by LiteLLM (``nooa.media_policy.resolved_provider``), as the clients do,
+    so an unprefixed model such as ``gpt-4.1`` counts as OpenAI. When LiteLLM
+    cannot resolve the model, falls back to ``custom_llm_provider`` or the
+    model name's prefix. Reads no keys and makes no requests.
+    """
+    from nooa.media_policy import resolved_provider
+
+    model = entry.get("model_name") or ""
+    return resolved_provider(model, entry) or (
+        entry.get("custom_llm_provider") or model.split("/", 1)[0]
+    )
+
+
 def _retry_policy(entry):
     """Return the entry's retry policy as JSON, resolved the way the registry does.
 
@@ -197,10 +213,7 @@ def effective_config_snapshot(entry: dict, check: str = "routing") -> dict:
         # the top level of the request last, so do the same here; Anthropic
         # keeps it nested. Other providers have not been verified, so their
         # extra_body is kept nested as written.
-        provider = (
-            entry.get("custom_llm_provider") or (entry.get("model_name") or "").split("/", 1)[0]
-        )
-        if entry.get("client_type") == "responses" or provider in {"openai", "azure"}:
+        if entry.get("client_type") == "responses" or _provider(entry) in {"openai", "azure"}:
             extra = params.pop("extra_body", {}) or {}
             params.update(extra)
     snapshot = {
