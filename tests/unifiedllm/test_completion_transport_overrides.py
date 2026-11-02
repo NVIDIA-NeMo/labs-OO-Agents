@@ -268,3 +268,20 @@ def test_same_endpoint_override_keeps_media_permissions():
     params = client._prepare_call_config({"api_base": url})
     assert params["base_url"] == url
     assert client._request_media_inputs(params) == ("image",)
+
+
+@pytest.mark.parametrize("client_class", [CompletionClient, ResponsesClient])
+@pytest.mark.parametrize(
+    "configured,override", [("api_base", "base_url"), ("base_url", "api_base")]
+)
+def test_other_spelling_of_the_same_endpoint_keeps_media_permissions(
+    client_class, configured, override
+):
+    url = "https://gateway.example/v1"
+    client = client_class(
+        "openai/opaque-model", api_key="key", media_inputs=["image"], **{configured: url}
+    )
+    assert client._request_media_inputs(client._prepare_call_config({override: url})) == ("image",)
+    # A different URL is a replacement route and inherits nothing.
+    other = client._prepare_call_config({override: "https://other.example/v1"})
+    assert client._request_media_inputs(other) == ()

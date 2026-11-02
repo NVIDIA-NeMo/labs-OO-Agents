@@ -1319,10 +1319,25 @@ class UnifiedLLM(ABC):
         return params
 
     def _request_media_inputs(self, call_config: dict[str, Any]) -> tuple[MediaInput, ...]:
-        """A replacement route never inherits permissions from this connection."""
-        if self._effective_model(call_config) != self.model or any(
-            call_config.get(key) != self.config.get(key)
-            for key in ("api_base", "base_url", "custom_llm_provider", "client")
+        """A replacement route never inherits permissions from this connection.
+
+        ``api_base`` and ``base_url`` are compared as one endpoint, so the
+        configured URL under the other spelling keeps the permissions.
+        """
+        from nooa.unifiedllm.reasoning import _endpoint_changed
+
+        if (
+            self._effective_model(call_config) != self.model
+            or _endpoint_changed(self.config, call_config)
+            # A request with no endpoint goes to the provider default.
+            or (
+                any(self.config.get(key) for key in ("api_base", "base_url"))
+                and not any(call_config.get(key) for key in ("api_base", "base_url"))
+            )
+            or any(
+                call_config.get(key) != self.config.get(key)
+                for key in ("custom_llm_provider", "client")
+            )
         ):
             return ()
         return validate_media_inputs(self.media_inputs)
