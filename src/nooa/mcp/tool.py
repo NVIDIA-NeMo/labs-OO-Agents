@@ -85,14 +85,26 @@ class MCPToolSpec:
     required: set[str] = field(default_factory=set)
 
 
-def _json_schema_type_to_python_type(json_type: str) -> type:
-    """Convert JSON schema type string to Python type.
+def _combine_python_types(python_types: Sequence[Any]) -> Any:
+    """Combine Python annotation members into one PEP 604 union."""
+    unique_types = list(dict.fromkeys(python_types))
+    if not unique_types:
+        return str
+
+    combined = unique_types[0]
+    for python_type in unique_types[1:]:
+        combined |= python_type
+    return combined
+
+
+def _json_schema_type_to_python_type(json_type: Any) -> Any:
+    """Convert a JSON Schema ``type`` value to a Python annotation.
 
     Args:
-        json_type: JSON schema type (e.g., "string", "integer", "number")
+        json_type: A scalar type name or an array of type names.
 
     Returns:
-        Python type corresponding to the JSON schema type
+        Python annotation corresponding to the JSON Schema type value.
     """
     type_map = {
         "string": str,
@@ -101,8 +113,38 @@ def _json_schema_type_to_python_type(json_type: str) -> type:
         "boolean": bool,
         "array": list,
         "object": dict,
+        "null": type(None),
     }
+    if isinstance(json_type, list):
+        return _combine_python_types(
+            [_json_schema_type_to_python_type(member) for member in json_type]
+        )
+    if not isinstance(json_type, str):
+        return str
     return type_map.get(json_type, str)
+
+
+def _json_schema_to_python_type(schema: dict[str, Any]) -> Any:
+    """Resolve supported scalar and composed JSON Schema types."""
+    for keyword in ("anyOf", "oneOf"):
+        branches = schema.get(keyword)
+        if isinstance(branches, list):
+            branch_types = [
+                _json_schema_to_python_type(branch)
+                for branch in branches
+                if isinstance(branch, dict)
+            ]
+            if branch_types:
+                return _combine_python_types(branch_types)
+
+    return _json_schema_type_to_python_type(schema.get("type", "string"))
+
+
+def _python_type_allows_none(python_type: Any) -> bool:
+    """Return whether a generated annotation explicitly permits ``None``."""
+    return python_type is type(None) or (
+        isinstance(python_type, types.UnionType) and type(None) in python_type.__args__
+    )
 
 
 def _value_to_ast_node(value: Any) -> ast.expr:
@@ -153,6 +195,7 @@ def _create_method_from_schema(
     annotations: dict[str, Any] = {"return": Any}
     defaults: dict[str, Any] = {}
     param_names: list[str] = []
+    required_nullable_params: set[str] = set()
 
     # Process each property
     param_constraints: dict[str, list[str]] = {}  # Store constraints for docstring
@@ -164,8 +207,9 @@ def _create_method_from_schema(
         param_names.append(param_name)
 
         # Get type
-        json_type = param_schema.get("type", "string")
-        param_type = _json_schema_type_to_python_type(json_type)
+        param_type = _json_schema_to_python_type(param_schema)
+        if param_name in required and _python_type_allows_none(param_type):
+            required_nullable_params.add(param_name)
 
         # Extract description
         param_desc = param_schema.get("description", "")
@@ -246,7 +290,7 @@ def _create_method_from_schema(
                 annotations[param_name] = param_type
         else:
             # Optional but no schema default -> synthesize None so the caller
-            # may omit it; ``_call_tool`` strips None before sending.
+            # may omit it; generated kwargs omit values that remain at this default.
             defaults[param_name] = None
             annotations[param_name] = param_type | type(None)
 
@@ -367,7 +411,21 @@ Args:
                     value=ast.Name(id="self", ctx=ast.Load()), attr="_call_tool", ctx=ast.Load()
                 ),
                 args=[ast.Constant(value=tool_name), ast.Name(id="kwargs", ctx=ast.Load())],
-                keywords=[],
+                keywords=(
+                    [
+                        ast.keyword(
+                            arg="_preserve_none",
+                            value=ast.Set(
+                                elts=[
+                                    ast.Constant(value=name)
+                                    for name in sorted(required_nullable_params)
+                                ]
+                            ),
+                        )
+                    ]
+                    if required_nullable_params
+                    else []
+                ),
             )
         )
     )
@@ -599,18 +657,27 @@ class MCPTool:
         self,
         tool_name: str,
         arguments: dict[str, Any] | None = None,
+        *,
+        _preserve_none: set[str] | frozenset[str] = frozenset(),
     ) -> Any:
         """Internal: invoke a tool on the server. Used by generated methods only.
 
         Args:
             tool_name: Name of the MCP tool to call
             arguments: Tool arguments (optional, defaults to empty dict)
+            _preserve_none: Required nullable properties whose explicit null
+                values must reach the server.
 
         Returns:
             Tool execution result from the MCP server
         """
-        # Strip None values — MCP servers use Pydantic and reject None for optional params
-        clean_args = {k: v for k, v in (arguments or {}).items() if v is not None}
+        # Optional Python defaults remain omitted for compatibility, while a
+        # generated required property whose schema permits ``null`` must retain it.
+        clean_args = {
+            key: value
+            for key, value in (arguments or {}).items()
+            if value is not None or key in _preserve_none
+        }
 
         try:
             return await self._invoke(tool_name, clean_args)
