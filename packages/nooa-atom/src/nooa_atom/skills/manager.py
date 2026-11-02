@@ -36,8 +36,7 @@ _WORK_WORDS = frozenset(
 )
 _BUILT_IN_WORK = (
     "self.jobs (built in, no skill needed): self.jobs.after(seconds, name=...) timer, "
-    "self.jobs.every(seconds, name=...) ticks; watch a command or follow a file in its "
-    "own Shell (a Shell runs one command at a time; keep sh for other commands): "
+    "self.jobs.every(seconds, name=...) ticks; watch a command or follow a file: "
     'self.jobs.launch(Shell().run("tail -F app.log"), name=..., progress=Throttle(seconds=5))'
 )
 

@@ -412,7 +412,7 @@ async def test_search_for_timers_and_tails_points_to_self_jobs(agent, query):
         "progress=Throttle(",
     ):
         assert call in first
-    assert "own Shell" in first and "one command at a time" in first
+    assert "own Shell" not in first and "one command at a time" not in first
     assert "self.jobs.tail(" not in first
     assert "subtract" not in first
 
