@@ -226,6 +226,33 @@ async def test_async_factory_bounds_total_time_across_pages():
 
 
 @pytest.mark.asyncio
+async def test_inner_timeout_is_not_reported_as_the_overall_deadline():
+    """A fast inner TimeoutError keeps its own message instead of blaming the deadline."""
+    session = AsyncMock()
+    session.list_tools.side_effect = TimeoutError("page request timed out")
+
+    @asynccontextmanager
+    async def connect():
+        """Yield a session whose first page fails well before the deadline."""
+        yield session
+
+    client = SimpleNamespace(connect_to_server=connect)
+
+    with (
+        patch("nooa.mcp.tool.create_mcp_client", return_value=client),
+        pytest.raises(RuntimeError) as exc_info,
+    ):
+        await MCPManager.create_stdio_server(
+            "fast-inner-timeout",
+            "paged-server",
+            discovery_timeout=timedelta(minutes=5),
+        )
+
+    assert "page request timed out" in str(exc_info.value)
+    assert "overall" not in str(exc_info.value)
+
+
+@pytest.mark.asyncio
 async def test_async_factory_generates_methods_from_every_page():
     """The async discovery entry point must expose tools beyond page one."""
     session = AsyncMock()

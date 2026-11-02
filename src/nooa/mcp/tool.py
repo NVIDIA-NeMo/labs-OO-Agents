@@ -823,10 +823,13 @@ async def _run_before_discovery_deadline(
         raise RuntimeError(
             f"MCP tool discovery exceeded its overall {timeout_seconds:g}-second timeout"
         )
+    scope = asyncio.timeout(remaining)
     try:
-        async with asyncio.timeout(remaining):
+        async with scope:
             return await operation()
     except TimeoutError as exc:
+        if not scope.expired():
+            raise  # an inner timeout, not the overall deadline: keep its own message
         raise RuntimeError(
             f"MCP tool discovery exceeded its overall {timeout_seconds:g}-second timeout"
         ) from exc
