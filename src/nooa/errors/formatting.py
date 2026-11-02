@@ -93,8 +93,8 @@ commands or standard input.'''
 # triple-quoted): the text usually contains or ends with the closing quote.
 _UNTERMINATED_STRING_RE = re.compile(r"^unterminated (?:triple-quoted )?string literal")
 _QUOTE_HINT = (
-    "Hint: pick a quote style the text neither contains nor ends with, or pass a "
-    'script on stdin: sh.run("python3 -", stdin=script).'
+    "Hint: pick a quote style the text neither contains nor ends with, or pass the "
+    "text on standard input or in a file instead of a string literal."
 )
 
 

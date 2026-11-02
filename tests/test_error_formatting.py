@@ -887,8 +887,8 @@ class TestQuoteHint:
     """An unterminated string literal gets a one-line quote-style / stdin hint."""
 
     HINT = (
-        "Hint: pick a quote style the text neither contains nor ends with, or pass a "
-        'script on stdin: sh.run("python3 -", stdin=script).'
+        "Hint: pick a quote style the text neither contains nor ends with, or pass the "
+        "text on standard input or in a file instead of a string literal."
     )
 
     @staticmethod
