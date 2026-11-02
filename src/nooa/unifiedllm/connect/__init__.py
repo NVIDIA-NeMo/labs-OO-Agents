@@ -450,7 +450,8 @@ class Verdict:
 
     Tests the user did not approve are "skipped"; tests that ran but did not
     show the expected result "need attention". ``unobserved_levels`` lists
-    reasoning levels whose test call returned no reasoning.
+    reasoning levels whose test call returned no reasoning. A level that turns
+    reasoning off but still reasoned also needs attention.
     """
 
     passed: tuple[str, ...]
@@ -472,13 +473,18 @@ def verdict(entry: dict) -> Verdict:
     """
     provenance = entry.get("provenance", {})
     missing = tuple(unobserved_reasoning_levels(entry))
+    # A level that turns reasoning off but still reasoned needs attention too.
+    flagged = {*missing, *ignored_off_reasoning_levels(entry)}
     groups = {"passed": [], "attention": [], "skipped": []}
     for name, record in {
         **provenance.get("probes", {}),
         **provenance.get("session_checks", {}),
     }.items():
         status = check_status(
-            name, record, entry=entry, missing_reasoning=name.removeprefix("level:") in missing
+            name,
+            record,
+            entry=entry,
+            missing_reasoning=name.startswith("level:") and name[6:] in flagged,
         )
         groups[status].append(name)
     return Verdict(
@@ -938,6 +944,44 @@ def reasoning_settings(template: str, style: str, level: str, *, budget: int = 4
     if template == "thinking":
         return {"thinking": {"type": "enabled" if enabled else "disabled"}}
     raise ValueError(f"Unknown reasoning template: {template}")
+
+
+def reasoning_disabled(params: Mapping[str, Any]) -> bool:
+    """Return True when a reasoning level's request settings ask the model not to reason.
+
+    Recognises ``thinking.type: disabled``, ``enable_thinking: false`` in
+    ``chat_template_kwargs``, and an effort of ``none`` or ``off``.
+    """
+    thinking = params.get("thinking")
+    template = params.get("chat_template_kwargs")
+    reasoning = params.get("reasoning")
+    efforts = (
+        params.get("reasoning_effort"),
+        reasoning.get("effort") if isinstance(reasoning, dict) else None,
+    )
+    return (
+        (isinstance(thinking, dict) and thinking.get("type") == "disabled")
+        or (isinstance(template, dict) and template.get("enable_thinking") is False)
+        or any(isinstance(e, str) and e.strip().lower() in {"none", "off"} for e in efforts)
+    )
+
+
+def ignored_off_reasoning_levels(entry: dict) -> list[str]:
+    """Return the levels that turn reasoning off but whose test reply still reasoned.
+
+    Such a level did not do what it asks for, so its check needs attention
+    and the level is never counted as verified; the stored test results are
+    not changed.
+    """
+    records = entry.get("provenance", {}).get("probes", {})
+    return [
+        label
+        for label, params in entry.get("reasoning_levels", {}).items()
+        if isinstance(params, Mapping)
+        and reasoning_disabled(params)
+        and records.get(f"level:{label}", {}).get("outcome") == "accepted"
+        and records.get(f"level:{label}", {}).get("reasoning_observed") is True
+    ]
 
 
 def unobserved_reasoning_levels(entry: dict) -> list[str]:

@@ -660,7 +660,7 @@ class CheckProgress:
         status = (
             "skipped"
             if name == "explicit_cache"
-            else check_status(name, record, missing_reasoning=missing_reasoning)
+            else check_status(name, record, missing_reasoning=missing_reasoning or ignored_off)
         )
         if (
             name == "routing"
@@ -680,7 +680,7 @@ class CheckProgress:
         if ignored_off:
             # The "off" level still returned reasoning, so the setting had no effect.
             headline = "Not available"
-            detail = "Reasoning was still returned; this model may ignore this setting."
+            detail = "This model ignores Off: it still reasoned, so Off is not verified."
         # For a passed call, the "accepted" or "finished" details add nothing,
         # so show no detail except for the few cases below.
         if (

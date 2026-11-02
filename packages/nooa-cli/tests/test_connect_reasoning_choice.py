@@ -350,7 +350,8 @@ def test_off_setting_that_still_returns_reasoning_is_reported():
     result = CliRunner().invoke(command)
     text = " ".join(result.output.split())
     assert "Reasoning (off): Not available" in text
-    assert "this model may ignore this setting" in text
+    assert "This model ignores Off: it still reasoned, so Off is not verified." in text
+    assert "Results · 0 passed" in text
 
 
 def test_edit_model_default_clears_raw_reasoning_override(native):

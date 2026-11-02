@@ -221,21 +221,10 @@ def clear_reasoning_controls(params: dict) -> None:
 def reasoning_disabled(params) -> bool:
     """Return True when a reasoning level's request settings ask the model not to reason.
 
-    Recognises ``thinking.type: disabled``, ``enable_thinking: false`` in
-    ``chat_template_kwargs``, and an effort of ``none`` or ``off``.
+    The same rule as ``connect.reasoning_disabled``, which decides whether
+    such a level counts as verified.
     """
-    thinking = params.get("thinking")
-    template = params.get("chat_template_kwargs")
-    reasoning = params.get("reasoning")
-    efforts = (
-        params.get("reasoning_effort"),
-        reasoning.get("effort") if isinstance(reasoning, dict) else None,
-    )
-    return (
-        (isinstance(thinking, dict) and thinking.get("type") == "disabled")
-        or (isinstance(template, dict) and template.get("enable_thinking") is False)
-        or any(isinstance(e, str) and e.strip().lower() in {"none", "off"} for e in efforts)
-    )
+    return connect.reasoning_disabled(params)
 
 
 async def show_checks(

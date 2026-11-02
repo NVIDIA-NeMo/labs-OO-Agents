@@ -46,3 +46,52 @@ async def test_server_error_over_http_reads_failed_in_row_and_summary(monkeypatc
     assert record["status_code"] == 503
     assert view.connection_detail(record) == "Failed · Server error. Try again later."
     assert "private upstream detail" not in repr(result)
+
+
+@pytest.mark.asyncio
+async def test_off_level_that_still_reasons_is_never_verified(monkeypatch):
+    """Nemotron and MiniMax still reason with Off; Off must not be saved as verified."""
+    from nooa.unifiedllm.connect._verification import save_verification
+
+    def handle(request):
+        return httpx.Response(
+            200,
+            json={
+                "id": "r",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {
+                            "role": "assistant",
+                            "content": '{"value":323}',
+                            "reasoning_content": "Thinking anyway.",
+                        },
+                    }
+                ],
+                "usage": {"prompt_tokens": 20, "completion_tokens": 9, "total_tokens": 29},
+            },
+        )
+
+    mock_http(monkeypatch, handle)
+    off = {"chat_template_kwargs": {"enable_thinking": False}}
+    proposal = connect.plan(
+        "local",
+        "model",
+        "chat",
+        "https://api.test/v1",
+        "",
+        reasoning_levels={"off": off},
+        reasoning_level="off",
+    )
+    result = await connect.check_stage(proposal, "all", api_key="test-key")
+    record = result.entry["provenance"]["probes"]["level:off"]
+    assert record["outcome"] == "accepted" and record["reasoning_observed"] is True
+    assert connect.ignored_off_reasoning_levels(result.entry) == ["off"]
+    assert "level:off" in connect.verdict(result.entry).needs_attention
+    summary, _ = save_verification(result.entry)
+    assert summary["state"] != "verified"
+    assert "level:off" in summary["unverified_scopes"]
