@@ -218,10 +218,13 @@ def new_secret_env(path, name: str, value: str, *, model_may_be_saved=None, roll
             other cooperating writers cannot change the model file meanwhile.
 
     Raises:
-        ValueError: Always, if the block raises (the original exception is not
-            chained). The message says whether the key was removed or may
-            remain ("partial state"), in which case the user should review both
-            files. The key is not removed if the secrets file was changed by
+        KeyboardInterrupt, SystemExit, asyncio.CancelledError: Re-raised
+            unchanged (any ``BaseException`` that is not an ``Exception``)
+            when the key was rolled back successfully.
+        ValueError: If the block raises an ordinary exception (the original
+            exception is not chained), or if rollback could not finish. The
+            message says whether the key was removed or may remain ("partial
+            state"), in which case the user should review both files. The key is not removed if the secrets file was changed by
             someone else after this function wrote it. Also raised if the
             variable already exists or the secrets file changed during the
             block.
@@ -237,7 +240,7 @@ def new_secret_env(path, name: str, value: str, *, model_may_be_saved=None, roll
             yield
             if path.read_bytes() != owned:
                 raise ValueError("Secret changed during model commit")
-        except BaseException:
+        except BaseException as error:
             with ExitStack() as stack:
                 if rollback_guard is not None:
                     try:
@@ -283,6 +286,10 @@ def new_secret_env(path, name: str, value: str, *, model_may_be_saved=None, roll
                 finally:
                     if temporary is not None:
                         temporary.unlink(missing_ok=True)
+                if not isinstance(error, Exception):
+                    # The key was rolled back; let an interrupt, exit or
+                    # cancellation continue as itself.
+                    raise
                 raise ValueError(
                     "Model save failed; the new key was rolled back. "
                     "Reload the model file and re-review consent before retrying."
