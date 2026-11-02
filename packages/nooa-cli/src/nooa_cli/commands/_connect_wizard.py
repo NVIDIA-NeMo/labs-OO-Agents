@@ -39,6 +39,7 @@ import httpx
 import yaml
 
 from nooa import paths
+from nooa._platform import PosixOnlyFeatureError
 from nooa.unifiedllm import connect
 
 from . import _connect_prompts as prompts
@@ -3841,7 +3842,7 @@ def run_wizard(**options):
                     view.note("Approved connection test failed. Nothing saved.", err=True)
                     raise click.ClickException("Test failed.")
                 return
-    except (ValueError, OSError, yaml.YAMLError, httpx.HTTPError) as exc:
+    except (ValueError, OSError, yaml.YAMLError, httpx.HTTPError, PosixOnlyFeatureError) as exc:
         detail = scrub_setup(
             state, view.local_failure(exc, api_key=state.api_key, api_key_env=state.api_key_env)
         )

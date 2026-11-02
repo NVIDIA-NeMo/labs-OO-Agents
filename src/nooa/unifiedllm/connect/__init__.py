@@ -3666,13 +3666,24 @@ def registry_write_lock(path: Path):
     Recovery code holds it while checking which aliases use a credential and
     while restoring the secrets file.
     """
-    import fcntl
-
     path = Path(path).resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.with_name(f".{path.name}.lock")
+    from nooa._platform import is_native_windows
+
+    if is_native_windows():
+        # Windows has no fcntl; filelock uses LockFileEx there and manages the
+        # lock file itself.
+        from filelock import FileLock
+
+        with FileLock(lock_path):
+            yield path
+        return
+    import fcntl
+
     # Never delete the lock file: a new file would let a writer skip processes
     # still waiting on the old one.
-    with path.with_name(f".{path.name}.lock").open("a") as lock:
+    with lock_path.open("a") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
         yield path
 
@@ -3809,7 +3820,14 @@ def _write_entry(
     temporary_path = None
     try:
         with tempfile.NamedTemporaryFile(
-            mode="w", encoding="utf-8", dir=path.parent, prefix=path.name + ".", delete=False
+            mode="w",
+            encoding="utf-8",
+            # Line endings are converted above; Windows text mode would turn
+            # each \r\n into \r\r\n.
+            newline="",
+            dir=path.parent,
+            prefix=path.name + ".",
+            delete=False,
         ) as temporary:
             temporary_path = Path(temporary.name)
             temporary.write(text.replace("\n", newline))
