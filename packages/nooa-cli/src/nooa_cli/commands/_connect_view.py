@@ -161,7 +161,11 @@ def connection_detail(record):
 
     if text_baseline_passed(record):
         return "Passed"
-    if record.get("outcome") == "not_probed":
+    # A call that was sent and failed (for example HTTP 503) is also stored as
+    # "not_probed"; report it as the failure the row shows, not "Not tested".
+    if record.get("outcome") == "not_probed" and not (
+        record.get("error") or record.get("status_code")
+    ):
         return (
             "Not tested: check budget used up"
             if record.get("reason") == "budget exhausted"
