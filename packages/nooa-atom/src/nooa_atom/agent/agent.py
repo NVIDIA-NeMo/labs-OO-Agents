@@ -837,9 +837,9 @@ class AtomAgent(AtomAgentBase):
         self.context["python_cell_lifetime"] = Context(
             "\n".join(
                 (
-                    '- Your live Python names are in the python_cell_state block ("omitted: N" '
-                    "counts the rest); python_cell_state() lists up to 20: check both and your "
-                    "context before recreating a name.",
+                    "- The python_cell_state block lists up to 20 of your live Python names and "
+                    'says how many more exist ("omitted: N"); python_cell_state() returns all of '
+                    "them with their types. Check both before recreating a name.",
                     "- Names you define in cells (values, functions, classes) survive Done, "
                     "Waiting and NeedInput in this live session: define a helper once and reuse "
                     "it in later turns.",

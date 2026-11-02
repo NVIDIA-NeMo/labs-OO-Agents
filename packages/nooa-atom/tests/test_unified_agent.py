@@ -30,8 +30,9 @@ ENVIRONMENT_LINE = (
     "sh.run(\"python3 script.py\")); don't install task packages into Atom's Python."
 )
 LIVE_NAMES_LINE = (
-    'Your live Python names are in the python_cell_state block ("omitted: N" counts '
-    "the rest); python_cell_state() lists up to 20: check both and your context before recreating a name."
+    "The python_cell_state block lists up to 20 of your live Python names and "
+    'says how many more exist ("omitted: N"); python_cell_state() returns all of '
+    "them with their types. Check both before recreating a name."
 )
 
 WORK_RESULT = (
