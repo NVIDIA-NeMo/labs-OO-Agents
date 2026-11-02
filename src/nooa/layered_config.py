@@ -79,15 +79,21 @@ def entry_point_paths(group: str) -> list[Path]:
         try:
             value = ep.load()
             path = value() if callable(value) else value
+            if path is None:
+                continue
+            if not isinstance(path, (str, os.PathLike)):
+                logger.warning("%s entry-point %r returned %r, not a path", group, ep.name, path)
+                continue
+            # Inside the handler too: a custom PathLike's __fspath__ can raise.
+            out.append(Path(path))
         except Exception:  # noqa: BLE001 — third-party entry-point code, be defensive
-            logger.warning("%s entry-point %r failed to load", group, ep.name, exc_info=True)
+            logger.warning(
+                "%s entry-point %r failed to load or convert its path",
+                group,
+                ep.name,
+                exc_info=True,
+            )
             continue
-        if path is None:
-            continue
-        if not isinstance(path, (str, os.PathLike)):
-            logger.warning("%s entry-point %r returned %r, not a path", group, ep.name, path)
-            continue
-        out.append(Path(path))
     return out
 
 

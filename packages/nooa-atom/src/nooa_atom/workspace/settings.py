@@ -157,7 +157,13 @@ def load_settings_layers(project_dir: Path | None = None) -> dict[str, Any]:
         for key in EXTENDED_LIST_SETTINGS:
             base, extra = section.get(key), override.get(key)
             if isinstance(base, list) and isinstance(extra, list):
-                target[key] = list(dict.fromkeys([*base, *extra]))
+                # Order-preserving and by equality, so an unhashable (invalid)
+                # entry still reaches settings validation instead of raising here.
+                combined: list[Any] = []
+                for item in [*base, *extra]:
+                    if item not in combined:
+                        combined.append(item)
+                target[key] = combined
     return merged
 
 

@@ -179,3 +179,30 @@ def test_path_type_is_kept(tmp_path, monkeypatch):
         lambda *, group: [_EntryPoint("p", lambda: tmp_path), _EntryPoint("bad", lambda: 3)],
     )
     assert layered_config.entry_point_paths("g") == [Path(tmp_path)]
+
+
+def test_unhashable_active_skills_entries_do_not_break_the_merge(tmp_path, isolated, bundle):
+    """An invalid (unhashable) user entry reaches settings validation instead of
+    raising TypeError while the bundled and user lists are merged."""
+    (isolated / "settings.yaml").write_text("atom:\n  active_skills: [{name: web}, nvidia.docs]\n")
+    merged = load_settings_layers(tmp_path / "workspace")
+    assert merged["atom"]["active_skills"] == ["nvidia.search", "nvidia.docs", {"name": "web"}]
+    workspace = tmp_path / "workspace"
+    (workspace / ".nooa").mkdir(parents=True)
+    try:
+        AtomOptions.load(workspace)
+    except TypeError as exc:  # pragma: no cover - the regression this guards
+        pytest.fail(f"merge raised TypeError: {exc}")
+    except Exception:
+        pass  # rejecting the invalid entry is settings validation's call
+
+
+def test_a_path_like_that_fails_to_convert_is_skipped(tmp_path, monkeypatch):
+    class Broken:
+        def __fspath__(self):
+            raise RuntimeError("cannot materialise")
+
+    good = tmp_path / "good.yaml"
+    eps = [_EntryPoint("a_broken", lambda: Broken()), _EntryPoint("b_good", lambda: good)]
+    monkeypatch.setattr(layered_config.metadata, "entry_points", lambda *, group: eps)
+    assert layered_config.bundled_settings_paths() == [good]
