@@ -137,6 +137,27 @@ def test_compatible_routes_normalize_endpoint_spellings():
     assert c.context_window is None  # Conflicting compatible declarations.
 
 
+@pytest.mark.parametrize("client_class", [CompletionClient, ResponsesClient])
+def test_direct_lookup_ignores_the_unforwarded_endpoint_key(client_class):
+    """A completion/Responses entry's registry-only ``endpoint`` is not part of its route."""
+    registry.MODELS["local"] = entry(
+        endpoint="https://decisions.test/v1/decisions",
+        **({"client_type": "responses"} if client_class is ResponsesClient else {}),
+    )
+    assert client_class(MODEL, api_base=BASE).context_window == 8192
+
+
+def test_direct_lookup_needs_every_matching_entry_to_declare_the_window():
+    """One matching alias without a window makes the registry value unknown."""
+    registry.MODELS["local"] = entry()
+    registry.MODELS["undeclared"] = {
+        key: value for key, value in entry().items() if key != "context_window"
+    }
+    assert CompletionClient(MODEL, api_base=BASE).context_window is None
+    registry.MODELS["undeclared"]["context_window"] = 8192
+    assert CompletionClient(MODEL, api_base=BASE).context_window == 8192
+
+
 def test_alias_key_collision_does_not_prove_model_identity():
     registry.MODELS[MODEL] = {**entry(), "model_name": "openai/different"}
     assert CompletionClient(MODEL, api_base=BASE).context_window is None
