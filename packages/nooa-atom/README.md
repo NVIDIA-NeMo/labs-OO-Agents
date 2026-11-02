@@ -324,8 +324,8 @@ strategy and does not gain Atom's namespace behavior.
 
 The owned namespaces are in-process only. Helpers see subsequent global rebindings;
 definitions/defaults/decorators execute once, and intentional library caches retain
-their normal semantics. Each root/child session owns separate state. Other generated
-methods have separate call-local owners. Reserved runtime
+their normal semantics. Each root/child session owns separate state. Agent methods
+other than `handle` start each call with a fresh namespace. Reserved runtime
 names and call inputs cannot be overwritten; background/nested/stale completion
 capabilities cannot complete a different foreground call.
 

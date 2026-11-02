@@ -773,7 +773,7 @@ class AtomAgent(AtomAgentBase):
     @hidden
     @no_trace
     def _execution_namespace_for(self, call: Any) -> Any:
-        """Handle shares this live session's owner; other methods are call-local."""
+        """Handle shares this live session's namespace; other agent methods start each call fresh."""
         from nooa.runtime.execution_namespace import RUNTIME_NAMES, ExecutionNamespace
 
         if call.method_name == "handle":
@@ -835,16 +835,24 @@ class AtomAgent(AtomAgentBase):
         )
         self.context.pop("experimental_namespace", None)  # replace an earlier snapshot's block
         self.context["python_cell_lifetime"] = Context(
-            'Your live Python names are in the python_cell_state block ("omitted: N" counts '
-            "the rest); python_cell_state() lists up to 20: check both and your context before recreating a name. "
-            "Cell variables survive Done, Waiting and NeedInput in this live session. "
-            "Other generated methods are call-local. "
-            "Restart loses these names, not self.v. No automatic expiry. "
-            "del removes names, NOT jobs/resources: close/cancel work explicitly. "
-            "Globals are shared with jobs, not transactional. "
-            "Job stdout/stderr/media: job.output / JobEvent.output, never a later cell. "
-            "Descendant output belongs to its originating open scope; late output is dropped. "
-            "Inventory: bounded names/types only.",
+            "\n".join(
+                (
+                    '- Your live Python names are in the python_cell_state block ("omitted: N" '
+                    "counts the rest); python_cell_state() lists up to 20: check both and your "
+                    "context before recreating a name.",
+                    "- Names you define in cells (values, functions, classes) survive Done, "
+                    "Waiting and NeedInput in this live session: define a helper once and reuse "
+                    "it in later turns.",
+                    "- Agent methods other than handle start each call with fresh names.",
+                    "- A restart loses these names, not self.v. Nothing expires on its own.",
+                    "- del removes a name, not a job or resource: close or cancel work explicitly.",
+                    "- Globals are shared with running jobs and are not transactional.",
+                    "- A job's stdout/stderr/media are in job.output / JobEvent.output, never in "
+                    "a later cell.",
+                    "- Output from work a cell started belongs to that cell; output that arrives "
+                    "after it ended is dropped.",
+                )
+            ),
             prefix=True,
         )
         self.context["todo_status"] = Context(expr="self.todo.status()")

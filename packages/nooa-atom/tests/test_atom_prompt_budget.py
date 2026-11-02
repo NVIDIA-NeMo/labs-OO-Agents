@@ -315,7 +315,8 @@ async def test_first_call_prompt_stays_within_budget(spec, method, tmp_path, ses
     assert "<experimental_namespace>" not in rendered
     assert "<python_cell_lifetime>" in rendered
     assert "job.output / JobEvent.output" in rendered
-    assert "Cell variables survive Done, Waiting and NeedInput" in rendered
+    assert "Names you define in cells (values, functions, classes) survive Done" in rendered
+    assert "- Agent methods other than handle start each call with fresh names." in rendered
     assert LIVE_NAMES_LINE in rendered
     assert "cell locals last one method call" not in rendered
     assert sizes["system"] <= system_limit
