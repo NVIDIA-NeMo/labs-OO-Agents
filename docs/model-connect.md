@@ -12,6 +12,7 @@ and saves a reply/output token limit, records the context window when known
 tools, reasoning, and caching, then saves a named entry (an *alias*) in
 `llm_config.yaml`. Your agents use the model by that alias.
 
+The checks send real requests and may incur provider charges.
 The interactive wizard asks before checks and saving. `--yes` confirms both
 without asking. For a reference to the saved settings and configuration files,
 see [Model configuration](model-configuration.md).

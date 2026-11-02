@@ -153,9 +153,10 @@ Choose your provider or endpoint, API key, exact model, and an alias such as
 `my-model`. Connect helps your agents run smoothly: it suggests and saves a
 reply/output token limit, records the context window when known (you can supply
 it), and lists your chosen media formats. It also tests the configured route,
-tools, reasoning, and caching. The wizard asks before checks and saving. Keep
-keys in environment variables or NOOA's secrets file, not in model configuration
-or committed code.
+tools, reasoning, and caching. The checks send real requests and may incur
+provider charges. The wizard asks before checks and saving. Keep keys in
+environment variables or NOOA's secrets file, not in model configuration or
+committed code.
 
 Use the saved alias in Python:
 
