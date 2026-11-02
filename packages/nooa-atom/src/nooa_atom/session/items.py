@@ -32,12 +32,6 @@ if TYPE_CHECKING:
     from nooa_atom.session.port import SessionPort
 
 
-def _hide_empty[Model: type[BaseModel]](model: Model) -> Model:
-    """Apply display metadata without erasing the model's constructor type."""
-    spec(model, hide_empty=True)
-    return model
-
-
 SessionStatus = Literal["running", "working", "idle", "retained", "closed", "on_disk"]
 """``running``: a turn is running. ``working``: its last turn ended ``Waiting``
 on a job of its own. ``idle``: live, nothing to do. ``retained``: an idle kept
@@ -60,7 +54,7 @@ class Receipt(BaseModel):
     delivered: Literal["queued", "steered"]
 
 
-@_hide_empty
+@spec(hide_empty=True)
 class ChildRef(BaseModel):
     """A handle on a child session: data plus ``wait()``, ``send()`` and ``close()``.
 
@@ -199,7 +193,7 @@ class ChildFailedError(RuntimeError):
     """A child's turn failed, it is closed, or waiting for it could never end."""
 
 
-@_hide_empty
+@spec(hide_empty=True)
 class ChildResult(BaseModel):
     """A child finished a turn with ``Done``; its full report is ``item.result.report``."""
 
@@ -259,7 +253,7 @@ class ChildResult(BaseModel):
         return self.path
 
 
-@_hide_empty
+@spec(hide_empty=True)
 class ChildQuestion(BaseModel):
     """A kept child asked you a question (its ``NeedInput``); reply with ``await item.child.send(...)``."""
 
@@ -288,7 +282,7 @@ class ChildQuestion(BaseModel):
         return self.path
 
 
-@_hide_empty
+@spec(hide_empty=True)
 class ChildFailed(BaseModel):
     """A child's turn failed or the child ended without a result; read ``item.error``."""
 
@@ -313,7 +307,7 @@ CHILD_MESSAGE_CHARS = 1_000
 CHILD_MESSAGE_CUT = "\n[cut: the full report belongs in the result]"
 
 
-@_hide_empty
+@spec(hide_empty=True)
 class ChildMessage(BaseModel):
     """A progress note a child sent with ``self.message()``, not its result; read ``item.text``."""
 
