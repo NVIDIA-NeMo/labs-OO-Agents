@@ -317,7 +317,8 @@ def command(
 
     if no_metadata and (catalogue_model or models_url or discovery_file or catalogue_file):
         raise click.UsageError("--no-metadata cannot be combined with metadata mappings/files/URLs")
-    if no_catalogue and stage in {"catalogue", "model-info"}:
+    # --no-catalogue only skips automatic lookups; an explicit catalogue stage still runs.
+    if no_catalogue and stage == "model-info":
         raise click.UsageError(
             "--no-catalogue disables automatic server metadata; omit it for model-info"
         )
