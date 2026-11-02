@@ -1031,7 +1031,7 @@ def test_authentication_failure_restart_keeps_secrets_out(tmp_path, monkeypatch,
     assert context["target_file"] == str(path.resolve())
     assert context["alias"] == "local"
     assert context["remaining_budget_tokens"] == connect.DEFAULT_CHECK_BUDGET - 3 * PER_PROBE
-    assert context["interface_timeout_seconds"] == 30
+    assert context["interface_timeout_seconds"] == connect.INTERFACE_DISCOVERY_TIMEOUT == 90
     assert "--stage interfaces" in context["rerun_command"]
     assert "skills/nooa-model-configuration/SKILL.md" in handoff
     assert "git clone" not in handoff

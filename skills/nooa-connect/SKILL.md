@@ -356,8 +356,9 @@ budgets only with authorization. Typical defaults and reservations:
   reserve the cap plus 512 input tokens each; configured checks use 120-second
   timeouts. A 4,096-token budget without a smaller explicit cap may skip them.
 - Initial interface routing defaults to 2,048 output tokens plus 512 input tokens,
-  with a 30-second timeout. The example explicitly selects `--output-tokens 200`
-  for a cheaper check; this is not the default and can truncate responses.
+  with a 90-second timeout, since slow routes can take longer than 30 seconds.
+  The example explicitly selects `--output-tokens 200` for a cheaper check;
+  this is not the default and can truncate responses.
   Optional reasoning comparisons need additional allowance.
 - Chat session: three turns, each reserving `8192 + 3 * selected reply cap`,
   with a 120-second timeout per turn. Inspect the plan before approving it.

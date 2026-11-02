@@ -133,7 +133,10 @@ def check_failure(outcome):
         return "Server rate limit reached. Try again later."
     if isinstance(status, int) and status >= 500:
         return "Server error. Try again later."
-    if "Timeout" in error:
+    if "Timeout" in error or outcome.get("timeout_kind"):
+        waited = (outcome.get("request_shape") or {}).get("timeout_seconds")
+        if isinstance(waited, (int, float)) and not isinstance(waited, bool) and waited > 0:
+            return f"Model response timed out after {waited:g} s; the route may be slow."
         return "Model response timed out; the route may be slow."
     if error == "ReasoningReplayError":
         return "Could not read the reply."

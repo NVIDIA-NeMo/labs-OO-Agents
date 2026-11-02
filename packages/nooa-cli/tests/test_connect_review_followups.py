@@ -191,7 +191,9 @@ def test_wizard_slow_discovery_reports_slow_route_then_offers_restart(tmp_path, 
     assert result.exit_code != 0, result.output
     assert len(posts) == 3  # One discovery probe per interface; no extra retry.
     assert all(request.extensions["timeout"]["read"] != 120 for request in posts)
-    assert "route may be slow" in result.output
+    # Slow routes get the 90-second interface timeout, and the message says how long it waited.
+    assert all(request.extensions["timeout"]["read"] == 90 for request in posts)
+    assert "timed out after 90 s; the route may be slow" in result.output
     assert "Start over? [Y/n]: n" in result.output
     assert "120-second" not in result.output and "Next step" not in result.output
     assert "Nothing was saved" in result.output

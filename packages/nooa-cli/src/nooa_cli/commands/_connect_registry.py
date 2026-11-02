@@ -130,7 +130,7 @@ def diagnostic_context(
     reasoning_output_tokens=4096,
     stage=None,
     discovery_succeeded=None,
-    interface_timeout_seconds=30,
+    interface_timeout_seconds=90,  # == connect.INTERFACE_DISCOVERY_TIMEOUT (tested)
 ):
     """Return a dict describing this run, for troubleshooting output.
 

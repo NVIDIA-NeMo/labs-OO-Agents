@@ -102,7 +102,7 @@ async def test_failed_interface_is_not_offered_but_other_interfaces_are_checked(
         assert record["elapsed_seconds"] >= 0
         assert record["request_shape"] == {
             "api_style": "responses",
-            "timeout_seconds": 30,
+            "timeout_seconds": connect.INTERFACE_DISCOVERY_TIMEOUT,
             "output_tokens": DISCOVERY,
             "store": False,
             "include": ["reasoning.encrypted_content"],

@@ -155,6 +155,9 @@ def _include_rejected(exc: Exception) -> bool:
 
 
 REASONING_DISCOVERY_TIMEOUT = 90
+# Interface discovery calls: some routes (seen on NVIDIA Build) take more than
+# 30 seconds to answer even a short request.
+INTERFACE_DISCOVERY_TIMEOUT = 90
 
 CACHE_PARAMS = ("prompt_cache_options", "prompt_cache_breakpoint", "cache_control")
 
@@ -3486,7 +3489,7 @@ async def check_interfaces(
     styles: tuple[str, ...] = ("chat", "responses", "anthropic"),
     endpoints: Mapping[str, str] | None = None,
     allow_cross_origin_credentials: bool = False,
-    timeout_seconds: float = 30,
+    timeout_seconds: float = INTERFACE_DISCOVERY_TIMEOUT,
     reasoning_template: str | None = None,
     reasoning_level: str = "medium",
     reasoning_output_tokens: int = DEFAULT_REASONING_OUTPUT_TOKENS,

@@ -972,7 +972,7 @@ def check_interfaces(state: WizardState) -> bool:
         if state.approval != "none":
             state.interface_spent = state.interface_spent or 0
             retry_styles = available
-            interface_timeout = 30
+            interface_timeout = connect.INTERFACE_DISCOVERY_TIMEOUT
             while True:
                 # Test reasoning for each API style as well as the basic request,
                 # so a plain "nooa connect" runs the most useful tests without
@@ -1030,7 +1030,7 @@ def check_interfaces(state: WizardState) -> bool:
                 view.line(
                     scrub_setup(
                         state,
-                        "Model listing succeeded, but model responses timed out; the route may be slow."
+                        f"Model listing succeeded, but model responses timed out after {interface_timeout} s; the route may be slow."
                         if slow
                         else "Connection check failed. Review the key, server URL and API format, then try again.",
                     ),
