@@ -20,9 +20,12 @@ One shared budget (``Limits``) bounds the whole capture:
 - ``max_items`` / ``max_string``: items per container and characters per
   string, kept from the start and (``tail_share``) the end.
 
-``capture.register(T)`` extends it with nearest-MRO dispatch; a registered
-function builds its children only through the ``Out`` it is given, so the
-shared budget holds.
+``capture.register(T, shape)`` extends it with nearest-MRO dispatch: a
+shape (``array_like``, ``ndarray_like``, ``mapping_like``, ``object_like``,
+``text_like``) maps out the structure of a type through accessors, and capture
+builds the snapshot with the same builders as the built-in types, so the
+shared budget and the notation hold. Pydantic models and dataclasses are
+internal ``object_like`` shapes over their privileged field readers.
 """
 
 from __future__ import annotations
@@ -30,6 +33,7 @@ from __future__ import annotations
 import ast
 import builtins
 import dataclasses
+import itertools
 import math
 import sys
 import types
@@ -71,7 +75,17 @@ from nooa.snapshot._model import (
     Unavailable,
 )
 
-__all__ = ["DEFAULT_LIMITS", "Limits", "Out", "capture", "capture_fields"]
+__all__ = [
+    "DEFAULT_LIMITS",
+    "Limits",
+    "array_like",
+    "capture",
+    "capture_fields",
+    "mapping_like",
+    "ndarray_like",
+    "object_like",
+    "text_like",
+]
 
 _FIELD_METADATA_ATTR = "_agentdoc_fields_docs"
 _MAX_TYPE_NAME = 200
@@ -324,14 +338,28 @@ def _cut_string(value: str, max_size: int, max_keep: int | None, limits: Limits)
         encoded_size = len(dumps(value))
         if encoded_size <= max_size:
             return _Built(Text(value, "", length, "chars", True, None), encoded_size)
-    kept_cap = min(length, keep_cap)
-    reason: Reason = "max_length"
+        return _cut_chars(length, value, value, length, max_size, limits)
+    head_n, tail_n = limits.split(keep_cap)
+    tail = value[length - tail_n :] if tail_n else ""
+    return _cut_chars(length, value[:head_n], tail, keep_cap, max_size, limits)
+
+
+def _cut_chars(
+    length: int, head_src: str, tail_src: str, kept_cap: int, max_size: int, limits: Limits
+) -> _Built:
+    """The cut ``Text`` of a string of ``length`` chars, keeping at most ``kept_cap`` of them.
+
+    Shared by exact ``str`` and ``text_like``. ``head_src`` / ``tail_src`` are
+    the original's first / last chars that ``limits.split(kept_cap)`` keeps
+    (the whole string for both when ``kept_cap >= length``); every smaller cut
+    is a part of them, so the original is never read again.
+    """
 
     def parts(kept: int) -> tuple[str, str]:
         if kept >= length:
-            return value, ""
+            return head_src, ""
         head_n, tail_n = limits.split(kept)
-        return value[:head_n], value[length - tail_n :] if tail_n else ""
+        return head_src[:head_n], tail_src[len(tail_src) - tail_n :] if tail_n else ""
 
     head, tail = parts(kept_cap)
     if _string_cost(head, tail) > max_size:
@@ -345,8 +373,8 @@ def _cut_string(value: str, max_size: int, max_keep: int | None, limits: Limits)
         head, tail = parts(low)
     kept = len(head) + len(tail)
     if kept >= length:
-        return _Built(Text(value, "", length, "chars", True, None), len(dumps(value)))
-    node = Text(head, tail, length, "chars", False, reason, omitted=length - kept)
+        return _Built(Text(head, "", length, "chars", True, None), len(dumps(head)))
+    node = Text(head, tail, length, "chars", False, "max_length", omitted=length - kept)
     return _Built(node, _string_cost(head, tail))
 
 
@@ -362,19 +390,41 @@ def _cut_bytes(value: bytes, max_size: int, max_keep: int | None, limits: Limits
         encoded_size = len(dumps(decoded))
         if encoded_size <= max_size:
             return _Built(Scalar(value), encoded_size)
+    return _cut_byte_parts(length, value, value, 0, min(length - 1, keep_cap), max_size, limits)
+
+
+def _cut_byte_parts(
+    length: int,
+    head_src: bytes,
+    tail_src: bytes,
+    tail_offset: int,
+    kept_cap: int,
+    max_size: int,
+    limits: Limits,
+) -> _Built:
+    """The cut bytes ``Text`` of ``length`` bytes, keeping at most ``kept_cap`` (< ``length``).
+
+    Shared by exact ``bytes`` and ``text_like``. With ``(H, T) =
+    limits.split(kept_cap)``: ``head_src`` holds the original's first ``H + 1``
+    bytes (one more, to see whether ``H`` is a code point boundary) and
+    ``tail_src`` the bytes from ``tail_offset = length - T``; both may be the
+    whole value (offset 0). Every smaller cut is a part of them.
+    """
 
     def parts(kept: int) -> tuple[bytes, bytes]:
         head_n, tail_n = limits.split(kept)
-        head_end = safe_end(value, head_n) if head_n else 0
-        tail_start = safe_start(value, length - tail_n) if tail_n else length
+        head_end = safe_end(head_src, head_n) if head_n else 0
+        if tail_n:
+            tail_start = safe_start(tail_src, length - tail_n - tail_offset) + tail_offset
+        else:
+            tail_start = length
         tail_start = max(tail_start, head_end)
-        return value[:head_end], value[tail_start:]
+        return head_src[:head_end], tail_src[tail_start - tail_offset :]
 
     def cost(kept: int) -> int:
         head, tail = parts(kept)
         return _string_cost(decode_counted(head)[0], decode_counted(tail)[0])
 
-    kept_cap = min(length - 1, keep_cap)
     low = kept_cap
     if cost(kept_cap) > max_size:
         low, high = 0, kept_cap
@@ -518,17 +568,22 @@ def _sequence_from(
     state: _State,
     *,
     tail_source: Callable[[int], list[Any]] | None = None,
-    out: Out | None = None,
+    split: tuple[int, int] | None = None,
 ) -> _Built:
     """Kept items of a sequence: a head (and a tail when known), under the shared budget.
 
-    ``out``: the ``Out`` whose parts may appear as items (see ``_build_slot``).
+    Items may be private ``_Part`` builders (see ``_build_slot``). ``split``:
+    the (head, tail) counts to keep instead of the ``max_items`` rule
+    (``ndarray_like``'s per-axis selection; it needs ``length`` and ``tail_source``).
     """
     limits = state.limits
     box = _Container(max_size)
     head_n: int | None = None
     tail_n = 0
-    if limits.max_items is not None and (length is None or length > limits.max_items):
+    if split is not None:
+        if length is not None and split[0] + split[1] < length:
+            head_n, tail_n = split
+    elif limits.max_items is not None and (length is None or length > limits.max_items):
         head_n, tail_n = limits.split(limits.max_items)
         if tail_source is None or length is None:
             head_n, tail_n = limits.max_items, 0
@@ -541,9 +596,7 @@ def _sequence_from(
         if available < 1:
             box.stop("max_length")
             return False
-        built = _build_slot(
-            child, available, depth + 1, pointer_child(path, str(index)), state, out
-        )
+        built = _build_slot(child, available, depth + 1, pointer_child(path, str(index)), state)
         kept.append(built.node)
         box.commit(0, built.size)
         return True
@@ -620,7 +673,6 @@ def _mapping_from(
     state: _State,
     head_n: int | None,
     tail_items: list[tuple[Any, Any]] | None = None,
-    out: Out | None = None,
 ) -> _Built:
     box = _Container(max_size)
 
@@ -643,7 +695,7 @@ def _mapping_from(
         if available < 1:
             box.stop("max_length")
             return False
-        built = _build_slot(child, available, depth + 1, pointer_child(path, key_text), state, out)
+        built = _build_slot(child, available, depth + 1, pointer_child(path, key_text), state)
         kept.append((cast(Key, key), built.node))
         box.commit(overhead, built.size)
         return True
@@ -1001,20 +1053,42 @@ def _declaring_module(
     return None
 
 
-def _part_of(child: Any, out: Out | None) -> _Deferred | None:
-    """``child`` when it is a part of ``out`` (identity checks only), else ``None``."""
-    if out is not None and type(child) is _Deferred and child._out is out:
-        return child
-    return None
+class _Part:
+    """A slot builder of a shape: a field, an item or a level built only once its slot is known.
+
+    Private: only the shape builders of this module make parts (users register
+    shapes, never parts). ``build(max_size, depth, path)`` builds it in its
+    slot; ``min_size`` / ``min_nodes`` are what a later sibling reserves for it.
+    ``exhausted(max_size)``: what a structural part (an items sequence, an
+    ndarray level) becomes when no node work is left for it; ``None`` for a
+    part that captures a value, whose ``_build`` charges itself.
+    """
+
+    __slots__ = ("build", "exhausted", "min_nodes", "min_size")
+
+    def __init__(
+        self,
+        build: Callable[[int, int, str], _Built],
+        min_size: int = 2,
+        min_nodes: int = 1,
+        exhausted: Callable[[int], _Built] | None = None,
+    ) -> None:
+        self.build = build
+        self.min_size = min_size
+        self.min_nodes = min_nodes
+        self.exhausted = exhausted
 
 
-def _build_slot(
-    child: Any, max_size: int, depth: int, path: str, state: _State, out: Out | None
-) -> _Built:
-    """``child`` in a container slot: built when it is a part of ``out``, else captured."""
-    part = _part_of(child, out)
-    if part is not None:
-        return part.build(max_size, depth, path, state)
+def _build_slot(child: Any, max_size: int, depth: int, path: str, state: _State) -> _Built:
+    """``child`` in a container slot: built when it is a shape's ``_Part``, else captured.
+
+    A structural part is one node of the shared work; a part that captures a
+    value is charged by that capture.
+    """
+    if type(child) is _Part:
+        if child.exhausted is not None and not state.take_node():
+            return child.exhausted(max_size)
+        return child.build(max_size, depth, path)
     return _build(child, max_size, depth, path, state)
 
 
@@ -1068,24 +1142,24 @@ def _object_fields(
     path: str,
     state: _State,
     kind: str | None = None,
-    out: Out | None = None,
     reserves: list[tuple[int, int]] | None = None,
+    capped: bool = True,
 ) -> _Built:
     """Emit the selected (name, value) fields of an object; ``None`` entries fail closed.
 
-    ``out``: the ``Out`` whose parts may appear as field values; each is
-    built in its field's slot (see ``_build_slot``).
-
-    ``reserves[i]``: (chars, nodes) held back while field ``i`` is built so
-    that every later field still fits its minimal fallback.
+    A field value may be a shape's ``_Part``, built in its field's slot (see
+    ``_build_slot``). ``reserves[i]``: (chars, nodes) held back while field
+    ``i`` is built so that every later field still fits its minimal fallback.
 
     ``Limits.max_items`` caps the fields kept, like the items of any container:
     the first ones are kept (a field order is not a sequence end) and the
     object is marked ``max_items`` when another field was left out.
+    ``capped=False``: the caller already applied it (a shape's structural
+    fields, such as ``items`` or ``data``, are never cut by it).
     """
     box = _Container(max_size)
     fields: list[tuple[str, Snapshot]] = []
-    max_items = state.limits.max_items
+    max_items = state.limits.max_items if capped else None
     for index, entry in enumerate(selected):
         if entry is None:
             return _closed(type_name, module)
@@ -1109,7 +1183,7 @@ def _object_fields(
         held_nodes = min(held_nodes, max(0, state.nodes_left - 1))
         state.nodes_left -= held_nodes
         try:
-            built = _build_slot(child, available, depth + 1, pointer_child(path, name), state, out)
+            built = _build_slot(child, available, depth + 1, pointer_child(path, name), state)
         finally:
             state.nodes_left += held_nodes
         fields.append((name, built.node))
@@ -1126,7 +1200,7 @@ def _min_size(child: Any) -> int:
     value is never compared, hashed or asked for attributes (a metaclass
     ``__eq__`` must not run).
     """
-    if type(child) is _Deferred:
+    if type(child) is _Part:
         return child.min_size
     name = _builtin_name(child)
     return len(dumps(fallback_candidates(name)[0])) if name else 2
@@ -1135,70 +1209,58 @@ def _min_size(child: Any) -> int:
 _STOP = object()
 
 
-def _build_pydantic(
-    value: BaseModel,
-    mro: tuple[type[Any], ...],
-    max_size: int,
-    depth: int,
-    path: str,
-    state: _State,
-) -> _Built:
-    """Build a bounded declared/stored-field view of a Pydantic v2 model."""
-    type_name = _bounded_type_name(value, _MAX_TYPE_NAME)
-    module = _module_name(type(value), state)
-    if depth >= state.max_depth:
-        return _Built(Object(type_name, (), False, "max_depth", module), 2)
-    ref = _enter(value, path, "object", state)
-    if ref is not None:
-        return _Built(ref, 2)
+_Entries = tuple[typing.Iterator[tuple[str, Any] | None] | None, list[Reason]]
+"""A field reader's result: the (name, value) fields, ``None`` (fail closed), and why it stopped."""
+
+
+def _pydantic_entries(
+    value: BaseModel, mro: tuple[type[Any], ...], index: int, state: _State
+) -> _Entries:
+    """The privileged field reader of a Pydantic v2 model: declared fields, raw stored values."""
     try:
-        try:
-            obj_dict = _BASE_MODEL_DICT.__get__(value, type(value))
-        except Exception:
-            obj_dict = None
-        storage = _copy_storage(obj_dict, state)
-        if storage is None:
-            return _closed(type_name, module)
-        overrides = _visibility_overrides(storage, mro, state)
-        fields = _pydantic_fields(mro, state)
-        if overrides is None or fields is None:
-            return _closed(type_name, module)
-        stopped: list[Reason] = []
+        obj_dict = _BASE_MODEL_DICT.__get__(value, type(value))
+    except Exception:
+        obj_dict = None
+    storage = _copy_storage(obj_dict, state)
+    if storage is None:
+        return None, []
+    overrides = _visibility_overrides(storage, mro, state)
+    fields = _pydantic_fields(mro, state)
+    if overrides is None or fields is None:
+        return None, []
+    stopped: list[Reason] = []
 
-        def selected() -> typing.Iterator[tuple[str, Any] | None]:
-            for name, field_info in dict.items(fields):
-                if not state.take_node():
-                    stopped.append("max_nodes")
-                    return
-                if type(name) is not str or type(field_info) is not FieldInfo:
-                    yield None
-                    return
-                try:
-                    excluded = object.__getattribute__(field_info, "exclude")
-                    represented = object.__getattribute__(field_info, "repr")
-                except Exception:
-                    yield None
-                    return
-                if excluded is not None and type(excluded) is not bool:
-                    yield None
-                    return
-                if type(represented) is not bool:
-                    yield None
-                    return
-                if excluded is True or represented is False:
-                    continue
-                metadata_hidden = _field_hidden(field_info, state)
-                if metadata_hidden is None:
-                    yield None
-                    return
-                if overrides.get(name, metadata_hidden) or name not in storage:
-                    continue
-                yield name, dict.__getitem__(storage, name)
+    def selected() -> typing.Iterator[tuple[str, Any] | None]:
+        for name, field_info in dict.items(fields):
+            if not state.take_node():
+                stopped.append("max_nodes")
+                return
+            if type(name) is not str or type(field_info) is not FieldInfo:
+                yield None
+                return
+            try:
+                excluded = object.__getattribute__(field_info, "exclude")
+                represented = object.__getattribute__(field_info, "repr")
+            except Exception:
+                yield None
+                return
+            if excluded is not None and type(excluded) is not bool:
+                yield None
+                return
+            if type(represented) is not bool:
+                yield None
+                return
+            if excluded is True or represented is False:
+                continue
+            metadata_hidden = _field_hidden(field_info, state)
+            if metadata_hidden is None:
+                yield None
+                return
+            if overrides.get(name, metadata_hidden) or name not in storage:
+                continue
+            yield name, dict.__getitem__(storage, name)
 
-        built = _object_fields(type_name, module, selected(), max_size, depth, path, state)
-        return _with_stop(built, stopped)
-    finally:
-        state.active.pop(id(value), None)
+    return selected(), stopped
 
 
 def _with_stop(built: _Built, stopped: list[Reason]) -> _Built:
@@ -1246,142 +1308,91 @@ def _slot_value(name: str, mro: tuple[type[Any], ...], value: Any, state: _State
     return _STOP
 
 
-def _build_dataclass(
-    value: Any,
-    mro: tuple[type[Any], ...],
-    carrier: type[Any],
-    max_size: int,
-    depth: int,
-    path: str,
-    state: _State,
-) -> _Built:
-    """Declared fields of a dataclass (from the class), values from raw instance storage."""
-    type_name = _bounded_type_name(value, _MAX_TYPE_NAME)
-    module = _module_name(type(value), state)
-    if depth >= state.max_depth:
-        return _Built(Object(type_name, (), False, "max_depth", module), 2)
-    ref = _enter(value, path, "object", state)
-    if ref is not None:
-        return _Built(ref, 2)
-    try:
-        raw = _instance_storage(value, mro, state)
-        storage = _copy_storage(raw, state) if raw is not _STOP else None
-        namespace = _raw_namespace(carrier, state)
-        fields = dict.get(namespace, "__dataclass_fields__") if namespace is not None else None
-        if storage is None or type(fields) is not dict:
-            return _closed(type_name, module)
-        overrides = _visibility_overrides(storage, mro, state)
-        if overrides is None:
-            return _closed(type_name, module)
-        stopped: list[Reason] = []
+def _dataclass_entries(
+    value: Any, mro: tuple[type[Any], ...], index: int, state: _State
+) -> _Entries:
+    """The privileged field reader of a dataclass: declared fields of ``mro[index]``, raw values."""
+    carrier = mro[index]
+    raw = _instance_storage(value, mro, state)
+    storage = _copy_storage(raw, state) if raw is not _STOP else None
+    namespace = _raw_namespace(carrier, state)
+    fields = dict.get(namespace, "__dataclass_fields__") if namespace is not None else None
+    if storage is None or type(fields) is not dict:
+        return None, []
+    overrides = _visibility_overrides(storage, mro, state)
+    if overrides is None:
+        return None, []
+    stopped: list[Reason] = []
 
-        def selected() -> typing.Iterator[tuple[str, Any] | None]:
-            for name, field in dict.items(fields):
-                if not state.take_node():
-                    stopped.append("max_nodes")
-                    return
-                if type(name) is not str or type(field) is not dataclasses.Field:
-                    yield None
-                    return
-                try:
-                    field_type = object.__getattribute__(field, "_field_type")
-                    represented = object.__getattribute__(field, "repr")
-                    annotation = object.__getattribute__(field, "type")
-                except Exception:
-                    yield None
-                    return
-                if field_type is not _DATACLASS_FIELD_TYPE:
-                    continue  # ClassVar / InitVar pseudo-fields
-                if type(represented) is not bool:
-                    yield None
-                    return
-                if represented is False or name.startswith("_"):
-                    continue
-                namespace = (
-                    _declaring_module(name, field, mro, state) if type(annotation) is str else None
-                )
-                annotation_hidden = _annotation_hidden(annotation, state, namespace)
-                if annotation_hidden is None:
-                    # This field can't be shown safely: omit it, the object is incomplete.
-                    stopped.append("opaque")
-                    continue
-                if overrides.get(name, annotation_hidden):
-                    continue
-                if name in storage:
-                    yield name, dict.__getitem__(storage, name)
-                    continue
-                slot = _slot_value(name, mro, value, state)
-                if slot is not _STOP:
-                    yield name, slot
+    def selected() -> typing.Iterator[tuple[str, Any] | None]:
+        for name, field in dict.items(fields):
+            if not state.take_node():
+                stopped.append("max_nodes")
+                return
+            if type(name) is not str or type(field) is not dataclasses.Field:
+                yield None
+                return
+            try:
+                field_type = object.__getattribute__(field, "_field_type")
+                represented = object.__getattribute__(field, "repr")
+                annotation = object.__getattribute__(field, "type")
+            except Exception:
+                yield None
+                return
+            if field_type is not _DATACLASS_FIELD_TYPE:
+                continue  # ClassVar / InitVar pseudo-fields
+            if type(represented) is not bool:
+                yield None
+                return
+            if represented is False or name.startswith("_"):
+                continue
+            namespace = (
+                _declaring_module(name, field, mro, state) if type(annotation) is str else None
+            )
+            annotation_hidden = _annotation_hidden(annotation, state, namespace)
+            if annotation_hidden is None:
+                # This field can't be shown safely: omit it, the object is incomplete.
+                stopped.append("opaque")
+                continue
+            if overrides.get(name, annotation_hidden):
+                continue
+            if name in storage:
+                yield name, dict.__getitem__(storage, name)
+                continue
+            slot = _slot_value(name, mro, value, state)
+            if slot is not _STOP:
+                yield name, slot
 
-        built = _object_fields(type_name, module, selected(), max_size, depth, path, state)
-        return _with_stop(built, stopped)
-    finally:
-        state.active.pop(id(value), None)
+    return selected(), stopped
 
 
-# --- registry --------------------------------------------------------------------
-
-CaptureFunction = Callable[[Any, "Out"], "_Deferred"]
-"""``function(value, out)`` returns one part of its ``out`` (an opaque part, not a node)."""
+# --- shapes: the extension API -------------------------------------------------------
+#
+# A shape maps out the structure of a type (its length, items, fields, text
+# slices) through accessors; capture builds the snapshot itself, with the same
+# builders and size rules as the built-in types. Accessors are trusted
+# extension code: they run only when capture decides it needs their result.
 
 
 _OBJECT_MIN_NODES = 16
-"""Nodes held back for a later field that captures a non-built-in value."""
+"""Nodes held back for a later field whose value is not known yet (its MRO and a few fields)."""
 
+_NDARRAY_ELEMENT_CHARS = 6
+"""Characters ``ndarray_like`` assumes per shown element (a short number and its separator)."""
 
-class _Deferred:
-    """A part an ``Out`` builds only when its slot is known (see ``Out``).
-
-    Private: extension code only passes the part an ``out`` method returned on
-    (as a field, item or value of the same ``out``, or as its return value);
-    ``build``, ``min_size`` and ``min_nodes`` are this module's accounting,
-    not an API. A part is single-use: it is built in at most one slot.
-
-    ``exhausted(max_size)``: the node this part becomes when no node work is
-    left for it; ``None`` for ``out.capture``, whose ``_build`` charges itself.
-    """
-
-    __slots__ = ("_build", "_exhausted", "_out", "_used", "min_nodes", "min_size")
-
-    def __init__(
-        self,
-        out: Out,
-        build: Callable[[int, int, str], _Built],
-        min_size: int,
-        min_nodes: int = 1,
-        exhausted: Callable[[int], _Built] | None = None,
-    ) -> None:
-        self._out = out
-        self._build = build
-        self._exhausted = exhausted
-        self._used = False
-        self.min_size = min_size
-        self.min_nodes = min_nodes
-
-    def build(self, max_size: int, depth: int, path: str, state: _State | None = None) -> _Built:
-        """Build in a slot at ``depth`` / ``path``, within ``max_size``; a second use raises.
-
-        With ``state`` (a container's slot), a part built by its ``out`` is one
-        node of work of the shared budget; without (the value's own slot, the
-        registered value's node already taken by ``_build``) it is not charged.
-        """
-        if self._used:
-            raise ValueError(
-                "an out part takes one slot only: call the out method again for another"
-            )
-        self._used = True
-        if state is not None and self._exhausted is not None and not state.take_node():
-            return self._exhausted(max_size)
-        return self._build(max_size, depth, path)
+_STRUCTURE_FIELDS = {
+    "array": ("items",),
+    "mapping": ("items",),
+    "ndarray": ("shape", "labels", "data"),
+}
 
 
 def _metadata(value: Any, what: str) -> str:
     """``value`` as an exact built-in ``str`` (a ``str`` subclass is copied), else ``TypeError``.
 
-    Names, kinds and type names a registered function passes are kept in the
-    snapshot, which must hold no live object: a ``str`` subclass could carry
-    state and run its own ``__str__`` / ``__eq__`` when a renderer reads it.
+    Names and kinds a shape declares are kept in the snapshot, which must hold
+    no live object: a ``str`` subclass could carry state and run its own
+    ``__str__`` / ``__eq__`` when a renderer reads it.
     """
     value_type = type(value)
     if value_type is str:
@@ -1395,240 +1406,684 @@ def _metadata(value: Any, what: str) -> str:
     raise TypeError(f"{what} must be a str, got {_bounded_type_name(value, _MAX_TYPE_NAME)}")
 
 
-def _length(value: Any) -> int | None:
-    """A declared length as an exact non-negative ``int`` (or ``None``), else ``TypeError``."""
-    if value is None:
-        return None
-    if type(value) is not int or value < 0:
-        raise TypeError("length must be a non-negative int or None")
-    return value
+def _accessor(function: Any, what: str) -> Callable[..., Any]:
+    if not callable(function):
+        raise TypeError(f"{what} must be callable")
+    return function
 
 
-class Out:
-    """What a registered capture function builds its snapshot with.
+def _kind(kind: Any) -> str | None:
+    return None if kind is None else _metadata(kind, "kind")
 
-    Every method returns a deferred part: no child is built (and no item is
-    pulled) until the part takes its slot, as a field value of
-    ``object(...)``, an item of ``sequence(...)``, a value of ``mapping(...)``
-    or the function's return value. So the function returns one tree of
-    parts, built top-down, each part in its own slot (its share of the
-    budget, its depth and path). Parts are opaque: pass them on unchanged.
-    A part is single-use: a second use raises ``ValueError`` (the value then
-    becomes ``Unavailable("error")``); call the method again for a second
-    placement. Only ``object``'s known field list (a ``dict``, ``list`` or
-    ``tuple``) is copied, and its reservation prepared, when it is called.
-    ``object`` builds its fields in order: its own wrapper and the
-    minimal fallback of every later field are reserved first (for a ``dict``,
-    ``list`` or ``tuple`` of fields, and only while the slot fits them: a
-    field is never held below its own minimum), so a greedy field (a long
-    ``sequence``) gets what is left. The function returns one part of its
-    own ``Out``; it always fits the value's slot of the shared budget (node
-    work is charged to the shared ``max_nodes`` as it happens). When each part
-    is built and which budget it uses: *Extension contract* in
-    ``docs/snapshot-model.md``.
+
+def _accessor_fields(fields: Any, shape: str) -> tuple[tuple[str, Callable[[Any], Any]], ...]:
+    """A shape's ``fields``: an ordered ``dict`` of ``str`` name -> accessor, copied."""
+    if fields is None:
+        return ()
+    if not isinstance(fields, dict):
+        raise TypeError("fields must be a dict of name -> accessor")
+    reserved = _STRUCTURE_FIELDS.get(shape, ())
+    copied: list[tuple[str, Callable[[Any], Any]]] = []
+    for name, function in dict.items(cast(dict[Any, Any], fields)):
+        name = _metadata(name, "a field name")
+        if name in reserved:
+            raise TypeError(f"field name {name!r} is taken by the shape itself")
+        copied.append((name, _accessor(function, f"field {name!r}")))
+    return tuple(copied)
+
+
+@dataclass(frozen=True)
+class _ArrayLike:
+    length: Callable[[Any], int]
+    items: Callable[[Any], Iterable[Any]]
+    fields: tuple[tuple[str, Callable[[Any], Any]], ...]
+    kind: str | None
+
+
+@dataclass(frozen=True)
+class _MappingLike:
+    length: Callable[[Any], int]
+    items: Callable[[Any], Iterable[tuple[Any, Any]]]
+    fields: tuple[tuple[str, Callable[[Any], Any]], ...]
+    kind: str | None
+
+
+@dataclass(frozen=True)
+class _NdarrayLike:
+    shape: Callable[[Any], tuple[int, ...]]
+    element: Callable[[Any, tuple[int, ...]], Any]
+    fields: tuple[tuple[str, Callable[[Any], Any]], ...]
+    labels: tuple[tuple[int, Callable[[Any], Any]], ...]
+    kind: str | None
+
+
+@dataclass(frozen=True)
+class _ObjectLike:
+    """Ordered named accessors, or (internal) a privileged field ``reader`` (Pydantic, dataclasses)."""
+
+    fields: tuple[tuple[str, Callable[[Any], Any]], ...]
+    kind: str | None
+    reader: Callable[[Any, tuple[type[Any], ...], int, _State], _Entries] | None = None
+
+
+@dataclass(frozen=True)
+class _TextLike:
+    length: Callable[[Any], int]
+    slice: Callable[[Any, int, int], str | bytes]
+    unit: Literal["chars", "bytes"]
+    kind: str | None
+
+
+_Shape = _ArrayLike | _MappingLike | _NdarrayLike | _ObjectLike | _TextLike
+_SHAPE_TYPES: tuple[type[Any], ...] = (
+    _ArrayLike,
+    _MappingLike,
+    _NdarrayLike,
+    _ObjectLike,
+    _TextLike,
+)
+
+
+def array_like(
+    length: Callable[[Any], int],
+    items: Callable[[Any], Iterable[Any]],
+    *,
+    fields: dict[str, Callable[[Any], Any]] | None = None,
+    kind: str | None = None,
+) -> _ArrayLike:
+    """A shape for sequence-like values: ``length(v)`` items, pulled lazily from ``items(v)``.
+
+    ``length(v)`` is called once; ``items(v)`` is iterated only as far as the
+    kept items (``max_items``, the budget), plus at most one. ``fields``: name
+    -> ``accessor(v)``, each called once, only when its field is kept. Without
+    fields the value becomes a ``Sequence``; with fields an ``Object`` whose
+    fields are followed by ``items`` (that ``Sequence``).
     """
+    return _ArrayLike(
+        _accessor(length, "length"),
+        _accessor(items, "items"),
+        _accessor_fields(fields, "array"),
+        _kind(kind),
+    )
 
-    def __init__(self, value: Any, max_size: int, depth: int, path: str, state: _State) -> None:
-        self._value = value
-        self._max_size = max_size
-        self._depth = depth
-        self._path = path
-        self._state = state
 
-    def _finish(self, result: Any) -> _Built | None:
-        """The function's result built in the value's own slot (None: not a part of ours)."""
-        part = _part_of(result, self)
-        return None if part is None else part.build(self._max_size, self._depth, self._path)
+def mapping_like(
+    length: Callable[[Any], int],
+    items: Callable[[Any], Iterable[tuple[Any, Any]]],
+    *,
+    fields: dict[str, Callable[[Any], Any]] | None = None,
+    kind: str | None = None,
+) -> _MappingLike:
+    """A shape for mapping-like values: ``items(v)`` yields ``(key, value)`` pairs lazily.
 
-    def capture(self, child: Any) -> _Deferred:
-        """``child`` captured as this value's snapshot or a part of it.
+    As ``array_like``: a ``Mapping``, or with ``fields`` an ``Object`` whose
+    fields are followed by ``items`` (that ``Mapping``). Keys must be exact
+    ``str``, ``int``, ``float``, ``bool`` or ``None``, as for a ``dict``.
+    """
+    return _MappingLike(
+        _accessor(length, "length"),
+        _accessor(items, "items"),
+        _accessor_fields(fields, "mapping"),
+        _kind(kind),
+    )
 
-        It is built in the slot it takes: returned, at this value's depth and
-        path; as a field, item or value, one level deeper, under that name.
-        """
 
-        def build(max_size: int, depth: int, path: str) -> _Built:
-            if max_size < 1:
-                return _Built(Unavailable("max_length", _builtin_name(child)), 1)
-            return _build(child, max_size, depth, path, self._state)
+def ndarray_like(
+    shape: Callable[[Any], tuple[int, ...]],
+    element: Callable[[Any, tuple[int, ...]], Any],
+    *,
+    fields: dict[str, Callable[[Any], Any]] | None = None,
+    labels: dict[int, Callable[[Any], Any]] | None = None,
+    kind: str | None = None,
+) -> _NdarrayLike:
+    """A shape for n-dimensional arrays: ``shape(v)``, and ``element(v, index)`` per shown element.
 
-        # A non-built-in value needs node work for its MRO and a few fields.
-        min_nodes = 1 if _builtin_name(child) else _OBJECT_MIN_NODES
-        return _Deferred(self, build, _min_size(child), min_nodes)
+    The value becomes an ``Object`` with its ``fields``, then ``shape`` (the
+    tuple), ``labels`` (when given) and ``data``: nested ``Sequence`` nodes, one
+    level per axis, keeping the first and last entries along every axis like
+    numpy's summarised print (the rule: *Shapes* in ``docs/snapshot-model.md``).
+    ``element`` is called only for the shown elements. ``labels``: axis ->
+    ``accessor(v)`` returning that axis's labels (e.g. DataFrame columns);
+    only the shown ones are read (``labels[i]``) and kept.
+    """
+    label_accessors: list[tuple[int, Callable[[Any], Any]]] = []
+    if labels is not None:
+        if not isinstance(labels, dict):
+            raise TypeError("labels must be a dict of axis -> accessor")
+        for axis, function in dict.items(cast(dict[Any, Any], labels)):
+            if type(axis) is not int or axis < 0:
+                raise TypeError("a labels axis must be a non-negative int")
+            label_accessors.append((axis, _accessor(function, f"labels[{axis}]")))
+    return _NdarrayLike(
+        _accessor(shape, "shape"),
+        _accessor(element, "element"),
+        _accessor_fields(fields, "ndarray"),
+        tuple(label_accessors),
+        _kind(kind),
+    )
 
-    def _empty(
-        self,
-        node_type: Any,
-        type_name: str,
-        length: int | None,
-        max_size: int,
-        depth: int,
-        reason: Reason | None = None,
-    ) -> _Built:  # type_name / length: checked by ``_metadata`` / ``_length``
-        if reason is None:
-            reason = "max_depth" if depth >= self._state.max_depth else "max_length"
-        if max_size < 2:
-            name = "list" if node_type is Sequence else "dict"
-            return _Built(Unavailable(reason, name), 1)
-        return _Built(node_type(type_name, length, (), False, reason), 2)
 
-    def sequence(
-        self, items: Iterable[Any], *, length: int | None = None, type_name: str = "list"
-    ) -> _Deferred:
-        """A sequence of ``items`` (pulled one at a time when built), cut like a list."""
-        type_name = _metadata(type_name, "Sequence type_name")
-        length = _length(length)
-        state = self._state
+def object_like(fields: dict[str, Callable[[Any], Any]], *, kind: str | None = None) -> _ObjectLike:
+    """A shape for record-like values: ordered name -> ``accessor(v)``, an ``Object``.
 
-        def build(max_size: int, depth: int, path: str) -> _Built:
-            if depth >= state.max_depth or max_size < 2:
-                return self._empty(Sequence, type_name, length, max_size, depth)
-            return _sequence_from(items, length, type_name, max_size, depth, path, state, out=self)
+    Fields are built in order; each leaves room for the minimal value of every
+    later field, and an accessor runs only when its field is kept.
+    """
+    if not isinstance(fields, dict):
+        raise TypeError("fields must be a dict of name -> accessor")
+    return _ObjectLike(_accessor_fields(fields, "object"), _kind(kind))
 
-        def exhausted(max_size: int) -> _Built:
-            return self._empty(Sequence, type_name, length, max_size, 0, "max_nodes")
 
-        return _Deferred(self, build, 2, exhausted=exhausted)
+def text_like(
+    length: Callable[[Any], int],
+    slice: Callable[[Any, int, int], str | bytes],
+    *,
+    unit: Literal["chars", "bytes"] = "chars",
+    kind: str | None = None,
+) -> _TextLike:
+    """A shape for text too large to copy: ``length(v)`` units, read with ``slice(v, start, stop)``.
 
-    def mapping(
-        self,
-        items: Iterable[tuple[Any, Any]],
-        *,
-        length: int | None = None,
-        type_name: str = "dict",
-    ) -> _Deferred:
-        """A mapping of ``(key, value)`` pairs; keys must be exact built-in scalars."""
-        type_name = _metadata(type_name, "Mapping type_name")
-        length = _length(length)
-        state = self._state
+    ``slice`` returns ``str`` (``unit="chars"``) or ``bytes`` (``"bytes"``). It
+    is called only for the head and tail capture keeps, at most twice, never
+    for the whole of a text that is cut. The value becomes a ``Text``.
+    """
+    if unit != "chars" and unit != "bytes":
+        raise TypeError('unit must be "chars" or "bytes"')
+    return _TextLike(_accessor(length, "length"), _accessor(slice, "slice"), unit, _kind(kind))
 
-        def build(max_size: int, depth: int, path: str) -> _Built:
-            if depth >= state.max_depth or max_size < 2:
-                return self._empty(Mapping, type_name, length, max_size, depth)
-            head_n = state.limits.max_items
-            return _mapping_from(
-                items,
-                length,
-                type_name,
-                max_size,
-                depth,
-                path,
-                state,
-                head_n,
-                out=self,
+
+_PYDANTIC_SHAPE = _ObjectLike((), None, _pydantic_entries)
+_DATACLASS_SHAPE = _ObjectLike((), None, _dataclass_entries)
+
+
+class _ShapeError(Exception):
+    """An accessor failed in a way that leaves no sensible part: the whole value is an error."""
+
+
+def _call(function: Callable[..., Any], *args: Any) -> Any:
+    """Call an accessor; any exception becomes ``_ShapeError``."""
+    try:
+        return function(*args)
+    except Exception as error:
+        raise _ShapeError from error
+
+
+def _shape_length(function: Callable[[Any], Any], value: Any) -> int:
+    length = _call(function, value)
+    if type(length) is not int or length < 0:
+        raise _ShapeError("length must be a non-negative int")
+    return length
+
+
+def _error(type_name: str, max_size: int) -> _Built:
+    """An accessor failed: ``Unavailable("error")``, sized as its fallback."""
+    return _Built(Unavailable("error", type_name), fallback_json("", max_size)[1])
+
+
+def _guarded(
+    iterator: typing.Iterator[Any], failed: list[bool], pairs: bool
+) -> typing.Iterator[Any]:
+    """``iterator`` until it ends or raises (``failed``); ``pairs``: each item an exact 2-tuple."""
+    while True:
+        try:
+            item = next(iterator)
+        except StopIteration:
+            return
+        except Exception:
+            failed.append(True)
+            return
+        if pairs and (type(item) is not tuple or tuple.__len__(item) != 2):
+            failed.append(True)
+            return
+        yield item
+
+
+def _failed(built: _Built, failed: list[bool]) -> _Built:
+    """A sequence or mapping whose items raised: incomplete, reason ``error``."""
+    node = built.node
+    if failed and (type(node) is Sequence or type(node) is Mapping):
+        node = dataclasses.replace(cast(Any, node), complete=False, reason="error")
+    return _Built(node, built.size)
+
+
+def _empty(
+    node_type: Any, type_name: str, length: int | None, max_size: int, reason: Reason
+) -> _Built:
+    if max_size < 2:
+        return _Built(Unavailable(reason, "list" if node_type is Sequence else "dict"), 1)
+    return _Built(node_type(type_name, length, (), False, reason), 2)
+
+
+def _collection(
+    shape: _ArrayLike | _MappingLike,
+    value: Any,
+    type_name: str,
+    length: int,
+    max_size: int,
+    depth: int,
+    path: str,
+    state: _State,
+) -> _Built:
+    """The items of an ``array_like`` / ``mapping_like`` value, with the list / dict builders."""
+    try:
+        source = iter(shape.items(value))
+    except Exception:
+        return _error(type_name, max_size)
+    failed: list[bool] = []
+    if type(shape) is _ArrayLike:
+        items = _guarded(itertools.islice(source, length), failed, pairs=False)
+        built = _sequence_from(items, length, type_name, max_size, depth, path, state)
+    else:
+        pairs = _guarded(source, failed, pairs=True)
+        head_n = state.limits.max_items
+        built = _mapping_from(pairs, length, type_name, max_size, depth, path, state, head_n)
+    return _failed(built, failed)
+
+
+def _field_part(function: Callable[[Any], Any], value: Any, state: _State) -> _Part:
+    """A field whose accessor runs only when the field is built (kept), captured normally."""
+
+    def build(max_size: int, depth: int, path: str) -> _Built:
+        try:
+            child = function(value)
+        except Exception:
+            return _error("", max_size)
+        return _build(child, max_size, depth, path, state)
+
+    return _Part(build, 2, _OBJECT_MIN_NODES)
+
+
+def _structure_part(
+    node_type: Any, length: int | None, build: Callable[[int, int, str], _Built], state: _State
+) -> _Part:
+    """A ``Sequence`` / ``Mapping`` field of a shape (``items``, ``data``, ``labels``): one node."""
+
+    def built(max_size: int, depth: int, path: str) -> _Built:
+        if depth >= state.max_depth or max_size < 2:
+            reason: Reason = "max_depth" if depth >= state.max_depth else "max_length"
+            return _empty(
+                node_type, "list" if node_type is Sequence else "dict", length, max_size, reason
             )
+        return build(max_size, depth, path)
 
-        def exhausted(max_size: int) -> _Built:
-            return self._empty(Mapping, type_name, length, max_size, 0, "max_nodes")
+    def exhausted(max_size: int) -> _Built:
+        name = "list" if node_type is Sequence else "dict"
+        return _empty(node_type, name, length, max_size, "max_nodes")
 
-        return _Deferred(self, build, 2, exhausted=exhausted)
+    return _Part(built, 2, 1, exhausted)
 
-    def object(
-        self,
-        fields: Iterable[tuple[str, Any]] | dict[str, Any],
-        *,
-        type_name: str | None = None,
-        kind: str | None = None,
-    ) -> _Deferred:
-        """An object with these ``(name, value)`` fields (names must be ``str``).
 
-        ``fields`` may also be a plain ``dict`` (its items, in order). A value
-        may be a part of this ``out`` (``out.capture(...)``, a nested
-        ``out.object(...)``, ...): fields are built in order, each in its own
-        slot, leaving room for the minimal fallback of every later field (for
-        a ``dict``, ``list`` or ``tuple``; other iterables are pulled lazily,
-        without reservation; see *Extension contract* in
-        ``docs/snapshot-model.md`` for where reservation stops). ``kind`` is
-        the rendering key stored on the node (``Object.kind``) for per-kind
-        render hooks.
-        """
-        if kind is not None:
-            kind = _metadata(kind, "Object kind")
-        if type_name is not None:
-            type_name = _metadata(type_name, "Object type_name")
-        known: list[Any] | None = None
-        if isinstance(fields, dict):
-            # A dict subclass's own ``items`` is not trusted: read it as a plain dict.
-            known = list(dict.items(cast(dict[str, Any], fields)))
-        elif type(fields) is list or type(fields) is tuple:
-            known = list(cast(Any, fields))
-        pairs: Iterable[Any] = known if known is not None else fields
-        state = self._state
-        name = (
-            type_name if type_name is not None else _bounded_type_name(self._value, _MAX_TYPE_NAME)
-        )
-        module = _module_name(type(self._value), state)
-        reserves: list[tuple[int, int]] | None = None
-        min_nodes = 1
-        if known is not None:
-            max_items = state.limits.max_items
-            # Later fields are cut anyway.
-            reserves, needed = _field_reserves(known if max_items is None else known[:max_items])
-            min_nodes += needed
+def _build_object(
+    shape: _ObjectLike | _ArrayLike | _MappingLike | _NdarrayLike,
+    value: Any,
+    mro: tuple[type[Any], ...],
+    index: int,
+    max_size: int,
+    depth: int,
+    path: str,
+    state: _State,
+) -> _Built:
+    """An ``Object`` of a shape: a field reader's fields, or accessor fields and structure parts.
 
-        def empty(max_size: int, reason: Reason) -> _Built:
-            if max_size < 2:
-                return _Built(Unavailable(reason, "dict"), 1)
-            return _Built(Object(name, (), False, reason, module, kind), 2)
-
-        def build(max_size: int, depth: int, path: str) -> _Built:
-            if depth >= state.max_depth or max_size < 2:
-                return empty(max_size, "max_depth" if depth >= state.max_depth else "max_length")
-            stopped: list[Reason] = []
-
-            def selected() -> typing.Iterator[tuple[str, Any] | None]:
-                for field_name, child in pairs:
-                    if not state.take_node():
-                        stopped.append("max_nodes")
-                        return
-                    if type(field_name) is not str:
-                        yield None
-                        return
-                    yield field_name, child
-
-            built = _object_fields(
-                name,
-                module,
-                selected(),
-                max_size,
-                depth,
-                path,
-                state,
-                kind,
-                out=self,
-                reserves=reserves,
-            )
+    Pydantic models and dataclasses are ``_ObjectLike`` shapes whose ``reader``
+    is their privileged field reader; registered shapes add their accessor
+    fields (built only when kept, each leaving room for the later ones) and
+    their structure (``items``, ``shape`` / ``labels`` / ``data``), never cut
+    by ``max_items``.
+    """
+    type_name = _bounded_type_name(value, _MAX_TYPE_NAME)
+    module = _module_name(type(value), state)
+    kind = shape.kind
+    if depth >= state.max_depth:
+        return _Built(Object(type_name, (), False, "max_depth", module, kind), 2)
+    ref = _enter(value, path, "object", state)
+    if ref is not None:
+        return _Built(ref, 2)
+    try:
+        if type(shape) is _ObjectLike and shape.reader is not None:
+            selected, stopped = shape.reader(value, mro, index, state)
+            if selected is None:
+                return _closed(type_name, module)
+            built = _object_fields(type_name, module, selected, max_size, depth, path, state)
             return _with_stop(built, stopped)
+        stopped = []
+        entries: list[tuple[str, Any]] = [
+            (name, _field_part(function, value, state)) for name, function in shape.fields
+        ]
+        max_items = state.limits.max_items
+        if max_items is not None and len(entries) > max_items:
+            del entries[max_items:]
+            stopped.append("max_items")
+        try:
+            entries += _structure(shape, value, type_name, max_size, state)
+        except _ShapeError:
+            return _error(type_name, max_size)
+        reserves, _nodes = _field_reserves(entries)
 
-        return _Deferred(
-            self, build, 2, min_nodes, exhausted=lambda max_size: empty(max_size, "max_nodes")
+        def fields() -> typing.Iterator[tuple[str, Any] | None]:
+            for entry in entries:
+                if not state.take_node():
+                    stopped.append("max_nodes")
+                    return
+                yield entry
+
+        built = _object_fields(
+            type_name,
+            module,
+            fields(),
+            max_size,
+            depth,
+            path,
+            state,
+            kind,
+            reserves=reserves,
+            capped=False,
         )
+        return _with_stop(built, stopped)
+    finally:
+        state.active.pop(id(value), None)
 
-    def opaque(self) -> _Deferred:
-        """This value as ``Opaque`` (what an unregistered type becomes)."""
-        state = self._state
 
-        def build(max_size: int, depth: int, path: str) -> _Built:
-            return _opaque(self._value, max(max_size, 1), state)
+def _structure(
+    shape: _ObjectLike | _ArrayLike | _MappingLike | _NdarrayLike,
+    value: Any,
+    type_name: str,
+    max_size: int,
+    state: _State,
+) -> list[tuple[str, Any]]:
+    """The structure fields that follow a shape's accessor fields (``_ShapeError``: whole value)."""
+    if type(shape) is _ArrayLike or type(shape) is _MappingLike:
+        collection = shape
+        length = _shape_length(collection.length, value)
+        node_type = Sequence if type(collection) is _ArrayLike else Mapping
+        name = "list" if node_type is Sequence else "dict"
 
-        def exhausted(max_size: int) -> _Built:
-            return _fallback(self._value, "max_nodes", max_size)
+        def items(slot: int, depth: int, path: str) -> _Built:
+            return _collection(collection, value, name, length, slot, depth, path, state)
 
-        return _Deferred(self, build, 2, exhausted=exhausted)
+        return [("items", _structure_part(node_type, length, items, state))]
+    if type(shape) is _NdarrayLike:
+        return _ndarray_structure(shape, value, max_size, state)
+    return []
+
+
+# --- ndarray_like ------------------------------------------------------------------
+
+
+def _ndarray_dims(shape: _NdarrayLike, value: Any) -> tuple[int, ...]:
+    dims = _call(shape.shape, value)
+    if type(dims) is not tuple or any(type(n) is not int or n < 0 for n in dims):
+        raise _ShapeError("shape must be a tuple of non-negative ints")
+    return dims
+
+
+def _ndarray_selection(
+    dims: tuple[int, ...], labelled: int, max_size: int, state: _State
+) -> list[tuple[int, int]]:
+    """Per axis, the (head, tail) entries shown: numpy's summary, sized by the limits.
+
+    ``K`` entries per axis at most (all of a shorter axis), split between the
+    start and the end (the start takes the odd one). ``K`` is ``max_items``
+    when set, and never more than the budget affords: the largest ``K`` whose
+    shown elements and labels (``_NDARRAY_ELEMENT_CHARS`` each) and nested
+    brackets fit three quarters of the value's characters, and whose elements
+    and levels fit three quarters of the node work left. The rest of the
+    budget is left for the fields, the shape and the keys; capture's usual
+    budget still cuts elements larger than assumed.
+    """
+    limits = state.limits
+    longest = max(dims, default=0)
+    cap = longest if limits.max_items is None else min(longest, limits.max_items)
+    chars = max_size * 3 // 4
+    nodes = state.nodes_left * 3 // 4
+
+    def fits(k: int) -> bool:
+        kept = [min(n, k) for n in dims]
+        elements = math.prod(kept)
+        levels = 0
+        rows = 1
+        for count in kept:
+            levels += rows
+            rows *= count
+        shown_labels = labelled * k
+        cost = (elements + shown_labels) * _NDARRAY_ELEMENT_CHARS + 2 * levels
+        return cost <= chars and elements + levels <= nodes
+
+    low, high = 0, cap
+    while low < high:
+        midpoint = (low + high + 1) // 2
+        if fits(midpoint):
+            low = midpoint
+        else:
+            high = midpoint - 1
+    selection: list[tuple[int, int]] = []
+    for n in dims:
+        if n <= low:
+            selection.append((n, 0))
+        else:
+            selection.append(((low + 1) // 2, low // 2))
+    return selection
+
+
+def _indexed(
+    length: int,
+    split: tuple[int, int],
+    child: Callable[[int], Any],
+    type_name: str,
+    max_size: int,
+    depth: int,
+    path: str,
+    state: _State,
+) -> _Built:
+    """A ``Sequence`` of the entries ``child(i)`` at the head and tail indices of ``split``."""
+    head_n, tail_n = split
+
+    def tail(_count: int) -> list[Any]:
+        return [child(i) for i in range(length - tail_n, length)]
+
+    return _sequence_from(
+        (child(i) for i in range(head_n)),
+        length,
+        type_name,
+        max_size,
+        depth,
+        path,
+        state,
+        tail_source=tail,
+        split=split,
+    )
+
+
+def _ndarray_structure(
+    shape: _NdarrayLike, value: Any, max_size: int, state: _State
+) -> list[tuple[str, Any]]:
+    """``shape``, ``labels`` and ``data`` of an ``ndarray_like`` value."""
+    dims = _ndarray_dims(shape, value)
+    ndim = len(dims)
+    selection = _ndarray_selection(dims, len(shape.labels), max_size, state)
+
+    def element(index: tuple[int, ...]) -> _Part:
+        def build(slot: int, depth: int, path: str) -> _Built:
+            try:
+                child = shape.element(value, index)
+            except Exception:
+                return _error("", slot)
+            return _build(child, slot, depth, path, state)
+
+        return _Part(build, 2, _OBJECT_MIN_NODES)
+
+    def level(axis: int, prefix: tuple[int, ...], slot: int, depth: int, path: str) -> _Built:
+        def child(i: int) -> _Part:
+            index = (*prefix, i)
+            if axis + 1 == ndim:
+                return element(index)
+            return _structure_part(
+                Sequence,
+                dims[axis + 1],
+                lambda s, d, p: level(axis + 1, index, s, d, p),
+                state,
+            )
+
+        return _indexed(dims[axis], selection[axis], child, "list", slot, depth, path, state)
+
+    entries: list[tuple[str, Any]] = [("shape", dims)]
+    if shape.labels:
+
+        def labels(slot: int, depth: int, path: str) -> _Built:
+            parts = [(axis, label_part(axis, function)) for axis, function in shape.labels]
+            return _mapping_from(parts, len(parts), "dict", slot, depth, path, state, None)
+
+        def label_part(axis: int, function: Callable[[Any], Any]) -> _Part:
+            def build(slot: int, depth: int, path: str) -> _Built:
+                if axis >= ndim:
+                    return _error("", slot)
+                try:
+                    found = function(value)
+                except Exception:
+                    return _error("", slot)
+
+                def label(i: int) -> _Part:
+                    def read(s: int, d: int, p: str) -> _Built:
+                        try:
+                            child = found[i]
+                        except Exception:
+                            return _error("", s)
+                        return _build(child, s, d, p, state)
+
+                    return _Part(read, 2, _OBJECT_MIN_NODES)
+
+                split = selection[axis]
+                return _indexed(dims[axis], split, label, "list", slot, depth, path, state)
+
+            return _structure_part(Sequence, dims[axis] if axis < ndim else None, build, state)
+
+        entries.append(("labels", _structure_part(Mapping, len(shape.labels), labels, state)))
+    if ndim == 0:
+        entries.append(("data", element(())))
+    else:
+        data = _structure_part(Sequence, dims[0], lambda s, d, p: level(0, (), s, d, p), state)
+        entries.append(("data", data))
+    return entries
+
+
+# --- text_like ---------------------------------------------------------------------
+
+
+def _build_text(shape: _TextLike, value: Any, max_size: int, state: _State) -> _Built:
+    """A ``Text`` of a ``text_like`` value, reading only the head and tail it keeps.
+
+    Any accessor error (``length``, ``slice``, a slice of the wrong type or
+    size) leaves no sensible part: the whole value is ``Unavailable("error")``.
+    """
+    type_name = _bounded_type_name(value, _MAX_TYPE_NAME)
+    try:
+        return _text_parts(shape, value, max_size, state.limits)
+    except _ShapeError:
+        return _error(type_name, max_size)
+
+
+def _text_parts(shape: _TextLike, value: Any, max_size: int, limits: Limits) -> _Built:
+    length = _shape_length(shape.length, value)
+    chars = shape.unit == "chars"
+
+    def fetch(start: int, stop: int) -> Any:
+        part = _call(shape.slice, value, start, stop)
+        if chars:
+            if type(part) is not str:
+                try:
+                    part = _metadata(part, "a chars slice")
+                except TypeError as error:
+                    raise _ShapeError from error
+            size = str.__len__(part)
+        else:
+            if type(part) is bytearray or type(part) is memoryview:
+                part = bytes(part)
+            if type(part) is not bytes:
+                raise _ShapeError("a bytes slice must be bytes")
+            size = bytes.__len__(part)
+        if size != stop - start:
+            raise _ShapeError("a slice must hold exactly the units asked for")
+        return part
+
+    if max_size < 2:
+        return _Built(Unavailable("max_length", "str" if chars else "bytes"), 1)
+    raw_limit = max_size - 2
+    keep_cap = raw_limit if limits.max_string is None else min(raw_limit, limits.max_string)
+    if length <= keep_cap:  # small enough to be kept whole: one read
+        whole = fetch(0, length)
+        if chars:
+            encoded_size = len(dumps(whole))
+            if encoded_size <= max_size:
+                return _Built(Text(whole, "", length, "chars", True, None), encoded_size)
+            return _cut_chars(length, whole, whole, length, max_size, limits)
+        decoded, replaced = decode_counted(whole)
+        encoded_size = len(dumps(decoded))
+        if encoded_size <= max_size:
+            node = Text(decoded, "", length, "bytes", True, None, None, replaced, 0, length, 0)
+            return _Built(node, encoded_size)
+        return _cut_byte_parts(length, whole, whole, 0, length - 1, max_size, limits)
+    head_n, tail_n = limits.split(keep_cap)
+    empty: Any = "" if chars else b""
+    tail = fetch(length - tail_n, length) if tail_n else empty
+    if chars:
+        head = fetch(0, head_n) if head_n else empty
+        return _cut_chars(length, head, tail, keep_cap, max_size, limits)
+    # One byte past the head shows whether the head ends on a code point boundary.
+    if not head_n:
+        head = empty
+    elif head_n + 1 < length:
+        head = fetch(0, head_n + 1)
+    else:  # no tail, and the head is one byte short of the whole: read that byte apart
+        head = fetch(0, head_n) + fetch(head_n, length)
+    return _cut_byte_parts(length, head, tail, length - tail_n, keep_cap, max_size, limits)
+
+
+# --- dispatch ----------------------------------------------------------------------
+
+
+def _build_shape(
+    shape: _Shape,
+    value: Any,
+    mro: tuple[type[Any], ...],
+    index: int,
+    max_size: int,
+    depth: int,
+    path: str,
+    state: _State,
+) -> _Built:
+    """Build ``value`` (whose MRO matched at ``index``) as ``shape`` describes it."""
+    shape_type = type(shape)
+    if shape_type is _TextLike:
+        return _build_text(cast(_TextLike, shape), value, max_size, state)
+    if shape_type is _ObjectLike or shape_type is _NdarrayLike or cast(Any, shape).fields:
+        return _build_object(cast(Any, shape), value, mro, index, max_size, depth, path, state)
+    collection = cast(_ArrayLike | _MappingLike, shape)
+    type_name = _bounded_type_name(value, _MAX_TYPE_NAME)
+    node_type = Sequence if shape_type is _ArrayLike else Mapping
+    try:
+        length = _shape_length(collection.length, value)
+    except _ShapeError:
+        return _error(type_name, max_size)
+    if depth >= state.max_depth:
+        return _Built(node_type(type_name, length, (), False, "max_depth"), 2)
+    ref = _enter(value, path, "sequence" if node_type is Sequence else "mapping", state)
+    if ref is not None:
+        return _Built(ref, 2)
+    try:
+        return _collection(collection, value, type_name, length, max_size, depth, path, state)
+    finally:
+        state.active.pop(id(value), None)
 
 
 def _field_reserves(pairs: list[tuple[Any, Any]]) -> tuple[list[tuple[int, int]], int]:
     """Per field: the (chars, nodes) every later field needs for its minimal fallback.
 
-    Also the node work all the fields need together (an object part's ``min_nodes``).
+    Also the node work all the fields need together.
     """
     needs: list[tuple[int, int]] = []
-    for entry in pairs:
-        if type(entry) is not tuple or len(entry) != 2 or type(entry[0]) is not str:
-            break  # the object fails closed or stops here
-        name, child = entry
+    for name, child in pairs:
         # separator + "name": + minimal value; one node for the field, some for its value.
-        nodes = 1 + (child.min_nodes if type(child) is _Deferred else 1)
+        nodes = 1 + (child.min_nodes if type(child) is _Part else 1)
         needs.append((2 + len(dumps(name)) + 2 + _min_size(child), nodes))
     reserves: list[tuple[int, int]] = []
     chars = nodes = 0
@@ -1666,48 +2121,28 @@ def _raw_qualified_name(cls: type[Any], state: _State) -> tuple[str, str] | None
 
 
 class _Registry:
-    """The process-wide ``capture.register(T)`` registrations, matched by class identity.
+    """The process-wide ``capture.register(T, shape)`` registrations, matched by class identity.
 
-    A list of ``(cls, function)`` pairs scanned with ``is``: a class is never
+    A list of ``(cls, shape)`` pairs scanned with ``is``: a class is never
     hashed or compared with ``==``, so a metaclass ``__hash__``/``__eq__``
     cannot run during dispatch.
     """
 
     def __init__(self) -> None:
-        self.entries: list[tuple[type[Any], CaptureFunction]] = []
+        self.entries: list[tuple[type[Any], _Shape]] = []
 
-    def find(self, mro: tuple[type[Any], ...]) -> tuple[int, CaptureFunction] | None:
+    def find(self, mro: tuple[type[Any], ...]) -> tuple[int, _Shape] | None:
         """The registration nearest in ``mro`` (identity comparisons only)."""
         if not self.entries:
             return None
         for index, base in enumerate(mro):
-            for registered, function in self.entries:
+            for registered, shape in self.entries:
                 if registered is base:
-                    return index, function
+                    return index, shape
         return None
 
 
 _REGISTRY = _Registry()
-
-
-def _build_registered(
-    function: CaptureFunction, value: Any, max_size: int, depth: int, path: str, state: _State
-) -> _Built:
-    ref = _enter(value, path, "object", state)
-    if ref is not None:
-        return _Built(ref, 2)
-    out = Out(value, max_size, depth, path, state)
-    result: _Built | None = None
-    try:
-        result = out._finish(function(value, out))
-    except Exception:
-        result = None
-    finally:
-        state.active.pop(id(value), None)
-    if result is None or result.size > max_size:
-        failed = Unavailable("error", _bounded_type_name(value, _MAX_TYPE_NAME))
-        return _Built(failed, fallback_json("", max_size)[1])
-    return result
 
 
 # --- the walk --------------------------------------------------------------------
@@ -1793,15 +2228,18 @@ def _build(
         return committed_fallback or _fallback(value, "max_length", max_size)
     if kind == 0:
         assert found is not None
-        return _build_registered(found[1], value, max_size, depth, path, state)
+        return _build_shape(found[1], value, mro, found[0], max_size, depth, path, state)
     if kind == 1:
-        return _build_pydantic(value, mro, max_size, depth, path, state)
+        assert model_index is not None
+        return _build_object(_PYDANTIC_SHAPE, value, mro, model_index, max_size, depth, path, state)
     assert dataclass_index is not None
-    return _build_dataclass(value, mro, mro[dataclass_index], max_size, depth, path, state)
+    return _build_object(
+        _DATACLASS_SHAPE, value, mro, dataclass_index, max_size, depth, path, state
+    )
 
 
 class _CaptureFunction:
-    """``capture(value, limits)``, with ``capture.register(T)`` to extend it."""
+    """``capture(value, limits)``, with ``capture.register(T, shape)`` to extend it."""
 
     def __call__(self, value: object, limits: Limits = DEFAULT_LIMITS) -> Snapshot:
         """A bounded snapshot of ``value``; no user code runs on unregistered types."""
@@ -1809,29 +2247,32 @@ class _CaptureFunction:
         state = _State(limits)
         return _build(value, limits.max_chars, 0, "", state).node
 
-    def register(self, cls: type[Any], function: CaptureFunction | None = None) -> Any:
-        """Register ``function(value, out)``, returning one part of its out, for ``cls`` and subclasses.
+    def register(self, cls: type[Any], shape: _Shape) -> None:
+        """Capture ``cls`` and its subclasses as ``shape`` describes them.
 
-        Use as ``@capture.register(T)`` or ``capture.register(T, function)``.
+        ``shape`` is one of ``array_like``, ``ndarray_like``, ``mapping_like``,
+        ``object_like`` or ``text_like``; anything else raises ``TypeError``.
         Registering needs the imported type, so supporting a library is opt-in
         by whoever sets up the agent; the registry is process-wide. Classes
         are matched by identity (``is``) along the value's raw MRO, so no user
         code runs during lookup. The registration nearest in a value's MRO
         wins (over the built-in Pydantic and dataclass views too); registering
-        ``cls`` again replaces it. Exact built-in types (``str``, ``list``, ...) are always native.
-        An exception in ``function`` (a part used twice too), or a result
-        that is not a part of its ``out``, becomes ``Unavailable("error")``.
+        ``cls`` again replaces it. Exact built-in types (``str``, ``list``, ...)
+        are always native.
         """
         if not isinstance(cls, type):
             raise TypeError(f"capture.register needs a type, got {type(cls).__name__}")
-
-        def add(function: CaptureFunction) -> CaptureFunction:
-            entries = _REGISTRY.entries
-            entries[:] = [entry for entry in entries if entry[0] is not cls]
-            entries.append((cls, function))
-            return function
-
-        return add(function) if function is not None else add
+        shape_type = type(shape)
+        if not any(shape_type is known for known in _SHAPE_TYPES) or (
+            shape_type is _ObjectLike and cast(_ObjectLike, shape).reader is not None
+        ):
+            raise TypeError(
+                "capture.register needs a shape (array_like, ndarray_like, mapping_like,"
+                f" object_like or text_like), got {_bounded_type_name(shape, _MAX_TYPE_NAME)}"
+            )
+        entries = _REGISTRY.entries
+        entries[:] = [entry for entry in entries if entry[0] is not cls]
+        entries.append((cls, shape))
 
     def unregister(self, cls: type[Any]) -> None:
         """Remove the registration for exactly ``cls`` (no-op when absent)."""

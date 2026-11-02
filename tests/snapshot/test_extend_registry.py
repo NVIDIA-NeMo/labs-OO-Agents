@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Extension registry: ``capture.register(T)`` dispatch by class identity, and its safety."""
+"""Extension registry: ``capture.register(T, shape)`` dispatch by class identity, and its safety."""
 
 from __future__ import annotations
 
@@ -11,28 +11,37 @@ import pytest
 from nooa.snapshot import (
     Object,
     Opaque,
-    Out,
     Scalar,
+    _capture,
+    array_like,
     capture,
+    mapping_like,
+    ndarray_like,
+    object_like,
     render_python,
+    text_like,
 )
 from tests.snapshot._extend_support import (
     FAKE_MODULE,
     _named,
 )
 
-# --- register(T): identity dispatch ---------------------------------------------------
+
+def _text(value: Any) -> Any:
+    """A shape that captures every instance as the text ``value`` (``str(value)``)."""
+    text = str(value)
+    return text_like(lambda v: len(text), lambda v, start, stop: text[start:stop])
+
+
+# --- register(T, shape): identity dispatch ---------------------------------------------
 
 
 def test_register_decorator_form_and_unregister() -> None:
     Gadget = _named("Gadget")
 
-    @capture.register(Gadget)
-    def gadget(value: Any, out: Out):
-        return out.capture(1)
-
+    capture.register(Gadget, _text("gadget"))
     try:
-        assert capture(Gadget()) == Scalar(1)
+        assert render_python(capture(Gadget())) == "'gadget'"
     finally:
         capture.unregister(Gadget)
     assert capture(Gadget()) == Opaque(FAKE_MODULE, "Gadget")
@@ -42,30 +51,66 @@ def test_register_decorator_form_and_unregister() -> None:
 def test_register_needs_a_class() -> None:
     for not_a_class in ("numpy.ndarray", None, 1, _named("Widget")()):
         with pytest.raises(TypeError):
-            capture.register(not_a_class)  # type: ignore[arg-type]
+            capture.register(not_a_class, _text("x"))  # type: ignore[arg-type]
+
+
+def test_register_needs_a_shape() -> None:
+    Widget = _named("Widget")
+    not_shapes: list[Any] = [
+        lambda value, out: out.capture(1),  # the removed function-handler form
+        None,
+        "array_like",
+        {"length": len},
+        _capture._PYDANTIC_SHAPE,  # internal shapes are not public
+    ]
+    for not_a_shape in not_shapes:
         with pytest.raises(TypeError):
-            capture.register(not_a_class, lambda value, out: out.capture(1))  # type: ignore[arg-type]
+            capture.register(Widget, not_a_shape)
+    with pytest.raises(TypeError):
+        capture.register(Widget)  # type: ignore[call-arg]
+    assert capture(Widget()) == Opaque(FAKE_MODULE, "Widget")  # nothing was registered
 
 
-def test_register_matches_the_class_not_its_name(eager) -> None:
+@pytest.mark.parametrize(
+    "make",
+    [
+        lambda: array_like(1, iter),  # type: ignore[arg-type]  # not callable
+        lambda: array_like(len, iter, fields={"items": len}),  # taken by the shape
+        lambda: array_like(len, iter, fields={1: len}),  # type: ignore[arg-type]  # not a str name
+        lambda: array_like(len, iter, fields=[("a", len)]),  # type: ignore[arg-type]  # not a dict
+        lambda: mapping_like(len, iter, kind=3),  # type: ignore[arg-type]  # not a str kind
+        lambda: ndarray_like(len, len, fields={"data": len}),  # type: ignore[arg-type]
+        lambda: ndarray_like(len, len, labels={-1: len}),  # type: ignore[arg-type]
+        lambda: ndarray_like(len, len, labels={"columns": len}),  # type: ignore[arg-type]
+        lambda: object_like([("a", len)]),  # type: ignore[arg-type]
+        lambda: object_like({"a": "not callable"}),  # type: ignore[arg-type]
+        lambda: text_like(len, len, unit="lines"),  # type: ignore[arg-type]
+    ],
+)
+def test_shape_constructors_check_their_arguments(make) -> None:
+    with pytest.raises(TypeError):
+        make()
+
+
+def test_register_matches_the_class_not_its_name(registered) -> None:
     Inner = _named("Inner", qualname="Outer.Inner")
-    eager(Inner, lambda value, out: out.capture("inner"))
+    registered(Inner, _text("inner"))
 
     assert render_python(capture(Inner())) == "'inner'"
     # Another class with the same module and qualname is not registered.
     assert capture(_named("Inner", qualname="Outer.Inner")()) == Opaque(FAKE_MODULE, "Inner")
 
 
-def test_subclass_matches_and_unregistered_stays_opaque(eager) -> None:
+def test_subclass_matches_and_unregistered_stays_opaque(registered) -> None:
     Base = _named("Base")
     Child = type("Child", (Base,), {"__module__": "elsewhere"})
-    eager(Base, lambda value, out: out.capture("base"))
+    registered(Base, _text("base"))
 
     assert render_python(capture(Child())) == "'base'"
     assert capture(_named("Other")()) == Opaque(FAKE_MODULE, "Other")
 
 
-def test_nearest_registered_class_in_the_mro_wins(eager) -> None:
+def test_nearest_registered_class_in_the_mro_wins(registered) -> None:
     Base = _named("Base")
 
     class Middle(Base):  # type: ignore[misc,valid-type]
@@ -73,14 +118,14 @@ def test_nearest_registered_class_in_the_mro_wins(eager) -> None:
 
     Leaf = type("Leaf", (Middle,), {"__module__": FAKE_MODULE})
 
-    eager(Middle, lambda value, out: out.capture("middle"))
-    eager(Base, lambda value, out: out.capture("base"))  # registered later, still farther
+    registered(Middle, _text("middle"))
+    registered(Base, _text("base"))  # registered later, still farther
 
     assert render_python(capture(Base())) == "'base'"
     assert render_python(capture(Middle())) == "'middle'"
     assert render_python(capture(Leaf())) == "'middle'"
 
-    eager(Leaf, lambda value, out: out.capture("leaf"))
+    registered(Leaf, _text("leaf"))
     assert render_python(capture(Leaf())) == "'leaf'"  # a new registration applies
     capture.unregister(Leaf)
     assert render_python(capture(Leaf())) == "'middle'"
@@ -88,10 +133,10 @@ def test_nearest_registered_class_in_the_mro_wins(eager) -> None:
     assert render_python(capture(Leaf())) == "'base'"
 
 
-def test_registering_again_replaces_it(eager) -> None:
+def test_registering_again_replaces_it(registered) -> None:
     Both = _named("Both")
-    eager(Both, lambda value, out: out.capture("first"))
-    eager(Both, lambda value, out: out.capture("second"))
+    registered(Both, _text("first"))
+    registered(Both, _text("second"))
 
     assert render_python(capture(Both())) == "'second'"
 
@@ -126,7 +171,7 @@ def _hostile(name: str, bases: tuple[type[Any], ...] = ()) -> type[Any]:
     return _Recording(name, bases, {"__module__": FAKE_MODULE, "__qualname__": name})
 
 
-def test_metaclass_hooks_never_run_during_dispatch(eager) -> None:
+def test_metaclass_hooks_never_run_during_dispatch(registered) -> None:
     Hostile = _hostile("Hostile")
     Sub = _hostile("Sub", (Hostile,))
     Unregistered = _hostile("Unregistered")
@@ -136,9 +181,9 @@ def test_metaclass_hooks_never_run_during_dispatch(eager) -> None:
     assert render_python(capture([Hostile(), Unregistered()])) == (
         "[<opaque: Hostile>, <opaque: Unregistered>]"
     )
-    eager(int, lambda value, out: out.capture(0))  # a non-empty registry to compare against
+    registered(int, _text(0))  # a non-empty registry to compare against
     assert render_python(capture([Unregistered()])) == "[<opaque: Unregistered>]"
-    eager(Hostile, lambda value, out: out.capture("matched"))
+    registered(Hostile, _text("matched"))
 
     for _ in range(2):
         assert render_python(capture(Hostile())) == "'matched'"
@@ -149,11 +194,11 @@ def test_metaclass_hooks_never_run_during_dispatch(eager) -> None:
     assert _Recording.calls == []
 
 
-def test_dispatch_survives_a_class_rename(eager) -> None:
+def test_dispatch_survives_a_class_rename(registered) -> None:
     class Target:
         pass
 
-    eager(Target, lambda value, out: out.object({"ok": True}))
+    registered(Target, object_like({"ok": lambda value: True}))
     Target.__module__ = "renamed_module"
     Target.__qualname__ = "Renamed"
 
@@ -162,14 +207,14 @@ def test_dispatch_survives_a_class_rename(eager) -> None:
     assert renamed.module == "renamed_module"
 
 
-def test_registration_retains_only_registered_classes(eager) -> None:
+def test_registration_retains_only_registered_classes(registered) -> None:
     import gc
     import weakref
 
     Matched = _named("Matched")
-    eager(Matched, lambda value, out: out.capture(1))
+    registered(Matched, _text(1))
     Seen = type("Seen", (Matched,), {})
-    assert capture(Seen()) == Scalar(1)
+    assert render_python(capture(Seen())) == "'1'"
     reference = weakref.ref(Seen)
 
     del Seen
@@ -180,6 +225,9 @@ def test_registration_retains_only_registered_classes(eager) -> None:
 def test_public_api_is_what_extension_authors_and_consumers_use() -> None:
     import nooa.snapshot as snapshot
 
-    assert "Deferred" not in snapshot.__all__ and not hasattr(snapshot, "Deferred")
+    for private in ("Deferred", "Out"):
+        assert private not in snapshot.__all__ and not hasattr(snapshot, private)
+    for shape in ("array_like", "ndarray_like", "mapping_like", "object_like", "text_like"):
+        assert shape in snapshot.__all__
     for name in snapshot.__all__:
         assert getattr(snapshot, name) is not None

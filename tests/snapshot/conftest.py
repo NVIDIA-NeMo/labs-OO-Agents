@@ -13,12 +13,12 @@ from nooa.snapshot import capture
 
 
 @pytest.fixture
-def eager() -> Iterator[Any]:
-    """``capture.register(T, function)`` with cleanup."""
+def registered() -> Iterator[Any]:
+    """``capture.register(T, shape)`` with cleanup."""
     registered: list[type[Any]] = []
 
-    def register(cls: type[Any], function: Any) -> None:
-        capture.register(cls, function)
+    def register(cls: type[Any], shape: Any) -> None:
+        capture.register(cls, shape)
         registered.append(cls)
 
     yield register

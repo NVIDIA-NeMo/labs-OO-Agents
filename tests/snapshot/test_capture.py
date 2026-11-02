@@ -19,16 +19,19 @@ from nooa.snapshot import (
     Mapping,
     Object,
     Opaque,
-    Out,
     Ref,
     Scalar,
     Sequence,
     Text,
     Unavailable,
+    array_like,
     capture,
+    mapping_like,
+    object_like,
     preview_attributes,
     render_json,
     render_python,
+    text_like,
 )
 from tests.snapshot import _annotation_aliases
 
@@ -561,8 +564,8 @@ class Puppy(Dog):
 def registry():
     registered: list[type[Any]] = []
 
-    def register(cls: type[Any], function: Any) -> None:
-        capture.register(cls, function)
+    def register(cls: type[Any], shape: Any) -> None:
+        capture.register(cls, shape)
         registered.append(cls)
 
     yield register
@@ -570,18 +573,22 @@ def registry():
         capture.unregister(cls)
 
 
-def test_registered_function_builds_through_out(registry) -> None:
-    def animal(value: Animal, out: Out):
-        return out.object([("name", value.name)])
+def _constant(value: Any) -> Any:
+    """A shape that captures every instance as ``value`` (a text_like or array_like)."""
+    if type(value) is str:
+        return text_like(lambda v: len(value), lambda v, start, stop: value[start:stop])
+    return array_like(lambda v: len(value), lambda v: iter(value))
 
-    registry(Animal, animal)
+
+def test_registered_shape_builds_through_capture(registry) -> None:
+    registry(Animal, object_like({"name": lambda value: value.name}))
 
     assert render_python(capture([Animal("rex")])) == "[Animal(name='rex')]"
 
 
 def test_nearest_registration_in_the_mro_wins(registry) -> None:
-    registry(Animal, lambda value, out: out.capture("animal"))
-    registry(Dog, lambda value, out: out.capture("dog"))
+    registry(Animal, _constant("animal"))
+    registry(Dog, _constant("dog"))
 
     assert render_python(capture(Animal("a"))) == "'animal'"
     assert render_python(capture(Dog("d"))) == "'dog'"
@@ -589,26 +596,26 @@ def test_nearest_registration_in_the_mro_wins(registry) -> None:
 
 
 def test_registering_again_replaces(registry) -> None:
-    registry(Dog, lambda value, out: out.capture(1))
-    registry(Dog, lambda value, out: out.capture(2))
+    registry(Dog, _constant([1]))
+    registry(Dog, _constant([2]))
 
-    assert capture(Dog("d")) == Scalar(2)
+    assert capture(Dog("d")) == Sequence("Dog", 1, (Scalar(2),), True, None)
 
 
 def test_registration_overrides_pydantic_view_for_subclass(registry) -> None:
     class Model(BaseModel):
         secret: str = "x"
 
-    registry(Model, lambda value, out: out.object([], type_name="Redacted"))
+    registry(Model, object_like({}))
 
-    assert render_python(capture(Model())) == "Redacted()"
+    assert render_python(capture(Model())) == "Model()"
 
 
-def test_exception_in_registered_function_is_unavailable(registry) -> None:
-    def broken(value: Any, out: Out):
+def test_exception_in_an_accessor_is_unavailable(registry) -> None:
+    def broken(value: Any) -> int:
         raise RuntimeError("boom")
 
-    registry(Animal, broken)
+    registry(Animal, array_like(broken, lambda value: []))
 
     snapshot = capture({"a": Animal("x")})
     assert isinstance(snapshot, Mapping)
@@ -617,52 +624,49 @@ def test_exception_in_registered_function_is_unavailable(registry) -> None:
     assert attributes["nooa.output.preview.reasons"] == ("error",)
 
 
-def test_node_not_built_by_out_is_rejected(registry) -> None:
-    registry(Animal, lambda value, out: Scalar("x" * 10_000))  # type: ignore[arg-type]
-
-    assert capture(Animal("a")) == Unavailable("error", "Animal")
-
-
-def test_budget_is_enforced_through_out(registry) -> None:
+def test_budget_is_enforced_on_shape_items(registry) -> None:
     pulled: list[int] = []
 
-    def endless():
+    def endless(value: Any):
         index = 0
         while True:
             pulled.append(index)
             yield "x" * 20
             index += 1
 
-    registry(Animal, lambda value, out: out.sequence(endless()))
+    registry(Animal, array_like(lambda value: 10**12, endless))
 
     snapshot = capture(Animal("a"), Limits(max_chars=100, max_nodes=50))
     text = render_json(snapshot, max_chars=100)
 
     assert len(text) <= 100
     assert isinstance(snapshot, Sequence) and not snapshot.complete
-    assert snapshot.length is None
-    assert len(pulled) < 10  # stopped at the budget, the rest never pulled
+    assert snapshot.length == 10**12 and snapshot.reason == "max_length"
+    assert len(pulled) == len(snapshot.items) + 1  # stopped at the budget
 
 
-def test_out_sequence_obeys_max_items_and_nodes(registry) -> None:
-    registry(Animal, lambda value, out: out.sequence(range(1_000_000), length=1_000_000))
+def test_array_like_obeys_max_items_and_nodes(registry) -> None:
+    registry(Animal, array_like(lambda value: 1_000_000, lambda value: range(1_000_000)))
 
     snapshot = capture(Animal("a"), Limits(max_items=3))
     assert isinstance(snapshot, Sequence)
-    assert render_python(snapshot) == "list(len=1000000, [:3]=[0, 1, 2])"
+    assert render_python(snapshot) == "Animal(len=1000000, [:3]=[0, 1, 2])"
 
     starved = capture(Animal("a"), Limits(max_nodes=5))
     assert isinstance(starved, Sequence) and starved.reason == "max_nodes"
 
 
-def test_out_mapping_and_nested_values(registry) -> None:
-    registry(Animal, lambda value, out: out.mapping([("name", value.name), ("tags", ["a"])]))
+def test_mapping_like_and_nested_values(registry) -> None:
+    registry(
+        Animal,
+        mapping_like(lambda value: 2, lambda value: [("name", value.name), ("tags", ["a"])]),
+    )
 
     assert render_python(capture(Animal("rex"))) == "{'name': 'rex', 'tags': ['a']}"
 
 
 def test_registered_self_reference_is_a_cycle(registry) -> None:
-    registry(Animal, lambda value, out: out.object([("me", value)]))
+    registry(Animal, object_like({"me": lambda value: value}))
 
     snapshot = capture(Animal("a"))
     assert isinstance(snapshot, Object)
@@ -682,7 +686,7 @@ def _node_depth(node: Any) -> int:
 
 
 def test_registered_recursive_type_respects_max_depth(registry) -> None:
-    registry(_Node, lambda n, out: out.object({"left": out.capture(n.left)}, type_name="Node"))
+    registry(_Node, object_like({"left": lambda n: n.left}))
     chain = None
     for _ in range(30):
         chain = _Node(chain)
@@ -698,15 +702,13 @@ def test_registered_recursive_type_respects_max_depth(registry) -> None:
     assert deepest.fields == () and deepest.reason == "max_depth"
 
 
-def test_registered_parts_in_sequences_and_mappings_get_their_slot(registry) -> None:
+def test_registered_items_in_sequences_and_mappings_get_their_slot(registry) -> None:
     registry(
         _Node,
-        lambda n, out: out.object(
-            {
-                "items": out.sequence([out.capture(n.left)]),
-                "by_key": out.mapping([("k", out.capture(n.left))]),
-            },
-            type_name="Node",
+        array_like(
+            lambda n: 1,
+            lambda n: [n.left],
+            fields={"by_key": lambda n: {"k": n.left}},
         ),
     )
     chain = None
@@ -717,12 +719,13 @@ def test_registered_parts_in_sequences_and_mappings_get_their_slot(registry) -> 
 
     assert _node_depth(snapshot) <= 4
     assert isinstance(snapshot, Object)
-    items = snapshot.fields[0][1]
+    assert [name for name, _node in snapshot.fields] == ["by_key", "items"]
+    items = snapshot.fields[1][1]
     assert isinstance(items, Sequence) and isinstance(items.items[0], Object)
 
 
 def test_registered_cycle_ref_ids_use_field_paths(registry) -> None:
-    registry(_Node, lambda n, out: out.object({"left": out.capture(n.left)}, type_name="Node"))
+    registry(_Node, object_like({"left": lambda n: n.left}))
     a = _Node()
     b = _Node(a)
     a.left = b
@@ -739,13 +742,7 @@ def test_registered_cycle_ref_ids_use_field_paths(registry) -> None:
 
 def test_register_needs_a_type() -> None:
     with pytest.raises(TypeError):
-        capture.register("Animal")  # type: ignore[arg-type]
-
-
-def test_out_opaque(registry) -> None:
-    registry(Animal, lambda value, out: out.opaque())
-
-    assert capture(Animal("a")) == Opaque(__name__, "Animal")
+        capture.register("Animal", object_like({}))  # type: ignore[arg-type]
 
 
 # --- review findings: untrusted equality ------------------------------------

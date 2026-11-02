@@ -56,7 +56,7 @@ Relative to the proposal, `Text` gains `unit`, `full` and `replaced` for spillin
 As in the proposal and in #342:
 - One shared budget (`Limits`): characters, nodes, depth, items per container, string head and tail.
 - Exact built-in types are handled natively. Pydantic and dataclass declared fields are read from raw storage. `spec()` hidden fields are refused before they are read. Anything else is `Opaque`.
-- `@capture.register(T)` extends it, using nearest-MRO dispatch.
+- `capture.register(T, shape)` extends it, using nearest-MRO dispatch: a declarative shape (`array_like`, `ndarray_like`, `mapping_like`, `object_like`, `text_like`) maps out the type's structure, and capture builds the nodes.
 - No `repr()`, `str()`, properties, descriptors or custom iteration on untrusted values.
 - #342's builder (`_trace_json.py`) is the starting implementation. It already does the raw Pydantic view, visibility metadata, cycle tracking and accounting. It moves to the shared package and produces snapshot nodes instead of JSON directly.
 
@@ -106,7 +106,68 @@ It is today's `Shell` wording. It is the newest notation and the one models alre
 
 ## Extending for third-party types (numpy, pandas, …)
 
-Two hooks, one per step. Neither makes NOOA import or depend on the library: the capture function is registered by whoever sets up the agent, where the library is already imported.
+Two hooks, one per step. Neither makes NOOA import or depend on the library: the shape is registered by whoever sets up the agent, where the library is already imported.
+
+### Capture: shapes, registered by type
+
+An extension doesn't print anything and doesn't build nodes. It maps out the structure of its type, a **shape**: "this is array-like, here is how to get its size, here is how to get its data, here are a couple of other properties". Capture then builds the snapshot itself, with the same builders and size rules as the built-in types, so the notation, the cuts and the shared budget are the ones a `list`, `dict` or `str` gets.
+
+```python
+import numpy
+from nooa.snapshot import capture, ndarray_like
+
+capture.register(numpy.ndarray, ndarray_like(
+    lambda a: a.shape,
+    lambda a, index: a[index].item(),          # called only for the shown elements
+    fields={"dtype": lambda a: a.dtype.name},
+    kind="numpy.ndarray",
+))
+# ndarray(dtype='float64', shape=(1000, 1000),
+#         data=list(len=1000, [:2]=[list(len=1000, [:2]=[0.0, 1.0], [-2:]=[998.0, 999.0]), …], [-2:]=[…]))
+```
+
+A plain class:
+
+```python
+capture.register(Point, object_like({"x": lambda p: p.x, "y": lambda p: p.y}))
+# Point(x=1, y=2)
+```
+
+A huge text-like object (a rope, a memory-mapped log), never copied whole:
+
+```python
+capture.register(Rope, text_like(lambda r: r.length, lambda r, start, stop: r.read(start, stop)))
+# str(len=…, [:h]='…', [-t:]='…'): slice is called for that head and tail only
+```
+
+`capture.register(T, shape)` takes the class itself and one of five shapes, all exported from `nooa.snapshot`:
+
+| Shape | Accessors | Node |
+|---|---|---|
+| `array_like(length, items, *, fields=None, kind=None)` | `length(v) -> int`, called once; `items(v) -> iterable`, pulled lazily, only as many as are kept (plus at most one) | without fields a `Sequence` (`type_name`: the class name); with fields an `Object` whose fields are followed by `items`, that `Sequence` (`type_name` `list`) |
+| `ndarray_like(shape, element, *, fields=None, labels=None, kind=None)` | `shape(v) -> tuple[int, ...]`; `element(v, index_tuple)`, called only for the shown elements; `labels`: axis -> `accessor(v)` returning that axis's labels, read only at the shown indices (`labels[i]`) | an `Object`: its fields, then `shape` (the tuple), `labels` (a `Mapping` axis -> `Sequence` of the shown labels, when given) and `data`: nested `Sequence` nodes, one level per axis, each with the axis's length and its kept head and `tail`; a 0-d array's `data` is its one element |
+| `mapping_like(length, items, *, fields=None, kind=None)` | `length(v)`; `items(v)` yields `(key, value)` pairs lazily | a `Mapping`, or an `Object` whose fields are followed by `items`, that `Mapping` (`type_name` `dict`) |
+| `object_like(fields, *, kind=None)` | ordered `dict` name -> `accessor(v)` | an `Object` |
+| `text_like(length, slice, *, unit="chars", kind=None)` | `length(v)`; `slice(v, start, stop) -> str` (`"chars"`) or `bytes` (`"bytes"`) | a `Text` with the right `length`, `omitted` and `unit`, cut exactly as a `str` or `bytes` of that content would be |
+
+The rules that hold for every shape:
+
+- **Accessors run only when their result is needed.** `fields` is an ordered `dict` name -> `accessor(v)`: each accessor is called once, and only when its field is kept (a field cut by the budget or by `max_items` never runs). Fields keep back room for the later fields, as for the root fields of `capture_fields`: each leaves the minimal value of every later field (and some node work), so a greedy first field gets what is left. The structure fields of a shape (`items`, `shape`, `labels`, `data`) come after the accessor fields, get what those leave, and are never cut by `max_items` (the accessor fields are: an object keeps its first `max_items` of them).
+- **What accessors return is captured normally,** recursively and under the same budget: a returned list is a list, a returned registered type uses its own shape, an unknown type is `Opaque`, a returned `v` is a cycle (`Ref`).
+- **`text_like` never reads the whole of a text it cuts.** It calls `slice` only for the head and the tail it keeps, at most twice (for bytes, the head read takes one byte more, to see whether the head ends on a code point boundary; when that byte is the last one, it is read on its own). A text short enough to be kept whole (at most `max_string` and what the budget leaves, in units) is read in one call.
+- **`ndarray_like` element selection** (numpy's summarised print): along every axis, the first and the last entries, at most `K` per axis (all of a shorter axis), the start taking the odd one: `K = 4` shows indices `0, 1, n-2, n-1`. `K` is `max_items` when it is set, and never more than the budget affords: the largest `K` whose shown elements and labels (6 characters each: a short number and its separator) and nested brackets fit three quarters of the value's characters, and whose elements and levels fit three quarters of the node work left (the rest is for the fields, the shape and the keys). The split ignores `tail_share`: an array always shows both ends. Elements larger than assumed are still cut by the usual budget, from the end. `element` is called only for the elements in the snapshot.
+- **Errors.** An exception in `length` or `shape` (or a result that is not a non-negative `int`, or a tuple of them) makes the whole value `Unavailable("error")`. An exception in a field accessor, `element` or one label makes just that part `Unavailable("error")`. An exception from `items` (calling it, or a pair that is not a 2-tuple) makes the `items` part `Unavailable("error")` when the shape has fields, the whole value when it has none; raised while pulling, it ends the items there, the kept ones stay and the `Sequence` / `Mapping` is incomplete with reason `error`. A `text_like` has no sensible part: an exception in `slice`, or a slice of the wrong type or size, makes the whole value `Unavailable("error")`.
+- **`kind`** is stored on the `Object` (`Object.kind`) and feeds the per-kind render hooks below; `Sequence`, `Mapping` and `Text` have no `kind`, so a shape without fields renders with the generic notation. Names and kinds must be `str` (a `str` subclass is copied); constructors check their arguments and raise `TypeError`.
+
+Registration:
+
+- `capture.register(T, shape)` takes the class itself, so registering imports the type. Support for a library is therefore opt-in: whoever sets up the agent, and already imports numpy or pandas, registers it; NOOA itself never imports them. `capture.unregister(T)` removes it, and registering `T` again replaces it. Anything but a class, or anything but one of the five shapes (a function, the earlier `register(T)(fn)` form), raises `TypeError`.
+- The registry is process-wide: one registry for the whole process, with no per-agent scope.
+- At capture time, the dispatcher walks the value's raw MRO (`type.__dict__["__mro__"]`, read through `type`'s own descriptor) and compares each class with the registered classes by identity (`is`); the nearest registered class wins, also against the built-in Pydantic and dataclass views. A class is never hashed or compared with `==`, so a custom metaclass `__hash__`/`__eq__` can't run, and a lookup runs no user code. Matching is by identity, not name, so a class renamed by assigning `__module__` or `__qualname__` still dispatches, and another class with the same name does not. Only registered classes are retained.
+- A value whose class is not registered stays `Opaque`, exactly as before. Exact built-in types (`str`, `bytes`, `int`, `float`, `bool`, `None`, `list`, `tuple`, `dict`) are always native, checked first.
+- Accessors are trusted extension code, as in the proposal; they run only when capture asks for their result, never during dispatch.
+
+**Internal shapes.** Pydantic models and dataclasses are internal `object_like` shapes too: their field list and accessors are the privileged readers (raw instance storage, the hidden-field rules, string annotations parsed and never run; see *Dataclasses* below), and they go through the same object builder as a registered `object_like`. The exact built-in types keep their fast paths, and those share their building code with the shapes: `array_like` items go through the list builder, `mapping_like` through the dict builder, `text_like` through the `str` / `bytes` cutting, and every `Object` through one field builder.
 
 ### Extension contract
 
@@ -114,37 +175,11 @@ When each part is built, and what bounds it:
 
 | Part | Built | Budget | Limits that apply |
 |---|---|---|---|
-| `out.capture(v)`, `out.sequence(items)`, `out.mapping(items)`, `out.object(fields)`, `out.opaque()` | deferred: children are built only when the part takes its slot (a field of `out.object`, an item or value of `out.sequence` / `out.mapping`, or the function's return value); each part takes one slot only | the slot's share of the capture budget, one level deeper than its container (returned: the value's own slot) | capture `Limits`: `max_chars` (canonical JSON characters), shared `max_nodes`, `max_depth`, `max_items`, `max_string` (`out.opaque()`: `max_chars`) |
+| shape accessors (`length`, `items`, `element`, `slice`, field accessors) | during capture, only when their result is kept (see above) | the slot of the part they fill: its share of the capture budget, depth and path | capture `Limits`: `max_chars` (canonical JSON characters), shared `max_nodes`, `max_depth`, `max_items`, `max_string` |
 | `render_python` / `render_output` hook | when the snapshot is rendered | **none**: these renderers have no length limit | none: the hook formats nodes that capture already bounded. Its return value is not checked for length; a hook is trusted code, and its output is as long as the string it builds |
 | `render_json` hook | when the snapshot is rendered | the node's `r.max_chars` | it returns detached data, a snapshot node, which `render_json` encodes in the node's place with its normal accounting (cut to `r.max_chars`, cuts reported at the projection's paths); a hook that raises, returns no node or a node that can't be encoded means generic rendering |
 
-A registered function so returns one tree of parts, and it is built top-down: every part, nested objects too, is built once, in its final slot. Each part placed in a container's slot is one node of the shared `max_nodes` work (an `out.capture` part through the capture it delegates to; the returned part shares the registered value's own node), so a tree of empty containers stops at `max_nodes` like any other; a part left no node work becomes its empty, typed fallback with reason `max_nodes`. A part used a second time raises `ValueError`, and like any error in the function the value becomes `Unavailable("error")`; call the `out` method again for a second placement (two parts, built and budgeted separately).
-
-What is not deferred: `out.object` copies a `dict`, `list` or `tuple` of fields and prepares their reservation (below) when it is called, so a later change to that collection is not seen; any other field iterable, and `out.sequence` / `out.mapping` items, are consumed only on placement.
-
-So capture limits bound what a snapshot holds, and only `render_json` bounds what a renderer produces. Children a text hook renders through `r` get the renderer's notation, cut markers and hooks, nothing more.
-
-**Reservation, and where it stops.** With a `dict`, `list` or `tuple` of fields, `out.object` builds them in order and each leaves room for the minimal fallback of every later field, so a greedy field gets what is left. That holds only while the slot fits the wrapper, the current field's own minimum and those fallbacks: a field is never held below its own minimum, so in a smaller slot later fields are still cut. Fields from any other iterable are pulled one at a time, and nothing can be reserved for fields not yet seen. The one detailed explanation is under [The implementation](#the-implementation-nooasnapshot) (`out.object`).
-
-### Capture: registration by type
-
-```python
-import numpy
-
-@capture.register(numpy.ndarray)
-def capture_ndarray(array, out):
-    return out.object({
-        "shape": out.capture(array.shape),
-        "dtype": out.capture(array.dtype.name),
-        "sample": out.sequence(array.flat),   # gets what shape and dtype leave
-    }, type_name="ndarray", kind="numpy.ndarray")
-```
-
-- `capture.register(T)` takes the class itself, so registering imports the type. Support for a library is therefore opt-in: whoever sets up the agent, and already imports numpy or pandas, registers it; NOOA itself never imports them. `capture.register(T, function)` is the non-decorator form, `capture.unregister(T)` removes it, and registering `T` again replaces it. Anything but a class raises `TypeError`.
-- The registry is process-wide: one registry for the whole process, with no per-agent scope.
-- At capture time, the dispatcher walks the value's raw MRO (`type.__dict__["__mro__"]`, read through `type`'s own descriptor) and compares each class with the registered classes by identity (`is`); the nearest registered class wins. A class is never hashed or compared with `==`, so a custom metaclass `__hash__`/`__eq__` can't run, and a lookup runs no user code. Matching is by identity, not name, so a class renamed by assigning `__module__` or `__qualname__` still dispatches, and another class with the same name does not. Only registered classes are retained.
-- A value whose class is not registered stays `Opaque`, exactly as before.
-- The registered function is trusted extension code, as in the proposal. It builds children only through `out`, so the shared budget holds. An exception becomes `Unavailable`.
+Every part of a shape is built once, top-down, in its final slot: an accessor field and an element take the capture of what they return (one node of `max_nodes` work, as any value); a structure part (`items`, `labels`, a level of `data`) is one node, and a structure part left no node work is its empty, typed fallback with reason `max_nodes`. So capture limits bound what a snapshot holds, and only `render_json` bounds what a renderer produces. Children a text hook renders through `r` get the renderer's notation, cut markers and hooks, nothing more.
 
 ### Rendering: a `kind` on objects and per-kind renderers
 
@@ -158,7 +193,7 @@ class Object:
     complete: bool
     reason: str | None
     module: str = ""
-    kind: str | None = None       # rendering key set by the capture function, e.g. "numpy.ndarray"
+    kind: str | None = None       # rendering key set by the shape, e.g. "numpy.ndarray"
 ```
 
 Each renderer has its own registry, keyed by `kind`:
@@ -167,19 +202,19 @@ Each renderer has its own registry, keyed by `kind`:
 @render_python.register("numpy.ndarray")
 def render_ndarray(node: Object, r: PythonRenderer) -> str:
     shape = r.render(node.field("shape"))
-    sample = r.render(node.field("sample"))
-    return f"array({sample}, shape={shape}, dtype={r.render(node.field('dtype'))})"
+    data = r.render(node.field("data"))
+    return f"array({data}, shape={shape}, dtype={r.render(node.field('dtype'))})"
 ```
 
 - A hook receives the node and the renderer `r`. It renders children only through `r`, so they keep the renderer's notation, cut markers and their own hooks. Nothing bounds the string a `render_python` / `render_output` hook returns (see [Extension contract](#extension-contract)): it formats nodes that capture already bounded, and it is trusted code.
-- No hook for a `kind`, or a hook that raises (or returns something other than a `str`): generic rendering (`ndarray(shape=…, dtype=…, sample=…)`). Rendering never fails. A hook that renders its own node through `r` gets the generic rendering for it.
+- No hook for a `kind`, or a hook that raises (or returns something other than a `str`): generic rendering (`ndarray(dtype=…, shape=…, data=…)`). Rendering never fails. A hook that renders its own node through `r` gets the generic rendering for it.
 - `render_python` and `render_output` accept hooks (`render_python.register(kind)` as a decorator, `register(kind, hook)`, `unregister(kind)`). `render_output` also takes any node now: a `Text` renders in the output notation exactly as before; other nodes use the Python notation, with nested `Text` in the output notation.
 - `render_json` stays generic by default, so trace files remain plain and tool-readable. It accepts hooks too, `hook(node, r: JsonRenderer) -> Snapshot`: the hook returns detached data, a snapshot node built from the node's fields and new nodes (not JSON text), and `render_json` encodes that projection in the node's place with its normal accounting. So it is cut to the node's budget `r.max_chars` like any node (data larger than the budget is cut, not refused), stays valid JSON, and its cuts are reported at the projection's own paths by `preview_attributes`, which uses the same hooks:
 
   ```python
   @render_json.register("numpy.ndarray")
   def json_ndarray(node: Object, r: JsonRenderer) -> Snapshot:
-      fields = (("shape", node.field("shape")), ("values", node.field("sample")))
+      fields = (("shape", node.field("shape")), ("values", node.field("data")))
       return Mapping("dict", 2, fields, True, None)   # {"shape": [...], "values": [...]}
   ```
 
@@ -188,7 +223,7 @@ def render_ndarray(node: Object, r: PythonRenderer) -> str:
 
 ### First users
 
-Open PR **#87** ("shape-aware pformat previews for numpy and pandas", pierreolivierbonin) already designs previews for these types. Once PR 1 lands, its previews can be re-expressed as `capture.register(T)` capture functions, registered where numpy and pandas are imported, plus `render_python` hooks for `numpy.ndarray`, `pandas.DataFrame` and `pandas.Series`.
+Open PR **#87** ("shape-aware pformat previews for numpy and pandas", pierreolivierbonin) already designs previews for these types. Once PR 1 lands, its previews become shape registrations, made where numpy and pandas are imported: `numpy.ndarray` as `ndarray_like` (shape, element, `dtype` field), `pandas.DataFrame` as `ndarray_like` over its values with `labels={1: columns, 0: index}` (and a `dtypes` field), `pandas.Series` as `ndarray_like` with `labels={0: index}` (or `mapping_like` over its index and values), plus `render_python` hooks for their kinds where the generic notation is not enough.
 
 ## The implementation (`nooa.snapshot`)
 
@@ -197,8 +232,8 @@ Public API, all importable from `nooa.snapshot`:
 | Name | What it is |
 |---|---|
 | `Scalar`, `Text`, `Sequence`, `Mapping`, `Object`, `Opaque`, `Unavailable`, `Ref`, `Spill` | the frozen snapshot nodes; `Snapshot` is their union, `Reason` / `REASONS` the reason names, `Key` a mapping key |
-| `capture(value, limits=DEFAULT_LIMITS)`, `Limits`, `DEFAULT_LIMITS` | a snapshot of a finished value; `capture.register(T)` / `capture.unregister(T)` extend it (process-wide, matched by class identity) |
-| `Out` | what a registered function gets as `(value, out: Out)`: `out.capture/sequence/mapping/object/opaque` |
+| `capture(value, limits=DEFAULT_LIMITS)`, `Limits`, `DEFAULT_LIMITS` | a snapshot of a finished value; `capture.register(T, shape)` / `capture.unregister(T)` extend it (process-wide, matched by class identity) |
+| `array_like`, `ndarray_like`, `mapping_like`, `object_like`, `text_like` | the five shapes `capture.register` takes (see *Capture: shapes, registered by type*) |
 | `capture_fields(**fields, limits=...)` | #342's `trace_fields`: a framework wrapper whose every root field survives with its type |
 | `TextStream`, `SpillTarget`, `DEFAULT_SPILL_BYTES`, `merge` | output that arrives over time; `merge` joins unread deltas |
 | `render_output`, `render_python`, `render_json`, `preview_attributes` | the renderers; the first three take per-kind hooks (`.register(kind)`) |
@@ -209,9 +244,8 @@ Details that the sections above leave open:
 - **`Limits`** has `max_chars`, `max_nodes`, `max_depth` (#342's defaults: 50,000 / 2,000 / 16), `max_items` and `max_string` (`None`: only the shared budget) and `tail_share`, the part of a cut string or container kept from its end (0: a prefix, as in trace previews; 0.5: agentdoc's split). `max_items` caps the items of every container, the fields of an `Object` too: an object keeps its first `max_items` fields (not a head and tail) and is marked `max_items` when a later field was left out. `max_string` is an upper bound: a byte value keeps only whole code points within it, so a code point wider than what is left is omitted.
 - **`max_chars` counts canonical JSON**, exactly as #342 does. So `render_json(capture(v, limits), max_chars=limits.max_chars)` gives #342's text and incomplete paths (checked against the original builder on random shapes). `render_json` also walks the snapshot with the same accounting, so it stays valid and within any smaller `max_chars`, and `preview_attributes(..., max_chars=...)` reports the cuts that rendering made. Text and metadata come from one walk: `preview_attributes` collects the spill files while it renders (the parts JSON leaves out, such as a `tail`, are only scanned for them), and the private `_render._preview(direction, snapshot, max_chars=…)` returns both the `render_json` text and the attributes, for the trace path, so a `render_json` hook runs once.
 - **Nodes beyond the design's fields:** `Text.omitted` (the units left out between head and tail: for bytes it can't be derived from the decoded strings), `Text.head_units` / `Text.tail_units` (the original units each kept part stands for, for the same reason), `Sequence.tail` / `Mapping.tail` (items kept from the end), `Sequence.type_name` / `Mapping.type_name`, `Object.module`, `Unavailable.type_name` (picks #342's typed fallback), `Ref.kind`, and `Mapping.wrapper` (marks a `capture_fields` root). `Ref.id` is the JSON Pointer of the enclosing container that the cycle points back to. Repeated references that are not cycles are captured again each time, as in #342.
-- **Every `out` method returns a deferred part** (`out.capture`, `out.sequence`, `out.mapping`, `out.object`, `out.opaque`): an opaque value whose type is private; pass one on unchanged (as below, or return it) and use nothing else of it. No child is built and no item is pulled until the part takes its slot (only a `dict`, `list` or `tuple` of `out.object` fields is copied, with its reservation prepared, when `out.object` is called; see *Extension contract*), as a field value of `out.object(...)`, an item of `out.sequence(...)`, a value of `out.mapping(...)`, or as the function's return value. A part is built in its slot's context: as a field, item or value it is one level deeper than the container, under that field name, index or key (so `max_depth` holds for recursive registered types and nested objects, and cycle `Ref` ids are field-name pointer paths); returned, it takes the value's own depth and path. Parts are single-use: building one a second time raises `ValueError` ("an out part takes one slot only"), so the value becomes `Unavailable("error")`. Single use is what lets every node be built once, in its final slot: nothing is built early and fitted into a slot later.
-- **`out.object(fields, *, type_name=None, kind=None)`** takes `(name, value)` pairs or a plain `dict`; `type_name` and `kind` are checked when it is called. A `dict`, `list` or `tuple` of fields is copied, and its reservation prepared, when it is called too; other field iterables are consumed when it is built, and every field value (a part) is built only on placement (see *Extension contract*). Fields are built in order, and each field leaves room (characters and node work) for the minimal fallback of every later field, as #342's `trace_fields` does for root fields. So in the ndarray example `shape` and `dtype` stay complete and `sample` gets what is left: present, possibly empty, and incomplete with the reason that stopped it (`max_length` or `max_nodes`). A greedy first field leaves its later siblings at least their fallback when the slot fits them: a field is never held below its own minimal value (it gets `max(min(room, its minimum), room - reserved)` characters), and node work is held back only down to one node for the current field, so in a slot too small for all the minimums the later fields are cut. A nested `out.object(...)` is a part like any other: it is built in its field's slot (that share, depth and path) and reserves for its own later fields there; as a later field it reserves the minimal fallback of its known fields (node work for each). The reservation needs the field list up front: for a `dict`, `list` or `tuple` (only for the first `max_items` fields); other iterables are pulled lazily, without it. Fields that fit are kept whole. A non-`str` `kind` or `type_name` (of `out.object`, `out.sequence` or `out.mapping`), or a `length` that is not a non-negative `int` or `None`, is an error in the capture function, so the value becomes `Unavailable("error")`. A `str` subclass is copied to an exact `str`: a snapshot never holds a live object a renderer could run.
-- **Reason `error`** is added to the list. A registered function that raises (a part used twice too), or that returns anything but a part of its own `out`, becomes `Unavailable("error")`.
+- **Shape fields and reservation.** The accessor fields of a shape are built in order, and each leaves room (characters and node work) for the minimal value of every later field, as #342's `trace_fields` does for root fields; a later accessor field, whose value is not known before its accessor runs, counts as a 2-character value and 16 nodes, a structure field (`items`, `data`, …) as an empty container and one node. So in the ndarray example `dtype` and `shape` stay complete and `data` gets what is left: present, possibly cut, and incomplete with the reason that stopped it (`max_items`, `max_length` or `max_nodes`). A field is never held below its own minimal value (it gets `max(min(room, its minimum), room - reserved)` characters), and node work is held back only down to one node for the current field, so in a slot too small for all the minimums the later fields are cut. Each part is built in its slot's context: one level deeper than the object, under its field name, index or key (so `max_depth` holds for recursive registered types, and cycle `Ref` ids are field-name pointer paths). Fields that fit are kept whole.
+- **Reason `error`** is added to the list: a shape accessor that raised, or returned something its shape can't use (see *Errors* under the shapes).
 - **Dataclasses:** the declared fields come from the nearest `__dataclass_fields__` in raw class namespaces. Values come from the native `__dict__` getset descriptor or the slot member descriptors, never through properties. `_private` fields, `repr=False` fields, `ClassVar`/`InitVar` fields and hidden fields (`Annotated[..., hidden]`, `spec(hidden=True)`, `spec()` overrides on the class or instance) are left out. String annotations (PEP 563) are never evaluated: they are parsed with `ast`, and their names (`A`, `typing.Annotated`, `agentdoc.hidden`, ...) are looked up in the raw `__dict__` of the already-loaded module that declared the field (then builtins), with no attribute hooks. Resolved objects are compared by identity with `Annotated` and the `hidden`/`spec` markers, so aliases hide like the literal form. A name that resolves to a `spec(...)` marker object (`H = spec(hidden=True)`, by exact type) or to a whole `Annotated` alias (`Secret = Annotated[str, hidden]`, by exact type) is read through its raw `kwargs` / `__metadata__`, as the runtime annotation would be, without running user code. Only the outermost `Annotated` counts, as at runtime. When a field's metadata can't be read safely (an unknown name inside `Annotated`, a `spec(...)` call without a literal `hidden=`, a marker object whose `hidden` is not a `bool`; without the declaring module, also a bare name that could alias `Annotated`), that field fails closed: it is left out and the object is marked incomplete (reason `opaque`). Unknown names outside `Annotated` (`list[Foo]`, forward references) don't matter. A string that doesn't parse (or is over 2000 chars) falls back to the textual rule: one that mentions `hidden` or `spec` inside `Annotated` fails closed the same way.
 - **Mapping keys** may be exact `str`, `int`, `float`, `bool` or `None`. `render_json` converts them the way `json.dumps` does, and stops the mapping at a key that would collide.
 - **`bytes` values** become a `Scalar` when they fit, otherwise a byte `Text` cut on code points. `render_json` shows them decoded.
@@ -255,4 +289,5 @@ Configuration stays in `TruncationConfig`. `capture.max_stdout` etc. become `Tex
 1. **Atom spills cell stdout by default:** yes, as `Shell` does.
 2. **The per-cell stdout limit stays at 50,000 characters.** It does not shrink to `Shell`'s 10 kB, even though the full output is on disk.
 3. **Spill files follow `Shell`'s lifetime rules:** kept while the job is listed, or until the `Shell` or session closes.
-4. **Capture extensions register by type only:** `capture.register(T)`, one registry per process; registration by module and class name was removed.
+4. **Capture extensions register by type only:** `capture.register(T, shape)`, one registry per process; registration by module and class name was removed. ("I would do 2 register(T) and make it per process. Don't overcomplicate things.")
+5. **Extensions declare shapes, not handlers:** "rather than writing a handler from scratch, could we have a handler that says, 'Hey, this is array-like. Here's how to get the size. Here's how to get the data. Here are a couple of other properties.' Rather than doing the printing yourself, you're mapping out the structure of the type", "maybe also ndarray like". Shapes (`array_like`, `ndarray_like`, `mapping_like`, `object_like`, `text_like`) are the only public extension API; the function handler with its `out` / `Out` and deferred parts was removed, and its builder became internal. "Use shapes for internal types (minus hot path)": Pydantic models and dataclasses are internal `object_like` shapes over their privileged readers, and the exact built-in fast paths stay, checked first, sharing their building code with the shapes.

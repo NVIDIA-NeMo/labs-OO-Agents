@@ -4,10 +4,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 from typing import Any
 
-from nooa.snapshot import Object, Out, PythonRenderer
+from nooa.snapshot import Object, PythonRenderer, ndarray_like
 
 FAKE_MODULE = "fakelib_not_installed_7c1e"
 
@@ -25,59 +24,55 @@ class _DType:
 
 
 class _FakeNdarray:
-    """Stands in for ``numpy.ndarray``: its class claims the module ``numpy``."""
+    """Stands in for ``numpy.ndarray`` (C order); counts the elements read."""
 
     def __init__(self, values: list[float], shape: tuple[int, ...]) -> None:
         self._values = values
         self.shape = shape
         self.dtype = _DType("float64")
-        self.pulled = 0
+        self.read: list[tuple[int, ...]] = []
 
-    @property
-    def flat(self) -> Iterator[float]:
-        for value in self._values:
-            self.pulled += 1
-            yield value
+    def item(self, index: tuple[int, ...]) -> float:
+        self.read.append(index)
+        flat = 0
+        for axis, i in enumerate(index):
+            flat = flat * self.shape[axis] + i
+        return self._value(flat)
+
+    def _value(self, flat: int) -> float:
+        return self._values[flat]
 
     def __repr__(self) -> str:
         raise AssertionError("repr must not run")
 
 
 _FakeNdarray.__module__ = "fakenumpy_7c1e"
-_FakeNdarray.__qualname__ = "ndarray"
-
-
-def capture_ndarray(array: Any, out: Out):
-    return out.object(
-        {
-            "shape": out.capture(array.shape),
-            "dtype": out.capture(array.dtype.name),
-            "sample": out.sequence(array.flat),
-        },
-        type_name="ndarray",
-        kind="numpy.ndarray",
-    )
-
-
-def render_ndarray(node: Object, r: PythonRenderer) -> str:
-    shape, dtype, sample = (node.field(name) for name in ("shape", "dtype", "sample"))
-    assert shape is not None and dtype is not None and sample is not None
-    return f"array({r.render(sample)}, shape={r.render(shape)}, dtype={r.render(dtype)})"
+_FakeNdarray.__qualname__ = _FakeNdarray.__name__ = "ndarray"
 
 
 class _HugeNdarray(_FakeNdarray):
-    """A huge ndarray-like value whose ``flat`` is generated, never materialized."""
+    """A huge ndarray-like value whose elements are computed, never materialized."""
 
     def __init__(self, size: int) -> None:
         super().__init__([], (size // 1000, 1000))
-        self._size = size
 
-    @property
-    def flat(self) -> Iterator[float]:
-        for value in range(self._size):
-            self.pulled += 1
-            yield float(value)
+    def _value(self, flat: int) -> float:
+        return float(flat)
 
 
 _HugeNdarray.__module__ = "fakenumpy_7c1e"
-_HugeNdarray.__qualname__ = "ndarray"
+_HugeNdarray.__qualname__ = _HugeNdarray.__name__ = "ndarray"
+
+NDARRAY = ndarray_like(
+    lambda array: array.shape,
+    lambda array, index: array.item(index),
+    fields={"dtype": lambda array: array.dtype.name},
+    kind="numpy.ndarray",
+)
+"""How numpy would be registered: ``capture.register(numpy.ndarray, NDARRAY)``."""
+
+
+def render_ndarray(node: Object, r: PythonRenderer) -> str:
+    shape, dtype, data = (node.field(name) for name in ("shape", "dtype", "data"))
+    assert shape is not None and dtype is not None and data is not None
+    return f"array({r.render(data)}, shape={r.render(shape)}, dtype={r.render(dtype)})"

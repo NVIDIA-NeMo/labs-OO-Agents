@@ -1,88 +1,261 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""A realistic extension: an ndarray-like class (no numpy), registered by type and rendered by a hook."""
+"""``ndarray_like``: an ndarray-like class (no numpy), registered by type and rendered by a hook."""
 
 from __future__ import annotations
 
 import json
 import sys
+from typing import Any
 
 import pytest
 
 from nooa.snapshot import (
     Limits,
+    Mapping,
     Object,
     Scalar,
     Sequence,
     Text,
+    Unavailable,
     capture,
+    ndarray_like,
     render_json,
     render_python,
 )
 from tests.snapshot._extend_support import (
+    NDARRAY,
     _FakeNdarray,
     _HugeNdarray,
-    capture_ndarray,
+    _named,
     render_ndarray,
 )
 
-# --- a realistic example: an ndarray-like class, no numpy ------------------------------
 
+def test_ndarray_like_nodes(registered) -> None:
+    registered(_FakeNdarray, NDARRAY)
+    small = _FakeNdarray([1.0, 2.0, 3.0, 4.0, 5.0, 6.0], (2, 3))
 
-def test_ndarray_like_example(eager, hooks) -> None:
-    before = set(sys.modules)
-    eager(_FakeNdarray, capture_ndarray)
-    hooks(render_python, "numpy.ndarray", render_ndarray)
+    snapshot = capture(small)
 
-    small = _FakeNdarray([1.0, 2.0, 3.0, 4.0], (2, 2))
-    snapshot = capture({"x": small})
-    assert render_python(snapshot) == (
-        "{'x': array([1.0, 2.0, 3.0, 4.0], shape=(2, 2), dtype='float64')}"
+    assert snapshot == Object(
+        "ndarray",
+        (
+            ("dtype", Text("float64", "", 7, "chars", True, None)),
+            ("shape", Sequence("tuple", 2, (Scalar(2), Scalar(3)), True, None)),
+            (
+                "data",
+                Sequence(
+                    "list",
+                    2,
+                    (
+                        Sequence("list", 3, (Scalar(1.0), Scalar(2.0), Scalar(3.0)), True, None),
+                        Sequence("list", 3, (Scalar(4.0), Scalar(5.0), Scalar(6.0)), True, None),
+                    ),
+                    True,
+                    None,
+                ),
+            ),
+        ),
+        True,
+        None,
+        "fakenumpy_7c1e",
+        "numpy.ndarray",
     )
-    # No json hook: the trace preview stays plain, generic JSON.
+    assert sorted(small.read) == [(i, j) for i in range(2) for j in range(3)]
+    # The generic notations, no new render code.
+    assert render_python(snapshot) == (
+        "ndarray(dtype='float64', shape=(2, 3), data=[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])"
+    )
     assert json.loads(render_json(snapshot, max_chars=1_000)) == {
-        "x": {"shape": [2, 2], "dtype": "float64", "sample": [1.0, 2.0, 3.0, 4.0]}
+        "dtype": "float64",
+        "shape": [2, 3],
+        "data": [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]],
     }
 
-    big = _FakeNdarray([float(i) for i in range(1_000_000)], (1000, 1000))
-    cut = capture(big, Limits(max_chars=200, max_items=3))
-    assert isinstance(cut, Object) and cut.kind == "numpy.ndarray"
-    assert render_python(cut) == (
-        "array(list(len=?, [:3]=[0.0, 1.0, 2.0]), shape=(1000, 1000), dtype='float64')"
+
+def test_ndarray_like_render_hook(registered, hooks) -> None:
+    before = set(sys.modules)
+    registered(_FakeNdarray, NDARRAY)
+    hooks(render_python, "numpy.ndarray", render_ndarray)
+
+    snapshot = capture({"x": _FakeNdarray([1.0, 2.0, 3.0, 4.0], (2, 2))})
+    assert render_python(snapshot) == (
+        "{'x': array([[1.0, 2.0], [3.0, 4.0]], shape=(2, 2), dtype='float64')}"
     )
-    assert big.pulled < 10  # the budget stopped the sample; the rest was never pulled
-    assert len(render_json(cut, max_chars=200)) <= 200
     assert set(sys.modules) - before == set()
 
 
-def test_ndarray_like_failing_hook_falls_back(eager, hooks) -> None:
-    eager(_FakeNdarray, capture_ndarray)
+def test_ndarray_like_failing_hook_falls_back(registered, hooks) -> None:
+    registered(_FakeNdarray, NDARRAY)
     hooks(render_python, "numpy.ndarray", lambda node, r: node.fields["shape"])  # a TypeError
 
     snapshot = capture(_FakeNdarray([1.0], (1,)))
-    assert render_python(snapshot) == "ndarray(shape=(1,), dtype='float64', sample=[1.0])"
+    assert render_python(snapshot) == "ndarray(dtype='float64', shape=(1,), data=[1.0])"
+
+
+def test_ndarray_like_summarises_the_ends_of_every_axis(registered) -> None:
+    registered(_FakeNdarray, NDARRAY)
+    array = _HugeNdarray(10**6)  # (1000, 1000)
+
+    snapshot = capture(array, Limits(max_items=4))
+
+    assert isinstance(snapshot, Object)
+    data = snapshot.field("data")
+    assert isinstance(data, Sequence) and data.length == 1000 and data.reason == "max_items"
+    assert len(data.items) == 2 and len(data.tail) == 2
+    first, last = data.items[0], data.tail[-1]
+    assert isinstance(first, Sequence) and isinstance(last, Sequence)
+    assert first.items == (Scalar(0.0), Scalar(1.0)) and first.tail == (
+        Scalar(998.0),
+        Scalar(999.0),
+    )
+    assert last.tail[-1] == Scalar(999_999.0)
+    # element ran only for the shown elements: 4 rows x 4 columns.
+    shown = {(i, j) for i in (0, 1, 998, 999) for j in (0, 1, 998, 999)}
+    assert len(array.read) == 16 and set(array.read) == shown
+    assert render_python(snapshot).startswith(
+        "ndarray(dtype='float64', shape=(1000, 1000), data=list(len=1000, [:2]=[list(len=1000,"
+        " [:2]=[0.0, 1.0], [-2:]=[998.0, 999.0])"
+    )
+
+
+def test_ndarray_like_odd_count_gives_the_head_one_more(registered) -> None:
+    registered(_FakeNdarray, NDARRAY)
+    array = _FakeNdarray([float(i) for i in range(10)], (10,))
+
+    data = capture(array, Limits(max_items=3))
+    assert isinstance(data, Object)
+    assert data.field("data") == Sequence(
+        "list", 10, (Scalar(0.0), Scalar(1.0)), False, "max_items", (Scalar(9.0),)
+    )
+    assert sorted(array.read) == [(0,), (1,), (9,)]
 
 
 @pytest.mark.parametrize("limits", [Limits(max_chars=400), Limits(max_chars=5_000), Limits()])
 @pytest.mark.parametrize("size", [10**6, 10**9])
-def test_ndarray_like_large_keeps_shape_and_dtype(eager, hooks, limits, size) -> None:
-    eager(_FakeNdarray, capture_ndarray)
-    hooks(render_python, "numpy.ndarray", render_ndarray)
+def test_ndarray_like_budget_picks_the_count(registered, limits, size) -> None:
+    registered(_FakeNdarray, NDARRAY)
     array = _HugeNdarray(size)
 
     snapshot = capture(array, limits)
 
     assert isinstance(snapshot, Object) and snapshot.kind == "numpy.ndarray"
-    assert [name for name, _node in snapshot.fields] == ["shape", "dtype", "sample"]
-    shape, dtype, sample = (snapshot.field(name) for name in ("shape", "dtype", "sample"))
-    assert shape == Sequence("tuple", 2, (Scalar(size // 1000), Scalar(1000)), True, None)
-    assert dtype == Text("float64", "", 7, "chars", True, None)
-    assert isinstance(sample, Sequence) and not sample.complete
-    expected = "max_nodes" if limits.max_chars == 50_000 else "max_length"
-    assert sample.reason == expected
-    assert 0 < len(sample.items) and array.pulled <= limits.max_nodes
-    rendered = render_python(snapshot)
-    assert rendered.startswith("array(") and f"shape=({size // 1000}, 1000)" in rendered
+    assert [name for name, _node in snapshot.fields] == ["dtype", "shape", "data"]
+    assert snapshot.field("shape") == Sequence(
+        "tuple", 2, (Scalar(size // 1000), Scalar(1000)), True, None
+    )
+    data = snapshot.field("data")
+    assert isinstance(data, Sequence) and not data.complete and data.items and data.tail
+    rows = [*data.items, *data.tail]
+    shown = sum(len(row.items) + len(row.tail) for row in rows if isinstance(row, Sequence))
+    assert len(array.read) == shown  # never an element that is not shown
+    assert len(array.read) <= limits.max_nodes
     text = render_json(snapshot, max_chars=limits.max_chars)
     assert len(text) <= limits.max_chars
     assert json.loads(text)["shape"] == [size // 1000, 1000]
+
+
+def test_ndarray_like_scalar_and_empty_axes(registered) -> None:
+    registered(_FakeNdarray, NDARRAY)
+
+    scalar = capture(_FakeNdarray([7.0], ()))
+    assert isinstance(scalar, Object) and scalar.field("data") == Scalar(7.0)
+    empty = _FakeNdarray([], (0, 5))
+    node = capture(empty)
+    assert isinstance(node, Object)
+    assert node.field("data") == Sequence("list", 0, (), True, None)
+    assert empty.read == []
+
+
+def test_ndarray_like_labels_keep_only_the_shown_ones(registered) -> None:
+    Frame = _named("Frame")
+    reads: list[int] = []
+
+    class Columns:
+        def __getitem__(self, i: int) -> str:
+            reads.append(i)
+            return f"c{i}"
+
+    shape = ndarray_like(
+        lambda frame: (3, 1000),
+        lambda frame, index: index[0] * 1000 + index[1],
+        labels={1: lambda frame: Columns(), 0: lambda frame: ["a", "b", "c"]},
+        kind="fake.frame",
+    )
+    registered(Frame, shape)
+
+    snapshot = capture(Frame(), Limits(max_items=4))
+
+    assert isinstance(snapshot, Object)
+    assert [name for name, _node in snapshot.fields] == ["shape", "labels", "data"]
+    assert snapshot.field("labels") == Mapping(
+        "dict",
+        2,
+        (
+            (
+                1,
+                Sequence(
+                    "list",
+                    1000,
+                    (
+                        Text("c0", "", 2, "chars", True, None),
+                        Text("c1", "", 2, "chars", True, None),
+                    ),
+                    False,
+                    "max_items",
+                    (
+                        Text("c998", "", 4, "chars", True, None),
+                        Text("c999", "", 4, "chars", True, None),
+                    ),
+                ),
+            ),
+            (
+                0,
+                Sequence(
+                    "list", 3, tuple(Text(c, "", 1, "chars", True, None) for c in "abc"), True, None
+                ),
+            ),
+        ),
+        True,
+        None,
+    )
+    assert sorted(reads) == [0, 1, 998, 999]
+    assert render_python(snapshot).startswith(
+        "Frame(shape=(3, 1000), labels={1: list(len=1000, [:2]=['c0', 'c1'], [-2:]=['c998', 'c999']),"
+        " 0: ['a', 'b', 'c']}, data=[list(len=1000, [:2]=[0, 1], [-2:]=[998, 999]),"
+    )
+
+
+def test_ndarray_like_errors(registered) -> None:
+    Broken = _named("Broken")
+
+    def element(value: Any, index: tuple[int, ...]) -> int:
+        if index == (1,):
+            raise RuntimeError("boom")
+        return index[0]
+
+    def fail(value: Any) -> Any:
+        raise RuntimeError("boom")
+
+    registered(Broken, ndarray_like(lambda v: (3,), element, labels={0: fail, 5: lambda v: []}))
+    snapshot = capture(Broken())
+    assert isinstance(snapshot, Object)
+    assert snapshot.field("data") == Sequence(
+        "list", 3, (Scalar(0), Unavailable("error"), Scalar(2)), True, None
+    )
+    labels = snapshot.field("labels")
+    assert isinstance(labels, Mapping)
+    assert labels.items == ((0, Unavailable("error")), (5, Unavailable("error")))  # 5: no such axis
+
+    for bad_shape in (fail, lambda v: [3], lambda v: (-1,), lambda v: (True, 2.0)):
+        registered(Broken, ndarray_like(bad_shape, element))  # type: ignore[arg-type]
+        assert capture(Broken()) == Unavailable("error", "Broken")
+
+
+def test_ndarray_like_is_built_once_in_its_slot(registered) -> None:
+    registered(_FakeNdarray, NDARRAY)
+    nested = capture([[_FakeNdarray([1.0, 2.0], (2,))]], Limits(max_depth=3))
+    assert render_python(nested) == (
+        "[[ndarray(dtype='float64', shape=(tuple: 1 items), data=[list: 2 items])]]"
+    )

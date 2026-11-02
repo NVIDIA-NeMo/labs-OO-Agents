@@ -39,7 +39,7 @@ Reason = Literal[
     "not_kept",
     "error",
 ]
-"""Why a node is incomplete. ``error``: a registered capture function raised."""
+"""Why a node is incomplete. ``error``: an accessor of a registered shape raised."""
 
 REASONS: tuple[str, ...] = (
     "max_length",
@@ -175,8 +175,8 @@ class Mapping:
 class Object:
     """A Pydantic model, a dataclass or a registered type: its kept fields, in order.
 
-    ``kind``: an optional rendering key set by a registered capture function
-    (``out.object(..., kind="numpy.ndarray")``); renderers look up per-kind
+    ``kind``: an optional rendering key set by a registered shape
+    (``ndarray_like(..., kind="numpy.ndarray")``); renderers look up per-kind
     hooks by it (``render_python.register(kind)``).
     """
 

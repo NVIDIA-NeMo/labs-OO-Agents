@@ -7,8 +7,11 @@ A snapshot is a small, detached tree (``Scalar``, ``Text``, ``Sequence``,
 node says whether it is complete and, if not, why. Two producers build it:
 
 - ``capture(value, limits)`` for finished Python values (no user code runs on
-  types it does not know; ``capture.register(T)``, process-wide and matched
-  by class identity, extends it);
+  types it does not know). ``capture.register(T, shape)``, process-wide and
+  matched by class identity, extends it with a declarative shape that maps
+  out the type's structure: ``array_like``, ``ndarray_like``,
+  ``mapping_like``, ``object_like`` or ``text_like``. Capture builds the
+  snapshot itself, with the builders and size rules of the built-in types;
 - ``TextStream`` for output that arrives over time (head, rolling tail,
   counter and an optional spill file).
 
@@ -20,9 +23,13 @@ output), ``render_python`` (agentdoc's prefill notation), ``render_json`` and
 from nooa.snapshot._capture import (
     DEFAULT_LIMITS,
     Limits,
-    Out,
+    array_like,
     capture,
     capture_fields,
+    mapping_like,
+    ndarray_like,
+    object_like,
+    text_like,
 )
 from nooa.snapshot._model import (
     REASONS,
@@ -60,7 +67,6 @@ __all__ = [
     "Mapping",
     "Object",
     "Opaque",
-    "Out",
     "OutputRenderer",
     "PythonRenderer",
     "Reason",
@@ -73,11 +79,16 @@ __all__ = [
     "Text",
     "TextStream",
     "Unavailable",
+    "array_like",
     "capture",
     "capture_fields",
+    "mapping_like",
     "merge",
+    "ndarray_like",
+    "object_like",
     "preview_attributes",
     "render_json",
     "render_output",
     "render_python",
+    "text_like",
 ]
