@@ -15,7 +15,6 @@ The unified pformat() function handles:
 - Info objects (TypeInfo, CallableInfo, ModuleInfo) directly
 """
 
-import functools
 import importlib
 import inspect
 import io
@@ -26,6 +25,7 @@ from nooa.agentdoc._format_observation import record_truncation
 from nooa.agentdoc._info import REQUIRED, CallableInfo, ModuleInfo, TypeInfo
 from nooa.agentdoc._metadata import is_expand_false
 from nooa.agentdoc._structured import _ClassRef, _InstanceRef
+from nooa.agentdoc._visibility import _resolve_type_hints, _type_hint_scope
 from nooa.agentdoc.protocols import SupportsInstanceValues
 
 
@@ -135,6 +135,7 @@ def _field_type_docstring(
     return docstring.split("\n")[0].strip()
 
 
+@_type_hint_scope()
 def _pformat(
     _object: Any,
     _stream: Any,
@@ -958,13 +959,10 @@ def _format_module_info(
 _MISSING = object()
 
 
-@functools.lru_cache(maxsize=64)
-def _get_type_hints_cached(obj_type: type) -> dict[str, Any]:
-    """Cached wrapper around typing.get_type_hints(include_extras=True)."""
-    import typing
-
+def _get_type_hints(obj_type: type) -> dict[str, Any]:
+    """Resolve formatting metadata using the current render's cache."""
     try:
-        return typing.get_type_hints(obj_type, include_extras=True)
+        return _resolve_type_hints(obj_type)
     except Exception:
         return {}
 
@@ -980,12 +978,12 @@ def _field_spec_override(obj_type: type, field_name: str, key: str) -> Any:
 
     from nooa.agentdoc._docs import SpecAnnotation
 
-    hints = _get_type_hints_cached(obj_type)
+    hints = _get_type_hints(obj_type)
     hint = hints.get(field_name)
     if hint is None:
         field = inspect.getattr_static(obj_type, field_name, None)
         if isinstance(field, property) and field.fget is not None:
-            hint = _get_type_hints_cached(field.fget).get("return")
+            hint = _get_type_hints(field.fget).get("return")
     if hint is None or typing.get_origin(hint) is not typing.Annotated:
         return _MISSING
     for metadata in typing.get_args(hint)[1:]:

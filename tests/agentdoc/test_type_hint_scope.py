@@ -1,0 +1,86 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+"""Formatting reuses annotations without retaining visibility decisions."""
+
+from __future__ import annotations
+
+import typing
+from collections import Counter
+from dataclasses import dataclass
+
+import pytest
+
+from nooa.agentdoc import hidden, pformat, pprint, spec, truncating_pformat
+from nooa.agentdoc._visibility import _type_hint_scope, is_hidden_field
+
+
+@dataclass
+class Record:
+    value: int
+    secret: typing.Annotated[str, hidden] = "PRIVATE"
+
+
+@pytest.mark.parametrize("render", [pformat, truncating_pformat, pprint])
+def test_repeated_records_reuse_hints_but_keep_instance_overrides(render, monkeypatch, capsys):
+    calls = Counter()
+    original = typing.get_type_hints
+
+    def counted(obj, *args, **kwargs):
+        calls[obj] += 1
+        return original(obj, *args, **kwargs)
+
+    monkeypatch.setattr(typing, "get_type_hints", counted)
+    shown = Record(1, "VISIBLE")
+    spec(shown, "secret", hidden=False)
+    records = [Record(0), shown] * 20
+    result = render(records)
+    if result is None:
+        result = capsys.readouterr().out
+    assert "PRIVATE" not in result
+    assert result.count("VISIBLE") == 20
+    assert calls[Record] == 1
+
+
+def test_later_render_observes_annotation_changes():
+    @dataclass
+    class Mutable:
+        value: int = 1
+        other: int = 2
+
+    item = Mutable()
+    assert "value=1" in pformat(item)
+    Mutable.__annotations__["value"] = typing.Annotated[int, hidden]
+    assert "value=1" not in pformat(item)
+    Mutable.__annotations__["value"] = int
+    assert "value=1" in pformat(item)
+
+
+def test_unresolved_annotations_can_resolve_later_in_scope(monkeypatch):
+    class Forward:
+        value: FutureHint  # noqa: F821 -- installed after the first resolution attempt
+
+    with _type_hint_scope():
+        assert not is_hidden_field(Forward, "value")
+        monkeypatch.setitem(globals(), "FutureHint", typing.Annotated[int, hidden])
+        assert is_hidden_field(Forward, "value")
+
+
+def test_scope_restores_outer_cache_and_cleans_up_after_exception(monkeypatch):
+    calls = 0
+    original = typing.get_type_hints
+
+    def counted(obj, *args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(obj, *args, **kwargs)
+
+    monkeypatch.setattr(typing, "get_type_hints", counted)
+    with pytest.raises(RuntimeError, match="render failed"), _type_hint_scope():
+        assert is_hidden_field(Record, "secret")
+        with _type_hint_scope():
+            assert is_hidden_field(Record, "secret")
+        assert is_hidden_field(Record, "secret")
+        assert calls == 1
+        raise RuntimeError("render failed")
+    assert is_hidden_field(Record, "secret")
+    assert calls == 2

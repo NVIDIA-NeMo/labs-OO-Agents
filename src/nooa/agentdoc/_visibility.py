@@ -22,7 +22,42 @@ import sys
 import threading
 import types
 import typing
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Annotated, Any, cast
+
+_type_hints: ContextVar[dict[int, tuple[Any, dict[str, Any]]] | None] = ContextVar(
+    "agentdoc_type_hints", default=None
+)
+
+
+@contextmanager
+def _type_hint_scope() -> Iterator[None]:
+    """Reuse resolved annotations within a render, never across later renders.
+
+    Recursive formatting shares the cache. Instance/class visibility overrides
+    remain live; only successful type-hint resolution is memoized.
+    """
+    if _type_hints.get() is not None:
+        yield
+        return
+    token = _type_hints.set({})
+    try:
+        yield
+    finally:
+        _type_hints.reset(token)
+
+
+def _resolve_type_hints(obj: Any) -> dict[str, Any]:
+    cache = _type_hints.get()
+    if cache is None:
+        return typing.get_type_hints(obj, include_extras=True)
+    # Keep the object alive and key by identity: callable instances can be unhashable.
+    key = id(obj)
+    if key not in cache:
+        cache[key] = (obj, typing.get_type_hints(obj, include_extras=True))
+    return cache[key][1]
 
 
 def _is_dunder(name: str) -> bool:
@@ -159,7 +194,7 @@ def is_hidden_field(cls: Any, name: str) -> bool:
             continue
         # get_type_hints resolves string annotations and forward refs
         try:
-            resolved = typing.get_type_hints(klass, include_extras=True)
+            resolved = _resolve_type_hints(klass)
         except (NameError, AttributeError, TypeError):
             resolved = None
 
