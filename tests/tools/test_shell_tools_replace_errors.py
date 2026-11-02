@@ -892,3 +892,31 @@ def test_closest_region_compares_large_old_text_line_by_line():
     lines = _closest_region_lines(content, old)
     assert lines and lines[0].startswith("Closest region: lines 2-81 (")
     assert any("factor=99" in line for line in lines)
+
+
+async def test_closest_region_search_does_not_block_the_event_loop(shell, tmp_path):
+    """The not-found hint is built off the loop: other tasks keep running meanwhile."""
+    import asyncio
+
+    lines = [
+        f"value_{i} = compute(alpha_{i}, beta_{i}, gamma_{i})  # step {i}" for i in range(6000)
+    ]
+    (tmp_path / "big.py").write_text("\n".join(lines) + "\n")
+    old = "\n".join(line.replace("compute", "computer") for line in lines[3000:3100])
+    ticks = 0
+    done = asyncio.Event()
+
+    async def ticker():
+        nonlocal ticks
+        while not done.is_set():
+            ticks += 1
+            await asyncio.sleep(0.005)
+
+    task = asyncio.create_task(ticker())
+    started_ticks = ticks
+    with pytest.raises(ValueError, match="not found|Closest region|does not occur"):
+        await shell.replace("big.py", old, "x")
+    done.set()
+    await task
+    # The search runs up to its time budget; the ticker must have run during it.
+    assert ticks - started_ticks >= 3

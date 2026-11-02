@@ -29,6 +29,7 @@ Attach to an agent::
 
 from __future__ import annotations
 
+import asyncio
 import difflib
 import functools
 import inspect
@@ -1429,7 +1430,12 @@ class ShellTools(Skill):
 
         count = content.count(old)
         if count == 0:
-            raise ValueError(_not_found_replace_message(path, resolved, content, old, new))
+            # The closest-region search is CPU work: run it off the event loop so
+            # jobs, Shells and children keep running while the hint is built.
+            message = await asyncio.to_thread(
+                _not_found_replace_message, path, resolved, content, old, new
+            )
+            raise ValueError(message)
         if count > 1:
             raise ValueError(_ambiguous_replace_message(path, content, old, count))
 
@@ -1503,7 +1509,7 @@ class ShellTools(Skill):
                 raise StaleMatchError(target, current, "captured line range is out of bounds")
             if current != target.text:
                 # Where the captured text is now, if it moved (the anchor is not relocated).
-                closest = _closest_region_lines(content, target.text)
+                closest = await asyncio.to_thread(_closest_region_lines, content, target.text)
                 hint = closest[0].split(". What differs", 1)[0] if closest else ""
                 if hint:
                     hint = hint.replace("Closest region:", "The captured text is now closest to")
