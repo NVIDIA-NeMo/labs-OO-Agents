@@ -31,6 +31,13 @@ from nooa.runtime.turn_loop import TurnCancelled  # noqa: F401  (re-exported)
 if TYPE_CHECKING:
     from nooa_atom.session.port import SessionPort
 
+
+def _hide_empty[Model: type[BaseModel]](model: Model) -> Model:
+    """Apply display metadata without erasing the model's constructor type."""
+    spec(model, hide_empty=True)
+    return model
+
+
 SessionStatus = Literal["running", "working", "idle", "retained", "closed", "on_disk"]
 """``running``: a turn is running. ``working``: its last turn ended ``Waiting``
 on a job of its own. ``idle``: live, nothing to do. ``retained``: an idle kept
@@ -53,7 +60,7 @@ class Receipt(BaseModel):
     delivered: Literal["queued", "steered"]
 
 
-@spec(hide_empty=True)
+@_hide_empty
 class ChildRef(BaseModel):
     """A handle on a child session: data plus ``wait()``, ``send()`` and ``close()``.
 
@@ -192,19 +199,19 @@ class ChildFailedError(RuntimeError):
     """A child's turn failed, it is closed, or waiting for it could never end."""
 
 
-@spec(hide_empty=True)
+@_hide_empty
 class ChildResult(BaseModel):
     """A child finished a turn with ``Done``; its full report is ``item.result.report``."""
 
-    name: str = Field("", description="the child's name")
-    path: str = Field("", description="the child's path in the session tree, else its name")
-    summary: str = Field("", description="the child's Done.explanation: one status line")
+    name: str = Field(default="", description="the child's name")
+    path: str = Field(default="", description="the child's path in the session tree, else its name")
+    summary: str = Field(default="", description="the child's Done.explanation: one status line")
     result: Annotated[TaskResult | None, spec(max_string=8000)] = Field(
-        None,
+        default=None,
         description="the child's TaskResult (always one for a worker): .report is the full report",
     )
     message: Annotated[str, spec(max_string=1000)] = Field(
-        "", description="the child's Done.message, if it sent one"
+        default="", description="the child's Done.message, if it sent one"
     )
     evidence: Annotated[list[str], spec(max_length=5, max_string=300)] = Field(
         default_factory=list, description="the child's Done.evidence"
@@ -237,7 +244,7 @@ class ChildResult(BaseModel):
     def _flatten(self) -> "ChildResult":
         done = self.done
         result = done.result if isinstance(done.result, TaskResult) else None
-        self.__dict__.update(
+        vars(self).update(
             name=self.child.name,
             path=self.child.path or self.child.name,
             summary=done.explanation,
@@ -252,7 +259,7 @@ class ChildResult(BaseModel):
         return self.path
 
 
-@spec(hide_empty=True)
+@_hide_empty
 class ChildQuestion(BaseModel):
     """A kept child asked you a question (its ``NeedInput``); reply with ``await item.child.send(...)``."""
 
@@ -260,15 +267,15 @@ class ChildQuestion(BaseModel):
         default_factory=lambda: uuid.uuid4().hex[:8],
         description="names the question until any send() to the child or its next turn",
     )
-    name: str = Field("", description="the child's name")
-    path: str = Field("", description="the child's path in the session tree, else its name")
+    name: str = Field(default="", description="the child's name")
+    path: str = Field(default="", description="the child's path in the session tree, else its name")
     question: Annotated[str, spec(max_string=2000)] = Field(description="the question")
-    reason: str | None = Field(None, description="why the child asks")
+    reason: str | None = Field(default=None, description="why the child asks")
     child: ChildRef = Field(description="handle on the child: await item.child.send(...)")
 
     @model_validator(mode="after")
     def _flatten(self) -> "ChildQuestion":
-        self.__dict__.update(name=self.child.name, path=self.child.path or self.child.name)
+        vars(self).update(name=self.child.name, path=self.child.path or self.child.name)
         return self
 
     @classmethod
@@ -281,18 +288,18 @@ class ChildQuestion(BaseModel):
         return self.path
 
 
-@spec(hide_empty=True)
+@_hide_empty
 class ChildFailed(BaseModel):
     """A child's turn failed or the child ended without a result; read ``item.error``."""
 
-    name: str = Field("", description="the child's name")
-    path: str = Field("", description="the child's path in the session tree, else its name")
+    name: str = Field(default="", description="the child's name")
+    path: str = Field(default="", description="the child's path in the session tree, else its name")
     error: Annotated[str, spec(max_string=2000)] = Field(description="what went wrong")
     child: ChildRef = Field(description="handle on the child")
 
     @model_validator(mode="after")
     def _flatten(self) -> "ChildFailed":
-        self.__dict__.update(name=self.child.name, path=self.child.path or self.child.name)
+        vars(self).update(name=self.child.name, path=self.child.path or self.child.name)
         return self
 
     def status_source(self) -> str:
@@ -306,18 +313,18 @@ CHILD_MESSAGE_CHARS = 1_000
 CHILD_MESSAGE_CUT = "\n[cut: the full report belongs in the result]"
 
 
-@spec(hide_empty=True)
+@_hide_empty
 class ChildMessage(BaseModel):
     """A progress note a child sent with ``self.message()``, not its result; read ``item.text``."""
 
-    name: str = Field("", description="the child's name")
-    path: str = Field("", description="the child's path in the session tree, else its name")
+    name: str = Field(default="", description="the child's name")
+    path: str = Field(default="", description="the child's path in the session tree, else its name")
     text: Annotated[str, spec(max_string=2000)] = Field(description="the message")
     child: ChildRef = Field(description="handle on the child: await item.child.send(...)")
 
     @model_validator(mode="after")
     def _flatten(self) -> "ChildMessage":
-        self.__dict__.update(name=self.child.name, path=self.child.path or self.child.name)
+        vars(self).update(name=self.child.name, path=self.child.path or self.child.name)
         return self
 
     def status_source(self) -> str:
@@ -616,6 +623,15 @@ class UsageChangedUpdate(_Update):
     usage: Usage
 
 
+class ExecutionUpdate(_Update):
+    """One live method lifecycle observation; never stored in the transcript."""
+
+    kind: Literal["execution"] = "execution"
+    node: dict[str, Any]
+    status: Literal["in_progress", "completed", "failed"]
+    error: str | None = None
+
+
 class AgentEventUpdate(_Update):
     """One event from the session's agent: tool calls, cell output, messages, model responses.
 
@@ -629,6 +645,7 @@ class AgentEventUpdate(_Update):
 
     kind: Literal["agent_event"] = "agent_event"
     event: SerializeAsAny[EventBase]
+    execution: dict[str, Any] | None = None
 
 
 class ClosedUpdate(_Update):
@@ -651,6 +668,7 @@ SessionEvent = Annotated[
     | ChildCreatedUpdate
     | UsageChangedUpdate
     | AgentEventUpdate
+    | ExecutionUpdate
     | ClosedUpdate,
     Field(discriminator="kind"),
 ]

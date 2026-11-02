@@ -15,6 +15,7 @@ the agent: status beyond the updates comes from ``model_info()`` and
 import asyncio
 import logging
 import re
+import time
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
@@ -46,6 +47,8 @@ from acp.schema import (
     SessionInfoUpdate,
     TextContentBlock,
     ToolCallLocation,
+    ToolCallProgress,
+    ToolCallStart,
     UsageUpdate,
     UserMessageChunk,
 )
@@ -66,6 +69,7 @@ from nooa_atom.session.items import (
     AgentEventUpdate,
     CancelledUpdate,
     ChildCreatedUpdate,
+    ExecutionUpdate,
     ItemAdmittedUpdate,
     ItemConsumedUpdate,
     ModeChangedUpdate,
@@ -352,6 +356,11 @@ class ACPEventBridge:
         # Sticky: any close(finish_open=False) before the cards are finalised
         # wins, whoever started the close.
         self._finish_open = True
+        self._execution_packet: dict[str, Any] | None = None
+        self._execution_source: str | None = None
+        self._execution_cards: dict[str, tuple[dict[str, Any], str]] = {}
+        # Only ancestry membership, bounded independently of session lifetime.
+        self._execution_seen: dict[str, None] = {}
         self._open: dict[ToolKey, _OpenCard] = {}
         self._rolling: dict[str, _RollingSlot] = {}
         self._helper_names: dict[str, str] = {}
@@ -397,6 +406,8 @@ class ACPEventBridge:
         # A mirrored child can still be running when the parent changes verbosity.
         # Finalise already-visible cards so reduced detail leaves no spinning cards.
         self._fail_tools(list(self._open), "Activity detail changed.", title="Display ended")
+        self._finish_methods("Activity detail changed.")
+        self._execution_seen.clear()
         self._rolling.clear()
         self.verbosity = cast(Verbosity, level)
 
@@ -412,7 +423,9 @@ class ACPEventBridge:
 
     # ---- subscriptions -----------------------------------------------
 
-    def _on_agent_event(self, event: EventBase, source: str | None) -> None:
+    def _on_agent_event(
+        self, event: EventBase, source: str | None, execution: dict[str, Any] | None = None
+    ) -> None:
         """One agent event, from an ``AgentEventUpdate``.
 
         ``source`` is ``None`` for this session's own agent, else the id of
@@ -421,7 +434,13 @@ class ACPEventBridge:
         """
         card = self._card_handlers.get(event.event_type)
         if card is not None:
-            card(event, source)
+            previous, previous_source = self._execution_packet, self._execution_source
+            self._execution_packet = execution if self.verbosity == "verbose" else None
+            self._execution_source = source or self.session_id
+            try:
+                card(event, source)
+            finally:
+                self._execution_packet, self._execution_source = previous, previous_source
             return
         if source is None:
             own = self._own_handlers.get(event.event_type)
@@ -435,8 +454,10 @@ class ACPEventBridge:
 
         def on_child_update(update: Any) -> None:
             kind = getattr(update, "kind", None)
-            if isinstance(update, AgentEventUpdate):
-                self._on_agent_event(update.event, child.id)
+            if isinstance(update, ExecutionUpdate):
+                self._on_execution(update)
+            elif isinstance(update, AgentEventUpdate):
+                self._on_agent_event(update.event, child.id, update.execution)
             elif isinstance(update, ChildCreatedUpdate):
                 # Announced like this session's own children, so the client
                 # knows the id before cards arrive under it.
@@ -453,6 +474,7 @@ class ACPEventBridge:
         self._mirrors[child.id] = [child.subscribe(on_child_update)]
 
     def _unmirror(self, child_id: str) -> None:
+        self._finish_methods("The subagent ended.", child_id)
         self._reset_rolling("The subagent ended before this finished.", source=child_id)
         for unsubscribe in self._mirrors.pop(child_id, []):
             unsubscribe()
@@ -462,9 +484,80 @@ class ACPEventBridge:
             title="Unfinished",
         )
 
+    def _on_execution(self, observation: ExecutionUpdate) -> None:
+        if self.verbosity != "verbose":
+            return
+        node = observation.node
+        wire = self._wire_id((observation.session_id, node["spanId"]))
+        if observation.status != "in_progress" and wire not in self._execution_cards:
+            return  # Attached/re-enabled after the start, or already finalized.
+        old, source = self._execution_packet, self._execution_source
+        self._execution_packet, self._execution_source = node, observation.session_id
+        try:
+            if observation.status == "in_progress":
+                self._enqueue(
+                    start_tool_call(wire, node["name"], kind="other", status="in_progress")
+                )
+            else:
+                self._enqueue(
+                    update_tool_call(
+                        wire,
+                        status=observation.status,
+                        content=[tool_content(text_block(observation.error))]
+                        if observation.error
+                        else None,
+                    )
+                )
+        finally:
+            self._execution_packet, self._execution_source = old, source
+
+    def _decorate_execution(self, update: ToolCallStart | ToolCallProgress) -> None:
+        cached = self._execution_cards.get(update.tool_call_id)
+        if cached is not None:
+            metadata, source = cached
+            metadata = dict(metadata)
+            if self._execution_packet and "endedAtMs" in self._execution_packet:
+                metadata["endedAtMs"] = self._execution_packet["endedAtMs"]
+        elif isinstance(update, ToolCallStart) and self._execution_packet is not None:
+            packet = dict(self._execution_packet)
+            parent_session = packet.pop("_parentSessionId", None)
+            parent = packet.get("parentSpanId")
+            parent_wire = (
+                self._wire_id((parent_session, parent)) if parent_session and parent else None
+            )
+            packet["spanId"] = update.tool_call_id
+            packet["parentSpanId"] = (
+                parent_wire
+                if parent_wire in self._execution_seen or parent_wire in self._execution_cards
+                else None
+            )
+            metadata, source = packet, self._execution_source or self.session_id
+            self._execution_seen[update.tool_call_id] = None
+            if len(self._execution_seen) > 4096:
+                self._execution_seen.pop(next(iter(self._execution_seen)))
+        else:
+            return
+        if update.status in {"completed", "failed"}:
+            metadata.setdefault("endedAtMs", time.time_ns() / 1_000_000)
+            self._execution_cards.pop(update.tool_call_id, None)
+        else:
+            self._execution_cards[update.tool_call_id] = (metadata, source)
+        update.field_meta = {**(update.field_meta or {}), "nooa.dev/execution": metadata}
+
+    def _finish_methods(self, reason: str, source: str | None = None) -> None:
+        for wire, (node, owner) in tuple(self._execution_cards.items()):
+            if node["nodeType"] == "method" and (source is None or source == owner):
+                self._enqueue(
+                    update_tool_call(
+                        wire, status="failed", content=[tool_content(text_block(reason))]
+                    )
+                )
+
     # ---- keys --------------------------------------------------------
 
     def _key(self, tool_call_id: str, source: str | None) -> ToolKey:
+        if self._execution_packet is not None:
+            tool_call_id = self._execution_packet["spanId"]
         return (source or self.session_id, tool_call_id)
 
     def _wire_id(self, key: ToolKey) -> str:
@@ -500,6 +593,8 @@ class ACPEventBridge:
 
     def _enqueue(self, update: Any) -> None:
         if not self._closed:
+            if isinstance(update, (ToolCallStart, ToolCallProgress)):
+                self._decorate_execution(update)
             for part in split_text_chunk(end_line(update)):
                 wire_id = getattr(part, "tool_call_id", None)
                 if wire_id is not None and any(
@@ -611,8 +706,10 @@ class ACPEventBridge:
         )
 
     def _on_session_update(self, update: Any) -> None:
-        if isinstance(update, AgentEventUpdate):
-            self._on_agent_event(update.event, None)
+        if isinstance(update, ExecutionUpdate):
+            self._on_execution(update)
+        elif isinstance(update, AgentEventUpdate):
+            self._on_agent_event(update.event, None, update.execution)
         elif isinstance(update, ItemConsumedUpdate):
             self._taken[update.item_id] = None
             while len(self._taken) > 256:
@@ -784,7 +881,7 @@ class ACPEventBridge:
             title = self._card_title(key, card)
             if first:
                 update = start_tool_call(
-                    card.wire_id,
+                    slot.wire_id,
                     title,
                     kind="other",
                     status="in_progress",
@@ -793,7 +890,7 @@ class ACPEventBridge:
                 )
             else:
                 update = update_tool_call(
-                    card.wire_id,
+                    slot.wire_id,
                     title=title,
                     status="in_progress",
                     content=_python_content(code),
@@ -1248,6 +1345,7 @@ class ACPEventBridge:
         # A turn that ended before its PythonOutput — an exception escaping the
         # strategy, say — leaves cards in_progress and their source retained.
         if self._finish_open:
+            self._finish_methods("Session closed before this finished.")
             # Every card, mirrored children's too: nothing will close them now.
             self._fail_tools(
                 sorted(self._open), "Session closed before this finished.", title="Unfinished"
@@ -1257,6 +1355,8 @@ class ACPEventBridge:
         self._rolling.clear()
         with suppress(Exception):
             await self.flush()
+        self._execution_cards.clear()
+        self._execution_seen.clear()
         self._closed = True
         self._fail_client_inputs(RuntimeError("closed"))
         self._queue.put_nowait(_STOP)

@@ -206,3 +206,18 @@ def test_llm_config_summary_names_the_files_and_the_env_var(tmp_path, monkeypatc
 
     monkeypatch.delenv("NEMO_OO_LLM_CONFIG")
     assert "NEMO_OO_LLM_CONFIG not set" in llm_config_summary(workspace)
+
+
+def test_execution_tree_requires_an_explicit_flag(served):
+    result = CliRunner().invoke(cli.command, [])
+    assert result.exit_code == 0, result.output
+    assert served["execution_tree"] is False
+    result = CliRunner().invoke(cli.command, ["--execution-tree"])
+    assert result.exit_code == 0, result.output
+    assert served["execution_tree"] is True
+
+
+def test_programmatic_tree_policy_reaches_worker_command(monkeypatch):
+    monkeypatch.setattr(sys, "orig_argv", ["python", "demo.py", "--execution-tree"])
+    assert cli._worker_command(True) == ["python", "demo.py", "--execution-tree"]
+    assert cli._worker_command(False) == ["python", "demo.py"]

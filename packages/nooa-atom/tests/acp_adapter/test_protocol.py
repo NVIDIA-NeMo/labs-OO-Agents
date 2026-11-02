@@ -154,6 +154,7 @@ async def test_a_session_runs_a_turn_over_stdio(tmp_path):
     assert source.content.text.startswith("```python\n")
     completed = next(u for _, u in client.updates if isinstance(u, ToolCallProgress))
     assert completed.title == started.title
+    assert completed.title is not None
     assert completed.title.startswith("python: ")
     assert "NOOA ACP smoke test passed.\n\n" in client.texts()
 
@@ -209,6 +210,7 @@ async def test_session_close_works_over_the_wire(tmp_path):
                 connection.prompt(session.session_id, [text_block("still there?")]),
                 timeout=_HANG_TIMEOUT,
             )
+    assert initialized.agent_capabilities is not None
     capabilities = initialized.agent_capabilities.session_capabilities
     assert capabilities is not None and capabilities.close is not None
     assert capabilities.delete is None
@@ -356,6 +358,7 @@ async def test_client_shutdown_releases_sessions_for_resume(tmp_path, shutdown, 
         if shutdown == "sigterm":
             process.send_signal(signal.SIGTERM)
         else:
+            assert process.stdin is not None
             process.stdin.close()
         await asyncio.wait_for(process.wait(), _HANG_TIMEOUT)
         assert process.returncode == 0
@@ -421,3 +424,64 @@ async def test_stray_prints_do_not_reach_the_acp_stream(tmp_path):
     assert b"noise on stdout" in stderr
     # Standard input is the client's: the process's own readers see nothing.
     assert (tmp_path / "stdin-read.bin").read_bytes() == b"<eof>"
+
+
+@pytest.mark.parametrize("role", [[], ["--single-process"]])
+async def test_execution_tree_round_trip_and_fresh_runs(tmp_path, role):
+    """Both router/worker and direct stdio preserve metadata and drain root completion."""
+    key = "nooa.dev/execution"
+
+    class TreeClient(_RecordingClient):
+        def __init__(self):
+            super().__init__()
+            self.root_done = asyncio.Event()
+
+        async def session_update(self, session_id, update, **kwargs):
+            await super().session_update(session_id, update, **kwargs)
+            node = (getattr(update, "field_meta", None) or {}).get(key)
+            if (
+                node
+                and node.get("parentSpanId") is None
+                and isinstance(update, ToolCallProgress)
+                and update.status == "completed"
+            ):
+                self.root_done.set()
+
+    client = TreeClient()
+    async with _spawn(client, *role, "--execution-tree", cwd=tmp_path) as (connection, _):
+        await connection.initialize(PROTOCOL_VERSION)
+        session = await connection.new_session(str(tmp_path))
+        runs = []
+        for text in ("first", "second"):
+            before = len(client.updates)
+            client.root_done.clear()
+            result = await asyncio.wait_for(
+                connection.prompt(session.session_id, [text_block(text)]), 60
+            )
+            await asyncio.wait_for(client.root_done.wait(), 10)
+            assert result.stop_reason == "end_turn"
+            updates = [
+                u
+                for _, u in client.updates[before:]
+                if isinstance(u, (ToolCallStart, ToolCallProgress))
+                and u.field_meta
+                and key in u.field_meta
+            ]
+            nodes = {
+                u.tool_call_id: (u.field_meta or {})[key]
+                for u in updates
+                if isinstance(u, ToolCallStart)
+            }
+            assert {n["nodeType"] for n in nodes.values()} >= {"method", "python"}
+            assert all(n["spanId"] == span for span, n in nodes.items())
+            assert all(
+                n["parentSpanId"] is None or n["parentSpanId"] in nodes for n in nodes.values()
+            )
+            runs.append({n["runId"] for n in nodes.values()})
+            assert len(runs[-1]) == 1
+            assert set(nodes) <= {
+                u.tool_call_id
+                for u in updates
+                if isinstance(u, ToolCallProgress) and u.status in {"completed", "failed"}
+            }
+        assert runs[0].isdisjoint(runs[1])

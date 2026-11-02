@@ -19,7 +19,7 @@ from collections import OrderedDict, deque
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import suppress
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from pydantic import BaseModel
 
@@ -327,6 +327,7 @@ class Session:
         self._closed = False
         self._before_close = before_close
         self._loop_context_hooks: list[Callable[[], object]] = []
+        self._execution = None
         self._pending_steers: list[tuple[str, str, str]] = []  # (item_id, text, source)
         self._snapshot_digest: str | None = None
         self._checkpoint_task: asyncio.Task[None] | None = None
@@ -356,6 +357,16 @@ class Session:
             set_on_change(self._on_commands_changed)
 
     # ---- lifecycle ---------------------------------------------------
+
+    def enable_execution_tree(self) -> None:
+        """Enable session-owned live observations before starting the loop."""
+        from nooa_atom.session.execution import ExecutionObserver
+
+        if self._started:
+            raise RuntimeError("enable execution observation before starting the session")
+        if self._execution is None:
+            self._execution = ExecutionObserver(self)
+            self.add_loop_context_hook(self._execution.install)
 
     def add_loop_context_hook(self, hook: Callable[[], object]) -> None:
         """Run ``hook`` once in the loop's own context before the loop starts.
@@ -478,6 +489,8 @@ class Session:
             await self._close_step("unsubscribing from its queues", unsubscribe)
         await self._close_step("closing its model client", self._close_owned_llm)
         await self._close_step("closing its record", self.handle.close)
+        if self._execution is not None:
+            self._execution.close()
         self._closed = True
         self.info.status = "closed"
         self._emit(ClosedUpdate(session_id=self.id))
@@ -881,6 +894,8 @@ class Session:
         self.info.status = "running"
 
     def _on_turn_began(self, _event: Any) -> None:
+        if self._execution is not None:
+            self._execution.begin_turn()
         self._turn_messages.clear()
         for channel, item_id in self._batch_consumed:
             self._emit(ItemConsumedUpdate(session_id=self.id, channel=channel, item_id=item_id))
@@ -888,6 +903,8 @@ class Session:
 
     def _on_turn_settled(self, event: TurnSettled) -> None:
         """``TurnSettled``: record the outcome; if recording fails, fail the turn's prompts."""
+        if self._execution is not None and event.committed:
+            self._execution.end_turn(event.kind in {"cancelled", "error"})
         if not event.committed:
             if event.kind in ("error", "cancelled"):
                 error = (
@@ -1115,7 +1132,7 @@ class Session:
         else:
             future.set_result(outcome)
 
-    def _resolve_all(self, outcome: Outcome) -> None:
+    def _resolve_all(self, outcome: Outcome | BaseException) -> None:
         pending = set(self._futures) | set(self._waiting) | set(self._consumed)
         pending.update(item_id for entries in self._ids.values() for _, item_id in entries)
         pending.update(item_id for item_id, _, _ in self._pending_steers)
@@ -1136,7 +1153,7 @@ class Session:
         hook = getattr(self._agent, "prepare_tools", None)
         if not callable(hook):
             return []
-        return [str(warning) for warning in await hook()]
+        return [str(warning) for warning in await cast(Callable[[], Awaitable[Any]], hook)()]
 
     async def register_tools(self, tools: Mapping[str, Any]) -> dict[str, str]:
         """Register and activate each tool as an agent skill under its name.
@@ -1396,6 +1413,12 @@ class Session:
         return unsubscribe
 
     def _emit(self, update: SessionEvent) -> None:
+        if self._execution is not None:
+            self._execution.dispatch(self._deliver_update, update)
+        else:
+            self._deliver_update(update)
+
+    def _deliver_update(self, update: SessionEvent) -> None:
         for listener in list(self._listeners):
             try:
                 listener(update)
@@ -1403,10 +1426,17 @@ class Session:
                 logger.warning("Session listener %r raised", listener, exc_info=True)
 
     def _on_agent_event(self, event: Any) -> None:
+        if self._execution is not None:
+            packet = self._execution.capture(event)
+            self._execution.dispatch(self._deliver_agent_event, event, packet)
+        else:
+            self._deliver_agent_event(event)
+
+    def _deliver_agent_event(self, event: Any, execution: dict[str, Any] | None = None) -> None:
         # First, so listeners see the event before anything it causes here
         # (the usage update of a model response).
         if self._listeners:
-            self._emit(AgentEventUpdate(session_id=self.id, event=event))
+            self._emit(AgentEventUpdate(session_id=self.id, event=event, execution=execution))
         if event.event_role is Role.RUNTIME_EVENT:
             return
         if isinstance(event, LLMResponse):
@@ -1426,7 +1456,7 @@ class Session:
         if not callable(hook):
             return []
         try:
-            return [PlanEntry.model_validate(entry) for entry in hook()]
+            return [PlanEntry.model_validate(entry) for entry in cast(Callable[[], Any], hook)()]
         except Exception:
             logger.warning("Session %s: could not read the agent's plan", self.id, exc_info=True)
             return []

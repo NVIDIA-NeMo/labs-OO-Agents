@@ -17,7 +17,7 @@ import uuid
 from collections.abc import Awaitable, Callable, Iterable
 from contextlib import suppress
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from nooa.events import TuiSessionResumed
 from nooa.interactive import AgentMessage, Done
@@ -127,6 +127,7 @@ class SessionRegistry:
         *,
         agent_factory: AgentFactory,
         llm_factory: LLMFactory | None = None,
+        execution_tree: bool = False,
     ) -> None:
         """``agent_factory(options, storage)`` builds each agent; the host
         chooses it (usually the agent layer's ``create_session_agent``,
@@ -137,6 +138,7 @@ class SessionRegistry:
         default. The session owns that client and closes it. When the client
         has a non-empty ``alias`` attribute, it is recorded as ``info.model``.
         """
+        self.execution_tree = execution_tree
         self.store = store
         self.llm_factory = llm_factory
         self.sessions: dict[str, Session] = {}
@@ -319,6 +321,8 @@ class SessionRegistry:
         resolved = getattr(owned_llm, "alias", None)
         if isinstance(resolved, str) and resolved:
             session.info.model = resolved
+        if self.execution_tree:
+            session.enable_execution_tree()
         install_port(agent, session, self)
         return session
 
@@ -435,7 +439,9 @@ class SessionRegistry:
         """A data handle on a live child."""
         return ChildRef(
             id=child.id,
-            name=child.name if is_valid_name(child.name) else self.child_name(child.info),
+            name=cast(str, child.name)
+            if is_valid_name(child.name)
+            else self.child_name(child.info),
             path=self.path(child.id),
             depth=child.depth,
             status=_live_status(child),
@@ -783,8 +789,9 @@ class SessionRegistry:
                 asked = None
                 if raw.get("outcome_kind") == "need_input":
                     with suppress(ValueError):
-                        asked = json.loads(str(raw.get("result_json") or "{}"))
-                        asked.setdefault("question_id", question_id(child_id, replies))
+                        parsed = json.loads(str(raw.get("result_json") or "{}"))
+                        asked = parsed
+                        parsed.setdefault("question_id", question_id(child_id, replies))
             elif event_type == "TurnStarted":
                 asked = None
             elif raw.get("channel") in ("user_messages", "steer"):

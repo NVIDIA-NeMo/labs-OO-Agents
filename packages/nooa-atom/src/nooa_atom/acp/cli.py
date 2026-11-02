@@ -147,6 +147,11 @@ def _resolve_agent_spec(_ctx: click.Context, _param: click.Parameter, value: str
 )
 @click.option("--worker-fd", type=int, default=None, hidden=True)
 @click.option("--id-base", type=int, default=None, hidden=True)
+@click.option(
+    "--execution-tree",
+    is_flag=True,
+    help="Emit optional nested method execution cards and metadata in verbose mode.",
+)
 @click.pass_context
 def command(
     ctx: click.Context,
@@ -162,6 +167,7 @@ def command(
     no_auth: bool,
     worker_fd: int | None,
     id_base: int | None,
+    execution_tree: bool,
 ) -> None:
     """Serve NOOA Atom over ACP on standard input/output, or over WebSocket.
 
@@ -234,6 +240,7 @@ def command(
         single_process=single_process,
         worker_fd=worker_fd,
         id_base=id_base,
+        execution_tree=execution_tree,
         http=HttpOptions(
             host=host,
             port=port,
@@ -267,6 +274,7 @@ def run(
     worker_fd: int | None = None,
     id_base: int | None = None,
     http: HttpOptions | None = None,
+    execution_tree: bool | None = None,
 ) -> None:
     """Serve ACP until the client leaves, in the role the options select.
 
@@ -277,6 +285,9 @@ def run(
     ``id_base`` are not passed, they are read from ``sys.argv``.
     """
     acp_stdin, acp_stdout = reserve_stdio_for_acp()
+    if execution_tree is None:
+        execution_tree = "--execution-tree" in sys.argv[1:]
+    policy = {"execution_tree": True} if execution_tree else {}
     if single_process is None and worker_fd is None and id_base is None:
         single_process, worker_fd, id_base = _role_from_argv(sys.argv[1:])
     if worker_fd is not None:
@@ -290,6 +301,7 @@ def run(
             agent_spec=agent_spec,
             sessions_dir=sessions_dir,
             agent_factory=agent_factory,
+            **policy,
         )
     elif single_process:
         asyncio.run(
@@ -302,12 +314,15 @@ def run(
                 agent_factory=agent_factory,
                 acp_stdin=acp_stdin,
                 acp_stdout=acp_stdout,
+                **policy,
             )
         )
     elif http is not None:
-        _run_http(http, sessions_dir=sessions_dir)
+        _run_http(http, sessions_dir=sessions_dir, **policy)
     else:
-        _run_router(sessions_dir=sessions_dir, tee=tee, acp_stdin=acp_stdin, acp_stdout=acp_stdout)
+        _run_router(
+            sessions_dir=sessions_dir, tee=tee, acp_stdin=acp_stdin, acp_stdout=acp_stdout, **policy
+        )
 
 
 def _role_from_argv(argv: list[str]) -> tuple[bool, int | None, int | None]:
@@ -339,8 +354,19 @@ def llm_config_summary(workspace: Path) -> str:
     return f"LLM configuration for {workspace} (lowest priority first): {listed}; {source}"
 
 
+def _worker_command(execution_tree: bool) -> list[str]:
+    """Carry an explicit programmatic policy into re-executed workers too."""
+    argv = [arg for arg in sys.orig_argv if arg != "--execution-tree"]
+    return [*argv, "--execution-tree"] if execution_tree else argv
+
+
 def _run_router(
-    *, sessions_dir: Path | None, tee: Path | None, acp_stdin: int, acp_stdout: int
+    *,
+    sessions_dir: Path | None,
+    tee: Path | None,
+    acp_stdin: int,
+    acp_stdout: int,
+    execution_tree: bool = False,
 ) -> None:
     import logging
 
@@ -357,7 +383,7 @@ def _run_router(
     if frame_log is not None:
         observers.append(frame_log)
     router = Router(
-        spawn=process_spawn(list(sys.orig_argv)),
+        spawn=process_spawn(_worker_command(execution_tree)),
         sessions_dir=sessions_dir,
         observers=observers,
     )
@@ -369,7 +395,9 @@ def _run_router(
         logging.shutdown()
 
 
-def _run_http(options: HttpOptions, *, sessions_dir: Path | None) -> None:
+def _run_http(
+    options: HttpOptions, *, sessions_dir: Path | None, execution_tree: bool = False
+) -> None:
     import logging
     import signal
 
@@ -392,7 +420,7 @@ def _run_http(options: HttpOptions, *, sessions_dir: Path | None) -> None:
         await serve_websocket(
             host=options.host,
             port=options.port,
-            spawn=process_spawn(list(sys.orig_argv)),
+            spawn=process_spawn(_worker_command(execution_tree)),
             sessions_dir=sessions_dir,
             gate=Gate(token=options.token, allowed_origins=options.allowed_origins),
             stop=stop,
@@ -413,6 +441,7 @@ def _run_worker(
     agent_spec: str | None,
     sessions_dir: Path | None,
     agent_factory: Any,
+    execution_tree: bool = False,
 ) -> None:
     # --tee and NOOA_ACP_MCP_TRACE are ignored here: the router records the
     # client's side. The server logs each workspace's model configuration
@@ -427,7 +456,10 @@ def _run_worker(
 
     def new_registry(store: SessionStore) -> SessionRegistry:
         return SessionRegistry(
-            store, agent_factory=agent_factory or create_session_agent, llm_factory=llm_factory
+            store,
+            agent_factory=agent_factory or create_session_agent,
+            llm_factory=llm_factory,
+            execution_tree=execution_tree,
         )
 
     def make_agent() -> AtomACPAgent:
@@ -466,6 +498,7 @@ async def _serve(
     agent_factory: Any,
     acp_stdin: int,
     acp_stdout: int,
+    execution_tree: bool = False,
 ) -> None:
     from nooa_atom.acp._mcp_trace import MCPHandoffTrace
     from nooa_atom.acp.server import serve
@@ -476,7 +509,10 @@ async def _serve(
 
     def new_registry(store: SessionStore) -> SessionRegistry:
         return SessionRegistry(
-            store, agent_factory=agent_factory or create_session_agent, llm_factory=llm_factory
+            store,
+            agent_factory=agent_factory or create_session_agent,
+            llm_factory=llm_factory,
+            execution_tree=execution_tree,
         )
 
     observers: list[Any] = []
