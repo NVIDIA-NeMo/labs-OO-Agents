@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from nooa import Agent, DynamicContext, strategy
+from nooa import Agent, Context, DynamicContext, strategy
 from nooa.llm_types import AssistantReasoning, AssistantText
 from nooa.runtime.event_manager import EventManager
 from nooa.strategies import PredictStrategy
@@ -293,6 +293,27 @@ class TestLLMResponseEvent:
         )
         assert "<context>" not in recorded[0].dynamic_context
         assert "</context>" not in recorded[0].dynamic_context
+        assert recorded[0].dynamic_context == fake_llm.last_messages[-1]["content"]
+
+    @pytest.mark.asyncio
+    async def test_block_named_context_does_not_replace_dynamic_context(self) -> None:
+        """A user block keyed "context" is one trailing block among the others."""
+        recorded: list[LLMResponse] = []
+        fake_llm = FakeLLMClient(scripted_responses=[_resp(content='{"v":1}')])
+
+        class TestAgent(Agent, llm=fake_llm):
+            # Decorator Context blocks come last, so this one ends the request.
+            @strategy(PredictStrategy(), context={"context": Context("only-me")})
+            async def run(self) -> dict:
+                """Return one value."""
+                ...
+
+        agent = TestAgent()
+        agent.event_manager.on("LLMResponse", lambda event: recorded.append(event))
+        await agent.run()
+
+        assert recorded[0].dynamic_context.endswith("<context>\nonly-me\n</context>")
+        assert "<state" in recorded[0].dynamic_context
         assert recorded[0].dynamic_context == fake_llm.last_messages[-1]["content"]
 
 

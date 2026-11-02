@@ -146,32 +146,6 @@ warnings.filterwarnings(
 )
 
 
-_TRAILING_CONTEXT_RE = _re.compile(r"^(.*?)(<context>.*?</context>)\s*\Z", _re.DOTALL)
-
-
-def _extract_trailing_context_envelope(messages: list[dict[str, Any]]) -> str:
-    """Pull the trailing ``<context>…</context>`` envelope from messages.
-
-    A custom context view may emit an explicit trailing ``<context>`` envelope.
-    This compatibility helper extracts it for observability consumers.
-
-    Returns the envelope (including the ``<context>…</context>`` tags)
-    when the last message is a user message whose content ends in such
-    an envelope; ``""`` otherwise. Idempotent if the envelope is missing
-    (e.g. agents without dynamic blocks).
-    """
-    if not messages:
-        return ""
-    last = messages[-1]
-    if not isinstance(last, dict) or last.get("role") != "user":
-        return ""
-    content = last.get("content", "")
-    if not isinstance(content, str):
-        return ""
-    m = _TRAILING_CONTEXT_RE.match(content)
-    return m.group(2) if m is not None else ""
-
-
 def _dynamic_context_trace_snapshot(items: tuple[Any, ...], messages: list[Any]) -> str:
     """Capture rendered trailing context blocks without adding trace-only markup."""
     if not items or not messages:
@@ -199,8 +173,7 @@ def _snapshot_llm_request(
     """Snapshot the rendered request for observability consumers (e.g. ATIF).
 
     Emits a :class:`SystemPrompt` event carrying ``messages[0].content`` and
-    returns either an explicit trailing ``<context>…</context>`` envelope or
-    the trailing block text captured during rendering. The returned
+    returns the trailing block text captured during rendering. The returned
     text is stamped onto the matching :class:`LLMResponse`. ``record=False``
     keeps the snapshot out of the LLM-visible event timeline.
     """
@@ -212,7 +185,7 @@ def _snapshot_llm_request(
             SystemPrompt(content=content, generation_id=generation_id),
             record=False,
         )
-    return _extract_trailing_context_envelope(messages) or dynamic_context_snapshot
+    return dynamic_context_snapshot
 
 
 # ---------------------------------------------------------------------------

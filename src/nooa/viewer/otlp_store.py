@@ -1307,7 +1307,70 @@ def _augment_span_attrs(
     return kept + in_attrs + out_attrs
 
 
-def reconstruct_full_spans(session_id: str) -> list[dict[str, Any]]:
+NEW_INPUT_ATTR = "nooa.viewer.new"
+"""Per-input-message flag: the message was not in the previous call of its generation."""
+
+
+def _input_identities(skeleton: list[Any]) -> list[set[str]]:
+    """Identify each input message by its block keys, or by its content when unkeyed.
+
+    Context blocks keep their key on every request while each event gets a
+    fresh one, so a key unseen in the previous call is new input even when
+    the content of a repeated block changed.
+    """
+    identities: list[set[str]] = []
+    for msg in skeleton:
+        if not msg:
+            continue  # mirrors the dense re-indexing in _augment_span_attrs
+        keys = {
+            f"key:{part['key']}"
+            for part in msg.get("parts") or []
+            if isinstance(part, dict) and part.get("key")
+        }
+        identities.append(keys or {"msg:" + json.dumps(msg, sort_keys=True, default=str)})
+    return identities
+
+
+def _new_input_attrs(spans: list[dict[str, Any]], journal_by_span: dict[str, Any]) -> None:
+    """Flag input messages that first appear in each LLM call of a generation.
+
+    Calls are compared with the previous call under the same nearest
+    ``generation`` span. The first call of a generation has nothing to
+    compare against and gets no flags.
+    """
+    by_id = {span.get("spanId"): span for span in spans}
+
+    def group_of(span: dict[str, Any]) -> str | None:
+        parent_id = span.get("parentSpanId")
+        parent = by_id.get(parent_id)
+        while parent is not None:
+            if parent.get("name") == "generation":
+                return parent.get("spanId")
+            parent = by_id.get(parent.get("parentSpanId"))
+        return parent_id
+
+    previous: dict[str | None, set[str]] = {}
+    for span in spans:  # ordered by start time
+        call = journal_by_span.get(span.get("spanId") or "")
+        if call is None:
+            continue
+        group = group_of(span)
+        identities = _input_identities(list(call.get("input_skeleton") or []))
+        seen = previous.get(group)
+        if seen is not None:
+            span["attributes"] = span.get("attributes", []) + [
+                {
+                    "key": f"llm.input_messages.{i}.message.{NEW_INPUT_ATTR}",
+                    "value": {"boolValue": not identity <= seen},
+                }
+                for i, identity in enumerate(identities)
+            ]
+        previous[group] = set().union(*identities)
+
+
+def reconstruct_full_spans(
+    session_id: str, *, mark_new_inputs: bool = False
+) -> list[dict[str, Any]]:
     """Return OTLP spans for *session_id* with journal-reconstructed messages.
 
     The single read-side helper that resolves the journal sideband
@@ -1319,6 +1382,9 @@ def reconstruct_full_spans(session_id: str) -> list[dict[str, Any]]:
     ``export_session_otlp`` (download path) so they always agree on what
     a session "is" -- the on-the-wire compression of the journal protocol
     is a strictly internal concern.
+
+    ``mark_new_inputs`` adds the viewer-only :data:`NEW_INPUT_ATTR` flags.
+    Downloads leave it off so they match a JSONL export.
     """
     db = _get_db()
     exists = db.execute("SELECT 1 FROM sessions WHERE session_id = ?", (session_id,)).fetchone()
@@ -1353,6 +1419,8 @@ def reconstruct_full_spans(session_id: str) -> list[dict[str, Any]]:
         if is_llm:
             span["attributes"] = _augment_span_attrs(attrs, journal_by_span[span_id], blocks)
 
+    if mark_new_inputs:
+        _new_input_attrs(spans, journal_by_span)
     return spans
 
 
@@ -1403,7 +1471,8 @@ def get_session_spans(session_id: str, augment: bool = True) -> list[dict[str, A
 
     With ``augment=True`` (default), LLM spans receive
     journal-reconstructed ``llm.input_messages.*`` /
-    ``llm.output_messages.*`` attributes via :func:`reconstruct_full_spans`.
+    ``llm.output_messages.*`` attributes via :func:`reconstruct_full_spans`,
+    plus the viewer's new-input flags.
     Pass ``augment=False`` to see the raw stored shape (debugging only;
     consumers should never rely on the stripped form leaking through).
     """
@@ -1424,7 +1493,7 @@ def get_session_spans(session_id: str, augment: bool = True) -> list[dict[str, A
             spans.append(span)
         return spans
 
-    return reconstruct_full_spans(session_id)
+    return reconstruct_full_spans(session_id, mark_new_inputs=True)
 
 
 def export_session_otlp(session_id: str) -> list[dict[str, Any]]:
