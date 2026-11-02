@@ -166,7 +166,7 @@ resolve view
 - Source-specific helpers translate existing state APIs; they do not choose global placement.
 - The renderer expands items in place and emits no boundary text. A canonical assistant tool-call turn and its linked results form one atomic replay group; a boundary cannot split it.
 - Provider formatting preserves a cache marker when its output can carry one and otherwise removes it. UnifiedLLM maps explicit boundaries to provider annotations or removes them when unsupported. Without a boundary, NOOA emits no explicit `cache_control` annotation.
-- The selected view owns cache placement. The CodeAct example adds a boundary after visible history and before trailing context; custom views receive none implicitly.
+- The selected view owns cache placement and places at most one `CacheBoundary`; rendering a second raises `UnsupportedContextLayout`. The CodeAct example adds a boundary after visible history and before trailing context; custom views receive none implicitly.
 - Provider-managed automatic caching and transport-routing hints such as `prompt_cache_key` are independent of explicit cache breakpoints.
 - Bounded serialization is formatting; recovery for missing data or other invented content belongs to event production or view policy.
 - Downstream stages preserve view order, except for declared atomic replay groups, or raise `UnsupportedContextLayout`; they do not resolve, evict, repair, or invent content.

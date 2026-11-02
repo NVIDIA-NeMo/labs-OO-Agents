@@ -4,7 +4,7 @@
 
 import pytest
 
-from nooa import Agent, ContextAssemblyError, strategy
+from nooa import Agent, CacheBoundary, ContextAssemblyError, strategy
 from nooa.context_blocks import UnsupportedContextLayout
 from nooa.default_context_view import CodeActView, PredictView, PurePythonView
 from nooa.events import Error, Feedback
@@ -64,6 +64,40 @@ async def test_view_failure_fails_once_without_model_calls_or_feedback(
         await agent.run()
     assert isinstance(info.value.__cause__, TypeError if failure == "raw_item" else KeyError)
     assert type(view).assembled == 1
+    assert client.calls == 0
+    assert not [e for e in agent.event_manager.values() if isinstance(e, Error | Feedback)]
+
+
+@pytest.mark.parametrize(
+    ("make_strategy", "view_base"),
+    [
+        (CodeActStrategy, CodeActView),
+        (PurePythonStrategy, PurePythonView),
+        (PredictStrategy, PredictView),
+    ],
+    ids=["codeact", "pure_python", "predict"],
+)
+async def test_second_cache_boundary_fails_once_without_model_calls_or_feedback(
+    make_strategy, view_base
+):
+    class TwoBoundaries(view_base):
+        async def assemble(self, owner, call):
+            yield CacheBoundary()
+            async for item in super().assemble(owner, call):
+                yield item
+            yield CacheBoundary()
+
+    client = CountingClient()
+
+    class Example(Agent, llm=client):
+        @strategy(make_strategy(), context_view=TwoBoundaries())
+        async def run(self) -> int:
+            """Return a number."""
+            ...
+
+    agent = Example()
+    with pytest.raises(UnsupportedContextLayout, match="at most one CacheBoundary"):
+        await agent.run()
     assert client.calls == 0
     assert not [e for e in agent.event_manager.values() if isinstance(e, Error | Feedback)]
 
