@@ -2015,6 +2015,20 @@ class CompletionClient(UnifiedLLM):
             )
         return params
 
+    def _call_endpoint_changed(self, call_config) -> bool:
+        """Whether this call sends to a different endpoint than the constructor's.
+
+        ``api_base`` and ``base_url`` are two spellings of one endpoint (the
+        same comparison as ``_request_media_inputs``); a call with no endpoint
+        while one is configured goes to the provider default, a change.
+        """
+        from nooa.unifiedllm.reasoning import _endpoint_changed
+
+        return _endpoint_changed(self.config, call_config) or (
+            any(self.config.get(key) for key in ("api_base", "base_url"))
+            and not any(call_config.get(key) for key in ("api_base", "base_url"))
+        )
+
     def _native_output_for_call(self, overrides, call_config) -> bool:
         """Return whether this call sends its output schema as ``output_config.format``.
 
@@ -2027,9 +2041,13 @@ class CompletionClient(UnifiedLLM):
         mode = validate_structured_output_mode(
             overrides.get("structured_output_mode", self.structured_output_mode)
         )
-        route_changed = self._effective_model(call_config) != self.model or any(
-            call_config.get(key) != self.config.get(key)
-            for key in ("api_base", "base_url", "custom_llm_provider", "client")
+        route_changed = (
+            self._effective_model(call_config) != self.model
+            or self._call_endpoint_changed(call_config)
+            or any(
+                call_config.get(key) != self.config.get(key)
+                for key in ("custom_llm_provider", "client")
+            )
         )
         if mode == "anthropic" and route_changed and "structured_output_mode" not in overrides:
             raise ValueError(
@@ -2388,9 +2406,11 @@ class CompletionClient(UnifiedLLM):
         self, call_config: dict[str, Any], *, is_async: bool, max_retries: int
     ) -> Any:
         """Reuse the owned transport only while its constructor routing still applies."""
-        routing_fields = ("api_base", "base_url", "api_key", "custom_llm_provider")
-        if self._effective_model(call_config) != self.model or any(
-            call_config.get(key) != self.config.get(key) for key in routing_fields
+        routing_fields = ("api_key", "custom_llm_provider")
+        if (
+            self._effective_model(call_config) != self.model
+            or self._call_endpoint_changed(call_config)
+            or any(call_config.get(key) != self.config.get(key) for key in routing_fields)
         ):
             # LiteLLM uses a supplied OpenAI SDK client's bound URL/key, ignoring
             # the corresponding call parameters. Let it build the correct client

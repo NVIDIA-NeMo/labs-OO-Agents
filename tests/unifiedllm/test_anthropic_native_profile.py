@@ -562,3 +562,36 @@ async def test_registry_native_output_config_effort_and_conflict_are_preserved(m
         assert len(bodies) == 1
     finally:
         await c.aclose()
+
+
+@pytest.mark.parametrize(
+    "configured, call",
+    [
+        ({"api_base": "https://api.test/v1"}, {"base_url": "https://api.test/v1"}),
+        ({"base_url": "https://api.test/v1"}, {"api_base": "https://api.test/v1"}),
+    ],
+)
+async def test_other_endpoint_spelling_keeps_native_profile(monkeypatch, configured, call):
+    """api_base and base_url name one endpoint; the other spelling is not a route change."""
+    bodies, _ = http_fixture(monkeypatch)
+    c = CompletionClient(
+        "openai/azure/anthropic/claude-opus-5-5",
+        api_key="fake",
+        max_tokens=8192,
+        cache_breakpoint=None,
+        retry_config=RetryConfig(max_retries=0, rate_limit_extra_retries=0),
+        structured_output_mode="anthropic",
+        **configured,
+    )
+    try:
+        await c.acall([{"role": "user", "content": "hello"}], output_model=OriginalResult, **call)
+        assert_native(bodies[0])
+        with pytest.raises(ValueError, match="cannot inherit"):
+            await c.acall(
+                [{"role": "user", "content": "hello"}],
+                output_model=OriginalResult,
+                **dict.fromkeys(call, "https://other.test/v1"),
+            )
+        assert len(bodies) == 1
+    finally:
+        await c.aclose()
