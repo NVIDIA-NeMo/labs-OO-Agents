@@ -3,12 +3,20 @@ name: nooa-model-configuration
 description: Understand and troubleshoot NOOA registry settings, aliases, credentials, reply budgets, reasoning levels, caching and reasoning replay. For permission and running Connect headlessly to onboard or edit models, use the nooa-connect skill.
 ---
 
-# Configure NOOA models
+# NOOA registry settings and semantics
 
-Produce a usable registry entry for the user's actual route, and state what was
-verified. Keep model configuration separate from agent prompts and strategies.
+For onboarding, network checks, credentials, budgets, diagnostic handoffs and
+configuration writes, follow [nooa-connect](../nooa-connect/SKILL.md), the
+canonical permission-first headless guide. Do not configure a model merely
+because you are authoring an agent or have a key available. Use existing aliases
+where appropriate; obtain scoped permission before changes or checks.
 
-## Locate the configuration before changing it
+This skill explains saved registry settings, precedence and client selection,
+not an alternative Connect workflow. See
+[Model configuration](../../docs/model-configuration.md) for file discovery and
+[Connect reference](../../docs/model-connect.md) for guided human setup/library APIs.
+Copied skills need sibling skills and the source docs matching the installed
+release/commit; use absolute installation references from a diagnostic handoff.
 
 - For a diagnostic handoff, inspect its running package/version, target file,
   effective alias source, registry chain, credential source and remaining budget.
@@ -23,6 +31,9 @@ verified. Keep model configuration separate from agent prompts and strategies.
   registry entries, shell arguments, reports or commits. `--prompt-key` provides
   masked input. Persisting a pasted key requires separate consent; check whether
   a project secrets file shadows the user file.
+
+**Windows:** run Connect inside WSL 2. Native Windows refuses `nooa` unless
+`NOOA_SKIP_PLATFORM_CHECK=1` is set; with it, `nooa connect` works and is tested.
 
 ## Run Connect through the headless skill
 
@@ -62,7 +73,7 @@ same scope and evidence rules as the headless skill.
   context window to leave room for input; check server limits if they differ
   from the published model reply maximum.
   Configured checks send this cap, including a selected level’s override; only
-  initial interface discovery uses a smaller cap. Insufficient approved budget
+  initial interface discovery uses a smaller cap. Insufficient token budget
   skips checks rather than lowering their caps. If no check sent the saved cap, report it
   as unverified. Thinking and the final answer can share the cap; a level-specific
   thinking budget needs answer headroom.
@@ -92,11 +103,13 @@ same scope and evidence rules as the headless skill.
   Responses and recognized Anthropic routes have explicit marker mappings.
   `cache_breakpoint: null` opts out of NOOA markers, not provider implicit caching.
 
-## Configure media
+## Media declarations and diagnostic evidence
 
-Set each model's `media_inputs` to the formats its provider accepts: `image`,
-`audio`, `video`, `pdf`. `File` supports PDFs with MIME type `application/pdf`.
-Use [nooa-media](../nooa-media/SKILL.md) for examples.
+Each model's `media_inputs` declares accepted `image`, `audio`, `video`, `pdf`
+formats; omitted/null/empty means text-only. `File` supports PDFs with
+`application/pdf`. Use [nooa-media](../nooa-media/SKILL.md) for typed examples and
+[nooa-connect](../nooa-connect/SKILL.md) for authorized checks before changing
+these settings. Declaration alone is not verification.
 
 Headless configuration, manual declarations and generated checks follow the
 permission and evidence rules in [nooa-connect](../nooa-connect/SKILL.md).
@@ -171,7 +184,7 @@ models:
       high: {reasoning: {effort: high, summary: auto}}
 ```
 
-The following call makes inference requests; run it only with approved allowance.
+The following example makes an inference request.
 
 ```python
 from pathlib import Path
@@ -182,7 +195,7 @@ reload_registry(Path("llm_config.yaml"))
 llm = get_llm_client("my-route", reasoning_level="high")  # persistent selection
 levels = llm.reasoning_levels
 default = llm.reasoning_default
-# Pass llm to an Agent, or make an approved direct UnifiedLLM call:
+# Pass llm to an Agent, or make a direct UnifiedLLM call:
 # For a direct UnifiedLLM call, override only this request:
 try:
     reply = await llm.acall(messages, reasoning_level="low")

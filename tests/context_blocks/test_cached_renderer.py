@@ -321,3 +321,34 @@ class TestCachedRendererEndToEndOpenAI:
             provider_formatter=OpenAIProviderFormatter(),
         ).output
         assert result == []
+
+
+class TestCachedRendererLoneSurrogates:
+    """Escaping a lone surrogate keeps the cache layout and prefix stable."""
+
+    def _render(self, status: str) -> list:
+        return render_context(
+            [
+                _static_block("sys", "Stable prefix 🎉"),
+                _dynamic_block("todo_status", status, expr="self.todo.status()"),
+            ],
+            block_formatter=CachedBlockFormatter(),
+            provider_formatter=OpenAIProviderFormatter(),
+        ).output
+
+    def test_surrogate_in_dynamic_suffix_leaves_prefix_and_boundary_intact(self):
+        clean = self._render("note ok")
+        poisoned = self._render("note ::1%\ud800.x")
+
+        assert poisoned[0] == clean[0]
+        assert isinstance(poisoned[1], CacheBoundary)
+        assert "note ::1%\\ud800.x" in poisoned[2]["content"]
+        json.dumps(poisoned[2], ensure_ascii=False).encode("utf-8")
+
+    def test_escaping_is_deterministic_across_turns(self):
+        """The same poisoned context renders identically every turn, so it can be cached."""
+        first = self._render("note ::1%\ud800.x")
+        second = self._render("note ::1%\ud800.x")
+
+        assert first[0] == second[0]
+        assert first[2] == second[2]

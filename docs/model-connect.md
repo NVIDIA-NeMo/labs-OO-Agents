@@ -1,14 +1,21 @@
 # Configure a model with NOOA Connect
 
-`nooa connect` sets up a model for NOOA. It finds the model on your endpoint,
-runs a few small test requests, and saves a named entry (an *alias*) in
-`llm_config.yaml`. Your agents then use the model by that alias.
+**Agents: start with [nooa-connect](../skills/nooa-connect/SKILL.md), the canonical
+permission-first headless guide.** Obtain scoped permission before configuration,
+network/media checks and file/alias writes. Use `--stage`, not piped wizard
+answers or unattended masked-key prompts. This page also covers guided human
+setup and the library reference.
 
-Test requests can cost money. The interactive wizard asks before its first
-test request. Agent-driven stages run without a spending prompt; authorize
-those calls before invoking them. `--yes` approves wizard checks and saving.
-To set up a model without any requests, see [Configure a model without paid
-checks](model-configuration.md).
+`nooa connect` configures a model so your agents can run smoothly. It suggests
+and saves a reply/output token limit, records the context window when known
+(or supplied by you), and lists your chosen media formats. It tests the route,
+tools, reasoning, and caching, then saves a named entry (an *alias*) in
+`llm_config.yaml`. Your agents use the model by that alias.
+
+The checks send real requests and may incur provider charges.
+The interactive wizard asks before checks and saving. `--yes` confirms both
+without asking. For a reference to the saved settings and configuration files,
+see [Model configuration](model-configuration.md).
 
 ## CLI
 
@@ -123,8 +130,8 @@ uv run nooa connect your-model --as my-model \
   never the key itself. Use `--api-key-env ''` for a local server with no key.
 - `--prompt-key` lets you paste a masked key instead (even with `--yes`). At the
   end Connect offers to save it in NOOA's `secrets.yaml`; persisting a key
-  requires separate approval, not just `--yes`.
-- `--yes` approves the test requests and saving without asking. It needs
+  requires a separate confirmation; `--yes` does not save a newly pasted key.
+- `--yes` confirms the test requests and saving without asking. It needs
   `MODEL`, `--as`, and either `--provider` or `--endpoint` plus `--api-style`.
 
 Run `uv run nooa connect --help` for all options.
@@ -409,8 +416,8 @@ tools, reasoning, conversation, and media checks. Connect may first try the API
 styles if you did not choose one.
 
 `--no-probe` (or `--probe none`) skips model requests and saves an **unverified**
-entry. It can still fetch model lists and catalogue details. To stay offline,
-supply the exact model, endpoint, and API style plus `--no-probe --no-catalogue`.
+entry. It can still fetch model lists and catalogue details. To skip those too,
+supply the exact model, endpoint, and API style plus `--no-catalogue`.
 
 For chat-family routes, a failed connection or configured text baseline blocks
 wizard saving. Tool, reasoning, caching, or media results that need attention do not.
@@ -541,7 +548,9 @@ recovery UI. Existing retry and context-window reply-cap handling retain the
 selected carrier (including an explicit per-call opt-out).
 
 - `--budget-tokens N` limits the estimated total tokens for all checks. The
-  default is no limit. It is an estimate, not a spending cap.
+  default is effectively unlimited (`10**15`). Actual use can differ from the
+  estimate; this is not a spending cap. Each invocation starts a new budget;
+  agents must track allowance across commands and get consent to raise it.
 - A check that does not fit the remaining budget is skipped. Connect does not
   lower limits or ask for more budget.
 - For chat-family routes, `--no-cache` explicitly saves `cache_breakpoint: null`
@@ -702,12 +711,18 @@ a masked credential on endpoint checks; use `--api-key-env` for unattended use.
 | `all` | Chat: baseline, tools, declared reasoning, conversation and optional media. Native decisions: routing, fresh typed smoke cases and optional image checks. |
 | `save` | Write an entry from a plan or result file. |
 
-Example:
+Minimal approved routing example (not an automatic save pipeline):
 
 ```sh
 uv run nooa connect your-model --stage routing --as work \
   --endpoint https://gateway.example/v1 --api-style chat \
-  --api-key-env MODEL_KEY > result.json
+  --api-key-env MODEL_KEY --max-tokens 1024 --budget-tokens 4096 > result.json
+```
+
+Review `ok`, `checks`, `warnings` and the entry, then confirm file/alias writes
+are authorized. Save as a separate step:
+
+```sh
 uv run nooa connect --stage save --input result.json --output llm_config.yaml
 # Register this explicit output path for the application:
 export NEMO_OO_LLM_CONFIG="$PWD/llm_config.yaml"
@@ -716,11 +731,23 @@ export NEMO_OO_LLM_CONFIG="$PWD/llm_config.yaml"
 - Pass `--endpoint`, `--api-style`, and `--api-key-env` explicitly.
 - Save `--stage discover` output and reuse it with `--discovery-file` to avoid
   another listing request.
-- `--stage save` needs `--yes` to replace an existing alias.
+- `--stage save` needs `--yes` to replace an existing alias. It can save an
+  unverified plan or a failed result; inspect the report before saving.
 - Exit code `0` means the stage passed, `1` means it failed or was inconclusive,
   and `2` means the options were invalid.
-- The report's `diagnostic_prompt` describes the failure for an agent to fix.
-  It never contains key values.
+- Reports contain `version`, `stage`, `ok`, `data`, `error`, `checks`, `warnings`,
+  `run_context` and `diagnostic_prompt`. Inspect them, not exit status alone.
+  Parser/prevalidation failures can be plain Click stderr rather than JSON.
+  Library validation errors can return stage failure/exit 1 (for example decision
+  tools/media/session or reply-cap misuse), not invalid-option/exit 2.
+- `diagnostic_prompt` describes the failure. Active credentials are redacted,
+  but keep artifacts private: plan deliberately includes synthetic requests.
+- Save strips transient provenance and replaces the selected alias as a whole,
+  not a merge. Preserve other aliases and review/carry forward approved custom
+  fields from the selected alias. Retain reports as evidence.
+- Wizard exit 0 is not proof of save: failed baseline can return normally with
+  “Nothing was saved”. Stage save can succeed on an untested or failed proposal
+  (the latter emits a stderr warning); neither proves route support.
 
 ## When something fails
 
@@ -751,8 +778,8 @@ Add `--show-diagnostics` in the wizard to see full details.
   model. Use `--output FILE` to choose another file.
 - After saving to a custom file, set `NEMO_OO_LLM_CONFIG` to its path or load it
   with `reload_registry(Path(...))`. `-w DIR` saves to `DIR/.nooa/llm_config.yaml`.
-- Editing a saved model runs fresh checks, which may cost money. Keep diagnostic
-  reports separately if you need a record of earlier results.
+- Editing a saved model runs fresh checks. Keep diagnostic reports separately
+  if you need a record of earlier results.
 - To load a config file from another path, add it to `NEMO_OO_LLM_CONFIG`.
 
 ## Choose media inputs during setup
@@ -804,9 +831,9 @@ When there is no advertised suggestion, chat setup keeps its existing choices:
 
 - **Test all media inputs (generated samples).** Connect sends one small
   generated sample per format to check that this model accepts it through this
-  connection. Formats that pass are enabled for this model entry. This uses the
-  budget you already approved. Check the model's answers on your own examples
-  before relying on it.
+  connection. Formats that pass are enabled for this model entry. The checks
+  check that the model accepts each format. Test the model's answers on your
+  own examples before relying on it.
 - **Choose media inputs manually.** No requests. The choice is saved as
   unverified.
 
@@ -830,24 +857,23 @@ Test limits:
 From the command line:
 
 ```sh
-# Set formats by hand (unverified, no requests):
-uv run nooa connect your-model --as vision --endpoint https://gateway.example/v1 \
-  --api-style chat --api-key-env MODEL_KEY --media-inputs image,pdf \
-  --no-probe --no-catalogue --yes
-
 # Test formats and enable those that pass:
 uv run nooa connect your-model --as vision --endpoint https://gateway.example/v1 \
   --api-style chat --api-key-env MODEL_KEY --test-media-inputs image,audio,video,pdf \
   --yes
 
-# Same, as a stage:
-uv run nooa connect your-model --stage media --endpoint https://gateway.example/v1 \
-  --api-style chat --api-key-env MODEL_KEY --test-media-inputs image,pdf \
-  > result.json
-uv run nooa connect --stage save --input result.json --output llm_config.yaml
-# Register this explicit output path for the application:
-export NEMO_OO_LLM_CONFIG="$PWD/llm_config.yaml"
 ```
+
+For agents, first authorize generated formats/samples and the check allowance:
+
+```sh
+uv run nooa connect your-model --stage media --as vision \
+  --endpoint https://gateway.example/v1 --api-style chat --api-key-env MODEL_KEY \
+  --max-tokens 1024 --budget-tokens 16384 --test-media-inputs image,pdf > result.json
+```
+
+Review routing/media evidence before separately saving as shown above. Media
+pass confirms strict typed Boolean access, not general accuracy.
 
 Rules:
 
