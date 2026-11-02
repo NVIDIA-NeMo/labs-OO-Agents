@@ -225,6 +225,16 @@ class TestPydantic:
         blob, allowlist = serialize(model)
         assert deserialize(blob, allowlist).model_extra == {"num_retries": 7}
 
+    @pytest.mark.parametrize("value", [{"secret": "private"}, ["private"], ("private",)])
+    def test_nosnapshot_collection_extras_are_skipped(self, value):
+        """Marked collections are omitted directly and inside nested extra values."""
+        marked_type = type("PrivateCollection", (type(value),), {"__nosnapshot__": True})
+        marked = marked_type(value)
+        assert serialize(marked)[0] is SKIP
+        model = ModelConfig(custom={"hidden": marked, "visible": value}, private=marked)
+        blob, allowlist = serialize(model)
+        assert deserialize(blob, allowlist).model_extra == {"custom": {"visible": value}}
+
     def test_simple_model_roundtrip(self):
         """Ordinary declared Pydantic fields still survive a snapshot round trip."""
         m = MyModel(name="test", value=42)
@@ -813,6 +823,30 @@ class StrictModel(BaseModel):
 
 
 class TestPydanticExtraForbid:
+    @pytest.mark.parametrize("model_cls", [MyModel, StrictModel])
+    @pytest.mark.parametrize("allow_retired_class", [False, True])
+    def test_obsolete_envelopes_are_discarded_before_restoration(
+        self, model_cls, allow_retired_class
+    ):
+        """Ignored extras need neither an allowlist entry nor an importable class."""
+        blob, allowlist = serialize(model_cls(name="saved", value=7))
+        retired_class = "retired_snapshot_module.Payload"
+        blob["data"]["obsolete"] = {
+            "__type__": "dataclass",
+            "__class__": retired_class,
+            "data": {"value": "old"},
+        }
+        if allow_retired_class:
+            allowlist.add(retired_class)
+        assert deserialize(blob, allowlist) == model_cls(name="saved", value=7)
+
+    def test_known_nested_fields_still_require_allowlist(self):
+        """Filtering obsolete fields must not bypass checks on retained fields."""
+        blob, allowlist = serialize(NestedModel(inner=MyModel(name="saved")))
+        allowlist.remove(f"{MyModel.__module__}.{MyModel.__qualname__}")
+        with pytest.raises(DeserializationError, match="not in the allowlist"):
+            deserialize(blob, allowlist)
+
     def test_pydantic_extra_forbid_lenient_restore(self):
         """Model with extra='forbid' deserializes when extra fields exist in blob."""
         blob = {
