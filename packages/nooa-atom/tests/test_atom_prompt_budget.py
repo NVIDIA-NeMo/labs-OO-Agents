@@ -375,11 +375,12 @@ async def test_prompts_make_done_message_the_reply(spec, method, tmp_path, sessi
     assert 'Done(message="your reply", explanation="short status")' in rendered
     assert "Waiting(explanation=..., on=[names], message=...)" in rendered
     assert (
-        "``message`` and ``question`` are shown as your reply; when the request asks for an "
-        "exact value or format, ``message`` is exactly that, with nothing added. "
+        "``message`` and ``question`` are shown as your reply. "
         "``explanation`` is a short status line, not the reply; use ``self.message()`` for "
         "notes while you work."
     ) in rendered
+    # The exact-output rule is said once, in the interactive role.
+    assert rendered.count("exact value or format") == (1 if method == "handle" else 0)
     assert (
         "Replies and notes go to the user, or to your parent if you are a subagent; unattended, "
         "only your result is read."
