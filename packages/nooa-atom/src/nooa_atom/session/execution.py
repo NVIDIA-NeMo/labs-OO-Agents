@@ -1,6 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Session-owned execution observations; no client or ACP dependencies."""
+"""Session-owned observations for the private ``nooa.dev/execution`` extension.
+
+Wire metadata v1 contains runId (causal group), spanId/parentSpanId (ACP card
+ids), nodeType (method/python/file/terminal), name, optional agent class, and
+startedAtMs/endedAtMs (Unix milliseconds). The ACP bridge prefixes child ids,
+roots unseen parents, and merges tool updates into complete metadata snapshots.
+Status and errors use ordinary ACP fields; arguments and return values are not
+exported. Root turns start fresh groups; children keep their creator's group.
+"""
 
 from __future__ import annotations
 
@@ -47,8 +55,9 @@ class ExecutionObserver:
     """Capture in the emitter context, deliver immutable snapshots on the session loop.
 
     Causal run ids group linked sessions; separate turn tokens scope cleanup.
-    Only active calls retain a nested agent's subscription. Completed methods
-    and tools are discarded, so this is a live feed rather than a history store.
+    Only active calls retain a nested agent's subscription. Tool starts carry
+    metadata; subsequent tool events need only their identity because the ACP
+    bridge owns the visible cards. This observer does not retain tool history.
     """
 
     def __init__(self, session: Any) -> None:
@@ -65,9 +74,8 @@ class ExecutionObserver:
         self._python: ContextVar[tuple[str, str | None] | None] = ContextVar(
             "atom_execution_python", default=None
         )
-        self._nodes: dict[str, _Node] = {}
-        self._python_ids: dict[tuple[str | None, str], str] = {}
-        self._terminals: dict[str, str] = {}
+        self._nodes: dict[str, _Node] = {}  # Active methods only; tools live in the bridge.
+        self._python_ids: dict[tuple[str | None, str], tuple[str, str]] = {}
         self._managers: dict[Any, tuple[int, Callable[[], None]]] = {}
         self._turn: str | None = None
         caller = _owner.get()
@@ -157,7 +165,6 @@ class ExecutionObserver:
             parent_session,
             run[1],
         )
-        self._nodes[span] = node
         return node
 
     @staticmethod
@@ -217,6 +224,7 @@ class ExecutionObserver:
             f"{type(agent).__name__}.{method_name}",
             parent_call_id,
         )
+        self._nodes[node.metadata["spanId"]] = node
         node.metadata["agent"] = type(agent).__name__
         node.manager = self._subscribe(agent)
         self._method_update(node, "in_progress")
@@ -262,52 +270,50 @@ class ExecutionObserver:
     @_locked
     def capture(self, event: Any) -> dict[str, Any] | None:
         """Correlate before queuing: code hooks on worker threads need the ids immediately."""
-        if self._closed or self._run.get() is None or _owner.get() is not self:
+        run = self._run.get()
+        if self._closed or run is None or _owner.get() is not self:
             return None
         kind = event.event_type
         stack = _get_agent_call_stack()
         caller = stack[-1] if stack else None
-        node = None
-        finish = False
         if kind == "ToolCallEvent" and event.name in {"python_cell", "execute_python"}:
             if event.metadata.get("prefill") or event.metadata.get("synthetic"):
                 return None
             span = f"nooa-python-{event.id}"
-            self._python_ids[self._python_key(event.tool_call_id)] = span
+            self._python_ids[self._python_key(event.tool_call_id)] = (span, run[1])
             node = self._new(span, "python", "Running Python", caller)
         elif kind == "PythonOutput":
-            span = self._python_ids.pop(self._python_key(event.tool_call_id), None)
-            node = self._nodes.pop(span, None) if span is not None else None
-            finish = True
+            execution = self._python_ids.pop(self._python_key(event.tool_call_id), None)
+            return (
+                {"spanId": execution[0], "endedAtMs": time.time_ns() / 1_000_000}
+                if execution is not None
+                else None
+            )
         elif kind == "FileEdit":
             node = self._new(f"nooa-file-{event.id}", "file", "File edit", caller)
-            self._nodes.pop(node.metadata["spanId"])
-            finish = True
-        elif kind == "TerminalCommandStarted":
-            span = f"nooa-terminal-{event.id}"
-            self._terminals[event.command_id] = span
-            node = self._new(span, "terminal", "Terminal command", caller)
-        elif kind in {"TerminalCommandOutput", "TerminalCommandFinished"}:
-            span = self._terminals.get(event.command_id)
-            node = self._nodes.get(span) if span is not None else None
-            if kind == "TerminalCommandFinished":
-                self._terminals.pop(event.command_id, None)
-                if span is not None:
-                    self._nodes.pop(span, None)
-                finish = True
-        if node is None:
-            return None
-        if finish:
             node.metadata["endedAtMs"] = time.time_ns() / 1_000_000
+        elif kind == "TerminalCommandStarted":
+            node = self._new(
+                f"nooa-terminal-{event.command_id}", "terminal", "Terminal command", caller
+            )
+        elif kind in {"TerminalCommandOutput", "TerminalCommandFinished"}:
+            # The bridge owns the full metadata. Preserve the emitter's end
+            # time: worker-thread delivery may happen after the parent ends.
+            packet: dict[str, Any] = {"spanId": f"nooa-terminal-{event.command_id}"}
+            if kind == "TerminalCommandFinished":
+                packet["endedAtMs"] = time.time_ns() / 1_000_000
+            return packet
+        else:
+            return None
         return self._packet(node)
 
     def before_code_execution(self, agent, code, execution_id, generation_id=None, **kwargs):
         with self._lock:
-            span = self._python_ids.get(self._python_key(kwargs.get("tool_call_id", "")))
-        if span is None:
+            execution = self._python_ids.get(self._python_key(kwargs.get("tool_call_id", "")))
+        if execution is None:
             return None
         stack = _get_agent_call_stack()
-        return self._python.set((span, stack[-1] if stack else None))
+        return self._python.set((execution[0], stack[-1] if stack else None))
 
     def after_code_execution(self, agent, code, result, exception, context, execution_id, **kwargs):
         if context is not None:
@@ -323,13 +329,14 @@ class ExecutionObserver:
             if turn is not None and node.turn != turn:
                 continue
             self._nodes.pop(span, None)
-            if node.metadata["nodeType"] == "method":
-                self._release(node.manager)
-                node.metadata["endedAtMs"] = time.time_ns() / 1_000_000
-                self._method_update(node, "failed", reason)
-        live = self._nodes.keys()
-        self._python_ids = {k: v for k, v in self._python_ids.items() if v in live}
-        self._terminals = {k: v for k, v in self._terminals.items() if v in live}
+            self._release(node.manager)
+            node.metadata["endedAtMs"] = time.time_ns() / 1_000_000
+            self._method_update(node, "failed", reason)
+        self._python_ids = {
+            key: execution
+            for key, execution in self._python_ids.items()
+            if turn is not None and execution[1] != turn
+        }
 
     @_locked
     def close(self) -> None:

@@ -536,45 +536,8 @@ Shared reader guides and GitHub are not modified.
 
 ## Optional execution-tree observations
 
-Run `nooa atom --execution-tree` to add live method cards and hierarchy metadata
-in **verbose** ACP activity. The flag defaults to off: existing Pool/default ACP
-presentation is unchanged. Concise and silent activity keep their normal
-presentation. `nooa_atom.acp.cli.run(execution_tree=True, ...)` supports the same
-policy programmatically, including re-executed router workers and HTTP workers.
-
-This is a private extension, not standard ACP subagent sessions. The paired
-[Aion renderer](https://github.com/ryana/aion/pull/1) understands it; Pool v1.0.16
-accepts the stream but displays method cards flat. See the
-[scripted Atom experiment](../../experiments/atom_execution_tree/README.md).
-
-Each observed method/Python/file/terminal card carries a complete value in
-`_meta["nooa.dev/execution"]`:
-
-| Field | Meaning |
-|---|---|
-| `version` | Schema version, currently `1`. |
-| `runId` | Causal execution group. A root turn starts a fresh group; children keep their creator's group across continuations. |
-| `spanId` | This card's actual ACP `toolCallId`, including any child mirroring prefix. |
-| `parentSpanId` | Owning card's actual wire ID, or `null` when this attachment has not seen that parent. |
-| `nodeType` | `method`, `python`, `file`, or `terminal`. |
-| `name` | Method or activity name. |
-| `agent` | Agent class, present on method observations. |
-| `startedAtMs` / `endedAtMs` | Unix epoch milliseconds with fractional precision; end appears on completion. |
-
-Status and errors use ordinary ACP status/content fields. Arguments, return
-values and agent context are not automatically exported. Method errors have
-bounded displayed messages. Existing Python/file/terminal content is unchanged.
-
-The session owns instrumentation; bridges only project its live updates. A
-client attached mid-execution receives subsequent activity without historical
-backfill: unknown parents become roots and completions without visible starts
-are omitted. Switching verbosity down finalizes visible cards without stopping
-the underlying work. Switching back to verbose resumes live observation. A
-bounded completed-ancestor cache may root later descendants after eviction;
-still-open ancestors remain linked. Session/load replays transcript text, not
-execution trees. Aion may persist the trees it receives in its own history.
-
-Cancellation cleanup uses a separate per-session turn identity: cancelling a
-root cannot finish a running child's calls or an older suspended generator.
-Scoped nested-agent subscriptions are released when their methods finish;
-observation composes with existing tracing and does not require OpenTelemetry.
+`nooa atom --execution-tree` adds method cards and private hierarchy metadata to
+verbose ACP activity. It defaults to off. The paired
+[Aion viewer](https://github.com/ryana/aion/pull/1) renders the tree; Pool accepts
+the metadata but displays the extra cards flat. Concise and silent activity keep
+their usual presentation. Observation is live, with no history backfill on attach.

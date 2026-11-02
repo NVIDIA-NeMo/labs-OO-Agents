@@ -267,9 +267,18 @@ async def test_detach_does_not_stop_session_observation(setup_tree):
     await attached.close()
 
 
-async def test_real_atom_python_tools_and_child_sessions(tmp_path):
+async def test_real_atom_python_tools_and_child_sessions(tmp_path, monkeypatch):
+    import time
+    from types import SimpleNamespace
+
     from atom_test_agents import ATOM_SPEC, AtomModels, cell
 
+    # Simulate delayed bridge delivery: completion times must come from the
+    # observer's emitter clock, like method times, rather than delivery time.
+    delivery_time_ns = time.time_ns() + 86_400_000_000_000
+    monkeypatch.setattr(
+        "nooa_atom.acp.event_bridge.time", SimpleNamespace(time_ns=lambda: delivery_time_ns)
+    )
     models = AtomModels()
     child_code = "return_result(Done(explanation='fixed', result=TaskResult(solution_description='s', evidence='e', how_to_verify='h', report='ok')))"
     models.scripts["helper"] = [cell(child_code)]
@@ -320,6 +329,20 @@ async def test_real_atom_python_tools_and_child_sessions(tmp_path):
             and u.status == "completed"
         ]
         assert any(u.raw_output is not None and u.raw_output["exit_code"] == 0 for u in terminals)
+        for node_type in ("python", "terminal"):
+            completed = [
+                meta(u)
+                for u in client.updates
+                if isinstance(u, ToolCallProgress)
+                and u.field_meta
+                and meta(u)["nodeType"] == node_type
+                and u.status in {"completed", "failed"}
+            ]
+            assert completed
+            for packet in completed:
+                original = nodes[packet["spanId"]]
+                assert {k: v for k, v in packet.items() if k != "endedAtMs"} == original
+                assert packet["startedAtMs"] <= packet["endedAtMs"] < delivery_time_ns / 1_000_000
         assert (tmp_path / "tree.txt").read_text() == "checked"
         before = len(client.updates)
         await root.prompt("again")
