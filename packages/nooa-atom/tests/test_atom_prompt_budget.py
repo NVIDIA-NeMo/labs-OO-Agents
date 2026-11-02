@@ -449,17 +449,13 @@ async def test_installed_skills_are_counted_not_listed(monkeypatch, tmp_path, se
         assert skill.name.split(".")[-1] not in rendered
 
 
-def test_the_quoting_advice_keeps_triple_quotes_and_adds_quote_choice_and_stdin():
+def test_the_quoting_advice_keeps_triple_quotes_only():
     from nooa_atom.agent.agent import AtomAgent
 
     text = " ".join(AtomAgent.__doc__.split())
     # The triple-quote rule stays (it cut SWE quoting errors 35 -> 9).
     assert "Write shell commands as triple-quoted strings (``sh.run('''...''')``)" in text
-    assert (
-        "Pick the quote style the text neither contains nor ends with (``'''`` when it "
-        'has three double quotes or ends with ``"``).' in text
-    )
-    assert (
-        'Run a script on stdin, not in nested quotes: ``sh.run("python3 -", stdin=script)``.'
-        in text
-    )
+    # Quote choice and script-on-stdin are an error hint on an unterminated string
+    # (nooa.errors.formatting), not always-on advice.
+    assert "neither contains nor ends with" not in text
+    assert "stdin=script" not in text

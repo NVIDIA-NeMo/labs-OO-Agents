@@ -89,6 +89,22 @@ Use `print(doc(...))` to inspect the available command runner and how it accepts
 commands or standard input.'''
 
 
+# Appended to a SyntaxError for an unterminated string literal (single- or
+# triple-quoted): the text usually contains or ends with the closing quote.
+_UNTERMINATED_STRING_RE = re.compile(r"^unterminated (?:triple-quoted )?string literal")
+_QUOTE_HINT = (
+    "Hint: pick a quote style the text neither contains nor ends with, or pass a "
+    'script on stdin: sh.run("python3 -", stdin=script).'
+)
+
+
+def _maybe_quote_hint(error: SyntaxError) -> str | None:
+    """Return the quote-style hint for an unterminated string literal, else None."""
+    if _UNTERMINATED_STRING_RE.match(error.msg or ""):
+        return _QUOTE_HINT
+    return None
+
+
 # Call-shape TypeError messages — a method/function called with the wrong
 # signature. These name the bad arg but never the correct signature, so the
 # model loops guessing synonyms (issue #245). We append the callable's concise
@@ -850,9 +866,9 @@ class IPythonErrorFormatter:
         # Adjust line numbers for wrapper offset
         formatted = _adjust_line_numbers(formatted, line_offset)
 
-        hint = _maybe_heredoc_hint(error)
-        if hint:
-            formatted = f"{formatted}\n\n{hint}"
+        for hint in (_maybe_heredoc_hint(error), _maybe_quote_hint(error)):
+            if hint:
+                formatted = f"{formatted}\n\n{hint}"
 
         return formatted
 

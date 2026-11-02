@@ -883,6 +883,52 @@ class TestHeredocHint:
         assert "shell.write" not in hint
 
 
+class TestQuoteHint:
+    """An unterminated string literal gets a one-line quote-style / stdin hint."""
+
+    HINT = (
+        "Hint: pick a quote style the text neither contains nor ends with, or pass a "
+        'script on stdin: sh.run("python3 -", stdin=script).'
+    )
+
+    @staticmethod
+    def _format(code: str) -> str:
+        try:
+            compile(code, "Cell In[1]", "exec")
+        except SyntaxError as e:
+            return format_error_for_llm(e, code)
+        raise AssertionError(f"expected SyntaxError compiling: {code!r}")
+
+    @pytest.mark.parametrize(
+        "code",
+        [
+            'x = "abc',
+            'r = await sh.run("""echo "hi"""")',
+            'script = """print("done")\n',
+        ],
+    )
+    def test_hint_on_unterminated_string_literal(self, code):
+        result = self._format(code)
+        assert "unterminated" in result and "string literal" in result
+        assert result.count(self.HINT) == 1
+
+    def test_hint_on_a_validator_wrapped_unterminated_string(self):
+        from nooa.runtime.code_validator import UnifiedCodeValidator, ValidationContext
+
+        code = "r = await sh.run('''cat x\n"
+        with pytest.raises(RestrictedCodeError) as exc_info:
+            UnifiedCodeValidator().validate(code, ValidationContext(execution_count=2))
+        result = format_error_for_llm(exc_info.value, code)
+        assert "unterminated triple-quoted string literal" in result
+        assert result.count(self.HINT) == 1
+
+    @pytest.mark.parametrize("code", ["x = (1", "def f(:\n    pass", "x = 1 +", 'x = "a" "b" c'])
+    def test_no_hint_for_other_syntax_errors(self, code):
+        result = self._format(code)
+        assert "SyntaxError" in result
+        assert "quote style" not in result and "stdin" not in result
+
+
 class _ShellToolsLike:
     def replace(self, path, old, new):
         """Replace at an unambiguous location."""
