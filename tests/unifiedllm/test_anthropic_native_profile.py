@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Explicit native carrier through Predict, LiteLLM, SDKs and mock HTTP only."""
 
+import asyncio
 import json
 from copy import deepcopy
 
@@ -595,3 +596,52 @@ async def test_other_endpoint_spelling_keeps_native_profile(monkeypatch, configu
         assert len(bodies) == 1
     finally:
         await c.aclose()
+
+
+async def test_shared_http_client_keeps_one_native_hook_and_no_noaa_clients(monkeypatch):
+    """Clients sharing a caller-owned httpx client leave one hook that holds none of them."""
+    import gc
+    import weakref
+
+    from openai import AsyncOpenAI
+
+    bodies, _ = http_fixture(monkeypatch)
+
+    def respond(request):
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, json=response_body("chat", '{"value":323}'))
+
+    shared = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+    sdk = AsyncOpenAI(
+        http_client=shared, base_url="https://api.test/v1", api_key="fake", max_retries=0
+    )
+    references = []
+    try:
+        for _ in range(3):
+            c = client(structured_output_mode="anthropic", client=sdk)
+            await c.acall([{"role": "user", "content": "hello"}], output_model=OriginalResult)
+            references.append(weakref.ref(c))
+            del c
+        gc.collect()
+        assert len(shared.event_hooks["request"]) <= 1
+        assert all(reference() is None for reference in references)
+        assert all(body["output_config"]["format"] for body in bodies)
+        # Ordinary requests on the shared client are not checked.
+        response = await shared.post("https://api.test/v1/other", json={"tools": []})
+        assert response.status_code == 200
+        # Concurrent native calls on two clients each see their own schema.
+        a = client(structured_output_mode="anthropic", client=sdk)
+        b = client(structured_output_mode="anthropic", client=sdk)
+        try:
+            await asyncio.gather(
+                *(
+                    c.acall([{"role": "user", "content": "hello"}], output_model=OriginalResult)
+                    for c in (a, b, a, b)
+                )
+            )
+        finally:
+            await a.aclose()
+            await b.aclose()
+        assert len(shared.event_hooks["request"]) <= 1
+    finally:
+        await shared.aclose()

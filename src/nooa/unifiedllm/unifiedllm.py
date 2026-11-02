@@ -1992,6 +1992,57 @@ def _apply_cache_control_preserve_patch():
 _apply_cache_control_preserve_patch()
 
 
+# The output schema of the native-output call running in this context, read by
+# the request hooks below. A ContextVar keeps concurrent calls separate.
+_NATIVE_OUTPUT_CONTRACT: ContextVar[dict[str, Any] | None] = ContextVar(
+    "nooa_native_output_contract", default=None
+)
+
+
+def _check_native_output_request(request):
+    """httpx request hook: verify the outgoing body still has the expected schema.
+
+    Raises ``ValueError`` (which stops the request) if
+    ``output_config.format`` is missing or differs from the schema built for
+    this call, or if another output format or tools were added. Requests
+    outside a native-output call are not checked. This is one module-level
+    function, so a shared httpx client gets a single hook that keeps no NOOA
+    client alive; the expected schema comes from the ContextVar set by the
+    active call's ``_native_output_request_scope``.
+    """
+    expected = _NATIVE_OUTPUT_CONTRACT.get()
+    if expected is None:
+        return
+    wire = json.loads(request.content)
+    output = wire.get("output_config")
+    if (
+        not isinstance(output, dict)
+        or output.get("format") != expected
+        or any(
+            key in wire
+            for key in (
+                "response_format",
+                "output_format",
+                "text_format",
+                "text.format",
+                "tools",
+                "tool_choice",
+            )
+        )
+        or isinstance(wire.get("text"), dict)
+        and "format" in wire["text"]
+    ):
+        raise ValueError(
+            "Native output_config.format schema was changed or dropped before send; "
+            "generic structured-output carriers are not permitted"
+        )
+
+
+async def _acheck_native_output_request(request):
+    """Async version of ``_check_native_output_request`` for ``httpx.AsyncClient``."""
+    _check_native_output_request(request)
+
+
 class CompletionClient(UnifiedLLM):
     def _prepare_call_config(self, overrides: dict[str, Any]) -> dict[str, Any]:
         """Validate and remove a per-call ``structured_output_mode`` before the base logic.
@@ -2196,45 +2247,6 @@ class CompletionClient(UnifiedLLM):
                 "Native Anthropic carrier requires Anthropic Messages or a Chat-compatible gateway"
             )
 
-    def _check_native_output_request(self, request):
-        """httpx request hook: verify the outgoing body still has the expected schema.
-
-        Raises ``ValueError`` (which stops the request) if
-        ``output_config.format`` is missing or differs from the schema built
-        for this call, or if another output format or tools were added.
-        Requests outside a native-output call are not checked.
-        """
-        expected = self._native_output_contract.get()
-        if expected is None:
-            return
-        wire = json.loads(request.content)
-        output = wire.get("output_config")
-        if (
-            not isinstance(output, dict)
-            or output.get("format") != expected
-            or any(
-                key in wire
-                for key in (
-                    "response_format",
-                    "output_format",
-                    "text_format",
-                    "text.format",
-                    "tools",
-                    "tool_choice",
-                )
-            )
-            or isinstance(wire.get("text"), dict)
-            and "format" in wire["text"]
-        ):
-            raise ValueError(
-                "Native output_config.format schema was changed or dropped before send; "
-                "generic structured-output carriers are not permitted"
-            )
-
-    async def _acheck_native_output_request(self, request):
-        """Async version of ``_check_native_output_request`` for ``httpx.AsyncClient``."""
-        self._check_native_output_request(request)
-
     @contextmanager
     def _native_output_request_scope(self, api_params, output_model, native_output, *, is_async):
         """Check the HTTP request LiteLLM sends during a native-output call.
@@ -2253,9 +2265,11 @@ class CompletionClient(UnifiedLLM):
 
         # Check the request body that is actually sent, not only the
         # parameters given to LiteLLM, which could still drop or rewrite the
-        # schema. The hook is added to this client's own httpx client, never to
-        # a shared global one; concurrent calls each see their own expected
-        # schema through the ContextVar.
+        # schema. The hook is added to this call's httpx client, never to a
+        # global one. It is a module-level function, added once per httpx
+        # client, so a caller-owned client shared by several CompletionClients
+        # holds no reference to them; concurrent calls each see their own
+        # expected schema through the ContextVar.
         client = api_params.get("client")
         http = getattr(client, "_client", None)
         if http is None:
@@ -2266,17 +2280,17 @@ class CompletionClient(UnifiedLLM):
                 "Native structured output requires a verifiable per-client HTTP transport; "
                 "construct a separate CompletionClient for a replacement route"
             )
-        hook = self._acheck_native_output_request if is_async else self._check_native_output_request
+        hook = _acheck_native_output_request if is_async else _check_native_output_request
         hooks = http.event_hooks.setdefault("request", [])
         if hook not in hooks:
             hooks.append(hook)
         # Build the expected schema again from output_model instead of reusing
         # the dict in api_params, which LiteLLM could modify in place.
-        token = self._native_output_contract.set(anthropic_output_format(output_model))
+        token = _NATIVE_OUTPUT_CONTRACT.set(anthropic_output_format(output_model))
         try:
             yield
         finally:
-            self._native_output_contract.reset(token)
+            _NATIVE_OUTPUT_CONTRACT.reset(token)
 
     @staticmethod
     def _response_from_chat(raw_response, scope, tools, output_model, *, native_output=False):
@@ -2382,9 +2396,6 @@ class CompletionClient(UnifiedLLM):
             structured_output_mode=structured_output_mode,
             media_inputs=media_inputs,
             **config,
-        )
-        self._native_output_contract: ContextVar[dict[str, Any] | None] = ContextVar(
-            "native_output_contract", default=None
         )
         self.retry_config = retry_config or RetryConfig()
         self.cache_breakpoint = cache_breakpoint
