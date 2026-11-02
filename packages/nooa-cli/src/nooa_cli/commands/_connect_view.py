@@ -185,7 +185,11 @@ def connection_detail(record):
     if record.get("finish_reason") != "stop":
         return "Failed · Reply did not finish"
     if record.get("final_answer_observed") is not True:
-        return "Failed · No final answer returned"
+        # Seen with DeepSeek on NVIDIA Build: with reasoning on, the server put
+        # the whole reply in the reasoning field and left the answer empty.
+        if record.get("reasoning_observed"):
+            return "Failed · The model returned no answer, only reasoning"
+        return "Failed · The model returned no answer"
     if record.get("typed_result_validated") is not True:
         return "Failed · Answer was not in the required format"
     if record.get("answer_correct") is not True:

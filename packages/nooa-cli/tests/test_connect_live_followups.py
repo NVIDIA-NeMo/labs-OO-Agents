@@ -95,3 +95,40 @@ async def test_off_level_that_still_reasons_is_never_verified(monkeypatch):
     summary, _ = save_verification(result.entry)
     assert summary["state"] != "verified"
     assert "level:off" in summary["unverified_scopes"]
+
+
+@pytest.mark.asyncio
+async def test_answer_only_in_reasoning_says_the_model_returned_no_answer(monkeypatch):
+    """DeepSeek v4.1 flash on Build put the typed answer in reasoning_content, not content."""
+
+    def handle(request):
+        return httpx.Response(
+            200,
+            json={
+                "id": "r",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {
+                            "role": "assistant",
+                            "content": None,
+                            "reasoning_content": '{"value": 323}',
+                        },
+                    }
+                ],
+                "usage": {"prompt_tokens": 275, "completion_tokens": 8, "total_tokens": 283},
+            },
+        )
+
+    mock_http(monkeypatch, handle)
+    proposal = connect.plan("local", "model", "chat", "https://api.test/v1", "")
+    result = await connect.check_stage(proposal, "routing", api_key="test-key")
+    record = result.entry["provenance"]["probes"]["routing"]
+    assert record["final_answer_observed"] is False and record["reasoning_observed"] is True
+    assert view.connection_detail(record) == (
+        "Failed · The model returned no answer, only reasoning"
+    )

@@ -760,7 +760,11 @@ def test_false_access_is_clear_and_keeps_effective_permission(kind, enabled):
     [
         ({"finish_reason": "length"}, "Reply reached the token limit before finishing"),
         ({"finish_reason": "content_filter"}, "Reply failed or was filtered"),
-        ({"final_answer_observed": False}, "No final answer returned"),
+        ({"final_answer_observed": False}, "Failed · The model returned no answer"),
+        (
+            {"final_answer_observed": False, "reasoning_observed": True},
+            "Failed · The model returned no answer, only reasoning",
+        ),
         ({"typed_result_validated": False}, "Answer was not in the required format"),
         ({"settings_sent": False}, "selected settings were not observed"),
         (
