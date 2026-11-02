@@ -717,3 +717,53 @@ def test_save_verification_uses_setting_aware_reasoning_rule(level, settings, st
     assert summary["state"] == state
     assert agrees == (state == "verified")
     assert ("level:" + level in summary["verified_scopes"]) == agrees
+
+
+def test_preexisting_key_reference_does_not_block_rollback(tmp_path, monkeypatch, capsys):
+    """An alias that already named the key variable is not evidence the save wrote anything."""
+    state = wizard_state(tmp_path, monkeypatch, key=True)
+    state.path.write_text(
+        yaml.safe_dump({"models": {"existing": candidate() | {"temperature": 0.3}}})
+    )
+    before = state.path.read_bytes()
+    monkeypatch.setattr(prompts, "confirm", lambda *a, **k: True)
+
+    def fail_before_write(*a, **kw):
+        raise OSError("synthetic failure before the model file changed")
+
+    monkeypatch.setattr(connect, "write", fail_before_write)
+    with pytest.raises(ValueError, match="the new key was rolled back"):
+        wizard.save_model(state)
+    assert state.path.read_bytes() == before
+    secrets_file = tmp_path / "secrets.yaml"
+    assert not secrets_file.exists() or "SYNTHETIC_SAVE_KEY" not in secrets_file.read_text()
+    captured = capsys.readouterr()
+    assert "Saved model" not in captured.out and "Saved key" not in captured.out
+
+
+def test_preexisting_key_reference_still_keeps_key_for_new_reference(tmp_path, monkeypatch):
+    """A reference written by the attempted commit keeps the key, even beside an old one."""
+    state = wizard_state(tmp_path, monkeypatch, key=True)
+    state.path.write_text(yaml.safe_dump({"models": {"existing": candidate()}}))
+    monkeypatch.setattr(prompts, "confirm", lambda *a, **k: True)
+    real_write = connect.write
+
+    def committed_then_moved(*a, **kw):
+        real_write(*a, **kw)
+        committed = registry.load_model_entries(state.path)["local"]
+        real_write(committed, state.path, alias="moved", expected_alias=connect.ALIAS_MISSING)
+        real_write(
+            candidate() | {"api_key_env": "DIFFERENT_SYNTHETIC_KEY"},
+            state.path,
+            alias="local",
+            expected_alias=committed,
+        )
+        raise OSError("synthetic post-commit failure")
+
+    monkeypatch.setattr(connect, "write", committed_then_moved)
+    with pytest.raises(ValueError, match="partial state"):
+        wizard.save_model(state)
+    assert (
+        yaml.safe_load((tmp_path / "secrets.yaml").read_text())["env"]["SYNTHETIC_SAVE_KEY"]
+        == "synthetic-secret-canary"
+    )

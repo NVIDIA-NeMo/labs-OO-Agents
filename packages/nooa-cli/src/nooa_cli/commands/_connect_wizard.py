@@ -3236,6 +3236,28 @@ def save_model(state: WizardState) -> bool:
         if save_key:
             from nooa.secrets import new_secret_env
 
+            def key_references(document):
+                """Return the profiles in ``document`` that use the new key variable."""
+                return {
+                    alias: profile
+                    for alias, profile in (document.get("models") or {}).items()
+                    if isinstance(profile, dict) and profile.get("api_key_env") == state.api_key_env
+                }
+
+            # References that exist before the commit were not written by it,
+            # so they alone must not keep the new key after a failed save. If
+            # the file cannot be read now, assume there were none (keeps the key).
+            try:
+                before_document = yaml.safe_load(state.path.read_text())
+                earlier_references = (
+                    key_references(before_document)
+                    if isinstance(before_document, dict)
+                    and isinstance(before_document.get("models", {}), dict)
+                    else {}
+                )
+            except Exception:
+                earlier_references = {}
+
             def model_may_be_saved():
                 # The usual registry reader ignores read and parse errors. Here an
                 # unreadable file must not count as "model not saved", so read
@@ -3249,11 +3271,12 @@ def save_model(state: WizardState) -> bool:
                 ):
                     raise ValueError("Cannot determine whether the model was committed")
                 # Another process may have changed the entry or its alias in the
-                # meantime but still use the new key variable. If any entry uses
-                # it, keep the saved key.
+                # meantime but still use the new key variable. If any entry that
+                # was not there unchanged before the commit uses it, keep the
+                # saved key.
                 return any(
-                    isinstance(profile, dict) and profile.get("api_key_env") == state.api_key_env
-                    for profile in saved_document.get("models", {}).values()
+                    earlier_references.get(alias) != profile
+                    for alias, profile in key_references(saved_document).items()
                 )
 
             with new_secret_env(
