@@ -152,4 +152,4 @@ async def test_collapse_keeps_only_complete_active_native_turns(
     assert "trailing live state" in encoded
     assert "nooa_turn" not in encoded
     assert "nooa_cache_boundary" not in encoded
-    assert ("incomplete visible execution batch" in caplog.text) is (collapse == "result_only")
+    assert ("incomplete execution batch" in caplog.text) is (collapse == "result_only")

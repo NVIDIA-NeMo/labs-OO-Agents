@@ -1,10 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Missing-result recovery is default-view policy, never a stored-state rewrite."""
+"""replayable() repairs a selection for sending, never stored state; rendering only checks."""
 
 import pytest
 
-from nooa import Agent, collect_context_items
+from nooa import Agent, collect_context_items, is_model_visible, replayable
 from nooa.context_blocks import OpenAIProviderFormatter, XMLBlockFormatter, render_context
 from nooa.context_blocks.events import ResultStatus, ToolCallEvent, ToolResult
 from nooa.context_blocks.exceptions import UnsupportedContextLayout
@@ -39,8 +39,8 @@ def response(*ids):
     )
 
 
-async def test_default_view_empty_rendered_history_keeps_boundary_and_task():
-    from nooa import CacheBoundary, Context
+async def test_default_view_omits_incomplete_turn_and_keeps_task():
+    from nooa import Context
 
     agent = Agent(llm=object())
     for key in ("system_prompt", "self", "state"):
@@ -55,9 +55,9 @@ async def test_default_view_empty_rendered_history_keeps_boundary_and_task():
         result = render_context(
             items, block_formatter=XMLBlockFormatter(), provider_formatter=OpenAIProviderFormatter()
         ).output
-        assert result[0] == CacheBoundary()
-        assert len(result) == 2
-        assert "continue" in result[1]["content"]
+        # Nothing replayable precedes the task, so there is no prefix to mark.
+        assert len(result) == 1
+        assert "continue" in result[0]["content"]
         assert event.model_dump_json() == original
     finally:
         await agent.aclose()
@@ -75,7 +75,7 @@ async def test_default_view_recovers_standalone_missing_result_without_mutation(
     assert len(tools) == 1
     assert "execution outcome is unknown" in tools[0].content
     assert event.model_dump_json() == original
-    # The renderer still rejects unrecovered input from a different view.
+    # Rendering rejects history that did not go through replayable().
     with pytest.raises(UnsupportedContextLayout, match="no result"):
         render([event])
     await agent.aclose()
@@ -94,8 +94,8 @@ def test_canonical_batch_recovers_missing_result_atomically(missing):
         if missing == "archived_event":
             agent.event_manager.collapse(tag, tag, summary_text="Archived execution")
     before = [event.model_dump_json() for event in agent.event_manager.values()]
-    items = visible_events(agent)
-    assert items == visible_events(agent), "Projection must not generate unstable IDs/timestamps"
+    items = replayable(visible_events(agent))
+    assert items == replayable(visible_events(agent)), "Projection must be deterministic"
     messages = render(items)
     if missing == "result":
         assert [message.role.value for message in messages] == ["assistant", "tool", "tool"]
@@ -130,7 +130,7 @@ def test_existing_results_and_inline_return_are_not_changed(status):
     )
     for event in (canonical, completed, inline):
         agent.event_manager.add(event)
-    projected = visible_events(agent)
+    projected = replayable(visible_events(agent))
     assert all(a is b for a, b in zip(projected, (canonical, completed, inline), strict=True))
     messages = render(projected)
     assert len(messages) == 2
@@ -141,10 +141,49 @@ def test_existing_results_and_inline_return_are_not_changed(status):
 def test_orphan_sidecar_does_not_invent_canonical_turn():
     agent = Agent(llm=object())
     agent.event_manager.add(execution("orphan", response=response("orphan")))
-    assert render(visible_events(agent)) == []
+    assert render(replayable(visible_events(agent))) == []
 
 
 def test_duplicate_canonical_ids_remain_unreplayable():
     agent = Agent(llm=object())
     agent.event_manager.add(response("duplicate", "duplicate"))
-    assert render(visible_events(agent)) == []
+    assert render(replayable(visible_events(agent))) == []
+
+
+@pytest.mark.parametrize("gap", ["incomplete_batch", "orphan_result"])
+def test_rendering_rejects_gaps_instead_of_dropping_them(gap):
+    canonical = response("a", "b")
+    done = ToolResult(tool_call_id="a", content="done")
+    events = (
+        [canonical, execution("a", response=canonical, result=done)]
+        if gap == "incomplete_batch"
+        else [execution("a", response=canonical, result=done)]
+    )
+    with pytest.raises(UnsupportedContextLayout, match="replayable"):
+        render(events)
+    assert render(replayable(events)) == []
+
+
+def test_filtered_selection_is_repaired_after_filtering_without_changing_history():
+    """The current-call recipe: the filter separates a result from its turn."""
+    agent = Agent(llm=object())
+    earlier = response("a")
+    agent.event_manager.add(earlier)
+    result = execution("a", response=earlier, result=ToolResult(tool_call_id="a", content="x"))
+    pending = execution("pending")
+    agent.event_manager.add(result)
+    agent.event_manager.add(pending)
+    before = list(agent.event_manager.values())
+    snapshot = [event.model_dump_json() for event in before]
+
+    current = {result.id, pending.id}  # stands in for related_call_ids filtering
+    selection = [e for e in agent.event_manager.values() if e.id in current and is_model_visible(e)]
+    with pytest.raises(UnsupportedContextLayout):
+        render(selection)
+    messages = render(replayable(selection))
+
+    assert [m.tool_call_id for m in messages if m.tool_call_id] == ["pending"]
+    assert "execution outcome is unknown" in messages[-1].content
+    assert list(agent.event_manager.values()) == before
+    assert [event.model_dump_json() for event in before] == snapshot
+    assert pending.result is None

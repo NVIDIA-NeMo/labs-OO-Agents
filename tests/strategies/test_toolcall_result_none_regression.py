@@ -12,8 +12,9 @@ Three-part fix verified here:
    update ToolCallEvent with error result before re-raising.
 2. Catch GenerationError in _handle_execute_python inline return_result
    path → same pattern.
-3. Defensive check in formatter: if ToolCallEvent.result is None,
-   emit a placeholder tool_result instead of skipping.
+3. Views pass history through replayable(), which gives a result=None
+   call an outcome-unknown result on a copy; the formatter rejects any
+   call that still has no result instead of repairing it.
 """
 
 import json
@@ -21,9 +22,10 @@ from typing import Any
 
 import pytest
 
-from nooa import Agent, strategy
+from nooa import Agent, replayable, strategy
 from nooa.config import CodeActConfig
 from nooa.context_blocks.events import ToolCallEvent, ToolResult
+from nooa.context_blocks.exceptions import UnsupportedContextLayout
 from nooa.context_blocks.formatter import (
     XMLBlockFormatter,
     _event_block_to_messages,
@@ -202,12 +204,20 @@ class TestInlineReturnResultPath:
 # ---------------------------------------------------------------------------
 
 
-class TestFormatterSafetyNet:
-    """_event_block_to_messages must emit a tool_result even when
-    ToolCallEvent.result is None (the belt-and-suspenders defensive check)."""
+def _replayable_blocks(*blocks):
+    """Pass block events through replayable(), as views do."""
+    events = replayable(block.event for block in blocks)
+    return [
+        block.model_copy(update={"event": event})
+        for block, event in zip(blocks, events, strict=True)
+    ]
 
-    def test_none_result_produces_placeholder_tool_result(self):
-        """ToolCallEvent with result=None → placeholder RenderedMessage(role=TOOL)."""
+
+class TestFormatterSafetyNet:
+    """The formatter rejects result=None; replayable() repairs it beforehand."""
+
+    def test_none_result_is_rejected_by_formatter(self):
+        """ToolCallEvent with result=None reaching the formatter raises."""
         block = _tool_call_block(
             tool_call_id="tc_orphan",
             name="execute_python",
@@ -215,22 +225,15 @@ class TestFormatterSafetyNet:
             result=None,  # Simulates the bug
         )
 
-        messages = _event_block_to_messages(block, wrap_content=None)
+        with pytest.raises(UnsupportedContextLayout, match="no result"):
+            _event_block_to_messages(block, wrap_content=None)
 
-        # Should produce 2 messages: assistant tool_call + tool result
-        assert len(messages) == 2, (
-            f"Expected 2 messages (tool_call + placeholder tool_result), got {len(messages)}"
-        )
-
-        tool_call_msg = messages[0]
-        assert tool_call_msg.role == Role.ASSISTANT
-        assert [call.id for call in tool_call_msg.tool_calls] == ["tc_orphan"]
-
-        result_msg = messages[1]
-        assert result_msg.role == Role.TOOL
-        assert result_msg.tool_call_id == "tc_orphan"
-        assert result_msg.content is not None
-        assert "(no result recorded)" in result_msg.content
+        messages = _event_block_to_messages(_replayable_blocks(block)[0], wrap_content=None)
+        assert [call.id for call in messages[0].tool_calls] == ["tc_orphan"]
+        assert messages[1].role == Role.TOOL
+        assert messages[1].tool_call_id == "tc_orphan"
+        assert "execution outcome is unknown" in messages[1].content
+        assert block.event.result is None
 
     def test_normal_result_still_works(self):
         """Sanity check: ToolCallEvent with a proper result still works normally."""
@@ -638,7 +641,7 @@ class TestFormatterFullPipeline:
     ToolCallEvent.result=None correctly."""
 
     def test_xml_formatter_handles_none_result(self):
-        """XMLBlockFormatter.format() with result=None block → valid messages."""
+        """XMLBlockFormatter.format() with a replayable result=None block → valid messages."""
         block = _tool_call_block(
             tool_call_id="tc_null",
             name="return_result",
@@ -647,7 +650,7 @@ class TestFormatterFullPipeline:
         )
 
         formatter = XMLBlockFormatter()
-        messages = formatter.format([block])
+        messages = formatter.format(_replayable_blocks(block))
 
         # Should include both the assistant tool_call and the tool result
         tool_messages = [m for m in messages if m.role == Role.TOOL]
@@ -678,7 +681,7 @@ class TestFormatterFullPipeline:
         )
 
         formatter = XMLBlockFormatter()
-        messages = formatter.format([normal_block, none_block])
+        messages = formatter.format(_replayable_blocks(normal_block, none_block))
 
         tool_use_ids = {call.id for message in messages for call in message.tool_calls}
         tool_result_ids = {

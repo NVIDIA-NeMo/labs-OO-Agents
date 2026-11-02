@@ -85,12 +85,21 @@ class TestRenderContextBasic:
         assert result[2]["role"] == "system"
 
     def test_boundary_survives_omitted_incomplete_history(self):
+        from nooa import replayable
+
         response = LLMResponse(
             tool_calls=[ToolCall(id="missing", name="execute_python", arguments="{}")],
             finish_reason="tool_calls",
         )
+        task = Block(key="task", content="continue", role=Role.USER)
+        with pytest.raises(UnsupportedContextLayout, match="incomplete execution batch"):
+            render_context(
+                [response, CacheBoundary(), task],
+                block_formatter=XMLBlockFormatter(),
+                provider_formatter=OpenAIProviderFormatter(),
+            )
         result = render_context(
-            [response, CacheBoundary(), Block(key="task", content="continue", role=Role.USER)],
+            [*replayable([response]), CacheBoundary(), task],
             block_formatter=XMLBlockFormatter(),
             provider_formatter=OpenAIProviderFormatter(),
         ).output

@@ -257,7 +257,7 @@ its context view. `DecisionContextView` evaluates explicit decorator/scoped
 context and includes no history by default. Extend it to select history:
 
 ```python
-from nooa import Context, is_model_visible
+from nooa import Context, is_model_visible, replayable
 from nooa.decisions.context_view import DecisionContextView
 
 
@@ -265,9 +265,9 @@ class RecentDecisionView(DecisionContextView):
     async def assemble(self, agent, call):
         async for block in super().assemble(agent, call):
             yield block
-        for event in agent.event_manager.values()[-5:]:
-            if is_model_visible(event):
-                yield event
+        recent = agent.event_manager.values()[-5:]
+        for event in replayable(event for event in recent if is_model_visible(event)):
+            yield event
 
 
 class SupportAgent(Agent, llm=llm, decision_model=decision_model):
@@ -317,7 +317,8 @@ automatically; reference one explicitly with, for example,
 `Context(expr='self.context["policy"]')`.
 
 The selected view owns event selection; this example excludes metadata and
-runtime events with `is_model_visible`. A call-level `context_view=` overrides
+runtime events with `is_model_visible` and keeps tool calls paired with their
+results with `replayable`. A call-level `context_view=` overrides
 the method view. Decision context accepts unique SYSTEM-role blocks followed by
 events; layouts that would require reordering or discarding roles raise
 `UnsupportedContextLayout`. Unsupported cache markers are omitted.

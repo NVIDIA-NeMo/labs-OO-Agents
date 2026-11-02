@@ -19,7 +19,6 @@ This split keeps the "format" axis (XML / Markdown / Plain) orthogonal to the
 message-shape axis. Neither knows about the other.
 """
 
-import logging
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from enum import StrEnum
@@ -39,8 +38,6 @@ from nooa.context_blocks.models import (
     ToolCallInfo,
 )
 from nooa.llm_types import assistant_message
-
-logger = logging.getLogger(__name__)
 
 
 def _is_llm_response(event: EventBase | None) -> TypeGuard["LLMResponse"]:
@@ -217,18 +214,11 @@ def _markdown_message_content(block: ResolvedBlock) -> str:
 
 def _tool_result_message(event: ToolCallEvent) -> RenderedMessage:
     """Project one execution event into a provider-neutral tool result."""
-    if event.result is not None:
-        content = event.result.content
-    else:
-        logger.warning(
-            "ToolCallEvent %s has result=None — emitting placeholder tool_result "
-            "to prevent context corruption.",
-            event.tool_call_id,
-        )
-        content = "(no result recorded)"
+    if event.result is None:
+        raise UnsupportedContextLayout(f"ToolCallEvent {event.tool_call_id!r} has no result")
     return RenderedMessage(
         role=Role.TOOL,
-        content=content,
+        content=event.result.content,
         tool_call_id=event.tool_call_id,
     )
 
@@ -366,13 +356,10 @@ def _event_block_projections(
                 call.id not in by_call_id or by_call_id[call.id].result is None
                 for call in event.replay_tool_calls
             ):
-                logger.warning(
-                    "LLMResponse %s has an incomplete visible execution batch — "
-                    "omitting the assistant tool-call turn from replay.",
-                    event.id,
+                raise UnsupportedContextLayout(
+                    f"LLMResponse {event.id!r} has an incomplete execution batch; "
+                    "select history through replayable()"
                 )
-                projections.append([])
-                continue
             projection = [
                 RenderedMessage(
                     role=Role.ASSISTANT,
@@ -390,10 +377,14 @@ def _event_block_projections(
             projections.append(projection)
             continue
 
-        # A linked execution is not an independent assistant turn. If its
-        # source response was filtered out (or its batch is incomplete), fail
-        # closed instead of fabricating provider history from the sidecar.
+        # A linked execution renders inside its response's batch. Without that
+        # response it would be a result for a call the model never sees.
         if isinstance(event, ToolCallEvent) and event.llm_response_id is not None:
+            if event.llm_response_id not in replayable_turn_ids:
+                raise UnsupportedContextLayout(
+                    f"ToolCallEvent {event.tool_call_id!r} is linked to a response "
+                    "outside the selection; select history through replayable()"
+                )
             projections.append([])
             continue
 
