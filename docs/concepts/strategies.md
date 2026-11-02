@@ -1,18 +1,20 @@
 # Strategies
 
-A strategy decides how an agentic method uses an LLM. It does not change the
+A strategy decides how an agentic method uses a model client. It does not change the
 method's Python interface: callers still pass the same arguments and receive
 the declared return type.
 
-NOOA's two primary strategies cover most applications.
+NOOA's primary strategies cover most applications.
 
 | Strategy | Use it when | Execution model |
 |---|---|---|
 | `PredictStrategy` | A non-tool attempt can classify, extract, or produce the typed answer | Structured LLM attempt followed by validation; invalid output may be retried |
 | `CodeActStrategy` | The task needs tools, live Python objects, code execution, or iteration | Repeated LLM turns in a per-call Python REPL; locals persist across cells |
+| `DecideStrategy` | A decision model should produce probabilities, choices, or rubric scores | One typed request through the configured decision model; raises `DecisionModelRequiredError` when none is configured |
 
 CodeAct is the default. Select Predict explicitly when the task does not need
-the extra loop.
+the extra loop. See [Decision models](decisions.md) when calibrated decision
+evidence matters.
 
 ## Predict: one focused judgment
 
@@ -54,6 +56,57 @@ variables, helper definitions persist across cells, and generated code can call
 visible methods and tools on `self`. The loop ends when a value validates
 against the return annotation.
 
+### Recovering from a text-only CodeAct turn
+
+CodeAct expects every model turn to call `execute_python` or `return_result`,
+but models sometimes emit plain prose instead. NOOA keeps that original
+assistant turn in history, then asks a configurable callback what to do:
+
+```python
+from nooa import CodeActStrategy, return_text_as_result, strategy
+
+
+class Summarizer(Agent, llm=llm):
+    @strategy(CodeActStrategy(on_text_only=return_text_as_result))
+    async def summarize(self, text: str) -> str:
+        """Summarize the text."""
+        ...
+```
+
+`TextOnlyResponseAction` is the callback's return value; it is not passed to
+`@strategy`. The wiring is:
+
+1. `@strategy(...)` attaches a `CodeActStrategy` to the method.
+2. `CodeActStrategy(on_text_only=handler)` registers a sync or async callback.
+3. When a text-only response occurs, the handler receives a
+   `TextOnlyResponseContext` and returns a `TextOnlyResponseAction`.
+
+The default handler, `retry_text_only_response`, appends a model-visible
+`Error` telling the model to use one of its tools and retries. The opt-in
+`return_text_as_result` handler validates the bare text against the method's
+return type. Custom handlers can return `TextOnlyResponseAction.return_result`,
+`.retry`, or `.tool_calls`; all paths preserve the provider's original turn.
+
+For example, an application can supply its own model-visible correction:
+
+```python
+from nooa import TextOnlyResponseAction, TextOnlyResponseContext
+from nooa.events import Error
+
+
+def require_tool(context: TextOnlyResponseContext) -> TextOnlyResponseAction:
+    return TextOnlyResponseAction.retry(
+        Error(content=f"Plain text cannot finish {context.call.method_name}; call a tool.")
+    )
+
+
+class Investigator(Agent, llm=llm):
+    @strategy(CodeActStrategy(on_text_only=require_tool))
+    async def investigate(self, question: str) -> str:
+        """Investigate the question."""
+        ...
+```
+
 ## Strategy selection is not model selection
 
 The strategy controls the interaction pattern. The LLM setting controls which
@@ -66,6 +119,10 @@ class ResearchAgent(Agent, llm=fast_llm):
         """Extract independently verifiable claims."""
         ...
 ```
+
+The `llm=` override also accepts a registry alias or model string
+(``@strategy(PredictStrategy(), llm="gpt-5-mini")``) — resolved lazily on the
+first call per instance, so declaring it constructs no client at import time.
 
 LLM overrides may also be supplied per instance or per call. Keep model routing
 out of the public method contract unless the application truly needs callers to
@@ -92,7 +149,8 @@ Predict and CodeAct lock an agent instance while a generation call is active.
 Calling several agentic methods concurrently on the same instance therefore
 serializes by default. Create one agent instance per independent concurrent
 task. Custom strategies can opt out of locking when they do not share mutable
-runtime state.
+runtime state. `DecideStrategy` does not lock, so decision calls on one
+instance can run concurrently.
 
 ## Common mistakes
 

@@ -39,7 +39,6 @@ class _FakeLLM:
                 ),
             ],
             finish_reason="tool_calls",
-            assistant_message={},
         )
 
 
@@ -78,7 +77,6 @@ class _AsyncFakeLLM:
                 ),
             ],
             finish_reason="tool_calls",
-            assistant_message={},
         )
 
 

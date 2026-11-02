@@ -73,7 +73,6 @@ class _CodeActFakeLLM:
                 ),
             ],
             finish_reason="tool_calls",
-            assistant_message={},
         )
 
 

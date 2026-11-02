@@ -703,30 +703,29 @@ def test_public_report_sanitization(mr):
     assert "[REDACTED]" in safe and "[private-path]" in safe
 
 
-@pytest.mark.parametrize(
-    ("capability_gate_ran", "diff", "expected", "unexpected"),
-    [
-        (False, None, "NOT RUN — the capability gate was skipped", "PASS"),
-        (True, None, "PASS — all automated hard gates passed", "NOT RUN"),
-        (True, "stable floor", "FAIL — stable floor", "PASS"),
-    ],
-)
-def test_public_notes_report_the_actual_capability_gate_state(
-    mr, capability_gate_ran, diff, expected, unexpected
-):
+def test_public_notes_put_github_changes_before_capability_report(mr):
+    changes = "## What's Changed\n* Added a feature"
+    capability = (
+        "## 🧪 Capability Test Results\n\n"
+        "✅ Release OK — [full results](https://example.com/results)"
+    )
     notes = mr.build_public_notes(
-        tag="v1.2.3",
-        sha="a" * 40,
-        prev_tag="v1.2.2",
-        diff=mr.Diff(floor_breach=diff, markdown="capability report"),
-        change_notes="changes",
-        pipeline_url="https://gitlab.example/pipelines/1",
-        distributions=[],
-        capability_gate_ran=capability_gate_ran,
+        diff=mr.Diff(markdown=capability),
+        change_notes=changes,
     )
 
-    assert expected in notes
-    assert unexpected not in notes
+    assert notes == f"{changes}\n\n---\n\n{capability}\n"
+    assert "Unpublished NOOA release candidate" not in notes
+    assert "Reviewer checklist" not in notes
+
+
+def test_public_notes_have_a_fallback_when_github_returns_no_changes(mr):
+    notes = mr.build_public_notes(
+        diff=mr.Diff(markdown="capability report"),
+        change_notes="",
+    )
+
+    assert notes == "No generated change notes were returned.\n\n---\n\ncapability report\n"
 
 
 def _ci_args(mr, tmp_path):

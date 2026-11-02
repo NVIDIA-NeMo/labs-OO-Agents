@@ -86,6 +86,59 @@ def _fake_response_with_tool(arguments: str) -> SimpleNamespace:
     )
 
 
+def test_reasoning_uses_one_block_across_input_output_and_repeated_calls():
+    """Readable reasoning survives journal resolution without repeated payloads."""
+    from nooa.context_blocks.models import RenderedMessage, Role
+    from nooa.tracing import set_session
+    from nooa.tracing._journal_builder import build_journal_payload
+    from nooa.viewer.otlp_store import _resolve_message
+
+    reasoning = "Check café evidence. " * 5000
+    payload = build_journal_payload(
+        [RenderedMessage(role=Role.ASSISTANT, content="answer", reasoning=reasoning)]
+    )
+    posts, fake_post = _capture_posts()
+    cb = MessageJournalCallback("http://example.invalid")
+    set_session("reasoning-dedup")
+    response = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message={"role": "assistant", "content": "answer", "reasoning_content": reasoning}
+            )
+        ],
+        usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1),
+    )
+    with patch("nooa.tracing._litellm_journal._post_json", side_effect=fake_post):
+        for call_id in ("first", "second"):
+            set_journal_payload(payload)
+            cb.log_pre_api_call(model="m", messages=[], kwargs={"litellm_call_id": call_id})
+            cb.log_success_event(
+                kwargs={"litellm_call_id": call_id, "model": "m"},
+                response_obj=response,
+                start_time=0.0,
+                end_time=1.0,
+            )
+    blocks = [
+        b for url, batch, _ in posts if urlparse(url).path == "/v1/journal/blocks" for b in batch
+    ]
+    stored = {b["hash"]: b["content"] for b in blocks}
+    assert sum(b["content"] == reasoning for b in blocks) == 1
+    calls = [body for url, body, _ in posts if urlparse(url).path == "/v1/journal/calls"]
+    assert len(calls) == 2
+    for call in calls:
+        assert reasoning not in json.dumps(call, ensure_ascii=False)
+        for entry in call["input_skeleton"] + call["output_messages"]:
+            assert "reasoning_content_hash" in entry
+            assert _resolve_message(entry, stored)["reasoning_content"] == reasoning
+    # Old journal records remain readable; missing blocks remain visible.
+    legacy = {"role": "assistant", "reasoning_content": reasoning}
+    assert _resolve_message(legacy, {}) == legacy
+    assert (
+        _resolve_message({"reasoning_content_hash": "absent"}, {})["reasoning_content"]
+        == "<missing block: absent>"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Output-block sideband
 # ---------------------------------------------------------------------------

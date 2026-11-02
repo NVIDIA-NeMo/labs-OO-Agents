@@ -33,7 +33,6 @@ def _resp(tool_calls: list) -> LLMResponse:
         content="",
         tool_calls=tool_calls,
         finish_reason="tool_calls",
-        assistant_message={"role": "assistant", "content": ""},
     )
 
 

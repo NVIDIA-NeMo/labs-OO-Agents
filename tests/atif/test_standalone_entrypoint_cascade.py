@@ -55,7 +55,6 @@ def _resp(tool_calls: list[ToolCall] | None = None, content: str = "") -> LLMRes
         content=content,
         tool_calls=tool_calls or [],
         finish_reason="tool_calls" if tool_calls else "stop",
-        assistant_message={"role": "assistant", "content": content},
         usage={"prompt_tokens": 5, "completion_tokens": 1},
     )
 

@@ -2,7 +2,7 @@
 name = "nooa-bench"
 # Version is derived from git tags at build time by uv-dynamic-versioning.
 dynamic = ["version"]
-description = "Benchmark agent (BenchAgent) and Harbor runner for the NOOA framework — reproduces the tech report's SWE-bench and Terminal-Bench results"
+description = "Coding benchmark agents, Harbor runner and trajectory analysis for the NOOA framework"
 license = {text = "Apache-2.0"}
 readme = "README.md"
 # Matches nooa and nooa-cli (both >=3.12,<3.14), which this depends on.

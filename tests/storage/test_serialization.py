@@ -35,6 +35,19 @@ class NestedModel(BaseModel):
     tags: list[str] = []
 
 
+class HookedExtraModel(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    name: str
+
+    def __snapshot_data__(self):
+        return {"saved_name": self.name}
+
+    @classmethod
+    def __restore_snapshot__(cls, data):
+        return cls(name=data["saved_name"], restored=True)
+
+
 @dataclasses.dataclass
 class Point:
     x: float
@@ -171,6 +184,16 @@ class TestNoSnapshot:
 
 
 class TestPydantic:
+    def test_snapshot_hooks_take_precedence_over_allowed_extras(self):
+        """Custom snapshot hooks own the schema even when a model allows extras."""
+        model = HookedExtraModel(name="test", transient=UnsupportedThing())
+        blob, allowlist = serialize(model)
+        assert blob["data"] == {"saved_name": "test"}
+        restored = deserialize(blob, allowlist)
+        assert isinstance(restored, HookedExtraModel)
+        assert restored.name == "test"
+        assert restored.model_extra == {"restored": True}
+
     def test_model_config_preserves_provider_extras(self):
         """Snapshot round trips retain provider options stored as allowed model extras."""
         model = ModelConfig(model_name="test", num_retries=7, custom={"stops": ("a", "b")})

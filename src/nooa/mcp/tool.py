@@ -647,6 +647,19 @@ class MCPTool:
         async with self._client.connect_to_server() as session:
             result = await session.call_tool(tool_name, clean_args)
 
+        if getattr(result, "isError", False) is True:
+            details = None
+            if hasattr(result, "content") and result.content:
+                for content in result.content:
+                    if hasattr(content, "text") and content.text:
+                        details = content.text
+                        break
+
+            raise RuntimeError(
+                f"MCP tool {tool_name!r} on {self._server_name!r} returned an error"
+                + (f": {details}" if details else "")
+            )
+
         if hasattr(result, "content") and result.content:
             for content in result.content:
                 if hasattr(content, "text"):
@@ -714,7 +727,7 @@ def _create_tool_instance(
     """
     tool_specs = []
     for tool in tools_result.tools:
-        input_schema = tool.inputSchema if isinstance(tool.inputSchema, dict) else {}
+        input_schema = _tool_input_schema(tool)
         tool_specs.append(
             MCPToolSpec(
                 name=tool.name,
@@ -728,6 +741,15 @@ def _create_tool_instance(
     instance = object.__new__(dynamic_class)
     instance.__init__(client, server_name, refresh_ctx=refresh_ctx)
     return instance
+
+
+def _tool_input_schema(tool: Any) -> dict[str, Any]:
+    """Return a tool schema across MCP SDK field naming conventions."""
+    for attribute in ("input_schema", "inputSchema"):
+        schema = getattr(tool, attribute, None)
+        if isinstance(schema, dict):
+            return schema
+    return {}
 
 
 async def _list_server_tools(server_name: str, client: Any) -> Any:

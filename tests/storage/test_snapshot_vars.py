@@ -71,6 +71,13 @@ class TestSnapshotVarsRoundTrips:
         assert blob["__type__"] == "dict_class"
         assert blob["data"]["_data"] == {"keep": {"token": "abc"}}
 
+    def test_snapshot_serialize_succeeds_even_after_non_string_key_write(self):
+        v = SnapshotVars()
+        v["keep"] = {"token": "abc"}
+        v[123] = "bad key"  # skipped on write
+        blob, _allow = serialize(v)
+        assert blob["data"]["_data"] == {"keep": {"token": "abc"}}
+
     def test_round_trip_preserves_kept_values(self):
         from nooa.storage.serialization import deserialize
 

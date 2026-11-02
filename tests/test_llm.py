@@ -92,14 +92,12 @@ async def test_fake_llm_custom_responses():
             content="First response",
             tool_calls=[],
             finish_reason="stop",
-            assistant_message={"role": "assistant", "content": "First response"},
         ),
         LLMResponse(
             raw_response=None,
             content="Second response",
             tool_calls=[],
             finish_reason="stop",
-            assistant_message={"role": "assistant", "content": "Second response"},
         ),
     ]
 
@@ -126,21 +124,18 @@ async def test_fake_llm_multiple_calls():
                 content="Response 1",
                 tool_calls=[],
                 finish_reason="stop",
-                assistant_message={"role": "assistant", "content": "Response 1"},
             ),
             LLMResponse(
                 raw_response=None,
                 content="Response 2",
                 tool_calls=[],
                 finish_reason="stop",
-                assistant_message={"role": "assistant", "content": "Response 2"},
             ),
             LLMResponse(
                 raw_response=None,
                 content="Response 3",
                 tool_calls=[ToolCall(id="1", name="test_tool", arguments=json.dumps({}))],
                 finish_reason="tool_calls",
-                assistant_message={"role": "assistant", "content": "Response 3"},
             ),
         ]
     )

@@ -1,7 +1,7 @@
 ---
 name: nooa-agent-authoring
 description: Author agents with NVIDIA-labs Object Oriented Agents (NOOA). Use when writing or modifying an Agent subclass, agentic methods (ellipsis bodies), docstring prompts, structured output contracts, strategy selection (CodeAct/Predict), visibility control, orchestrators, or subagent composition.
-compatibility: Python >= 3.12, uv, nooa package (CLI: nooa)
+compatibility: 'Python >= 3.12, uv, nooa package (CLI: nooa)'
 ---
 
 # Authoring NVIDIA-labs Object Oriented Agents (NOOA)
@@ -20,7 +20,7 @@ from typing import Annotated
 from nooa import Agent
 from nooa.unifiedllm import get_llm_client
 
-llm = get_llm_client("gpt-4o-mini")    # any litellm model name, or a registry alias
+llm = get_llm_client("my-model")    # alias saved by nooa connect; configure it first
 
 class Summarizer(Agent, llm=llm):
     """Produce concise, faithful summaries."""          # class docstring → static prefix
@@ -43,18 +43,18 @@ Use `Annotated[type, "description"]` on parameters and return types to give the 
 
 ## LLM clients and cascading
 
-```python
-from nooa.unifiedllm import get_llm_client, CompletionClient, RetryConfig
-
-llm = get_llm_client("gpt-4o-mini")                        # any litellm name passes through (needs provider key)
-llm = get_llm_client("qwen3.5-397b")                       # registry alias (public NIM via NVIDIA_API_KEY from build.nvidia.com)
-llm = get_llm_client("gpt-4o-mini", retry_config=RetryConfig(max_retries=5))  # retries default ON (max_retries=3)
-llm = CompletionClient(model="m", base_url="https://.../v1", api_key="...")  # any OpenAI-compatible endpoint
-```
-
-**Registry:** models are defined in YAML configs loaded from `~/.config/nooa/models.yaml` (user) and the package's built-in `model_registry.yaml`. Each entry maps an alias to `{model, base_url, api_key_env}`. Inspect with `nooa config show` (shows all config layers and resolved values) or programmatically via `from nooa.unifiedllm.registry import reload_registry; configs = reload_registry()`.
-
-Keys come from `.env` (library use) or `~/.config/nooa/secrets.yaml`.
+Use existing registry aliases with `get_llm_client("my-model")`. Before model
+onboarding, checks or configuration writes, follow
+[nooa-connect](../nooa-connect/SKILL.md), the canonical permission-first headless
+guide. Authoring an agent does not itself authorize configuring/testing models.
+For saved settings, precedence, reasoning levels and caching semantics, use
+[nooa-model-configuration](../nooa-model-configuration/SKILL.md).
+On Windows, run nooa inside WSL 2; native Windows stops at `import nooa`
+unless `NOOA_SKIP_PLATFORM_CHECK=1` is set.
+For images, audio, video, PDFs, and CodeAct `show()`, use
+[nooa-media](../nooa-media/SKILL.md). Configure each model's `media_inputs`
+with the formats your provider accepts.
+The rest of this section covers how an agent selects and inherits its client.
 
 **Resolution cascade** for which LLM a method uses — first match wins:
 
@@ -64,9 +64,20 @@ Keys come from `.env` (library use) or `~/.config/nooa/secrets.yaml`.
 4. `class MyAgent(Agent, llm=default)` — class default
 5. **Parent inheritance** — a subagent with no `llm=` of its own inherits from the agent that calls it
 
-The method override also accepts a **callable** taking the agent and returning
-a client, resolved on each call. Use it when the per-method model has to be
-chosen per instance (or per call) rather than fixed at import time:
+The method override accepts three spellings. A **registry alias or model
+string** resolves lazily on the first call per instance (no client constructed
+at import time) — the natural way to pin a method to a cheaper or stronger
+model:
+
+```python
+class SupportAgent(Agent, llm=default):       # agent default takes a client
+    @strategy(llm="gpt-5-mini")                 # alias or model string
+    async def summarize(self, text: str) -> str: ...
+```
+
+A **callable** taking the agent and returning a client is resolved on each
+call. Use it when the per-method model has to be chosen per instance (or per
+call) rather than fixed at import time:
 
 ```python
 class Researcher(Agent, llm=fast):
@@ -81,8 +92,8 @@ class Researcher(Agent, llm=fast):
     async def solve(self, problem: str) -> str: ...   # differs per call
 ```
 
-Standalone `@strategy` functions must pass a client, not a callable — they
-have no instance to resolve against.
+Standalone `@strategy` functions may pass a client or an alias string, but
+not a callable — they have no instance to resolve against.
 
 Child agents inherit the parent's LLM by default. Any explicit `llm=` on the child overrides it — that's how you run a cheap model for one phase:
 
@@ -134,6 +145,17 @@ async def summarize(self, text: str) -> str:
 If the default argument rendering is unsuitable, customize or disable the
 prefill deliberately; do not silently fall back to raw argument interpolation.
 For advanced prefill and truncation control, see `nooa-codeact-advanced`.
+
+CodeAct and PurePython initially print bounded input previews (by default,
+2,000 characters per string, 25 items per container, depth 4). The complete
+objects remain available in the REPL, but the model may need to inspect more
+data. For a complete text input use `Annotated[str, spec(max_string=None)]`
+with imports `from typing import Annotated` and `from nooa import spec`.
+Method-level `@strategy(..., truncation=...)` settings also apply. A
+`PrefillTruncationWarning` reports actual omissions and suggests the relevant
+setting; stdout capture has its own 50,000-character budget, so removing a
+formatting limit alone does not guarantee the full printed input reaches the
+model. Check an execution trace when full inclusion matters.
 
 Template expansion is primarily for values the signature *can't* show: `{self.attr}` instance state and computed expressions like `{len(items)}`. Escape literal braces as `{{ }}`.
 
@@ -195,7 +217,16 @@ async def classify(self, text: str) -> Intent: ...
 async def implement(self, task: str) -> str: ...
 ```
 
-**Constructors take `config=` only.** `PredictStrategy(max_retries=3)` and `CodeActStrategy(max_iterations=10)` are errors — wrap options in `PredictConfig(...)`/`CodeActConfig(...)`. Useful `CodeActConfig` fields: `max_iterations`, `max_retries`, `cell_timeout`, `max_tokens`, `temperature`, `max_consecutive_text_only`, `restrictions`.
+**Configuration fields go through `config=`.** `PredictStrategy(max_retries=3)` and `CodeActStrategy(max_iterations=10)` are errors — wrap options in `PredictConfig(...)`/`CodeActConfig(...)`. Strategy-level extension points such as `CodeActStrategy(on_text_only=...)` remain direct constructor arguments. Useful `CodeActConfig` fields: `max_iterations`, `max_retries`, `cell_timeout`, `max_tokens`, `temperature`, `max_consecutive_text_only`, `loop_guard`, `restrictions`.
+
+CodeAct preserves a model response that contains prose but no tool call. By
+default it appends an `Error` asking the model to use `execute_python` or
+`return_result`, then retries. For a method where prose is a valid final value,
+use `CodeActStrategy(on_text_only=return_text_as_result)`. `on_text_only`
+receives a sync or async callback; the callback receives
+`TextOnlyResponseContext` and returns `TextOnlyResponseAction`. The action is
+the callback result—it is not passed to `@strategy`. See
+`nooa-codeact-advanced` for custom retry and synthetic-tool examples.
 
 `max_iterations` is a safety net, not the main tuning dial — decompose the task instead of raising the cap. For prefill control, truncation tuning, code restrictions, and the full config surface, see `nooa-codeact-advanced`.
 

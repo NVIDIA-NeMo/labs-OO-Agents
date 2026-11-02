@@ -138,7 +138,7 @@ def test_distinct_facts_survive_reconciliation():
     assert mgr.store.count() == 3  # the model said "distinct" -> nothing archived
 
 
-def test_malformed_llm_output_is_contained():
+def test_malformed_llm_response_is_contained():
     agent = MemAgent()
     llm = ScriptedLLM(lambda prompt: "sorry, I can't produce JSON today")
     mgr = _install(agent, reconciler=llm_reconciler(lambda: llm))

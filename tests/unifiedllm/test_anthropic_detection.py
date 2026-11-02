@@ -1,15 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Unit tests for `_is_anthropic_model` and `_inject_cache_control` behavior."""
+"""Unit tests for `_is_anthropic_model`."""
 
 from __future__ import annotations
-
-from copy import deepcopy
 
 import pytest
 
 from nooa.unifiedllm.unifiedllm import (
-    CompletionClient,
     _is_anthropic_model,
 )
 
@@ -51,76 +48,3 @@ from nooa.unifiedllm.unifiedllm import (
 )
 def test_is_anthropic_model(model: str, expected: bool) -> None:
     assert _is_anthropic_model(model) is expected
-
-
-def _make_messages_with_tool_result() -> list[dict]:
-    return [
-        {"role": "system", "content": "You are an agent."},
-        {"role": "user", "content": "Compute 2*5."},
-        {
-            "role": "assistant",
-            "content": None,
-            "tool_calls": [
-                {
-                    "id": "c1",
-                    "type": "function",
-                    "function": {"name": "execute_python", "arguments": "{}"},
-                }
-            ],
-        },
-        {"role": "tool", "tool_call_id": "c1", "content": "status: complete"},
-        {"role": "user", "content": "follow-up"},
-    ]
-
-
-def test_inject_cache_control_active_on_anthropic_models() -> None:
-    """On Anthropic models, the last tool message should be flipped to parts
-    format with cache_control attached, and system gets cache_control on the
-    message envelope."""
-    client = CompletionClient(model="anthropic/claude-sonnet-4-5")
-    original = _make_messages_with_tool_result()
-    result = client._inject_cache_control(
-        original,
-        [{"role": "system"}, {"role": "tool", "position": "last"}],
-    )
-    # system message — gains cache_control at message level
-    assert result[0]["cache_control"] == {"type": "ephemeral"}
-    # last tool message — content converted to parts with cache_control on last block
-    tool_content = result[3]["content"]
-    assert isinstance(tool_content, list), "tool content should be parts array"
-    assert tool_content[-1].get("cache_control") == {"type": "ephemeral"}
-
-
-@pytest.mark.parametrize(
-    "model",
-    [
-        "nvidia/nvidia/nemotron-3-super-v3",
-        "huggingface/meta-llama/Llama-3.1-70B-Instruct",
-    ],
-)
-def test_inject_cache_control_message_level_on_non_anthropic_models(model: str) -> None:
-    """On non-Anthropic models the last tool message keeps its string content, with
-    cache_control on the message envelope rather than the parts format."""
-    client = CompletionClient(model=model)
-    original = _make_messages_with_tool_result()
-    result = client._inject_cache_control(
-        original,
-        [{"role": "system"}, {"role": "tool", "position": "last"}],
-    )
-    # system still gains message-level cache_control (unchanged for every provider)
-    assert result[0]["cache_control"] == {"type": "ephemeral"}
-    # last tool message — content stays a STRING, marked at the message envelope
-    tool_msg = result[3]
-    assert isinstance(tool_msg["content"], str), "tool content must remain a string"
-    assert tool_msg["content"] == "status: complete"
-    assert tool_msg["cache_control"] == {"type": "ephemeral"}
-
-
-def test_inject_cache_control_noop_on_empty_injection_points() -> None:
-    """Empty injection_points short-circuits without mutation."""
-    client = CompletionClient(model="anthropic/claude-sonnet")
-    original = _make_messages_with_tool_result()
-    baseline = deepcopy(original)
-    result = client._inject_cache_control(original, [])
-    assert result == baseline
-    assert original == baseline

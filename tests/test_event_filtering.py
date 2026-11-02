@@ -149,7 +149,7 @@ def test_filter_by_call_id():
 
 def test_filter_by_call_id_and_type():
     """Test that call_id and type filters are ANDed together."""
-    from nooa.events import LLMOutput, Task
+    from nooa.events import LLMResponse, Task
 
     events = EventManager()
 
@@ -157,7 +157,7 @@ def test_filter_by_call_id_and_type():
     t1.metadata["call_id"] = "call-1"
     events.add(t1)
 
-    llm1 = LLMOutput(content="LLM for call-1")
+    llm1 = LLMResponse(content="LLM for call-1")
     llm1.metadata["call_id"] = "call-1"
     events.add(llm1)
 
@@ -171,7 +171,7 @@ def test_filter_by_call_id_and_type():
     assert result[0].prompt == "Task for call-1"
 
     # LLM output for call-1
-    result = events.filter(call_id="call-1", type="LLMOutput")
+    result = events.filter(call_id="call-1", type="LLMResponse")
     assert len(result) == 1
     assert result[0].content == "LLM for call-1"
 

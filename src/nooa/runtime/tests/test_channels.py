@@ -188,7 +188,7 @@ async def test_reader_get_times_out_with_actionable_error():
 
     message = str(exc_info.value)
     assert "Timed out after 0.01s waiting for queue 'user_messages'" in message
-    assert "WAIT/NEED_INPUT" in message
+    assert "Waiting/NeedInput" in message
     assert not q.has_waiters()
 
 

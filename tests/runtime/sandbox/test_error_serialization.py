@@ -5,13 +5,15 @@
 from __future__ import annotations
 
 import asyncio
-import pickle
+from typing import ClassVar
 
 import pytest
+from pydantic import BaseModel
 
 from nooa.config.truncation_config import DEFAULT_TRUNCATION_CONFIG
 from nooa.errors.formatting import format_error_for_llm
 from nooa.events import _NO_RETURN, ExecutionResult, ExecutionSignal
+from nooa.runtime.sandbox import wire
 from nooa.runtime.sandbox.cell_core import run_cell_source
 from nooa.runtime.sandbox.errors import (
     CellMemoryError,
@@ -26,25 +28,37 @@ from nooa.runtime.sandbox.readonly import SandboxStateError
 from nooa.runtime.sandbox.serialization import (
     ErrorDTO,
     ResultDTO,
+    dto_from_wire,
     dto_to_result,
+    dto_to_wire,
     result_to_dto,
 )
+from nooa.tools.shell_tools import Match, ShellTools, StaleMatchError
 
 
 def _result_with_error(error: Exception, *, line_offset: int = 0) -> ExecutionResult:
     return ExecutionResult(error=error, wrapper_line_offset=line_offset)
 
 
-class _PicklesOnlyOnce:
-    """Value whose reducer fails if transport tries to serialize it twice."""
+class _DumpsOnlyOnce(BaseModel):
+    """Value whose serializer fails if transport tries to encode it twice."""
 
-    calls = 0
+    calls: ClassVar[int] = 0
+    value: str = "serialized once"
 
-    def __reduce__(self):
+    def model_dump(self, *args, **kwargs):
         type(self).calls += 1
         if type(self).calls > 1:
-            raise RuntimeError("second pickle explodes")
-        return str, ("serialized once",)
+            raise RuntimeError("second encode explodes")
+        return super().model_dump(*args, **kwargs)
+
+
+_DECODER = wire.Codec({wire.type_key(_DumpsOnlyOnce): _DumpsOnlyOnce})
+
+
+def _transport(dto: ResultDTO) -> ResultDTO:
+    """Send the DTO through the real pipe encoding."""
+    return dto_from_wire(wire.Codec().loads(wire.Codec().dumps(dto_to_wire(dto))))
 
 
 class SignalWithResult(ExecutionSignal):
@@ -71,6 +85,64 @@ def test_builtin_exception_reconstruction_keeps_worker_diagnostic() -> None:
     assert isinstance(result.error.original_error, ValueError)
     assert result.error.original_type == "ValueError"
     assert format_error_for_llm(result.error) == diagnostic
+
+
+@pytest.mark.parametrize("size", [3, 20_000], ids=["small-diff", "omitted-diff"])
+async def test_stale_match_diagnostic_survives_error_transport(tmp_path, size):
+    path = tmp_path / "example.txt"
+    path.write_text("x" * size + "\n")
+    shell = ShellTools(cwd=str(tmp_path))
+    try:
+        match = await shell.read("example.txt")
+        path.write_text("y" * size + "\n")
+        with pytest.raises(StaleMatchError) as caught:
+            await shell.replace(match, "replacement")
+        message = str(caught.value)
+        result = dto_to_result(_transport(result_to_dto(_result_with_error(caught.value))))
+        assert isinstance(result.error, SandboxExecutionError)
+        assert result.error.original_type == "StaleMatchError"
+        assert message.rstrip() in format_error_for_llm(result.error)
+        # Existing custom-error transport preserves text/type name, not custom fields.
+        assert not isinstance(result.error.original_error, StaleMatchError)
+        assert "No file was changed" in format_error_for_llm(result.error)
+        assert "recompute the Match" in format_error_for_llm(result.error)
+        if size > 16_384:
+            assert "Diff omitted (incomplete)" in format_error_for_llm(result.error)
+            assert "x" * size not in format_error_for_llm(result.error)
+    finally:
+        await shell.close()
+
+
+async def test_stale_match_broker_error_survives_as_actionable_surrogate(tmp_path):
+    from nooa.runtime.sandbox.worker import ParentToolError, _raise_broker_error
+
+    path = tmp_path / "example.txt"
+    path.write_text("current\n")
+    match = Match("example.txt", 1, 1, "captured\n", resolved_path=path)
+    shell = ShellTools(cwd=str(tmp_path))
+
+    class Target:
+        async def edit(self):
+            return await shell.replace(match, "replacement")
+
+    executor = object.__new__(SandboxedExecutor)
+    executor._agent = Target()
+    executor._max_error = DEFAULT_TRUNCATION_CONFIG.capture.max_error
+    try:
+        response = await executor._dispatch_tool_call(
+            {"kind": "call", "path": ["edit"], "args": (), "kwargs": {}}
+        )
+        assert response["ok"] is False
+        assert response["error_type"] == "StaleMatchError"
+        for text in [str(path), "captured lines 1-1", "No file was changed", "recompute the Match"]:
+            assert text in response["error"]
+        with pytest.raises(ParentToolError) as caught:
+            _raise_broker_error(response)
+        # Broker uses ParentToolError for unknown custom types; response retains type name.
+        assert str(caught.value) == response["error"]
+        assert path.read_bytes() == b"current\n"
+    finally:
+        await shell.close()
 
 
 def test_custom_exception_uses_surrogate_with_original_type_and_diagnostic() -> None:
@@ -409,37 +481,34 @@ def test_base_exception_from_exception_string_does_not_escape_serialization(rais
     assert dto.error.diagnostic == "BrokenStringError: BrokenStringError"
 
 
-def test_ordinary_return_is_pickled_only_once_before_transport() -> None:
-    _PicklesOnlyOnce.calls = 0
-    dto = result_to_dto(ExecutionResult(returned_value=_PicklesOnlyOnce()))
+def test_ordinary_return_is_encoded_only_once_before_transport() -> None:
+    _DumpsOnlyOnce.calls = 0
+    dto = result_to_dto(ExecutionResult(returned_value=_DumpsOnlyOnce()))
 
-    transported_dto = pickle.loads(pickle.dumps(dto))
-    result = dto_to_result(transported_dto)
+    result = dto_to_result(_transport(dto), codec=_DECODER)
 
-    assert _PicklesOnlyOnce.calls == 1
-    assert result.returned_value == "serialized once"
+    assert _DumpsOnlyOnce.calls == 1
+    assert result.returned_value == _DumpsOnlyOnce()
 
 
-def test_return_result_payload_is_pickled_only_once_before_transport() -> None:
+def test_return_result_payload_is_encoded_only_once_before_transport() -> None:
     class Signal(ExecutionSignal):
         def __init__(self) -> None:
-            self.result = _PicklesOnlyOnce()
+            self.result = _DumpsOnlyOnce()
 
-    _PicklesOnlyOnce.calls = 0
+    _DumpsOnlyOnce.calls = 0
     dto = result_to_dto(ExecutionResult(signal=Signal()))
 
-    transported_dto = pickle.loads(pickle.dumps(dto))
     result = dto_to_result(
-        transported_dto,
-        signal_factory=lambda value: SignalWithResult(value),
+        _transport(dto), signal_factory=lambda value: SignalWithResult(value), codec=_DECODER
     )
 
-    assert _PicklesOnlyOnce.calls == 1
+    assert _DumpsOnlyOnce.calls == 1
     assert result.signal is not None
-    assert result.signal.result == "serialized once"
+    assert result.signal.result == _DumpsOnlyOnce()
 
 
-def test_unpicklable_ordinary_return_becomes_serialization_error() -> None:
+def test_unserializable_ordinary_return_becomes_serialization_error() -> None:
     def returned_value() -> None:
         pass
 
@@ -447,12 +516,11 @@ def test_unpicklable_ordinary_return_becomes_serialization_error() -> None:
     result = dto_to_result(dto)
 
     assert isinstance(result.error, CellSerializationError)
-    assert "Return value of type 'function' is not picklable" in str(result.error)
-    assert "sandbox boundary" in str(result.error)
+    assert "Return value of type 'function' cannot cross the sandbox boundary" in str(result.error)
     assert result.returned_value is _NO_RETURN
 
 
-def test_unpicklable_return_result_payload_becomes_serialization_error() -> None:
+def test_unserializable_return_result_payload_becomes_serialization_error() -> None:
     class Signal(ExecutionSignal):
         def __init__(self) -> None:
             self.result = lambda: None
@@ -462,7 +530,7 @@ def test_unpicklable_return_result_payload_becomes_serialization_error() -> None
 
     assert isinstance(result.error, CellSerializationError)
     assert "return_result(...)" in str(result.error)
-    assert "JSON/pickle-safe value" in str(result.error)
+    assert "sandbox boundary" in str(result.error)
     assert result.signal is None
 
 

@@ -198,7 +198,7 @@ specific query; spontaneous recall covers the passive "what's relevant right now
 |---|---|
 | `last_message` *(default)* | the most recent user-text message |
 | `recent_events` | the last `recent_events_n` events, concatenated |
-| `working_state` | recent `PythonOutput`/`LLMOutput` (the agent's scratch state) |
+| `working_state` | recent `PythonOutput`/`LLMResponse` (the agent's scratch state) |
 | `distilled` | LLM-distilled query — falls back to `recent_events` with no LLM |
 
 If no anchor can be derived (e.g. empty turn) **nothing is injected** — it never

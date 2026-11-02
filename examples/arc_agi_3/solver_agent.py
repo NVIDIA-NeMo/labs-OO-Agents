@@ -34,7 +34,7 @@ from types import SimpleNamespace
 import numpy as np  # noqa: F401
 
 from nooa import hidden, strategy
-from nooa.interactive import InteractiveAgent, RespondReason, RespondResult  # noqa: F401
+from nooa.interactive import Done, InteractiveAgent, Waiting  # noqa: F401
 from nooa.media import Image  # visual grid input (show()n to the LLM)
 from nooa.runtime import show  # CodeAct builtin — attach an image to the turn
 
@@ -50,7 +50,7 @@ with hidden:
     from nooa.agentdoc import pformat, spec
     from nooa.config import CodeActConfig
     from nooa.interactive import SummarizationConfig, install_summarizer
-    from nooa.runtime.channels import Channel, _ChannelReader
+    from nooa.runtime.channels import Channel, ChannelReader
     from nooa.runtime.restrictions import (
         DEFAULT_BLOCKED_MODULES,
         RestrictionsConfig,
@@ -122,26 +122,23 @@ _ARC_RESTRICTIONS = RestrictionsConfig(
 
 
 def _wait_requires_submission(agent, result, call) -> None:
-    """Postcondition on ``handle``: a WAIT turn-result must be backed by a
+    """Postcondition on ``handle``: a ``Waiting`` turn result must be backed by a
     submission for the current turn (method-local; not LLM-visible).
 
     In the 20260716 fleet the agent 13 times ended a turn claiming "submitted N
     actions" while nothing reached ``ipc/actions.jsonl`` (implicit-return bug,
     worker restarts) — and both sides idled the full 900s nudge timer. Raising
-    ``InvariantError`` routes the unbacked WAIT through the standard
+    ``InvariantError`` routes the unbacked ``Waiting`` through the standard
     validation-retry channel: an immediate same-turn resubmit instead of a stall.
     """
-    kind = getattr(result, "kind", None)
-    if kind is None and isinstance(result, dict):
-        kind = result.get("kind")
-    if kind is None or str(kind).upper() != "WAIT":
+    if not isinstance(result, Waiting):
         return
     state = agent._latest_state()
     turn = state.get("turn") if state else None
     if turn is None or agent._last_submitted_turn() == turn:
         return
     raise InvariantError(
-        f"result kind WAIT, but no actions were submitted for turn {turn} — "
+        f"result is Waiting, but no actions were submitted for turn {turn} — "
         "nothing reached the harness. Call self.submit_actions([...], rationale) now; "
         "a successful submit ends the turn by itself."
     )
@@ -520,7 +517,7 @@ class ArcSolverBase(InteractiveAgent):
 
     # Producer-side channel (hidden) + LLM-facing reader for harness states.
     _game_states_in: Annotated[Channel, hidden, nosnapshot]
-    game_states: Annotated[_ChannelReader, nosnapshot]
+    game_states: Annotated[ChannelReader, nosnapshot]
     # Namespace of loaded helper modules: after load_helpers(), call e.g.
     # self.h.world_model.predict(...). HIDDEN from the rendered <state> block:
     # a loaded module's repr is "<module 'x' from '/abs/run_dir/.../x.py'>", and
@@ -957,9 +954,11 @@ class ArcSolverBase(InteractiveAgent):
         self._ladder_active_effort = self._effort_ladder[0][1] if self._effort_ladder else None
         raise _ReturnResultSignal(
             result={
-                "kind": RespondReason.WAIT,
-                "explanation": f"submitted {len(actions)} action(s) for turn {turn}"
-                f"{truncation_warning}; waiting for the next state",
+                "result": Waiting(
+                    explanation=f"submitted {len(actions)} action(s) for turn {turn}"
+                    f"{truncation_warning}; waiting for the next state",
+                    on=["game_states"],
+                )
             }
         )
 
@@ -1016,7 +1015,7 @@ class ArcSolverBase(InteractiveAgent):
 
     @hidden
     @strategy(CodeActStrategy(config=_ARC_CELL_CONFIG))
-    async def handle(self, notification: dict[str, list]) -> RespondResult:
+    async def handle(self, notification: dict[str, list]) -> Done | Waiting:
         """One interactive-grid-game solving turn. Follow the <arc_skill> context block.
 
         ``notification`` maps channel name to new items:
@@ -1056,9 +1055,9 @@ class ArcSolverBase(InteractiveAgent):
 
         If state == "WIN": write your final level reflection to the knowledge
         store, message() a short victory summary, then
-        return_result(RespondReason.DONE, explanation="game solved").
+        return_result(Done(explanation="game solved")).
         If the game is stuck/over (harness note says so), summarize what you
-        learned and return_result(RespondReason.DONE, ...).
+        learned and return_result(Done(explanation=...)).
         Never end a turn without either submitting actions or (only when the
         game is finished) reporting the outcome.
         """

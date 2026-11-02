@@ -32,7 +32,7 @@ from nooa_cli.coding import (
 
 from nooa.agentdoc import pformat
 from nooa.context_blocks.events import EventBase, ResultStatus, ToolCallEvent
-from nooa.events import LLMComplete, PythonOutput
+from nooa.events import LLMResponse, PythonOutput
 from nooa.interactive import AgentMessage
 
 # ACP owns stdout for JSON-RPC; diagnostics belong on stderr, which is where
@@ -80,12 +80,15 @@ class ACPEventBridge:
         self._open_tools: set[str] = set()
         self._python_source: dict[str, str] = {}
         self._terminal_output: dict[str, str] = {}
+        # Partial stdout/stderr of a cancelled cell, shown on its card when
+        # fail_open_tools closes it.
+        self._cancelled_output: dict[str, str] = {}
         self._cost_usd = 0.0
         self._unsubscribers: list[Callable[[], None]] = [
             agent.event_manager.on("AgentMessage", self._on_agent_message),
             agent.event_manager.on("ToolCallEvent", self._on_tool_call),
             agent.event_manager.on("PythonOutput", self._on_python_output),
-            agent.event_manager.on("LLMComplete", self._on_llm_complete),
+            agent.event_manager.on("LLMResponse", self._on_llm_response),
             agent.event_manager.on("FileEdit", self._on_file_edit),
             agent.event_manager.on("TerminalCommandStarted", self._on_terminal_started),
             agent.event_manager.on("TerminalCommandOutput", self._on_terminal_output),
@@ -113,7 +116,7 @@ class ACPEventBridge:
     def _on_tool_call(self, event: EventBase) -> None:
         if (
             not isinstance(event, ToolCallEvent)
-            or event.name != "execute_python"
+            or event.name not in {"execute_python", "python_cell"}
             or event.metadata.get("prefill") is True
             # codeact manufactures an execute_python call to carry a prose-only
             # reply. Nothing ran, so showing it as a Python card would present
@@ -142,6 +145,16 @@ class ACPEventBridge:
 
     def _on_python_output(self, event: EventBase) -> None:
         if not isinstance(event, PythonOutput) or event.tool_call_id not in self._open_tools:
+            return
+        # Core records a cancelled cell with whatever it printed. Keep that
+        # output and leave the card open so cancel()'s fail_open_tools closes
+        # it as "Cancelled" with the partial output shown.
+        if event.execution_status is ResultStatus.CANCELLED:
+            partial = "\n".join(
+                part.rstrip() for part in (event.stdout, event.stderr) if part.strip()
+            )
+            if partial:
+                self._cancelled_output[event.tool_call_id] = partial
             return
         self._open_tools.discard(event.tool_call_id)
         code = self._python_source.pop(event.tool_call_id, "")
@@ -254,18 +267,21 @@ class ACPEventBridge:
             )
         )
 
-    def _on_llm_complete(self, event: EventBase) -> None:
-        if not isinstance(event, LLMComplete):
+    def _on_llm_response(self, event: EventBase) -> None:
+        if not isinstance(event, LLMResponse):
             return
-        self._cost_usd += event.cost_usd
+        usage = event.usage
+        if usage is None:
+            return
+        self._cost_usd += usage.cost_usd
         context_window = getattr(self.agent.llm, "context_window", None)
         if context_window is None:
             return
         self._enqueue(
             UsageUpdate(
                 session_update="usage_update",
-                used=event.prompt_tokens,
-                size=max(context_window, event.prompt_tokens),
+                used=usage.input_tokens,
+                size=max(context_window, usage.input_tokens),
                 cost=Cost(amount=self._cost_usd, currency="USD"),
             )
         )
@@ -364,10 +380,16 @@ class ACPEventBridge:
         """
         for tool_call_id in tuple(self._open_tools):
             code = self._python_source.pop(tool_call_id, None)
+            # Output shown before the close: a cancelled cell's partial output, or
+            # what a terminal command streamed so far.
+            partial = self._cancelled_output.pop(tool_call_id, None)
+            if partial is None:
+                partial = self._terminal_output.pop(tool_call_id, "").rstrip("\n")
+            output = f"{partial}\n\n{reason}" if partial else reason
             content = (
-                _python_content(code, reason)
+                _python_content(code, output)
                 if code is not None
-                else [tool_content(text_block(reason))]
+                else [tool_content(text_block(output))]
             )
             self._enqueue(
                 update_tool_call(
@@ -380,6 +402,7 @@ class ACPEventBridge:
         self._open_tools.clear()
         self._python_source.clear()
         self._terminal_output.clear()
+        self._cancelled_output.clear()
 
     async def close(self) -> None:
         if self._closed:

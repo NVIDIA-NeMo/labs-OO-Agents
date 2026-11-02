@@ -61,13 +61,12 @@ class EventsApi(Skill):
         tasks = events.query(type="Task", query="summarise")
 
     Context compaction:
-        When context grows too large, use events to summarize or collapse
-        old history. The summarizer does this automatically at token budget
-        thresholds, but you can also compact manually:
+        Keep context small by collapsing completed work into concise summaries.
+        Preserve key findings, decisions, unresolved issues, and references:
 
         events.query(limit=20)       # inspect what's taking space
-        # Summarization happens at the runtime level — old events get
-        # replaced by summary events with range tags like "1..22".
+        events.collapse("1", "22", "Key findings and remaining work...")
+        # Old events are replaced by summary events with range tags like "1..22".
         # After compaction, access originals via summary.children_tags.
 
     Load this library:
@@ -201,11 +200,16 @@ class EventsApi(Skill):
         """
         return self._manager.get(key) is not None
 
-    def collapse(self, start_tag: str, end_tag: str, summary_text: str | None = None) -> str:
+    def collapse(
+        self, start_tag: str | int, end_tag: str | int, summary_text: str | None = None
+    ) -> str:
         """Archive a range of events into a single Summary marker.
 
         Replaces tags start_tag..end_tag with one summary tag.
         Original events remain accessible by their individual tags.
+        Prefer string tags, including summary tags such as "2..10". Integers
+        are accepted if they identify existing events (including archived ones).
+        Either endpoint may be an integer.
 
         Args:
             start_tag: First tag to collapse (inclusive), e.g. "2".
@@ -220,7 +224,17 @@ class EventsApi(Skill):
             events.collapse("2", "40", "User discussed X")   # summarize
             summary = events[events.collapse("2", "40")]     # get the Summary event
         """
-        return self._manager.collapse(start_tag, end_tag, summary_text)
+        tags: list[str] = []
+        for name, tag in (("start_tag", start_tag), ("end_tag", end_tag)):
+            if type(tag) is int:
+                tag = str(tag)
+                if self._manager.get(tag) is None:
+                    raise ValueError(f"{name} does not identify an existing event: {tag!r}")
+            elif not isinstance(tag, str):
+                raise TypeError(f"{name} must be a string tag or an integer event tag")
+            tags.append(tag)
+
+        return self._manager.collapse(tags[0], tags[1], summary_text)
 
     def keys(self) -> list[str]:
         """Return the list of active event tags in chronological order.
