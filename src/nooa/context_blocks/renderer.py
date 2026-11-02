@@ -113,6 +113,8 @@ def render_context(
     linked_execution_segments: list[tuple[str, str, int]] = []
     for item in blocks:
         if isinstance(item, CacheBoundary):
+            if segment_index:
+                raise UnsupportedContextLayout("A view may place at most one CacheBoundary")
             segments.append((segment, True))
             segment = []
             segment_index += 1

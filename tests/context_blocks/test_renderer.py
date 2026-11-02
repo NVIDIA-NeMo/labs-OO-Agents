@@ -74,15 +74,23 @@ class TestRenderContextBasic:
         assert result[0]["role"] == "system"
         assert result[1] == CacheBoundary()
 
-    def test_leading_and_consecutive_boundaries_are_preserved(self):
+    def test_leading_boundary_is_preserved(self):
         result = render_context(
-            [CacheBoundary(), CacheBoundary(), Block(key="only", content="only")],
+            [CacheBoundary(), Block(key="only", content="only")],
             block_formatter=XMLBlockFormatter(),
             provider_formatter=OpenAIProviderFormatter(),
         ).output
-        assert result[:2] == [CacheBoundary(), CacheBoundary()]
-        assert len(result) == 3
-        assert result[2]["role"] == "system"
+        assert result[0] == CacheBoundary()
+        assert len(result) == 2
+        assert result[1]["role"] == "system"
+
+    def test_second_boundary_is_rejected(self):
+        with pytest.raises(UnsupportedContextLayout, match="at most one CacheBoundary"):
+            render_context(
+                [CacheBoundary(), CacheBoundary(), Block(key="only", content="only")],
+                block_formatter=XMLBlockFormatter(),
+                provider_formatter=OpenAIProviderFormatter(),
+            )
 
     def test_boundary_survives_omitted_incomplete_history(self):
         from nooa import replayable

@@ -184,12 +184,16 @@ def apply_cache_policy(
     instructions: str | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, bool]:
     """Consume one boundary and map it to provider-specific cache metadata."""
+    from nooa.context_blocks.exceptions import UnsupportedContextLayout
+
     clean = []
     boundary = None
     for message in messages:
         if isinstance(message, CacheBoundary):
             if boundary is not None:
-                raise ValueError("Rendered history contains more than one cache boundary")
+                raise UnsupportedContextLayout(
+                    "Rendered history contains more than one cache boundary"
+                )
             boundary = len(clean)
             continue
         reject_boundary_dict(message)

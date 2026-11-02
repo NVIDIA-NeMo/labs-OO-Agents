@@ -310,7 +310,7 @@ def test_multiple_cache_boundaries_fail_loudly() -> None:
         CacheBoundary(),
     ]
     with ResponsesClient(model="openai/gpt-5.6", cache_breakpoint="openai") as client:
-        with pytest.raises(ValueError, match="more than one cache boundary"):
+        with pytest.raises(UnsupportedContextLayout, match="more than one cache boundary"):
             client._prepare_cache_boundary(messages, responses=True)
 
 
