@@ -84,21 +84,23 @@ async def test_every_in_a_turn(tmp_path, sessions_dir):
 def test_the_tools_doc_shows_after_every_and_the_tail_idiom():
     from nooa_atom.agent.agent import _WORK_EXAMPLES
     from nooa_atom.agent.work_manager import WorkManager
+    from nooa_atom.agent.work_shell import Shell
 
     from nooa.agentdoc import doc
 
     text = doc(WorkManager, inline_depth=0)
-    for wanted in ("def after(", "def every(", "progress=Throttle("):
+    for wanted in ("def after(", "def every("):
         assert wanted in text, wanted
+    assert "progress=Throttle(" in _WORK_EXAMPLES
     assert "def tail(" not in text and "self.jobs.tail(" not in _WORK_EXAMPLES
     # after() says the delay counts from now; no elapsed-time advice is repeated.
     assert "subtract" not in text.lower() and "subtract" not in _WORK_EXAMPLES
     for call in ("self.jobs.after(", "self.jobs.every("):
         assert sum(call in line for line in _WORK_EXAMPLES.splitlines()) == 1
-    # Following a file is a command in its own Shell watched with a Throttle: one
-    # line each, never on the Shell other commands use (it would queue them).
-    assert 'Shell().run("tail -F app.log"' in text and "its own Shell" in text
-    [line] = [line for line in _WORK_EXAMPLES.splitlines() if "tail -F" in line]
-    assert 'Shell().run("tail -F app.log"' in line and "progress=Throttle(" in line
-    assert "one command at a time" in line
-    assert 'sh.run("tail' not in _WORK_EXAMPLES
+    # The one-command-at-a-time fact is said once, in the Shell doc; no tail example.
+    assert "tail -F" not in text and "tail -F" not in _WORK_EXAMPLES
+    assert "one command at a time" not in text and "one command at a time" not in _WORK_EXAMPLES
+    shell_doc = " ".join(doc(Shell, inline_depth=0).split())
+    assert (
+        "A Shell runs one command at a time: use another Shell for a second concurrent command."
+    ) in shell_doc

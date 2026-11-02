@@ -386,7 +386,7 @@ class Shell:
 
     Reuse ``sh``: FIFO commands preserve cwd, variables, options and traps.
     A new Shell starts fresh in the workspace; bash starts on first use.
-    One command at a time: give a long job its own Shell (``log = Shell()``).
+    A Shell runs one command at a time: use another Shell for a second concurrent command.
 
     ``timeout`` defaults to 600 s. Timeout returns 124 with ``timed_out=True``
     and a note in stderr on how to go on. Timeout/cancel skips remaining

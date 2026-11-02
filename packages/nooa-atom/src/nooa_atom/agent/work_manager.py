@@ -1011,8 +1011,6 @@ class WorkManager:
     turns: return ``Waiting(on=[name])`` while they run; cancel unneeded work.
     Names: letters, digits, ``_`` or ``-``; requests are ``<name>#1``, ``<name>#2``...
     Built in, as launch(): ``after(s)`` timer; ``every(s)`` ticks.
-    Watch a command or follow a file in its own Shell:
-    ``launch(Shell().run("tail -F app.log"), progress=Throttle(seconds=5))``.
     """
 
     __nosnapshot__ = True
