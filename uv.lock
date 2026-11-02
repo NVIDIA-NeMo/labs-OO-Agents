@@ -1463,12 +1463,14 @@ wheels = [
 name = "nooa"
 source = { editable = "." }
 dependencies = [
+    { name = "anyio" },
     { name = "filelock", marker = "sys_platform == 'win32'" },
     { name = "httpx" },
     { name = "litellm" },
     { name = "msgpack" },
     { name = "openinference-instrumentation-litellm" },
     { name = "pydantic" },
+    { name = "urllib3" },
 ]
 
 [package.optional-dependencies]
@@ -1488,7 +1490,9 @@ cli = [
     { name = "nooa-cli" },
 ]
 mcp = [
+    { name = "cryptography" },
     { name = "mcp" },
+    { name = "pyjwt", extra = ["crypto"] },
 ]
 memory = [
     { name = "nooa-memory" },
@@ -1551,8 +1555,10 @@ trace-viewer = [
 
 [package.metadata]
 requires-dist = [
+    { name = "anyio", specifier = ">=4.15.1" },
     { name = "arc-agi", marker = "extra == 'arc'", specifier = ">=0.9.8" },
     { name = "arcengine", marker = "extra == 'arc'", specifier = ">=0.9.3" },
+    { name = "cryptography", marker = "extra == 'mcp'", specifier = ">=50.0.2" },
     { name = "fastapi", marker = "extra == 'viewer'", specifier = ">=0.100.0" },
     { name = "filelock", marker = "sys_platform == 'win32'", specifier = ">=3.29.4" },
     { name = "httpx", specifier = ">=0.27.0" },
@@ -1573,9 +1579,11 @@ requires-dist = [
     { name = "opentelemetry-sdk", marker = "extra == 'tracing'", specifier = ">=1.20.0" },
     { name = "pillow", marker = "extra == 'arc'", specifier = ">=10.0" },
     { name = "pydantic", specifier = ">=2.5.0" },
+    { name = "pyjwt", extras = ["crypto"], marker = "extra == 'mcp'", specifier = ">=2.15.1" },
     { name = "python-dotenv", marker = "extra == 'viewer'", specifier = ">=1.0.0" },
     { name = "python-multipart", marker = "extra == 'viewer'", specifier = ">=0.0.5" },
     { name = "rich", marker = "extra == 'arc'", specifier = ">=13.0" },
+    { name = "urllib3", specifier = ">=2.8.0" },
     { name = "uvicorn", extras = ["standard"], marker = "extra == 'viewer'", specifier = ">=0.20.0" },
 ]
 provides-extras = ["acp", "arc", "bench", "cli", "mcp", "memory", "nemo-relay", "sandbox", "tracing", "viewer"]
