@@ -7,8 +7,8 @@ A snapshot is a small, detached tree (``Scalar``, ``Text``, ``Sequence``,
 node says whether it is complete and, if not, why. Two producers build it:
 
 - ``capture(value, limits)`` for finished Python values (no user code runs on
-  types it does not know; ``capture.register(T)`` and, by name without
-  importing, ``capture.register_lazy(module, qualname)`` extend it);
+  types it does not know; ``capture.register(T)``, process-wide and matched
+  by class identity, extends it);
 - ``TextStream`` for output that arrives over time (head, rolling tail,
   counter and an optional spill file).
 

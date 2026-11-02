@@ -65,7 +65,7 @@ def render_ndarray(node: Object, r: PythonRenderer) -> str:
     return f"array({r.render(sample)}, shape={r.render(shape)}, dtype={r.render(dtype)})"
 
 
-class _LazyNdarray(_FakeNdarray):
+class _HugeNdarray(_FakeNdarray):
     """A huge ndarray-like value whose ``flat`` is generated, never materialized."""
 
     def __init__(self, size: int) -> None:
@@ -79,5 +79,5 @@ class _LazyNdarray(_FakeNdarray):
             yield float(value)
 
 
-_LazyNdarray.__module__ = "fakenumpy_7c1e"
-_LazyNdarray.__qualname__ = "ndarray"
+_HugeNdarray.__module__ = "fakenumpy_7c1e"
+_HugeNdarray.__qualname__ = "ndarray"

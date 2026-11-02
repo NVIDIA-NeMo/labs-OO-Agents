@@ -1666,36 +1666,24 @@ def _raw_qualified_name(cls: type[Any], state: _State) -> tuple[str, str] | None
 
 
 class _Registry:
-    """Eager registrations (by class identity) and lazy ones (by qualified name)."""
+    """The process-wide ``capture.register(T)`` registrations, matched by class identity.
+
+    A list of ``(cls, function)`` pairs scanned with ``is``: a class is never
+    hashed or compared with ``==``, so a metaclass ``__hash__``/``__eq__``
+    cannot run during dispatch.
+    """
 
     def __init__(self) -> None:
         self.entries: list[tuple[type[Any], CaptureFunction]] = []
-        # (module, qualname) -> function; keys are exact ``str`` pairs only.
-        self.lazy: dict[tuple[str, str], CaptureFunction] = {}
 
-    def _lazy_for(self, cls: type[Any], state: _State) -> CaptureFunction | None:
-        """The lazy registration for ``cls``'s current raw name (never the class itself).
-
-        The name is read on every lookup (a class can be renamed), and a dict
-        lookup of an exact ``str`` pair runs no user code: nothing is cached.
-        """
-        if not self.lazy:
+    def find(self, mro: tuple[type[Any], ...]) -> tuple[int, CaptureFunction] | None:
+        """The registration nearest in ``mro`` (identity comparisons only)."""
+        if not self.entries:
             return None
-        name = _raw_qualified_name(cls, state)
-        return self.lazy.get(name) if name is not None else None
-
-    def find(self, mro: tuple[type[Any], ...], state: _State) -> tuple[int, CaptureFunction] | None:
-        """The registration nearest in ``mro`` (identity comparisons only).
-
-        At one class an eager registration wins over a lazy one.
-        """
         for index, base in enumerate(mro):
             for registered, function in self.entries:
                 if registered is base:
                     return index, function
-            lazy = self._lazy_for(base, state)
-            if lazy is not None:
-                return index, lazy
         return None
 
 
@@ -1789,7 +1777,7 @@ def _build(
     mro = _safe_mro(value, state)
     if mro is None:
         return _opaque(value, max_size, state)
-    found = _REGISTRY.find(mro, state)
+    found = _REGISTRY.find(mro)
     model_index = _index_of(mro, BaseModel)
     dataclass_index = _dataclass_index(mro, state)
     candidates = [
@@ -1825,9 +1813,12 @@ class _CaptureFunction:
         """Register ``function(value, out)``, returning one part of its out, for ``cls`` and subclasses.
 
         Use as ``@capture.register(T)`` or ``capture.register(T, function)``.
-        The registration nearest in a value's MRO wins (over the built-in
-        Pydantic and dataclass views too); registering ``cls`` again replaces
-        it. Exact built-in types (``str``, ``list``, ...) are always native.
+        Registering needs the imported type, so supporting a library is opt-in
+        by whoever sets up the agent; the registry is process-wide. Classes
+        are matched by identity (``is``) along the value's raw MRO, so no user
+        code runs during lookup. The registration nearest in a value's MRO
+        wins (over the built-in Pydantic and dataclass views too); registering
+        ``cls`` again replaces it. Exact built-in types (``str``, ``list``, ...) are always native.
         An exception in ``function`` (a part used twice too), or a result
         that is not a part of its ``out``, becomes ``Unavailable("error")``.
         """
@@ -1846,34 +1837,6 @@ class _CaptureFunction:
         """Remove the registration for exactly ``cls`` (no-op when absent)."""
         entries = _REGISTRY.entries
         entries[:] = [entry for entry in entries if entry[0] is not cls]
-
-    def register_lazy(
-        self, module: str, qualname: str, function: CaptureFunction | None = None
-    ) -> Any:
-        """Register ``function(value, out)`` for the class named ``module`` / ``qualname``.
-
-        Use as ``@capture.register_lazy("numpy", "ndarray")`` or
-        ``capture.register_lazy("numpy", "ndarray", function)``. Only the name
-        is recorded: the module is never imported, so a library NOOA does not
-        depend on can be supported. At capture time each class of the value's
-        raw MRO is matched by its native ``__module__`` and ``__qualname__``
-        (no metaclass hooks); the nearest class matching an eager
-        (``register``) or a lazy registration wins, and at the same class the
-        eager one. Registering the same name again replaces it.
-        """
-        if type(module) is not str or type(qualname) is not str or not module or not qualname:
-            raise TypeError("capture.register_lazy needs a module and a qualname (non-empty str)")
-        key = (module, qualname)
-
-        def add(function: CaptureFunction) -> CaptureFunction:
-            _REGISTRY.lazy[key] = function
-            return function
-
-        return add(function) if function is not None else add
-
-    def unregister_lazy(self, module: str, qualname: str) -> None:
-        """Remove the lazy registration for ``module`` / ``qualname`` (no-op when absent)."""
-        _REGISTRY.lazy.pop((module, qualname), None)
 
 
 capture = _CaptureFunction()

@@ -106,7 +106,7 @@ It is today's `Shell` wording. It is the newest notation and the one models alre
 
 ## Extending for third-party types (numpy, pandas, …)
 
-Two hooks, one per step. Neither makes NOOA import or depend on the library.
+Two hooks, one per step. Neither makes NOOA import or depend on the library: the capture function is registered by whoever sets up the agent, where the library is already imported.
 
 ### Extension contract
 
@@ -126,10 +126,12 @@ So capture limits bound what a snapshot holds, and only `render_json` bounds wha
 
 **Reservation, and where it stops.** With a `dict`, `list` or `tuple` of fields, `out.object` builds them in order and each leaves room for the minimal fallback of every later field, so a greedy field gets what is left. That holds only while the slot fits the wrapper, the current field's own minimum and those fallbacks: a field is never held below its own minimum, so in a smaller slot later fields are still cut. Fields from any other iterable are pulled one at a time, and nothing can be reserved for fields not yet seen. The one detailed explanation is under [The implementation](#the-implementation-nooasnapshot) (`out.object`).
 
-### Capture: lazy registration by name
+### Capture: registration by type
 
 ```python
-@capture.register_lazy("numpy", "ndarray")
+import numpy
+
+@capture.register(numpy.ndarray)
 def capture_ndarray(array, out):
     return out.object({
         "shape": out.capture(array.shape),
@@ -138,8 +140,9 @@ def capture_ndarray(array, out):
     }, type_name="ndarray", kind="numpy.ndarray")
 ```
 
-- `register_lazy(module, qualname)` records the name only. It never imports the module. `capture.register_lazy(module, qualname, function)` is the non-decorator form, and `capture.unregister_lazy(module, qualname)` removes it.
-- At capture time, the dispatcher walks the value's raw MRO (`type.__dict__["__mro__"]`). For each class it reads `__module__` and `__qualname__` through `type`'s own descriptors (the class's native storage), without metaclass hooks. The nearest class that matches an eager registration (`capture.register(T)`) or a lazy one (`register_lazy`) wins. At the same class, the eager one wins. The match is looked up by the class's current raw name, an exact `str` pair, at every capture: nothing is cached per class, so renaming a class (assigning `__module__` or `__qualname__`) takes effect at the next capture, no class is retained, and the class is never hashed or compared, so a custom metaclass `__hash__`/`__eq__` can't run.
+- `capture.register(T)` takes the class itself, so registering imports the type. Support for a library is therefore opt-in: whoever sets up the agent, and already imports numpy or pandas, registers it; NOOA itself never imports them. `capture.register(T, function)` is the non-decorator form, `capture.unregister(T)` removes it, and registering `T` again replaces it. Anything but a class raises `TypeError`.
+- The registry is process-wide: one registry for the whole process, with no per-agent scope.
+- At capture time, the dispatcher walks the value's raw MRO (`type.__dict__["__mro__"]`, read through `type`'s own descriptor) and compares each class with the registered classes by identity (`is`); the nearest registered class wins. A class is never hashed or compared with `==`, so a custom metaclass `__hash__`/`__eq__` can't run, and a lookup runs no user code. Matching is by identity, not name, so a class renamed by assigning `__module__` or `__qualname__` still dispatches, and another class with the same name does not. Only registered classes are retained.
 - A value whose class is not registered stays `Opaque`, exactly as before.
 - The registered function is trusted extension code, as in the proposal. It builds children only through `out`, so the shared budget holds. An exception becomes `Unavailable`.
 
@@ -181,11 +184,11 @@ def render_ndarray(node: Object, r: PythonRenderer) -> str:
   ```
 
   A hook that raises, returns anything but a node (JSON text, plain data) or a node that can't be encoded (`Scalar(float("nan"))`, a non-node child) gives the generic rendering. A projection that returns or embeds the hook's own node gets the generic rendering for that node; projections nest at most 64 deep, deeper ones render generically, so a hook that builds a fresh node of its own kind each time still ends.
-- `kind` is a plain string, so render hooks need no lazy mechanism.
+- `kind` is a plain string, so render hooks don't need the type: a hook can be registered without importing the library.
 
 ### First users
 
-Open PR **#87** ("shape-aware pformat previews for numpy and pandas", pierreolivierbonin) already designs previews for these types. Once PR 1 lands, its previews can be re-expressed as `register_lazy` capture functions plus `render_python` hooks for `numpy.ndarray`, `pandas.DataFrame` and `pandas.Series`.
+Open PR **#87** ("shape-aware pformat previews for numpy and pandas", pierreolivierbonin) already designs previews for these types. Once PR 1 lands, its previews can be re-expressed as `capture.register(T)` capture functions, registered where numpy and pandas are imported, plus `render_python` hooks for `numpy.ndarray`, `pandas.DataFrame` and `pandas.Series`.
 
 ## The implementation (`nooa.snapshot`)
 
@@ -194,7 +197,7 @@ Public API, all importable from `nooa.snapshot`:
 | Name | What it is |
 |---|---|
 | `Scalar`, `Text`, `Sequence`, `Mapping`, `Object`, `Opaque`, `Unavailable`, `Ref`, `Spill` | the frozen snapshot nodes; `Snapshot` is their union, `Reason` / `REASONS` the reason names, `Key` a mapping key |
-| `capture(value, limits=DEFAULT_LIMITS)`, `Limits`, `DEFAULT_LIMITS` | a snapshot of a finished value; `capture.register(T)` / `capture.unregister(T)` and `capture.register_lazy(module, qualname)` / `capture.unregister_lazy(...)` extend it |
+| `capture(value, limits=DEFAULT_LIMITS)`, `Limits`, `DEFAULT_LIMITS` | a snapshot of a finished value; `capture.register(T)` / `capture.unregister(T)` extend it (process-wide, matched by class identity) |
 | `Out` | what a registered function gets as `(value, out: Out)`: `out.capture/sequence/mapping/object/opaque` |
 | `capture_fields(**fields, limits=...)` | #342's `trace_fields`: a framework wrapper whose every root field survives with its type |
 | `TextStream`, `SpillTarget`, `DEFAULT_SPILL_BYTES`, `merge` | output that arrives over time; `merge` joins unread deltas |
@@ -252,3 +255,4 @@ Configuration stays in `TruncationConfig`. `capture.max_stdout` etc. become `Tex
 1. **Atom spills cell stdout by default:** yes, as `Shell` does.
 2. **The per-cell stdout limit stays at 50,000 characters.** It does not shrink to `Shell`'s 10 kB, even though the full output is on disk.
 3. **Spill files follow `Shell`'s lifetime rules:** kept while the job is listed, or until the `Shell` or session closes.
+4. **Capture extensions register by type only:** `capture.register(T)`, one registry per process; registration by module and class name was removed.

@@ -1,10 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Extension registry: ``register`` / ``register_lazy`` dispatch, its cache and its safety."""
+"""Extension registry: ``capture.register(T)`` dispatch by class identity, and its safety."""
 
 from __future__ import annotations
 
-import sys
 from typing import Any
 
 import pytest
@@ -14,7 +13,6 @@ from nooa.snapshot import (
     Opaque,
     Out,
     Scalar,
-    Text,
     capture,
     render_python,
 )
@@ -23,107 +21,79 @@ from tests.snapshot._extend_support import (
     _named,
 )
 
-# --- register_lazy -------------------------------------------------------------------
+# --- register(T): identity dispatch ---------------------------------------------------
 
 
-def test_register_lazy_never_imports_the_module(lazy) -> None:
-    before = set(sys.modules)
-    lazy(FAKE_MODULE, "Widget", lambda value, out: out.capture("widget"))
-    assert FAKE_MODULE not in sys.modules
+def test_register_decorator_form_and_unregister() -> None:
+    Gadget = _named("Gadget")
 
-    Widget = _named("Widget")
-    assert capture(Widget()) == Text("widget", "", 6, "chars", True, None)
-    assert FAKE_MODULE not in sys.modules
-    assert set(sys.modules) - before == set()
-
-
-def test_register_lazy_decorator_form() -> None:
-    @capture.register_lazy(FAKE_MODULE, "Gadget")
+    @capture.register(Gadget)
     def gadget(value: Any, out: Out):
         return out.capture(1)
 
     try:
-        assert capture(_named("Gadget")()) == Scalar(1)
+        assert capture(Gadget()) == Scalar(1)
     finally:
-        capture.unregister_lazy(FAKE_MODULE, "Gadget")
-    assert capture(_named("Gadget")()) == Opaque(FAKE_MODULE, "Gadget")
+        capture.unregister(Gadget)
+    assert capture(Gadget()) == Opaque(FAKE_MODULE, "Gadget")
+    capture.unregister(Gadget)  # absent: a no-op
 
 
-def test_register_lazy_matches_module_and_qualname(lazy) -> None:
-    lazy(FAKE_MODULE, "Outer.Inner", lambda value, out: out.capture("inner"))
-
-    assert render_python(capture(_named("Inner", qualname="Outer.Inner")())) == "'inner'"
-    # Same qualname, other module; same module, other qualname: not registered.
-    assert capture(_named("Inner", module="other", qualname="Outer.Inner")()) == Opaque(
-        "other", "Inner"
-    )
-    assert capture(_named("Inner")()) == Opaque(FAKE_MODULE, "Inner")
+def test_register_needs_a_class() -> None:
+    for not_a_class in ("numpy.ndarray", None, 1, _named("Widget")()):
+        with pytest.raises(TypeError):
+            capture.register(not_a_class)  # type: ignore[arg-type]
+        with pytest.raises(TypeError):
+            capture.register(not_a_class, lambda value, out: out.capture(1))  # type: ignore[arg-type]
 
 
-def test_register_lazy_with_a_class_defined_in_this_module(lazy) -> None:
-    class Local:
-        pass
+def test_register_matches_the_class_not_its_name(eager) -> None:
+    Inner = _named("Inner", qualname="Outer.Inner")
+    eager(Inner, lambda value, out: out.capture("inner"))
 
-    lazy(__name__, Local.__qualname__, lambda value, out: out.capture("local"))
-    assert render_python(capture(Local())) == "'local'"
-
-
-def test_register_lazy_needs_names() -> None:
-    with pytest.raises(TypeError):
-        capture.register_lazy("", "x")
-    with pytest.raises(TypeError):
-        capture.register_lazy(FAKE_MODULE, None)  # type: ignore[arg-type]
+    assert render_python(capture(Inner())) == "'inner'"
+    # Another class with the same module and qualname is not registered.
+    assert capture(_named("Inner", qualname="Outer.Inner")()) == Opaque(FAKE_MODULE, "Inner")
 
 
-def test_lazy_subclass_matches_and_unregistered_stays_opaque(lazy) -> None:
+def test_subclass_matches_and_unregistered_stays_opaque(eager) -> None:
     Base = _named("Base")
     Child = type("Child", (Base,), {"__module__": "elsewhere"})
-    lazy(FAKE_MODULE, "Base", lambda value, out: out.capture("base"))
+    eager(Base, lambda value, out: out.capture("base"))
 
     assert render_python(capture(Child())) == "'base'"
     assert capture(_named("Other")()) == Opaque(FAKE_MODULE, "Other")
 
 
-def test_nearest_mro_wins_between_eager_and_lazy(lazy, eager) -> None:
-    LazyBase = _named("LazyBase")
+def test_nearest_registered_class_in_the_mro_wins(eager) -> None:
+    Base = _named("Base")
 
-    class EagerMiddle(LazyBase):  # type: ignore[misc,valid-type]
+    class Middle(Base):  # type: ignore[misc,valid-type]
         pass
 
-    LazyLeaf = type("LazyLeaf", (EagerMiddle,), {"__module__": FAKE_MODULE})
+    Leaf = type("Leaf", (Middle,), {"__module__": FAKE_MODULE})
 
-    lazy(FAKE_MODULE, "LazyBase", lambda value, out: out.capture("lazy-base"))
-    eager(EagerMiddle, lambda value, out: out.capture("eager-middle"))
+    eager(Middle, lambda value, out: out.capture("middle"))
+    eager(Base, lambda value, out: out.capture("base"))  # registered later, still farther
 
-    assert render_python(capture(LazyBase())) == "'lazy-base'"
-    assert render_python(capture(EagerMiddle())) == "'eager-middle'"
-    assert render_python(capture(LazyLeaf())) == "'eager-middle'"
+    assert render_python(capture(Base())) == "'base'"
+    assert render_python(capture(Middle())) == "'middle'"
+    assert render_python(capture(Leaf())) == "'middle'"
 
-    lazy(FAKE_MODULE, "LazyLeaf", lambda value, out: out.capture("lazy-leaf"))
-    assert render_python(capture(LazyLeaf())) == "'lazy-leaf'"  # a new registration applies
+    eager(Leaf, lambda value, out: out.capture("leaf"))
+    assert render_python(capture(Leaf())) == "'leaf'"  # a new registration applies
+    capture.unregister(Leaf)
+    assert render_python(capture(Leaf())) == "'middle'"
+    capture.unregister(Middle)
+    assert render_python(capture(Leaf())) == "'base'"
 
 
-def test_eager_wins_over_lazy_at_the_same_class(lazy, eager) -> None:
+def test_registering_again_replaces_it(eager) -> None:
     Both = _named("Both")
-    lazy(FAKE_MODULE, "Both", lambda value, out: out.capture("lazy"))
-    eager(Both, lambda value, out: out.capture("eager"))
+    eager(Both, lambda value, out: out.capture("first"))
+    eager(Both, lambda value, out: out.capture("second"))
 
-    assert render_python(capture(Both())) == "'eager'"
-
-
-def test_lazy_registration_does_not_retain_matched_classes(lazy) -> None:
-    import gc
-    import weakref
-
-    lazy(FAKE_MODULE, "Matched", lambda value, out: out.capture(1))
-    Matched = _named("Matched")
-    assert capture(Matched()) == Scalar(1)
-    assert capture(Matched()) == Scalar(1)  # matched again, by its current name
-    reference = weakref.ref(Matched)
-
-    del Matched
-    gc.collect()
-    assert reference() is None
+    assert render_python(capture(Both())) == "'second'"
 
 
 class _Recording(type):
@@ -156,39 +126,55 @@ def _hostile(name: str, bases: tuple[type[Any], ...] = ()) -> type[Any]:
     return _Recording(name, bases, {"__module__": FAKE_MODULE, "__qualname__": name})
 
 
-def test_metaclass_hooks_never_run_during_lazy_dispatch(lazy, eager) -> None:
+def test_metaclass_hooks_never_run_during_dispatch(eager) -> None:
     Hostile = _hostile("Hostile")
     Sub = _hostile("Sub", (Hostile,))
     Unregistered = _hostile("Unregistered")
     _Recording.calls.clear()
 
-    lazy(FAKE_MODULE, "Hostile", lambda value, out: out.capture("matched"))
-    eager(int, lambda value, out: out.capture(0))  # a non-empty eager list to compare against
+    # Before any registration, the hostile classes are looked up and miss.
+    assert render_python(capture([Hostile(), Unregistered()])) == (
+        "[<opaque: Hostile>, <opaque: Unregistered>]"
+    )
+    eager(int, lambda value, out: out.capture(0))  # a non-empty registry to compare against
+    assert render_python(capture([Unregistered()])) == "[<opaque: Unregistered>]"
+    eager(Hostile, lambda value, out: out.capture("matched"))
 
-    for _ in range(2):  # the second round is served from the cache
+    for _ in range(2):
         assert render_python(capture(Hostile())) == "'matched'"
         assert render_python(capture(Sub())) == "'matched'"
         assert render_python(capture([Unregistered()])) == "[<opaque: Unregistered>]"
+    capture.unregister(Hostile)
+    assert render_python(capture(Sub())) == "<opaque: Sub>"
     assert _Recording.calls == []
 
 
-# --- review findings: lazy renames
-
-
-def test_lazy_dispatch_follows_a_class_rename(lazy) -> None:
+def test_dispatch_survives_a_class_rename(eager) -> None:
     class Target:
         pass
 
-    Target.__module__ = "before_rename"
-    Target.__qualname__ = "Target"
-    lazy("after_rename", "Target", lambda value, out: out.object({"ok": True}))
+    eager(Target, lambda value, out: out.object({"ok": True}))
+    Target.__module__ = "renamed_module"
+    Target.__qualname__ = "Renamed"
 
-    assert isinstance(capture(Target()), Opaque)  # caches the miss
-    Target.__module__ = "after_rename"
     renamed = capture(Target())
     assert isinstance(renamed, Object) and renamed.fields == (("ok", Scalar(True)),)
-    Target.__qualname__ = "Other"
-    assert isinstance(capture(Target()), Opaque)  # a cached hit is not kept either
+    assert renamed.module == "renamed_module"
+
+
+def test_registration_retains_only_registered_classes(eager) -> None:
+    import gc
+    import weakref
+
+    Matched = _named("Matched")
+    eager(Matched, lambda value, out: out.capture(1))
+    Seen = type("Seen", (Matched,), {})
+    assert capture(Seen()) == Scalar(1)
+    reference = weakref.ref(Seen)
+
+    del Seen
+    gc.collect()
+    assert reference() is None  # a matched subclass is not kept
 
 
 def test_public_api_is_what_extension_authors_and_consumers_use() -> None:

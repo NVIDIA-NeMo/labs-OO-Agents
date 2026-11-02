@@ -13,21 +13,8 @@ from nooa.snapshot import capture
 
 
 @pytest.fixture
-def lazy() -> Iterator[Any]:
-    """``capture.register_lazy`` with cleanup."""
-    names: list[tuple[str, str]] = []
-
-    def register(module: str, qualname: str, function: Any) -> None:
-        capture.register_lazy(module, qualname, function)
-        names.append((module, qualname))
-
-    yield register
-    for module, qualname in names:
-        capture.unregister_lazy(module, qualname)
-
-
-@pytest.fixture
 def eager() -> Iterator[Any]:
+    """``capture.register(T, function)`` with cleanup."""
     registered: list[type[Any]] = []
 
     def register(cls: type[Any], function: Any) -> None:

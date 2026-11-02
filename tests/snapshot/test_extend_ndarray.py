@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""A realistic extension: an ndarray-like class (no numpy), captured lazily and rendered by a hook."""
+"""A realistic extension: an ndarray-like class (no numpy), registered by type and rendered by a hook."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from nooa.snapshot import (
 )
 from tests.snapshot._extend_support import (
     _FakeNdarray,
-    _LazyNdarray,
+    _HugeNdarray,
     capture_ndarray,
     render_ndarray,
 )
@@ -29,9 +29,9 @@ from tests.snapshot._extend_support import (
 # --- a realistic example: an ndarray-like class, no numpy ------------------------------
 
 
-def test_ndarray_like_example(lazy, hooks) -> None:
+def test_ndarray_like_example(eager, hooks) -> None:
     before = set(sys.modules)
-    lazy("fakenumpy_7c1e", "ndarray", capture_ndarray)
+    eager(_FakeNdarray, capture_ndarray)
     hooks(render_python, "numpy.ndarray", render_ndarray)
 
     small = _FakeNdarray([1.0, 2.0, 3.0, 4.0], (2, 2))
@@ -55,8 +55,8 @@ def test_ndarray_like_example(lazy, hooks) -> None:
     assert set(sys.modules) - before == set()
 
 
-def test_ndarray_like_failing_hook_falls_back(lazy, hooks) -> None:
-    lazy("fakenumpy_7c1e", "ndarray", capture_ndarray)
+def test_ndarray_like_failing_hook_falls_back(eager, hooks) -> None:
+    eager(_FakeNdarray, capture_ndarray)
     hooks(render_python, "numpy.ndarray", lambda node, r: node.fields["shape"])  # a TypeError
 
     snapshot = capture(_FakeNdarray([1.0], (1,)))
@@ -65,10 +65,10 @@ def test_ndarray_like_failing_hook_falls_back(lazy, hooks) -> None:
 
 @pytest.mark.parametrize("limits", [Limits(max_chars=400), Limits(max_chars=5_000), Limits()])
 @pytest.mark.parametrize("size", [10**6, 10**9])
-def test_ndarray_like_large_keeps_shape_and_dtype(lazy, hooks, limits, size) -> None:
-    lazy("fakenumpy_7c1e", "ndarray", capture_ndarray)
+def test_ndarray_like_large_keeps_shape_and_dtype(eager, hooks, limits, size) -> None:
+    eager(_FakeNdarray, capture_ndarray)
     hooks(render_python, "numpy.ndarray", render_ndarray)
-    array = _LazyNdarray(size)
+    array = _HugeNdarray(size)
 
     snapshot = capture(array, limits)
 

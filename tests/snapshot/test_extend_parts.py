@@ -26,7 +26,8 @@ from nooa.snapshot import (
 )
 from tests.snapshot._extend_support import (
     FAKE_MODULE,
-    _LazyNdarray,
+    _FakeNdarray,
+    _HugeNdarray,
     _named,
     capture_ndarray,
 )
@@ -34,13 +35,13 @@ from tests.snapshot._extend_support import (
 # --- Object.kind ---------------------------------------------------------------------
 
 
-def test_kind_round_trips_through_the_builder(lazy) -> None:
-    lazy(
-        FAKE_MODULE,
-        "Kinded",
+def test_kind_round_trips_through_the_builder(eager) -> None:
+    Kinded = _named("Kinded")
+    eager(
+        Kinded,
         lambda value, out: out.object({"a": 1, "b": out.capture("x")}, kind="fake.kinded"),
     )
-    snapshot = capture(_named("Kinded")())
+    snapshot = capture(Kinded())
 
     assert isinstance(snapshot, Object)
     assert snapshot.kind == "fake.kinded"
@@ -52,16 +53,16 @@ def test_kind_round_trips_through_the_builder(lazy) -> None:
     assert json.loads(render_json(snapshot, max_chars=1_000)) == {"a": 1, "b": "x"}
 
 
-def test_kind_survives_cuts(lazy) -> None:
-    lazy(
-        FAKE_MODULE,
-        "Cut",
+def test_kind_survives_cuts(eager) -> None:
+    Cut = _named("Cut")
+    eager(
+        Cut,
         lambda value, out: out.object(((f"f{i}", "y" * 50) for i in range(100)), kind="k"),
     )
-    snapshot = capture(_named("Cut")(), Limits(max_chars=200))
+    snapshot = capture(Cut(), Limits(max_chars=200))
     assert isinstance(snapshot, Object) and not snapshot.complete and snapshot.kind == "k"
 
-    deep = capture([[_named("Cut")()]], Limits(max_depth=1))
+    deep = capture([[Cut()]], Limits(max_depth=1))
     assert isinstance(deep, Sequence)
 
 
@@ -77,13 +78,14 @@ def test_default_kind_is_none_and_must_be_a_string(eager) -> None:
     assert capture(Plain()) == Unavailable("error", "Plain")
 
 
-def test_part_too_large_for_its_slot_is_cut(lazy) -> None:
+def test_part_too_large_for_its_slot_is_cut(eager) -> None:
     def build(value: Any, out: Out):
         big = out.capture("z" * 500)
         return out.object({"big": big, "more": "w" * 500})
 
-    lazy(FAKE_MODULE, "Pre", build)
-    snapshot = capture(_named("Pre")(), Limits(max_chars=300))
+    Pre = _named("Pre")
+    eager(Pre, build)
+    snapshot = capture(Pre(), Limits(max_chars=300))
     text = render_json(snapshot, max_chars=300)
     assert len(text) <= 300
     json.loads(text)
@@ -92,7 +94,7 @@ def test_part_too_large_for_its_slot_is_cut(lazy) -> None:
 # --- sibling reservation, single-use parts and nesting ----------------------------------------
 
 
-def test_greedy_first_field_does_not_starve_later_fields(lazy) -> None:
+def test_greedy_first_field_does_not_starve_later_fields(eager) -> None:
     def build(value: Any, out: Out):
         return out.object(
             {
@@ -103,9 +105,10 @@ def test_greedy_first_field_does_not_starve_later_fields(lazy) -> None:
             }
         )
 
-    lazy(FAKE_MODULE, "Greedy", build)
+    Greedy = _named("Greedy")
+    eager(Greedy, build)
     for limits in (Limits(max_chars=120), Limits(max_chars=2_000), Limits(max_nodes=50)):
-        snapshot = capture(_named("Greedy")(), limits)
+        snapshot = capture(Greedy(), limits)
         assert isinstance(snapshot, Object)
         assert [name for name, _node in snapshot.fields] == ["sample", "name", "count", "plain"]
         sample = snapshot.field("sample")
@@ -119,14 +122,15 @@ def test_greedy_first_field_does_not_starve_later_fields(lazy) -> None:
         assert set(json.loads(text)) == {"sample", "name", "count", "plain"}
 
 
-def test_fields_that_fit_are_kept_whole_in_order(lazy) -> None:
+def test_fields_that_fit_are_kept_whole_in_order(eager) -> None:
     def build(value: Any, out: Out):
         return out.object(
             [("a", out.capture("x" * 20)), ("rest", out.sequence(iter(range(10**6))))]
         )
 
-    lazy(FAKE_MODULE, "Ordered", build)
-    snapshot = capture(_named("Ordered")(), Limits(max_chars=100))
+    Ordered = _named("Ordered")
+    eager(Ordered, build)
+    snapshot = capture(Ordered(), Limits(max_chars=100))
     assert isinstance(snapshot, Object)
     assert snapshot.field("a") == Text("x" * 20, "", 20, "chars", True, None)
     rest = snapshot.field("rest")
@@ -134,13 +138,14 @@ def test_fields_that_fit_are_kept_whole_in_order(lazy) -> None:
     assert len(render_json(snapshot, max_chars=100)) <= 100
 
 
-def test_nested_object_is_built_in_its_slot(lazy) -> None:
+def test_nested_object_is_built_in_its_slot(eager) -> None:
     def build(value: Any, out: Out):
         inner = out.object({"a": "z" * 400, "b": "never"})  # nothing is built yet
         return out.object({"first": out.capture("y" * 100), "inner": inner})
 
-    lazy(FAKE_MODULE, "Nested", build)
-    snapshot = capture(_named("Nested")(), Limits(max_chars=300))
+    Nested = _named("Nested")
+    eager(Nested, build)
+    snapshot = capture(Nested(), Limits(max_chars=300))
     assert isinstance(snapshot, Object)
     assert snapshot.field("first") == Text("y" * 100, "", 100, "chars", True, None)
     inner = snapshot.field("inner")
@@ -154,7 +159,7 @@ def test_nested_object_is_built_in_its_slot(lazy) -> None:
     assert len(text) <= 300 and json.loads(text)["inner"]["a"].startswith("zzz")
 
 
-def test_object_part_is_deferred_until_its_slot(lazy) -> None:
+def test_object_part_is_deferred_until_its_slot(eager) -> None:
     pulled: list[str] = []
 
     def fields() -> Iterator[tuple[str, Any]]:
@@ -166,22 +171,24 @@ def test_object_part_is_deferred_until_its_slot(lazy) -> None:
         assert pulled == []  # out.object builds nothing when called
         return out.object({"inner": inner})
 
-    lazy(FAKE_MODULE, "Later", build)
-    snapshot = capture(_named("Later")())
+    Later = _named("Later")
+    eager(Later, build)
+    snapshot = capture(Later())
     assert isinstance(snapshot, Object) and pulled == ["x"]
     assert snapshot.field("inner") == Object("Later", (("x", Scalar(1)),), True, None, FAKE_MODULE)
 
 
-def test_nested_object_part_takes_its_slot_depth(lazy) -> None:
-    lazy(FAKE_MODULE, "Deep", lambda value, out: out.object({"inner": out.object({"x": 1})}))
+def test_nested_object_part_takes_its_slot_depth(eager) -> None:
+    Deep = _named("Deep")
+    eager(Deep, lambda value, out: out.object({"inner": out.object({"x": 1})}))
 
-    snapshot = capture(_named("Deep")(), Limits(max_depth=1))
+    snapshot = capture(Deep(), Limits(max_depth=1))
     assert isinstance(snapshot, Object)
     inner = snapshot.field("inner")
     assert isinstance(inner, Object) and inner.fields == () and inner.reason == "max_depth"
 
 
-def test_part_used_twice_is_an_error(lazy) -> None:
+def test_part_used_twice_is_an_error(eager) -> None:
     def twice(value: Any, out: Out):
         big = out.capture("z" * 500)
         return out.object({"big": big, "again": big})
@@ -193,14 +200,17 @@ def test_part_used_twice_is_an_error(lazy) -> None:
     def two_calls(value: Any, out: Out):
         return out.object({"big": out.capture("z" * 500), "again": out.capture("z" * 500)})
 
-    lazy(FAKE_MODULE, "Twice", twice)
-    lazy(FAKE_MODULE, "Items", in_a_sequence)
-    lazy(FAKE_MODULE, "TwoCalls", two_calls)
+    Twice = _named("Twice")
+    eager(Twice, twice)
+    Items = _named("Items")
+    eager(Items, in_a_sequence)
+    TwoCalls = _named("TwoCalls")
+    eager(TwoCalls, two_calls)
     # A second use raises ValueError in the capture; the value becomes ``error``.
-    assert capture(_named("Twice")(), Limits(max_chars=300)) == Unavailable("error", "Twice")
-    assert capture(_named("Items")()) == Unavailable("error", "Items")
+    assert capture(Twice(), Limits(max_chars=300)) == Unavailable("error", "Twice")
+    assert capture(Items()) == Unavailable("error", "Items")
     # Two placements: two parts, each built and budgeted in its own slot.
-    snapshot = capture(_named("TwoCalls")(), Limits(max_chars=300))
+    snapshot = capture(TwoCalls(), Limits(max_chars=300))
     assert isinstance(snapshot, Object)
     big, again = snapshot.field("big"), snapshot.field("again")
     assert isinstance(big, Text) and isinstance(again, Text)
@@ -209,7 +219,7 @@ def test_part_used_twice_is_an_error(lazy) -> None:
     assert len(render_json(snapshot, max_chars=300)) <= 300
 
 
-def test_part_used_twice_raises_a_clear_error(lazy) -> None:
+def test_part_used_twice_raises_a_clear_error(eager) -> None:
     errors: list[BaseException] = []
 
     def build(value: Any, out: Out):
@@ -226,18 +236,20 @@ def test_part_used_twice_raises_a_clear_error(lazy) -> None:
             errors.append(error)
         return root
 
-    lazy(FAKE_MODULE, "Clear", build)
-    capture(_named("Clear")())
+    Clear = _named("Clear")
+    eager(Clear, build)
+    capture(Clear())
     assert len(errors) == 1 and "one slot only" in str(errors[0])
 
 
-def test_nested_object_sequence_keeps_its_head_and_tail(lazy) -> None:
+def test_nested_object_sequence_keeps_its_head_and_tail(eager) -> None:
     def build(value: Any, out: Out):
         numbers = out.object({"n": list(range(200))})
         return out.object({"label": out.capture("w" * 40), "numbers": numbers})
 
-    lazy(FAKE_MODULE, "Tail", build)
-    snapshot = capture(_named("Tail")(), Limits(max_chars=200, max_items=20, tail_share=0.5))
+    Tail = _named("Tail")
+    eager(Tail, build)
+    snapshot = capture(Tail(), Limits(max_chars=200, max_items=20, tail_share=0.5))
     assert isinstance(snapshot, Object)
     numbers = snapshot.field("numbers")
     assert isinstance(numbers, Object)
@@ -248,22 +260,23 @@ def test_nested_object_sequence_keeps_its_head_and_tail(lazy) -> None:
     assert len(render_json(snapshot, max_chars=200)) <= 200
 
 
-def test_nested_registered_objects_keep_their_fields(lazy) -> None:
-    lazy("fakenumpy_7c1e", "ndarray", capture_ndarray)
+def test_nested_registered_objects_keep_their_fields(eager) -> None:
+    eager(_FakeNdarray, capture_ndarray)
 
     def build(value: Any, out: Out):
         return out.object(
             {
-                "values": out.capture(_LazyNdarray(10**9)),
-                "index": out.capture(_LazyNdarray(10**6)),
+                "values": out.capture(_HugeNdarray(10**9)),
+                "index": out.capture(_HugeNdarray(10**6)),
                 "name": out.capture("frame"),
             },
             kind="fake.frame",
         )
 
-    lazy(FAKE_MODULE, "Frame", build)
+    Frame = _named("Frame")
+    eager(Frame, build)
     for limits in (Limits(max_chars=400), Limits(max_chars=5_000), Limits()):
-        snapshot = capture(_named("Frame")(), limits)
+        snapshot = capture(Frame(), limits)
         assert isinstance(snapshot, Object)
         assert [name for name, _node in snapshot.fields] == ["values", "index", "name"]
         values = snapshot.field("values")
@@ -281,8 +294,8 @@ def test_nested_registered_objects_keep_their_fields(lazy) -> None:
 
 
 @pytest.mark.parametrize("max_chars", [4, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610])
-def test_parts_never_exceed_the_budget(lazy, max_chars) -> None:
-    lazy("fakenumpy_7c1e", "ndarray", capture_ndarray)
+def test_parts_never_exceed_the_budget(eager, max_chars) -> None:
+    eager(_FakeNdarray, capture_ndarray)
 
     def build(value: Any, out: Out):
         inner = out.object({"s": "q" * 300, "l": list(range(50))})
@@ -290,18 +303,19 @@ def test_parts_never_exceed_the_budget(lazy, max_chars) -> None:
             {
                 "seq": out.sequence(iter(range(10**6))),
                 "map": out.mapping((str(i), "v" * i) for i in range(1_000)),
-                "arr": out.capture(_LazyNdarray(10**6)),
+                "arr": out.capture(_HugeNdarray(10**6)),
                 "inner": inner,
                 "s": out.capture("x" * 1_000),
             }
         )
 
-    lazy(FAKE_MODULE, "Budget", build)
-    snapshot = capture([_named("Budget")()], Limits(max_chars=max_chars))
+    Budget = _named("Budget")
+    eager(Budget, build)
+    snapshot = capture([Budget()], Limits(max_chars=max_chars))
     text = render_json(snapshot, max_chars=max_chars)
     assert len(text) <= max_chars
     json.loads(text)
-    assert snapshot == capture([_named("Budget")()], Limits(max_chars=max_chars))  # deterministic
+    assert snapshot == capture([Budget()], Limits(max_chars=max_chars))  # deterministic
 
 
 # --- node work of deferred parts ------------------------------------------------------
@@ -316,30 +330,31 @@ _CHILD_PARTS = {
 
 
 @pytest.mark.parametrize("make", _CHILD_PARTS.values(), ids=list(_CHILD_PARTS))
-def test_every_deferred_part_is_one_node_of_the_shared_budget(lazy, make) -> None:
+def test_every_deferred_part_is_one_node_of_the_shared_budget(eager, make) -> None:
     # The registered value takes 1 node and its MRO (class, object) 2; the root
     # part shares the value's node, and each child part is one more.
-    lazy(FAKE_MODULE, "Parts", lambda value, out: out.sequence([make(out) for _ in range(100)]))
-    value = _named("Parts")()
+    Parts = _named("Parts")
+    eager(Parts, lambda value, out: out.sequence([make(out) for _ in range(100)]))
+    value = Parts()
 
     starved = capture(value, Limits(max_nodes=20))
     assert isinstance(starved, Sequence) and len(starved.items) == 17
     assert not starved.complete and starved.reason == "max_nodes"
 
-    lazy(FAKE_MODULE, "Parts", lambda value, out: out.sequence([make(out) for _ in range(5)]))
+    eager(Parts, lambda value, out: out.sequence([make(out) for _ in range(5)]))  # replaces it
     assert capture(value, Limits(max_nodes=3 + 5)).complete  # not charged twice
     short = capture(value, Limits(max_nodes=3 + 4))
     assert isinstance(short, Sequence) and len(short.items) == 4 and short.reason == "max_nodes"
 
 
-def test_starved_object_field_parts_say_max_nodes(lazy) -> None:
+def test_starved_object_field_parts_say_max_nodes(eager) -> None:
     # A field part with no node work left is its empty, typed fallback.
-    lazy(
-        FAKE_MODULE,
-        "Fields",
+    Fields = _named("Fields")
+    eager(
+        Fields,
         lambda value, out: out.object([(f"f{i}", out.sequence([1])) for i in range(50)]),
     )
-    snapshot = capture(_named("Fields")(), Limits(max_nodes=30))
+    snapshot = capture(Fields(), Limits(max_nodes=30))
 
     assert isinstance(snapshot, Object) and not snapshot.complete
     assert len(snapshot.fields) < 50
