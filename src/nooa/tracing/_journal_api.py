@@ -25,6 +25,9 @@ log = logging.getLogger(__name__)
 # Roles that the runtime never sends to a model (mirrors ``build_journal_payload``).
 _SKIPPED_ROLES = ("metadata", "runtime_event")
 
+# Name of the LLM span created for a journaled call that has no span of its own.
+_LLM_SPAN_NAME = "llm_call"
+
 
 def journal_llm_call(
     *,
@@ -59,8 +62,11 @@ def journal_llm_call(
         started_at, ended_at: Unix seconds or datetimes. ``ended_at``
             defaults to now, ``started_at`` to ``ended_at - latency_ms``.
         latency_ms: Call duration, used when ``started_at`` is omitted.
-        span_id: 16-hex span id the call belongs to; defaults to the current
-            OTel span (the ``generation`` span inside a NOOA turn).
+        span_id: 16-hex span id the call belongs to.  By default the call
+            gets an ``LLM`` span of its own under the current OTel span (the
+            ``generation`` span inside a NOOA turn), which is what the viewer
+            shows the messages on; a caller already inside an ``LLM`` span is
+            linked to that span.
         extra: JSON-able values stored on the call record as ``extra``
             (e.g. ``{"response_id": ...}`` to join with external rollouts).
         use_rendered_context: Consume the skeleton the NOOA runtime published
@@ -133,10 +139,7 @@ def _record(
     use_rendered_context: bool,
 ) -> None:
     from nooa.tracing._context_sideband import get_journal_payload, set_journal_payload
-    from nooa.tracing._litellm_journal import (
-        MessageJournalCallback,
-        _to_ts,
-    )
+    from nooa.tracing._litellm_journal import _to_ts
     from nooa.tracing._secret_scrubber import scrub_value
     from nooa.tracing._session import get_session
 
@@ -178,7 +181,13 @@ def _record(
         "output_messages": output_messages,
         "tokens": _tokens(response),
     }
-    span = span_id or MessageJournalCallback._current_span_id()
+    span = span_id or _llm_span_id(
+        model=record["model"],
+        start=start,
+        end=end,
+        tokens=record["tokens"],
+        failed=response is None,
+    )
     if span:
         record["span_id"] = span
     if extra:
@@ -192,6 +201,49 @@ def _record(
             sink._send_call(session, record)
         except Exception as exc:
             log.debug("journal_llm_call: sink %r failed: %s", sink, exc, exc_info=True)
+
+
+def _llm_span_id(
+    *, model: str, start: float, end: float, tokens: Mapping[str, int] | None, failed: bool
+) -> str | None:
+    """The span this call is linked to, as 16 hex chars; ``None`` without a tracer.
+
+    The viewer puts journal messages back only onto spans whose
+    ``openinference.span.kind`` is ``LLM`` (``reconstruct_full_spans``) and maps
+    one call per span.  NOOA's ``generation`` span is a ``CHAIN`` span, so a
+    call linked to it is stored but never shown, and two calls in one
+    generation would collide.  So, like the LiteLLM instrumentor, each call
+    gets an ``LLM`` span of its own: a child of the current span covering the
+    call's duration.  A caller already inside an ``LLM`` span (its own
+    instrumentation) is linked to that span instead.
+    """
+    from openinference.semconv.trace import OpenInferenceSpanKindValues, SpanAttributes
+    from opentelemetry import trace as otel_trace
+    from opentelemetry.trace import Status, StatusCode
+
+    current = otel_trace.get_current_span()
+    ctx = current.get_span_context()
+    kind = (getattr(current, "attributes", None) or {}).get(SpanAttributes.OPENINFERENCE_SPAN_KIND)
+    if ctx.is_valid and kind == OpenInferenceSpanKindValues.LLM.value:
+        return format(ctx.span_id, "016x")
+
+    attributes: dict[str, Any] = {
+        SpanAttributes.OPENINFERENCE_SPAN_KIND: OpenInferenceSpanKindValues.LLM.value,
+        SpanAttributes.LLM_MODEL_NAME: model,
+    }
+    if tokens:
+        attributes[SpanAttributes.LLM_TOKEN_COUNT_PROMPT] = tokens["prompt"]
+        attributes[SpanAttributes.LLM_TOKEN_COUNT_COMPLETION] = tokens["completion"]
+        if "cached" in tokens:
+            attributes[SpanAttributes.LLM_TOKEN_COUNT_PROMPT_DETAILS_CACHE_READ] = tokens["cached"]
+    span = otel_trace.get_tracer(__name__).start_span(
+        _LLM_SPAN_NAME, start_time=int(start * 1e9), attributes=attributes
+    )
+    if failed:
+        span.set_status(Status(StatusCode.ERROR, "no response"))
+    span.end(end_time=int(max(end, start) * 1e9))
+    span_ctx = span.get_span_context()
+    return format(span_ctx.span_id, "016x") if span_ctx.is_valid else None
 
 
 def _role_of(msg: Any) -> str | None:

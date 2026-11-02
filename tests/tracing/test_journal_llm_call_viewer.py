@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Any
 
 import pytest
 from starlette.testclient import TestClient
@@ -27,7 +28,7 @@ class FakeGymLLM(UnifiedLLM):
         from nooa.tracing import journal_llm_call
 
         response = LLMResponse(
-            parts=(AssistantText(text="POLICY REPLY"),),
+            parts=(AssistantText(text=f"POLICY REPLY {len(messages)}"),),
             usage={"input_tokens": 12, "output_tokens": 2},
             model_name=self.model,
         )
@@ -36,7 +37,7 @@ class FakeGymLLM(UnifiedLLM):
             messages=messages,
             response=response,
             latency_ms=5,
-            extra={"response_id": "resp_gym_1"},
+            extra={"response_id": f"resp_gym_{len(messages)}"},
         )
         return response
 
@@ -64,7 +65,9 @@ def viewer(tmp_path, monkeypatch):
             del tls.conn
 
 
-async def _run_policy_call(session_id: str) -> str:
+async def _run_policy_calls(session_id: str, calls: int = 1) -> str:
+    """Run ``calls`` policy calls inside one ``generation`` span; return its span id."""
+    from openinference.semconv.trace import OpenInferenceSpanKindValues, SpanAttributes
     from opentelemetry import trace
 
     from nooa.tracing import flush_traces, set_session
@@ -72,12 +75,16 @@ async def _run_policy_call(session_id: str) -> str:
     set_session(session_id)
     llm = FakeGymLLM("gym-policy")
     with trace.get_tracer(__name__).start_as_current_span("generation") as span:
-        await llm.acall(
-            [
-                {"role": "system", "content": "GYM SYSTEM"},
-                {"role": "user", "content": "GYM TASK"},
-            ]
+        span.set_attribute(
+            SpanAttributes.OPENINFERENCE_SPAN_KIND, OpenInferenceSpanKindValues.CHAIN.value
         )
+        messages = [
+            {"role": "system", "content": "GYM SYSTEM"},
+            {"role": "user", "content": "GYM TASK"},
+        ]
+        for _ in range(calls):
+            response = await llm.acall(messages)
+            messages = [*messages, response, {"role": "user", "content": "GYM FOLLOW-UP"}]
         span_id = format(span.get_span_context().span_id, "016x")
     flush_traces()
     return span_id
@@ -106,6 +113,20 @@ def _import(client: TestClient, otlp_store, lines: list[str], session_id: str) -
             otlp_store.ingest(body)
 
 
+def _attrs(span: dict[str, Any]) -> dict[str, Any]:
+    """OTLP attribute list -> {key: scalar}."""
+    out: dict[str, Any] = {}
+    for attr in span.get("attributes", []):
+        value = attr.get("value", {})
+        scalar = next(iter(value.values()), None) if value else None
+        out[attr["key"]] = int(scalar) if "intValue" in value else scalar
+    return out
+
+
+def _spans_by_id(spans: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    return {span["spanId"]: span for span in spans}
+
+
 @pytest.mark.asyncio
 async def test_journal_file_from_non_litellm_client_reaches_viewer_calls(tmp_path: Path, viewer):
     from nooa.tracing import enable_tracing, exporters
@@ -114,7 +135,7 @@ async def test_journal_file_from_non_litellm_client_reaches_viewer_calls(tmp_pat
     traces = tmp_path / "traces"
     enable_tracing(exporters=[exporters.journal_file(traces)])
     session_id = "gym-row-0"
-    span_id = await _run_policy_call(session_id)
+    generation_span_id = await _run_policy_calls(session_id)
 
     lines = (traces / f"{session_id}.nooa.jsonl").read_text().splitlines()
     _import(client, otlp_store, lines, session_id)
@@ -123,8 +144,7 @@ async def test_journal_file_from_non_litellm_client_reaches_viewer_calls(tmp_pat
     assert len(calls) == 1
     call = calls[0]
     assert call["model"] == "gym-policy"
-    assert call["span_id"] == span_id
-    assert call["extra"] == {"response_id": "resp_gym_1"}
+    assert call["extra"] == {"response_id": "resp_gym_2"}
     assert call["tokens"] == {"prompt": 12, "completion": 2}
 
     # Messages are content-addressed; the session's blocks resolve them.
@@ -135,4 +155,81 @@ async def test_journal_file_from_non_litellm_client_reaches_viewer_calls(tmp_pat
         {"role": "system", "content": "GYM SYSTEM"},
         {"role": "user", "content": "GYM TASK"},
     ]
-    assert outputs == [{"role": "assistant", "content": "POLICY REPLY"}]
+    assert outputs == [{"role": "assistant", "content": "POLICY REPLY 2"}]
+
+    # The call has an LLM span of its own under the generation span: that is the
+    # span the viewer puts the messages back onto (generation is a CHAIN span).
+    spans = _spans_by_id(otlp_store.reconstruct_full_spans(session_id))
+    assert call["span_id"] != generation_span_id
+    llm_span = spans[call["span_id"]]
+    assert llm_span["name"] == "llm_call"
+    assert llm_span["parentSpanId"] == generation_span_id
+    attrs = _attrs(llm_span)
+    assert attrs["openinference.span.kind"] == "LLM"
+    assert attrs["llm.model_name"] == "gym-policy"
+    assert attrs["llm.token_count.prompt"] == 12
+    assert attrs["llm.input_messages.0.message.content"] == "GYM SYSTEM"
+    assert attrs["llm.input_messages.1.message.content"] == "GYM TASK"
+    assert attrs["llm.output_messages.0.message.content"] == "POLICY REPLY 2"
+    assert "llm.input_messages.0.message.content" not in _attrs(spans[generation_span_id])
+
+
+@pytest.mark.asyncio
+async def test_each_call_in_one_generation_gets_its_own_llm_span(tmp_path: Path, viewer):
+    from nooa.tracing import enable_tracing, exporters
+
+    client, otlp_store = viewer
+    traces = tmp_path / "traces"
+    enable_tracing(exporters=[exporters.journal_file(traces)])
+    session_id = "gym-row-1"
+    generation_span_id = await _run_policy_calls(session_id, calls=2)
+
+    lines = (traces / f"{session_id}.nooa.jsonl").read_text().splitlines()
+    _import(client, otlp_store, lines, session_id)
+
+    calls = sorted(
+        client.get(f"/api/traces/{session_id}/calls").json(), key=lambda c: c["ts_start"]
+    )
+    assert [c["extra"]["response_id"] for c in calls] == ["resp_gym_2", "resp_gym_4"]
+    assert len({c["span_id"] for c in calls}) == 2
+
+    spans = _spans_by_id(otlp_store.reconstruct_full_spans(session_id))
+    first, second = (_attrs(spans[c["span_id"]]) for c in calls)
+    assert all(spans[c["span_id"]]["parentSpanId"] == generation_span_id for c in calls)
+    assert first["llm.output_messages.0.message.content"] == "POLICY REPLY 2"
+    assert "llm.input_messages.2.message.content" not in first
+    assert second["llm.input_messages.2.message.content"] == "POLICY REPLY 2"
+    assert second["llm.input_messages.3.message.content"] == "GYM FOLLOW-UP"
+    assert second["llm.output_messages.0.message.content"] == "POLICY REPLY 4"
+
+
+@pytest.mark.asyncio
+async def test_a_client_inside_its_own_llm_span_is_linked_to_it(tmp_path: Path, viewer):
+    from openinference.semconv.trace import OpenInferenceSpanKindValues, SpanAttributes
+    from opentelemetry import trace
+
+    from nooa.tracing import enable_tracing, exporters, flush_traces, set_session
+
+    client, otlp_store = viewer
+    traces = tmp_path / "traces"
+    enable_tracing(exporters=[exporters.journal_file(traces)])
+    session_id = "gym-row-2"
+    set_session(session_id)
+    llm = FakeGymLLM("gym-policy")
+    tracer = trace.get_tracer(__name__)
+    with tracer.start_as_current_span("generation"), tracer.start_as_current_span("my.llm") as own:
+        own.set_attribute(
+            SpanAttributes.OPENINFERENCE_SPAN_KIND, OpenInferenceSpanKindValues.LLM.value
+        )
+        await llm.acall([{"role": "user", "content": "GYM TASK"}])
+        own_span_id = format(own.get_span_context().span_id, "016x")
+    flush_traces()
+
+    lines = (traces / f"{session_id}.nooa.jsonl").read_text().splitlines()
+    _import(client, otlp_store, lines, session_id)
+
+    (call,) = client.get(f"/api/traces/{session_id}/calls").json()
+    assert call["span_id"] == own_span_id
+    spans = _spans_by_id(otlp_store.reconstruct_full_spans(session_id))
+    assert [s["name"] for s in spans.values() if s["name"] == "llm_call"] == []
+    assert _attrs(spans[own_span_id])["llm.output_messages.0.message.content"] == "POLICY REPLY 1"

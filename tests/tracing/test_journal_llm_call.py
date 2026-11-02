@@ -219,3 +219,14 @@ def test_live_viewer_sink_posts_blocks_and_call(monkeypatch):
     call = posted[1][1]
     assert call["session_id"] == "live" and call["extra"] == {"response_id": "r1"}
     assert {b["content"] for b in posted[0][1]} == {"hello", "world"}
+
+
+def test_an_explicit_span_id_is_kept(writer):
+    journal_llm_call(
+        model="m", messages=[{"role": "user", "content": "hi"}], session_id="s", span_id="ab" * 8
+    )
+    journal_llm_call(model="m", messages=[{"role": "user", "content": "hi"}], session_id="s")
+    (_, explicit), (_, default) = writer.calls
+    assert explicit["span_id"] == "ab" * 8
+    # The default is a span of the call's own (or none without a tracer), never the explicit one.
+    assert default.get("span_id") != "ab" * 8
