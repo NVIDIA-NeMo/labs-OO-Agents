@@ -13,7 +13,7 @@ Role: Re-exported from roles.py for backward compatibility.
 
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 # Import EventBase here (not forward ref) — possible because events.py imports
 # Role from roles.py, breaking the circular dependency.
@@ -143,6 +143,47 @@ class Context(BaseModel):
         if self.prefix:
             parts.append("prefix=True")
         return f"Context({', '.join(parts)})"
+
+
+class LiteralContextBlock(BaseModel):
+    """Canonical runtime record for a literal context block."""
+
+    model_config = ConfigDict(frozen=True)
+
+    key: Annotated[str, Field(description="Unique context block key")]
+    type: Literal["literal"] = "literal"
+    value: Any = Field(default=None, description="Literal value rendered into the prompt")
+    prefix: bool = Field(default=False, description="Place in the cacheable prefix when true")
+
+
+class ExpressionContextBlock(BaseModel):
+    """Canonical runtime record for an evaluated context block."""
+
+    model_config = ConfigDict(frozen=True)
+
+    key: Annotated[str, Field(description="Unique context block key")]
+    type: Literal["expression"] = "expression"
+    expr: Annotated[str, Field(description="Python expression evaluated each turn")]
+    display_expr: str | None = Field(
+        default=None,
+        description="Optional expression shown in rendered block metadata instead of expr",
+    )
+    prefix: bool = Field(default=False, description="Place in the cacheable prefix when true")
+
+    @field_validator("expr")
+    @classmethod
+    def _validate_expr(cls, expr: str) -> str:
+        try:
+            compile(expr, "<context_block_expr>", "eval")
+        except SyntaxError as exc:
+            raise BlockSyntaxError(key="<expression>", expr=expr, original_error=exc) from exc
+        return expr
+
+
+type ContextBlock = Annotated[
+    LiteralContextBlock | ExpressionContextBlock,
+    Field(discriminator="type"),
+]
 
 
 class BlockMetadata(BaseModel):

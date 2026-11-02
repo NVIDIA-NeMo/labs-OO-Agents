@@ -103,6 +103,38 @@ class TestDynamicContext:
         assert d != "self.value"
 
 
+class TestCanonicalContextBlocks:
+    def test_literal_block_accepts_arbitrary_values(self):
+        from nooa.context_blocks import LiteralContextBlock
+
+        value = {"limits": [1, 2, 3]}
+        block = LiteralContextBlock(key="config", value=value, prefix=True)
+
+        assert block.value is value
+        assert block.type == "literal"
+        assert block.prefix is True
+
+    def test_expression_block_keeps_runtime_and_display_expressions_separate(self):
+        from nooa.context_blocks import ExpressionContextBlock
+
+        block = ExpressionContextBlock(
+            key="status",
+            expr="self.render_status()",
+            display_expr="self.context['status']",
+            prefix=False,
+        )
+
+        assert block.expr == "self.render_status()"
+        assert block.display_expr == "self.context['status']"
+
+    def test_expression_block_rejects_invalid_python(self):
+        from nooa.context_blocks import ExpressionContextBlock
+        from nooa.context_blocks.exceptions import BlockSyntaxError
+
+        with pytest.raises(BlockSyntaxError):
+            ExpressionContextBlock(key="bad", expr="not valid python!!!")
+
+
 class TestBlockMetadata:
     """Tests for BlockMetadata Pydantic model."""
 
