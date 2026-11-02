@@ -351,3 +351,46 @@ def test_off_setting_that_still_returns_reasoning_is_reported():
     text = " ".join(result.output.split())
     assert "Reasoning (off): Not available" in text
     assert "this model may ignore this setting" in text
+
+
+def test_edit_model_default_clears_raw_reasoning_override(native):
+    """Choosing "Model default" removes saved raw reasoning controls, keeps the rest."""
+    flags, path, calls, choices = native
+    original = {
+        "model_name": "anthropic/" + MODEL_ID,
+        "api_style": "anthropic",
+        "api_base": "https://api.anthropic.com/v1",
+        "api_key_env": "OFFLINE_KEY",
+        "context_window": 1000000,
+        "max_tokens": 4096,
+        "media_inputs": [],
+        "temperature": 0.2,
+        "reasoning_effort": "high",
+        "output_config": {"effort": "high", "keep_me": 1},
+        "extra_body": {"reasoning_effort": "high", "thinking": {"type": "adaptive"}, "custom": 1},
+        "cache_breakpoint": None,
+    }
+    path.write_text(yaml.safe_dump({"models": {"local": original}}))
+    result = CliRunner().invoke(
+        command,
+        [
+            "--edit-model",
+            "local",
+            "--output",
+            str(path),
+            "--media-inputs",
+            "",
+            "--probe",
+            "minimal",
+        ],
+        input="default\nsave\ny\ny\n",
+    )
+    assert result.exit_code == 0, result.output
+    entry = yaml.safe_load(path.read_text())["models"]["local"]
+    assert "reasoning_level" not in entry
+    for field in ("reasoning_effort", "reasoning", "thinking"):
+        assert field not in entry
+    assert entry["output_config"] == {"keep_me": 1}
+    assert entry["extra_body"] == {"custom": 1}
+    assert entry["temperature"] == 0.2 and entry["max_tokens"] == 4096
+    assert all(r.method == "GET" for r in calls)

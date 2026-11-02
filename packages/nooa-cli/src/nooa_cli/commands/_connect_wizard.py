@@ -197,6 +197,26 @@ def setup_diagnostic(state: WizardState, *args, **kwargs):
     return scrub_setup(state, connect.diagnostic_prompt(*args, **kwargs))
 
 
+def clear_reasoning_controls(params: dict) -> None:
+    """Remove explicit reasoning controls from ``params`` in place.
+
+    These are the request settings the reasoning templates write
+    (``connect.reasoning_settings``): ``reasoning_effort``, ``reasoning`` and
+    ``thinking`` as a whole, ``effort`` in ``output_config`` and
+    ``enable_thinking`` in ``chat_template_kwargs``. Other keys of those two
+    mappings, and all other settings, are kept; a mapping left empty is
+    removed.
+    """
+    for name in ("reasoning_effort", "reasoning", "thinking"):
+        params.pop(name, None)
+    for name, key in (("output_config", "effort"), ("chat_template_kwargs", "enable_thinking")):
+        value = params.get(name)
+        if isinstance(value, dict):
+            value.pop(key, None)
+            if not value:
+                params.pop(name)
+
+
 def reasoning_disabled(params) -> bool:
     """Return True when a reasoning level's request settings ask the model not to reason.
 
@@ -2669,6 +2689,11 @@ def configure_checks(state: WizardState) -> bool:
                 entry["reasoning_level"] = state.guided_reasoning_active
         elif choice == "default":
             entry.pop("reasoning_level", None)
+            clear_reasoning_controls(entry)
+            if isinstance(entry.get("extra_body"), dict):
+                clear_reasoning_controls(entry["extra_body"])
+                if not entry["extra_body"]:
+                    entry.pop("extra_body")
         else:
             entry["reasoning_level"] = state.guided_reasoning_active
         entry["provenance"]["reasoning_selection"] = {
