@@ -853,11 +853,16 @@ class ActorRuntime:
 
         Each image-bearing event (a ``Task`` or ``PythonOutput`` with image
         blocks) older than the newest ``limit`` images is collapsed on its
-        own, so its text survives in the summary and the original stays
-        readable at ``self.events["<tag>"]``. Returns the number collapsed.
+        own. Only its images go: the summary carries the event's text (the
+        cell's printed output, the task prompt) followed by a short note in
+        place of the images, and the original stays readable at
+        ``self.events["<tag>"]``. Returns the number collapsed.
         """
+        from nooa.agentdoc import pformat
+
         em = self.event_manager
         bearing: list[tuple[str, int]] = []
+        events: dict[str, Any] = {}
         for tag in em.keys():
             try:
                 event = em[tag]
@@ -866,6 +871,7 @@ class ActorRuntime:
             count = _image_block_count(event)
             if count:
                 bearing.append((tag, count))
+                events[tag] = event
         kept = 0
         to_collapse: list[str] = []
         for tag, count in reversed(bearing):
@@ -876,7 +882,11 @@ class ActorRuntime:
                 kept = limit  # an older, smaller event must not slip in after a skipped one
         collapsed = 0
         for tag in reversed(to_collapse):
-            summary_text = (
+            try:
+                text = pformat(events[tag])  # images are repr=False: the event's text only
+            except Exception:  # noqa: BLE001
+                text = ""
+            summary_text = (text + "\n" if text else "") + (
                 f"[image collapsed (request image limit {limit}); "
                 f'original: self.events["{tag}"]; show it again: '
                 f'show(Image.from_url(self.events["{tag}"].images[0]["image_url"]["url"]))]'

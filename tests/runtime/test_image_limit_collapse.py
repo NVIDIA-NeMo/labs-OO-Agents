@@ -124,7 +124,7 @@ async def test_the_oldest_images_are_collapsed_and_can_be_shown_again(monkeypatc
     assert summary_tag == f"{tag}..{tag}" and tag not in em.keys()  # collapsed on its own ...
     summary = em[summary_tag]
     assert isinstance(summary, Summary)
-    assert summary.summary_text == (
+    assert summary.summary_text.endswith(
         f'[image collapsed (request image limit 1); original: self.events["{tag}"]; '
         f'show it again: show(Image.from_url(self.events["{tag}"].images[0]["image_url"]["url"]))]'
     )
@@ -136,3 +136,42 @@ async def test_the_oldest_images_are_collapsed_and_can_be_shown_again(monkeypatc
     assert attrs["harness.media_image_limit_collapsed.count"] == 2  # the retry, then proactive
     assert attrs["harness.media_image_limit_collapsed.limits"] == [1, 1]
     assert attrs["harness.media_image_limit_collapsed.events"] == 2
+
+
+async def test_a_collapsed_cell_keeps_its_printed_output_and_tool_pairing():
+    seen: list[list] = []
+
+    class Spy(LimitedClient):
+        async def acall(self, messages, *args, **kwargs):
+            seen.append(self._prepare_media_messages(messages, kwargs))
+            return await super().acall(messages, *args, **kwargs)
+
+    client = Spy(
+        [
+            response("print('CELL-ONE-STDOUT-KEEP-ME'); show(self.first)", "c1"),
+            response("show(self.second)", "c2"),
+            response("return_result('done')", "c3"),
+        ],
+        media_inputs=["image"],
+    )
+    agent = ImageAgent(llm=client)
+    agent.first = Image.from_bytes(b"first-png", media_type="image/png")
+    agent.second = Image.from_bytes(b"second-png", media_type="image/png")
+    assert await agent.look() == "done"
+    last = seen[-1]
+    assert _images(last) == 1
+    text = json.dumps(last, default=str)
+    assert "CELL-ONE-STDOUT-KEEP-ME" in text  # only the image was collapsed
+    assert "[image collapsed (request image limit 1)" in text
+    calls = {
+        call["id"] if isinstance(call, Mapping) else call.id
+        for message in last
+        if isinstance(message, Mapping)
+        for call in message.get("tool_calls") or []
+    }
+    results = {
+        message.get("tool_call_id")
+        for message in last
+        if isinstance(message, Mapping) and message.get("role") == "tool"
+    }
+    assert calls == results == {"c1", "c2"}
