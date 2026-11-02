@@ -350,9 +350,13 @@ def save_verification(entry: dict) -> tuple[dict, dict]:
     whole model, nor about whether the save itself succeeded. Results that
     are out of date or have no snapshot never count, even after an import.
     """
+    from . import unobserved_reasoning_levels
     from ._records import check_status
 
     candidate = invalidate_verification(entry)
+    # The same setting-aware rule as connect.verdict(): only a level whose
+    # settings turn reasoning on needs reasoning in its reply.
+    missing = unobserved_reasoning_levels(candidate)
     provenance = candidate.get("provenance") or {}
     checks = {
         **(provenance.get("probes") or {}),
@@ -372,8 +376,7 @@ def save_verification(entry: dict) -> tuple[dict, dict]:
             name,
             record,
             entry=candidate,
-            missing_reasoning=name.startswith("level:")
-            and record.get("reasoning_observed") is not True,
+            missing_reasoning=name.startswith("level:") and name[6:] in missing,
         )
         == "passed"
     ]

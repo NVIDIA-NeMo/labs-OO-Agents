@@ -694,3 +694,26 @@ def test_model_recovery_lock_is_held_through_secret_rollback(tmp_path, monkeypat
     # The stable sidecar is retained and released after recovery completes.
     with state.path.with_name(".models.yaml.lock").open("a") as other_writer:
         fcntl.flock(other_writer.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+@pytest.mark.parametrize(
+    "level, settings, state",
+    [
+        ("off", {"reasoning_effort": "none"}, "verified"),
+        ("high", {"reasoning_effort": "high"}, "partial"),
+    ],
+)
+def test_save_verification_uses_setting_aware_reasoning_rule(level, settings, state):
+    """A passing Off check needs no reasoning output; an On check still does."""
+    entry = candidate()
+    entry["reasoning_levels"] = {level: settings}
+    entry["reasoning_level"] = level
+    proof(entry)
+    record = {"outcome": "accepted", "finish_reason": "stop", "reasoning_observed": False}
+    stamp_verification(record, entry, "level:" + level)
+    entry["provenance"]["probes"]["level:" + level] = record
+    summary, _ = save_verification(entry)
+    agrees = "level:" + level in connect.verdict(entry).passed
+    assert summary["state"] == state
+    assert agrees == (state == "verified")
+    assert ("level:" + level in summary["verified_scopes"]) == agrees
