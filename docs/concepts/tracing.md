@@ -69,10 +69,14 @@ journal_llm_call(
 ```
 
 It writes to every installed journal sink (journal file, live viewer) and does
-nothing without one. The session defaults to the current trace session and the
-call is linked to the current span. Inside a NOOA turn it uses the context the
-runtime rendered for the call, so the record matches the LiteLLM path. It never
-raises.
+nothing without one. The session defaults to the current trace session. Each
+call gets an `LLM` span of its own (`llm_call`) under the current span, the way
+the LiteLLM instrumentor nests `litellm.acompletion` under `generation`; the
+viewer shows journal messages only on `LLM` spans, one call per span. A client
+that already runs inside its own `LLM` span is linked to that span, and
+`span_id=` links the call to any span. Inside a NOOA turn it uses the context
+the runtime rendered for the call, so the record matches the LiteLLM path. It
+never raises.
 
 Use `exporters.journal_file` by itself for such runs. It keeps every span
 (LLM spans lose their message attributes) and adds the journal. Don't add
