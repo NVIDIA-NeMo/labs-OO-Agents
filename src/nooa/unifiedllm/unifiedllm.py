@@ -1326,8 +1326,18 @@ class UnifiedLLM(ABC):
             self._media_exclusions = exclusions
         return exclusions[1]
 
-    def _exclude_rejected_media(self, messages, kwargs: dict[str, Any], exc: Exception) -> bool:
-        """Exclude the newest sent attachment the provider explicitly rejected.
+    def _exclude_rejected_media(
+        self, messages, kwargs: dict[str, Any], exc: Exception, staged: list[tuple[set, Any]]
+    ) -> bool:
+        """Exclude sent attachments the provider explicitly rejected, for a retry.
+
+        The first exclusion of a request takes the newest sent attachment: the
+        only one when the request carries one, and usually the one just added.
+        A provider rarely says which one it could not read, so if the retry is
+        rejected too, the next one excludes every remaining attachment of that
+        kind at once. Each exclusion is appended to ``staged``; the caller
+        drops them all again unless the request finally succeeds, so a request
+        that still fails never leaves good attachments replaced by a note.
 
         True means the request changed and may be retried; a generic error, or
         one with nothing left to exclude, returns False.
@@ -1338,17 +1348,29 @@ class UnifiedLLM(ABC):
             return False  # The request itself is invalid; re-raise the original error.
         rejected = self._rejected_media(call_config)
         sent = media_occurrences(messages, self._request_media_inputs(call_config))
-        for kind, key in reversed(sent):
-            if key not in rejected and explicitly_rejected(exc, kind):
-                rejected.add(key)
-                _record_llm_metric("media_rejected_retry", kind)
-                logger.warning(
-                    "Provider rejected an attached %s; retrying with a note in its place: %s",
-                    kind,
-                    str(exc)[:300],
-                )
-                return True
-        return False
+        candidates = [
+            (kind, key)
+            for kind, key in reversed(sent)
+            if key not in rejected and explicitly_rejected(exc, kind)
+        ]
+        if not candidates:
+            return False
+        if staged:  # the newest was not it: the provider did not say which one
+            kind = candidates[0][0]
+            chosen = [(k, key) for k, key in candidates if k == kind]
+        else:
+            chosen = candidates[:1]
+        for kind, key in chosen:
+            rejected.add(key)
+            staged.append((rejected, key))
+            _record_llm_metric("media_rejected_retry", kind)
+        logger.warning(
+            "Provider rejected an attached %s; retrying with a note in place of %d: %s",
+            chosen[0][0],
+            len(chosen),
+            str(exc)[:300],
+        )
+        return True
 
     def _media_recovery_attempts(self) -> int:
         # Shares the endpoint retry budget: max_retries=0 (e.g. a connect
@@ -1356,25 +1378,41 @@ class UnifiedLLM(ABC):
         retry_config = getattr(self, "retry_config", None)
         return max(0, retry_config.max_retries) if retry_config else 0
 
+    @staticmethod
+    def _unstage_media(staged: list[tuple[set, Any]]) -> None:
+        """The request still failed: its exclusions were not the fix, so undo them."""
+        for rejected, key in staged:
+            rejected.discard(key)
+
     def _call_recovering_media(self, call_once, messages, kwargs):
         """Retry a request without each attachment the provider explicitly rejects."""
-        for _ in range(self._media_recovery_attempts()):
-            try:
-                return call_once()
-            except Exception as exc:
-                if not self._exclude_rejected_media(messages, kwargs, exc):
-                    raise
-        return call_once()
+        staged: list[tuple[set, Any]] = []
+        try:
+            for _ in range(self._media_recovery_attempts()):
+                try:
+                    return call_once()
+                except Exception as exc:
+                    if not self._exclude_rejected_media(messages, kwargs, exc, staged):
+                        raise
+            return call_once()
+        except BaseException:
+            self._unstage_media(staged)
+            raise
 
     async def _acall_recovering_media(self, call_once, messages, kwargs):
         """Async ``_call_recovering_media``."""
-        for _ in range(self._media_recovery_attempts()):
-            try:
-                return await call_once()
-            except Exception as exc:
-                if not self._exclude_rejected_media(messages, kwargs, exc):
-                    raise
-        return await call_once()
+        staged: list[tuple[set, Any]] = []
+        try:
+            for _ in range(self._media_recovery_attempts()):
+                try:
+                    return await call_once()
+                except Exception as exc:
+                    if not self._exclude_rejected_media(messages, kwargs, exc, staged):
+                        raise
+            return await call_once()
+        except BaseException:
+            self._unstage_media(staged)
+            raise
 
     def get_context_limits(
         self, overrides: dict[str, Any] | None = None, *, fallback_reserve: int = 0

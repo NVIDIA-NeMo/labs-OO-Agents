@@ -164,3 +164,66 @@ async def test_exclusion_is_cleared_when_the_connection_changes():
             assert [len(images(blocks)) for blocks in sent] == [1, 0, 0, 1]
             assert NOTE in texts(sent[1])
             assert NOTE not in texts(sent[2])  # a replacement route has its own permissions
+
+
+def numbered_images(count):
+    return [
+        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,aW1n{i:04d}"}}
+        for i in range(count)
+    ]
+
+
+@pytest.mark.parametrize("max_retries", [1, 3])
+async def test_an_unnamed_bad_older_image_never_costs_good_images_on_failure(max_retries):
+    """Bedrock names no image. The bad one is the oldest of six."""
+    from nooa.unifiedllm import RetryConfig
+
+    bad, *good = numbered_images(6)
+    messages = [{"role": "user", "content": [block]} for block in (bad, *good)]
+
+    def wire_reply(*args, **kwargs):
+        sent = [b for m in kwargs["messages"] for b in m["content"]]
+        if bad in sent:
+            raise bad_request(BEDROCK)
+        return ok(False)
+
+    with CompletionClient(
+        "openai/test",
+        media_inputs=["image"],
+        cache_breakpoint=None,
+        retry_config=RetryConfig(max_retries=max_retries),
+    ) as client:
+        with patch("litellm.acompletion", new_callable=AsyncMock) as wire:
+            wire.side_effect = wire_reply
+            if max_retries == 1:
+                # One retry (the newest image) is not enough: the request fails
+                # and no good image stays replaced for later requests.
+                with pytest.raises(litellm.BadRequestError):
+                    await client.acall(messages)
+                assert wire.call_count == 2
+                view = client._prepare_media_messages(messages, client._prepare_call_config({}))
+                assert NOTE not in texts([b for m in view for b in m["content"]])
+            else:
+                # Newest first, then every remaining image at once: it succeeds.
+                assert (await client.acall(messages)).content == "UNREADABLE"
+                sent = [sent_blocks(call, False) for call in wire.call_args_list]
+                assert [len(images(blocks)) for blocks in sent] == [6, 5, 0]
+                assert texts(sent[-1]).count(NOTE) == 6
+
+
+def test_a_still_failing_sync_request_undoes_its_exclusions():
+    from nooa.unifiedllm import RetryConfig
+
+    messages = [{"role": "user", "content": [IMAGE]}]
+    with CompletionClient(
+        "openai/test",
+        media_inputs=["image"],
+        cache_breakpoint=None,
+        retry_config=RetryConfig(max_retries=1),
+    ) as client:
+        with patch("litellm.completion") as wire:
+            wire.side_effect = [bad_request(BEDROCK), bad_request(GENERIC)]
+            with pytest.raises(litellm.BadRequestError):
+                client.call(messages)
+        view = client._prepare_media_messages(messages, client._prepare_call_config({}))
+        assert images(view[0]["content"]) == [IMAGE]
