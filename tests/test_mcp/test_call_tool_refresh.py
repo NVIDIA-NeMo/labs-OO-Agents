@@ -284,7 +284,9 @@ def test_a_tool_with_an_output_schema_is_annotated_as_returning_a_dict():
     assert type(tool).plain.__annotations__["return"] is Any
     assert type(tool).wrapped.__annotations__["return"] is Any
     assert "MCPToolError is raised" in type(tool).__doc__
-    assert "report failure in its result" in type(tool).__doc__
+    # Said once per tool method (where models read), not again on the class.
+    assert "report failure in its result" not in type(tool).__doc__
+    assert "report failure in its result" in type(tool).typed.__doc__
 
 
 @pytest.mark.asyncio

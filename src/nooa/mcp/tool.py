@@ -125,7 +125,7 @@ def _value_to_ast_node(value: Any) -> ast.expr:
     return ast.parse(repr(value), mode="eval").body
 
 
-# Repeated on each tool method: models read a tool's doc, not its server class's (HCB F01).
+# On each tool method: models read a tool's doc, not its server class's.
 _RESULT_FAILURE_LINE = (
     "A tool can also report failure in its result (e.g. an 'error' field): "
     "check the value before going on."
@@ -544,8 +544,7 @@ def _make_dynamic_class(
         f"MCP server '{server_name}'. Call a tool as a method of this object, "
         "e.g. await self.<server>.<tool>(...), not as a bare name. It returns the structured "
         "result (dict) if the server sends one, else the text. MCPToolError is raised "
-        "when the server marks the call failed; a tool can also report failure in its "
-        "result (e.g. an 'error' field): check the value before going on."
+        "when the server marks the call failed."
     )
     reserved = {"__doc__", "_tool_method_names"}
     collisions = reserved.intersection(methods)
