@@ -42,14 +42,17 @@ def return_type_field_names(return_type: Any) -> set[str]:
     return names
 
 
-def return_call_hint(return_type: Any, python_tool: str | None = None) -> str | None:
+def return_call_hint(
+    return_type: Any, python_tool: str | None = None, *, cell_only: bool = False
+) -> str | None:
     """Name the call that returns a model return type, e.g. ``return_result(Done(...))``.
 
     Only for return types whose members are all Pydantic models: other types
     already get an example from the formatter. ``python_tool``: the failed
     call was a direct ``return_result`` tool call, which takes JSON arguments;
     the constructor form is then labelled as code for that Python tool, and a
-    JSON example follows.
+    JSON example follows. ``cell_only``: there is no ``return_result`` tool
+    (the call was taken as the cell builtin), so only the cell form is shown.
     """
     forms = []
     json_forms = []
@@ -71,9 +74,22 @@ def return_call_hint(return_type: Any, python_tool: str | None = None) -> str | 
     call = forms[0] if len(forms) == 1 else f"one of: {', '.join(forms)}"
     if python_tool is None:
         return f"Call it as {call}."
+    if cell_only:
+        return f"Call {python_tool} with code {call}."
     return (
         f"In {python_tool} code, call it as {call}. As a direct return_result tool call, "
         f"pass JSON arguments: {' or '.join(json_forms)}."
+    )
+
+
+def return_alias_note(python_tool: str, value: Any, limit: int = 200) -> str:
+    """The line telling the model a provider ``return_result`` call was taken as the builtin."""
+    shown = repr(value)
+    if len(shown) > limit:
+        shown = shown[: limit - 1] + "…"
+    return (
+        f"return_result is a function inside {python_tool}; "
+        f"this call was taken as return_result({shown})"
     )
 
 

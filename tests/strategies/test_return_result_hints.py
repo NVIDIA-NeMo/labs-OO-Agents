@@ -49,3 +49,20 @@ def test_call_hint_for_a_direct_tool_call_labels_code_and_gives_json():
         "return_result(NeedInput(question=...)). As a direct return_result tool call, pass "
         'JSON arguments: {"result": {"explanation": ...}} or {"result": {"question": ...}}.'
     )
+
+
+def test_call_hint_for_an_aliased_call_shows_only_the_cell_form():
+    assert return_call_hint(Done | NeedInput, "python_cell", cell_only=True) == (
+        "Call python_cell with code one of: return_result(Done(explanation=...)), "
+        "return_result(NeedInput(question=...))."
+    )
+
+
+def test_alias_note_names_the_value_taken_and_is_bounded():
+    from nooa.strategies.codeact_errors import return_alias_note
+
+    assert return_alias_note("python_cell", 42) == (
+        "return_result is a function inside python_cell; this call was taken as return_result(42)"
+    )
+    long = return_alias_note("python_cell", "x" * 1000)
+    assert len(long) < 300 and long.endswith("…)")
