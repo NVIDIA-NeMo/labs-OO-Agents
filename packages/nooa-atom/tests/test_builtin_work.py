@@ -91,8 +91,8 @@ def test_the_tools_doc_shows_after_every_and_the_tail_idiom():
     for wanted in ("def after(", "def every(", "progress=Throttle("):
         assert wanted in text, wanted
     assert "def tail(" not in text and "self.jobs.tail(" not in _WORK_EXAMPLES
-    clause = "a delay counts from now: subtract time you have already spent"
-    assert clause in text.lower() and clause in _WORK_EXAMPLES
+    # after() says the delay counts from now; no elapsed-time advice is repeated.
+    assert "subtract" not in text.lower() and "subtract" not in _WORK_EXAMPLES
     for call in ("self.jobs.after(", "self.jobs.every("):
         assert sum(call in line for line in _WORK_EXAMPLES.splitlines()) == 1
     # Following a file is a command in its own Shell watched with a Throttle: one

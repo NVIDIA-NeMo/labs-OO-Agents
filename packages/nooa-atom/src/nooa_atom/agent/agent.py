@@ -609,7 +609,7 @@ sh = Shell()  # make one; bash starts on first use
 r = await sh.run("cd src && make", timeout=600)  # wait for it
 job = self.jobs.launch(sh.run("make"), name="build", progress=Throttle(seconds=5))  # background
 job.set_progress(None)  # quiet again
-self.jobs.after(120, name="t")  # timer: a delay counts from now: subtract time you have already spent
+self.jobs.after(120, name="t")  # timer
 self.jobs.every(60, name="poll")  # tick items
 self.jobs.launch(Shell().run("tail -F app.log", timeout=3600), name="log", progress=Throttle(seconds=5))  # own Shell: one command at a time
 self.jobs.launch(sh.run("pytest -q"), name="tests")

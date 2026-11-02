@@ -414,7 +414,7 @@ async def test_search_for_timers_and_tails_points_to_self_jobs(agent, query):
         assert call in first
     assert "own Shell" in first and "one command at a time" in first
     assert "self.jobs.tail(" not in first
-    assert "a delay counts from now: subtract time you have already spent" in first
+    assert "subtract" not in first
 
 
 async def test_search_hint_comes_before_matching_skills(agent):

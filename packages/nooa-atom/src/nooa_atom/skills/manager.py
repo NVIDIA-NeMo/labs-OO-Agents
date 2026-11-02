@@ -35,8 +35,7 @@ _WORK_WORDS = frozenset(
     "periodic periodically monitor watch tail follow delay sleep wait".split()
 )
 _BUILT_IN_WORK = (
-    "self.jobs (built in, no skill needed): self.jobs.after(seconds, name=...) timer "
-    "(a delay counts from now: subtract time you have already spent), "
+    "self.jobs (built in, no skill needed): self.jobs.after(seconds, name=...) timer, "
     "self.jobs.every(seconds, name=...) ticks; watch a command or follow a file in its "
     "own Shell (a Shell runs one command at a time; keep sh for other commands): "
     'self.jobs.launch(Shell().run("tail -F app.log"), name=..., progress=Throttle(seconds=5))'
