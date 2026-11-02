@@ -2,19 +2,22 @@
 # SPDX-License-Identifier: Apache-2.0
 """Composable context assembly contracts and reusable mechanisms."""
 
-from collections.abc import AsyncIterator, Sequence
+import logging
+from collections.abc import AsyncIterator, Iterable, Sequence
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict
 
-from nooa.context_blocks.events import EventBase
+from nooa.context_blocks.events import EventBase, ResultStatus, ToolCallEvent, ToolResult
 from nooa.context_blocks.models import BlockMetadata
 from nooa.context_blocks.roles import Role
-from nooa.llm_types import CacheBoundary
+from nooa.llm_types import CacheBoundary, LLMResponse
 
 if TYPE_CHECKING:
     from nooa.strategies.current_call import CurrentCall
+
+logger = logging.getLogger(__name__)
 
 
 class Block(BaseModel):
@@ -45,6 +48,59 @@ class ContextView[Owner](Protocol):
 def is_model_visible(event: EventBase) -> bool:
     """Whether an event carries model-facing content, without selecting history."""
     return event._role not in (Role.RUNTIME_EVENT, Role.METADATA) and not event.is_empty
+
+
+def replayable(events: Iterable[EventBase]) -> tuple[EventBase, ...]:
+    """Make a selection of events sendable without changing stored history.
+
+    Every tool call needs its result and every linked result its call. A call
+    without a recorded result gets an outcome-unknown result on a copy. A
+    tool-call turn missing any of its executions is omitted with its results,
+    as are results whose turn is not in the selection. Run it after any
+    filtering, since filtering can separate calls from results.
+    """
+    events = tuple(events)
+    executions: dict[str, dict[str, ToolCallEvent]] = {}
+    for event in events:
+        if isinstance(event, ToolCallEvent) and event.llm_response_id is not None:
+            executions.setdefault(event.llm_response_id, {})[event.tool_call_id] = event
+    complete: set[str] = set()
+    for event in events:
+        if isinstance(event, LLMResponse) and event.replay_tool_calls:
+            ids = [call.id for call in event.replay_tool_calls]
+            # Duplicate ids cannot be paired with executions.
+            if len(set(ids)) == len(ids) and set(ids) <= executions.get(event.id, {}).keys():
+                complete.add(event.id)
+            else:
+                logger.warning(
+                    "LLMResponse %s has an incomplete execution batch; omitting the "
+                    "tool-call turn and its results from replay.",
+                    event.id,
+                )
+
+    selected: list[EventBase] = []
+    for event in events:
+        if isinstance(event, LLMResponse) and event.replay_tool_calls:
+            if event.id not in complete:
+                continue
+        elif isinstance(event, ToolCallEvent):
+            if event.llm_response_id is not None and event.llm_response_id not in complete:
+                continue
+            if event.result is None:
+                event = event.model_copy(
+                    update={
+                        "result": ToolResult(
+                            tool_call_id=event.tool_call_id,
+                            content=(
+                                "Tool result unavailable in the active history; "
+                                "execution outcome is unknown."
+                            ),
+                            result_status=ResultStatus.ERROR,
+                        )
+                    }
+                )
+        selected.append(event)
+    return tuple(selected)
 
 
 async def collect_context_items[Owner](
@@ -154,4 +210,5 @@ __all__ = [
     "context_text",
     "evaluate_context_expression",
     "is_model_visible",
+    "replayable",
 ]

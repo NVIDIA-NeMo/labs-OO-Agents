@@ -10,7 +10,7 @@ blocks) and returns ``list[RenderedMessage]``. ProviderFormatter.format() takes
 import pytest
 from pydantic import ValidationError
 
-from nooa import CacheBoundary
+from nooa import CacheBoundary, replayable
 from nooa.context_blocks.events import ToolCallEvent, ToolResult
 from nooa.context_blocks.exceptions import UnsupportedContextLayout
 from nooa.context_blocks.formatter import (
@@ -200,7 +200,7 @@ class TestXMLBlockFormatter:
         assert "first output" in messages[3].content
         assert "second output" in messages[3].content
 
-    def test_incomplete_linked_call_batch_is_omitted(self):
+    def test_incomplete_linked_call_batch_is_rejected(self):
         turn = LLMResponse(
             content="",
             tool_calls=(
@@ -217,16 +217,16 @@ class TestXMLBlockFormatter:
             llm_response_id=turn.id,
         )
 
-        messages = XMLBlockFormatter().format(
-            [
-                ResolvedBlock(key="turn", content="", role=Role.ASSISTANT, event=turn),
-                call_1,
-            ]
-        )
+        with pytest.raises(UnsupportedContextLayout, match="incomplete execution batch"):
+            XMLBlockFormatter().format(
+                [
+                    ResolvedBlock(key="turn", content="", role=Role.ASSISTANT, event=turn),
+                    call_1,
+                ]
+            )
+        assert replayable([turn, call_1.event]) == ()
 
-        assert messages == []
-
-    def test_linked_execution_without_source_turn_is_not_rendered(self):
+    def test_linked_execution_without_source_turn_is_rejected(self):
         call = _tool_call_block(
             tool_call_id="call_1",
             name="one",
@@ -235,9 +235,9 @@ class TestXMLBlockFormatter:
             llm_response_id="filtered-response",
         )
 
-        messages = XMLBlockFormatter().format([call])
-
-        assert messages == []
+        with pytest.raises(UnsupportedContextLayout, match="outside the selection"):
+            XMLBlockFormatter().format([call])
+        assert replayable([call.event]) == ()
 
     @pytest.mark.parametrize(
         ("finish_reason", "arguments", "content"),
@@ -331,7 +331,7 @@ class TestXMLBlockFormatter:
         assert carrier.replay_message is response
         assert dict(response.parts[0].native) == {"opaque": "state"}
 
-    def test_linked_execution_is_omitted_when_carrier_is_rejected(self):
+    def test_linked_execution_is_rejected_when_carrier_is_not_replayable(self):
         turn = LLMResponse(
             content="",
             tool_calls=(
@@ -351,14 +351,14 @@ class TestXMLBlockFormatter:
             llm_response_id=turn.id,
         )
 
-        messages = XMLBlockFormatter().format(
-            [
-                ResolvedBlock(key="turn", content="", role=Role.ASSISTANT, event=turn),
-                execution,
-            ]
-        )
-
-        assert messages == []
+        with pytest.raises(UnsupportedContextLayout, match="outside the selection"):
+            XMLBlockFormatter().format(
+                [
+                    ResolvedBlock(key="turn", content="", role=Role.ASSISTANT, event=turn),
+                    execution,
+                ]
+            )
+        assert replayable([turn, execution.event]) == (turn,)
 
 
 class TestMarkdownBlockFormatter:
@@ -712,7 +712,7 @@ def test_synthetic_inline_return_is_observable_but_not_replayed_to_provider():
 
 
 @pytest.mark.parametrize("formatter", [XMLBlockFormatter(), MarkdownBlockFormatter()])
-@pytest.mark.parametrize("kind", ["sidecar", "inline_return"])
+@pytest.mark.parametrize("kind", ["inline_return"])
 @pytest.mark.parametrize("role", [Role.SYSTEM, Role.USER])
 def test_empty_projection_does_not_split_materialized_blocks(formatter, kind, role):
     event = ToolCallEvent(

@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, cast
 
 from nooa.context_blocks import BlockMetadata, Context, DynamicContext, Role
-from nooa.context_blocks.events import EventBase, ResultStatus, ToolCallEvent, ToolResult
+from nooa.context_blocks.events import EventBase
 from nooa.context_view import (
     Block,
     CacheBoundary,
@@ -18,6 +18,7 @@ from nooa.context_view import (
     context_text,
     evaluate_context_expression,
     is_model_visible,
+    replayable,
 )
 
 if TYPE_CHECKING:
@@ -338,24 +339,8 @@ def partition_blocks(blocks: Sequence[Block]) -> tuple[tuple[Block, ...], tuple[
 
 
 def visible_events(agent: "Agent") -> tuple[EventBase, ...]:
-    """Select active history, projecting unavailable tool results without changing state."""
-    events = [event for event in agent.event_manager.values() if is_model_visible(event)]
-
-    def unavailable(call_id: str) -> ToolResult:
-        return ToolResult(
-            tool_call_id=call_id,
-            content="Tool result unavailable in the active history; execution outcome is unknown.",
-            result_status=ResultStatus.ERROR,
-        )
-
-    projected: list[EventBase] = []
-    for event in events:
-        if isinstance(event, ToolCallEvent) and event.result is None:
-            event = event.model_copy(update={"result": unavailable(event.tool_call_id)})
-        projected.append(event)
-    # Do not reconstruct absent execution records: they may be deliberately
-    # archived. Incomplete canonical batches remain omitted by atomic replay.
-    return tuple(projected)
+    """Select active model-visible history. Pass the selection through ``replayable``."""
+    return tuple(event for event in agent.event_manager.values() if is_model_visible(event))
 
 
 async def collect_skill_blocks(
@@ -501,7 +486,7 @@ class ManagedContextView(ContextView["Agent"]):
         prefix, trailing = partition_blocks(blocks)
 
         items: list[ContextItem] = [*prefix]
-        items.extend(visible_events(owner))
+        items.extend(replayable(visible_events(owner)))
         if items:
             items.append(CacheBoundary())
         items.extend(trailing)

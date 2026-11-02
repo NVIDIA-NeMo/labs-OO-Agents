@@ -42,6 +42,7 @@ from nooa.context_view import (  # noqa: E402
     context_text,
     evaluate_context_expression,
     is_model_visible,
+    replayable,
 )
 from nooa.decisions import (  # noqa: E402
     BooleanDecision,
@@ -182,6 +183,7 @@ __all__ = [
     "context_text",
     "evaluate_context_expression",
     "is_model_visible",
+    "replayable",
     "ContextApi",  # LLM-facing context API wrapper (Skill)
     "ContextManager",  # Context block state backend
     "EventsApi",  # Runtime events query API

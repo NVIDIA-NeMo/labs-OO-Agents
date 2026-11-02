@@ -78,18 +78,22 @@ async collect_context_items(view, owner, call) -> tuple[ContextItem, ...]
 apply_context_budget(items, *, call, evictable) -> tuple[ContextItem, ...]
 async evaluate_context_expression(expression, *, owner, call) -> object
 is_model_visible(event) -> bool
+replayable(events) -> tuple[EventBase, ...]
 ```
 
-`context_text` formats one value; `collect_context_items` validates and retains yielded order; expression evaluation binds `self` to `owner`; `is_model_visible` identifies nonempty model-facing events without selecting history. Budgeting follows the caller's eviction order and counts blocks only, so it is not a full rendered-request limit. A source helper may retrieve, evaluate, or format one source. It does not select other sources or decide global precedence, placement, or order.
+`context_text` formats one value; `collect_context_items` validates and retains yielded order; expression evaluation binds `self` to `owner`; `is_model_visible` identifies nonempty model-facing events without selecting history; `replayable` makes a selection sendable by giving tool calls without a recorded result an outcome-unknown result and omitting tool-call turns or results the selection separated, on copies, without changing stored events. Budgeting follows the caller's eviction order and counts blocks only, so it is not a full rendered-request limit. A source helper may retrieve, evaluate, or format one source. It does not select other sources or decide global precedence, placement, or order.
 
 Iterative views must explicitly include the task, model outputs, and execution feedback they need. Strategies produce these as typed events; rendering injects none. `self.events.query()` searches stored history, including archived events, so it is an inspection API rather than prompt selection. `call.invocation_id` stays stable while a strategy may change `call.id`. Tool schemas and execution policy remain strategy-owned.
 
 Views select active history directly. For example, a current-invocation view uses:
 
 ```python
-for event in agent.event_manager.values():
-    if call.invocation_id in event.related_call_ids and is_model_visible(event):
-        yield event
+for event in replayable(
+    event
+    for event in agent.event_manager.values()
+    if call.invocation_id in event.related_call_ids and is_model_visible(event)
+):
+    yield event
 ```
 
 ## Defaults
@@ -112,7 +116,7 @@ class CodeActView(ContextView[Agent]):
         blocks = order_blocks(blocks, self.block_order)
         prefix, trailing = partition_blocks(blocks)
 
-        history = visible_events(agent)
+        history = replayable(visible_events(agent))
         items = [*prefix, *history]
         if items:
             items.append(CacheBoundary())
@@ -122,7 +126,7 @@ class CodeActView(ContextView[Agent]):
             yield item
 ```
 
-The private phase methods contain source-specific detail. `assemble()` keeps global order, event placement, cache placement, and budgeting visible. `apply_block_overrides` preserves replacement, deletion, inherited placement, and explicit prefix hints. `visible_events` selects active model-facing history and projects recorded tool calls without results as outcome-unknown, without changing stored events or reconstructing absent records.
+The private phase methods contain source-specific detail. `assemble()` keeps global order, event placement, cache placement, and budgeting visible. `apply_block_overrides` preserves replacement, deletion, inherited placement, and explicit prefix hints. `visible_events` selects active model-facing history; `replayable` then pairs its tool calls and results without reconstructing absent records.
 
 The three built-in helpers derive content directly from the agent. Protected-key registration selects which defaults apply; disable state and stored overrides are checked before evaluation. The manager stores those controls, user declarations, and the last materialized values for compatible named reads, but does not create defaults.
 

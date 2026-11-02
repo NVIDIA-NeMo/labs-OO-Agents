@@ -9,12 +9,13 @@ from types import SimpleNamespace
 import pytest
 from pydantic import ValidationError
 
-from nooa.context_blocks.events import ToolCallEvent, ToolResult
+from nooa.context_blocks.events import EventBase, ToolCallEvent, ToolResult
+from nooa.context_blocks.exceptions import UnsupportedContextLayout
 from nooa.context_blocks.formatter import OpenAIProviderFormatter
 from nooa.context_blocks.models import BlockMetadata, Role
 from nooa.context_blocks.renderer import render_context
 from nooa.context_blocks.renderers.cached import CachedBlockFormatter
-from nooa.context_view import Block
+from nooa.context_view import Block, replayable
 from nooa.llm_types import AssistantText, LLMResponse, ToolCall
 from nooa.runtime.middleware import LLMCallContext
 from nooa.storage.sqlite import SQLiteStorageManager
@@ -260,10 +261,19 @@ def test_renderer_keeps_reference_and_truncation_replaces_without_native_state()
     assert original.content == "Before.Between."
 
 
-def test_renderer_drops_incomplete_calls_as_a_state_stripping_edit():
+def test_incomplete_calls_render_as_a_state_stripping_edit_after_replayable():
     original = turn()
     original.finish_reason = "length"
-    result = render(original)
+    with pytest.raises(UnsupportedContextLayout, match="outside the selection"):
+        render(original)
+    items = blocks(original)
+    kept = {event.id for event in replayable(i for i in items if isinstance(i, EventBase))}
+    items = [i for i in items if not isinstance(i, EventBase) or i.id in kept]
+    result = render_context(
+        items,
+        block_formatter=CachedBlockFormatter(),
+        provider_formatter=OpenAIProviderFormatter(),
+    )
     replacement = result.output[1]
     assert "tool_calls" not in replacement
     resolved = [replacement]

@@ -77,19 +77,27 @@ maps this boundary to provider-specific cache metadata when supported.
 Per-method event selection belongs to the context view:
 
 ```python
-from nooa import is_model_visible, strategy
+from nooa import is_model_visible, replayable, strategy
 
 class CurrentCallView:
     async def assemble(self, agent, call):
-        for event in agent.event_manager.values():
-            if call.invocation_id in event.related_call_ids and is_model_visible(event):
-                yield event
+        for event in replayable(
+            event
+            for event in agent.event_manager.values()
+            if call.invocation_id in event.related_call_ids and is_model_visible(event)
+        ):
+            yield event
 
 @strategy(context_view=CurrentCallView())
 async def solve(self, problem: str) -> str:
     """Solves with a clean view: only this call's events, no prior history."""
     ...
 ```
+
+Pass any event selection through `replayable()` after filtering. It gives tool calls without a
+recorded result an outcome-unknown result and omits tool-call turns or results the selection
+separated, on copies only; stored history is unchanged. Rendering rejects such gaps with
+`UnsupportedContextLayout` instead of repairing them.
 
 ## Events
 

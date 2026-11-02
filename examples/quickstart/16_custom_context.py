@@ -12,7 +12,15 @@ uv run python examples/quickstart/16_custom_context.py
 
 import re
 
-from nooa import Agent, Block, CacheBoundary, context_text, is_model_visible, strategy
+from nooa import (
+    Agent,
+    Block,
+    CacheBoundary,
+    context_text,
+    is_model_visible,
+    replayable,
+    strategy,
+)
 from nooa.context_blocks import Role
 from nooa.util.quickstart import BaseModel, autorun, llm
 
@@ -60,10 +68,14 @@ class ResearchContextView:
                 "Answer only from selected research and cite source IDs."
             ),
         )
-        # This view chooses only this invocation's active task and feedback.
-        for event in owner.event_manager.values():
-            if call.invocation_id in event.related_call_ids and is_model_visible(event):
-                yield event
+        # This view chooses only this invocation's active task and feedback;
+        # replayable() keeps every tool call paired with its result.
+        for event in replayable(
+            event
+            for event in owner.event_manager.values()
+            if call.invocation_id in event.related_call_ids and is_model_visible(event)
+        ):
+            yield event
         yield CacheBoundary()
 
         # A search changes ResearchContext; the next turn receives its selection.
