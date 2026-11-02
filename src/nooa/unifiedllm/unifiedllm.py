@@ -1581,22 +1581,34 @@ class UnifiedLLM(ABC):
 
         # A directly built client has no entry of its own. Use a registry
         # context_window only if every alias with the same route declares the
-        # same value; if they disagree, the result would depend on YAML order,
-        # so return None instead.
+        # same positive value. If they disagree, or one of them declares none,
+        # the result would depend on YAML order, so fall back instead.
         windows = set()
+        undeclared = False
         for key, cfg in models_snapshot.items():
+            entry_client_type = cfg.get("client_type", "completion")
+            # Completion and Responses clients are never sent the registry-only
+            # ``endpoint`` key (the decision-route spelling), so leave it out of
+            # the comparison, as client_from_config does. Decision entries keep it.
+            route = (
+                cfg
+                if entry_client_type == "decision"
+                else {name: value for name, value in cfg.items() if name != "endpoint"}
+            )
             if same_context_route(
                 model_str,
                 self.config,
                 client_type,
                 cfg.get("model_name", key),
-                cfg,
-                cfg.get("client_type", "completion"),
+                route,
+                entry_client_type,
             ):
                 cw = cfg.get("context_window")
                 if type(cw) is int and cw > 0:
                     windows.add(cw)
-        if len(windows) == 1:
+                else:
+                    undeclared = True
+        if len(windows) == 1 and not undeclared:
             return windows.pop()
 
         # Fallback to litellm
