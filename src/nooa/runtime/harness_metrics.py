@@ -144,8 +144,6 @@ class HarnessMetrics(BaseModel):
     return_result_keyword_aliases: list[str] = Field(default_factory=list)
     # Invalid return_result values sent back as a retryable cell error; the error type
     return_result_invalid_retries: list[str] = Field(default_factory=list)
-    # NeedInput(explanation=...) accepted (NeedInput used to reject the extra field)
-    need_input_explanations: int = 0
     # A Shell command queued behind another still running in the same Shell
     shell_queued_behind_running: int = 0
     # A Shell command awaited in a cell refused: the Shell runs a launched job's command
@@ -344,10 +342,6 @@ class HarnessMetrics(BaseModel):
     def queue_read_timeout(self, channel: str) -> None:
         """A cell's ``await self.<channel>.get()`` timed out with nothing queued."""
         self._append(self.queue_read_timeouts, channel)
-
-    def need_input_explanation(self) -> None:
-        """NeedInput(explanation=...) was accepted as a status line."""
-        self.need_input_explanations += 1
 
     def shell_queued(self) -> None:
         """A Shell command was queued behind another still running in the same Shell."""
@@ -894,12 +888,6 @@ _SPAN_SCHEMA: tuple[SchemaEntry, ...] = (
         "Return Value Handling",
         lambda m: m.return_result_invalid_retries,
         True,
-    ),
-    SchemaEntry(
-        "harness.need_input_explanation.count",
-        "NeedInput(explanation=) accepted",
-        "Return Value Handling",
-        lambda m: m.need_input_explanations,
     ),
     SchemaEntry(
         "harness.shell_queued_behind_running.count",

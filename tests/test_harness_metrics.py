@@ -236,16 +236,14 @@ class TestRecording:
         assert attrs["harness.return_result_invalid.count"] == 2
         assert attrs["harness.return_result_invalid.types"] == ["ValidationError", "InvariantError"]
 
-    def test_need_input_explanation_is_counted_when_set(self):
+    def test_need_input_explanation_is_a_field_not_a_metric(self):
         from nooa.interactive import NeedInput
         from nooa.runtime.harness_metrics import harness_metrics_session
 
         with harness_metrics_session() as m:
-            NeedInput(question="which?", explanation="  ")
-            NeedInput(question="which?")
-            assert m.to_span_attributes().get("harness.need_input_explanation.count") is None
-            NeedInput(question="which?", explanation="asking")
-            assert m.to_span_attributes()["harness.need_input_explanation.count"] == 1
+            assert NeedInput(question="which?", explanation="  ").explanation is None
+            assert NeedInput(question="which?", explanation="asking").explanation == "asking"
+            assert not any("need_input" in key for key in m.to_span_attributes())
 
     def test_media_rejected_retry(self):
         m = HarnessMetrics()
