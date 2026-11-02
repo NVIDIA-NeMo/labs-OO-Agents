@@ -846,7 +846,6 @@ class AtomAgent(AtomAgentBase):
                     "- Agent methods other than handle start each call with fresh names.",
                     "- A restart loses these names, not self.v. Nothing expires on its own.",
                     "- del removes a name, not a job or resource: close or cancel work explicitly.",
-                    "- Globals are shared with running jobs and are not transactional.",
                     "- A job's stdout/stderr/media are in job.output / JobEvent.output, never in "
                     "a later cell.",
                     "- Output from work a cell started belongs to that cell; output that arrives "
