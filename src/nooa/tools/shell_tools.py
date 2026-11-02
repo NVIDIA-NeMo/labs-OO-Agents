@@ -552,9 +552,13 @@ _CLOSEST_MAX_FILE_LINES = 20_000  # bound the search work; larger files get no c
 _CLOSEST_MAX_OLD_CHARS = 8_000
 _CLOSEST_MIN_RATIO = 0.6
 _CLOSEST_DIFF_ROWS = 8
-# ``ratio()`` can be quadratic on near-identical long lines; the search runs
-# on the event loop, so past this many seconds the optional hint is skipped.
+# The search runs on the event loop, so past this many seconds the optional
+# hint is skipped; the deadline is checked before every window.
 _CLOSEST_MAX_SECONDS = 0.25
+# A character ``ratio()`` is roughly quadratic (8,000 x 8,000 chars took ~3 s),
+# so a window and ``old`` larger than this product of lengths (one call
+# ~0.05 s) are compared line by line instead, which is cheap.
+_CLOSEST_MAX_CHAR_CELLS = 1_500 * 1_500
 
 
 @hidden
@@ -584,16 +588,24 @@ def _closest_region_lines(content: str, old: str) -> list[str]:
     size = len(old_lines)
     wanted = "\n".join(old_lines)
     best_ratio, best_start = 0.0, -1
-    matcher = difflib.SequenceMatcher(None, autojunk=False)
-    matcher.set_seq2(wanted)
+    chars = difflib.SequenceMatcher(None, autojunk=False)
+    chars.set_seq2(wanted)
+    by_line = difflib.SequenceMatcher(None, autojunk=False)
+    by_line.set_seq2(old_lines)
     deadline = time.monotonic() + _CLOSEST_MAX_SECONDS
     for start in range(max(1, len(file_lines) - size + 1)):
-        window = "\n".join(file_lines[start : start + size])
-        matcher.set_seq1(window)
-        if matcher.real_quick_ratio() <= best_ratio or matcher.quick_ratio() <= best_ratio:
-            continue
         if time.monotonic() > deadline:
             return []  # too costly for an optional hint
+        window_lines = file_lines[start : start + size]
+        window = "\n".join(window_lines)
+        if len(window) * len(wanted) <= _CLOSEST_MAX_CHAR_CELLS:
+            matcher = chars
+            matcher.set_seq1(window)
+        else:  # a character ratio() this large could block the loop for seconds
+            matcher = by_line
+            matcher.set_seq1(window_lines)
+        if matcher.real_quick_ratio() <= best_ratio or matcher.quick_ratio() <= best_ratio:
+            continue
         ratio = matcher.ratio()
         if ratio > best_ratio:
             best_ratio, best_start = ratio, start

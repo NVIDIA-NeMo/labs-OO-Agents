@@ -844,4 +844,51 @@ def test_closest_region_search_gives_up_on_costly_near_identical_lines():
     old = base[:4_000] + "Q" + base[4_001:]
     started = time.monotonic()
     assert _closest_region_lines(content, old) == []
-    assert time.monotonic() - started < 3
+    assert time.monotonic() - started < 0.5
+
+
+def test_closest_region_search_bounds_one_long_window_comparison():
+    """One ~8,000-character window once took ~3 s in a single ratio() call."""
+    import time
+
+    from nooa.tools.shell_tools import _closest_region_lines
+
+    line = "x = foo(a, b, c)  # " + "abcdefgh" * 4
+    old = "\n".join(line + str(i) for i in range(150))[:7_990]
+    content = "\n".join(line + str(i % 7) for i in range(150))
+    started = time.monotonic()
+    _closest_region_lines(content, old)
+    assert time.monotonic() - started < 0.5
+
+
+def test_closest_region_search_checks_its_deadline_on_skipped_windows():
+    """Windows the quick bounds skip still count against the 0.25 s budget."""
+    import time
+
+    from nooa.tools.shell_tools import _closest_region_lines
+
+    lines = [f"value_{i % 50} = compute(alpha, beta, gamma, delta)" for i in range(19_000)]
+    old = "\n".join(lines[:150])
+    content = (
+        "\n".join(lines[:150]).replace("compute", "compute2", 1)
+        + "\n"
+        + "\n".join(line[::-1] for line in lines[150:])
+    )
+    started = time.monotonic()
+    _closest_region_lines(content, old)
+    assert time.monotonic() - started < 0.5
+
+
+def test_closest_region_compares_large_old_text_line_by_line():
+    """An old text too large for a character ratio() still gets a closest region."""
+    from nooa.tools.shell_tools import _closest_region_lines
+
+    body = [f"    result_{i} = transform(value_{i}, factor={i})  # step {i}" for i in range(80)]
+    content = "def f():\n" + "\n".join(body) + "\n"
+    old_lines = list(body)
+    old_lines[40] = "    result_40 = transform(value_40, factor=99)  # step 40"
+    old = "\n".join(old_lines) + "\n"
+    assert len(old) > 1_500
+    lines = _closest_region_lines(content, old)
+    assert lines and lines[0].startswith("Closest region: lines 2-81 (")
+    assert any("factor=99" in line for line in lines)
