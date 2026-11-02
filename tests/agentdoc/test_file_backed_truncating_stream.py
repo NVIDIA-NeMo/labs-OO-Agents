@@ -142,6 +142,17 @@ class TestFileBackedFileOutput:
         finally:
             buf.cleanup()
 
+    def test_lone_surrogate_escaped_in_file(self, buf):
+        """Lone surrogates are escaped in the file; the full output stays recoverable."""
+        text = "before\ud800after"
+        assert buf.write(text) == len(text)
+        assert buf.getvalue() == text
+        assert buf.write("x" * 200) == 200
+        value = buf.getvalue()
+        assert "full untruncated output" in value
+        with open(buf.file_path, encoding="utf-8") as f:
+            assert f.read() == "before\\ud800after" + "x" * 200
+
     def test_large_output(self):
         """File correctness verified with 50k chars of output."""
         buf = FileBackedTruncatingStringIO(limit=1000)
@@ -203,17 +214,6 @@ class TestFileBackedTruncationNotice:
 
 class TestFileBackedErrorHandling:
     """Verify graceful fallback when file I/O fails."""
-
-    def test_fallback_on_unencodable_text(self, buf):
-        """Lone surrogates cannot be encoded as UTF-8 but remain usable in memory."""
-        text = "before\ud800after"
-        assert buf.write(text) == len(text)
-        assert buf.getvalue() == text
-        assert buf.write("x" * 200) == 200
-        assert buf.chars_written == len(text) + 200
-        value = buf.getvalue()
-        assert "not recoverable" in value
-        assert "full untruncated output" not in value
 
     def test_fallback_on_invalid_dir(self):
         """Invalid dir falls back to in-memory-only; no file path in notice."""
