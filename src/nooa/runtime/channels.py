@@ -27,6 +27,7 @@ from typing import Annotated, Any, ClassVar, Literal
 
 from pydantic import Field
 
+from nooa.agentdoc import spec
 from nooa.context_blocks import EventBase
 from nooa.context_blocks.roles import Role
 
@@ -722,6 +723,10 @@ class ChannelReader[T]:
 # ---------------------------------------------------------------------------
 # QueueManager
 # ---------------------------------------------------------------------------
+
+
+# The owner's timeout sentence is plumbing, not part of the reader's API.
+spec(ChannelReader, "timeout_hint", hidden=True)
 
 
 class QueueManager:

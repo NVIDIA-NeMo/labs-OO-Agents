@@ -21,7 +21,6 @@ interface, or this agent's spike spelling
 
 from __future__ import annotations
 
-import re
 from typing import Annotated, Any, ClassVar
 
 # Cells see this module's names: the model builds Done/TaskResult/Todo, Shell and
@@ -29,7 +28,6 @@ from typing import Annotated, Any, ClassVar
 from nooa import Context, hidden, strategy
 from nooa.agentdoc import doc, spec
 from nooa.interactive import Done, NeedInput, Waiting
-from nooa.runtime.harness_metrics import get_harness_metrics
 from nooa.strategies import CodeActV2, PredictStrategy  # noqa: F401
 from nooa_atom.agent.work_manager import Job, JobEvent, Throttle, WorkManager
 from nooa_atom.agent.work_shell import CommandResult, Shell
@@ -41,6 +39,7 @@ from nooa_atom.tools.todo_list import Todo, TodoList  # noqa: F401
 
 with hidden:
     import inspect
+    import re
     import sys
     import time
     import types
@@ -1127,7 +1126,7 @@ class AtomAgent(AtomAgentBase):
         raise TypeError(_ONE_TURN_METHOD)
 
 
-for _name in ("shell", "delegates", "system_messages", "cwd"):
+for _name in ("shell", "delegates", "producers", "system_messages", "cwd"):
     spec(AtomAgent, _name, hidden=True)
 spec(AtomAgent, "jobs", description="Run and track work: see WorkManager")
 spec(
