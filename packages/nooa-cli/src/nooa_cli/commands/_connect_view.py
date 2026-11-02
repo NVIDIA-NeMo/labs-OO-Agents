@@ -127,6 +127,8 @@ def check_failure(outcome):
     status = outcome.get("status_code")
     if status in {401, 403} or error in {"AuthenticationError", "PermissionDeniedError"}:
         return "Key rejected by this server. Check the key and server URL."
+    if status == 404 and outcome.get("unavailable_for_account"):
+        return "This model isn't available for your account (HTTP 404)."
     if status == 404 or error == "NotFoundError":
         return "No route found for this interface or model."
     if status == 429 or error == "RateLimitError":

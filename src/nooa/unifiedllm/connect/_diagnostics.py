@@ -7,6 +7,8 @@
   Connect documentation for this installation can be found.
 - ``timeout_details`` describes a timed-out test call using exception class
   names only, never exception messages, which may contain secrets.
+- ``unavailable_for_account`` tells whether an error says the model is not
+  available to this account; it returns a flag, never the error text.
 """
 
 import json
@@ -95,6 +97,34 @@ def installation_context():
             " The matching source revision is unknown; obtain it from the installer before cloning. Do not use main."
         )
     return result
+
+
+_ACCOUNT_NOT_FOUND = re.compile(r"not\s+found\s+for\s+(?:this\s+)?account", re.IGNORECASE)
+
+
+def unavailable_for_account(exc):
+    """Return True if a failed call's error says the model is not available to this account.
+
+    NVIDIA Build answers HTTP 404 with "Function '...': Not found for account
+    '...'" for a model the account cannot use. The error text of ``exc`` and
+    its cause/context chain is searched for that phrase only; the text itself
+    is never stored or shown, since it may contain account details.
+    """
+    current = exc
+    seen = 0
+    while current is not None and seen < 6:
+        texts = [str(current)]
+        response = getattr(current, "response", None)
+        try:
+            texts.append(response.text if response is not None else "")
+        except Exception:  # noqa: BLE001 - an unread or closed response has no text
+            pass
+        texts.append(str(getattr(current, "body", "") or ""))
+        if any(_ACCOUNT_NOT_FOUND.search(text or "") for text in texts):
+            return True
+        current = current.__cause__ or current.__context__
+        seen += 1
+    return False
 
 
 def timeout_details(exc, *, deadline_expired=False):

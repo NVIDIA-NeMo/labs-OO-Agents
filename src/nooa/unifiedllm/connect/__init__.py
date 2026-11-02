@@ -3125,6 +3125,11 @@ async def run_steps(
                     record.update(
                         outcome="not_confirmed", reason="Reply not understood by the runtime"
                     )
+                if status == 404:
+                    from ._diagnostics import unavailable_for_account
+
+                    if unavailable_for_account(exc):
+                        record["unavailable_for_account"] = True
             record.update(timeout_details(exc, deadline_expired=deadline.expired()))
             if type(exc).__name__ == "ReasoningReplayError":
                 record.update(
@@ -3335,7 +3340,7 @@ async def _run_decision_steps(
     authentication failure, if routing was not accepted, or (for the image
     test) if a typed decision test did not answer correctly.
     """
-    from ._diagnostics import timeout_details
+    from ._diagnostics import timeout_details, unavailable_for_account
 
     entry = configure_entry(proposal.entry)
     records = entry["provenance"]["probes"]
@@ -3461,6 +3466,8 @@ async def _run_decision_steps(
                 record["status_code"] = status
                 record["outcome"] = "rejected" if status in {400, 422} else "not_probed"
                 auth_failed = auth_failed or status in {401, 403}
+                if status == 404 and unavailable_for_account(exc):
+                    record["unavailable_for_account"] = True
                 if 200 <= status < 300:
                     record.update(
                         outcome="not_confirmed",
