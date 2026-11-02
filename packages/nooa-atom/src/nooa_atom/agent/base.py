@@ -562,6 +562,7 @@ class AtomAgentBase(InteractiveAgent):
         return await connect_session_mcp(self, AtomOptions.load(self.cwd))
 
     @hidden
+    @no_trace
     def inherit_tools(self, parent: Any) -> list[str]:
         """Share ``parent``'s connected MCP servers with this child agent; return warnings.
 
