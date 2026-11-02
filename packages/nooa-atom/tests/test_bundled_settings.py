@@ -206,3 +206,64 @@ def test_a_path_like_that_fails_to_convert_is_skipped(tmp_path, monkeypatch):
     eps = [_EntryPoint("a_broken", lambda: Broken()), _EntryPoint("b_good", lambda: good)]
     monkeypatch.setattr(layered_config.metadata, "entry_points", lambda *, group: eps)
     assert layered_config.bundled_settings_paths() == [good]
+
+
+def test_inactive_skills_opt_out_of_a_bundled_skill_when_applied(
+    tmp_path, isolated, bundle, monkeypatch
+):
+    """Applying the options to the skill registry: a bundled skill listed in
+    ``inactive_skills`` ends up inactive, the other bundled one stays active."""
+    from types import SimpleNamespace
+
+    import nooa_atom.skills.mcp_servers as mcp_servers
+    import nooa_atom.workspace.workspace_settings as workspace_settings
+    from nooa_atom.workspace.options import configure_session_skills
+
+    monkeypatch.setattr(mcp_servers, "MCPServers", lambda **kwargs: SimpleNamespace())
+    monkeypatch.setattr(workspace_settings, "WorkspaceSettings", lambda options: SimpleNamespace())
+
+    class Registry:
+        def __init__(self, active):
+            self.active = active
+
+        def activate(self, keys):
+            self.active.update(keys)
+
+        def deactivate(self, keys):
+            self.active.difference_update(keys)
+
+    class Skills:
+        def __init__(self):
+            self.active = set()
+            self.registry = Registry(self.active)
+            self.entries = {
+                name: SimpleNamespace(key=name, kind="text")
+                for name in ("nvidia.search", "nvidia.docs")
+            }
+
+        def set_mcp_servers(self, servers):
+            pass
+
+        def register(self, name, value):
+            pass
+
+        def discover_skills_dirs(self, dirs):
+            pass
+
+        def entry(self, name):
+            return self.entries.get(name)
+
+        def activated(self):
+            return set(self.active)
+
+    workspace = tmp_path / "workspace"
+    (workspace / ".nooa").mkdir(parents=True)
+    (workspace / ".nooa" / "settings.yaml").write_text(
+        "atom:\n  inactive_skills: [nvidia.search]\n"
+    )
+    options = AtomOptions.load(workspace)
+    skills = Skills()
+    warnings = configure_session_skills(SimpleNamespace(skills=skills), options)
+    assert warnings == []
+    assert "nvidia.docs" in skills.activated()
+    assert "nvidia.search" not in skills.activated()
