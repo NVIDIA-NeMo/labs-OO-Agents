@@ -59,6 +59,7 @@ from nooa.events import (
 from nooa.runtime.harness_metrics import get_harness_metrics
 from nooa.runtime.hooks import call_after_hook, call_before_hook
 from nooa.runtime.sandbox.errors import SandboxExecutionError
+from nooa.strategies._completion_guard import completion_binding_errors
 from nooa.strategies.base import RuntimeServices, build_sampling_kwargs
 from nooa.strategies.codeact_errors import format_validation_error
 from nooa.strategies.composite import CompositeStrategy
@@ -3128,7 +3129,23 @@ Standard Python builtins and agent instance (`self`) are available."""
 
         # Validate REPL policy (no classes, await async methods)
         validator = GeneratedCodeValidator()
-        validation_errors = validator.validate(code, runtime.agent)
+        try:
+            validation_errors = completion_binding_errors(
+                code,
+                reserved=frozenset(
+                    name.removesuffix("()") for name in self._always_available_builtins()
+                ),
+                filename=f"Cell In[{session.execution_count}]",
+            )
+        except SyntaxError as error:
+            return ExecutionResult(stdout="", error=error, defined_methods={})
+        try:
+            validation_errors.extend(validator.validate(code, runtime.agent))
+        except RecursionError:
+            validation_errors.append(
+                "Cell nests too deeply for REPL-policy validation; "
+                "split the deeply nested code into smaller statements, then retry."
+            )
         if validation_errors:
             error_msg = "Code validation failed:\n" + "\n".join(
                 f"• {err}" for err in validation_errors
