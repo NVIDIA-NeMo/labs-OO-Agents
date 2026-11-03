@@ -10,6 +10,7 @@ import httpx
 import pytest
 
 from nooa.llm_types import LLMResponse, LLMUsage
+from nooa.strategies.predict import PredictStrategy
 from nooa.unifiedllm import connect, registry
 from tests.unifiedllm.connect.connect_http import mock_http, response_body
 
@@ -62,6 +63,7 @@ async def test_probes_use_registry_entry_and_unified_call(monkeypatch, style):
     )
     before = deepcopy(proposal.entry)
     clients = []
+    real_factory = registry.client_from_config
 
     def create(name, config, **kwargs):
         assert name == "local"
@@ -70,11 +72,14 @@ async def test_probes_use_registry_entry_and_unified_call(monkeypatch, style):
         }
         assert kwargs["api_key"] == "transient-secret"
         assert kwargs["retry_config"].max_retries == 0
-        client = AsyncMock()
-        client.acall.return_value = LLMResponse(
-            content="323",
-            reasoning="Worked it out",
-            usage=LLMUsage(input_tokens=10, output_tokens=2),
+        client = real_factory(name, config, **kwargs)
+        client.acall = AsyncMock(
+            return_value=LLMResponse(
+                content='{"value":323}',
+                reasoning="Worked it out",
+                usage=LLMUsage(input_tokens=10, output_tokens=2),
+                parsed=PredictStrategy()._create_response_model(int, "compute")(value=323),
+            )
         )
         clients.append(client)
         return client
@@ -82,13 +87,11 @@ async def test_probes_use_registry_entry_and_unified_call(monkeypatch, style):
     monkeypatch.setattr(registry, "client_from_config", create)
     result = await connect.run(proposal, approved="all", api_key="transient-secret")
     calls = [call for client in clients for call in client.acall.call_args_list]
-    assert len(calls) == 3
-    assert calls[0].kwargs["messages"] == proposal.probes[0].body.get(
-        "messages", proposal.probes[0].body.get("input")
-    )
-    assert calls[1].kwargs["tools"][0].name == "probe_tool"
-    assert calls[2].kwargs["reasoning_level"] == "low"
-    assert all(client.aclose.await_count == 1 for client in clients)
+    # Uninstrumented typed call cannot confirm settings, so later probes stop.
+    assert len(calls) == 1
+    assert calls[0].kwargs["output_model"].model_fields["value"].annotation is int
+    assert "Compute 17 * 19" in repr(calls[0].args)
+    assert all(client.acall.await_count == 1 for client in clients)
     assert proposal.entry == before
     record = result.entry["provenance"]["probes"]["routing"]
     assert record["outcome"] == "not_confirmed"  # Mock bypassed HTTP: no wire evidence.
@@ -99,16 +102,18 @@ async def test_probes_use_registry_entry_and_unified_call(monkeypatch, style):
 
 @pytest.mark.asyncio
 async def test_runtime_failure_cannot_be_reported_as_success(monkeypatch):
-    client = AsyncMock()
-    client.acall.side_effect = ValueError("private server details and credentials")
+    proposal = connect.plan("local", "model", "responses", "https://api.test/v1", "")
+    client = registry.client_from_config("local", proposal.entry, api_key="key")
+    client.acall = AsyncMock(side_effect=ValueError("private server details and credentials"))
     monkeypatch.setattr(registry, "client_from_config", lambda *a, **kw: client)
     proposal = connect.plan("local", "model", "responses", "https://api.test/v1", "")
     result = await connect.run(proposal, approved="all", api_key="key")
     record = result.entry["provenance"]["probes"]["routing"]
     assert record["outcome"] != "accepted"
-    assert record["error"] == "ValueError"
+    assert record["error"] == "RuntimeError"  # Raw validation failures are sanitized.
     assert "private" not in repr(result)
-    assert client.acall.await_count == client.aclose.await_count == 1
+    assert client.acall.await_count == 1
+    assert client._http.httpx_async.is_closed
 
 
 @pytest.mark.asyncio
@@ -134,13 +139,20 @@ async def test_saved_entry_sends_the_same_request_as_connect(tmp_path, monkeypat
     registry.reload_registry(path)
     client = registry.get_llm_client("local")
     try:
-        await client.acall(
-            messages=[{"role": "user", "content": "Compute 17 * 19. Reply with the number."}],
-        )
+        from nooa.unifiedllm.connect._baseline import typed_baseline
+
+        _, scalar = await typed_baseline(client)
+        assert scalar == 323
     finally:
         await client.aclose()
     assert len(sent) == 2
-    assert sent[0] == sent[1]
+    # Runtime's per-agent cache shard varies; configured wire settings and
+    # native method/schema must be identical after save/reload.
+    bodies = [json.loads(item[1]) for item in sent]
+    for body in bodies:
+        body.pop("prompt_cache_key", None)
+    assert sent[0][0] == sent[1][0]
+    assert bodies[0] == bodies[1]
     assert (
         sent[0][0]
         == "/v1/"
@@ -177,8 +189,8 @@ async def test_old_http_only_success_is_not_reused(monkeypatch):
         "request": deepcopy(proposal.probes[0].body),
         "fields_reached_wire": True,
     }
-    client = AsyncMock()
-    client.acall.side_effect = ValueError("Bad runtime configuration")
+    client = registry.client_from_config("local", proposal.entry, api_key="key")
+    client.acall = AsyncMock(side_effect=ValueError("Bad runtime configuration"))
     monkeypatch.setattr(registry, "client_from_config", lambda *a, **kw: client)
     result = await connect.run(proposal, approved="minimal", api_key="key")
     assert client.acall.await_count == 1
@@ -196,9 +208,11 @@ async def test_level_changed_after_planning_cannot_exceed_approved_cap(monkeypat
         reasoning_levels={"high": {"max_tokens": 200}},
     )
     proposal.entry["reasoning_levels"]["high"]["max_tokens"] = 100000
-    client = AsyncMock()
-    client.acall.return_value = LLMResponse(content="323")
-    monkeypatch.setattr(registry, "client_from_config", lambda *a, **kw: client)
+    sent = []
+    mock_http(
+        monkeypatch,
+        lambda request: sent.append(request) or httpx.Response(200, json=response_body("chat")),
+    )
     result = await connect.run(proposal, approved="all", api_key="key")
     assert result.entry["provenance"]["probes"]["level:high"]["outcome"] == "not_probed"
-    assert client.acall.await_count == 2  # Routing and tools only.
+    assert len(sent) == 2  # Routing and tools only.

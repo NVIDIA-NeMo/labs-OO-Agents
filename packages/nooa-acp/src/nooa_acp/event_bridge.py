@@ -80,6 +80,9 @@ class ACPEventBridge:
         self._open_tools: set[str] = set()
         self._python_source: dict[str, str] = {}
         self._terminal_output: dict[str, str] = {}
+        # Partial stdout/stderr of a cancelled cell, shown on its card when
+        # fail_open_tools closes it.
+        self._cancelled_output: dict[str, str] = {}
         self._cost_usd = 0.0
         self._unsubscribers: list[Callable[[], None]] = [
             agent.event_manager.on("AgentMessage", self._on_agent_message),
@@ -142,6 +145,16 @@ class ACPEventBridge:
 
     def _on_python_output(self, event: EventBase) -> None:
         if not isinstance(event, PythonOutput) or event.tool_call_id not in self._open_tools:
+            return
+        # Core records a cancelled cell with whatever it printed. Keep that
+        # output and leave the card open so cancel()'s fail_open_tools closes
+        # it as "Cancelled" with the partial output shown.
+        if event.execution_status is ResultStatus.CANCELLED:
+            partial = "\n".join(
+                part.rstrip() for part in (event.stdout, event.stderr) if part.strip()
+            )
+            if partial:
+                self._cancelled_output[event.tool_call_id] = partial
             return
         self._open_tools.discard(event.tool_call_id)
         code = self._python_source.pop(event.tool_call_id, "")
@@ -367,10 +380,16 @@ class ACPEventBridge:
         """
         for tool_call_id in tuple(self._open_tools):
             code = self._python_source.pop(tool_call_id, None)
+            # Output shown before the close: a cancelled cell's partial output, or
+            # what a terminal command streamed so far.
+            partial = self._cancelled_output.pop(tool_call_id, None)
+            if partial is None:
+                partial = self._terminal_output.pop(tool_call_id, "").rstrip("\n")
+            output = f"{partial}\n\n{reason}" if partial else reason
             content = (
-                _python_content(code, reason)
+                _python_content(code, output)
                 if code is not None
-                else [tool_content(text_block(reason))]
+                else [tool_content(text_block(output))]
             )
             self._enqueue(
                 update_tool_call(
@@ -383,6 +402,7 @@ class ACPEventBridge:
         self._open_tools.clear()
         self._python_source.clear()
         self._terminal_output.clear()
+        self._cancelled_output.clear()
 
     async def close(self) -> None:
         if self._closed:

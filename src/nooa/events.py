@@ -19,16 +19,18 @@ Type names follow "Type Names are Prompts" - no redundant "Event" suffix.
 """
 
 from collections.abc import Callable
-from typing import Annotated, Any, ClassVar
+from typing import Annotated, Any, ClassVar, Literal
 
 from pydantic import BaseModel, Field, field_serializer
 from pydantic_core import PydanticSerializationError, to_json
 
+from nooa._immutable_json import NativeJSON
 from nooa.agentdoc import spec
 from nooa.context_blocks import EventBase as EventBase
 from nooa.context_blocks import ResultStatus as ResultStatus
 from nooa.context_blocks.models import Role
 from nooa.llm_types import LLMResponse as LLMResponse
+from nooa.llm_types import LLMUsage as LLMUsage
 
 # Sentinel value to distinguish "no return" from "return None"
 _NO_RETURN = object()
@@ -151,6 +153,109 @@ class TextOnlyReply(EventBase):  # type: ignore[misc]
     ] = 0
 
 
+class LoopGuardTriggered(EventBase):  # type: ignore[misc]
+    """The CodeAct loop guard detected a repeated tool call.
+
+    ``content`` is the fixed-template message shown to the model. The other
+    fields are structured trace data and are not rendered.
+    """
+
+    _role: ClassVar[Role] = Role.USER
+
+    content: Annotated[str, Field(description="Loop-guard message shown to the model")]
+    action: Annotated[
+        str,
+        Field(description="'blocked', 'nudged' or 'stopped'", repr=False),
+    ] = ""
+    tool_name: Annotated[str, Field(description="Repeated tool name", repr=False)] = ""
+    tool_call_id: Annotated[str, Field(description="Triggering tool call id", repr=False)] = ""
+    repeats: Annotated[
+        int, Field(description="Identical calls in the window, including this one", repr=False)
+    ] = 0
+    window: Annotated[int, Field(description="Tool calls compared", repr=False)] = 0
+    fingerprint: Annotated[str, Field(description="Hash of the normalized action", repr=False)] = ""
+
+
+_PLAIN_JSON_SCALARS = (int, float, bool)
+_PLAIN_JSON_MAX_DEPTH = 32
+_PLAIN_JSON_MAX_ITEMS = 10_000
+
+
+def _is_utf8_str(value: Any) -> bool:
+    """True if ``value`` is an exact ``str`` that UTF-8 can encode (no lone surrogates)."""
+    if type(value) is not str:
+        return False
+    if value.isascii():
+        return True
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
+def _is_plain_json(value: Any) -> bool:
+    """True if ``value`` is built only from plain JSON types, checked within fixed bounds.
+
+    Exact types only (a ``str`` subclass or enum still takes the probe), dict
+    keys must be ``str``, strings must be UTF-8 encodable (pydantic-core refuses
+    lone surrogates, as ``os.listdir`` returns for non-UTF-8 filenames), and the
+    walk gives up (returns False) past
+    ``_PLAIN_JSON_MAX_DEPTH`` levels or ``_PLAIN_JSON_MAX_ITEMS`` values.
+    """
+    budget = _PLAIN_JSON_MAX_ITEMS
+    stack: list[tuple[Any, int]] = [(value, 0)]
+    while stack:
+        item, depth = stack.pop()
+        budget -= 1
+        if budget < 0 or depth > _PLAIN_JSON_MAX_DEPTH:
+            return False
+        kind = type(item)
+        if item is None or kind in _PLAIN_JSON_SCALARS:
+            continue
+        if kind is str:
+            if not _is_utf8_str(item):
+                return False
+            continue
+        if kind is not dict and kind is not list and kind is not tuple:
+            return False
+        # Refuse before queueing, so a huge container costs nothing to reject.
+        if len(stack) + len(item) > budget:
+            return False
+        if kind is dict:
+            if not all(_is_utf8_str(key) for key in item):
+                return False
+            stack.extend((child, depth + 1) for child in item.values())
+        else:
+            stack.extend((child, depth + 1) for child in item)
+    return True
+
+
+def _json_safe(value: Any) -> Any:
+    """Return ``value`` if pydantic-core can JSON-encode it, else a bounded ``pformat`` string.
+
+    Used by ``Any``-typed event fields (``PythonOutput.value``,
+    ``Notification.value``) so ``model_dump_json()`` (the SQLite event store)
+    never raises ``PydanticSerializationError`` on an arbitrary object such as a
+    coroutine, a lock or a user class. ``to_json`` is probed first so
+    pydantic-native types (datetime, UUID, Decimal, set, ...) still round-trip
+    structurally; only genuinely un-encodable objects fall back to ``pformat``,
+    bounded by ``FormatConfig`` defaults since this hook cannot reach the live
+    ``TruncationConfig``. Plain JSON values skip the probe, so the common case
+    is not dumped twice.
+    """
+    if _is_plain_json(value):
+        return value
+    try:
+        to_json(value)
+    except (PydanticSerializationError, TypeError, ValueError):
+        from nooa.agentdoc import pformat
+        from nooa.config.truncation_config import FormatConfig
+
+        return pformat(value, **FormatConfig().model_dump())
+    return value
+
+
 class PythonOutput(EventBase):  # type: ignore[misc]
     """Output from execute_python - appears as user message in events.
 
@@ -164,7 +269,7 @@ class PythonOutput(EventBase):  # type: ignore[misc]
     tool_call_id: Annotated[str, Field(description="ID of the tool call that produced this output")]
     execution_status: Annotated[
         ResultStatus,
-        Field(description="Execution status (ResultStatus.COMPLETE or ResultStatus.ERROR)"),
+        Field(description="Execution status (ResultStatus.COMPLETE, ERROR or CANCELLED)"),
     ]
     execution_count: Annotated[
         int,
@@ -195,27 +300,8 @@ class PythonOutput(EventBase):  # type: ignore[misc]
 
     @field_serializer("value")
     def _serialize_value(self, value: Any, _info: Any) -> Any:
-        """Render values pydantic-core can't JSON-encode as a bounded ``pformat`` string.
-
-        ``value`` is ``Any`` + ``arbitrary_types_allowed``, so a cell can return an
-        object with no pydantic-core JSON serializer (e.g. a ``CancelledError`` from
-        an awaited Task, a coroutine, a lock). ``model_dump_json()`` (the SQLite
-        event store) would then raise ``PydanticSerializationError`` and wedge the
-        turn. We probe with ``to_json`` so pydantic-native types (datetime, UUID,
-        Decimal, set, ...) still round-trip structurally, and only fall back to
-        ``pformat`` — bounded by ``FormatConfig`` defaults, since this hook can't
-        reach the live ``TruncationConfig`` — for genuinely un-encodable objects.
-        """
-        if value is None:
-            return value
-        try:
-            to_json(value)
-        except (PydanticSerializationError, TypeError, ValueError):
-            from nooa.agentdoc import pformat
-            from nooa.config.truncation_config import FormatConfig
-
-            return pformat(value, **FormatConfig().model_dump())
-        return value
+        """See :func:`_json_safe`."""
+        return _json_safe(value)
 
 
 class BeforeTurn(EventBase):  # type: ignore[misc]
@@ -423,10 +509,61 @@ class LLMCallEnd(EventBase):  # type: ignore[misc]
     )
 
 
+class DecisionCallStart(EventBase):  # type: ignore[misc]
+    """Emitted immediately before a decision-client round-trip."""
+
+    _role: ClassVar[Role] = Role.RUNTIME_EVENT
+
+    method_name: str
+    generation_id: str
+    question_count: int
+    model: str
+
+
+class DecisionCallEnd(EventBase):  # type: ignore[misc]
+    """Emitted after a decision-client round-trip succeeds or fails."""
+
+    _role: ClassVar[Role] = Role.RUNTIME_EVENT
+
+    method_name: str
+    generation_id: str
+    question_count: int
+    model: str
+    success: bool = True
+    exception_type: str | None = None
+
+
+class DecisionRecord(EventBase):  # type: ignore[misc]
+    """Durable record of one logical decision-model call.
+
+    Unlike the transient decision lifecycle events, this metadata event is
+    persisted for inspection and replay but never rendered into a later model
+    prompt.
+    """
+
+    _role: ClassVar[Role] = Role.METADATA
+
+    decision_call_id: str
+    method_name: str
+    generation_id: str
+    state: Any
+    questions: dict[str, Any]
+    answers: dict[str, Any] | None = None
+    decision_source: Literal["native", "llm"] = "native"
+    question_digest: str | None = None
+    requested_model: str
+    resolved_model: str | None = None
+    response_id: str | None = None
+    usage: LLMUsage | None = None
+    raw_response: NativeJSON | None = Field(default=None, repr=False)
+    success: bool = False
+    exception_type: str | None = None
+
+
 class Notification(EventBase):  # type: ignore[misc]
     """Generic "something happened" signal rendered into the LLM context.
 
-    Not tied to any specific producer. The framework never emits this
+    Not tied to any specific producer. The core runtime never emits this
     event itself — input channels emit :class:`QueueOutput` on ``put()``
     (see ``runtime/channels.py``). ``Notification`` is a user-emitted
     signal you can ``event_manager.add(...)`` yourself for long-running
@@ -438,7 +575,23 @@ class Notification(EventBase):  # type: ignore[misc]
       ``"timer:daily-cron"``. The outer dispatcher keys off this to
       decide which handler to run next.
     - ``description`` is a free-form string for the LLM; include enough
-      to make the notification self-describing in the event stream.
+      to make the notification self-describing in the event stream. It
+      renders up to 20,000 chars uncut — well above the default event
+      render limit (10,000) so a typical steering message is never cut,
+      but still bounded against an unbounded forwarded payload.
+
+    - ``value`` is an optional data payload for when the signal carries an
+      object the agent will act on, not just text about it. It renders
+      through the default event renderer under its normal limits, and the
+      full object stays reachable as ``event_manager.get(tag).value``.
+
+    Session hosts use this event for steering: a message a person or
+    parent sends while a turn is running is appended as a ``Notification``
+    whose ``source`` says in plain words who sent it (for example "New
+    message from the user while you were working."), with the text as
+    ``description`` and, when the sender passed an object rather than
+    text, that object as ``value``, so the model sees it at its next call.
+    The model reads ``source``, so it is a sentence, not an identifier.
     """
 
     _role: ClassVar[Role] = Role.USER
@@ -447,8 +600,21 @@ class Notification(EventBase):  # type: ignore[misc]
         str, Field(description="Origin of the notification (e.g. 'queue:user_messages')")
     ]
     description: Annotated[
-        str, Field(description="Human-readable description of what happened")
+        str,
+        spec(max_string=20_000),
+        Field(description="Human-readable description"),
     ] = ""
+    value: Annotated[
+        Any,
+        Field(description="Optional data payload; full object via event_manager.get(tag).value"),
+    ] = None
+
+    model_config = {"arbitrary_types_allowed": True}
+
+    @field_serializer("value")
+    def _serialize_value(self, value: Any, _info: Any) -> Any:
+        """See :func:`_json_safe`: persist an arbitrary payload without raising."""
+        return _json_safe(value)
 
 
 class Summary(EventBase):  # type: ignore[misc]
@@ -551,6 +717,7 @@ Event = (
     | TuiSessionCleared
     | SystemPrompt
     | TextOnlyReply
+    | LoopGuardTriggered
 )
 
 
@@ -562,6 +729,10 @@ class ExecutionResult(BaseModel):
 
     stdout: str = Field(default="", description="Captured stdout from execution")
     stderr: str = Field(default="", description="Captured stderr from execution")
+    truncation_reasons: list[str] = Field(
+        default_factory=list,
+        description="Formatting omissions reported by an isolated execution worker",
+    )
     error: Exception | None = Field(default=None, description="Exception if execution failed")
     signal: ExecutionSignal | None = Field(
         default=None, description="Control flow signal (not an error), e.g. return_result()"
@@ -587,13 +758,22 @@ class ExecutionResult(BaseModel):
         default=0,
         description="Number of wrapper lines before user code (for traceback adjustment)",
     )
+    cancelled: bool = Field(
+        default=False,
+        description=(
+            "True for the partial result of a cell interrupted by asyncio cancellation. "
+            "execute_code() re-raises the CancelledError and appends this result to its "
+            "``execution_results`` list (innermost cell first); stdout/stderr hold the "
+            "output produced before the cancel"
+        ),
+    )
 
     model_config = {"arbitrary_types_allowed": True}
 
     @property
     def success(self) -> bool:
-        """True if execution completed without error."""
-        return self.error is None
+        """True if execution completed without error and was not cancelled."""
+        return self.error is None and not self.cancelled
 
     @property
     def has_return(self) -> bool:

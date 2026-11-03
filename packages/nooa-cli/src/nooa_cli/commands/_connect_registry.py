@@ -40,7 +40,7 @@ def credential_names(registry, endpoint):
     target = normalized(endpoint)
     names = []
     for entry, _ in registry.values():
-        address, name = entry.get("api_base"), entry.get("api_key_env")
+        address, name = entry.get("endpoint") or entry.get("api_base"), entry.get("api_key_env")
         if not isinstance(address, str) or not isinstance(name, str):
             continue
         try:
@@ -52,8 +52,18 @@ def credential_names(registry, endpoint):
     return names
 
 
-def shadowing_source(alias, path):
-    """Name a currently effective file that would override this destination."""
+def shadowing_source(alias, path, *, extra_priority=False):
+    """Name a currently effective file that would override this destination.
+
+    ``extra_priority`` is for a ``--working-dir``/``-w`` save target
+    specifically: ``entries()``'s ``extra_path`` is always appended last
+    (highest priority, matching what a future ``nooa tui -w`` read of the
+    same directory would do), so that target is never actually shadowed by
+    anything as long as the caller keeps pairing ``-w`` with the same
+    directory. An arbitrary ``--output`` path has no such guaranteed future
+    re-inclusion, so it keeps the original, stricter behavior: absent from
+    priority means always shadowed by an existing definition elsewhere.
+    """
     import os
     from pathlib import Path
 
@@ -74,6 +84,7 @@ def shadowing_source(alias, path):
             for p in os.environ.get("NEMO_OO_LLM_CONFIG", "").split(",")
             if p.strip()
         ),
+        *([path] if extra_priority else []),
     ]
     priority = {p.resolve(): i for i, p in enumerate(paths)}
     target = priority.get(path.resolve())
@@ -89,11 +100,12 @@ def diagnostic_context(
     alias=None,
     model=None,
     endpoint=None,
+    api_style=None,
     api_key_env=None,
     api_key=None,
     budget=None,
     remaining=None,
-    output_tokens=200,
+    output_tokens=2048,  # == nooa.unifiedllm.connect.DISCOVERY_OUTPUT_TOKENS (tested)
     reasoning_output_tokens=4096,
     stage=None,
     discovery_succeeded=None,
@@ -108,7 +120,7 @@ def diagnostic_context(
 
     from nooa._version import __version__
     from nooa.llm_config import llm_config_chain
-    from nooa.unifiedllm.connect import normalize_endpoint
+    from nooa.unifiedllm.connect import DECISION_API_STYLES, normalize_endpoint
     from nooa.unifiedllm.connect._diagnostics import installation_context
 
     context = {
@@ -185,10 +197,16 @@ def diagnostic_context(
                         if context["credential_source"] == "pasted"
                         else ["--api-key-env", api_key_env or ""]
                     ),
-                    "--output-tokens",
-                    str(output_tokens),
-                    "--budget-tokens",
-                    str(min(remaining, 3 * (output_tokens + 512))),
+                    *(
+                        ["--api-style", api_style, "--budget-tokens", str(min(remaining, 512))]
+                        if api_style in DECISION_API_STYLES
+                        else [
+                            "--output-tokens",
+                            str(output_tokens),
+                            "--budget-tokens",
+                            str(min(remaining, 3 * (output_tokens + 512))),
+                        ]
+                    ),
                 ]
             )
     if context["credential_source"] == "pasted":

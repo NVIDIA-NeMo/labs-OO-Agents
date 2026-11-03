@@ -20,6 +20,7 @@ Three classes of leak are covered:
 
 from __future__ import annotations
 
+import re
 import sys
 import types
 from typing import TypedDict
@@ -319,8 +320,9 @@ class TestModuleLevelFunctionSignatures:
         data = await build_prompt_data(agent.run)
         ec = TestExecutionContextRendering._extract_execution_context(data.system_prompt)
         # Dependencies render as runnable import statements, not a prose list.
-        assert "from nooa import" in ec
-        assert "Agent" in ec
+        # The path is the symbol's declared module, so it never depends on
+        # which re-exports happen to be loaded.
+        assert re.search(r"^from nooa(\.\w+)* import .*\bAgent\b", ec, re.M)
 
     @pytest.mark.asyncio
     async def test_doc_hint_present(self):

@@ -46,6 +46,41 @@ async def test_circular_debug_value_does_not_prevent_success_or_verifier_answer(
     assert not (tmp_path / "behavior.json").exists()
 
 
+@pytest.mark.asyncio
+async def test_enable_atif_adds_atif_alongside_event_trajectory(monkeypatch, tmp_path):
+    import json
+
+    from nooa.atif import Trajectory
+    from nooa.events import Task
+    from nooa.runtime.event_manager import EventManager
+    from nooa.unifiedllm import FakeLLMClient
+
+    class FinishedAgent:
+        def __init__(self, llm):
+            self.event_manager = EventManager()
+
+        async def _run_evaluation(self, task_input):
+            self.event_manager.add(Task(prompt=task_input["user_message"]))
+            return {"success": True, "response": "verified"}
+
+        async def close(self):
+            pass
+
+    monkeypatch.setattr(runner, "LOGS_DIR", tmp_path)
+    monkeypatch.setattr(runner, "_import_agent_class", lambda _: FinishedAgent)
+    monkeypatch.setattr("nooa.unifiedllm.get_llm_client", lambda *args, **kwargs: FakeLLMClient())
+
+    assert await runner._run("task", "model", "bench", None, enable_atif=True) == 0
+
+    trajectory = Trajectory.model_validate_json((tmp_path / "trajectory.json").read_text())
+    assert trajectory.schema_version == "ATIF-v1.7"
+    assert trajectory.agent.name == "FinishedAgent"
+    assert any("task" in str(step) for step in trajectory.steps)
+    events = json.loads((tmp_path / "trajectory.nooa.json").read_text())
+    assert events
+    assert (tmp_path / "behavior.json").exists()
+
+
 @pytest.mark.parametrize("agent_async", [False, True])
 @pytest.mark.parametrize("client_async", [False, True])
 @pytest.mark.parametrize(
@@ -90,7 +125,7 @@ async def test_cleanup_failures_preserve_the_original_outcome(
     monkeypatch.setattr(runner, "_import_agent_class", lambda name: FakeAgent)
     monkeypatch.setattr(runner, "_write_result", write_result)
     for name in ("_write_trajectory", "_write_behavior_report", "_write_answer"):
-        monkeypatch.setattr(runner, name, lambda *args: None)
+        monkeypatch.setattr(runner, name, lambda *args, **kwargs: None)
 
     if outcome.endswith("error") or outcome == "cancelled":
         with pytest.raises(type(original_error)) as caught:
@@ -197,8 +232,9 @@ async def test_runner_executes_delegation_and_preserves_provider_turns(
         )
 
     first = response(
-        "task = self.todo.add('Verify workspace')\n"
-        "report = await self.delegate(task, supplied_context={'api_key': 'private-sentinel'})",
+        "report = await self.delegate(\n"
+        "    'Verify workspace', supplied_context={'api_key': 'private-sentinel'}\n"
+        ")",
         "parent-start",
         native=True,
     )
@@ -209,17 +245,12 @@ async def test_runner_executes_delegation_and_preserves_provider_turns(
                 f"assert str(self.shell.cwd) == {str(tmp_path)!r}\n"
                 "checked = await self.shell.run('printf verified')\n"
                 "assert checked.returncode == 0 and checked.stdout == 'verified'\n"
-                "task = self.todo.list_todos()[0]\n"
-                "self.todo.comment(task, 'Observed verification')\n"
-                "self.todo.set_var(task, 'checked', True)\n"
                 "return_result(TaskResult(solution_description='Verified workspace', "
                 "evidence=checked.stdout, how_to_verify='true'))",
                 "worker-check",
             ),
             response(
-                "assert task.v.checked\n"
-                "assert task.comments[0].body == 'Observed verification'\n"
-                "return_result(report)",
+                "assert report.evidence == 'verified'\nreturn_result(report)",
                 "parent-finish",
             ),
         ]
@@ -269,3 +300,45 @@ async def test_runner_executes_delegation_and_preserves_provider_turns(
     )
     assert "private-sentinel" in str(llm.requests[1])  # Ordinary input, no custom redaction.
     assert "fixture-provider-state" not in (tmp_path / "logs/trajectory.json").read_text()
+
+
+@pytest.mark.parametrize(
+    ("result", "expected"),
+    [
+        ({"answer": " EXISTS\n", "response": "cat dest"}, " EXISTS\n"),
+        ({"response": "cat dest"}, "cat dest"),
+    ],
+)
+def test_write_answer_prefers_exact_value(monkeypatch, tmp_path, result, expected):
+    monkeypatch.setattr(runner, "ANSWER_FILE", tmp_path / "answer.txt")
+    runner._write_answer(result)
+    assert (tmp_path / "answer.txt").read_text() == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("value_arg", "expected"), [(", value='EXISTS'", "EXISTS"), ("", "true")])
+async def test_bench_runner_writes_task_result_value(monkeypatch, tmp_path, value_arg, expected):
+    import json
+
+    from nooa.unifiedllm import FakeLLMClient, LLMResponse, ToolCall
+
+    code = (
+        "return_result(TaskResult(solution_description='Kept destination', "
+        f"evidence='unchanged', how_to_verify='true', report='EXISTS: kept'{value_arg}))"
+    )
+    llm = FakeLLMClient(
+        scripted_responses=[
+            LLMResponse(
+                parts=(
+                    ToolCall(id="finish", name="python_cell", arguments=json.dumps({"code": code})),
+                ),
+                finish_reason="tool_calls",
+            )
+        ]
+    )
+    monkeypatch.setattr("nooa.unifiedllm.get_llm_client", lambda *args, **kwargs: llm)
+    monkeypatch.setattr(runner, "LOGS_DIR", tmp_path / "logs")
+    monkeypatch.setattr(runner, "ANSWER_FILE", tmp_path / "answer.txt")
+
+    assert await runner._run("Report EXISTS", "fixture-model", "bench", None, str(tmp_path)) == 0
+    assert (tmp_path / "answer.txt").read_text() == expected

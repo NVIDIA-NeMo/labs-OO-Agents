@@ -14,7 +14,6 @@ from litellm.types.utils import Choices, Message, ModelResponse
 from nooa.context_blocks.events import ToolCallEvent, ToolResult
 from nooa.context_blocks.formatter import (
     OpenAIProviderFormatter,
-    ResponsesProviderFormatter,
     XMLBlockFormatter,
 )
 from nooa.context_blocks.models import ResolvedBlock, Role
@@ -25,7 +24,7 @@ from nooa.unifiedllm.replay_state import (
     prepare_chat_messages,
     replay_scope,
 )
-from nooa.unifiedllm.response_parts import capture_parts
+from nooa.unifiedllm.response_parts import capture_parts, project_turn
 
 ANTHROPIC_THINKING = [
     {"type": "thinking", "thinking": "Check the inputs.", "signature": "anthropic-sig"},
@@ -96,7 +95,7 @@ def _gemini_response() -> ModelResponse:
     )
 
 
-def _render(response: LLMResponse, *, responses: bool = False) -> list[dict]:
+def _render(response: LLMResponse) -> list[dict]:
     blocks = [
         ResolvedBlock(key="turn", content=response.content, role=Role.ASSISTANT, event=response)
     ]
@@ -120,8 +119,7 @@ def _render(response: LLMResponse, *, responses: bool = False) -> list[dict]:
         for call in response.tool_calls
     )
     neutral = XMLBlockFormatter().format(blocks)
-    formatter = ResponsesProviderFormatter() if responses else OpenAIProviderFormatter()
-    return formatter.format(neutral)
+    return OpenAIProviderFormatter().format(neutral)
 
 
 def test_public_thinking_content_blocks_require_a_response(
@@ -216,7 +214,7 @@ def test_cross_provider_replay_warns_hides_opaque_state_and_keeps_reasoning_text
 
         replayed = completion.call_args.kwargs["messages"]
         assistant = next(message for message in replayed if message.get("role") == "assistant")
-        assert assistant["content"] == "Inspect the value."
+        assert assistant["content"] == [{"type": "text", "text": "Inspect the value."}]
         assert [call["id"] for call in assistant["tool_calls"]] == ["call_1", "call_2"]
         assert GEMINI_SIGNATURE not in json.dumps(replayed)
         assert GEMINI_SIGNATURE_2 not in json.dumps(replayed)
@@ -282,7 +280,16 @@ RESPONSES_MESSAGE = {
 @pytest.mark.asyncio
 @pytest.mark.parametrize("is_async", [False, True])
 @pytest.mark.parametrize("has_answer", [False, True])
-async def test_summary_without_encrypted_content_is_portable_text(is_async, has_answer) -> None:
+async def test_summary_without_encrypted_content_is_native_on_gateway_routes(
+    is_async, has_answer
+) -> None:
+    """LiteLLM resolves every OpenAI-compatible gateway route (not
+    api.openai.com or an Azure OpenAI resource) to the same provider name a
+    genuinely native route gets, so provider name alone can't identify these.
+    The endpoint can: such a route never gets a real encrypted envelope back,
+    so its summary-only reasoning item is native, non-truncated state, not an
+    incomplete OpenAI turn -- unlike on a real OpenAI/Azure endpoint (see
+    test_summary_without_encrypted_content_is_portable_on_native_openai)."""
     summary = {
         key: value for key, value in RESPONSES_REASONING.items() if key != "encrypted_content"
     }
@@ -302,10 +309,106 @@ async def test_summary_without_encrypted_content_is_portable_text(is_async, has_
             first = await client.acall(messages) if is_async else client.call(messages)
         assert request.call_args.kwargs.get("include") is None
         assert first.reasoning == "Check the evidence."
+        assert any(part.native is not None for part in first.parts)
+        assert first.replay_scope is not None
+        restored = LLMResponse.model_validate_json(first.model_dump_json())
+        with patch(target, return_value=raw) as replay:
+            rendered = _render(restored)
+            if is_async:
+                await client.acall(rendered)
+            else:
+                client.call(rendered)
+        expected = [summary, RESPONSES_MESSAGE] if has_answer else [summary]
+        assert replay.call_args.kwargs["input"] == expected
+
+
+@pytest.mark.parametrize(
+    ("api_base", "base_url", "expected"),
+    [
+        ("https://gateway.example/v1", "https://api.openai.com/v1", True),
+        ("https://api.openai.com/v1", "https://gateway.example/v1", False),
+    ],
+)
+def test_native_endpoint_check_matches_dispatchs_own_base_url_precedence(
+    api_base, base_url, expected
+) -> None:
+    """Dispatch always lets a per-call base_url win over an inherited api_base
+    (it pops base_url into api_base right before the request). The endpoint
+    check that decides native_encrypted_reasoning must use the same
+    precedence, or a client with a gateway api_base whose call overrides
+    base_url to real OpenAI (or the reverse) gets a decision that disagrees
+    with where the request actually goes."""
+    from nooa.unifiedllm.replay_state import _uses_native_openai_endpoint
+
+    assert _uses_native_openai_endpoint({"api_base": api_base, "base_url": base_url}) is expected
+
+
+def test_replay_scope_resolves_the_same_endpoint_precedence() -> None:
+    """replay_scope independently re-derived "configured_endpoint" with the
+    opposite precedence (api_base before base_url) from
+    _uses_native_openai_endpoint's -- both now share _configured_endpoint, so
+    provider resolution is based on the same endpoint dispatch actually
+    reaches, not a different one picked by a second, inconsistent copy."""
+    from nooa.unifiedllm.replay_state import _configured_endpoint
+
+    params = {"api_base": "https://gateway.example/v1", "base_url": "https://api.openai.com/v1"}
+    assert _configured_endpoint(params) == "https://api.openai.com/v1"
+
+
+def test_summary_only_reasoning_degrades_gracefully_on_a_now_stricter_route() -> None:
+    """A turn captured on a gateway route (native_encrypted_reasoning=False)
+    stores summary-only reasoning as native state. If the same stored turn is
+    later replayed through a client for the same model now resolving to a
+    genuinely native OpenAI/Azure endpoint (native_encrypted_reasoning=True),
+    that native state can't satisfy the stricter route -- this must degrade
+    to portable text like any other incompatible turn, not crash the caller.
+    """
+    scope = replay_scope("openai/gpt-5.6", "responses", {})
+    summary = {
+        key: value for key, value in RESPONSES_REASONING.items() if key != "encrypted_content"
+    }
+    parts = capture_parts([summary, RESPONSES_MESSAGE], scope, native_encrypted_reasoning=False)
+    assert any(part.native is not None for part in parts)
+    turn = LLMResponse(parts=parts, replay_scope=scope)
+
+    result = project_turn(turn, scope, native_encrypted_reasoning=True)
+
+    assert result == [
+        {"role": "assistant", "content": "Check the evidence."},
+        {"role": "assistant", "content": "Answer."},
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("is_async", [False, True])
+@pytest.mark.parametrize("has_answer", [False, True])
+async def test_summary_without_encrypted_content_is_portable_on_native_openai(
+    is_async, has_answer
+) -> None:
+    """A genuinely native OpenAI endpoint always requests and expects a real
+    encrypted envelope; a summary-only item there is a truncated/incomplete
+    turn, so it still demotes to portable text."""
+    summary = {
+        key: value for key, value in RESPONSES_REASONING.items() if key != "encrypted_content"
+    }
+    raw = ResponsesAPIResponse(
+        id="resp",
+        created_at=0,
+        model="gpt-5.6",
+        status="completed",
+        output=[summary, RESPONSES_MESSAGE] if has_answer else [summary],
+    )
+    async with ResponsesClient(model="openai/gpt-5.6", api_key="test") as client:
+        target = "litellm.aresponses" if is_async else "litellm.responses"
+        with patch(target, return_value=raw) as request:
+            messages = [{"role": "user", "content": "think"}]
+            first = await client.acall(messages) if is_async else client.call(messages)
+        assert "reasoning.encrypted_content" in request.call_args.kwargs.get("include", [])
+        assert first.reasoning == "Check the evidence."
         assert all(part.native is None for part in first.parts)
         restored = LLMResponse.model_validate_json(first.model_dump_json())
         with patch(target, return_value=raw) as replay:
-            rendered = _render(restored, responses=True)
+            rendered = _render(restored)
             if is_async:
                 await client.acall(rendered)
             else:
@@ -373,7 +476,7 @@ def test_reasoning_only_responses_turn_demotes_without_an_empty_message() -> Non
         with patch(
             "litellm.responses", return_value=_responses_output(RESPONSES_MESSAGE)
         ) as changed:
-            target.call(_render(first, responses=True))
+            target.call(_render(first))
 
         assert changed.call_args.kwargs["input"] == [
             {"role": "assistant", "content": "Check the evidence."}

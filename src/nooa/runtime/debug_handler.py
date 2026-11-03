@@ -424,9 +424,14 @@ def install_debug_handler(dump_dir: Path | None = None) -> None:
     except (RuntimeError, AttributeError, OSError) as exc:
         logger.debug("faulthandler.enable() skipped: %s", exc)
 
-    # Install SIGUSR2 handler (less commonly used than SIGUSR1)
+    # Install SIGUSR2 handler (less commonly used than SIGUSR1). SIGUSR2 is
+    # POSIX-only; on native Windows the dump-on-signal feature is simply off
+    # (dump_debug_info() still works) because this runs at ``import nooa``.
+    debug_signal = getattr(signal, "SIGUSR2", None)
+    if debug_signal is None:
+        return
     try:
-        signal.signal(signal.SIGUSR2, _debug_signal_handler)
+        signal.signal(debug_signal, _debug_signal_handler)
         _handler_installed = True
     except (ValueError, OSError):
         # Can't set signal handler (not main thread, or platform issue)

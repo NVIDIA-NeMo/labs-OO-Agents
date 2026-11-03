@@ -75,10 +75,12 @@ async def test_completion_uses_per_call_route_without_changing_defaults(
         staticmethod(lambda **kwargs: default_pool(is_async=True)),
     )
     try:
-        owned_client = client_http.async_client if is_async else client_http.sync_client
-        assert client._completion_http_client(client.config, is_async=is_async) is owned_client
+        owned_pool = client_http.httpx_async if is_async else client_http.httpx_sync
         unchanged = {**client.config, "temperature": 0.1}
-        assert client._completion_http_client(unchanged, is_async=is_async) is owned_client
+        for config in (client.config, unchanged):
+            sdk_client = client._completion_http_client(config, is_async=is_async, max_retries=0)
+            # Each call gets its own SDK client, but over the owned HTTP pool.
+            assert sdk_client._client is owned_pool
 
         for params in ({}, overrides, {}):
             allow_default_pool = bool(params)
