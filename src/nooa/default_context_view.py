@@ -4,7 +4,7 @@
 
 import inspect
 import logging
-from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, cast
 
 from nooa.context_blocks import BlockMetadata, Context, DynamicContext, Role
@@ -380,6 +380,13 @@ class ManagedContextView(ContextView["Agent"]):
         """Return this view's instruction declarations."""
         return {}
 
+    def history(self, owner: "Agent", call: "CurrentCall") -> Iterable[EventBase]:
+        """Select the events this view replays; blocks and placement are unchanged.
+
+        ``assemble`` passes the selection through ``replayable``.
+        """
+        return visible_events(owner)
+
     async def _materialize_agent_blocks(
         self,
         owner: "Agent",
@@ -486,7 +493,7 @@ class ManagedContextView(ContextView["Agent"]):
         prefix, trailing = partition_blocks(blocks)
 
         items: list[ContextItem] = [*prefix]
-        items.extend(replayable(visible_events(owner)))
+        items.extend(replayable(self.history(owner, call)))
         if items:
             items.append(CacheBoundary())
         items.extend(trailing)

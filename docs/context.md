@@ -85,7 +85,15 @@ replayable(events) -> tuple[EventBase, ...]
 
 Iterative views must explicitly include the task, model outputs, and execution feedback they need. Strategies produce these as typed events; rendering injects none. `self.events.query()` searches stored history, including archived events, so it is an inspection API rather than prompt selection. Tool schemas and execution policy remain strategy-owned.
 
-Views select active history directly. For example, a current-invocation view uses:
+Views select active history directly. The default views select it in `history(owner, call)` and pass the result through `replayable()`, so a subclass can change only the history and keep the instructions, blocks, cache boundary, and budget:
+
+```python
+class CurrentCallView(CodeActView):
+    def history(self, agent, call):
+        return (event for event in visible_events(agent) if call.id in event.related_call_ids)
+```
+
+A view written from scratch is the whole request; one that yields only events sends no system prompt or context blocks. It selects events directly:
 
 ```python
 for event in replayable(
@@ -116,7 +124,7 @@ class CodeActView(ContextView[Agent]):
         blocks = order_blocks(blocks, self.block_order)
         prefix, trailing = partition_blocks(blocks)
 
-        history = replayable(visible_events(agent))
+        history = replayable(self.history(agent, call))  # visible_events(agent)
         items = [*prefix, *history]
         if items:
             items.append(CacheBoundary())
@@ -126,7 +134,7 @@ class CodeActView(ContextView[Agent]):
             yield item
 ```
 
-The private phase methods contain source-specific detail. `assemble()` keeps global order, event placement, cache placement, and budgeting visible. `apply_block_overrides` preserves replacement, deletion, inherited placement, and explicit prefix hints. `visible_events` selects active model-facing history; `replayable` then pairs its tool calls and results without reconstructing absent records.
+The private phase methods contain source-specific detail. `assemble()` keeps global order, event placement, cache placement, and budgeting visible. `apply_block_overrides` preserves replacement, deletion, inherited placement, and explicit prefix hints. `history()` returns `visible_events` (active model-facing history) and is the override point for event selection; `replayable` then pairs its tool calls and results without reconstructing absent records.
 
 The three built-in helpers derive content directly from the agent. Protected-key registration selects which defaults apply; disable state and stored overrides are checked before evaluation. The manager stores those controls, user declarations, and the last materialized values for compatible named reads, but does not create defaults.
 

@@ -350,3 +350,63 @@ def test_default_module_imports_no_runtime_modules():
         if isinstance(node, ast.ImportFrom) and node.module is not None
     ]
     assert not any(name == "nooa.runtime" or name.startswith("nooa.runtime.") for name in imports)
+
+
+async def test_history_override_changes_only_replayed_events():
+    import json
+
+    from nooa import strategy
+    from nooa.default_context_view import CodeActView
+    from nooa.llm_types import LLMResponse, ToolCall
+    from nooa.unifiedllm import FakeLLMClient
+
+    class CurrentCallView(CodeActView):
+        def history(self, agent, call):
+            return (e for e in visible_events(agent) if call.id in e.related_call_ids)
+
+    def finish(value: str, call_id: str) -> LLMResponse:
+        code = f"return_result({value!r})"
+        return LLMResponse(
+            content="",
+            tool_calls=[
+                ToolCall(id=call_id, name="execute_python", arguments=json.dumps({"code": code}))
+            ],
+            finish_reason="tool_calls",
+        )
+
+    llm = FakeLLMClient([finish("one", "c1"), finish("two", "c2")])
+
+    class Solver(Agent, llm=llm):
+        @strategy(context_view=CurrentCallView())
+        async def solve(self, problem: str) -> str:
+            """Solve the problem."""
+            ...
+
+    agent = Solver()
+    await agent.solve("first problem")
+    await agent.solve("second problem")
+
+    request = str(llm.calls[1].messages)
+    assert llm.calls[1].messages[0]["role"] == "system"
+    assert "system_prompt" in request
+    assert "<state" in request
+    assert "second problem" in request
+    assert "first problem" not in request
+
+
+async def test_history_override_still_passes_through_replayable():
+    from nooa.events import LLMResponse
+    from nooa.unifiedllm import ToolCall
+
+    incomplete = LLMResponse(
+        tool_calls=[ToolCall(id="missing", name="execute_python", arguments="{}")],
+        finish_reason="tool_calls",
+    )
+
+    class GivenHistory(ManagedContextView):
+        def history(self, agent, call):
+            return [incomplete]
+
+    agent = ExampleAgent()
+    items = await collect_context_items(GivenHistory(), agent, _call(agent))
+    assert incomplete not in items
