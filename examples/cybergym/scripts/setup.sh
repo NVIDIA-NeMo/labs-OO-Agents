@@ -15,9 +15,10 @@ source "$(dirname "$0")/config.sh"
 
 echo "==> [1/6] Creating virtualenv at $VENV"
 if [ ! -f "$VENV/bin/activate" ]; then
-  uv venv --python python3 "$VENV"
+  python3 -m venv "$VENV"
 fi
 activate_venv
+python3 -m pip install --upgrade pip
 
 echo "==> [2/6] Ensuring a local CyberGym API key exists in .env"
 ENV_FILE="$AGENT_REPO/.env"
@@ -35,7 +36,7 @@ echo "==> [3/6] Installing CyberGym into $CYBERGYM_REPO"
 if [ ! -d "$CYBERGYM_REPO/.git" ]; then
   git clone https://github.com/sunblaze-ucb/cybergym.git "$CYBERGYM_REPO"
 fi
-(cd "$CYBERGYM_REPO" && uv pip install --python "$VENV/bin/python" -e '.[dev,server]')
+(cd "$CYBERGYM_REPO" && python3 -m pip install -e '.[dev,server]')
 
 echo "==> [4/6] Fetching task data for the subset (Git LFS)"
 git lfs install
@@ -56,7 +57,7 @@ echo "==> [5/6] Downloading CyberGym server Docker images for the subset"
 (cd "$CYBERGYM_REPO" && python3 scripts/server_data/download_subset.py)
 
 echo "==> [6/6] Installing this runner and building the agent image"
-(cd "$AGENT_REPO" && uv pip install --python "$VENV/bin/python" -e . && docker build -t "$RUNNER_IMAGE" .)
+(cd "$AGENT_REPO" && python3 -m pip install -e . && docker build -t "$RUNNER_IMAGE" .)
 
 echo
 echo "==> Setup complete."
