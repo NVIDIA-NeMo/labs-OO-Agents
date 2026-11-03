@@ -23,3 +23,20 @@ before the change and 0.230 seconds with the scoped cache, about 6 times faster.
 Both outputs had SHA-256
 `46a6ef2023be8b9c57bff1944a719c3c852e6c7174fa9af279aeadef11715b84`.
 These are formatter measurements, not end-to-end agent latency estimates.
+
+A November 3 follow-up added explicit cache expiration for copied execution
+contexts and isolated inherited contexts in other threads. In the same environment,
+the unchanged base measured 1.276 seconds and the completed ContextVar version
+measured 0.211 seconds (three repetitions each, about 6 times faster), with the same
+output hash above. A separate cache-miss check formatting 200 distinct one-field
+dataclass types measured 11.9 ms before and 9.7 ms after (seven repetitions each),
+with identical output hashes. These small timings are descriptive, not a precise
+claim of improvement for inputs without repeated types.
+
+Resolved annotations are stable within the outermost render, including recursive
+and reentrant formatting on the same thread. Imperative instance/class `spec()`
+overrides remain live. The cache holder is expired and cleared on normal or
+exceptional exit, so a context captured by a formatter callback or inherited by a
+later task cannot reuse stale annotations or retain cached objects. An inherited
+context used in another thread resolves independently. Inspection outside a render
+continues to resolve annotations without caching.

@@ -27,37 +27,54 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Annotated, Any, cast
 
-_type_hints: ContextVar[dict[int, tuple[Any, dict[str, Any]]] | None] = ContextVar(
-    "agentdoc_type_hints", default=None
-)
+
+class _TypeHintCache:
+    def __init__(self) -> None:
+        self.entries: dict[int, tuple[Any, dict[str, Any]]] = {}
+        self.active = True
+        self.owner_thread = threading.get_ident()
+
+    def is_current(self) -> bool:
+        return self.active and self.owner_thread == threading.get_ident()
+
+
+_type_hints: ContextVar[_TypeHintCache | None] = ContextVar("agentdoc_type_hints", default=None)
 
 
 @contextmanager
 def _type_hint_scope() -> Iterator[None]:
     """Reuse resolved annotations within a render, never across later renders.
 
-    Recursive formatting shares the cache. Instance/class visibility overrides
-    remain live; only successful type-hint resolution is memoized.
+    Recursive and reentrant formatting on this thread share the cache, so resolved
+    annotations are stable until the outermost render ends. Instance/class spec()
+    overrides remain live. Copied contexts cannot extend the cache's lifetime or
+    share it with another thread; calls outside a render resolve without caching.
     """
-    if _type_hints.get() is not None:
+    current = _type_hints.get()
+    if current is not None and current.is_current():
         yield
         return
-    token = _type_hints.set({})
+    cache = _TypeHintCache()
+    token = _type_hints.set(cache)
     try:
         yield
     finally:
+        # Copied contexts retain this holder even after our ContextVar is reset.
+        # Expire it explicitly, and release objects kept alive by its entries.
+        cache.active = False
+        cache.entries.clear()
         _type_hints.reset(token)
 
 
 def _resolve_type_hints(obj: Any) -> dict[str, Any]:
     cache = _type_hints.get()
-    if cache is None:
+    if cache is None or not cache.is_current():
         return typing.get_type_hints(obj, include_extras=True)
     # Keep the object alive and key by identity: callable instances can be unhashable.
     key = id(obj)
-    if key not in cache:
-        cache[key] = (obj, typing.get_type_hints(obj, include_extras=True))
-    return cache[key][1]
+    if key not in cache.entries:
+        cache.entries[key] = (obj, typing.get_type_hints(obj, include_extras=True))
+    return cache.entries[key][1]
 
 
 def _is_dunder(name: str) -> bool:
