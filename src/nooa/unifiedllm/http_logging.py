@@ -74,7 +74,8 @@ def enable_http_request_logging(
         import httpx
     except ImportError as e:
         raise ImportError(
-            "httpx is required for request logging. Install it with: pip install httpx"
+            "httpx is required for request logging. "
+            "Install it in the environment running NOOA with: uv pip install httpx"
         ) from e
 
     output_path = Path(output_dir)
