@@ -18,6 +18,7 @@ evaluated it.
 
 - Linux host with Docker
 - Python 3.12 or 3.13
+- [uv](https://docs.astral.sh/uv/getting-started/installation/) for Python environment and dependency management
 - Git LFS (`git lfs version` should work)
 - LLM credentials (put in `.env`) for the model configured in [`nooa_cybergym/llm_config.yaml`](nooa_cybergym/llm_config.yaml)
 

@@ -77,8 +77,6 @@ cd my-agent-project
 uv add nooa
 ```
 
-Or with pip: `pip install nooa`.
-
 <details>
 <summary><b>Optional sub-packages</b> — CLI, memory, benchmarks, evaluation pipeline</summary>
 
@@ -101,11 +99,9 @@ uv add "nooa[cli,memory]"       # several at once
 | `nooa-memory` | `nooa[memory]` | long-term memory subsystem (`MemoryManager`) |
 | `nooa-bench` | `nooa[bench]` | `BenchAgent` and the Harbor benchmark runner |
 
-`eval_pipeline` is not published to PyPI — install it from the repo:
-
-```bash
-uv add "eval_pipeline @ git+https://github.com/NVIDIA-NeMo/labs-OO-Agents.git@main#subdirectory=util/eval_pipeline"
-```
+For `eval_pipeline`, follow the [Contributing](#contributing) instructions to clone
+the repo and run `uv sync --group dev`. This installs it editable with the other
+workspace packages.
 
 </details>
 

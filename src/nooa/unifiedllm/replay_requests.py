@@ -42,7 +42,7 @@ async def replay_request(
         import httpx
     except ImportError as e:
         raise ImportError(
-            "httpx is required for request replay. Install it with: pip install httpx"
+            "httpx is required for request replay. Install it with: uv add httpx"
         ) from e
 
     request_data = error_entry["request"]

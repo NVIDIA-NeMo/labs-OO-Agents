@@ -721,7 +721,7 @@ async def run_inference(request: InferenceRequest):
         }
     except ImportError as e:
         raise HTTPException(
-            status_code=500, detail="litellm not installed. Run: pip install litellm"
+            status_code=500, detail="litellm not installed. Run: uv add litellm"
         ) from e
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Inference error: {str(e)}") from e

@@ -199,7 +199,7 @@ jobs:
             --check-url https://pypi.org/simple/ \
             upload/*
 
-  # Attach the built wheels to the GitHub Release so `pip install <url>` and
+  # Attach the built wheels to the GitHub Release so `uv add <url>` and
   # air-gapped consumers get the exact artifacts that went to PyPI.
   attach-to-release:
     needs: publish-pypi
