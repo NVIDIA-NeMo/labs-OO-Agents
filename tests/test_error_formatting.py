@@ -761,6 +761,16 @@ class TestHeredocHint:
         assert '"""' in result, f"expected triple-quote (Fix 1) in output, got:\n{result}"
         hint = result.split("Hint:", 1)[1]
         assert "doc(...)" in hint
+        flat = " ".join(hint.split())
+        # Standard input first, runner-neutral; the triple-quoted command is the fallback.
+        assert flat.startswith(
+            "this looks like a shell heredoc (`<<...`) embedded in a Python string. "
+            'Pass the content on standard input instead, e.g. run("cat > notes.txt", '
+            'stdin=content) or run("python3 -", stdin=code); check print(doc(...)) of your '
+            "command runner for its stdin parameter. Otherwise put the complete command in "
+            "a triple-quoted string:"
+        ), hint
+        assert "single- or multiple-line" not in flat and "documented API" not in flat
         assert "shell.run" not in hint
         assert "shell.write" not in hint
 

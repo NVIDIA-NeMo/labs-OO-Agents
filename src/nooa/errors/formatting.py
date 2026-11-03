@@ -77,16 +77,15 @@ _HEREDOC_RE = re.compile(r"<<-?\s*['\"]?\w+['\"]?")
 
 # Appended to SyntaxErrors that look like heredoc-in-quoted-string failures.
 _HEREDOC_HINT = '''\
-Hint: this looks like a shell heredoc (`<<...`) embedded in a single- or
-multiple-line Python string. Put the complete command in a triple-quoted
-string, then pass that value using the callable's documented API:
+Hint: this looks like a shell heredoc (`<<...`) embedded in a Python string.
+Pass the content on standard input instead, e.g. run("cat > notes.txt",
+stdin=content) or run("python3 -", stdin=code); check print(doc(...)) of your
+command runner for its stdin parameter. Otherwise put the complete command in
+a triple-quoted string:
 
     command = """cat <<'EOF'
 content
-EOF"""
-
-Use `print(doc(...))` to inspect the available command runner and how it accepts
-commands or standard input.'''
+EOF"""'''
 
 
 # Appended to a SyntaxError for an unterminated string literal (single- or
