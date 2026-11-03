@@ -69,6 +69,7 @@ from nooa.runtime.hooks import call_after_hook, call_before_hook
 from nooa.runtime.sandbox.errors import SandboxExecutionError
 from nooa.strategies.base import RuntimeServices, build_sampling_kwargs
 from nooa.strategies.codeact_errors import (
+    ReturnForm,
     format_validation_error,
     positional_result,
     return_alias_invalid_intro,
@@ -1913,8 +1914,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                     return_type,
                     session,
                     call,
-                    via_tool=True,
-                    alias=alias_note is not None,
+                    form="alias" if alias_note else "tool",
                 )
             except GenerationError:
                 # _handle_return_result raises GenerationError when validation
@@ -1951,12 +1951,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                 # No return_result tool exists: point only at the cell form.
                 content = f"{alias_intro}\n{error_msg}"
             else:
-                content = (
-                    f"Invalid result: {error_msg}\n"
-                    f"Please call return_result again with valid arguments. "
-                    f"Tip: if you computed the result in {self._python_tool_name()}(), you can "
-                    f"call return_result(variable) from within the code instead."
-                )
+                content = f"Invalid result: {error_msg}"
             runtime.event_manager.update(
                 tool_call_event_id,
                 result=ToolResult(
@@ -2395,15 +2390,13 @@ Standard Python builtins and agent instance (`self`) are available."""
         session: CodeActSession,
         call: Any,
         *,
-        via_tool: bool = False,
-        alias: bool = False,
+        form: ReturnForm = "cell",
     ) -> tuple[Any, str | None]:
         """Validate return_result arguments and return the result.
 
-        ``via_tool``: a direct ``return_result`` tool call (JSON arguments),
-        not ``return_result(...)`` inside Python code; it shapes the hint.
-        ``alias``: that call was taken as the cell builtin (there is no
-        ``return_result`` tool), so the hint shows the cell form first, no JSON.
+        ``form``: how the call was made (``return_call_hint``): ``cell``, a
+        direct ``return_result`` ``tool`` call (JSON arguments), or an ``alias``
+        provider call taken as the cell builtin (there is no such tool).
 
         Pure validation - does NOT update ToolCallEvent.result. Caller is responsible
         for updating the ToolCallEvent with the result when return_result is called
@@ -2560,9 +2553,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                 e, return_type, actual_value, runtime.truncation_config
             )
             if not isinstance(e, InvariantError):
-                call_hint = return_call_hint(
-                    return_type, self._python_tool_name() if via_tool else None, cell_only=alias
-                )
+                call_hint = return_call_hint(return_type, form, self._python_tool_name())
                 doc_hint = return_doc_hint(return_type, session.session_locals)
                 if call_hint and doc_hint:
                     call_hint = f"{call_hint}\n{doc_hint}"
@@ -2583,7 +2574,7 @@ Standard Python builtins and agent instance (`self`) are available."""
 
             # Offered back to the model as a cell error it can retry on.
             metrics.return_result_invalid(type(e).__name__)
-            if alias:
+            if form == "alias":
                 error_msg = f"{error_msg}\nThe turn goes on (attempt {attempts} of {budget})."
             else:
                 error_msg = (

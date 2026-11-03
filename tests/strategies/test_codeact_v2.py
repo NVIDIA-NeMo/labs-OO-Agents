@@ -146,6 +146,59 @@ async def test_integer_collapse_succeeds_without_warning():
 
 
 @pytest.mark.asyncio
+async def test_a_real_return_result_tool_error_gets_the_tool_form_and_no_old_tip():
+    """With a return_result tool, the hint is the tool form (M5); the old Tip is gone."""
+    from nooa.interactive import Done, NeedInput
+    from nooa.strategies.codeact import CodeActStrategy
+
+    llm = FakeLLMClient(
+        scripted_responses=[
+            LLMResponse(
+                parts=(ToolCall(id="bad", name="return_result", arguments='{"result": "x"}'),),
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(
+                parts=(
+                    ToolCall(
+                        id="ok",
+                        name="return_result",
+                        arguments=json.dumps({"result": {"explanation": "done"}}),
+                    ),
+                ),
+                finish_reason="tool_calls",
+            ),
+        ]
+    )
+
+    class TestAgent(Agent, llm=llm):
+        @strategy(CodeActStrategy(config=CodeActConfig(prefill=None)))
+        async def answer(self) -> Done | NeedInput:
+            """Return the answer."""
+            ...
+
+    agent = TestAgent()
+    try:
+        assert await agent.answer() == Done(explanation="done")
+        [bad] = [
+            event.result.content
+            for event in agent.runtime.event_manager.all_events()
+            if isinstance(event, ToolCallEvent) and event.tool_call_id == "bad" and event.result
+        ]
+    finally:
+        await agent.aclose()
+    assert bad.startswith("Invalid result: ")
+    assert (
+        "In execute_python code, call it as one of: return_result(Done(explanation=...)), "
+        "return_result(NeedInput(question=...)). As a direct return_result tool call, pass "
+        'JSON arguments: {"result": {"explanation": ...}} or {"result": {"question": ...}}.'
+    ) in bad
+    assert bad.endswith(
+        "The turn goes on: fix the value and call return_result again (attempt 1 of 3)."
+    )
+    assert "Tip:" not in bad and "Please call return_result again" not in bad
+
+
+@pytest.mark.asyncio
 async def test_invalid_results_have_their_own_budget_and_say_the_attempt():
     """One budget (H3): invalid results count on their own, not toward max_retries' errors."""
 

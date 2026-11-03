@@ -8,7 +8,7 @@ Extracted from CodeActStrategy to keep the strategy class focused on control flo
 
 import inspect
 import json
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import ValidationError as PydanticValidationError
 from pydantic_core import ErrorDetails
@@ -62,17 +62,20 @@ def positional_result(kwargs: dict[str, Any], return_type: Any) -> dict[str, Any
     return None
 
 
+ReturnForm = Literal["cell", "tool", "alias"]
+
+
 def return_call_hint(
-    return_type: Any, python_tool: str | None = None, *, cell_only: bool = False
+    return_type: Any, form: ReturnForm = "cell", python_tool: str = "python_cell"
 ) -> str | None:
     """Name the call that returns a model return type, e.g. ``return_result(Done(...))``.
 
     Only for return types whose members are all Pydantic models: other types
-    already get an example from the formatter. ``python_tool``: the failed
-    call was a direct ``return_result`` tool call, which takes JSON arguments;
-    the constructor form is then labelled as code for that Python tool, and a
-    JSON example follows. ``cell_only``: there is no ``return_result`` tool
-    (the call was taken as the cell builtin), so only the cell form is shown.
+    already get an example from the formatter. ``form`` is how the failed
+    call was made: ``cell`` (``return_result(...)`` in code), ``tool`` (a
+    direct ``return_result`` tool call, JSON arguments: the constructor form
+    is labelled as ``python_tool`` code and a JSON example follows) or
+    ``alias`` (a provider call when there is no such tool: the cell form only).
     """
     forms = []
     json_forms = []
@@ -92,9 +95,9 @@ def return_call_hint(
     if not forms:
         return None
     call = forms[0] if len(forms) == 1 else f"one of: {', '.join(forms)}"
-    if python_tool is None:
+    if form == "cell":
         return f"Call it as {call}."
-    if cell_only:
+    if form == "alias":
         return f"To finish, call {python_tool} with {call}."
     return (
         f"In {python_tool} code, call it as {call}. As a direct return_result tool call, "
