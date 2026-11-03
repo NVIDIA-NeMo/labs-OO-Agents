@@ -35,7 +35,6 @@ from nooa import hidden
 from nooa.runtime.cell_deadline import deadline_cancel
 from nooa.runtime.harness_metrics import get_harness_metrics
 from nooa.tools import Todo as _AnyTodo
-from nooa_atom.agent import work_manager as _work_manager
 from nooa_atom.agent.work_manager import current_name, describe, emitter
 from nooa_atom.session.items import ChildFailed, ChildQuestion, ChildResult, TaskResult
 from nooa_atom.session.names import is_valid_name
@@ -389,11 +388,7 @@ def _detach(
     if task is not None:  # cancelled before it ran, its body never closes the child
         task.add_done_callback(lambda _: _close_unstarted(port, route, future, ref, name))
     get_harness_metrics().child_detached()
-    deadline.note(
-        f"child {name} is still running as job {job.name}: "
-        f'Waiting(on=["{job.name}"]) for its result, '
-        f'or await self.jobs.get("{job.name}").cancel().'
-    )
+    deadline.note(still_running_note(job.name))
     return True
 
 
@@ -414,27 +409,30 @@ async def _adopted(
     return _value(item, name)
 
 
-def _note_running_job(job: Any) -> None:
-    """A cell's await of a running job ended by the deadline: the job runs on; say so.
+def still_running_note(name: str) -> str:
+    """The cell deadline's note for a job that runs on after the cell's await ended."""
+    return (
+        f"job {name} is still running: "
+        f'Waiting(on=["{name}"]) for its result, '
+        f'or await self.jobs.get("{name}").cancel().'
+    )
 
-    A kept child's request (``await rev.send(...)``) counts as a child
-    detached at the deadline, like a one-shot ``Subagent.run``.
+
+def note_running_job(job: Any) -> None:
+    """A cell's await of a running job ended: at the deadline, say the job runs on.
+
+    The work manager's ``on_wait_cancelled``. A kept child's request
+    (``await rev.send(...)``) counts as a child detached at the deadline,
+    like a one-shot ``Subagent.run``.
     """
     deadline = deadline_cancel()
-    if deadline is not None:
-        owner = getattr(job, "_owner", None)
-        if getattr(job, "_kind", None) == "request" and isinstance(
-            getattr(owner, "_work", None), Subagent
-        ):
-            get_harness_metrics().child_detached()
-        deadline.note(
-            f"job {job.name} is still running: "
-            f'Waiting(on=["{job.name}"]) for its result, '
-            f'or await self.jobs.get("{job.name}").cancel().'
-        )
+    if deadline is None:
+        return
+    owner = job._owner
+    if job._kind == "request" and isinstance(owner._work, Subagent):
+        get_harness_metrics().child_detached()
+    deadline.note(still_running_note(job.name))
 
-
-_work_manager.wait_cancelled_hook = _note_running_job
 
 _closing: set[asyncio.Task[Any]] = set()
 

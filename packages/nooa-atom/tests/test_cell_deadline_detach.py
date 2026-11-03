@@ -25,7 +25,7 @@ UNIFIED = "nooa_atom.agent:AtomAgent"
 TIMEOUT = 60
 ROOT_DEADLINE = 0.5
 DETACHED = (
-    "child subagent is still running as job subagent: "
+    "job subagent is still running: "
     'Waiting(on=["subagent"]) for its result, '
     'or await self.jobs.get("subagent").cancel().'
 )

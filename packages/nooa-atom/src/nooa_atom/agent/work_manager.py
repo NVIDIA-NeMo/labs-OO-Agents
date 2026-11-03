@@ -152,10 +152,6 @@ _current: contextvars.ContextVar[Job | None] = contextvars.ContextVar(
 )
 
 
-wait_cancelled_hook: Callable[[Job], None] | None = None
-"""Told of a running job whose await outside any job was cancelled (the host sets it)."""
-
-
 def emit(item: Any) -> None:
     """Report a progress item from the running job (a no-op outside a job)."""
     job = _current.get()
@@ -872,11 +868,11 @@ class Job:
                     # The outcome was handed to this await, which will not see it.
                     self._handoff.discard(future)
                     self._requeue()
-                hook = wait_cancelled_hook
-                if hook is not None and _current.get() is None and self._status == "running":
+                told = self._manager._on_wait_cancelled
+                if told is not None and _current.get() is None and self._status == "running":
                     # Only this await ends: the job runs on and delivers its event.
                     with contextlib.suppress(Exception):
-                        hook(self)
+                        told(self)
                 raise
             self._handoff.discard(future)
             self._consumed = True
@@ -1062,6 +1058,7 @@ class WorkManager:
         on_change: Callable[[], None] | None = None,
         capture_factory: Callable[[], Any] | None = None,
         launch_info: Callable[[Any, str], dict[str, str]] | None = None,
+        on_wait_cancelled: Callable[[Job], None] | None = None,
     ) -> None:
         """A manager whose undelivered events go to ``outbox``.
 
@@ -1076,7 +1073,8 @@ class WorkManager:
         after a job starts or finishes (to keep ``records()`` saved with a
         snapshot). ``launch_info(work, kind)`` returns a few short strings
         about new work (where it was launched, what it is), kept with the
-        job and in its record.
+        job and in its record. ``on_wait_cancelled(job)`` is told of a running
+        job whose await outside any job was cancelled (the job runs on).
         """
         for label, value in (
             ("keep", keep),
@@ -1099,6 +1097,7 @@ class WorkManager:
         self._on_change = on_change
         self._capture_factory = capture_factory
         self._launch_info = launch_info
+        self._on_wait_cancelled = on_wait_cancelled
 
     @_public_signature
     def launch(

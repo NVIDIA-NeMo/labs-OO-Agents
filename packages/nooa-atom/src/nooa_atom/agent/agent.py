@@ -31,7 +31,7 @@ from nooa.interactive import Done, NeedInput, Waiting
 from nooa.strategies import CodeActV2, PredictStrategy  # noqa: F401
 from nooa_atom.agent.work_manager import Job, JobEvent, Throttle, WorkManager
 from nooa_atom.agent.work_shell import CommandResult, Shell
-from nooa_atom.agent.work_subagent import Question, Subagent
+from nooa_atom.agent.work_subagent import Question, Subagent, note_running_job
 from nooa_atom.session.items import TaskResult  # noqa: F401
 from nooa_atom.skills.manager import SkillManager
 from nooa_atom.tools.repo_tools import RepoTools
@@ -753,6 +753,7 @@ class AtomAgent(AtomAgentBase):
             on_change=self._record_work,
             launch_info=self._launch_info,
             capture_factory=lambda: CaptureScope(self.runtime.truncation_config),
+            on_wait_cancelled=note_running_job,
         )
         self._shells = work_shell.ShellOwner()
         self.files = Files(self.shell)
