@@ -562,30 +562,31 @@ _CLOSEST_MAX_SECONDS = 0.25
 _CLOSEST_MAX_CHAR_CELLS = 1_500 * 1_500
 
 
-@hidden
-def _closest_region_lines(content: str, old: str) -> list[str]:
-    """Where the file is most like ``old`` (difflib), and what differs, bounded.
-
-    Slides a window of ``old``'s line count over the file and keeps the most
-    similar one (at least 60%). Lists at most eight differing lines, each
-    escaped (tabs show as ``\\t``) and cut at 160 characters, and says when
-    a line differs only in whitespace. Empty when nothing is close.
-    """
-    import difflib
-
-    def excerpt(text: str) -> str:
-        return _replace_diagnostic_excerpt(text, 0, len(text), 0, 160)
-
+def _old_lines(old: str) -> list[str]:
     old_lines = old.split("\n")
     if old_lines and old_lines[-1] == "" and len(old_lines) > 1:
         old_lines.pop()  # old ends with a newline
+    return old_lines
+
+
+@hidden
+def _closest_region(content: str, old: str) -> tuple[int, int, float] | None:
+    """Where the file is most like ``old`` (difflib): 1-based (first, last, ratio), bounded.
+
+    Slides a window of ``old``'s line count over the file and keeps the most
+    similar one (at least 60%). None when nothing is close, or the search
+    would cost too much.
+    """
+    import difflib
+
+    old_lines = _old_lines(old)
     file_lines = content.split("\n")
     if (
         not old.strip()
         or len(old) > _CLOSEST_MAX_OLD_CHARS
         or len(file_lines) > _CLOSEST_MAX_FILE_LINES
     ):
-        return []
+        return None
     size = len(old_lines)
     wanted = "\n".join(old_lines)
     best_ratio, best_start = 0.0, -1
@@ -596,7 +597,7 @@ def _closest_region_lines(content: str, old: str) -> list[str]:
     deadline = time.monotonic() + _CLOSEST_MAX_SECONDS
     for start in range(max(1, len(file_lines) - size + 1)):
         if time.monotonic() > deadline:
-            return []  # too costly for an optional hint
+            return None  # too costly for an optional hint
         window_lines = file_lines[start : start + size]
         window = "\n".join(window_lines)
         if len(window) * len(wanted) <= _CLOSEST_MAX_CHAR_CELLS:
@@ -611,9 +612,29 @@ def _closest_region_lines(content: str, old: str) -> list[str]:
         if ratio > best_ratio:
             best_ratio, best_start = ratio, start
     if best_start < 0 or best_ratio < _CLOSEST_MIN_RATIO:
+        return None
+    return best_start + 1, min(best_start + size, len(file_lines)), best_ratio
+
+
+@hidden
+def _closest_region_lines(content: str, old: str) -> list[str]:
+    """The closest region to ``old`` (``_closest_region``) and what differs, bounded.
+
+    Lists at most eight differing lines, each escaped (tabs show as ``\\t``)
+    and cut at 160 characters, and says when a line differs only in
+    whitespace. Empty when nothing is close.
+    """
+    import difflib
+
+    def excerpt(text: str) -> str:
+        return _replace_diagnostic_excerpt(text, 0, len(text), 0, 160)
+
+    found = _closest_region(content, old)
+    if found is None:
         return []
-    region = file_lines[best_start : best_start + size]
-    first, last = best_start + 1, best_start + len(region)
+    first, last, best_ratio = found
+    old_lines = _old_lines(old)
+    region = content.split("\n")[first - 1 : last]
     lines = [
         f"Closest region: lines {first}-{last} ({best_ratio:.0%} similar). What differs "
         "(file line: old text vs file):"
@@ -1509,11 +1530,14 @@ class ShellTools(Skill):
                 raise StaleMatchError(target, current, "captured line range is out of bounds")
             if current != target.text:
                 # Where the captured text is now, if it moved (the anchor is not relocated).
-                closest = await asyncio.to_thread(_closest_region_lines, content, target.text)
-                hint = closest[0].split(". What differs", 1)[0] if closest else ""
-                if hint:
-                    hint = hint.replace("Closest region:", "The captured text is now closest to")
-                    hint += "; read() those lines for a fresh Match."
+                found = await asyncio.to_thread(_closest_region, content, target.text)
+                hint = ""
+                if found is not None:
+                    first, last, ratio = found
+                    hint = (
+                        f"The captured text is now closest to lines {first}-{last} "
+                        f"({ratio:.0%} similar); read() those lines for a fresh Match."
+                    )
                 raise StaleMatchError(target, current, "captured text no longer matches", hint=hint)
 
         before = all_lines[: target.start - 1]
