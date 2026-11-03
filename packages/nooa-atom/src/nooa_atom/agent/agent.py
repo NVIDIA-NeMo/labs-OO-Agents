@@ -858,10 +858,11 @@ class AtomAgent(AtomAgentBase):
         # Same fallback as AtomAgentBase: the first prompt has no stats yet but
         # still needs the events guidance that replaces the events_api block.
         self.context["context_usage"] = Context(expr="self._context_usage()")
-        # Skills are documented in python_cell_tools (SkillManager); the
-        # registry's dynamic inventory block is not shown. self.skills.status()
-        # gives it on demand.
-        self.context.pop("skills", None)
+        # Skills are documented in python_cell_tools (SkillManager). The skills
+        # block is the manager's state, re-rendered every call like <status>:
+        # active skills, connected MCP servers with the call form, and a count
+        # of the rest (self.skills.search); never the catalog.
+        self.context["skills"] = Context(expr="self.skills.status()")
         if self._role_instructions:
             self.context["role"] = Context(self._role_instructions, prefix=True)
         else:
@@ -946,11 +947,7 @@ class AtomAgent(AtomAgentBase):
         status = self.queue_manager.status(more_work=running, idle=idle, read_hints=hints)
         if running or idle:
             status += "\nCancel: await self.jobs.get('<name>').cancel()"
-        # Connected MCP servers are otherwise only in self.skills.status/search/doc:
-        # a model that never looks there does not find them.
-        skills = getattr(self, "skills", None)
-        line = skills.mcp_line() if isinstance(skills, SkillManager) else ""
-        return f"{line}\n{status}" if line else status
+        return status  # connected MCP servers are in the skills block
 
     # ---- legacy surface, hidden ------------------------------------------------
 

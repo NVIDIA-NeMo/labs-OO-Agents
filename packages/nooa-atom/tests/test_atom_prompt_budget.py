@@ -183,11 +183,18 @@ RESULT = (
 # handle_orchestrate 22,297 / 23,322. Within the limits, so they stay. The line was
 # reworded (CodeRabbit: the block is bounded, so "anything not listed does not
 # exist" was wrong) to the python_cell_state() wording below; still within the limits.
+# Totals raised for the #517 prompt-review decisions (2026-11-03, user-approved):
+# the <skills> block is back as self.skills.status() (active skills, connected MCP
+# servers, a count of the rest), the timers show their fn, and python_cell_lifetime
+# drops the late-output bullet. Measured system / total: handle 21,921 / 23,251,
+# handle_batch 22,040 / 23,370, handle_work 22,208 / 23,538, handle_orchestrate
+# 22,343 / 23,673. System limits still hold; totals: measured plus about 2%,
+# rounded up to the next 100.
 LIMITS = {
-    (ATOM, "handle"): (22_200, 23_200),
-    (ATOM, "handle_batch"): (22_300, 23_300),
-    (ATOM, "handle_work"): (22_500, 23_500),
-    (ATOM, "handle_orchestrate"): (22_600, 23_600),
+    (ATOM, "handle"): (22_200, 23_800),
+    (ATOM, "handle_batch"): (22_300, 23_900),
+    (ATOM, "handle_work"): (22_500, 24_100),
+    (ATOM, "handle_orchestrate"): (22_600, 24_200),
 }
 # The bench guard's system-prompt ceiling; every agent stays under it.
 # Raised from 20,000 for the Done(message=...) guidance (2026-10-29, see above),
@@ -442,9 +449,11 @@ async def test_installed_skills_are_counted_not_listed(monkeypatch, tmp_path, se
     finally:
         await registry.close_all()
     rendered = "\n".join(str(m.get("content", "")) for m in llm.calls[0].messages)
-    # The Atom agent shows no dynamic <skills> inventory: SkillManager's docs
-    # are in the static python_cell_tools block, and status() is on demand.
-    assert "<skills" not in rendered
+    # The skills block (#517 P04) is the manager's state, not the inventory:
+    # installed skills are a count with the search call, never named.
+    block = rendered.split('<skills expr="self.skills.status()">\n', 1)[1].split("</skills>")[0]
+    assert block.startswith("Active: ") and "more (code" in block
+    assert "self.skills.search('query')" in block
     assert "class SkillManager" in rendered and "def status(self) -> str:" in rendered
     for skill in extra:
         assert skill.description not in rendered

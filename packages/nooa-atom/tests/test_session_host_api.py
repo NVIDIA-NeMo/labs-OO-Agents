@@ -289,8 +289,9 @@ async def test_children_share_the_parents_mcp_servers_and_closing_one_closes_not
             assert agent.docs is configured_tool
             assert agent.skills.mcp.connected() == ["docs"]
             status = agent.skills.status()
-            assert "hcb_resources (mcp: await self.hcb_resources.<tool>(...))" in status
-            assert "docs (mcp: await self.docs.<tool>(...))" in status
+            # Both servers are on the skills block's MCP line, with the call form.
+            assert "self.docs (" in status and "self.hcb_resources (" in status
+            assert "call: await self.<server>.<tool>(...)" in status
             assert "call: await self.hcb_resources.<tool>(...)" in agent.skills.search(
                 "hcb_resources"
             )

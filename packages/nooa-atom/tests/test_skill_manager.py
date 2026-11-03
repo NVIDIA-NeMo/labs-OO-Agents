@@ -226,14 +226,17 @@ async def test_activating_an_mcp_server_connects_it_and_its_tools_are_methods(ag
     approve(agent, "probe")
     result = await agent.skills.activate(["probe"])
     assert result == "probe: active; its tools are methods of self.probe: probe"
-    assert (
-        agent.skills.status()
-        .splitlines()[0]
-        .endswith(", probe (mcp: await self.probe.<tool>(...))")
+    # A connected server is named once, on the MCP line with its call form.
+    probe_line = (
+        "MCP servers (connected, no activation needed): self.probe (1 tool); "
+        "list tools: print(doc(self.probe)); call: await self.probe.<tool>(...)"
     )
+    active, mcp = agent.skills.status().splitlines()[:2]
+    assert "probe" not in active and mcp == probe_line
     assert "async def probe(self, nonce: str)" in agent.skills.doc("probe")
     assert await agent.skills.deactivate(["probe"]) == "probe: inactive (still connected)"
-    assert "probe" not in agent.skills.status().splitlines()[0]
+    active, mcp = agent.skills.status().splitlines()[:2]
+    assert "probe" not in active and mcp == probe_line  # still connected: still callable
 
 
 async def test_an_unapproved_mcp_server_asks_for_approval(agent):
@@ -271,11 +274,7 @@ async def test_a_server_that_needs_sign_in_sends_the_link_and_reports_back(
     finished = await control.run(["auth", "remote", pasted])
     assert finished.success, str(finished)
     assert "echo" in str(finished)
-    assert (
-        agent.skills.status()
-        .splitlines()[0]
-        .endswith(", remote (mcp: await self.remote.<tool>(...))")
-    )
+    assert "call: await self.remote.<tool>(...)" in agent.skills.status().splitlines()[1]
     notices = [
         event.description
         for event in agent.event_manager.values()
@@ -296,11 +295,7 @@ async def test_a_client_supplied_mcp_server_is_an_mcp_skill(agent):
     assert "remote (mcp, active; call: await self.remote.<tool>(...))" in agent.skills.search(
         "remote"
     )
-    assert (
-        agent.skills.status()
-        .splitlines()[0]
-        .endswith(", remote (mcp: await self.remote.<tool>(...))")
-    )
+    assert "call: await self.remote.<tool>(...)" in agent.skills.status().splitlines()[1]
 
 
 async def test_the_skills_control_lists_every_kind(agent, tmp_path):
@@ -467,7 +462,7 @@ async def test_a_client_server_shown_under_its_key_is_called_on_its_attribute(ag
     assert "mcp.greeter has wave_hello (MCP tool: self.greeter.wave_hello)" in found
     assert "self.mcp." not in found
     assert "self.mcp." not in agent.skills.search("greeter")
-    assert "mcp.greeter (mcp: await self.greeter.<tool>(...))" in agent.skills.status()
+    assert "call: await self.greeter.<tool>(...)" in agent.skills.status()
 
 
 async def test_search_omits_hidden_methods_of_code_skills(agent):

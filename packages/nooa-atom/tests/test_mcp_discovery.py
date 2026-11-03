@@ -152,6 +152,44 @@ async def test_root_and_child_name_the_server_in_the_first_request_and_hint_its_
     assert LINE in _prompt(models.llms["c"], 0)
 
 
+def _block(llm, index, key):
+    text = "\n".join(str(m.get("content", "")) for m in llm.calls[index].messages)
+    return text.split(f"<{key} expr=", 1)[1].split(">\n", 1)[1].split(f"</{key}>", 1)[0]
+
+
+def test_skills_status_names_a_connected_server_once_with_the_call_form(tmp_path):
+    agent = AtomAgentBase(llm=FakeLLMClient(), cwd=tmp_path)
+    tail = "self.skills.search('query') (sync); "
+    before = agent.skills.status().splitlines()
+    assert len(before) == 2 and before[0].startswith("Active: ") and tail in before[1]
+    assert "MCP servers" not in agent.skills.status()
+    agent.skills.register("mcp.hcb_resources", Resources())
+    lines = agent.skills.status().splitlines()
+    assert lines[0] == before[0]  # the server is not repeated among the active skills
+    assert lines[1] == LINE and tail in lines[2] and len(lines) == 3
+
+
+async def test_the_skills_block_has_the_server_line_and_status_does_not(registry, tmp_path):
+    models = registry.models
+    models.scripts[None] = [
+        cell("await self.skills.activate(['shell'])"),
+        cell("return_result(Done(explanation='ok'))"),
+    ]
+    root = await registry.create(
+        SessionOptions(workspace=tmp_path, agent_spec="nooa_atom.agent:AtomAgent")
+    )
+    assert await root.register_tools({"mcp.hcb_resources": Resources()}) == {}
+    assert await root.prompt("go") == Done(explanation="ok")
+    llm = models.llms[None]
+    first, second = _block(llm, 0, "skills"), _block(llm, 1, "skills")
+    assert first.splitlines()[1] == LINE and "more (" in first.splitlines()[2]
+    assert "shell" not in first.splitlines()[0] and "shell" in second.splitlines()[0]
+    assert "hcb_resources" not in first.splitlines()[0]  # once, on the MCP line
+    assert "lookup_order" not in first  # tools are not listed
+    for index in (0, 1):
+        assert "MCP servers" not in _block(llm, index, "status")
+
+
 async def test_no_line_in_the_request_without_a_server(registry, tmp_path):
     models = registry.models
     models.scripts[None] = [cell("return_result(Done(explanation='ok'))")]

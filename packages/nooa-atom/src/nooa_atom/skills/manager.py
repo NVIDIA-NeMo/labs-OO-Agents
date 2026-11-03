@@ -256,15 +256,20 @@ class SkillManager(Skill):
     def status(self) -> str:
         """Which skills are active now, and how many more there are (sync).
 
-        Also the text of the ``<skills>`` block of agents that show one.
+        Also the text of the ``<skills>`` block: active skills by name, the
+        connected MCP servers with the call form (one line), and a count of
+        the rest with the search call; never the catalog itself.
         """
+        mcp_line = self.mcp_line()
+        connected = {attr for _, attr, _ in self.connected_mcp()} if mcp_line else set()
         active, rest_kinds, rest = [], [], 0
         for name, kind, key in self._index():
             if self._is_active(kind, key):
+                attr = _call_attr(name, key)
+                if kind == "mcp" and attr in connected:
+                    continue  # named, with its call form, on the MCP line
                 active.append(
-                    f"{name} (mcp: await self.{_call_attr(name, key)}.<tool>(...))"
-                    if kind == "mcp"
-                    else name
+                    f"{name} (mcp: await self.{attr}.<tool>(...))" if kind == "mcp" else name
                 )
             else:
                 rest += 1
@@ -272,6 +277,8 @@ class SkillManager(Skill):
                     rest_kinds.append(_KIND_LABELS[kind])
         mcp_last = sorted(active, key=lambda item: (" (mcp: await self." in item, item))
         lines = [f"Active: {', '.join(mcp_last) or 'none'}"]
+        if mcp_line:
+            lines.append(mcp_line)
         if rest:
             order = [label for label in _KIND_LABELS.values() if label in rest_kinds]
             lines.append(

@@ -530,8 +530,17 @@ async def test_first_call_offers_one_work_vocabulary(
         "Import anything else you need",
     ):
         assert wanted in rendered, wanted
+    # The skills block is back (#517 P04), now the manager's own state: active
+    # skills, connected MCP servers with the call form, and a count of the rest
+    # pointing at self.skills.search. The old registry inventory never returns,
+    # and the catalog is never listed in it.
+    assert '<skills expr="self.skills.status()">\nActive: ' in rendered
+    skills_block = rendered.split('<skills expr="self.skills.status()">', 1)[1].split("</skills>")[
+        0
+    ]
+    assert "self.skills.search('query')" in skills_block
+    assert len(skills_block.strip().splitlines()) <= 3, skills_block
     for legacy in (
-        "<skills",
         "Nothing expires on its own",  # the restart bullet now points at self.v instead
         "output that arrives after it ended is dropped",  # dropped: job.output says it
         "## Python cell state",
@@ -1218,15 +1227,15 @@ def test_command_output_is_shown_cut_but_kept_whole():
 async def test_skills_are_documented_statically_and_activation_still_works(tmp_path):
     agent = await _agent(tmp_path)
     try:
-        assert "skills" not in agent.context
+        # The skills block shows self.skills.status(), rendered each call (#517 P04).
+        assert "skills" in agent.context
         tools = str(agent.context["python_cell_tools"])
         assert "class SkillManager" in tools and "def activate(" in tools
         assert "shell" not in agent.skills.status().splitlines()[0]
         print(await agent.skills.activate(["shell"]))
         assert "shell" in agent.skills.status().splitlines()[0]
-        assert "skills" not in agent.context  # activation does not bring the block back
         agent.after_restore()
-        assert "skills" not in agent.context
+        assert "skills" in agent.context
     finally:
         await agent.aclose()
 
