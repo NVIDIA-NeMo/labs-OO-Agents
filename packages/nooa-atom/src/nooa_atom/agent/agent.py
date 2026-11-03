@@ -844,12 +844,11 @@ class AtomAgent(AtomAgentBase):
                     "Waiting and NeedInput in this live session: define a helper once and reuse "
                     "it in later turns.",
                     "- Agent methods other than handle start each call with fresh names.",
-                    "- A restart loses these names, not self.v. Nothing expires on its own.",
+                    "- A restart loses these names. Store serializable state on self.v for "
+                    "persistence across restarts.",
                     "- del removes a name, not a job or resource: close or cancel work explicitly.",
                     "- A job's stdout/stderr/media are in job.output / JobEvent.output, never in "
                     "a later cell.",
-                    "- Output from work a cell started belongs to that cell; output that arrives "
-                    "after it ended is dropped.",
                 )
             ),
             prefix=True,

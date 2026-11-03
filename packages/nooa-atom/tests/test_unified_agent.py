@@ -522,6 +522,9 @@ async def test_first_call_offers_one_work_vocabulary(
         "<python_cell_lifetime>",
         LIVE_NAMES_LINE,
         "- Agent methods other than handle start each call with fresh names.",
+        "- A restart loses these names. Store serializable state on self.v for "
+        "persistence across restarts.",
+        "- A job's stdout/stderr/media are in job.output / JobEvent.output, never in a later cell.",
         "registered queue producers",
         'r = await sh.run("cd src && make", timeout=600)',
         "Import anything else you need",
@@ -529,6 +532,8 @@ async def test_first_call_offers_one_work_vocabulary(
         assert wanted in rendered, wanted
     for legacy in (
         "<skills",
+        "Nothing expires on its own",  # the restart bullet now points at self.v instead
+        "output that arrives after it ended is dropped",  # dropped: job.output says it
         "## Python cell state",
         "handle_batch",
         "handle_work",
