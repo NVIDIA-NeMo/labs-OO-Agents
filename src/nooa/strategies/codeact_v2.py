@@ -9,13 +9,12 @@ from typing import TYPE_CHECKING, Any
 
 from nooa.context_blocks import DynamicContext
 from nooa.decorators import strategy
-from nooa.events import Error
 from nooa.strategies.base import RuntimeServices
 from nooa.strategies.codeact import (
     CodeActStrategy,
     TextOnlyResponseAction,
     TextOnlyResponseContext,
-    text_only_tool_markup_note,
+    _text_only_correction,
 )
 from nooa.strategies.template import TemplateStrategy
 
@@ -272,14 +271,5 @@ Restrictions (will throw):
     @staticmethod
     def _retry_text_only_response(context: TextOnlyResponseContext) -> TextOnlyResponseAction:
         return TextOnlyResponseAction.retry(
-            Error(
-                content=(
-                    f"{text_only_tool_markup_note(context)}"
-                    "Your last reply was plain text with no tool call. It was preserved, "
-                    "but a bare message cannot end the turn or run code. "
-                    f"To finish `{context.call.method_name}`, call `python_cell` with "
-                    "`return_result(value)` inside the cell. To continue working, "
-                    "call `python_cell` with the next computation."
-                )
-            )
+            _text_only_correction(context, python_tool="python_cell")
         )

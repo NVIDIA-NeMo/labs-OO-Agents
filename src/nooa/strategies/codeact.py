@@ -257,7 +257,26 @@ def text_only_tool_markup_note(context: TextOnlyResponseContext) -> str:
 def _text_only_correction(
     context: TextOnlyResponseContext,
     validation_error: str | None = None,
+    *,
+    python_tool: str | None = None,
 ) -> Error:
+    """The correction for a plain-text reply.
+
+    ``python_tool``: the only tool is that Python cell (``return_result`` is a
+    function inside it), as in CodeActV2; else the two-tool form.
+    """
+    method = context.call.method_name
+    if python_tool is None:
+        how = (
+            f"To finish `{method}`, call `return_result(value)`. "
+            "To do more work, call `execute_python(code)`. "
+            "Re-issue your response now as one of those tool calls."
+        )
+    else:
+        how = (
+            f"To finish `{method}`, call `{python_tool}` with `return_result(value)` inside "
+            f"the cell. To continue working, call `{python_tool}` with the next computation."
+        )
     validation_feedback = (
         f"\n\nThe attempted result was invalid:\n{validation_error}" if validation_error else ""
     )
@@ -266,10 +285,7 @@ def _text_only_correction(
             f"{text_only_tool_markup_note(context)}"
             "Your last reply was plain text with no tool call. It was preserved, "
             "but a bare message cannot end the turn or run code. "
-            f"To finish `{context.call.method_name}`, call `return_result(value)`. "
-            "To do more work, call `execute_python(code)`. "
-            "Re-issue your response now as one of those tool calls."
-            f"{validation_feedback}"
+            f"{how}{validation_feedback}"
         )
     )
 
@@ -1582,30 +1598,21 @@ Standard Python builtins and agent instance (`self`) are available."""
                 result = await self._process_one_tool_call(
                     tool_call, runtime, builtins, session, call, return_type, llm_response_id
                 )
-                if result is not None:
-                    return self._skip_remaining_tool_calls(
-                        result, tool_calls, index, runtime, llm_response_id
+            else:
+                action, parsed_args = self._loop_guard_action(tool_call)
+                result = self._loop_guard_before(
+                    guard, action, parsed_args, tool_call, runtime, llm_response_id
+                )
+                if result is None:
+                    first_new = len(runtime.event_manager.keys())
+                    result = await self._process_one_tool_call(
+                        tool_call, runtime, builtins, session, call, return_type, llm_response_id
                     )
-                continue
-
-            action, parsed_args = self._loop_guard_action(tool_call)
-            blocked = self._loop_guard_before(
-                guard, action, parsed_args, tool_call, runtime, llm_response_id
-            )
-            if blocked is not None:
-                return self._skip_remaining_tool_calls(
-                    blocked, tool_calls, index, runtime, llm_response_id
-                )
-            first_new = len(runtime.event_manager.keys())
-            result = await self._process_one_tool_call(
-                tool_call, runtime, builtins, session, call, return_type, llm_response_id
-            )
-            if result is not None and result.completed:
-                return self._skip_remaining_tool_calls(
-                    result, tool_calls, index, runtime, llm_response_id
-                )
-            self._loop_guard_after(guard, action, parsed_args, tool_call, runtime, first_new)
-            if result is not None:
+                    if result is None or not result.completed:
+                        self._loop_guard_after(
+                            guard, action, parsed_args, tool_call, runtime, first_new
+                        )
+            if result is not None:  # failed or finished: the calls after it do not run
                 return self._skip_remaining_tool_calls(
                     result, tool_calls, index, runtime, llm_response_id
                 )
