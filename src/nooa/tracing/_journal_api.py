@@ -13,6 +13,7 @@ LiteLLM path and written to every installed sink.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import time
@@ -187,6 +188,7 @@ def _record(
         end=end,
         tokens=record["tokens"],
         failed=response is None,
+        session=session if session != "unknown" else None,
     )
     if span:
         record["span_id"] = span
@@ -204,7 +206,13 @@ def _record(
 
 
 def _llm_span_id(
-    *, model: str, start: float, end: float, tokens: Mapping[str, int] | None, failed: bool
+    *,
+    model: str,
+    start: float,
+    end: float,
+    tokens: Mapping[str, int] | None,
+    failed: bool,
+    session: str | None = None,
 ) -> str | None:
     """The span this call is linked to, as 16 hex chars; ``None`` without a tracer.
 
@@ -216,6 +224,11 @@ def _llm_span_id(
     gets an ``LLM`` span of its own: a child of the current span covering the
     call's duration.  A caller already inside an ``LLM`` span (its own
     instrumentation) is linked to that span instead.
+
+    ``session`` is the session the call record is stored under: the span is
+    started in that session's scope, so its ``session.id`` (stamped at span
+    start) matches the record even when the caller passed an explicit
+    ``session_id`` that differs from the current trace session.
     """
     from openinference.semconv.trace import OpenInferenceSpanKindValues, SpanAttributes
     from opentelemetry import trace as otel_trace
@@ -236,9 +249,13 @@ def _llm_span_id(
         attributes[SpanAttributes.LLM_TOKEN_COUNT_COMPLETION] = tokens["completion"]
         if "cached" in tokens:
             attributes[SpanAttributes.LLM_TOKEN_COUNT_PROMPT_DETAILS_CACHE_READ] = tokens["cached"]
-    span = otel_trace.get_tracer(__name__).start_span(
-        _LLM_SPAN_NAME, start_time=int(start * 1e9), attributes=attributes
-    )
+    from nooa.tracing._session import session_scope
+
+    scope = session_scope(session) if session else contextlib.nullcontext()
+    with scope:
+        span = otel_trace.get_tracer(__name__).start_span(
+            _LLM_SPAN_NAME, start_time=int(start * 1e9), attributes=attributes
+        )
     if failed:
         span.set_status(Status(StatusCode.ERROR, "no response"))
     span.end(end_time=int(max(end, start) * 1e9))
