@@ -609,8 +609,8 @@ sh = Shell()  # make one; bash starts on first use
 r = await sh.run("cd src && make", timeout=600)  # wait for it
 job = self.jobs.launch(sh.run("make"), name="build", progress=Throttle(seconds=5))  # background
 job.set_progress(None)  # quiet again
-self.jobs.after(120, name="t")  # timer
-self.jobs.every(60, name="poll")  # tick items
+self.jobs.after(600, lambda: "Check the training loss.")  # done value: the reminder
+self.jobs.every(60, self.check_status, name="poll")  # items: each return value
 self.jobs.launch(sh.run("pytest -q"), name="tests")
 job = self.jobs.launch(Shell(), name="sh")
 r = await job.send("make")

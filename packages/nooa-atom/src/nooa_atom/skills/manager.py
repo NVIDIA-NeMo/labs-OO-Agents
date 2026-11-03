@@ -35,8 +35,9 @@ _WORK_WORDS = frozenset(
     "periodic periodically monitor watch tail follow delay sleep wait".split()
 )
 _BUILT_IN_WORK = (
-    "self.jobs (built in, no skill needed): self.jobs.after(seconds, name=...) timer, "
-    "self.jobs.every(seconds, name=...) ticks; watch a command or follow a file: "
+    "self.jobs (built in, no skill needed): self.jobs.after(seconds, fn) calls fn once after "
+    "seconds, self.jobs.every(seconds, fn) calls it every seconds (fn optional); watch a "
+    "command or follow a file: "
     'self.jobs.launch(Shell().run("tail -F app.log"), name=..., progress=Throttle(seconds=5))'
 )
 

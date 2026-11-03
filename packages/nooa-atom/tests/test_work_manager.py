@@ -971,6 +971,73 @@ async def test_every_late_wake_up_yields_the_latest_due_tick(monkeypatch):
     await ticks.aclose()
 
 
+async def test_after_returns_what_fn_returns_sync_or_async(setup):
+    manager, channel = setup
+    assert await manager.after(0, lambda: "Check the training loss.") == "Check the training loss."
+
+    async def status():
+        await asyncio.sleep(0)
+        return {"ci": "green"}
+
+    job = manager.after(0.01, status, name="ci")
+    event = await _event(channel)
+    assert (event.name, event.kind, event.value) == ("ci", "done", {"ci": "green"})
+    assert job.result == {"ci": "green"}
+
+
+async def test_after_fails_with_what_fn_raises(setup):
+    manager, channel = setup
+
+    def broken():
+        raise RuntimeError("no such run")
+
+    job = manager.after(0, broken, name="check")
+    event = await _event(channel)
+    assert (event.kind, event.value) == ("failed", "RuntimeError: no such run")
+    assert job.status == "failed"
+    with pytest.raises(RuntimeError, match="no such run"):
+        await job
+
+
+async def test_every_delivers_fn_results_and_exceptions_and_goes_on(setup):
+    manager, channel = setup
+    calls = []
+
+    async def check():
+        calls.append(1)
+        if len(calls) == 2:
+            raise ValueError("flaky")
+        return len(calls)
+
+    job = manager.every(0.05, check, name="status")
+    values = [(await _event(channel)).value for _ in range(3)]
+    await job.cancel()
+    assert values[0] == 1 and values[2] == 3
+    assert isinstance(values[1], ValueError) and str(values[1]) == "flaky"
+    assert job.status == "cancelled"
+
+
+async def test_every_with_a_sync_fn_keeps_only_the_newest_unread_item(setup):
+    manager, channel = setup
+    calls = []
+    job = manager.every(0.02, lambda: calls.append(1) or f"call {len(calls)}", name="poll")
+    await asyncio.sleep(0.3)  # many ticks, nobody reading
+    assert channel.qsize() == 1
+    event = await _event(channel)
+    await job.cancel()
+    assert event.value == f"call {event.dropped + 1}" and event.dropped >= 4
+
+
+async def test_timers_refuse_a_fn_that_is_not_callable(setup):
+    manager, channel = setup
+    with pytest.raises(TypeError, match=r"self\.jobs\.after\(seconds, fn\) takes a function"):
+        manager.after(5, "Check the training loss.")
+    with pytest.raises(TypeError, match=r"self\.jobs\.every\(seconds, fn\) takes a function"):
+        manager.every(5, 42)
+    await settle()
+    assert manager.running() == [] and channel.qsize() == 0
+
+
 async def test_every_can_be_read_with_async_for(setup):
     manager, _ = setup
     job = manager.every(0.01)

@@ -980,11 +980,43 @@ def _clock(seconds_from_now: float) -> str:
     return time.strftime("%H:%M:%S", time.localtime(time.time() + seconds_from_now))
 
 
-async def _after(seconds: float) -> None:
+def _check_fn(fn: Any, call: str) -> None:
+    if fn is not None and not callable(fn):
+        raise TypeError(
+            f"{call} takes a function (or nothing) after seconds, got "
+            f'{type(fn).__name__}; e.g. {call.split("(")[0]}(600, lambda: "text")'
+        )
+
+
+async def _call(fn: Any) -> Any:
+    value = fn()
+    if inspect.isawaitable(value):
+        value = await value
+    return value
+
+
+async def _after(seconds: float, fn: Any = None) -> Any:
     await asyncio.sleep(seconds)
+    if fn is None:
+        return None
+    return await _call(fn)
 
 
-async def _every(seconds: float):
+async def _every(seconds: float, fn: Any = None):
+    async for tick in _ticks(seconds):
+        if fn is None:
+            yield tick
+            continue
+        try:
+            value = await _call(fn)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # delivered as this tick's item; the timer goes on
+            value = exc
+        yield value
+
+
+async def _ticks(seconds: float):
     start = time.monotonic()
     tick = 0
     while True:
@@ -1010,7 +1042,7 @@ class WorkManager:
     else a JobEvent in the next turn's ``notification["jobs"]``. Jobs outlive
     turns: return ``Waiting(on=[name])`` while they run; cancel unneeded work.
     Names: letters, digits, ``_`` or ``-``; requests are ``<name>#1``, ``<name>#2``...
-    Built in, as launch(): ``after(s)`` timer; ``every(s)`` ticks.
+    Built in, as launch(): ``after(s, fn)`` calls fn once after s seconds; ``every(s, fn)`` calls it every s seconds (fn optional).
     """
 
     __nosnapshot__ = True
@@ -1112,17 +1144,19 @@ class WorkManager:
             raise
         return self._start(name, work, kind, progress)
 
-    def after(self, seconds: float, *, name: str | None = None) -> Job:
-        """Timer: its ``done`` event (result None) comes ``seconds`` from now."""
+    def after(self, seconds: float, fn: Any = None, *, name: str | None = None) -> Job:
+        """Timer: after ``seconds``, calls ``fn()`` (awaited if async); its return value is the job's done value (None without fn). A reminder for yourself: ``self.jobs.after(600, lambda: "Check the training loss; stop the run if it stopped improving.")``"""
         seconds = _seconds(seconds, zero_ok=True)
-        job = self.launch(_after(seconds), name=name)
+        _check_fn(fn, "self.jobs.after(seconds, fn)")
+        job = self.launch(_after(seconds, fn), name=name)
         job._summary = f"timer: {seconds:g} s, due {_clock(seconds)}"
         return job
 
-    def every(self, seconds: float, *, name: str | None = None) -> Job:
-        """Items 1, 2, 3... every ``seconds`` until cancelled; one unread tick at most."""
+    def every(self, seconds: float, fn: Any = None, *, name: str | None = None) -> Job:
+        """Calls ``fn()`` every ``seconds`` (awaited if async) and delivers each return value as an item; an exception is delivered as that tick's item and the timer goes on; at most one unread item (the newest). Without fn, items are 1, 2, 3... Example: ``self.jobs.every(30, self.check_status, name="status")``"""
         seconds = _seconds(seconds, zero_ok=False)
-        job = self.launch(_every(seconds), name=name)
+        _check_fn(fn, "self.jobs.every(seconds, fn)")
+        job = self.launch(_every(seconds, fn), name=name)
         job._coalesce = True
         job._summary = f"every {seconds:g} s"
         return job

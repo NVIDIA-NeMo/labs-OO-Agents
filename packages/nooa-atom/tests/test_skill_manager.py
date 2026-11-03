@@ -406,8 +406,8 @@ async def test_search_for_timers_and_tails_points_to_self_jobs(agent, query):
     first = found.splitlines()[0]
     assert first.startswith("self.jobs (built in, no skill needed):")
     for call in (
-        "self.jobs.after(",
-        "self.jobs.every(",
+        "self.jobs.after(seconds, fn) calls fn once",
+        "self.jobs.every(seconds, fn) calls it every seconds (fn optional)",
         'Shell().run("tail -F',
         "progress=Throttle(",
     ):

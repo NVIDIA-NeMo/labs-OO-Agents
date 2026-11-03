@@ -91,6 +91,15 @@ def test_the_tools_doc_shows_after_every_and_the_tail_idiom():
     text = doc(WorkManager, inline_depth=0)
     for wanted in ("def after(", "def every("):
         assert wanted in text, wanted
+    # Timers take a function (no payload): the summary line and the examples show it.
+    flat = " ".join(text.split())
+    assert (
+        "Built in, as launch(): ``after(s, fn)`` calls fn once after s seconds; "
+        "``every(s, fn)`` calls it every s seconds (fn optional)."
+    ) in flat
+    assert "payload" not in text and "payload" not in _WORK_EXAMPLES
+    assert 'self.jobs.after(600, lambda: "Check the training loss.")' in _WORK_EXAMPLES
+    assert "self.jobs.every(60, self.check_status" in _WORK_EXAMPLES
     assert "progress=Throttle(" in _WORK_EXAMPLES
     assert "def tail(" not in text and "self.jobs.tail(" not in _WORK_EXAMPLES
     # after() says the delay counts from now; no elapsed-time advice is repeated.
