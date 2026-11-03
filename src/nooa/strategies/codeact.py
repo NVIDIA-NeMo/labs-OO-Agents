@@ -359,7 +359,7 @@ class CodeActSession:
     event_manager: Any  # EventManager reference for Out[n] access
     iteration: int = 0
     error_count: int = 0
-    result_error_count: int = 0  # invalid return_result values (max_result_retries)
+    result_error_count: int = 0  # invalid return_result values (max_result_retries or max_retries)
     consecutive_api_errors: int = 0
     consecutive_text_only: int = 0
     length_recoveries: int = 0  # Cut-off (finish_reason=length) replies nudged so far
@@ -2570,19 +2570,12 @@ Standard Python builtins and agent instance (`self`) are available."""
                     error_msg = f"{error_msg}\n{call_hint}"
             logger.debug(f"[CODEACT] return_result validation failed: {e}")
 
-            limit = self.config.max_result_retries
-            if limit is None:
-                session.record_error()
-                attempts, budget, exhausted = (
-                    session.error_count,
-                    session.max_retries,
-                    session.is_exhausted(),
-                )
-            else:
-                session.result_error_count += 1
-                attempts, budget = session.result_error_count, limit
-                exhausted = attempts >= limit
-            if exhausted:
+            # Invalid results have their own budget; they are retryable cell
+            # errors, so they do not count toward the session's error_count.
+            session.result_error_count += 1
+            attempts = session.result_error_count
+            budget = self.config.max_result_retries or session.max_retries
+            if attempts >= budget:
                 raise GenerationError(
                     f"return_result validation failed after {attempts} attempts.\n"
                     f"Last error:\n{error_msg}"
@@ -2590,9 +2583,9 @@ Standard Python builtins and agent instance (`self`) are available."""
 
             # Offered back to the model as a cell error it can retry on.
             metrics.return_result_invalid(type(e).__name__)
-            if limit is not None and alias:
+            if alias:
                 error_msg = f"{error_msg}\nThe turn goes on (attempt {attempts} of {budget})."
-            elif limit is not None:
+            else:
                 error_msg = (
                     f"{error_msg}\nThe turn goes on: fix the value and call return_result "
                     f"again (attempt {attempts} of {budget})."

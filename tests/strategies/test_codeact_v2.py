@@ -146,6 +146,43 @@ async def test_integer_collapse_succeeds_without_warning():
 
 
 @pytest.mark.asyncio
+async def test_invalid_results_have_their_own_budget_and_say_the_attempt():
+    """One budget (H3): invalid results count on their own, not toward max_retries' errors."""
+
+    def cell(code: str, call_id: str) -> LLMResponse:
+        return LLMResponse(
+            parts=(ToolCall(id=call_id, name="python_cell", arguments=json.dumps({"code": code})),),
+            finish_reason="tool_calls",
+        )
+
+    llm = FakeLLMClient(
+        scripted_responses=[
+            cell("return_result('not a number')", "r1"),
+            cell("1 / 0", "e1"),
+            cell("return_result('still not')", "r2"),
+            cell("1 / 0", "e2"),
+            cell("return_result(42)", "ok"),
+        ]
+    )
+
+    class TestAgent(Agent, llm=llm):
+        @strategy(CodeActV2(config=CodeActConfig(prefill=None, max_retries=3)))
+        async def answer(self) -> int:
+            """Return the answer."""
+            ...
+
+    agent = TestAgent()
+    try:
+        # Before: 2 invalid results + 2 cell errors = 4 errors >= max_retries 3.
+        assert await agent.answer() == 42
+        rendered = str(llm.last_messages)
+    finally:
+        await agent.aclose()
+    attempt = "The turn goes on: fix the value and call return_result again (attempt {} of 3)."
+    assert attempt.format(1) in rendered and attempt.format(2) in rendered
+
+
+@pytest.mark.asyncio
 async def test_provider_return_result_value_is_the_field_when_the_type_has_one():
     """As in a cell, value= is the return type's field when it has one (one rule, H2)."""
     from pydantic import BaseModel
@@ -281,10 +318,12 @@ async def test_aliased_return_result_says_how_it_was_taken_and_shows_the_cell_fo
     )
     # The validation errors follow; the cell form comes last and no JSON arguments.
     assert bad.splitlines()[1].startswith("return_result() failed")
-    assert bad.splitlines()[-1] == (
+    assert bad.splitlines()[-2:] == [
         "To finish, call python_cell with one of: "
-        "return_result(Done(explanation=...)), return_result(NeedInput(question=...))."
-    )
+        "return_result(Done(explanation=...)), return_result(NeedInput(question=...)).",
+        # One budget for every agent (H3): max_retries (3) when max_result_retries is unset.
+        "The turn goes on (attempt 1 of 3).",
+    ]
     # Done and NeedInput are not bound in this cell namespace: no doc() line.
     assert "Fields: print(doc(" not in bad
     assert "JSON" not in bad and '{"result"' not in bad
