@@ -190,8 +190,12 @@ RESULT = (
 # handle_batch 22,040 / 23,370, handle_work 22,208 / 23,538, handle_orchestrate
 # 22,343 / 23,673. System limits still hold; totals: measured plus about 2%,
 # rounded up to the next 100.
+# The handle system limit raised for the interactive role as a bulleted block
+# (2026-11-03, #517 user decision): handle system / total 22,092 / 23,422 ->
+# 22,286 / 23,616. System limit set to the bench ceiling (measured plus 2% would
+# pass it); total still within its limit.
 LIMITS = {
-    (ATOM, "handle"): (22_200, 23_800),
+    (ATOM, "handle"): (22_600, 23_800),
     (ATOM, "handle_batch"): (22_300, 23_900),
     (ATOM, "handle_work"): (22_500, 24_100),
     (ATOM, "handle_orchestrate"): (22_600, 24_200),
@@ -406,7 +410,8 @@ async def test_prompts_make_done_message_the_reply(spec, method, tmp_path, sessi
     else:
         assert "parent" not in role
     if method == "handle":
-        assert "You are working with a person, the user. Reply with Done(message=...)" in role
+        assert "You are working with a person, the user. - After a user message," in role
+        assert "Send brief progress notes" not in role
 
 
 class _InstalledSkill:

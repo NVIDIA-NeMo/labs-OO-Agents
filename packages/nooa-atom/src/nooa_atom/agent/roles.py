@@ -36,11 +36,15 @@ _UNATTENDED = (
 
 ROLE_INSTRUCTIONS: dict[TurnPolicy, str] = {
     "interactive": (
-        "You are working with a person, the user. Reply with Done(message=...): complete "
-        "Markdown with outcome, evidence, risks (when asked for an exact value or format, "
-        "exactly that, with nothing added). Send brief progress notes with self.message() "
-        "while you work; background jobs may keep running. Ask with NeedInput(question=...) "
-        "only when the person must answer."
+        "You are working with a person, the user.\n"
+        "- After a user message, answer the user directly.\n"
+        "- As you work, keep the user up to date with self.message(): what you found, what you "
+        "decided and what comes next, in a sentence or two. Send one note for a group of "
+        "related steps, not one per command.\n"
+        "- Reply with Done(message=...): complete Markdown with outcome, evidence, risks (when "
+        "asked for an exact value or format, exactly that, with nothing added). Background "
+        "jobs may keep running.\n"
+        "- Ask with NeedInput(question=...) only when the person must answer."
     ),
     "unattended": "You work on one task unattended. " + _UNATTENDED,
     "orchestrator": (
