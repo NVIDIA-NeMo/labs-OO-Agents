@@ -404,13 +404,14 @@ def _check_waiting(agent: Any, result: Any, *, fix: str) -> None:
         return
     reasons = []
     policy = getattr(agent, "_turn_policy", "interactive")
+    if policy == "child" and any(name in PERSON_NAMES for name in unmet):
+        fix = _CHILD_ASKS  # a child asks through NeedInput, never by waiting
     for name in unmet:
         job = agent.jobs.get(name) if isinstance(name, str) else None
         if name in PERSON_NAMES:
             get_harness_metrics().waiting_on_person_rejected(policy)
             if policy == "child":
                 reasons.append(f"Waiting on {name!r}, but your parent is not a job.")
-                fix = _CHILD_ASKS
             else:
                 reasons.append(f"Waiting on {name!r}, but the person is not a job.")
         elif job is not None and job.status == "running":
