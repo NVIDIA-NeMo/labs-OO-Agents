@@ -111,4 +111,4 @@ The untuned lexical controls were run over all 6,005 released test queries on
 
 The narrow implication is to retain a content baseline/fallback. These lexical
 controls do not reproduce or challenge trained STAIR results, and do not measure
-NOOA answer quality. Detailed per-domain outputs are in `results/lexical-test.json`.
+NOOA answer quality. Detailed per-domain outputs are in `lexical-test.json`.
