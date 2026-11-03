@@ -400,12 +400,18 @@ def install_summarizer(config: SummarizationConfig, agent: Agent) -> None:
     summarizer._automatic_context_budget_percent = config.threshold_fraction
 
 
-class AgentVars:
-    """Attribute-access proxy for an agent's persistent ``vars`` dict.
+def _var_name(key: Any) -> str:
+    if not isinstance(key, str):
+        raise TypeError(f"var names are str, got {type(key).__name__}")
+    return key
 
-    Mirrors ``TodoVars``: write ``self.v.spec = "..."`` instead of
-    ``self.vars["spec"] = "..."``. Reads and writes go straight
-    through to ``self.vars`` so snapshot serialization is unaffected.
+
+class AgentVars:
+    """An agent's persistent ``vars`` dict, also usable as attributes.
+
+    Mirrors ``TodoVars``: ``self.v.spec = "..."`` and ``self.v["spec"] = "..."``
+    write the same entry. Reads and writes go straight through to
+    ``self.vars`` so snapshot serialization is unaffected.
 
     Use for variables that need to survive across turns and across
     sessions but aren't tied to a specific todo. (For per-todo state,
@@ -429,10 +435,14 @@ class AgentVars:
     def __setattr__(self, key: str, value: Any) -> None:
         self._agent.vars[key] = value
 
+    def __getitem__(self, key: str) -> Any:
+        return self._agent.vars[_var_name(key)]
+
     def __setitem__(self, key: str, value: Any) -> None:
-        raise TypeError(
-            f"self.v does not support item assignment; write self.v.{key} = ... instead."
-        )
+        self._agent.vars[_var_name(key)] = value
+
+    def __delitem__(self, key: str) -> None:
+        del self._agent.vars[_var_name(key)]
 
     def __delattr__(self, key: str) -> None:
         try:
@@ -559,7 +569,7 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
 
     @property
     def v(self) -> AgentVars:
-        """Durable facts: write ``self.v.key = value``, read ``self.v.key``, delete ``del self.v.key``. Store serializable values.
+        """Durable facts: write ``self.v.key = value``, read ``self.v.key``, delete ``del self.v.key`` (or ``self.v["key"]``). Store serializable values.
 
         Use for state that should survive across turns and sessions
         but isn't tied to a specific todo. Snapshot-backed via

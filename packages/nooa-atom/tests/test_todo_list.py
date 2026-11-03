@@ -204,15 +204,11 @@ def test_misuses_name_what_to_use_instead():
     with pytest.raises(TypeError, match=r"add\(\) takes add\(title, description=''\), got 3"):
         todos.add("Fix the parser", "the brief", "more")
     assert todos.to_dict()["todos"] == []
-    item = todos.add("Fix the parser")
+    todos.add("Fix the parser")
     with pytest.raises(
         TypeError, match=r"self.todo is not subscriptable; use self.todo.get\('1'\)"
     ):
         todos["1"]
-    with pytest.raises(TypeError, match=r"write v.commit = value or v.set\('commit', value\)"):
-        item.v["commit"] = "abc"
-    with pytest.raises(TypeError, match=r"read v.commit or v.get\('commit'\)"):
-        _ = item.v["commit"]
 
 
 @pytest.mark.parametrize("todo_type", [Todo, CoreTodo])
