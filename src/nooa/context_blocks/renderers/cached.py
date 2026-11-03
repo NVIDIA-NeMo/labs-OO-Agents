@@ -6,6 +6,7 @@ Structure produced:
 
     (SYSTEM)    static blocks, stable across turns — cacheable prefix
     (events)    the full event history, append-only
+    (METADATA)  standalone cache boundary, translated by the provider formatter
     (USER)      trailing message wrapping dynamic blocks in a ``<context>``
                 envelope (always emitted as its own message — never merged
                 into a historical event — so the bytes of every prior
@@ -13,9 +14,8 @@ Structure produced:
                 what enables provider-side prompt caching to hit on the
                 event tail)
 
-Implemented as a single :class:`CachedBlockFormatter`. Pair with any stock
-provider formatter (``OpenAIProviderFormatter``, ``AnthropicProviderFormatter``);
-no paired provider formatter is needed.
+Implemented as a single :class:`CachedBlockFormatter`. Pair with the stock
+``OpenAIProviderFormatter``; no paired provider formatter is needed.
 
 Decoration is minimal by design: no "you are an agent" prose. The format
 description mirrors XMLBlockFormatter since the wire format is the same XML
@@ -26,7 +26,7 @@ from nooa.context_blocks.formatter import (
     FORMAT_XML,
     BlockFormatter,
     FormatType,
-    _event_block_to_messages,
+    _event_blocks_to_messages,
     _xml_system_block,
 )
 from nooa.context_blocks.models import (
@@ -80,6 +80,10 @@ class CachedBlockFormatter(BlockFormatter):
     Both the SYSTEM message and the trailing ``<context>`` USER message carry
     ``parts`` with per-block references so the journal publisher can
     content-address each block individually.
+
+    A standalone CacheBoundary separates history from live context. Its position
+    is decided here; the provider formatter passes the object through unchanged.
+    Only UnifiedLLM interprets it when preparing the provider request.
     """
 
     @property
@@ -114,15 +118,12 @@ class CachedBlockFormatter(BlockFormatter):
             content, parts = _concat_parts(static_blocks)
             messages.append(RenderedMessage(role=Role.SYSTEM, content=content, parts=parts))
 
-        # Event messages (wrap like XMLBlockFormatter does, except ToolCallEvents
-        # still fan out into tool_call + tool_result messages).
-        for block in message_blocks:
-            messages.extend(
-                _event_block_to_messages(
-                    block,
-                    wrap_content=_xml_message_content_shim,
-                )
+        messages.extend(
+            _event_blocks_to_messages(
+                message_blocks,
+                wrap_content=_xml_message_content_shim,
             )
+        )
 
         if dynamic_blocks:
             dynamic_rendered = [_xml_system_block(b) for b in dynamic_blocks]
@@ -142,7 +143,16 @@ class CachedBlockFormatter(BlockFormatter):
             # mutate the bytes of a historical event message whenever a later
             # turn becomes the new trailing event, breaking provider prompt
             # caching for the entire event tail (issue #208).
-            messages.append(RenderedMessage(role=Role.USER, content=suffix, parts=envelope_parts))
+            from nooa.llm_types import CacheBoundary
+
+            messages.append(RenderedMessage(role=Role.METADATA, replay_message=CacheBoundary()))
+            messages.append(
+                RenderedMessage(
+                    role=Role.USER,
+                    content=suffix,
+                    parts=envelope_parts,
+                )
+            )
 
         return messages
 

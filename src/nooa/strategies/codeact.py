@@ -17,17 +17,20 @@ Reference: "Executable Code Actions Elicit Better LLM Agents" (Wang et al.)
 """
 
 import ast
+import asyncio
 import inspect
 import json
 import logging
 import types
-from collections.abc import AsyncIterator, Iterator
+import typing
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import (
     TYPE_CHECKING,
     Annotated,
     Any,
+    Literal,
     get_args,
     get_origin,
 )
@@ -37,22 +40,26 @@ from pydantic import BaseModel, create_model
 from pydantic import ValidationError as PydanticValidationError
 
 from nooa.agentdoc._structured import format_type as _format_type
-from nooa.context_blocks import DynamicContext, ResultStatus, ToolCallEvent, ToolResult
+from nooa.context_blocks import DynamicContext, EventBase, ResultStatus, ToolCallEvent, ToolResult
+from nooa.context_blocks.events import CODEACT_INLINE_RETURN
 from nooa.context_blocks.exceptions import BlockSyntaxError
 from nooa.decorators import strategy
-from nooa.errors import GenerationError
+from nooa.errors import GenerationError, LoopDetectedError
 from nooa.events import (
     AfterTurn,
     BeforeTurn,
     DebugTrace,
     Error,
     ExecutionSignal,
+    LoopGuardTriggered,
     PythonOutput,
     Task,
     TextOnlyReply,
 )
 from nooa.runtime.harness_metrics import get_harness_metrics
 from nooa.runtime.hooks import call_after_hook, call_before_hook
+from nooa.runtime.sandbox.errors import SandboxExecutionError
+from nooa.strategies._completion_guard import completion_binding_errors
 from nooa.strategies.base import RuntimeServices, build_sampling_kwargs
 from nooa.strategies.codeact_errors import format_validation_error
 from nooa.strategies.composite import CompositeStrategy
@@ -61,27 +68,153 @@ from nooa.strategies.generated_code import (
     GeneratedCodeValidator,
     HelperFunctionManager,
 )
+from nooa.strategies.loop_guard import LoopGuard, action_fingerprint, mentions_return_result
 from nooa.strategies.template import TemplateStrategy
 from nooa.strategy_validation import (
     InvariantError,
     run_postconditions,
     run_preconditions,
 )
-from nooa.unifiedllm import Tool, ToolCall
+from nooa.unifiedllm import LLMResponse, ReasoningReplayError, Tool, ToolCall
 
 if TYPE_CHECKING:
     from nooa.config.strategy_config import CodeActConfig
-    from nooa.errors.formatting import IPythonErrorFormatter
+    from nooa.errors.formatting import ErrorFormatter
+    from nooa.events import ExecutionResult
     from nooa.strategies.current_call import CurrentCall
 
 logger = logging.getLogger(__name__)
+
+_EXECUTE_PYTHON_RECEIPT = "status: accepted"
+
+OUTPUT_TOKENS_EXHAUSTED_MESSAGE = (
+    "The model used all available output tokens before completing a tool call. "
+    "Increase `max_tokens` (16384 or more is often needed for reasoning models)."
+)
+"""The ``GenerationError`` message when a response stops at its output-token limit."""
+
+MAX_ITERATIONS_MESSAGE = (
+    "Generation failed after {iterations} iterations (max_iterations={max_iterations}). "
+    "Unable to complete `{method}`."
+)
+"""The ``GenerationError`` message (a ``str.format`` template) when iterations run out.
+
+Hosts map these two to protocol stop reasons, so they are named here rather
+than repeated as literals.
+"""
+
+
+@dataclass(frozen=True)
+class TextOnlyResponseContext:
+    """Input passed to a CodeAct text-only response handler.
+
+    ``CodeActStrategy`` creates this context only when the model returns no
+    tool call. The original response has already been preserved in history.
+    """
+
+    response: LLMResponse
+    content: str
+    call: "CurrentCall"
+    return_type: Any
+
+
+@dataclass(frozen=True)
+class TextOnlyResponseAction:
+    """Decision returned by a CodeAct text-only response handler.
+
+    This is not a strategy or decorator argument. Pass a sync or async callback
+    as ``CodeActStrategy(on_text_only=handler)``; that callback receives a
+    :class:`TextOnlyResponseContext` and returns one of these actions.
+    """
+
+    kind: Literal["return_result", "retry", "tool_calls"]
+    value: Any = None
+    events: tuple[EventBase, ...] = ()
+    calls: tuple[ToolCall, ...] = ()
+
+    @classmethod
+    def return_result(cls, value: Any) -> "TextOnlyResponseAction":
+        """Validate *value* using CodeAct's normal return-result path."""
+        return cls(kind="return_result", value=value)
+
+    @classmethod
+    def retry(cls, *events: EventBase) -> "TextOnlyResponseAction":
+        """Append model-visible feedback events, then ask the model again."""
+        return cls(kind="retry", events=events)
+
+    @classmethod
+    def tool_calls(cls, *calls: ToolCall) -> "TextOnlyResponseAction":
+        """Process synthetic tool calls while retaining the original model turn."""
+        if not calls:
+            raise ValueError("TextOnlyResponseAction.tool_calls() needs at least one call")
+        return cls(kind="tool_calls", calls=calls)
+
+
+type TextOnlyResponseHandler = Callable[
+    [TextOnlyResponseContext],
+    TextOnlyResponseAction | Awaitable[TextOnlyResponseAction],
+]
+
+
+def return_text_as_result(context: TextOnlyResponseContext) -> TextOnlyResponseAction:
+    """Opt-in handler that validates non-empty text (or ``None``) as the result."""
+    value = context.content if context.content.strip() else None
+    return TextOnlyResponseAction.return_result(value)
+
+
+def retry_text_only_response(context: TextOnlyResponseContext) -> TextOnlyResponseAction:
+    """Default handler that returns a model-visible tool-use correction."""
+    return TextOnlyResponseAction.retry(_text_only_correction(context))
+
+
+def _text_only_correction(
+    context: TextOnlyResponseContext,
+    validation_error: str | None = None,
+) -> Error:
+    validation_feedback = (
+        f"\n\nThe attempted result was invalid:\n{validation_error}" if validation_error else ""
+    )
+    return Error(
+        content=(
+            "Your last reply was plain text with no tool call. It was preserved, "
+            "but a bare message cannot end the turn or run code. "
+            f"To finish `{context.call.method_name}`, call `return_result(value)`. "
+            "To do more work, call `execute_python(code)`. "
+            "Re-issue your response now as one of those tool calls."
+            f"{validation_feedback}"
+        )
+    )
+
+
+def _handler_name(handler: TextOnlyResponseHandler) -> str:
+    return getattr(handler, "__qualname__", type(handler).__qualname__)
+
+
+def _response_debug_details(response: LLMResponse) -> str:
+    """Summarize an incomplete provider response for internal diagnostics."""
+    parts = [
+        f"finish_reason={response.finish_reason!r}",
+        f"content={response.content!r}",
+        f"tool_calls={response.tool_calls!r}",
+    ]
+    raw = getattr(response, "raw_response", None)
+    if raw is not None and (output := getattr(raw, "output", None)) is not None:
+        if isinstance(output, (list, tuple)):
+            item_types = [
+                item.get("type") if isinstance(item, dict) else getattr(item, "type", None)
+                for item in output
+            ]
+            parts.append(f"raw_response.output_count={len(output)}; output_types={item_types!r}")
+        else:
+            parts.append(f"raw_response.output_type={type(output).__name__!r}")
+    return "; ".join(parts)
 
 
 # Small, deterministic expression subset accepted inside constructor-string
 # arguments.  The values supplied to these callables have already been reduced
 # to plain data by ``_safe_constructor_arg``; callbacks and object attributes
 # therefore cannot cross into this compatibility path.
-_SAFE_CONSTRUCTOR_CALLS = {
+_SAFE_CONSTRUCTOR_CALLS: dict[str, Callable[..., Any]] = {
     "abs": abs,
     "all": all,
     "any": any,
@@ -112,36 +245,6 @@ class _ReturnResultSignal(ExecutionSignal):
         super().__init__("return_result() called")
 
 
-def _as_comment(text: str) -> str:
-    """Render *text* as Python comment lines (one ``#`` prefix per line)."""
-    return "\n".join(f"# {line}" if line else "#" for line in text.splitlines())
-
-
-def _prepend_comment(tool_calls: list[ToolCall], text: str) -> list[ToolCall]:
-    """Return a copy of *tool_calls* with *text* prepended as a comment to the
-    first execute_python code block.  Other tool calls are left unchanged.
-    """
-    result: list[ToolCall] = []
-    prepended = False
-    preview = _as_comment(text)
-    for tc in tool_calls:
-        if not prepended and tc.name == "execute_python":
-            try:
-                args = json.loads(tc.arguments)
-                original_code = args.get("code", "")
-                args["code"] = f"{preview}\n{original_code}"
-                tc = replace(tc, arguments=json.dumps(args))
-                prepended = True
-                get_harness_metrics().content_prepended_as_comment()
-            except json.JSONDecodeError:
-                logger.debug(
-                    "[CODEACT] _prepend_comment: skipping execute_python with unparseable arguments (tool_call_id=%s)",
-                    tc.id,
-                )
-        result.append(tc)
-    return result
-
-
 @dataclass
 class _ToolCallsResult:
     """Result of processing tool calls in a single turn."""
@@ -169,10 +272,13 @@ class CodeActSession:
     event_manager: Any  # EventManager reference for Out[n] access
     iteration: int = 0
     error_count: int = 0
+    consecutive_api_errors: int = 0
     consecutive_text_only: int = 0
     session_locals: dict[str, Any] = field(default_factory=dict)
     out_accessor: Any = field(default=None)  # OutAccessor instance, created lazily
     sandbox_executor: Any = field(default=None)  # SandboxedExecutor when backend="sandbox"
+    execution_count: int = 0
+    loop_guard: LoopGuard | None = None
 
     def __post_init__(self) -> None:
         """Initialize OutAccessor for Jupyter-style Out[n] access."""
@@ -190,8 +296,25 @@ class CodeActSession:
     def record_iteration(self) -> None:
         self.iteration += 1
 
+    def record_execution(self) -> int:
+        """Advance and return the per-cell execution counter."""
+        self.execution_count += 1
+        return self.execution_count
+
     def record_error(self) -> None:
         self.error_count += 1
+
+    def record_api_error(self) -> None:
+        """Count an LLM API error toward the consecutive-failure budget."""
+        self.consecutive_api_errors += 1
+
+    def reset_api_errors(self) -> None:
+        """Clear the API-error count after the model responds."""
+        self.consecutive_api_errors = 0
+
+    def api_errors_exhausted(self) -> bool:
+        """Whether consecutive LLM API errors have used up ``max_retries``."""
+        return self.consecutive_api_errors >= self.max_retries
 
     def record_text_only(self) -> None:
         self.consecutive_text_only += 1
@@ -211,8 +334,11 @@ class CodeActSession:
                 f"Unable to generate valid code for `{self.target_method_name}`."
             )
         return GenerationError(
-            f"Generation failed after {self.iteration} iterations (max_iterations={self.max_iterations}). "
-            f"Unable to complete `{self.target_method_name}`."
+            MAX_ITERATIONS_MESSAGE.format(
+                iterations=self.iteration,
+                max_iterations=self.max_iterations,
+                method=self.target_method_name,
+            )
         )
 
     @asynccontextmanager
@@ -296,9 +422,9 @@ class CodeActStrategy(CompositeStrategy):
     - Code is executed via explicit tool calls (not raw output)
     - Final response must be structured output matching return type
 
-    Configuration:
+    Configuration (fields of CodeActConfig, passed via config=):
         max_iterations: Maximum number of tool call iterations
-        max_retries: Maximum consecutive errors before failure
+        max_retries: Error budget; LLM API errors count only while consecutive
 
     Example:
         @strategy(CodeActStrategy())
@@ -310,21 +436,37 @@ class CodeActStrategy(CompositeStrategy):
         def quick_task(self, x: int) -> dict:
             '''Task with custom iteration limit.'''
             ...
+
+        # Opt in when a bare prose response is a valid final result.
+        @strategy(CodeActStrategy(on_text_only=return_text_as_result))
+        def summarize(self, text: str) -> str:
+            '''Summarize the text.'''
+            ...
     """
 
     def __init__(
         self,
         config: "CodeActConfig | None" = None,
         *,
-        error_formatter: "IPythonErrorFormatter | None" = None,
+        error_formatter: "ErrorFormatter | None" = None,
+        on_text_only: TextOnlyResponseHandler = retry_text_only_response,
     ):
         """Initialize CodeAct strategy.
 
         Args:
             config: CodeActConfig with iteration limits, timeouts, and sampling params.
                     Defaults to CodeActConfig() with standard defaults.
-            error_formatter: Custom error formatter for LLM feedback. Defaults to IPythonErrorFormatter.
-                Any object with a `format(error, code) -> str` method works.
+            error_formatter: Custom error formatter for LLM feedback. It must implement
+                ``format(error, code=None, *, line_offset=0, max_error=None,
+                tail_chars=None)``.
+            on_text_only: Callback that chooses how to recover when the model
+                returns text without a tool call. It receives a
+                ``TextOnlyResponseContext`` and returns (or awaits to) a
+                ``TextOnlyResponseAction``. The default preserves the model
+                turn, appends an ``Error`` asking it to use ``execute_python``
+                or ``return_result``, and retries. Use
+                ``return_text_as_result`` to opt into validating bare text as
+                the method result.
 
         Note:
             Prefill is always enabled and uses InspectInputsPrefill internally.
@@ -333,6 +475,7 @@ class CodeActStrategy(CompositeStrategy):
 
         self.config = config or _CC()
         self.error_formatter = error_formatter
+        self.on_text_only = on_text_only
 
     def _build_sampling_kwargs(self) -> dict[str, Any]:
         """Build sampling kwargs for llm calls, excluding None values."""
@@ -344,17 +487,8 @@ class CodeActStrategy(CompositeStrategy):
         return "CODEACT"
 
     def _get_truncation_config(self, runtime: RuntimeServices) -> Any:
-        """Get truncation config from runtime's agent.
-
-        Args:
-            runtime: RuntimeServices instance with agent reference
-
-        Returns:
-            TruncationConfig from agent, or default if not available
-        """
-        from nooa.config.truncation_config import DEFAULT_TRUNCATION_CONFIG
-
-        return getattr(runtime.agent, "_truncation", DEFAULT_TRUNCATION_CONFIG)
+        """Get the active runtime config, including method-level overrides."""
+        return runtime.truncation_config
 
     def get_block_overrides(self) -> dict[str, "str | DynamicContext | None"]:
         overrides: dict[str, str | DynamicContext | None] = {
@@ -427,7 +561,6 @@ Standard Python builtins and agent instance (`self`) are available."""
         standalone) or plain Python is an implementation detail; the ``async``
         keyword in the signature already carries the calling contract.
         """
-        import sys
 
         from nooa.runtime.restrictions import is_from_blocked_module
 
@@ -438,27 +571,35 @@ Standard Python builtins and agent instance (`self`) are available."""
         functions: list[tuple[str, Any]] = []  # (name, obj) — all callables, unified
 
         def record_import(obj: Any, name: str) -> None:
-            """Add a `from <module> import <name>` if it's faithfully importable.
+            """Add a `from <module> import <name>` for an imported symbol.
 
-            We only emit an import we know would actually resolve: the object
-            must be reachable as ``<module>.<name>``. Prefer the shortest public
-            path (``from pydantic import BaseModel`` over ``pydantic.main``) by
-            walking the dotted prefixes of ``__module__``. Type aliases and oddly
-            re-exported names (whose ``__module__`` doesn't actually expose them)
-            fall back to a plain in-scope listing rather than a fabricated,
-            unrunnable import.
+            The line documents a name that is already bound in the cell; it is
+            never executed. It is rendered from the object alone -- its declared
+            ``__module__`` and ``__name__`` -- and never from ``sys.modules``.
+            This text sits at the front of every request: if it tracked live
+            process state (another agent re-importing a library, a re-export
+            disappearing after a reload), a flip would restart the provider's
+            prompt cache for the whole conversation. Declared paths are longer
+            than the shortest public one (``pydantic.main`` rather than
+            ``pydantic``) but always name the definition. Parameterized and
+            typing aliases (``list[int]``, ``List[str]``) and nested definitions
+            keep the plain listing rather than a fabricated import.
             """
             mod = getattr(obj, "__module__", None)
-            if not mod:
+            original_name = getattr(obj, "__name__", "")
+            qualname = getattr(obj, "__qualname__", None) or original_name
+            if (
+                not isinstance(mod, str)
+                or not mod
+                or typing.get_origin(obj) is not None
+                or not isinstance(original_name, str)
+                or not original_name.isidentifier()
+                or qualname != original_name
+            ):
                 in_scope_only.append(name)
                 return
-            parts_ = mod.split(".")
-            for i in range(1, len(parts_) + 1):
-                candidate = ".".join(parts_[:i])
-                if getattr(sys.modules.get(candidate), name, None) is obj:
-                    from_imports.setdefault(candidate, set()).add(name)
-                    return
-            in_scope_only.append(name)
+            alias = name if original_name == name else f"{original_name} as {name}"
+            from_imports.setdefault(mod, set()).add(alias)
 
         for name, obj in context.items():
             if is_from_blocked_module(obj, blocked):
@@ -510,10 +651,14 @@ Standard Python builtins and agent instance (`self`) are available."""
                 code.append("")
             code.append(self._render_function_specs(functions))
 
+        return self._format_execution_context_stub(code, in_scope_only)
+
+    def _format_execution_context_stub(self, code: list[str], in_scope_only: list[str]) -> str:
+        """Wrap verified namespace declarations in the strategy's context format."""
         parts = [
             "## Execution Context",
             "",
-            "These names are already in scope inside `execute_python()` (state "
+            f"These names are already in scope inside `{self._python_tool_name()}()` (state "
             "persists across cells) — call them, don't re-import or re-define. "
             "Use `doc(name)` to inspect any type or function in detail.",
             "",
@@ -525,10 +670,7 @@ Standard Python builtins and agent instance (`self`) are available."""
         if in_scope_only:
             parts.append(f"Also in scope: {', '.join(sorted(in_scope_only))}.")
 
-        parts.append(
-            "Always available without import: `self`, `print()`, `pprint()`, `doc()`, "
-            "`return_result()`, plus stdlib `asyncio` and `typing`."
-        )
+        parts.append(self._always_available_text())
 
         return "\n".join(parts)
 
@@ -557,8 +699,51 @@ Standard Python builtins and agent instance (`self`) are available."""
         except Exception:
             return ", ".join(name for name, _ in ordered)
 
-    @strategy(TemplateStrategy())
+    def _always_available_text(self) -> str:
+        names = ", ".join(f"`{name}`" for name in self._always_available_builtins())
+        return f"Always available without import: {names}, plus stdlib `asyncio` and `typing`."
+
+    def _always_available_builtins(self) -> tuple[str, ...]:
+        return ("self", "print()", "pprint()", "doc()", "return_result()")
+
+    @staticmethod
+    def _restrictions_text() -> str:
+        """Shared model-facing restrictions for the two Python-tool strategies."""
+        return (
+            "- `eval`, `exec`, `compile`, `__import__`, `input`, `breakpoint`\n"
+            "- `globals`, `locals`, `vars`, `asyncio.run`, `loop.run_until_complete`\n"
+            "- Attaching callables to the agent: `self.foo = fn`, "
+            "`setattr(self, 'foo', fn)`, `type(self).foo = fn`"
+        )
+
+    def _python_tool_name(self) -> str:
+        """Return the model-facing name of the Python cell tool."""
+        return "execute_python"
+
+    def _build_tools(self, return_type: Any, method_name: str) -> list[Tool]:
+        """Build the model-facing tools for a generation turn."""
+        return [
+            self._build_execute_python_tool(),
+            self._build_return_result_tool(return_type, method_name),
+        ]
+
+    def _supports_return_result(self) -> bool:
+        """Whether return_result is accepted as a provider tool call."""
+        return True
+
+    def _available_tool_names(self) -> str:
+        return "execute_python, return_result"
+
+    def _python_output_value(self, result: Any) -> Any:
+        """Select the value exposed as the cell's Jupyter-style output."""
+        return result.returned_value if result.has_return and not result.error else None
+
     async def strategy_instructions(self, runtime: RuntimeServices) -> str:
+        """Bind strategy-owned text explicitly; template self refers to the agent."""
+        return await self._strategy_instructions(runtime, restrictions=self._restrictions_text())
+
+    @strategy(TemplateStrategy())
+    async def _strategy_instructions(self, runtime: RuntimeServices, restrictions: str) -> str:
         """
         ## Strategy
 
@@ -591,7 +776,9 @@ Standard Python builtins and agent instance (`self`) are available."""
         cleaned = [normalize(v) for v in values]
         ```
 
-        ## Fan-out generation
+        ## Delegation
+
+        ### LLM calls
 
         For per-item LLM work over a list, decorate a standalone async function with `@strategy(PredictStrategy())` and an ellipsis body. `asyncio.gather` runs the calls in parallel.
 
@@ -605,13 +792,13 @@ Standard Python builtins and agent instance (`self`) are available."""
         return_result(codes)
         ```
 
-        For iterative sub-tasks that need code execution, use `@strategy(CodeActStrategy())`. The sub-task must be strictly simpler than the current call to avoid infinite recursion.
+        ### Subagents
+
+        If `self` exposes a delegation method, use it for bounded work that benefits from an independent context; inspect its documentation with `doc(...)`. For other iterative sub-tasks that need code execution, use `@strategy(CodeActStrategy())`. A delegated task must be strictly simpler than the current call to avoid infinite recursion.
 
         ## Restrictions (will throw)
 
-        - `eval`, `exec`, `compile`, `__import__`, `input`, `breakpoint`
-        - `globals`, `locals`, `vars`, `asyncio.run`, `loop.run_until_complete`
-        - Attaching callables to the agent: `self.foo = fn`, `setattr(self, 'foo', fn)`, `type(self).foo = fn`
+        {restrictions}
         """
         ...
 
@@ -619,47 +806,6 @@ Standard Python builtins and agent instance (`self`) are available."""
     async def _tool_use_reminder(self, runtime: RuntimeServices, reason: str) -> str:
         """{reason} Use `execute_python(code)` to run code, or `return_result(...)` to submit your answer."""
         ...
-
-    @staticmethod
-    def _add_text_only_correction(runtime: RuntimeServices, call: "CurrentCall") -> None:
-        """Add a model-visible correction after a text-only turn.
-
-        Mirrors PredictStrategy's validation-retry feedback (``Error``,
-        ``Role.USER``): instead of silently dropping the turn, tell the model
-        what it did and what to do, so it self-corrects on the next turn. The
-        consecutive-text-only backstop still aborts after repeated text-only replies.
-        """
-        runtime.event_manager.add(
-            Error(
-                content=(
-                    f"Your last reply was plain text with no tool call, so it was "
-                    f"dropped — a bare message cannot end the turn or run code. "
-                    f"To finish `{call.method_name}`, call `return_result(value)`. "
-                    f"To do more work, call `execute_python(code)`. "
-                    f"Re-issue your response now as one of those tool calls."
-                )
-            )
-        )
-
-    @staticmethod
-    def _mark_text_only_recovered(runtime: RuntimeServices) -> None:
-        """Flip the most recent unrecovered ``TextOnlyReply`` to recovered=True.
-
-        Called when a real tool call lands after one or more text-only replies —
-        the correction worked. Lets capture/replay distinguish benign,
-        self-corrected replies from ones that needed an abort.
-        """
-        # Flip every unrecovered text-only reply since the last real progress,
-        # not just the most recent — multiple consecutive ones can precede a
-        # single tool call, and all were rescued by it. Stop at the first
-        # already-recovered one (older runs are already resolved).
-        for tag in reversed(runtime.event_manager.keys()):
-            event = runtime.event_manager.get(tag)
-            if not isinstance(event, TextOnlyReply):
-                continue
-            if event.recovered:
-                break
-            runtime.event_manager.update(tag, recovered=True)
 
     @strategy(TemplateStrategy())
     async def _build_task_message(
@@ -705,6 +851,8 @@ Standard Python builtins and agent instance (`self`) are available."""
             cell_timeout=self.config.cell_timeout,
             framework_builtins=framework_builtins,
             restrictions=self.config.restrictions,
+            max_error=runtime.truncation_config.capture.max_error,
+            error_tail=runtime.truncation_config.capture.tail,
         )
 
     async def _close_sandbox(self, session: "CodeActSession") -> None:
@@ -766,6 +914,9 @@ Standard Python builtins and agent instance (`self`) are available."""
             max_retries=self.config.max_retries,
             target_method_name=call.method_name,
             event_manager=runtime.event_manager,
+            loop_guard=(
+                LoopGuard(self.config.loop_guard) if self.config.loop_guard is not None else None
+            ),
         )
         # Publish to the caller so execute()'s finally can tear down the worker.
         session_holder["session"] = session
@@ -773,6 +924,9 @@ Standard Python builtins and agent instance (`self`) are available."""
         # Seed session_locals from caller-provided dict (persistent stack)
         if call.session_locals is not None:
             session.session_locals.update(call.session_locals)
+        # Expose this live dictionary to dynamic context renderers. Unlike
+        # call.session_locals, this also receives names defined by model cells.
+        call.execution_locals = session.session_locals
 
         # Build builtins for code execution
         _init_hm = get_harness_metrics()
@@ -785,17 +939,11 @@ Standard Python builtins and agent instance (`self`) are available."""
             if self.config.execution_backend == "sandbox":
                 session.sandbox_executor = self._create_sandbox_executor(runtime, call, builtins)
 
-            # Build both tools
-            execute_python_tool = self._build_execute_python_tool()
-            return_result_tool = self._build_return_result_tool(return_type, call.method_name)
-            tools = [execute_python_tool, return_result_tool]
+            tools = self._build_tools(return_type, call.method_name)
 
-            # Use the task event's tag as the call ID so the LLM sees a stable reference.
-            # _build_task_message reads only method_name/docstring, so it's safe to build
-            # before the event lands and assign the returned tag back to call.id.
+            # Keep the display tag separate from the event-correlation call ID.
             task_content = await self._build_task_message(runtime, original_call=call)
-            tag = runtime.event_manager.add(Task(prompt=task_content))
-            object.__setattr__(call, "id", tag)
+            call.task_tag = runtime.event_manager.add(Task(prompt=task_content))
             # Method-local preconditions run before generation and fail fast
             # (raise to abort the call); see nooa.strategy_validation.
             run_preconditions(runtime.agent, call, self.config.preconditions)
@@ -809,6 +957,8 @@ Standard Python builtins and agent instance (`self`) are available."""
         try:
             with _init_hm.timer("time_prefill"):
                 await self._run_prefill(runtime, call, builtins, session)
+        except ReasoningReplayError:
+            raise
         except Exception as e:
             logger.warning(f"[CODEACT] Prefill error (continuing): {e}")
             runtime.event_manager.add(Error(content=f"Prefill error: {e}"))
@@ -841,7 +991,9 @@ Standard Python builtins and agent instance (`self`) are available."""
 
                 logger.debug(
                     f"[CODEACT] Loop iteration: iter={session.iteration}/{session.max_iterations}, "
-                    f"err={session.error_count}/{session.max_retries}, tool_choice={tool_choice}"
+                    f"err={session.error_count}/{session.max_retries}, "
+                    f"api_err={session.consecutive_api_errors}/{session.max_retries}, "
+                    f"tool_choice={tool_choice}"
                 )
 
                 response = None
@@ -854,7 +1006,12 @@ Standard Python builtins and agent instance (`self`) are available."""
                         tool_choice=tool_choice,
                         **self._build_sampling_kwargs(),
                     )
+                except ReasoningReplayError:
+                    turn_state.is_final = True
+                    raise
                 except BlockSyntaxError as e:
+                    # Raised while building the prompt, before any LLM request,
+                    # so it neither counts as nor clears an API error.
                     self._handle_block_syntax_error(e, session, runtime)
                     continue
 
@@ -863,7 +1020,10 @@ Standard Python builtins and agent instance (`self`) are available."""
                     # Note: unifiedllm already has retry logic with exponential backoff
                     # for 429, 500, 502, 503, 504 errors. This handles cases where
                     # all retries are exhausted or the error is not retryable.
-                    session.record_error()
+                    # Only consecutive failures count: a transient endpoint error
+                    # followed by a successful call must not eat into the budget
+                    # for the rest of a long turn.
+                    session.record_api_error()
                     error_name = type(e).__name__
                     cause_parts = []
                     exc: BaseException | None = e
@@ -874,18 +1034,19 @@ Standard Python builtins and agent instance (`self`) are available."""
                         exc = exc.__cause__ or exc.__context__
                     cause_chain = " <- ".join(cause_parts)
                     error_msg = (
-                        f"LLM API error (attempt {session.error_count}/{session.max_retries}): "
+                        f"LLM API error (attempt {session.consecutive_api_errors}/{session.max_retries}): "
                         f"{cause_chain}"
                     )
                     get_harness_metrics().llm_api_error(cause_chain[:500])
                     runtime.event_manager.add(Error(content=error_msg))
                     logger.warning(
-                        f"[CODEACT] LLM API error (iter={session.iteration}, err={session.error_count}): "
+                        f"[CODEACT] LLM API error (iter={session.iteration}, "
+                        f"api_err={session.consecutive_api_errors}): "
                         f"{cause_chain}",
                         exc_info=True,
                     )
                     turn_state.exception = error_name
-                    if session.is_exhausted():
+                    if session.api_errors_exhausted():
                         turn_state.is_final = True
                         raise GenerationError(
                             f"LLM API error after {session.max_retries} retries. "
@@ -895,30 +1056,46 @@ Standard Python builtins and agent instance (`self`) are available."""
                 # Skip rest of turn if LLM call failed
                 if response is None:
                     continue
+                session.reset_api_errors()
+
+                # Output-limit responses are incomplete even when they carry
+                # partial text. Preserve the exact LLMResponse for diagnostics,
+                # but never let a text-only handler accept it as a successful
+                # result. Empty turns are filtered from provider projection.
+                if response.finish_reason == "length":
+                    session.record_error()
+                    if not response.content and not response.tool_calls:
+                        get_harness_metrics().empty_response()
+                    runtime.event_manager.add(
+                        DebugTrace(
+                            content=f"Truncated response: {_response_debug_details(response)}"
+                        )
+                    )
+                    turn_state.is_final = True
+                    raise GenerationError(OUTPUT_TOKENS_EXHAUSTED_MESSAGE)
+
+                # A provider-declared error is incomplete even if it includes
+                # partial text. Preserve that output for diagnostics, but do
+                # not let a text-only handler turn it into a successful result.
+                if response.finish_reason == "error":
+                    session.record_error()
+                    if not response.content and not response.tool_calls:
+                        get_harness_metrics().empty_response()
+                    runtime.event_manager.add(
+                        DebugTrace(content=f"Failed response: {_response_debug_details(response)}")
+                    )
+                    turn_state.is_final = True
+                    raise GenerationError("The model returned an incomplete response.")
 
                 # ── Post-response cleanup (CodeAct) ──────────────────────
                 # Intercept point: strategy-specific response transforms.
-                # Handles text-only→synthetic, comment prepend, tool call
-                # translation. Consider making extensible in the future.
+                # Handles text-only recovery and tool-call translation.
+                # Consider making extensible in the future.
                 if response.finish_reason == "tool_calls" and response.tool_calls:
                     tool_calls = response.tool_calls
-                    # If the LLM also emitted message content alongside the tool
-                    # call(s), preserve it by prepending it as a comment at the
-                    # top of the first execute_python code block.
-                    if response.content:
-                        content = response.content
-                        text = (
-                            content.model_dump_json()
-                            if isinstance(content, BaseModel)
-                            else str(content)
-                        )
-                        if text.strip():
-                            tool_calls = _prepend_comment(tool_calls, text)
                     # A real tool call counts as progress: reset the consecutive
                     # text-only guard (issue 185) before executing, so a single
                     # exec mid-stream rescues the run from accidental drift.
-                    if session.consecutive_text_only > 0:
-                        self._mark_text_only_recovered(runtime)
                     session.reset_text_only()
                     result = await self._process_tool_calls(
                         tool_calls,
@@ -937,146 +1114,88 @@ Standard Python builtins and agent instance (`self`) are available."""
                     continue
 
                 # ── Text-only response (no tool call) ──────────────────────
-                # Normalize content for both branches below.
-                _raw_content = response.content
-                _text = (
-                    _raw_content.model_dump_json()
-                    if isinstance(_raw_content, BaseModel)
-                    else str(_raw_content)
-                    if _raw_content
-                    else ""
-                )
+                _text = response.content
                 _has_text = bool(_text.strip())
 
-                # Route A: "return_result" mode — treat stop as a done signal
-                # and route through return_result() validation. Handles both
-                # stop+content and stop+no-content in one branch.
-                if (
-                    response.finish_reason == "stop"
-                    and self.config.text_only_stop_behavior == "return_result"
-                    and (_has_text or not _raw_content)
-                ):
-                    session.record_iteration()
-                    # Capture the drift faithfully for /bug + replay (recorded but
-                    # Role.METADATA, so it never reaches the model). Replaces the
-                    # old lossy DebugTrace; preserves the verbatim content (even
-                    # when empty) before the offending event is removed.
-                    drift_tag = runtime.event_manager.add(
+                if _has_text or response.finish_reason == "stop":
+                    context = TextOnlyResponseContext(
+                        response=response,
+                        content=_text,
+                        call=call,
+                        return_type=return_type,
+                    )
+                    action = self.on_text_only(context)
+                    if inspect.isawaitable(action):
+                        action = await action
+                    if not isinstance(action, TextOnlyResponseAction):
+                        raise TypeError(
+                            "CodeAct on_text_only must return TextOnlyResponseAction, "
+                            f"got {type(action).__name__}"
+                        )
+
+                    # Capture the drift faithfully for /bug reports. The original
+                    # LLMResponse remains the assistant turn; the handler may only
+                    # append recovery events after it.
+                    runtime.event_manager.add(
                         TextOnlyReply(
                             content=_text,
                             finish_reason=str(response.finish_reason),
-                            route="return_result",
+                            handler=_handler_name(self.on_text_only),
+                            action=action.kind,
                             consecutive_text_only=session.consecutive_text_only + 1,
                         )
                     )
-                    runtime.event_manager.remove(event_id)
-                    synthetic_id = f"synthetic_{uuid4().hex[:8]}"
-                    result_value = _text if _has_text else None
-                    synthetic_tool_call = ToolCall(
-                        id=synthetic_id,
-                        name="return_result",
-                        arguments=json.dumps({"result": result_value}),
-                    )
-                    get_harness_metrics().stop_to_return_result(result_value)
-                    logger.info(
-                        f"[CODEACT] finish_reason='stop' "
-                        f"({'content=' + str(len(_text)) + ' chars' if _has_text else 'no content'}) "
-                        f"→ synthetic return_result(). Routing through validation."
-                    )
-                    result = await self._process_tool_calls(
-                        [synthetic_tool_call],
-                        runtime,
-                        builtins,
-                        session,
-                        call,
-                        return_type,
-                        event_id or "",
-                    )
-                    if result.completed:
-                        # Recovered via the synthetic return_result — the drift was
-                        # benign. Mark it so capture/replay can distinguish recovered
-                        # drifts from ones that needed a correction.
-                        runtime.event_manager.update(drift_tag, recovered=True)
-                        turn_state.success = True
-                        turn_state.is_final = True
-                        self._sync_session_locals(call, session)
-                        return result.final_value
-                    # Validation failed — give the model a visible correction (the
-                    # PredictStrategy pattern: a Role.USER event it sees on the next
-                    # turn) instead of silently dropping the turn, then continue.
-                    # The abort below is only a backstop for repeated non-compliance.
+
+                    if action.kind == "return_result":
+                        session.record_iteration()
+                        # This metric stores a bounded text preview. Arbitrary
+                        # callback result values still take the normal
+                        # validation path without being stringified by
+                        # telemetry or passed to its string-only API.
+                        result_preview = action.value if isinstance(action.value, str) else None
+                        get_harness_metrics().stop_to_return_result(result_preview)
+                        validated, validation_error = self._handle_return_result(
+                            runtime,
+                            {"result": action.value},
+                            return_type,
+                            session,
+                            call,
+                        )
+                        if validation_error is None:
+                            turn_state.success = True
+                            turn_state.is_final = True
+                            self._sync_session_locals(call, session)
+                            return validated
+                        runtime.event_manager.add(_text_only_correction(context, validation_error))
+                    elif action.kind == "retry":
+                        session.record_iteration()
+                        for feedback_event in action.events:
+                            runtime.event_manager.add(feedback_event)
+                    elif action.kind == "tool_calls":
+                        get_harness_metrics().text_to_synthetic()
+                        result = await self._process_tool_calls(
+                            list(action.calls),
+                            runtime,
+                            builtins,
+                            session,
+                            call,
+                            return_type,
+                            event_id or "",
+                            preserve_llm_response=True,
+                        )
+                        if result.completed:
+                            turn_state.success = True
+                            turn_state.is_final = True
+                            self._sync_session_locals(call, session)
+                            return result.final_value
+                    else:
+                        raise ValueError(f"Unknown text-only action: {action.kind!r}")
+
                     session.record_text_only()
-                    self._add_text_only_correction(runtime, call)
                     max_text_only = self.config.max_consecutive_text_only
                     if max_text_only > 0 and session.consecutive_text_only >= max_text_only:
                         get_harness_metrics().text_only_loop_abort()
                         preview = _text if _has_text else "(empty)"
-                        turn_state.is_final = True
-                        raise GenerationError(
-                            f"CodeAct aborted: LLM returned plain text without a tool call "
-                            f"{session.consecutive_text_only} times in a row "
-                            f"(max_consecutive_text_only={max_text_only}) for "
-                            f"`{call.method_name}`. The agent likely thinks it is done — "
-                            f"it must call `return_result(...)` to finish. "
-                            f"Last text: {preview!r}"
-                        )
-
-                    continue
-
-                # Route B: "synthetic_comment" mode — convert text to a no-op
-                # execute_python comment that preserves content in traces.
-                elif _has_text:
-                    session.record_iteration()
-                    # Capture the drift faithfully for /bug + replay (recorded but
-                    # Role.METADATA, never shown to the model). Replaces the old
-                    # lossy DebugTrace.
-                    runtime.event_manager.add(
-                        TextOnlyReply(
-                            content=_text,
-                            finish_reason=str(response.finish_reason),
-                            route="synthetic_comment",
-                            consecutive_text_only=session.consecutive_text_only + 1,
-                        )
-                    )
-                    runtime.event_manager.remove(event_id)
-                    synthetic_id = f"synthetic_{uuid4().hex[:8]}"
-                    runtime.event_manager.add(
-                        ToolCallEvent(
-                            tool_call_id=synthetic_id,
-                            name="execute_python",
-                            arguments={"code": _as_comment(_text)},
-                            result=ToolResult(
-                                tool_call_id=synthetic_id,
-                                content="status: commentary only — task is NOT finished. You must call return_result() to complete.",
-                                result_status=ResultStatus.COMPLETE,
-                            ),
-                            metadata={"synthetic": True, "synthetic_type": "text_response"},
-                        )
-                    )
-                    runtime.event_manager.add(
-                        PythonOutput(
-                            tool_call_id=synthetic_id,
-                            execution_count=session.iteration or 1,
-                            execution_status=ResultStatus.COMPLETE,
-                            metadata={"synthetic": True, "synthetic_type": "text_response"},
-                        )
-                    )
-                    get_harness_metrics().text_to_synthetic()
-                    logger.debug(
-                        f"[CODEACT] Text-only response ({len(_text)} chars) "
-                        f"converted to synthetic comment."
-                    )
-                    # No extra Error correction here: Route B already injects a
-                    # synthetic execute_python comment whose ToolResult tells
-                    # the model the task isn't finished. Adding a "your reply had no
-                    # tool call" Error would contradict that synthetic tool call and
-                    # confuse the model. The backstop below still aborts on repeated
-                    # non-compliance.
-                    session.record_text_only()
-                    max_text_only = self.config.max_consecutive_text_only
-                    if max_text_only > 0 and session.consecutive_text_only >= max_text_only:
-                        get_harness_metrics().text_only_loop_abort()
-                        preview = _text
                         turn_state.is_final = True
                         raise GenerationError(
                             f"CodeAct aborted: LLM returned plain text without a tool call "
@@ -1091,34 +1210,12 @@ Standard Python builtins and agent instance (`self`) are available."""
                 # Empty response - error
                 get_harness_metrics().empty_response()
                 session.record_error()
-                # Capture raw LLM response for debugging before removing the event
-                _debug_parts = [
-                    f"finish_reason={response.finish_reason!r}",
-                    f"content={response.content!r}",
-                    f"tool_calls={response.tool_calls!r}",
-                ]
-                raw = getattr(response, "raw_response", None)
-                if raw is not None:
-                    output = getattr(raw, "output", None)
-                    if output is not None:
-                        _debug_parts.append(f"raw_response.output={output!r}")
+                # Keep the canonical provider turn and append recovery feedback.
+                # Context projection omits empty assistant messages from the
+                # next request without mutating the event journal.
                 runtime.event_manager.add(
-                    DebugTrace(content=f"Empty response: {'; '.join(_debug_parts)}")
+                    DebugTrace(content=f"Empty response: {_response_debug_details(response)}")
                 )
-                # Remove the empty assistant event - APIs reject empty content
-                runtime.event_manager.remove(event_id)
-                # Reasoning models that exhaust max_tokens produce empty output.
-                # Retrying won't help — abort immediately with an actionable message.
-                if response.finish_reason == "length":
-                    turn_state.is_final = True
-                    raise GenerationError(
-                        "Empty response: the model used all available output tokens "
-                        "on reasoning and had none left for a tool call. "
-                        "This typically means `max_tokens` is too low for a "
-                        "reasoning model (e.g. GPT-5.5, o-series). "
-                        "Increase `max_tokens` in the model config "
-                        "(16384+ recommended for reasoning models)."
-                    )
                 feedback = await self._tool_use_reminder(runtime, reason="Empty response received.")
                 runtime.event_manager.add(Error(content=feedback))
 
@@ -1194,6 +1291,91 @@ Standard Python builtins and agent instance (`self`) are available."""
         code = f"result = {call_expr}\nprint(result)"
         return code
 
+    def _empty_code_error(self, args: dict[str, Any]) -> str:
+        """Explain an empty cell, naming misplaced argument keys when present."""
+        extra = sorted(str(k) for k in args if k != "code")
+        if "code" in args or not extra:
+            return "Execution error: empty code provided."
+        return (
+            f"Execution error: {self._python_tool_name()} takes a single `code` argument "
+            f"containing Python source, but received {', '.join(f'`{k}`' for k in extra)}. "
+            'Pass Python source as {"code": "..."}; inspect print(doc(self)) for the '
+            "agent's APIs."
+        )
+
+    def _unknown_tool_feedback(
+        self, tool_name: str, args: dict[str, Any], runtime: RuntimeServices
+    ) -> str:
+        """Explain how to express a rejected tool call as a Python cell.
+
+        Models sometimes call an agent attribute such as ``todo`` or
+        ``self.shell.run`` as if it were a provider tool. The feedback names the
+        one valid tool, separates the tool name from the code it receives, and
+        shows a concrete cell for the rejected name: the equivalent call when
+        it resolves to a public callable on ``self``, otherwise a ``doc()``
+        inspection. Resolution is static, so no agent attribute is evaluated.
+        """
+        python_tool = self._python_tool_name()
+        shown_name = tool_name if len(tool_name) <= 80 else tool_name[:77] + "..."
+        header = f"Unknown tool `{shown_name}`. Available tools: {self._available_tool_names()}."
+        if tool_name == "return_result" and not self._supports_return_result():
+            return (
+                f"{header} To finish, call {python_tool} with code `return_result(value)`; "
+                "return_result is a Python builtin, not a provider tool."
+            )
+
+        from nooa.agentdoc._visibility import is_hidden_field, is_hidden_method
+
+        path = tool_name.removeprefix("self.").split(".")
+        target: Any = runtime.agent
+        for part in path:
+            owner = target
+            try:
+                if not part.isidentifier() or part.startswith("_"):
+                    raise AttributeError(part)
+                target = inspect.getattr_static(owner, part)
+            except AttributeError:
+                target = None
+                break
+            if is_hidden_method(target) or (
+                owner is runtime.agent and is_hidden_field(owner, part)
+            ):
+                target = None
+                break
+        expr = "self." + ".".join(path)
+
+        if target is None:
+            code = "print(doc(self))"
+            shown_expr = expr if len(expr) <= 80 else expr[:77] + "..."
+            hint = (
+                f"`{shown_expr}` does not exist. Inspect the available APIs with the cell above, "
+                f"then call them inside {python_tool}."
+            )
+        elif callable(target):
+            func = getattr(target, "__func__", target)
+            call_expr = f"{expr}({', '.join(f'{k}={v!r}' for k, v in args.items())})"
+            if len(call_expr) > 300:
+                call_expr = f"{expr}(...)"
+            if inspect.iscoroutinefunction(func):
+                call_expr = f"await {call_expr}"
+            code = f"result = {call_expr}\nprint(result)"
+            hint = f"Check the arguments with print(doc({expr})) inside {python_tool} if unsure."
+        else:
+            code = f"print(doc({expr}))"
+            hint = (
+                f"`{expr}` is an object, not a function. After inspecting it, call its "
+                f"documented methods as {expr}.method_name(...) inside {python_tool}; "
+                "await async methods."
+            )
+        arguments = json.dumps({"code": code})
+        return (
+            f"{header}\n\n"
+            f"Call the {python_tool} tool and put Python code in its `code` argument:\n\n"
+            f"Tool name: {python_tool}\n"
+            f"Arguments: {arguments}\n\n"
+            f"{hint} Do not call `{shown_name}` as a tool again."
+        )
+
     async def _process_tool_calls(
         self,
         tool_calls: list[Any],
@@ -1203,11 +1385,16 @@ Standard Python builtins and agent instance (`self`) are available."""
         call: "CurrentCall",
         return_type: Any,
         event_id: str,
+        preserve_llm_response: bool = False,
     ) -> _ToolCallsResult:
         """Process tool calls from a single LLM turn.
 
         Executes tool calls sequentially, stopping at the first error.
         Returns a _ToolCallsResult indicating whether the task completed.
+
+        ``preserve_llm_response`` distinguishes calls synthesized by a text-only
+        response handler from calls already recorded on the provider's
+        canonical LLMResponse event.
         """
         # Handle tool calls - process ALL tool calls sequentially
         # Some LLMs return multiple tool calls in one response even when
@@ -1215,46 +1402,350 @@ Standard Python builtins and agent instance (`self`) are available."""
         # cell's output available to subsequent cells via session_locals.
         session.record_iteration()
 
-        # Remove the empty LLMOutput that runtime.generate() created
-        # and replace it with a proper ToolCallEvent that includes tool_calls
-        runtime.event_manager.remove(event_id)
-
         num_tool_calls = len(tool_calls)
         if num_tool_calls > 1:
             logger.debug(f"[CODEACT] Processing {num_tool_calls} tool calls sequentially")
+
+        llm_response = runtime.event_manager.get(event_id) if not preserve_llm_response else None
+        llm_response_id = getattr(llm_response, "id", None)
 
         # Process each tool call in order, stopping at the first error.
         # If one cell fails, subsequent cells likely depend on its output
         # and would cascade into confusing errors.
         for tool_call in tool_calls:
-            # Parse arguments
-            try:
-                args = json.loads(tool_call.arguments)
-            except json.JSONDecodeError as e:
-                session.record_error()
-                runtime.event_manager.add(
-                    Error(content=f"Invalid arguments for tool `{tool_call.name}`: {e}")
+            guard = session.loop_guard
+            if guard is None:
+                result = await self._process_one_tool_call(
+                    tool_call, runtime, builtins, session, call, return_type, llm_response_id
                 )
-                # Stop processing remaining tool calls - let LLM fix this first
-                return _ToolCallsResult()
+                if result is not None:
+                    return result
+                continue
 
-            # Add ToolCallEvent to record the tool call (result will be nested later)
-            tool_call_event_id = runtime.event_manager.add(
-                ToolCallEvent(
+            action, parsed_args = self._loop_guard_action(tool_call)
+            blocked = self._loop_guard_before(
+                guard, action, parsed_args, tool_call, runtime, llm_response_id
+            )
+            if blocked is not None:
+                return blocked
+            first_new = len(runtime.event_manager.keys())
+            result = await self._process_one_tool_call(
+                tool_call, runtime, builtins, session, call, return_type, llm_response_id
+            )
+            if result is not None and result.completed:
+                return result
+            self._loop_guard_after(guard, action, parsed_args, tool_call, runtime, first_new)
+            if result is not None:
+                return result
+
+        # All tool calls processed without completion or error-break
+        return _ToolCallsResult()
+
+    def _loop_guard_action(self, tool_call: Any) -> tuple[str, Any]:
+        """Fingerprint a tool call from its raw arguments, valid JSON or not."""
+        try:
+            parsed: Any = json.loads(tool_call.arguments)
+        except ValueError:
+            parsed = tool_call.arguments
+        return action_fingerprint(tool_call.name, parsed, self._python_tool_name()), parsed
+
+    def _loop_guard_before(
+        self,
+        guard: LoopGuard,
+        action: str,
+        parsed_args: Any,
+        tool_call: Any,
+        runtime: RuntimeServices,
+        llm_response_id: str | None,
+    ) -> _ToolCallsResult | None:
+        """Skip a call that already failed identically; stop if it was warned about."""
+        verdict = guard.before(action)
+        if verdict is None:
+            return None
+        kind, repeats, outcome = verdict
+        message = guard.message(
+            kind,
+            tool_call.name,
+            repeats,
+            outcome,
+            completion=mentions_return_result(parsed_args),
+        )
+        runtime.event_manager.add(
+            ToolCallEvent(
+                tool_call_id=tool_call.id,
+                name=tool_call.name,
+                arguments=parsed_args if isinstance(parsed_args, dict) else {},
+                llm_response_id=llm_response_id,
+                result=ToolResult(
                     tool_call_id=tool_call.id,
-                    name=tool_call.name,
-                    arguments=args,
-                    result=None,  # Will be updated after execution
+                    content="Not executed: blocked by the loop guard.",
+                    result_status=ResultStatus.ERROR,
+                ),
+            )
+        )
+        self._record_loop_guard(
+            runtime,
+            message,
+            kind="blocked" if kind == "block" else "stopped",
+            tool_call=tool_call,
+            repeats=repeats,
+            action=action,
+            window=guard.config.window,
+        )
+        if kind == "stop":
+            raise LoopDetectedError(message)
+        return _ToolCallsResult()
+
+    def _loop_guard_after(
+        self,
+        guard: LoopGuard,
+        action: str,
+        parsed_args: Any,
+        tool_call: Any,
+        runtime: RuntimeServices,
+        first_new: int,
+    ) -> None:
+        """Record the call's outcome; warn on or stop at identical successful repeats."""
+        failed, outcome = self._tool_call_outcome(runtime, tool_call.id, first_new)
+        verdict = guard.after(action, outcome, failed)
+        if verdict is None:
+            return
+        kind, repeats = verdict
+        message = guard.message(
+            kind,
+            tool_call.name,
+            repeats,
+            outcome,
+            completion=mentions_return_result(parsed_args),
+        )
+        self._record_loop_guard(
+            runtime,
+            message,
+            kind="nudged" if kind == "nudge" else "stopped",
+            tool_call=tool_call,
+            repeats=repeats,
+            action=action,
+            window=guard.config.window,
+        )
+        if kind == "stop":
+            raise LoopDetectedError(message)
+
+    @staticmethod
+    def _tool_call_outcome(
+        runtime: RuntimeServices, tool_call_id: str, first_new: int
+    ) -> tuple[bool, str]:
+        """Summarize what a tool call produced, from its own events.
+
+        Uses the call's tool result and cell output; a failed cell is
+        represented by the final line of its error, so cell numbers in a
+        traceback do not matter. A call rejected before it became a
+        ToolCallEvent (invalid JSON arguments) is represented by its Error
+        events. Only events added since ``first_new`` are read; an outcome
+        that cannot be found (for example, summarized away) is unique, so it
+        never matches another call.
+        """
+        manager = runtime.event_manager
+        # Only events added during this call: providers may reuse tool-call ids.
+        tags = manager.keys()[first_new:]
+        own: list[Any] = []
+        recorded = False
+        for tag in reversed(tags):
+            event = manager.get(tag)
+            if getattr(event, "tool_call_id", None) != tool_call_id:
+                continue
+            own.append(event)
+            if isinstance(event, ToolCallEvent):
+                recorded = True
+                break
+        parts: list[str] = []
+        failed = False
+        for event in reversed(own):
+            if isinstance(event, ToolCallEvent):
+                result = event.result
+                if result is not None and result.result_status == ResultStatus.ERROR:
+                    failed = True
+                    parts.append(str(result.content))
+            elif isinstance(event, PythonOutput):
+                if event.error:
+                    failed = True
+                    lines = [line for line in str(event.error).splitlines() if line.strip()]
+                    parts.append(lines[-1] if lines else "")
+                else:
+                    parts.extend([event.stdout or "", event.stderr or "", repr(event.value)])
+        if not recorded:
+            errors = [str(e.content) for tag in tags if isinstance(e := manager.get(tag), Error)]
+            failed = bool(errors)
+            parts.extend(errors)
+        text = "\n".join(part for part in parts if part)
+        return failed, text or f"<no outcome for {tool_call_id}>"
+
+    @staticmethod
+    def _record_loop_guard(
+        runtime: RuntimeServices,
+        message: str,
+        *,
+        kind: str,
+        tool_call: Any,
+        repeats: int,
+        action: str,
+        window: int,
+    ) -> None:
+        metrics = get_harness_metrics()
+        if kind == "stopped":
+            metrics.loop_guard_stop()
+        else:
+            metrics.loop_guard_nudge()
+        logger.warning(
+            "[CODEACT] Loop guard %s %s call (%d repeats)", kind, tool_call.name, repeats
+        )
+        runtime.event_manager.add(
+            LoopGuardTriggered(
+                content=message,
+                action=kind,
+                tool_name=tool_call.name,
+                tool_call_id=tool_call.id,
+                repeats=repeats,
+                window=window,
+                fingerprint=action,
+            )
+        )
+
+    async def _process_one_tool_call(
+        self,
+        tool_call: Any,
+        runtime: RuntimeServices,
+        builtins: dict[str, Any],
+        session: CodeActSession,
+        call: "CurrentCall",
+        return_type: Any,
+        llm_response_id: str | None,
+    ) -> _ToolCallsResult | None:
+        """Handle one tool call; return a result to end the turn, or None to continue."""
+        # Parse arguments
+        try:
+            args = json.loads(tool_call.arguments)
+            if not isinstance(args, dict):
+                raise ValueError("tool arguments must be a JSON object")
+        except ValueError as e:
+            session.record_error()
+            runtime.event_manager.add(
+                Error(
+                    content=f"Invalid arguments for tool `{tool_call.name}`: {e}. "
+                    f"Tool arguments must be a JSON object; call {self._python_tool_name()} "
+                    f'with arguments like {{"code": "print(1)"}}.'
                 )
             )
+            # Stop processing remaining tool calls - let LLM fix this first
+            return _ToolCallsResult()
 
-            # Handle based on tool name
-            if tool_call.name == "execute_python":
-                # Execute Python code
+        # Add ToolCallEvent to record the tool call (result will be nested later)
+        tool_call_event_id = runtime.event_manager.add(
+            ToolCallEvent(
+                tool_call_id=tool_call.id,
+                name=tool_call.name,
+                arguments=args,
+                llm_response_id=llm_response_id,
+                result=None,  # Will be updated after execution
+            )
+        )
+
+        # Handle based on tool name
+        if tool_call.name == self._python_tool_name():
+            # Execute Python code
+            result = await self._handle_execute_python(
+                runtime,
+                tool_call,
+                args,
+                builtins,
+                session,
+                call,
+                return_type,
+                tool_call_event_id=tool_call_event_id,
+            )
+            if result is None or getattr(result, "error", None) is not None:
+                # Error occurred (already handled) or code execution failed -
+                # stop processing remaining tool calls
+                return _ToolCallsResult()
+
+            # Check if return_result() was called inline
+            if isinstance(result, tuple) and result[0] == "TASK_COMPLETE":
+                # Task completed via inline return_result()
+                return _ToolCallsResult(completed=True, final_value=result[1])
+
+        elif tool_call.name == "return_result" and self._supports_return_result():
+            # Return the final result
+            try:
+                validated, error_msg = self._handle_return_result(
+                    runtime, args, return_type, session, call
+                )
+            except GenerationError:
+                # _handle_return_result raises GenerationError when validation
+                # fails AND session is exhausted. Ensure the ToolCallEvent has
+                # an error result before re-raising so the event is never left
+                # with result=None in the DB (which corrupts the next session's
+                # context render).
+                runtime.event_manager.update(
+                    tool_call_event_id,
+                    result=ToolResult(
+                        tool_call_id=tool_call.id,
+                        content="return_result validation failed (session exhausted).",
+                        result_status=ResultStatus.ERROR,
+                    ),
+                )
+                raise
+            if error_msg is None:
+                # Rewrite the tool_call arguments to show correct syntax
+                # when coercion changed the value (teaches model the right format).
+                corrected_args = self._corrected_return_args(validated, args)
+                runtime.event_manager.update(
+                    tool_call_event_id,
+                    arguments=corrected_args,
+                    result=ToolResult(
+                        tool_call_id=tool_call.id,
+                        content="Result accepted.",
+                        result_status=ResultStatus.COMPLETE,
+                    ),
+                )
+                logger.info("[CODEACT] Task completed successfully via return_result")
+                return _ToolCallsResult(completed=True, final_value=validated)
+            # Validation error - update with error result
+            runtime.event_manager.update(
+                tool_call_event_id,
+                result=ToolResult(
+                    tool_call_id=tool_call.id,
+                    content=f"Invalid result: {error_msg}\n"
+                    f"Please call return_result again with valid arguments. "
+                    f"Tip: if you computed the result in {self._python_tool_name()}(), you can call "
+                    f"return_result(variable) from within the code instead.",
+                    result_status=ResultStatus.ERROR,
+                ),
+            )
+            # Stop processing remaining tool calls
+            return _ToolCallsResult()
+
+        else:
+            # Unknown tool — attempt to translate to execute_python.
+            # Weaker models sometimes call agent methods directly as tool
+            # calls instead of wrapping them in execute_python().
+            translated_code = (
+                self._translate_tool_call_to_code(tool_call.name, args, builtins, session, runtime)
+                if self.config.translate_tool_calls
+                else None
+            )
+            if translated_code is not None:
+                get_harness_metrics().tool_call_translated(tool_call.name)
+                logger.debug(f"[CODEACT] Translated tool call '{tool_call.name}' -> execute_python")
+                # Update ToolCallEvent to reflect the translation
+                runtime.event_manager.update(
+                    tool_call_event_id,
+                    name=self._python_tool_name(),
+                    arguments={"code": translated_code},
+                )
+                translated_args = {"code": translated_code}
                 result = await self._handle_execute_python(
                     runtime,
                     tool_call,
-                    args,
+                    translated_args,
                     builtins,
                     session,
                     call,
@@ -1262,120 +1753,24 @@ Standard Python builtins and agent instance (`self`) are available."""
                     tool_call_event_id=tool_call_event_id,
                 )
                 if result is None or getattr(result, "error", None) is not None:
-                    # Error occurred (already handled) or code execution failed -
-                    # stop processing remaining tool calls
                     return _ToolCallsResult()
-
-                # Check if return_result() was called inline
                 if isinstance(result, tuple) and result[0] == "TASK_COMPLETE":
-                    # Task completed via inline return_result()
                     return _ToolCallsResult(completed=True, final_value=result[1])
-
-            elif tool_call.name == "return_result":
-                # Return the final result
-                try:
-                    validated, error_msg = self._handle_return_result(
-                        runtime, tool_call, args, return_type, session, call
-                    )
-                except GenerationError:
-                    # _handle_return_result raises GenerationError when validation
-                    # fails AND session is exhausted. Ensure the ToolCallEvent has
-                    # an error result before re-raising so the event is never left
-                    # with result=None in the DB (which corrupts the next session's
-                    # context render).
-                    runtime.event_manager.update(
-                        tool_call_event_id,
-                        result=ToolResult(
-                            tool_call_id=tool_call.id,
-                            content="return_result validation failed (session exhausted).",
-                            result_status=ResultStatus.ERROR,
-                        ),
-                    )
-                    raise
-                if error_msg is None:
-                    # Rewrite the tool_call arguments to show correct syntax
-                    # when coercion changed the value (teaches model the right format).
-                    corrected_args = self._corrected_return_args(validated, args)
-                    runtime.event_manager.update(
-                        tool_call_event_id,
-                        arguments=corrected_args,
-                        result=ToolResult(
-                            tool_call_id=tool_call.id,
-                            content="Result accepted.",
-                            result_status=ResultStatus.COMPLETE,
-                        ),
-                    )
-                    logger.info("[CODEACT] Task completed successfully via return_result")
-                    return _ToolCallsResult(completed=True, final_value=validated)
-                # Validation error - update with error result
+            else:
+                # Truly unknown tool — not translatable
+                session.record_error()
                 runtime.event_manager.update(
                     tool_call_event_id,
                     result=ToolResult(
                         tool_call_id=tool_call.id,
-                        content=f"Invalid result: {error_msg}\n"
-                        f"Please call return_result again with valid arguments. "
-                        f"Tip: if you computed the result in execute_python(), you can call "
-                        f"return_result(variable) from within the code instead.",
+                        content=self._unknown_tool_feedback(tool_call.name, args, runtime),
                         result_status=ResultStatus.ERROR,
                     ),
                 )
                 # Stop processing remaining tool calls
                 return _ToolCallsResult()
 
-            else:
-                # Unknown tool — attempt to translate to execute_python.
-                # Weaker models sometimes call agent methods directly as tool
-                # calls instead of wrapping them in execute_python().
-                translated_code = (
-                    self._translate_tool_call_to_code(
-                        tool_call.name, args, builtins, session, runtime
-                    )
-                    if self.config.translate_tool_calls
-                    else None
-                )
-                if translated_code is not None:
-                    get_harness_metrics().tool_call_translated(tool_call.name)
-                    logger.debug(
-                        f"[CODEACT] Translated tool call '{tool_call.name}' -> execute_python"
-                    )
-                    # Update ToolCallEvent to reflect the translation
-                    runtime.event_manager.update(
-                        tool_call_event_id,
-                        name="execute_python",
-                        arguments={"code": translated_code},
-                    )
-                    translated_args = {"code": translated_code}
-                    result = await self._handle_execute_python(
-                        runtime,
-                        tool_call,
-                        translated_args,
-                        builtins,
-                        session,
-                        call,
-                        return_type,
-                        tool_call_event_id=tool_call_event_id,
-                    )
-                    if result is None or getattr(result, "error", None) is not None:
-                        return _ToolCallsResult()
-                    if isinstance(result, tuple) and result[0] == "TASK_COMPLETE":
-                        return _ToolCallsResult(completed=True, final_value=result[1])
-                else:
-                    # Truly unknown tool — not translatable
-                    session.record_error()
-                    runtime.event_manager.update(
-                        tool_call_event_id,
-                        result=ToolResult(
-                            tool_call_id=tool_call.id,
-                            content=f"Unknown tool `{tool_call.name}`. "
-                            f"Available tools: execute_python, return_result",
-                            result_status=ResultStatus.ERROR,
-                        ),
-                    )
-                    # Stop processing remaining tool calls
-                    return _ToolCallsResult()
-
-        # All tool calls processed without completion or error-break
-        return _ToolCallsResult()
+        return None
 
     @staticmethod
     def _handle_block_syntax_error(
@@ -1432,19 +1827,25 @@ Standard Python builtins and agent instance (`self`) are available."""
     ) -> Any | None:
         """Handle execute_python tool call with deferred output pattern.
 
-        The deferred output pattern ensures tool result is nested in ToolCallEvent
-        even when nested agent calls occur during execution:
+        The deferred output pattern ensures a protocol-valid tool result is
+        nested in ToolCallEvent even when nested agent calls occur during
+        execution:
 
-        1. Update ToolCallEvent.result with "status: executing" immediately
+        1. Add a stable "status: accepted" receipt immediately
         2. Execute code (nested agent events may be added here)
-        3. Update ToolCallEvent.result status to "complete" or "error"
+        3. Record final success/error without changing the receipt text
         4. Add PythonOutput with actual output content
+
+        The receipt text must not change after a nested generation has seen it.
+        Rewriting it from "executing" to "complete" would invalidate the
+        provider's cached prompt prefix containing the nested trajectory.
 
         Returns the execution result, a tuple ("TASK_COMPLETE", result) if return_result()
         was called inline, or None if an error occurred.
         """
         method_name = call.method_name
         code = args.get("code", "")
+        execution_count = session.record_execution()
 
         # Strip markdown fences early — validator and helper binding below
         # run ast.parse() which fails on fenced input. (runtime.execute_code
@@ -1469,9 +1870,10 @@ Standard Python builtins and agent instance (`self`) are available."""
             runtime.event_manager.add(
                 PythonOutput(
                     tool_call_id=tool_call.id,
-                    execution_count=session.iteration,
+                    execution_count=execution_count,
                     stdout="",
-                    stderr="Execution error: empty code provided.",
+                    stderr="",
+                    error=self._empty_code_error(args),
                     value=None,
                     explicit_return=False,
                     execution_status=ResultStatus.ERROR,
@@ -1479,14 +1881,15 @@ Standard Python builtins and agent instance (`self`) are available."""
             )
             return None
 
-        # Update ToolCallEvent with executing status immediately - BEFORE code execution
-        # This ensures result is nested even if nested agents add events
+        # Install a stable protocol receipt BEFORE code execution. Nested agent
+        # generations can observe this message, so its provider-visible content
+        # must remain byte-identical after execution completes.
         runtime.event_manager.update(
             tool_call_event_id,
             result=ToolResult(
                 tool_call_id=tool_call.id,
-                content="status: executing",
-                result_status=ResultStatus.COMPLETE,  # Will update to error if needed
+                content=_EXECUTE_PYTHON_RECEIPT,
+                result_status=ResultStatus.RUNNING,
             ),
         )
 
@@ -1504,16 +1907,20 @@ Standard Python builtins and agent instance (`self`) are available."""
         hm = get_harness_metrics()
         hm.exec_python(success=not result.error)
         if result.error:
-            hm.exec_error(
-                type(result.error).__name__, str(result.error)[:500], session.iteration, code[:200]
+            error_type = (
+                result.error.original_type
+                if isinstance(result.error, SandboxExecutionError)
+                else type(result.error).__name__
             )
+            hm.exec_error(error_type, str(result.error)[:500], session.iteration, code[:200])
 
-        # Update ToolCallEvent with final status
+        # Preserve the already-rendered receipt and update only lifecycle status.
+        # PythonOutput below appends the actual outcome to the conversation.
         runtime.event_manager.update(
             tool_call_event_id,
             result=ToolResult(
                 tool_call_id=tool_call.id,
-                content=f"status: {final_status.value}",
+                content=_EXECUTE_PYTHON_RECEIPT,
                 result_status=final_status,
             ),
         )
@@ -1545,7 +1952,6 @@ Standard Python builtins and agent instance (`self`) are available."""
             try:
                 validated, validation_error = self._handle_return_result(
                     runtime,
-                    tool_call,
                     result.signal.result,  # Extract the result dict from the signal
                     return_type,
                     session,
@@ -1577,17 +1983,8 @@ Standard Python builtins and agent instance (`self`) are available."""
                     ),
                 )
 
-            error_text = ""
-            if result.error:
-                line_offset = getattr(result, "wrapper_line_offset", 0)
-                error_text = self._format_error(result.error, line_offset=line_offset)
+            error_text = self._format_execution_error(runtime, result, code)
             stderr = result.stderr
-            if error_text:
-                stderr = (
-                    f"{stderr}\nExecution error:\n{error_text}"
-                    if stderr
-                    else f"Execution error:\n{error_text}"
-                )
             if validation_error:
                 stderr = (
                     f"{stderr}\nreturn_result validation error: {validation_error}"
@@ -1598,10 +1995,13 @@ Standard Python builtins and agent instance (`self`) are available."""
             runtime.event_manager.add(
                 PythonOutput(
                     tool_call_id=tool_call.id,
-                    execution_count=session.iteration,
+                    execution_count=execution_count,
                     stdout=result.stdout,
                     stderr=stderr,
-                    value=result.returned_value if result.has_return else None,
+                    error=error_text,
+                    # The trace-only completion marker is not replayed. Keep the
+                    # accepted value on this real execution output for later turns.
+                    value=validated if validation_error is None else None,
                     explicit_return=result.explicit_return,
                     execution_status=ResultStatus.ERROR if validation_error else final_status,
                     images=result.images,
@@ -1613,7 +2013,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                 # Emit a synthetic return_result ToolCallEvent so the final
                 # answer appears in the trajectory (otherwise the inline
                 # path leaves no trace of the value).  Mirrors PredictStrategy's
-                # _replace_with_tool_call pattern in predict.py.
+                # append-only synthetic tool-call pattern.
                 self._emit_synthetic_inline_return(runtime, validated)
                 logger.info("[CODEACT] Task completed successfully via inline return_result()")
                 return ("TASK_COMPLETE", validated)
@@ -1639,7 +2039,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                     runtime.event_manager.add(
                         PythonOutput(
                             tool_call_id=tool_call.id,
-                            execution_count=session.iteration,
+                            execution_count=execution_count,
                             stdout=result.stdout,
                             stderr=result.stderr,
                             value=result.returned_value,
@@ -1649,9 +2049,8 @@ Standard Python builtins and agent instance (`self`) are available."""
                         )
                     )
                     get_harness_metrics().explicit_return_completed()
-                    # Emit a synthetic return_result ToolCallEvent so the
-                    # final answer is visible in the trajectory; see the
-                    # inline-return_result path above.
+                    # Record a trace-only completion marker. Both CodeAct variants
+                    # omit this marker from provider replay: it was not an LLM call.
                     self._emit_synthetic_inline_return(runtime, validated)
                     logger.info("[CODEACT] Auto-completed task from explicit return statement")
                     return ("TASK_COMPLETE", validated)
@@ -1666,28 +2065,22 @@ Standard Python builtins and agent instance (`self`) are available."""
         # Only explicit `return x` statements can auto-complete the task.
 
         # Format error if present
-        error_text = ""
-        if result.error:
-            line_offset = getattr(result, "wrapper_line_offset", 0)
-            if (
-                isinstance(result.error, PydanticValidationError)
-                and result.returned_value is not None
-            ):
-                error_text = format_validation_error(
-                    result.error, return_type, result.returned_value, runtime.truncation_config
-                )
-            else:
-                error_text = self._format_error(result.error, line_offset=line_offset)
+        error_text = self._format_execution_error(
+            runtime,
+            result,
+            code,
+            return_type=return_type,
+        )
 
         # Add PythonOutput with actual output and value
         runtime.event_manager.add(
             PythonOutput(
                 tool_call_id=tool_call.id,
-                execution_count=session.iteration,
+                execution_count=execution_count,
                 stdout=result.stdout,
                 stderr=result.stderr,
                 error=error_text,
-                value=result.returned_value if result.has_return and not result.error else None,
+                value=self._python_output_value(result),
                 explicit_return=result.explicit_return if result.has_return else False,
                 execution_status=final_status,
                 images=result.images,
@@ -1703,10 +2096,51 @@ Standard Python builtins and agent instance (`self`) are available."""
 
         return result
 
+    @staticmethod
+    def _record_cancelled_cell(
+        runtime: RuntimeServices,
+        tool_call_id: str,
+        execution_count: int,
+        cancel: asyncio.CancelledError,
+        metadata: dict[str, Any],
+    ) -> None:
+        """Record a cell interrupted by cancellation so the model can see it.
+
+        Appends a ``PythonOutput`` with ``ResultStatus.CANCELLED`` and the
+        stdout/stderr the cell produced before the cancel. ``execute_code``
+        appends that partial output to the exception's ``execution_results``
+        list; when it is absent (the cancel landed before capture started) the
+        output is empty. The cell's tool-call event is left exactly as it was written:
+        a cancel is a later fact about the turn, recorded by appending, not by
+        rewriting an earlier event (which would also invalidate cached prompt
+        prefixes). ``metadata`` is the tag the cell's normal ``PythonOutput``
+        would carry (the prefill tag for a prefill step). ``_execute_code``
+        calls this and re-raises the cancellation.
+
+        The same exception passes through every enclosing cell of a nested
+        call, and each ``execute_code`` frame appends its own result, innermost
+        first. This is called right after this cell's frame unwound, so its
+        result is the last entry; it is removed so an enclosing cell takes its
+        own. Results left by inner cells that record nothing (other strategies)
+        stay earlier in the list and are never mistaken for this cell's output.
+        """
+        results = getattr(cancel, "execution_results", None)
+        partial = results.pop() if results else None
+        runtime.event_manager.add(
+            PythonOutput(
+                tool_call_id=tool_call_id,
+                execution_count=execution_count,
+                stdout=partial.stdout if partial is not None else "",
+                stderr=partial.stderr if partial is not None else "",
+                execution_status=ResultStatus.CANCELLED,
+                images=partial.images if partial is not None else [],
+                metadata=metadata,
+            )
+        )
+
     def _handle_return_result(
         self,
         runtime: RuntimeServices,
-        tool_call: Any,
         args: dict[str, Any],
         return_type: Any,
         session: CodeActSession,
@@ -1741,7 +2175,7 @@ Standard Python builtins and agent instance (`self`) are available."""
         )
 
         validated = None
-        exception = None
+        exception: BaseException | None = None
         error_msg = None
         normalized_args: dict[str, Any] = {}
 
@@ -1773,7 +2207,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                 # LLM passed direct fields (e.g., sum=100, mean=20)
                 # Wrap them as the result value
                 get_harness_metrics().args_normalized()
-                normalized_args: dict[str, Any] = {"result": args}
+                normalized_args = {"result": args}
             else:
                 # Already has "result" key, use as-is
                 normalized_args = args
@@ -1840,7 +2274,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                     raise TypeError(
                         f"Expected an instance of {type_name}, "
                         f"but got {type(validated).__name__}.\n"
-                        f"Hint: Use execute_python() to construct the {type_name} object, "
+                        f"Hint: Use {self._python_tool_name()}() to construct the {type_name} object, "
                         f"then call return_result(variable) from within the code."
                     )
 
@@ -1878,6 +2312,10 @@ Standard Python builtins and agent instance (`self`) are available."""
 
             return (None, error_msg)
 
+        except BaseException as error:
+            exception = error
+            raise
+
         finally:
             # Call after hook
             call_after_hook(
@@ -1913,12 +2351,12 @@ Standard Python builtins and agent instance (`self`) are available."""
         observability, we emit a synthetic ``ToolCallEvent`` with the
         captured value.
 
-        Mirrors :meth:`PredictStrategy._replace_with_tool_call` in
-        ``predict.py``. The event carries
+        Mirrors :meth:`PredictStrategy._append_tool_call`. The event carries
         ``metadata.synthetic = True`` and
         ``metadata.synthetic_type = "codeact_inline_return"`` so
         downstream consumers can distinguish framework-emitted markers
-        from genuine LLM tool_calls if desired.
+        from genuine LLM tool_calls. Both CodeAct variants retain this event for
+        traces and exports; provider replay omits it to avoid inventing a call.
         """
         tool_call_id = f"codeact_inline_{uuid4().hex[:8]}"
         # _jsonable() recurses unguarded — a self-referential dict/list
@@ -1946,7 +2384,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                 ),
                 metadata={
                     "synthetic": True,
-                    "synthetic_type": "codeact_inline_return",
+                    "synthetic_type": CODEACT_INLINE_RETURN,
                 },
             )
         )
@@ -2005,7 +2443,9 @@ Standard Python builtins and agent instance (`self`) are available."""
 
         return value
 
-    def _corrected_return_args(self, validated: Any, original_args: dict) -> dict:
+    def _corrected_return_args(
+        self, validated: Any, original_args: dict[str, Any]
+    ) -> dict[str, Any]:
         """Return corrected tool_call arguments showing correct JSON syntax.
 
         When coercion transformed the result (e.g. from a constructor-call
@@ -2296,7 +2736,7 @@ Standard Python builtins and agent instance (`self`) are available."""
             return ""
 
         return Tool(
-            name="execute_python",
+            name=self._python_tool_name(),
             description=(
                 "Execute Python code in the agent's environment. "
                 "Variables persist across calls. "
@@ -2404,7 +2844,7 @@ Standard Python builtins and agent instance (`self`) are available."""
             # Activate doc() adapters for installed libs (pandas, plotly, …) so the
             # rendering is concise rather than the library's full constructor docstring.
             # Idempotent and installed-gated; only runs on this (opaque-type) path.
-            register_all()
+            register_all()  # type: ignore[no-untyped-call]
             rendered = _doc(return_type)
         except Exception:  # noqa: BLE001 — doc() is advisory; never break tool build
             return None
@@ -2482,7 +2922,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                     f"Call this ONLY when you have computed the final answer. "
                     f"Expected return type: {type_name}. "
                     f"IMPORTANT: This type cannot be passed directly via this tool. "
-                    f"Construct the object in execute_python() and call "
+                    f"Construct the object in {self._python_tool_name()}() and call "
                     f"return_result(variable) from within the code instead."
                 )
                 # Opaque types (pd.DataFrame, np.ndarray, custom classes) carry no JSON
@@ -2498,7 +2938,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                     f"Return the final result for the task. "
                     f"Call this ONLY when you have computed the final answer. "
                     f"Expected return type: {type_name}. "
-                    f"Tip: prefer calling return_result(variable) from within execute_python() "
+                    f"Tip: prefer calling return_result(variable) from within {self._python_tool_name()}() "
                     f"to pass computed results directly."
                 )
 
@@ -2539,14 +2979,17 @@ Standard Python builtins and agent instance (`self`) are available."""
             inspect_code = prefill.get_code(call, config=truncation_config)
 
             if inspect_code:
-                await self._execute_prefill_step(
-                    runtime,
-                    inspect_code,
-                    prefill_builtins,
-                    session,
-                    call.method_name,
-                    prefill_type="inspect_inputs",
-                )
+                from nooa.strategies.prefill import warn_on_prefill_truncation
+
+                with warn_on_prefill_truncation(call):
+                    await self._execute_prefill_step(
+                        runtime,
+                        inspect_code,
+                        prefill_builtins,
+                        session,
+                        call.method_name,
+                        prefill_type="inspect_inputs",
+                    )
 
         # 2. Pre-ellipsis code (user-defined setup before ...)
         # Runs as separate execution - LLM sees variables persist from step 1
@@ -2577,32 +3020,41 @@ Standard Python builtins and agent instance (`self`) are available."""
         """
         get_harness_metrics().prefill(prefill_type)
         logger.debug(f"[CODEACT] Running prefill ({prefill_type}) for {method_name}")
+        execution_count = session.record_execution()
 
         # Create synthetic tool call
         prefill_id = f"prefill_{uuid4().hex[:8]}"
         prefill_event_id = runtime.event_manager.add(
             ToolCallEvent(
                 tool_call_id=prefill_id,
-                name="execute_python",
+                name=self._python_tool_name(),
                 arguments={"code": code},
                 result=None,  # Will be updated after execution
-                metadata={"prefill": True, "prefill_type": "inspect_inputs"},
+                metadata={"prefill": True, "prefill_type": prefill_type},
             )
         )
 
-        # Update with executing status immediately (deferred output pattern)
+        # Keep the provider-facing receipt stable if this prefill recursively
+        # triggers a generation before it completes.
         runtime.event_manager.update(
             prefill_event_id,
             result=ToolResult(
                 tool_call_id=prefill_id,
-                content="status: executing",
-                result_status=ResultStatus.COMPLETE,  # Will update to error if needed
+                content=_EXECUTE_PYTHON_RECEIPT,
+                result_status=ResultStatus.RUNNING,
             ),
         )
 
-        # Execute the code
+        # Execute the code. A cancel here is recorded exactly like a cancel in a
+        # model-written cell, with the prefill tag on the recorded output.
         result = await self._execute_code(
-            runtime, code, builtins, session, method_name, tool_call_id=prefill_id
+            runtime,
+            code,
+            builtins,
+            session,
+            method_name,
+            tool_call_id=prefill_id,
+            output_metadata={"prefill": True, "prefill_type": prefill_type},
         )
 
         # Merge captured locals into session (persists for next steps and LLM turns)
@@ -2613,28 +3065,25 @@ Standard Python builtins and agent instance (`self`) are available."""
                 f"{list(result.captured_locals.keys())}"
             )
 
-        # Update ToolCallEvent with final status
+        # Preserve the receipt text; only observability status changes.
         final_status = ResultStatus.ERROR if result.error else ResultStatus.COMPLETE
         runtime.event_manager.update(
             prefill_event_id,
             result=ToolResult(
                 tool_call_id=prefill_id,
-                content=f"status: {final_status.value}",
+                content=_EXECUTE_PYTHON_RECEIPT,
                 result_status=final_status,
             ),
         )
 
         # Format error if present
-        error_text = ""
-        if result.error:
-            line_offset = getattr(result, "wrapper_line_offset", 0)
-            error_text = self._format_error(result.error, line_offset=line_offset)
+        error_text = self._format_execution_error(runtime, result, code)
 
-        # Add execution output as user message (execution_count=0 since before main loop)
+        # Add execution output as a user message with this cell's unique count.
         runtime.event_manager.add(
             PythonOutput(
                 tool_call_id=prefill_id,
-                execution_count=0,  # Prefill is before main loop
+                execution_count=execution_count,
                 stdout=result.stdout,
                 stderr=result.stderr,
                 error=error_text,
@@ -2642,7 +3091,11 @@ Standard Python builtins and agent instance (`self`) are available."""
                 explicit_return=result.explicit_return if result.has_return else False,
                 execution_status=final_status,
                 images=result.images,
-                metadata={"prefill": True, "prefill_type": prefill_type},
+                metadata={
+                    "prefill": True,
+                    "prefill_type": prefill_type,
+                    **({"execution_error": True} if result.error else {}),
+                },
             )
         )
 
@@ -2657,8 +3110,14 @@ Standard Python builtins and agent instance (`self`) are available."""
         session: CodeActSession,
         target_method_name: str,
         tool_call_id: str | None = None,
+        output_metadata: dict[str, Any] | None = None,
     ) -> Any:
-        """Execute Python code via the runtime."""
+        """Execute Python code via the runtime.
+
+        If the cell is cancelled while it runs, the cancel is recorded with
+        ``_record_cancelled_cell`` (tagged with ``output_metadata``) under
+        ``tool_call_id`` and the current execution count, then re-raised.
+        """
         from nooa.events import ExecutionResult
 
         logger.debug(
@@ -2670,7 +3129,23 @@ Standard Python builtins and agent instance (`self`) are available."""
 
         # Validate REPL policy (no classes, await async methods)
         validator = GeneratedCodeValidator()
-        validation_errors = validator.validate(code, runtime.agent)
+        try:
+            validation_errors = completion_binding_errors(
+                code,
+                reserved=frozenset(
+                    name.removesuffix("()") for name in self._always_available_builtins()
+                ),
+                filename=f"Cell In[{session.execution_count}]",
+            )
+        except SyntaxError as error:
+            return ExecutionResult(stdout="", error=error, defined_methods={})
+        try:
+            validation_errors.extend(validator.validate(code, runtime.agent))
+        except RecursionError:
+            validation_errors.append(
+                "Cell nests too deeply for REPL-policy validation; "
+                "split the deeply nested code into smaller statements, then retry."
+            )
         if validation_errors:
             error_msg = "Code validation failed:\n" + "\n".join(
                 f"• {err}" for err in validation_errors
@@ -2683,90 +3158,142 @@ Standard Python builtins and agent instance (`self`) are available."""
         # delegate the cell to the guarded worker process. Routing through
         # execute_code (rather than the executor directly) keeps the execute_python
         # middleware, before/after_code_execution hooks and events firing.
+        run_kwargs: dict[str, Any]
         if session.sandbox_executor is not None:
-            from nooa.runtime.debug_handler import code_exec_context
+            # Validation of restrictions and the cell guard still runs on the parent.
+            run_kwargs = {"sandbox_executor": session.sandbox_executor}
+        else:
+            # Build execution namespace
+            strategy_extras: dict[str, Any] = {
+                "CodeActStrategy": type(self),
+            }
+            try:
+                from nooa.strategies.predict import PredictStrategy
 
-            with code_exec_context(code):
-                return await runtime.execute_code(
-                    code,
-                    validate=True,  # run restrictions/cell-guard validation on the parent
-                    wrap_in_function=True,
-                    timeout=self.config.cell_timeout,
-                    tool_call_id=tool_call_id,
-                    execution_count=session.iteration,
-                    restrictions=self.config.restrictions,
-                    sandbox_executor=session.sandbox_executor,
-                )
+                strategy_extras["PredictStrategy"] = PredictStrategy
+            except ImportError:
+                pass
 
-        # Build execution namespace
-        strategy_extras: dict[str, Any] = {
-            "CodeActStrategy": type(self),
-        }
-        try:
-            from nooa.strategies.predict import PredictStrategy
-
-            strategy_extras["PredictStrategy"] = PredictStrategy
-        except ImportError:
-            pass
-
-        namespace = ExecutionNamespaceBuilder.build(
-            runtime.agent, extra={**builtins, **session.session_locals, **strategy_extras}
-        )
-
-        # Pre-compile helper function defs so @strategy decorators can see
-        # _generated_source at decoration time. Helpers are never attached to the agent.
-        helper_compiler = HelperFunctionManager()
-        helper_result = helper_compiler.apply(
-            code,
-            runtime.agent,
-            session.session_locals,
-            namespace=namespace,
-        )
-
-        if helper_result.errors:
-            error_msg = "Failed to define helper function(s):\n" + "\n".join(
-                f"- {e}" for e in helper_result.errors
+            namespace = ExecutionNamespaceBuilder.build(
+                runtime.agent, extra={**builtins, **session.session_locals, **strategy_extras}
             )
-            logger.warning(f"[CODEACT] Helper compile errors: {helper_result.errors}")
-            return ExecutionResult(stdout="", error=Exception(error_msg), defined_methods={})
 
-        if helper_result.installed:
-            logger.debug(f"[CODEACT] Compiled helpers: {helper_result.installed}")
+            # Pre-compile helper function defs so @strategy decorators can see
+            # _generated_source at decoration time. Helpers are never attached to the agent.
+            helper_compiler = HelperFunctionManager()
+            helper_result = helper_compiler.apply(
+                code,
+                runtime.agent,
+                session.session_locals,
+                namespace=namespace,
+            )
 
-        # Execute with session locals
-        execution_builtins = {**builtins, **session.session_locals}
+            if helper_result.errors:
+                error_msg = "Failed to define helper function(s):\n" + "\n".join(
+                    f"- {e}" for e in helper_result.errors
+                )
+                logger.warning(f"[CODEACT] Helper compile errors: {helper_result.errors}")
+                return ExecutionResult(stdout="", error=Exception(error_msg), defined_methods={})
+
+            if helper_result.installed:
+                logger.debug(f"[CODEACT] Compiled helpers: {helper_result.installed}")
+
+            # Execute with session locals
+            run_kwargs = {"builtins": {**builtins, **session.session_locals}}
 
         # Track this execution so the /activity slash command can report that
         # the agent is currently running a code cell (vs blocked on an LLM call).
         from nooa.runtime.debug_handler import code_exec_context
 
         with code_exec_context(code):
-            return await runtime.execute_code(
-                code,
-                builtins=execution_builtins,
-                validate=True,
-                wrap_in_function=True,
-                timeout=self.config.cell_timeout,
-                tool_call_id=tool_call_id,
-                execution_count=session.iteration,
-                restrictions=self.config.restrictions,
+            try:
+                return await runtime.execute_code(
+                    code,
+                    validate=True,
+                    wrap_in_function=True,
+                    timeout=self.config.cell_timeout,
+                    tool_call_id=tool_call_id,
+                    execution_count=session.execution_count,
+                    restrictions=self.config.restrictions,
+                    **run_kwargs,
+                )
+            except asyncio.CancelledError as cancel:
+                if tool_call_id is not None:
+                    # A failure to store the record (SQLite, serialization) must
+                    # not replace the cancellation, so it is logged instead.
+                    try:
+                        self._record_cancelled_cell(
+                            runtime,
+                            tool_call_id,
+                            session.execution_count,
+                            cancel,
+                            output_metadata or {},
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Could not record cancelled cell %s; re-raising the cancel",
+                            tool_call_id,
+                        )
+                raise
+
+    def _format_execution_error(
+        self,
+        runtime: RuntimeServices,
+        result: "ExecutionResult",
+        code: str,
+        *,
+        return_type: Any = None,
+    ) -> str:
+        """Render one execution failure with the runtime's capture policy."""
+        if result.error is None:
+            return ""
+        if (
+            return_type is not None
+            and isinstance(result.error, PydanticValidationError)
+            and result.returned_value is not None
+        ):
+            return format_validation_error(
+                result.error,
+                return_type,
+                result.returned_value,
+                runtime.truncation_config,
             )
+        return self._format_error(
+            result.error,
+            code,
+            line_offset=result.wrapper_line_offset,
+            max_error=runtime.truncation_config.capture.max_error,
+            tail_chars=runtime.truncation_config.capture.tail,
+        )
 
     def _format_error(
-        self, error: Exception, code: str | None = None, *, line_offset: int = 0
+        self,
+        error: Exception,
+        code: str | None = None,
+        *,
+        line_offset: int = 0,
+        max_error: int | None = None,
+        tail_chars: int | None = None,
     ) -> str:
         """Format an error for display using the configured formatter."""
         if self.error_formatter is not None:
-            # Custom formatters may or may not support line_offset
-            try:
-                return self.error_formatter.format(error, code, line_offset=line_offset)
-            except TypeError:
-                # Formatter doesn't accept line_offset
-                return self.error_formatter.format(error, code)
+            return self.error_formatter.format(
+                error,
+                code,
+                line_offset=line_offset,
+                max_error=max_error,
+                tail_chars=tail_chars,
+            )
 
         from nooa.errors.formatting import format_error_for_llm
 
-        return format_error_for_llm(error, code, line_offset=line_offset)
+        return format_error_for_llm(
+            error,
+            code,
+            line_offset=line_offset,
+            max_error=max_error,
+            tail_chars=tail_chars,
+        )
 
     def _extract_module_context(
         self, agent_module: types.ModuleType, agent: Any | None = None
@@ -2904,8 +3431,8 @@ Standard Python builtins and agent instance (`self`) are available."""
                     # is routed to "kind" and the kwargs fill the rest, so
                     # return_result("respond", content="hi") is equivalent to
                     # return_result(kind="respond", content="hi"). Do NOT remove
-                    # this branch: it is relied on in production (the TUI's
-                    # RespondResult and skills-sw SKILL.md).
+                    # this branch: it is relied on in production (skills-sw
+                    # SKILL.md).
                     model_fields = getattr(call.return_type, "model_fields", {})
                     if "kind" not in model_fields:
                         raise ValueError("Cannot mix positional and keyword arguments")
@@ -2928,12 +3455,8 @@ Standard Python builtins and agent instance (`self`) are available."""
         if agent_module:
             builtins.update(self._extract_module_context(agent_module, agent=runtime.agent))
 
-        # Add strategy builtins (these override any module-level names)
-        builtins.update(
-            {
-                "return_result": return_result,
-            }
-        )
+        # Add strategy builtins (these override any module-level names).
+        builtins.update({"return_result": return_result})
 
         # Add method parameters as variables.
         # call.kwargs is already the fully merged positional+keyword mapping

@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for mcp_nooa module."""
 
+import asyncio
 import json
 
 import httpx
@@ -10,9 +11,13 @@ import pytest
 pytest.importorskip("mcp")
 
 from datetime import timedelta  # noqa: E402
+from types import SimpleNamespace  # noqa: E402
 from typing import Literal  # noqa: E402
 from unittest.mock import AsyncMock, MagicMock, patch  # noqa: E402
 
+from mcp.types import Tool as MCPRemoteTool  # noqa: E402
+
+from nooa.mcp import client as client_module  # noqa: E402
 from nooa.mcp import oauth  # noqa: E402
 from nooa.mcp.client import (  # noqa: E402
     MCPBaseClient,
@@ -21,7 +26,13 @@ from nooa.mcp.client import (  # noqa: E402
     MCPStreamableHTTPClient,
     create_mcp_client,
 )
-from nooa.mcp.tool import MCPTool, MCPToolSpec, _make_dynamic_class  # noqa: E402
+from nooa.mcp.tool import (  # noqa: E402
+    MCPManager,
+    MCPTool,
+    MCPToolSpec,
+    _make_dynamic_class,
+    _tool_input_schema,
+)
 
 
 # Fixtures
@@ -311,6 +322,24 @@ def test_tool_call_timeout_default(client_class: type[MCPBaseClient], client_kwa
     assert client.tool_call_timeout == timedelta(seconds=60)
 
 
+@pytest.mark.parametrize(
+    ("uses_float_seconds", "expected"),
+    [
+        (False, timedelta(seconds=7.5)),
+        (True, 7.5),
+    ],
+)
+def test_session_timeout_matches_mcp_sdk_contract(
+    monkeypatch: pytest.MonkeyPatch,
+    uses_float_seconds: bool,
+    expected: timedelta | float,
+):
+    """MCP 1.x expects timedelta while MCP 2.x expects float seconds."""
+    monkeypatch.setattr(client_module, "_MCP_READ_TIMEOUT_USES_FLOAT", uses_float_seconds)
+
+    assert client_module._session_read_timeout(timedelta(seconds=7.5)) == expected
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "client_fixture, transport_patch",
@@ -400,7 +429,9 @@ async def test_streamable_http_applies_tool_call_timeout(
     assert timeout.write == 90
     # Opening the connection is not a tool call and keeps its own short budget.
     assert timeout.connect == 5.0
-    assert mock_session_class.call_args.kwargs["read_timeout_seconds"] == timedelta(seconds=90)
+    assert mock_session_class.call_args.kwargs[
+        "read_timeout_seconds"
+    ] == client_module._session_read_timeout(timedelta(seconds=90))
 
 
 @pytest.mark.asyncio
@@ -432,7 +463,9 @@ async def test_session_enforces_tool_call_timeout(
         async with client.connect_to_server():
             pass
 
-    assert mock_session_class.call_args.kwargs["read_timeout_seconds"] == expected_timeout
+    assert mock_session_class.call_args.kwargs[
+        "read_timeout_seconds"
+    ] == client_module._session_read_timeout(expected_timeout)
 
 
 @pytest.mark.parametrize(
@@ -451,21 +484,22 @@ def test_create_mcp_client_forwards_tool_call_timeout(kwargs: dict[str, str]):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("provides_session_id", [False, True])
 async def test_streamable_http_connect_context_manager(
     streamable_http_client: MCPStreamableHTTPClient,
     mock_client_session: AsyncMock,
+    provides_session_id: bool,
 ):
-    """connect_to_server() is a proper async context manager for streamable-http."""
+    """MCP 1.x and 2.x stream tuples both establish a usable session."""
     mock_read = MagicMock()
     mock_write = MagicMock()
     mock_get_session_id = MagicMock(return_value="session-123")
+    transport_streams = (mock_read, mock_write, mock_get_session_id)
+    if not provides_session_id:
+        transport_streams = transport_streams[:2]
 
     with patch("nooa.mcp.client.streamable_http_client") as mock_http:
-        mock_http.return_value.__aenter__.return_value = (
-            mock_read,
-            mock_write,
-            mock_get_session_id,
-        )
+        mock_http.return_value.__aenter__.return_value = transport_streams
 
         with patch("nooa.mcp.client.ClientSession") as mock_session_class:
             mock_session_class.return_value.__aenter__.return_value = mock_client_session
@@ -477,7 +511,8 @@ async def test_streamable_http_connect_context_manager(
                 assert session is not None
                 mock_client_session.initialize.assert_awaited_once()
                 # During connection, mcp_session_id should be available
-                assert streamable_http_client.mcp_session_id == "session-123"
+                expected_session_id = "session-123" if provides_session_id else None
+                assert streamable_http_client.mcp_session_id == expected_session_id
 
             # After connection, mcp_session_id should be cleared
             assert streamable_http_client.mcp_session_id is None
@@ -789,3 +824,290 @@ def test_create_from_server_keeps_and_copies_nested_inline_config(monkeypatch):
     assert transport_args["args"] == ["server.py", "${MCP_HOST_SECRET}"]
     assert transport_args["env"] == {"TOKEN": "${MCP_HOST_SECRET}"}
     assert canary not in repr(transport_args)
+
+
+@pytest.mark.parametrize("attribute", ["inputSchema", "input_schema"])
+def test_tool_input_schema_supports_mcp_sdk_field_names(attribute: str):
+    """MCP 1.x and 2.x expose the input schema under different field names."""
+    schema = {"type": "object", "properties": {}}
+    remote_tool = SimpleNamespace(**{attribute: schema})
+
+    assert _tool_input_schema(remote_tool) is schema
+
+
+@pytest.mark.asyncio
+async def test_create_stdio_server_builds_tool_from_real_sdk_model():
+    session = AsyncMock()
+    schema = {
+        "type": "object",
+        "properties": {"query": {"type": "string"}},
+        "required": ["query"],
+    }
+    remote_tool = MCPRemoteTool(
+        name="lookup",
+        description="Look up a value",
+        inputSchema=schema,
+    )
+    session.list_tools.return_value.tools = [remote_tool]
+    client = MagicMock()
+
+    class Context:
+        async def __aenter__(self):
+            return session
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    client.connect_to_server.return_value = Context()
+
+    # The point of this factory is that the connect happens on the caller's
+    # loop. Record which loop list_tools is awaited on, so reverting to the
+    # thread-pool bridge — which runs it on a private loop in a worker thread —
+    # fails here instead of passing identically.
+    awaited_on: list[object] = []
+
+    tools_result = session.list_tools.return_value
+
+    async def record_loop(*args, **kwargs):
+        awaited_on.append(asyncio.get_running_loop())
+        return tools_result
+
+    session.list_tools = record_loop
+    caller_loop = asyncio.get_running_loop()
+
+    with patch("nooa.mcp.tool.create_mcp_client", return_value=client) as create:
+        tool = await MCPManager.create_stdio_server(
+            "lookup", "lookup-server", args=["--stdio"], env={"TOKEN": "test"}
+        )
+
+    assert awaited_on == [caller_loop], "connect did not stay on the caller's loop"
+    assert isinstance(tool, MCPTool)
+    assert callable(tool.lookup)  # type: ignore[attr-defined]
+    create.assert_called_once_with(
+        transport="stdio",
+        command="lookup-server",
+        args=["--stdio"],
+        env={"TOKEN": "test"},
+        tool_call_timeout=timedelta(seconds=60),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transport", ["streamable-http", "sse"])
+async def test_create_url_server_builds_tool_from_explicit_client_config(transport):
+    session = AsyncMock()
+    remote_tool = MagicMock()
+    remote_tool.name = "echo"
+    remote_tool.description = "Echo a value"
+    remote_tool.inputSchema = {
+        "type": "object",
+        "properties": {"message": {"type": "string"}},
+        "required": ["message"],
+    }
+    session.list_tools.return_value.tools = [remote_tool]
+    client = MagicMock()
+
+    class Context:
+        async def __aenter__(self):
+            return session
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    client.connect_to_server.return_value = Context()
+    headers = {"Authorization": "Bearer test"}
+
+    with patch("nooa.mcp.tool.create_mcp_client", return_value=client) as create:
+        tool = await MCPManager.create_url_server(
+            "everything",
+            "https://mcp.example.test/mcp",
+            headers=headers,
+            transport=transport,
+        )
+
+    assert isinstance(tool, MCPTool)
+    assert callable(tool.echo)  # type: ignore[attr-defined]
+    create.assert_called_once_with(
+        transport=transport,
+        url="https://mcp.example.test/mcp",
+        headers=headers,
+        tool_call_timeout=timedelta(seconds=60),
+    )
+
+
+@pytest.mark.asyncio
+async def test_create_url_server_surfaces_nested_connection_error():
+    client = MagicMock()
+
+    class Context:
+        async def __aenter__(self):
+            raise ExceptionGroup(
+                "unhandled errors in a TaskGroup",
+                [ConnectionRefusedError("connection refused")],
+            )
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    client.connect_to_server.return_value = Context()
+
+    with (
+        patch("nooa.mcp.tool.create_mcp_client", return_value=client),
+        pytest.raises(RuntimeError) as exc_info,
+    ):
+        await MCPManager.create_url_server(
+            "offline",
+            "https://mcp.example.test/mcp",
+        )
+
+    assert str(exc_info.value) == (
+        "Could not connect to MCP server 'offline': ConnectionRefusedError: connection refused"
+    )
+
+
+@pytest.mark.asyncio
+async def test_create_stdio_server_closes_connection_on_cancellation():
+    started = asyncio.Event()
+    closed = asyncio.Event()
+    session = AsyncMock()
+
+    async def list_tools():
+        started.set()
+        await asyncio.Event().wait()
+
+    session.list_tools.side_effect = list_tools
+    client = MagicMock()
+
+    class Context:
+        async def __aenter__(self):
+            return session
+
+        async def __aexit__(self, exc_type, exc, tb):
+            closed.set()
+            return False
+
+    client.connect_to_server.return_value = Context()
+
+    with patch("nooa.mcp.tool.create_mcp_client", return_value=client):
+        task = asyncio.create_task(MCPManager.create_stdio_server("lookup", "lookup-server"))
+        await asyncio.wait_for(started.wait(), timeout=1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert closed.is_set()
+
+
+async def test_a_refreshed_client_keeps_the_configured_tool_call_timeout():
+    """The rebuilt client must not silently revert to the 60s default.
+
+    `refresh_ctx` did not carry `tool_call_timeout`, so after a 401 the client
+    rebuilt by `_refresh_access_token` used the factory default. A server given
+    a longer timeout on purpose started failing once its token first refreshed.
+    """
+    session = AsyncMock()
+    remote_tool = MagicMock()
+    remote_tool.name = "echo"
+    remote_tool.description = "Echo a value"
+    remote_tool.inputSchema = {"type": "object", "properties": {}}
+    session.list_tools.return_value.tools = [remote_tool]
+
+    class Context:
+        async def __aenter__(self):
+            return session
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    client = MagicMock()
+    client.connect_to_server.return_value = Context()
+    configured = timedelta(seconds=300)
+
+    with patch("nooa.mcp.tool.create_mcp_client", return_value=client):
+        tool = await MCPManager.create_url_server(
+            "slow",
+            "https://mcp.example.test/mcp",
+            transport="streamable-http",
+            tool_call_timeout=configured,
+        )
+
+    token = MagicMock(token_type="Bearer", access_token="refreshed")
+    with (
+        patch("nooa.mcp.oauth.handle_mcp_oauth", new=AsyncMock(return_value=token)),
+        patch("nooa.mcp.tool.create_mcp_client", return_value=client) as rebuild,
+    ):
+        assert await tool._refresh_access_token() is True
+
+    assert rebuild.call_args.kwargs["tool_call_timeout"] == configured
+
+
+async def test_create_url_server_rejects_a_non_url_transport():
+    """The validation branch was unreachable from tests."""
+    with pytest.raises(ValueError, match="transport"):
+        await MCPManager.create_url_server("x", "https://mcp.example.test/mcp", transport="stdio")
+
+
+async def test_create_url_server_copies_the_caller_headers():
+    """A caller's dict must not be aliased into the client's refresh context."""
+    session = AsyncMock()
+    remote_tool = MagicMock()
+    remote_tool.name = "echo"
+    remote_tool.description = "Echo"
+    remote_tool.inputSchema = {"type": "object", "properties": {}}
+    session.list_tools.return_value.tools = [remote_tool]
+
+    class Context:
+        async def __aenter__(self):
+            return session
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    client = MagicMock()
+    client.connect_to_server.return_value = Context()
+    headers = {"Authorization": "Bearer test"}
+
+    with patch("nooa.mcp.tool.create_mcp_client", return_value=client) as create:
+        await MCPManager.create_url_server(
+            "svc", "https://mcp.example.test/mcp", headers=headers, transport="sse"
+        )
+
+    passed = create.call_args.kwargs["headers"]
+    assert passed == headers
+    assert passed is not headers, "caller's dict was aliased, not copied"
+
+
+async def test_create_from_server_also_keeps_the_configured_timeout():
+    """The regression test covered the new factory, not the buggy path.
+
+    `create_from_server` is the synchronous config+OAuth path where refresh is
+    the normal case and where this bug actually lived, so reverting its
+    refresh_ctx fix was invisible.
+    """
+    session = AsyncMock()
+    remote_tool = MagicMock()
+    remote_tool.name = "echo"
+    remote_tool.description = "Echo"
+    remote_tool.inputSchema = {"type": "object", "properties": {}}
+    session.list_tools.return_value.tools = [remote_tool]
+
+    class Context:
+        async def __aenter__(self):
+            return session
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    client = MagicMock()
+    client.connect_to_server.return_value = Context()
+    configured = timedelta(seconds=300)
+
+    with patch("nooa.mcp.tool.create_mcp_client", return_value=client):
+        tool = MCPManager.create_from_server(
+            "svc",
+            url="https://mcp.example.test/mcp",
+            transport="streamable-http",
+            tool_call_timeout=configured,
+        )
+
+    assert tool._refresh_ctx["tool_call_timeout"] == configured

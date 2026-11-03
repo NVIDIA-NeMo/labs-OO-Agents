@@ -44,10 +44,11 @@ class StorageManager(Protocol):
 
         # Events stream automatically through agent.event_manager,
         # which writes to storage.event_backend. Snapshot explicitly:
-        snapshot_id = agent.save()
+        snapshot_id = storage.save_snapshot(agent)
 
-        # Restore:
-        agent = MyAgent.load(snapshot_id, storage=storage)
+        # Restore into a freshly constructed agent:
+        agent = MyAgent(storage=storage)
+        storage.restore_snapshot(snapshot_id, agent)
     """
 
     @property

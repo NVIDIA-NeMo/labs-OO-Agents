@@ -24,7 +24,7 @@ from pathlib import Path
 VALID_STRATEGIES = [
     "pure_python",
     "codeact",
-    "codeact_lite",
+    "codeact_v2",
     "reflexion",
     "predict",
     "structured_output",
@@ -101,7 +101,7 @@ def get_strategy_instance(strategy_name: str):
     """Create a strategy instance from a strategy name.
 
     Args:
-        strategy_name: One of "pure_python", "codeact", "reflexion", "structured_output"
+        strategy_name: One of VALID_STRATEGIES, including "codeact" and "codeact_v2".
 
     Returns:
         GenerationStrategy instance
@@ -110,8 +110,8 @@ def get_strategy_instance(strategy_name: str):
         ValueError: If strategy_name is not recognized
     """
     from nooa import (
-        CodeActLiteStrategy,
         CodeActStrategy,
+        CodeActV2,
         PredictStrategy,
         ReflexionStrategy,
     )
@@ -120,7 +120,7 @@ def get_strategy_instance(strategy_name: str):
     strategies = {
         "pure_python": PurePythonStrategy,
         "codeact": CodeActStrategy,
-        "codeact_lite": CodeActLiteStrategy,
+        "codeact_v2": CodeActV2,
         "reflexion": ReflexionStrategy,
         "predict": PredictStrategy,
         "structured_output": PredictStrategy,  # Backward-compatible alias

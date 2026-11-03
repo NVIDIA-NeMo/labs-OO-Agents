@@ -33,6 +33,19 @@ class TestJsonlFactory:
             assert exp.trace_dir == Path(tmpdir)
 
 
+class TestJournalFileFactory:
+    def test_creates_opt_in_journal_file_exporter(self):
+        from nooa.tracing._journal_file_exporter import JournalFileExporter
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            exp = exporters.journal_file(tmpdir)
+            try:
+                assert isinstance(exp, JournalFileExporter)
+                assert exp.trace_dir == Path(tmpdir)
+            finally:
+                exp.shutdown()
+
+
 class TestOtlpFactory:
     def test_raises_import_error_for_http(self):
         # This test assumes the OTLP HTTP exporter may or may not be installed

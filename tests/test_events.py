@@ -72,16 +72,16 @@ class TestEventTypes:
         event2 = Feedback(content="Test")
         assert event2.event_type == "Feedback"
 
-    def test_llm_output_event(self):
-        """LLMOutput for LLM responses."""
-        from nooa.events import LLMOutput
+    def test_llm_response_event(self):
+        """LLMResponse for LLM responses."""
+        from nooa.events import LLMResponse
 
-        event = LLMOutput(content="def foo(): pass")
-        assert event.event_type == "LLMOutput"
+        event = LLMResponse(content="def foo(): pass")
+        assert event.event_type == "LLMResponse"
         assert event.content == "def foo(): pass"
         # Verify event_type
-        event2 = LLMOutput(content="Test")
-        assert event2.event_type == "LLMOutput"
+        event2 = LLMResponse(content="Test")
+        assert event2.event_type == "LLMResponse"
 
     def test_tag_property_returns_event_position(self):
         """tag property returns event position (set by EventManager)."""

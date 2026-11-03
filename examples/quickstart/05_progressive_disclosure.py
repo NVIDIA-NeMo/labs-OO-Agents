@@ -20,15 +20,12 @@ _WAREHOUSE = {
 }
 
 
-def get_item(item_id: str) -> Any:
-    """Retrieve an item from the warehouse by ID."""
-    return _WAREHOUSE.get(item_id)
-
-
 class WarehouseAppraiser(Agent, llm=llm):
     """Agent that appraises items without knowing their types ahead of time."""
 
-    get_item = staticmethod(get_item)
+    def get_item(self, item_id: str) -> Any:
+        """Retrieve an item from the warehouse by ID."""
+        return _WAREHOUSE.get(item_id)
 
     async def appraise_item(self, item_id: str) -> float:
         """Get the monetary value of an item."""
@@ -42,6 +39,6 @@ async def main():
 
     for item_id in test_items:
         value = await appraiser.appraise_item(item_id)
-        item = get_item(item_id)
+        item = appraiser.get_item(item_id)
         item_type = type(item).__name__
         print(f"  {item_id} ({item_type}): ${value:,.2f}")

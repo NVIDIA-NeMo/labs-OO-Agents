@@ -77,7 +77,7 @@ EOF
 fi
 
 echo "===== BUILD RUNNER IMAGE $(date -Is) ====="
-docker build -t "$RUNNER_IMAGE" .
+docker build -f "$AGENT_REPO/Dockerfile" -t "$RUNNER_IMAGE" "$AGENT_REPO"
 
 echo "===== RUN ${#TASKS[@]} TASKS $(date -Is) ====="
 for TASK_ID in "${TASKS[@]}"; do
@@ -89,6 +89,7 @@ for TASK_ID in "${TASKS[@]}"; do
   python3 -m nooa_cybergym.run \
     --use-firewall \
     --model "$MODEL" \
+    --reasoning-effort "$REASONING_EFFORT" \
     --task-id "$TASK_ID" \
     --data-dir "$CYBERGYM_DATA_DIR" \
     --mask-map "$CYBERGYM_MASK_MAP" \

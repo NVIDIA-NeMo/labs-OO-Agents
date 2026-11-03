@@ -38,6 +38,7 @@ from nooa.events import (
     Task,
 )
 from nooa.runtime.harness_metrics import get_harness_metrics
+from nooa.runtime.sandbox.errors import SandboxExecutionError
 from nooa.strategies.base import RuntimeServices
 from nooa.strategies.codeact_errors import format_validation_error
 from nooa.strategies.composite import CompositeStrategy
@@ -48,6 +49,7 @@ from nooa.strategies.generated_code import (
     ReturnValueValidator,
 )
 from nooa.strategies.template import TemplateStrategy
+from nooa.unifiedllm import ReasoningReplayError
 
 # Import httpx timeout exceptions if available (used by litellm)
 try:
@@ -81,7 +83,9 @@ class GenerationSession:
     target_method_name: str
     event_manager: "EventManager | None" = None  # Optional event manager for Out[n]
     iteration: int = 0
+    execution_count: int = 0
     error_count: int = 0
+    consecutive_api_errors: int = 0
     session_locals: dict[str, Any] = field(default_factory=dict)
     task_event_id: str = ""
     out_accessor: Any = field(default=None)  # OutAccessor instance, created lazily
@@ -101,8 +105,25 @@ class GenerationSession:
     def record_iteration(self) -> None:
         self.iteration += 1
 
+    def record_execution(self) -> int:
+        """Advance and return the per-cell execution counter."""
+        self.execution_count += 1
+        return self.execution_count
+
     def record_error(self) -> None:
         self.error_count += 1
+
+    def record_api_error(self) -> None:
+        """Count an LLM API error toward the consecutive-failure budget."""
+        self.consecutive_api_errors += 1
+
+    def reset_api_errors(self) -> None:
+        """Clear the API-error count after the model responds."""
+        self.consecutive_api_errors = 0
+
+    def api_errors_exhausted(self) -> bool:
+        """Whether consecutive LLM API errors have used up ``max_retries``."""
+        return self.consecutive_api_errors >= self.max_retries
 
     def record_output(self, execution_count: int, value: Any) -> None:
         """Record an execution output for Out[n] access."""
@@ -162,10 +183,8 @@ class PurePythonStrategy(CompositeStrategy):
         return "PURE_PYTHON"
 
     def _get_truncation_config(self, runtime: RuntimeServices):
-        """Get truncation config from runtime's agent, same as CodeActStrategy."""
-        from nooa.config.truncation_config import DEFAULT_TRUNCATION_CONFIG
-
-        return getattr(runtime.agent, "_truncation", DEFAULT_TRUNCATION_CONFIG)
+        """Get the active runtime config, including method-level overrides."""
+        return runtime.truncation_config
 
     def get_block_overrides(self) -> dict[str, str | DynamicContext | None]:
         return {
@@ -261,6 +280,8 @@ class PurePythonStrategy(CompositeStrategy):
         if self.prefill:
             try:
                 await self._run_prefill(runtime, call, builtins, session)
+            except ReasoningReplayError:
+                raise
             except Exception as e:
                 logger.warning(f"[PURE_PYTHON] Prefill error (continuing): {e}")
                 runtime.event_manager.add(Error(content=f"Prefill error: {e}"))
@@ -298,20 +319,26 @@ class PurePythonStrategy(CompositeStrategy):
                 generate_event_id: str | None = None
                 try:
                     code, generate_event_id = await self._generate_code(runtime, session)
+                except ReasoningReplayError as e:
+                    turn_final = True
+                    turn_exception = type(e).__name__
+                    raise
                 except _HTTPX_TIMEOUT_EXCEPTIONS as e:
-                    # Catch httpx timeout exceptions and preserve them
-                    session.record_error()
+                    # Catch httpx timeout exceptions and preserve them. Like other
+                    # LLM API errors, timeouts count only while consecutive.
+                    session.record_api_error()
                     error_msg = (
-                        f"LLM request timed out (attempt {session.error_count}/{session.max_retries}): "
-                        f"{type(e).__name__}: {e}"
+                        f"LLM request timed out (attempt {session.consecutive_api_errors}/"
+                        f"{session.max_retries}): {type(e).__name__}: {e}"
                     )
                     runtime.event_manager.add(Error(content=error_msg))
                     logger.warning(
-                        f"[PURE_PYTHON] LLM timeout (iter={session.iteration}, err={session.error_count}): {e}"
+                        f"[PURE_PYTHON] LLM timeout (iter={session.iteration}, "
+                        f"api_err={session.consecutive_api_errors}): {e}"
                     )
                     turn_exception = type(e).__name__
 
-                    if session.is_exhausted():
+                    if session.api_errors_exhausted():
                         turn_final = True
                         turn_exception = "GenerationError"
                         raise GenerationError(
@@ -319,7 +346,9 @@ class PurePythonStrategy(CompositeStrategy):
                             f"Original error: {type(e).__name__}: {e}"
                         ) from e
                 except XMLFormatError as e:
-                    # XML format error - already logged in _generate_code, just count as error
+                    # XML format error - already logged in _generate_code, just count as error.
+                    # The model responded, so the endpoint is healthy.
+                    session.reset_api_errors()
                     session.record_error()
                     logger.warning(
                         f"[PURE_PYTHON] XML format error (iter={session.iteration}, err={session.error_count})"
@@ -332,8 +361,11 @@ class PurePythonStrategy(CompositeStrategy):
                         self._sync_session_locals(call, session)
                         raise session.build_failure_error() from None
                 except Exception as e:
-                    # Catch other LLM API errors (rate limits, connection errors, etc.)
-                    session.record_error()
+                    # Catch other LLM API errors (rate limits, connection errors, etc.).
+                    # Only consecutive failures count: a transient endpoint error
+                    # followed by a successful call must not eat into the budget
+                    # for the rest of a long run.
+                    session.record_api_error()
                     error_name = type(e).__name__
                     cause_parts = []
                     exc: BaseException | None = e
@@ -344,18 +376,18 @@ class PurePythonStrategy(CompositeStrategy):
                         exc = exc.__cause__ or exc.__context__
                     cause_chain = " <- ".join(cause_parts)
                     error_msg = (
-                        f"LLM API error (attempt {session.error_count}/{session.max_retries}): "
-                        f"{cause_chain}"
+                        f"LLM API error (attempt {session.consecutive_api_errors}/"
+                        f"{session.max_retries}): {cause_chain}"
                     )
                     runtime.event_manager.add(Error(content=error_msg))
                     logger.warning(
-                        f"[PURE_PYTHON] LLM API error (iter={session.iteration}, err={session.error_count}): "
-                        f"{cause_chain}",
+                        f"[PURE_PYTHON] LLM API error (iter={session.iteration}, "
+                        f"api_err={session.consecutive_api_errors}): {cause_chain}",
                         exc_info=True,
                     )
                     turn_exception = error_name
 
-                    if session.is_exhausted():
+                    if session.api_errors_exhausted():
                         turn_final = True
                         turn_exception = "GenerationError"
                         raise GenerationError(
@@ -366,26 +398,25 @@ class PurePythonStrategy(CompositeStrategy):
                 # Skip rest of turn if code generation failed (caught exception above)
                 if code is None:
                     continue
+                session.reset_api_errors()
 
                 if not code:
                     session.record_error()
-                    # Remove the empty assistant event — some APIs reject empty content
                     if generate_event_id is not None:
-                        # Preserve LLM output for trace visibility before removing
                         _evt = runtime.event_manager.get(generate_event_id)
                         _raw = getattr(_evt, "content", "") if _evt else ""
                         runtime.event_manager.add(
                             DebugTrace(
                                 content=(
-                                    "Removed LLM output (empty code extraction): "
+                                    "Empty code extraction from retained LLM output: "
                                     f"raw response({len(_raw)} chars)={_raw!r}"
                                 )
                             )
                         )
-                        runtime.event_manager.remove(generate_event_id)
                     await self._send_empty_response_error(runtime, call.method_name)
                     continue
 
+                session.record_execution()
                 result = await self._execute_code(
                     runtime, code, builtins, session, call.method_name
                 )
@@ -400,9 +431,19 @@ class PurePythonStrategy(CompositeStrategy):
                 if result.error:
                     session.record_error()
                     await self._send_execution_error(
-                        runtime, result.error, code, result.stdout, result.stderr
+                        runtime,
+                        result.error,
+                        code,
+                        result.stdout,
+                        result.stderr,
+                        execution_count=session.execution_count,
+                        line_offset=getattr(result, "wrapper_line_offset", 0),
                     )
-                    turn_exception = type(result.error).__name__
+                    turn_exception = (
+                        result.error.original_type
+                        if isinstance(result.error, SandboxExecutionError)
+                        else type(result.error).__name__
+                    )
                     continue
 
                 session.record_iteration()
@@ -412,7 +453,7 @@ class PurePythonStrategy(CompositeStrategy):
                 runtime.event_manager.add(
                     PythonOutput(
                         tool_call_id="",  # No tool call in PURE_PYTHON mode
-                        execution_count=session.iteration,
+                        execution_count=session.execution_count,
                         stdout=result.stdout,
                         stderr=result.stderr,
                         value=result.returned_value if result.has_return else None,
@@ -498,7 +539,7 @@ class PurePythonStrategy(CompositeStrategy):
         Executes prefill code as a synthetic first turn through the normal
         execution path. Results persist in session_locals for subsequent turns.
         """
-        from nooa.events import LLMOutput
+        from nooa.context_blocks.events import AssistantEvent
 
         if not self.prefill:
             return
@@ -511,10 +552,9 @@ class PurePythonStrategy(CompositeStrategy):
 
         logger.debug(f"[PURE_PYTHON] Running prefill for {call.method_name}")
 
-        # Add as assistant message (as if LLM output this code)
-        # Mark with metadata so it's identifiable in traces
+        # This is an assistant-role prompt artifact, not a provider response.
         runtime.event_manager.add(
-            LLMOutput(
+            AssistantEvent(
                 content=code,
                 metadata={"prefill": True, "prefill_type": "inspect_inputs"},
             )
@@ -524,9 +564,12 @@ class PurePythonStrategy(CompositeStrategy):
         prefill_builtins = {**builtins, "_call": call}
 
         # Execute through normal code path
-        result = await self._execute_code(
-            runtime, code, prefill_builtins, session, call.method_name
-        )
+        from nooa.strategies.prefill import warn_on_prefill_truncation
+
+        with warn_on_prefill_truncation(call):
+            result = await self._execute_code(
+                runtime, code, prefill_builtins, session, call.method_name
+            )
 
         # Merge captured locals into session
         if result.captured_locals:
@@ -535,8 +578,21 @@ class PurePythonStrategy(CompositeStrategy):
                 f"[PURE_PYTHON] Prefill captured locals: {list(result.captured_locals.keys())}"
             )
 
-        # Emit PythonOutput for the prefill execution result (mirrors normal turn event sequence)
-        if not result.error:
+        # Emit PythonOutput for the prefill execution result (mirrors normal turn event sequence).
+        if result.error:
+            await self._send_execution_error(
+                runtime,
+                result.error,
+                code,
+                result.stdout,
+                result.stderr,
+                execution_count=0,
+                line_offset=getattr(result, "wrapper_line_offset", 0),
+                metadata={"prefill": True, "prefill_type": "inspect_inputs"},
+            )
+            # Prefill errors are visible to the LLM but remain non-fatal.
+            logger.warning(f"[PURE_PYTHON] Prefill execution error: {result.error}")
+        else:
             runtime.event_manager.add(
                 PythonOutput(
                     tool_call_id="",
@@ -549,9 +605,6 @@ class PurePythonStrategy(CompositeStrategy):
                     metadata={"prefill": True, "prefill_type": "inspect_inputs"},
                 )
             )
-        else:
-            # Prefill error - log but don't fail (LLM can still proceed)
-            logger.warning(f"[PURE_PYTHON] Prefill execution error: {result.error}")
 
     async def _generate_code(
         self, runtime: RuntimeServices, session: GenerationSession
@@ -560,12 +613,12 @@ class PurePythonStrategy(CompositeStrategy):
 
         Returns:
             (code, event_id): code ready for execution (without fences/XML),
-            and the event_id of the LLMOutput event so the caller can remove
-            it if empty (some APIs reject empty assistant messages).
+            and the event_id of the exact provider LLMResponse event.
         """
         logger.debug(
             f"[PURE_PYTHON] Loop iteration: iter={session.iteration}/{session.max_iterations}, "
-            f"err={session.error_count}/{session.max_retries}"
+            f"err={session.error_count}/{session.max_retries}, "
+            f"api_err={session.consecutive_api_errors}/{session.max_retries}"
         )
 
         response, event_id = await runtime.generate(tools=None)
@@ -576,25 +629,16 @@ class PurePythonStrategy(CompositeStrategy):
         try:
             code = self._strip_wrappers(raw_code)
         except XMLFormatError as e:
-            # Preserve LLM output for trace visibility before removing
             runtime.event_manager.add(
                 DebugTrace(
                     content=(
-                        f"Removed LLM output (XML format error): "
+                        f"Retained LLM output with XML format error: "
                         f"raw_code({len(raw_code)} chars)={raw_code!r}"
                     )
                 )
             )
-            # Remove the malformed LLMOutput — some APIs reject empty/malformed content
-            runtime.event_manager.remove(event_id)
             runtime.event_manager.add(Error(content=f"**Format Error**: {e}"))
             raise
-
-        # Store the unwrapped code in events so LLM learns to output plain Python.
-        # Note: legacy reasoning() calls are NOT rewritten — the builtin was
-        # removed, so they raise NameError and the model corrects itself from
-        # the error feedback.
-        runtime.event_manager.update(event_id, content=code)
 
         # Debug breadcrumbs: we keep these fairly high-signal so log output stays useful.
         logger.debug(
@@ -705,15 +749,6 @@ class PurePythonStrategy(CompositeStrategy):
         )
 
         if was_extracted:
-            # Update events to show unpacked code so LLM learns from example
-            # Find the most recent generated code event and update it
-            recent_events = runtime.event_manager.filter(limit=20)
-            for event in reversed(recent_events):
-                if event.event_type == "LLMOutput":
-                    runtime.event_manager.update(event.id, content=extracted_code)
-                    logger.debug(f"[PURE_PYTHON] Updated event {event.id} with unpacked code")
-                    break
-
             code = extracted_code
 
         # 1) Validate REPL policy (no classes, await async methods)
@@ -776,14 +811,13 @@ class PurePythonStrategy(CompositeStrategy):
         # the agent is currently running a code cell (vs blocked on an LLM call).
         from nooa.runtime.debug_handler import code_exec_context
 
-        # Use iteration+1 for 1-indexed execution count (matches event emission after record_iteration)
         with code_exec_context(code):
             return await runtime.execute_code(
                 code,
                 builtins=execution_builtins,
                 validate=True,
                 wrap_in_function=True,
-                execution_count=session.iteration + 1,
+                execution_count=session.execution_count,
             )
 
     def _is_task_complete(self, result: Any, runtime: RuntimeServices, call: "CurrentCall") -> bool:
@@ -850,34 +884,37 @@ class PurePythonStrategy(CompositeStrategy):
         code: str | None = None,
         stdout: str = "",
         stderr: str = "",
+        *,
+        execution_count: int = 0,
+        line_offset: int = 0,
+        metadata: dict[str, Any] | None = None,
     ) -> None:
-        """Send an execution error to the LLM with clean formatting.
-
-        Args:
-            runtime: RuntimeServices for event management
-            error: The exception that occurred
-            code: The code that was executed (for better error context)
-            stdout: Partial stdout captured before the error (debugging aid)
-            stderr: Partial stderr captured before the error (debugging aid)
-        """
-        error_msg = self._format_error(error, code)
-        guidance = ""
-
+        """Emit a failed cell through the shared structured output contract."""
+        error_msg = self._format_error(
+            error,
+            code,
+            line_offset=line_offset,
+            max_error=runtime.truncation_config.capture.max_error,
+            tail_chars=runtime.truncation_config.capture.tail,
+        )
         if isinstance(error, SyntaxError):
-            guidance = "\n\n" + await self.error_syntax(runtime)
+            from nooa.errors.formatting import _bound_diagnostic
 
-        # Include partial stdout/stderr if any (debugging aid)
-        # Build output section from the raw strings (not from result, since we have separate args)
-        output_parts = []
-        if stdout:
-            output_parts.append(f"Stdout:\n```\n{stdout}\n```")
-        if stderr:
-            output_parts.append(f"Stderr:\n```\n{stderr}\n```")
-        output_section = "\n\n" + "\n\n".join(output_parts) if output_parts else ""
+            error_msg = _bound_diagnostic(
+                f"{error_msg}\n\n{await self.error_syntax(runtime)}",
+                runtime.truncation_config.capture.max_error,
+                runtime.truncation_config.capture.tail,
+            )
 
         runtime.event_manager.add(
-            Error(
-                content=f"Execution error:\n```\n{error_msg}\n```{output_section}{guidance}\nFix and try again."
+            PythonOutput(
+                tool_call_id="",
+                execution_count=execution_count,
+                stdout=stdout,
+                stderr=stderr,
+                error=error_msg,
+                execution_status=ResultStatus.ERROR,
+                metadata={**(metadata or {}), "execution_error": True},
             )
         )
 
@@ -1042,19 +1079,22 @@ class PurePythonStrategy(CompositeStrategy):
 
         return inner_content
 
-    def _format_error(self, error: Exception, code: str | None = None) -> str:
-        """Format an error for LLM feedback.
-
-        Uses the error formatting module to produce high-signal, low-noise
-        error messages that hide framework internals.
-
-        Args:
-            error: The exception to format
-            code: Optional source code for better context
-
-        Returns:
-            Formatted error string
-        """
+    def _format_error(
+        self,
+        error: Exception,
+        code: str | None = None,
+        *,
+        line_offset: int = 0,
+        max_error: int | None = None,
+        tail_chars: int | None = None,
+    ) -> str:
+        """Format an error for LLM feedback with user-source line numbers."""
         from nooa.errors.formatting import format_error_for_llm
 
-        return format_error_for_llm(error, code)
+        return format_error_for_llm(
+            error,
+            code,
+            line_offset=line_offset,
+            max_error=max_error,
+            tail_chars=tail_chars,
+        )

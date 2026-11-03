@@ -1,3 +1,4 @@
+import { assertOk } from './http';
 // --- Annotation types ---
 
 export interface Annotation {
@@ -45,7 +46,7 @@ export interface TagInfo {
 
 export async function fetchAnnotations(sessionId: string): Promise<Annotation[]> {
   const res = await fetch(`/api/traces/${encodeURIComponent(sessionId)}/annotations`);
-  if (!res.ok) throw new Error(`Failed to fetch annotations: ${res.statusText}`);
+  assertOk(res, 'Failed to fetch annotations');
   return res.json();
 }
 
@@ -55,7 +56,7 @@ export async function createAnnotation(data: AnnotationCreate): Promise<Annotati
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data),
   });
-  if (!res.ok) throw new Error(`Failed to create annotation: ${res.statusText}`);
+  assertOk(res, 'Failed to create annotation');
   return res.json();
 }
 
@@ -65,7 +66,7 @@ export async function updateAnnotation(id: string, data: AnnotationUpdate): Prom
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data),
   });
-  if (!res.ok) throw new Error(`Failed to update annotation: ${res.statusText}`);
+  assertOk(res, 'Failed to update annotation');
   return res.json();
 }
 
@@ -73,12 +74,12 @@ export async function deleteAnnotation(id: string): Promise<void> {
   const res = await fetch(`/api/annotations/${encodeURIComponent(id)}`, {
     method: 'DELETE',
   });
-  if (!res.ok) throw new Error(`Failed to delete annotation: ${res.statusText}`);
+  assertOk(res, 'Failed to delete annotation');
 }
 
 export async function fetchTags(): Promise<TagInfo[]> {
   const res = await fetch('/api/tags');
-  if (!res.ok) throw new Error(`Failed to fetch tags: ${res.statusText}`);
+  assertOk(res, 'Failed to fetch tags');
   const data = await res.json();
   return data.tags || [];
 }

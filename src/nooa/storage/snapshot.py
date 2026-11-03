@@ -138,7 +138,8 @@ class AgentSnapshot(BaseModel):
         Note: this performs additive restoration — it does not clear
         pre-existing context blocks or attributes on the target agent.
         The expected usage is with a freshly constructed agent (via
-        ``Agent.load()``), not an agent with in-progress state.
+        ``StorageManager.restore_snapshot()``), not an agent with
+        in-progress state.
 
         Args:
             agent: A freshly constructed Agent instance to restore into.

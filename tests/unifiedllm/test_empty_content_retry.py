@@ -221,6 +221,27 @@ class TestCompletionClientEmptyContentRetry:
         sleep.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_completion_client_default_retries_request_timeout_408(self):
+        error = litellm.Timeout(
+            message="Connection timed out", model="test-model", llm_provider="anthropic"
+        )
+        mock_acompletion = AsyncMock(side_effect=[error, make_mock_response(content="ok")])
+        sleep = AsyncMock()
+
+        with (
+            patch("nooa.unifiedllm.retry.asyncio.sleep", sleep),
+            patch("litellm.acompletion", mock_acompletion),
+        ):
+            async with CompletionClient(
+                model="anthropic/test-model", api_key="test-key-not-real"
+            ) as client:
+                response = await client.acall([{"role": "user", "content": "Hi"}])
+
+        assert response.content == "ok"
+        assert mock_acompletion.call_count == 2
+        sleep.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_completion_client_zero_retry_config_disables_async_retries(self):
         """RetryConfig(max_retries=0, rate_limit_extra_retries=0) opts out for acall()."""
         client = CompletionClient(
@@ -251,10 +272,8 @@ class TestCompletionClientEmptyContentRetry:
             assert mock_acompletion.call_count == 1  # No retry for tool calls
 
     @pytest.mark.asyncio
-    async def test_tool_calls_with_none_content_stores_empty_string_in_assistant_message(
-        self, client_with_retry
-    ):
-        """When API returns tool_calls with message.content None, assistant_message['content'] must be ''."""
+    async def test_tool_calls_with_none_content_normalizes_public_content(self, client_with_retry):
+        """Tool-call-only responses normalize provider null content to empty text."""
         mock_tool_call = make_tool_call(
             id="call_123", name="test_function", arguments='{"arg": "value"}'
         )
@@ -267,7 +286,6 @@ class TestCompletionClientEmptyContentRetry:
             response = await client_with_retry.acall([{"role": "user", "content": "Hi"}])
 
             assert response.finish_reason == "tool_calls"
-            assert response.assistant_message["content"] == ""
             assert response.content == ""
 
 
@@ -329,10 +347,14 @@ class TestOutputModelReasoningFallback:
                 output_model=SentimentResponse,
             )
 
-            assert isinstance(response.content, SentimentResponse)
-            assert response.content.value == "positive"
-            # When reasoning was consumed as content, it should be cleared
-            assert response.reasoning is None
+            assert response.content == ""
+            assert isinstance(response.parsed, SentimentResponse)
+            assert response.parsed.value == "positive"
+            assert response.reasoning == '{"value": "positive"}'
+            restored = type(response).model_validate_json(response.model_dump_json())
+            assert restored.content == ""
+            assert restored.parsed is None
+            assert restored.reasoning == '{"value": "positive"}'
             assert mock_acompletion.call_count == 1
 
     def test_sync_output_model_falls_back_to_reasoning(self, client):
@@ -347,9 +369,10 @@ class TestOutputModelReasoningFallback:
                 output_model=SentimentResponse,
             )
 
-            assert isinstance(response.content, SentimentResponse)
-            assert response.content.value == "negative"
-            assert response.reasoning is None
+            assert response.content == ""
+            assert isinstance(response.parsed, SentimentResponse)
+            assert response.parsed.value == "negative"
+            assert response.reasoning == '{"value": "negative"}'
 
     @pytest.mark.asyncio
     async def test_output_model_prefers_content_over_reasoning(self, client):
@@ -367,7 +390,8 @@ class TestOutputModelReasoningFallback:
                 output_model=SentimentResponse,
             )
 
-            assert response.content.value == "from_content"
+            assert isinstance(response.parsed, SentimentResponse)
+            assert response.parsed.value == "from_content"
             # Reasoning is preserved when content was used
             assert response.reasoning == '{"value": "from_reasoning"}'
 
@@ -403,7 +427,8 @@ class TestOutputModelReasoningFallback:
                 output_model=SentimentResponse,
             )
 
-            assert response.content.value == "neutral"
+            assert isinstance(response.parsed, SentimentResponse)
+            assert response.parsed.value == "neutral"
 
     @pytest.mark.asyncio
     async def test_non_output_model_does_not_use_reasoning(self, client):

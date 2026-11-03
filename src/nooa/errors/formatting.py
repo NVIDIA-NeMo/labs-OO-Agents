@@ -1,34 +1,63 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Error formatting for LLM feedback.
+"""Build concise, source-aware Python diagnostics for language-model feedback.
 
-Formats errors to match IPython/Jupyter-style output:
-- Uses "Cell In[N], line X" format (stripping File "..." wrapper)
-- Adjusts line numbers to account for wrapper code offset
-- Filters out framework tracebacks, showing only user code
-- Source code lines are shown automatically via linecache registration
+This module is the presentation boundary between Python exceptions and the text
+shown to an agent.  It is intentionally responsible for one complete pipeline:
 
-Usage:
-    from nooa.errors.formatting import format_error_for_llm
-    result = format_error_for_llm(error, code, line_offset=2)
+1. Classify syntax, static-validation, and runtime failures.
+2. Render runtime failures with the standard-library ``traceback`` machinery,
+   recursively filtering framework frames from causes, contexts, and exception
+   groups while preserving generated-cell and downstream user-helper frames.
+3. Normalize the result to an IPython-like form (``Cell In[N]`` locations,
+   wrapper-line offsets, and hidden internal wrapper names).
+4. Add narrowly targeted, best-effort guidance for mistakes that models often
+   repeat, such as malformed heredocs and calls with the wrong signature.
+5. Bound the final diagnostic before it enters model context.
 
-    # Or use the formatter class directly
-    from nooa.errors.formatting import IPythonErrorFormatter
-    formatter = IPythonErrorFormatter()
-    result = formatter.format(error, code, line_offset=2)
+The module does *not* execute code, register generated source with ``linecache``,
+or serialize exceptions across process boundaries.  Those jobs belong to the
+runtime and sandbox layers.  A trusted backend may pass its already-rendered
+text to :func:`format_error_for_llm`; that preserves worker-side source context
+but still applies the final size bound.
+
+Formatting must never replace the original failure with a formatter failure.
+Resolution of optional hints is therefore defensive, and the public entry point
+falls back to a safe ``TypeName: message`` rendering when necessary.
+
+Typical callers should use :func:`format_error_for_llm`.  The
+:class:`IPythonErrorFormatter` class remains available for strategy-specific
+formatter injection.
 """
 
 import re
 import traceback
+from pathlib import Path, PurePath
+from typing import Protocol
 
-# Framework path markers - frames containing these are filtered out
-_FRAMEWORK_MARKERS = ("nooa/", "site-packages/", "lib/python", "<frozen")
+from nooa.agentdoc import TruncatingStringIO
+from nooa.config.truncation_config import DEFAULT_TRUNCATION_CONFIG
+
+# ---------------------------------------------------------------------------
+# Traceback selection and IPython normalization policy
+# ---------------------------------------------------------------------------
+
+# The checked-out/installed NOOA package root. Match it as a path ancestor,
+# never as the bare substring ``"nooa/"``: user repositories may themselves
+# live under a directory named ``nooa``.
+_NOOA_PACKAGE_ROOT = Path(__file__).resolve().parents[1]
+_FRAMEWORK_PATH_PARTS = {"site-packages", "dist-packages"}
 
 # User code filename pattern - matches "Cell In[N]" format
 _CELL_PATTERN = re.compile(r"^Cell In\[\d+\]$")
 
 # Internal wrapper function names to replace with <module>
 _WRAPPER_NAMES = ("__repl_wrapper__", "__wrapper__")
+
+
+# ---------------------------------------------------------------------------
+# Targeted model-recovery hints
+# ---------------------------------------------------------------------------
 
 # SyntaxError messages that LLMs frequently hit when they embed a bash heredoc
 # inside a single/double-quoted Python string. See issue 199.
@@ -45,19 +74,17 @@ _HEREDOC_TRIGGER_MSGS = (
 _HEREDOC_RE = re.compile(r"<<-?\s*['\"]?\w+['\"]?")
 
 # Appended to SyntaxErrors that look like heredoc-in-quoted-string failures.
-_HEREDOC_HINT = """\
-Hint: this looks like a bash heredoc (`<<...`) embedded in a single- or
-double-quoted Python string. Python rejects multi-line single/double-quoted
-strings, which is why the parser errored before reaching the heredoc body.
+_HEREDOC_HINT = '''\
+Hint: this looks like a shell heredoc (`<<...`) embedded in a single- or
+multiple-line Python string. Put the complete command in a triple-quoted
+string, then pass that value using the callable's documented API:
 
-Fix 1 (preferred) — use a triple-quoted Python string so newlines are legal:
-    await shell.run(\"\"\"cat <<EOF
-    content
-    EOF\"\"\")
+    command = """cat <<'EOF'
+content
+EOF"""
 
-Fix 2 — write the script to a file first, then run it:
-    await shell.write("/tmp/script.sh", script_text)
-    await shell.run("bash /tmp/script.sh")"""
+Use `doc(...)` to inspect the available command runner and how it accepts
+commands or standard input.'''
 
 
 # Call-shape TypeError messages — a method/function called with the wrong
@@ -157,25 +184,42 @@ def _resolve_called_callable(qual: str, error: Exception) -> object | None:
     return candidates[0] if len(candidates) == 1 else None
 
 
-def _bad_call_agentdoc(error: Exception) -> str | None:
-    """If ``error`` is a call-shape TypeError to a resolvable callable, return
-    its concise agentdoc to append to the feedback. Best-effort; ``None`` on any
-    miss so the caller falls back to the raw error (no regression)."""
+def _bad_call_agentdoc(error: BaseException, target: object | None = None) -> str | None:
+    """Return concise agentdoc for a recognized bad call, when safely resolvable.
+
+    ``target`` lets a broker that already resolved the called object preserve the
+    hint across a process boundary. Without it, the target is resolved from the
+    exception traceback. This is best-effort and never lets hostile ``__str__``
+    or documentation hooks replace the original error.
+    """
     if not isinstance(error, TypeError):
         return None
     try:
-        m = _BAD_CALL_RE.match(str(error))
-        if not m:
+        match = _BAD_CALL_RE.match(str(error))
+        if not match:
             return None
-        target = _resolve_called_callable(m.group("qual"), error)
-        if target is None:
+        resolved = (
+            target if target is not None else _resolve_called_callable(match.group("qual"), error)
+        )
+        if resolved is None:
+            return None
+        resolved_qualname = _callable_qualname(resolved)
+        if match.group("qual") not in {
+            resolved_qualname,
+            f"{resolved_qualname}.__init__",
+        }:
             return None
         from nooa.agentdoc import doc
 
-        rendered = doc(target, concise=True)
+        rendered = doc(resolved, concise=True, inline_depth=0)
         return str(rendered).strip() or None
-    except Exception:
+    except BaseException:
         return None
+
+
+# ---------------------------------------------------------------------------
+# Traceback rendering and normalization helpers
+# ---------------------------------------------------------------------------
 
 
 def _is_user_code_frame(filename: str) -> bool:
@@ -189,12 +233,30 @@ def _is_user_code_frame(filename: str) -> bool:
     Returns False for:
     - Framework paths (nooa/, site-packages/, lib/python, etc.)
     """
-    # Filter out framework paths first
-    if any(marker in filename for marker in _FRAMEWORK_MARKERS):
+    if filename.startswith("<frozen"):
         return False
 
-    # Everything else is user code (REPL cells, user's agent files, etc.)
-    return True
+    path = PurePath(filename)
+    parts = path.parts
+    if _FRAMEWORK_PATH_PARTS.intersection(parts):
+        return False
+    if any(
+        part.startswith("python")
+        for index, part in enumerate(parts)
+        if index and parts[index - 1] == "lib"
+    ):
+        return False
+
+    # Relative module paths emitted by some traceback producers are safe to
+    # classify only when ``nooa`` is the first complete component.
+    if not path.is_absolute() and parts and parts[0] == "nooa":
+        return False
+
+    try:
+        Path(filename).resolve().relative_to(_NOOA_PACKAGE_ROOT)
+    except (OSError, ValueError):
+        return True
+    return False
 
 
 def _is_validation_error(error: Exception) -> bool:
@@ -262,24 +324,208 @@ def _maybe_heredoc_hint(error: SyntaxError) -> str | None:
     return None
 
 
-def _adjust_line_numbers(text: str, offset: int) -> str:
-    """Adjust line numbers in formatted output by subtracting offset.
+def _filter_traceback_tree(
+    diagnostic: traceback.TracebackException,
+    seen: set[int] | None = None,
+) -> None:
+    """Filter framework frames from an entire chained-exception tree in place.
 
-    Transforms:
-        Cell In[1], line 5 → Cell In[1], line 3 (with offset=2)
-        line 5 → line 3 (with offset=2)
+    ``TracebackException`` stores a tree rather than one linear traceback: a
+    diagnostic can include explicit causes, implicit contexts, and nested
+    exception-group children.  Filtering only the root would therefore leak
+    internal framework frames from one of those branches.  Walk every branch
+    and apply the same user-frame policy, starting at the first generated cell
+    while retaining user helper frames reached from that cell.  ``seen`` makes
+    the recursive walk safe when traceback nodes are shared or cyclic.
+    """
+    if seen is None:
+        seen = set()
+    if id(diagnostic) in seen:
+        return
+    seen.add(id(diagnostic))
+
+    eligible = [frame for frame in diagnostic.stack if _is_user_code_frame(frame.filename)]
+    # Once generated-cell execution begins, omit outer callers but retain later
+    # user helpers: those downstream frames often contain the actual failing line.
+    first_cell = next(
+        (index for index, frame in enumerate(eligible) if _CELL_PATTERN.match(frame.filename)),
+        None,
+    )
+    if first_cell is not None:
+        eligible = eligible[first_cell:]
+    diagnostic.stack = traceback.StackSummary.from_list(eligible)
+
+    if diagnostic.__cause__ is not None:
+        _filter_traceback_tree(diagnostic.__cause__, seen)
+    if diagnostic.__context__ is not None:
+        _filter_traceback_tree(diagnostic.__context__, seen)
+    if diagnostic.exceptions is not None:
+        for child in diagnostic.exceptions:
+            _filter_traceback_tree(child, seen)
+
+
+def _concise_exception(error: BaseException) -> str:
+    """Return a safe type-and-message fallback for traceback-less errors."""
+    name = type(error).__name__
+    try:
+        message = str(error)
+    except BaseException:
+        message = name
+    return f"{name}: {message}" if message else name
+
+
+def _wrapper_cell_filename(
+    error: BaseException,
+    seen: set[int] | None = None,
+) -> str | None:
+    """Find the generated-cell wrapper frame anywhere in an exception tree."""
+    if seen is None:
+        seen = set()
+    if id(error) in seen:
+        return None
+    seen.add(id(error))
+
+    traceback_cursor = error.__traceback__
+    while traceback_cursor is not None:
+        frame_code = traceback_cursor.tb_frame.f_code
+        if frame_code.co_name in _WRAPPER_NAMES and _CELL_PATTERN.match(frame_code.co_filename):
+            return frame_code.co_filename
+        traceback_cursor = traceback_cursor.tb_next
+
+    for related in (error.__cause__, error.__context__):
+        if related is not None:
+            filename = _wrapper_cell_filename(related, seen)
+            if filename is not None:
+                return filename
+    if isinstance(error, BaseExceptionGroup):
+        for child in error.exceptions:
+            filename = _wrapper_cell_filename(child, seen)
+            if filename is not None:
+                return filename
+    return None
+
+
+def _format_runtime_error(error: BaseException) -> str:
+    """Render a filtered runtime diagnostic with Python's traceback formatter."""
+    if (
+        error.__traceback__ is None
+        and error.__cause__ is None
+        and error.__context__ is None
+        and not isinstance(error, BaseExceptionGroup)
+    ):
+        return _concise_exception(error)
+    diagnostic = traceback.TracebackException.from_exception(
+        error,
+        compact=True,
+        capture_locals=False,
+    )
+    _filter_traceback_tree(diagnostic)
+    return "".join(diagnostic.format(chain=True))
+
+
+def _adjust_line_numbers(
+    text: str,
+    offset: int,
+    *,
+    cell_only: bool = False,
+    cell_filename: str | None = None,
+) -> str:
+    """Adjust matching traceback headers without rewriting source/messages.
+
+    ``cell_filename`` limits adjustment to the currently wrapped cell. Persisted
+    helpers are compiled from their original source, so frames from older cells
+    already have source-relative line numbers and must not inherit the current
+    cell's wrapper offset.
     """
     if offset <= 0:
         return text
 
-    def adjust_match(match: re.Match[str]) -> str:
-        prefix = match.group(1)
-        line_num = int(match.group(2))
-        adjusted = max(1, line_num - offset)  # Never go below line 1
-        return f"{prefix}{adjusted}"
+    # Headers are the only lines that should change. In particular, source such
+    # as ``# line 99`` and messages such as ``failed at line 12`` are verbatim.
+    if cell_filename is not None:
+        prefix = rf" *{re.escape(cell_filename)}, "
+    elif cell_only:
+        prefix = r" *Cell In\[\d+\], "
+    else:
+        prefix = r'(?: *File "[^"]+", | *Cell In\[\d+\], |)'
+    header = re.compile(
+        rf"(?m)^(?P<prefix>{prefix}line )"
+        r"(?P<number>\d+)(?P<suffix>(?:, in .*)?)$"
+    )
 
-    # Match patterns like "Cell In[1], line 5" or "line 5"
-    return re.sub(r"((?:Cell In\[\d+\], )?line )(\d+)", adjust_match, text)
+    def adjust_match(match: re.Match[str]) -> str:
+        adjusted = max(1, int(match.group("number")) - offset)
+        return f"{match.group('prefix')}{adjusted}{match.group('suffix')}"
+
+    return header.sub(adjust_match, text)
+
+
+# ---------------------------------------------------------------------------
+# Formatter and public entry point
+# ---------------------------------------------------------------------------
+
+
+def _diagnostic_budget(
+    max_error: int | None,
+    tail_chars: int | None,
+) -> tuple[int, int | None]:
+    """Normalize an optional diagnostic budget defensively."""
+    if isinstance(max_error, int) and not isinstance(max_error, bool) and max_error > 0:
+        limit = max_error
+    else:
+        limit = DEFAULT_TRUNCATION_CONFIG.capture.max_error
+    if tail_chars is None:
+        tail: int | None = None
+    elif (
+        isinstance(tail_chars, int) and not isinstance(tail_chars, bool) and 0 <= tail_chars < limit
+    ):
+        tail = tail_chars
+    else:
+        default_tail = DEFAULT_TRUNCATION_CONFIG.capture.tail
+        tail = None if default_tail is None else min(default_tail, limit - 1)
+    return limit, tail
+
+
+def _bound_diagnostic(
+    text: str,
+    max_error: int | None,
+    tail_chars: int | None,
+) -> str:
+    """Apply the caller's error budget, falling back to framework defaults."""
+    limit, tail = _diagnostic_budget(max_error, tail_chars)
+    stream = TruncatingStringIO(limit=limit, tail_chars=tail)
+    stream.write(text)
+    return stream.getvalue()
+
+
+def _hard_bound_text(text: str, limit: int, *, closing: str = "") -> str:
+    """Cap text at ``limit``, optionally preserving a structural closing marker."""
+    if len(text) <= limit:
+        return text
+    marker = "...<truncated>"
+    suffix = closing if closing and text.endswith(closing) else ""
+    keep = limit - len(marker) - len(suffix)
+    if keep > 0:
+        return text[:keep] + marker + suffix
+    return marker[:limit]
+
+
+class ErrorFormatter(Protocol):
+    """Preferred strategy formatter contract.
+
+    Implementations receive the exception, source context, and resolved per-call
+    error budget. Custom strategy formatters must implement this complete contract.
+    """
+
+    def format(
+        self,
+        error: Exception,
+        code: str | None = None,
+        *,
+        line_offset: int = 0,
+        max_error: int | None = None,
+        tail_chars: int | None = None,
+    ) -> str: ...
 
 
 class IPythonErrorFormatter:
@@ -290,35 +536,62 @@ class IPythonErrorFormatter:
     - Adjusts line numbers to account for wrapper code offset
     - Replaces internal wrapper names with <module>
     - Filters out framework tracebacks, showing only user code
-    - Shows syntax errors with caret pointing to error location
+    - Preserves Python's native syntax/runtime source markers
     - Source lines shown automatically (via linecache registration in actor.py)
     """
 
-    def format(self, error: Exception, code: str | None = None, *, line_offset: int = 0) -> str:
-        """Format an error for LLM feedback.
+    def format(
+        self,
+        error: Exception,
+        code: str | None = None,
+        *,
+        line_offset: int = 0,
+        max_error: int | None = None,
+        tail_chars: int | None = None,
+    ) -> str:
+        """Format and bound an error for LLM feedback.
 
         Args:
             error: The exception to format.
             code: Optional source code (used for syntax errors if text is missing).
             line_offset: Number of wrapper lines to subtract from line numbers.
+            max_error: Maximum retained diagnostic characters. ``None`` uses the
+                framework default.
+            tail_chars: Characters reserved for the retained tail. ``None`` uses
+                the standard half-head/half-tail split.
 
         Returns:
             Formatted error string with adjusted line numbers.
         """
+        from nooa.runtime.sandbox.errors import SandboxExecutionError
+
+        if isinstance(error, SandboxExecutionError):
+            limit, _ = _diagnostic_budget(max_error, tail_chars)
+            return _hard_bound_text(
+                error.diagnostic.rstrip() or str(error),
+                limit + 1_024,
+                closing="\n</truncated-output>",
+            )
+
         if isinstance(error, SyntaxError):
-            return self._format_syntax_error(error, code, line_offset)
+            formatted = self._format_syntax_error(error, code, line_offset)
+        elif _is_validation_error(error):
+            formatted = f"{type(error).__name__}: {error}"
+        else:
+            formatted = self._format_runtime_error(error, line_offset)
+            # Issue #245: append the called callable's concise signature on a
+            # call-shape TypeError (see _bad_call_agentdoc). Best-effort — unchanged
+            # output on any miss.
+            transported_hint = getattr(error, "_nooa_call_hint", None)
+            agentdoc = (
+                transported_hint if isinstance(transported_hint, str) else _bad_call_agentdoc(error)
+            )
+            if agentdoc:
+                formatted = (
+                    f"{formatted}\n\nThe callable you called has this signature:\n{agentdoc}"
+                )
 
-        if _is_validation_error(error):
-            return f"{type(error).__name__}: {error}"
-
-        formatted = self._format_runtime_error(error, line_offset)
-        # Issue #245: append the called callable's concise signature on a
-        # call-shape TypeError (see _bad_call_agentdoc). Best-effort — unchanged
-        # output on any miss.
-        agentdoc = _bad_call_agentdoc(error)
-        if agentdoc:
-            formatted = f"{formatted}\n\nThe callable you called has this signature:\n{agentdoc}"
-        return formatted
+        return _bound_diagnostic(formatted, max_error, tail_chars)
 
     def _format_syntax_error(self, error: SyntaxError, code: str | None, line_offset: int) -> str:
         """Format SyntaxError using Python's traceback module, IPython-style.
@@ -350,55 +623,35 @@ class IPythonErrorFormatter:
 
         return formatted
 
-    def _format_runtime_error(self, error: Exception, line_offset: int) -> str:
-        """Format runtime error using Python's traceback module, IPython-style.
-
-        Filters to show only user code frames (excludes framework internals).
-        Source lines are shown automatically via linecache registration.
-
-        Output format:
-            Cell In[1], line 3, in <module>
-                x = 1 / 0
-                    ~~^~~
-            ZeroDivisionError: division by zero
-        """
-        if not error.__traceback__:
-            return f"{type(error).__name__}: {error}"
-
-        # Extract all frames as FrameSummary objects (filterable)
-        extracted = traceback.extract_tb(error.__traceback__)
-
-        # Filter to user code frames only
-        user_frames = [frame for frame in extracted if _is_user_code_frame(frame.filename)]
-
-        if not user_frames:
-            # No user frames found, just show the error type and message
-            return f"{type(error).__name__}: {error}"
-
-        # Format the filtered frames + exception
-        formatted_frames = traceback.format_list(user_frames)
-        formatted_exception = traceback.format_exception_only(type(error), error)
-        formatted = "".join(formatted_frames + formatted_exception).rstrip()
-
-        # Strip the File "..." prefix to match IPython
-        formatted = _strip_file_prefix(formatted)
-
-        # Replace internal wrapper names with <module>
-        formatted = _replace_wrapper_names(formatted)
-
-        # Adjust line numbers for wrapper offset
-        return _adjust_line_numbers(formatted, line_offset)
+    def _format_runtime_error(self, error: BaseException, line_offset: int) -> str:
+        """Format runtime errors using the stdlib traceback implementation."""
+        formatted = _strip_file_prefix(_format_runtime_error(error))
+        current_cell = _wrapper_cell_filename(error)
+        formatted = _adjust_line_numbers(
+            formatted,
+            line_offset,
+            cell_only=current_cell is None,
+            cell_filename=current_cell,
+        )
+        return _replace_wrapper_names(formatted).rstrip()
 
 
 # Default formatter instance
 _default_formatter = IPythonErrorFormatter()
 
 
-def format_error_for_llm(error: Exception, code: str | None = None, *, line_offset: int = 0) -> str:
+def format_error_for_llm(
+    error: Exception,
+    code: str | None = None,
+    *,
+    line_offset: int = 0,
+    max_error: int | None = None,
+    tail_chars: int | None = None,
+) -> str:
     """Format an error for LLM feedback.
 
     Uses IPython-style formatting:
-    - Syntax errors show caret pointing to error location
+    - Syntax errors retain Python's source marker when available
     - Validation errors show clean messages without tracebacks
     - Runtime errors filter to user code frames only
     - Line numbers are adjusted to account for wrapper code
@@ -411,8 +664,21 @@ def format_error_for_llm(error: Exception, code: str | None = None, *, line_offs
         line_offset: Number of wrapper lines to subtract from line numbers.
             This compensates for lines added by the async wrapper (e.g.,
             "async def __repl_wrapper__():", "try:", etc.).
+        max_error: Maximum retained diagnostic characters. ``None`` uses the
+            framework default.
+        tail_chars: Characters reserved for the retained tail. ``None`` uses
+            the standard half-head/half-tail split.
 
     Returns:
         Formatted error string suitable for LLM consumption.
     """
-    return _default_formatter.format(error, code, line_offset=line_offset)
+    try:
+        return _default_formatter.format(
+            error,
+            code,
+            line_offset=line_offset,
+            max_error=max_error,
+            tail_chars=tail_chars,
+        )
+    except BaseException:
+        return _bound_diagnostic(_concise_exception(error), max_error, tail_chars)

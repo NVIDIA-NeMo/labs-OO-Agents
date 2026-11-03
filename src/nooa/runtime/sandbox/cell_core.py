@@ -85,12 +85,15 @@ async def run_cell_source(
     ``result.error``. ``namespace`` is mutated in place so definitions persist
     across cells (the worker's long-lived REPL state).
     """
+    from nooa.agentdoc._format_observation import _truncation_reasons
     from nooa.runtime.media_capture import _media_buffer_var, _MediaBuffer
 
     stdout_buf = _HookedBuffer(stdout_hook)
     stderr_buf = _HookedBuffer(stderr_hook)
     media_buffer = _MediaBuffer(max_attachments=100)
     media_token = _media_buffer_var.set(media_buffer)
+    truncation_reasons: set[str] = set()
+    truncation_token = _truncation_reasons.set(truncation_reasons)
 
     returned_value: Any = _NO_RETURN
     has_explicit_return = False
@@ -101,6 +104,7 @@ async def run_cell_source(
         return ExecutionResult(
             stdout=stdout_buf.getvalue(),
             stderr=stderr_buf.getvalue(),
+            truncation_reasons=sorted(truncation_reasons),
             error=error,
             signal=signal,
             defined_methods=defined_methods,
@@ -114,8 +118,9 @@ async def run_cell_source(
     defined_methods: dict[str, Any] = {}
     try:
         with contextlib.redirect_stdout(stdout_buf), contextlib.redirect_stderr(stderr_buf):
+            source_code = code
             try:
-                tree = ast.parse(code)
+                tree = ast.parse(code, filename=cell_filename)
             except SyntaxError as exc:
                 return build_result(error=exc)
 
@@ -207,6 +212,15 @@ async def run_cell_source(
                     compile(ast.Module(body=func_defs, type_ignores=[]), cell_filename, "exec"),
                     namespace,
                 )
+                # Persisted helpers are compiled directly from the cell AST, not
+                # through the async wrapper. Keep their source cache aligned with
+                # those original line numbers for later-cell tracebacks.
+                linecache.cache[cell_filename] = (
+                    len(source_code),
+                    None,
+                    source_code.splitlines(keepends=True),
+                    cell_filename,
+                )
             for name, src in method_sources.items():
                 fn = namespace.get(name)
                 if callable(fn):
@@ -228,4 +242,5 @@ async def run_cell_source(
     except Exception as exc:
         return build_result(error=exc)
     finally:
+        _truncation_reasons.reset(truncation_token)
         _media_buffer_var.reset(media_token)

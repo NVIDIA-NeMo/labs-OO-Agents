@@ -42,7 +42,6 @@ def _resp(content: str, tool_calls: list | None = None) -> LLMResponse:
         content=content,
         tool_calls=tool_calls or [],
         finish_reason=finish_reason,
-        assistant_message={"role": "assistant", "content": content},
     )
 
 
@@ -69,7 +68,6 @@ def _llm_resp(content: str, reasoning: str | None = None) -> LLMResponse:
         content=content,
         tool_calls=[],
         finish_reason="stop",
-        assistant_message={"role": "assistant", "content": content},
         reasoning=reasoning,
     )
 
@@ -731,7 +729,6 @@ class TestPredictMalformedResponseFallback:
                     content="not json at all!!!",
                     tool_calls=[],
                     finish_reason="stop",
-                    assistant_message={"role": "assistant", "content": "not json"},
                 )
                 return resp, "evt_1"
             # Second call: correct response

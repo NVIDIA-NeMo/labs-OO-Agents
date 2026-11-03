@@ -93,36 +93,17 @@ class SpecAnnotation:
 
 
 class Spec:
-    """The ``spec`` singleton — step 1: specify how a type renders.
+    """Shape how objects appear in ``doc()`` and ``pformat()``.
 
-    Attach visibility rules, descriptions, and rendering hints to fields,
-    methods, or whole types; ``doc()`` and ``pformat()`` pick them up
-    automatically.
+    Use it as metadata, a decorator, or an imperative override::
 
-    **Default visibility rules:**
+        name: Annotated[str, spec(description="Display name")]
+        @spec(hidden=True)
+        def internal(self): ...
+        spec(ThirdParty, "verbose", hidden=True)
 
-    - Public names (no leading underscore) are **visible** by default.
-    - ``_private`` names (single or double leading underscore) are **hidden**
-      by default.  Use ``spec(hidden=False)`` or ``@spec(hidden=False)`` to
-      opt a private name back in.
-
-    Which form to use:
-
-    - **Annotated marker** — for fields in types you own::
-
-          api_key: Annotated[str, spec(hidden=True)] = ""
-
-    - **Decorator** — for methods or classes you own::
-
-          @spec(hidden=True)
-          def _internal(self): ...
-
-          @spec(hidden=False)       # opt a _private method back in
-          def _shown_helper(self): ...
-
-    - **Imperative** — for types you don't own::
-
-          spec(ThirdPartyClass, "verbose_field", hidden=True)
+    Public names are visible by default; private names are hidden unless
+    explicitly shown with ``spec(hidden=False)``.
     """
 
     def __call__(

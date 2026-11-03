@@ -143,6 +143,39 @@ class TestCustomInstanceValues:
         # Should NOT show _internal (filtered by __instance_values__)
         assert "hidden" not in result
 
+    def test_instance_values_omission_only_hides_from_pformat(self):
+        """doc() keeps type fields while pformat() honors protocol omission."""
+
+        class SelectiveValues:
+            @classmethod
+            def __type_info__(cls) -> TypeInfo:
+                return TypeInfo(
+                    name="SelectiveValues",
+                    base=None,
+                    fields=[
+                        FieldInfo("required", "str", ...),
+                        FieldInfo("defaulted", "int", 7),
+                        FieldInfo("shown", "str", ...),
+                    ],
+                    methods=[],
+                    docstring=None,
+                )
+
+            def __instance_values__(self) -> dict:
+                return {"shown": "runtime"}
+
+        obj = SelectiveValues()
+
+        instance_doc = doc(obj)
+        assert "required: str" in instance_doc
+        assert "defaulted: int = 7" in instance_doc
+        assert "shown: str = 'runtime'" in instance_doc
+
+        instance_repr = pformat(obj)
+        assert "shown='runtime'" in instance_repr
+        assert "required" not in instance_repr
+        assert "defaulted" not in instance_repr
+
     def test_partial_custom_uses_automatic_values(self):
         """Test object with only __type_info__ uses automatic value extraction."""
         obj = PartialCustomClass()

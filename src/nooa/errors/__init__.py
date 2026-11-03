@@ -10,6 +10,7 @@ Provides clear error categories for:
 Also provides error formatting utilities for LLM feedback.
 """
 
+from nooa.errors.formatting import ErrorFormatter as ErrorFormatter
 from nooa.errors.formatting import (
     IPythonErrorFormatter as IPythonErrorFormatter,
 )
@@ -37,6 +38,12 @@ class GenerationError(NemoOOAgentsError):
 
 class GenerationAborted(GenerationError):
     """Generation was explicitly aborted by the agent (via task.abort() in generated code)."""
+
+    pass
+
+
+class LoopDetectedError(GenerationError):
+    """Generation stopped because the model repeated a tool call after a loop-guard warning."""
 
     pass
 

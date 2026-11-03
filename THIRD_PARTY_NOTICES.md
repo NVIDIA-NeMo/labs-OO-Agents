@@ -26,6 +26,11 @@ Attribution Statements: NVIDIA includes `litellm` under the MIT License for use 
 License Text(https://spdx.org/licenses/MIT.html)
 Source/Homepage: https://github.com/BerriAI/litellm
 
+msgpack - Apache License 2.0
+Attribution Statements: NVIDIA includes `msgpack` under the Apache License 2.0 for use with NVIDIA OO Agents.
+License Text(https://spdx.org/licenses/Apache-2.0.html)
+Source/Homepage: https://github.com/msgpack/msgpack-python
+
 openinference-instrumentation-litellm - Apache License 2.0
 Attribution Statements: NVIDIA includes `openinference-instrumentation-litellm` under the Apache License 2.0 for use with NVIDIA OO Agents.
 License Text(https://spdx.org/licenses/Apache-2.0.html)
@@ -59,6 +64,35 @@ pyyaml - MIT License
 Attribution Statements: NVIDIA includes `pyyaml` under the MIT License for use with NVIDIA OO Agents.
 License Text(https://spdx.org/licenses/MIT.html)
 Source/Homepage: https://github.com/yaml/pyyaml
+
+---
+
+## `nooa-acp`
+
+agent-client-protocol - Apache License 2.0
+Attribution Statements: NVIDIA includes `agent-client-protocol` under the Apache License 2.0 for use with NVIDIA OO Agents.
+License Text(https://spdx.org/licenses/Apache-2.0.html)
+Source/Homepage: https://github.com/agentclientprotocol/python-sdk
+
+click - BSD 3-Clause License
+Attribution Statements: NVIDIA includes `click` under the BSD 3-Clause License for use with NVIDIA OO Agents.
+License Text(https://spdx.org/licenses/BSD-3-Clause.html)
+Source/Homepage: https://github.com/pallets/click
+
+litellm - MIT License
+Attribution Statements: NVIDIA includes `litellm` under the MIT License for use with NVIDIA OO Agents.
+License Text(https://spdx.org/licenses/MIT.html)
+Source/Homepage: https://github.com/BerriAI/litellm
+
+nooa - Apache License 2.0
+Attribution Statements: NVIDIA includes `nooa` under the Apache License 2.0 for use with NVIDIA OO Agents.
+License Text(https://spdx.org/licenses/Apache-2.0.html)
+Source/Homepage: https://github.com/NVIDIA-NeMo/labs-OO-Agents
+
+nooa-cli - Apache License 2.0
+Attribution Statements: NVIDIA includes `nooa-cli` under the Apache License 2.0 for use with NVIDIA OO Agents.
+License Text(https://spdx.org/licenses/Apache-2.0.html)
+Source/Homepage: https://github.com/NVIDIA-NeMo/labs-OO-Agents
 
 ---
 

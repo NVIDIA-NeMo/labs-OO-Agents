@@ -63,11 +63,11 @@ def test_archived_context_blocks_events_not_in_context(event_manager):
 
 def test_archived_nemo_events_not_in_context(event_manager):
     """nooa events collapsed into a Summary must not appear in context."""
-    from nooa.events import LLMOutput, Task
+    from nooa.events import LLMResponse, Task
 
     em = event_manager
     em.add(Task(prompt="do the thing"))  # tag "1"
-    em.add(LLMOutput(content="done"))  # tag "2"
+    em.add(LLMResponse(content="done"))  # tag "2"
     em.add(Task(prompt="do another thing"))  # tag "3"
 
     em.collapse("1", "2", summary_text="summarized first exchange")

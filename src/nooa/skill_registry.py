@@ -7,15 +7,33 @@ import importlib.util
 import inspect
 import logging
 import sys
+import threading
+from dataclasses import dataclass
 from importlib.metadata import entry_points
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from nooa.skill import Skill, TextSkill
 
 logger = logging.getLogger(__name__)
 
 ENTRY_POINT_GROUP = "nooa.skills"
+
+# Package imports mutate process-global import state. Serialize mutations made
+# by registries, including rollback, so concurrent registry operations cannot
+# observe one another's temporary sys.path/sys.modules state.
+_PACKAGE_IMPORT_LOCK = threading.RLock()
+
+
+@dataclass(frozen=True)
+class _SkillSource:
+    """Recipe for constructing a fresh skill object for one agent."""
+
+    kind: Literal["package", "python", "text"]
+    path: Path
+    target: str | None = None
+    module_name: str | None = None
+
 
 _RESERVED_ATTRS = frozenset(
     {
@@ -29,6 +47,20 @@ _RESERVED_ATTRS = frozenset(
         "event_query",
     }
 )
+
+
+def _package_search_paths(lib_dir: Path, top_package: str) -> tuple[str, ...]:
+    """Find import roots for flat, package, and src package layouts."""
+    candidates = [lib_dir.parent]
+    lib_dir_is_package = lib_dir.name == top_package and (lib_dir / "__init__.py").is_file()
+    if not lib_dir_is_package and (
+        (lib_dir / top_package).is_dir() or (lib_dir / f"{top_package}.py").is_file()
+    ):
+        candidates.append(lib_dir)
+    src_dir = lib_dir / "src"
+    if (src_dir / top_package).is_dir() or (src_dir / f"{top_package}.py").is_file():
+        candidates.append(src_dir)
+    return tuple(dict.fromkeys(str(path) for path in candidates))
 
 
 # ---------------------------------------------------------------------------
@@ -100,14 +132,21 @@ def skill_from_module(module: Any, module_name: str, source: str = "") -> "Skill
         return None
 
 
-def _load_python_skill(path: Path) -> "Skill | None":
+def _load_python_skill(
+    path: Path,
+    *,
+    module_instance_key: str = "",
+) -> "tuple[Skill | None, str | None]":
     """Import *path* and extract a ``Skill`` via :func:`skill_from_module`."""
-    module_name = f"_nooa_skill_{path.stem}_{abs(hash(str(path.resolve()))) & 0xFFFFFFFF:08x}"
+    suffix = f"_{module_instance_key}" if module_instance_key else ""
+    module_name = (
+        f"_nooa_skill_{path.stem}_{abs(hash(str(path.resolve()))) & 0xFFFFFFFF:08x}{suffix}"
+    )
     try:
         spec = importlib.util.spec_from_file_location(module_name, path)
         if spec is None or spec.loader is None:
             logger.warning("Skill file %s skipped: could not build import spec", path)
-            return None
+            return None, None
         module = importlib.util.module_from_spec(spec)
         sys.modules[module_name] = module
         try:
@@ -117,10 +156,14 @@ def _load_python_skill(path: Path) -> "Skill | None":
             raise
     except Exception:
         logger.warning("Skill file %s skipped: import failed", path, exc_info=True)
-        return None
+        return None, None
 
     try:
-        return skill_from_module(module, module_name, source=f"Skill file {path}")
+        skill = skill_from_module(module, module_name, source=f"Skill file {path}")
+        if skill is None:
+            sys.modules.pop(module_name, None)
+            return None, None
+        return skill, module_name
     except Exception:
         sys.modules.pop(module_name, None)
         raise
@@ -143,6 +186,23 @@ class SkillRegistry(Skill):
 
         self.skills.load(['nemo.*'])
         self.skills.activate(['nemo.shell', 'nemo.repo'])
+
+    Cleanup of superseded skills is deliberately split in two:
+
+    * **Skill objects and their classes are never torn down.** A reload
+      builds a new object; agents holding the old one keep working against
+      it, and it is collected once the last reference goes away. Lifetime
+      is by reference, not by registry bookkeeping.
+    * **Synthetic modules are tracked and reclaimed.** Every standalone
+      ``.py`` load gets a unique module name recorded in
+      ``_python_modules``. :meth:`reload` drops the module it replaces and
+      :meth:`shutdown` drops all of them, each only when ``sys.modules``
+      still holds the object this registry installed, so a third party that
+      replaced the entry is left alone. Failed loads unwind immediately.
+
+    Package skills follow the same rule for objects, but refresh
+    ``sys.modules`` under the top-level package on reload instead of using
+    a synthetic name, restoring the previous state if the reload fails.
     """
 
     __agentdoc_skip__ = True
@@ -155,7 +215,10 @@ class SkillRegistry(Skill):
         self._loaded: set[str] = set()
         self._activated: set[str] = set()
         self._attr_map: dict[str, str] = {}  # registry name → actual attr name on agent
-        self._lib_paths: dict[str, str] = {}  # lib_name → sys.path entry added for it
+        self._load_order: list[str] = []  # deterministic dependency-safe teardown order
+        self._sources: dict[str, _SkillSource] = {}
+        self._python_modules: dict[str, Any] = {}  # local synthetic name → imported module
+        self._load_generation = 0
         self._discover()
         super().__init__()
         # Self-register our own context block (we're never activated through ourselves)
@@ -212,24 +275,32 @@ class SkillRegistry(Skill):
         libs_path = Path(libs_path)
         if not libs_path.is_dir():
             return
-        for lib_dir in sorted(libs_path.iterdir()):
-            if not (lib_dir.is_dir() and (lib_dir / "pyproject.toml").exists()):
-                continue
+        libraries = [
+            entry
+            for entry in sorted(libs_path.iterdir())
+            if entry.is_dir() and (entry / "pyproject.toml").exists()
+        ]
+        for lib_dir in libraries:
             lib_name = lib_dir.name
-            reg_name = self._read_skill_name(lib_dir, lib_name)
+            reg_name, target = self._read_skill_entry(lib_dir, lib_name)
             if reg_name in self._loaded:
                 continue
             try:
-                skill = self._import_lib(lib_dir, lib_name)
+                skill = self._import_lib(lib_dir, lib_name, target)
                 if skill is not None:
                     skill._source_dir = lib_dir
                     self.register(reg_name, skill)
+                    self._sources[reg_name] = _SkillSource(
+                        "package",
+                        lib_dir.resolve(),
+                        target=target or lib_name,
+                    )
             except Exception:
                 logger.warning("Library %s skipped", lib_name, exc_info=True)
 
     @staticmethod
-    def _read_skill_name(lib_dir: "Path", lib_name: str) -> str:
-        """Read the skill registry name from pyproject.toml entry_points.
+    def _read_skill_entry(lib_dir: "Path", lib_name: str) -> tuple[str, str | None]:
+        """Read the first skill registry name and import target from pyproject.toml.
 
         Falls back to ``local.<lib_name>`` if no entry_point is declared.
         """
@@ -241,55 +312,89 @@ class SkillRegistry(Skill):
                 data = tomllib.load(f)
             eps = data.get("project", {}).get("entry-points", {}).get(ENTRY_POINT_GROUP, {})
             if eps:
-                # Use the first declared entry_point name
-                return next(iter(eps))
+                # One directory is one library skill. Its entry-point value is
+                # authoritative: the import package need not match the library
+                # directory name or the project distribution name.
+                name, target = next(iter(eps.items()))
+                return name, target if isinstance(target, str) else None
         except Exception:
             pass
-        return f"local.{lib_name}"
+        return f"local.{lib_name}", None
 
-    def _import_lib(self, lib_dir: "Path", lib_name: str) -> "Skill | None":
-        """Import a library package and extract its Skill instance."""
-        import importlib
-        import sys as _sys
+    def _import_lib(
+        self,
+        lib_dir: "Path",
+        lib_name: str,
+        target: str | None = None,
+        previous_module_state: dict[str, Any] | None = None,
+    ) -> "Skill | None":
+        """Freshly import a library package and construct one local Skill object.
 
-        libs_str = str(lib_dir.parent)
-        added_to_path = False
-        if libs_str not in _sys.path:
-            _sys.path.insert(0, libs_str)
-            added_to_path = True
+        Existing agents keep their old class and module objects through normal
+        Python references. ``sys.modules`` is only refreshed so this load sees
+        current source; it is not treated as NOOA-owned lifecycle state.
+        """
+        module_name, _, attr_path = (target or lib_name).partition(":")
+        top_package = module_name.split(".", 1)[0]
+        search_paths = _package_search_paths(lib_dir, top_package)
+        prefix = top_package + "."
+        with _PACKAGE_IMPORT_LOCK:
+            previous_modules = {
+                key: module
+                for key, module in sys.modules.items()
+                if key == top_package or key.startswith(prefix)
+            }
+            if previous_module_state is not None:
+                previous_module_state.update(previous_modules)
+            original_path = list(sys.path)
+            for key in previous_modules:
+                sys.modules.pop(key, None)
+            sys.path[:] = [*search_paths, *(p for p in original_path if p not in search_paths)]
+            importlib.invalidate_caches()
+            try:
+                module = importlib.import_module(module_name)
 
-        prefix = lib_name + "."
-        for key in [k for k in _sys.modules if k == lib_name or k.startswith(prefix)]:
-            del _sys.modules[key]
+                if attr_path:
+                    value: Any = module
+                    for part in attr_path.split("."):
+                        value = getattr(value, part)
+                    if isinstance(value, Skill):
+                        return value
+                    if inspect.isclass(value) and issubclass(value, Skill):
+                        return value()
+                    raise TypeError(f"Library {lib_name!r} target {target!r} is not a Skill")
 
-        try:
-            module = importlib.import_module(lib_name)
-        except Exception:
-            if added_to_path:
-                _sys.path.remove(libs_str)
-            raise
-
-        # Track the path addition so it can be cleaned up if the skill is unloaded
-        if added_to_path:
-            self._lib_paths[lib_name] = libs_str
-
-        return skill_from_module(module, lib_name, source=f"Library {lib_name!r}")
+                skill = skill_from_module(
+                    module,
+                    module_name,
+                    source=f"Library {lib_name!r}",
+                )
+                if skill is None:
+                    raise TypeError(f"Library {lib_name!r} does not export a Skill")
+                return skill
+            except Exception:
+                self._restore_package_modules(sys.modules, top_package, previous_modules)
+                raise
+            finally:
+                sys.path[:] = original_path
 
     def discover_skills_dirs(self, dirs: "list[Path]") -> None:
-        """Scan skills directories for TextSkills and Python skills.
+        """Scan skill roots for packaged libraries, TextSkills, and Python skills.
 
-        TextSkills (SKILL.md directories) register as cmd.<skill_id>.
-        Python skills (.py files with Skill subclass) register as ext.<name>.
+        Immediate child directories with a ``pyproject.toml`` are discovered
+        through :meth:`discover_libs`, using their ``nooa.skills`` entry-point
+        metadata. TextSkills (SKILL.md directories) register as
+        cmd.<skill_id>. Python skills (.py files with Skill subclass) register
+        as ext.<name>.
 
         Args:
-            dirs: List of directories to scan.
+            dirs: List of skill roots to scan.
         """
         from pathlib import Path
 
-        for skills_dir in dirs:
-            skills_dir = Path(skills_dir)
-            if not skills_dir.is_dir():
-                continue
+        skill_roots = [Path(path) for path in dirs if Path(path).is_dir()]
+        for skills_dir in skill_roots:
+            self.discover_libs(skills_dir)
             for entry in skills_dir.iterdir():
                 if entry.is_dir():
                     skill_md = entry / "SKILL.md"
@@ -297,7 +402,7 @@ class SkillRegistry(Skill):
                         skill_md = entry / "skill.md"
                     if skill_md.exists():
                         self._register_text_skill(entry)
-                elif entry.is_file() and entry.suffix == ".py" and not entry.name.startswith("_"):
+                elif _is_python_skill_file(entry):
                     self._register_python_skill(entry)
 
     def _register_text_skill(self, entry: "Path") -> None:
@@ -309,22 +414,43 @@ class SkillRegistry(Skill):
             reg_name = f"cmd.{skill.id}"
             if reg_name not in self._loaded:
                 self.register(reg_name, skill)
+                self._sources[reg_name] = _SkillSource("text", entry.resolve())
         except Exception:
             logger.warning("TextSkill %s skipped", entry, exc_info=True)
 
     def _register_python_skill(self, entry: "Path") -> None:
         """Register a Python skill from a .py file."""
 
+        module_name: str | None = None
         try:
-            skill = _load_python_skill(entry)
+            skill, module_name = _load_python_skill(
+                entry,
+                module_instance_key=self._next_module_instance_key(),
+            )
             if skill is not None:
                 skill._source_dir = entry.parent
                 name = entry.stem.replace("-", "_").replace(" ", "_")
                 reg_name = f"ext.{name}"
                 if reg_name not in self._loaded:
                     self.register(reg_name, skill)
+                    if module_name is not None:
+                        self._python_modules[module_name] = sys.modules[module_name]
+                    self._sources[reg_name] = _SkillSource(
+                        "python",
+                        entry.resolve(),
+                        module_name=module_name,
+                    )
+                elif module_name is not None:
+                    sys.modules.pop(module_name, None)
         except Exception:
+            if module_name is not None:
+                sys.modules.pop(module_name, None)
             logger.warning("Python skill %s skipped", entry, exc_info=True)
+
+    def _next_module_instance_key(self) -> str:
+        """Return a unique key for a freshly loaded standalone skill module."""
+        self._load_generation += 1
+        return f"{id(self):x}_{self._load_generation:x}"
 
     # ------------------------------------------------------------------
     # Loading
@@ -342,7 +468,8 @@ class SkillRegistry(Skill):
         args must be constructed manually and registered via register().
         """
         matched = self._match(patterns, set(self._discovered.keys()))
-        for name in matched:
+        changed = False
+        for name in sorted(matched):
             if name in self._loaded:
                 continue
             entry = self._discovered[name]
@@ -360,6 +487,15 @@ class SkillRegistry(Skill):
                 if attr_name.startswith("_") or attr_name in _RESERVED_ATTRS:
                     logger.warning("Refusing to load skill with reserved name %s", attr_name)
                     continue
+                held_by = self._protected_conflict(name, attr_name, skill)
+                if held_by is not None:
+                    logger.warning(
+                        "Refusing to load skill %s as '%s': %s",
+                        name,
+                        attr_name,
+                        held_by,
+                    )
+                    continue
                 if hasattr(self._agent, attr_name) and attr_name not in set(
                     self._attr_map.values()
                 ):
@@ -372,9 +508,40 @@ class SkillRegistry(Skill):
                 skill.attach(self._agent)
                 self._loaded.add(name)
                 self._attr_map[name] = attr_name
+                self._load_order.append(name)
+                changed = True
                 logger.info("Loaded skill %s as self.%s", name, attr_name)
             except Exception:
                 logger.warning("Failed to load skill %s", name, exc_info=True)
+        if changed:
+            self._refresh_host_commands()
+
+    def _protected_conflict(self, name: str, attr: str, skill: Any = None) -> str | None:
+        """Describe why *name* may not take over *attr*, or None if it may.
+
+        Agents declare the attributes carrying their own tools via
+        ``__protected_skill_attrs__``. Those may be claimed once: a second
+        claimant removes the tool while the model is still told it has one.
+
+        Protection cannot depend on the attribute being skill-owned. An agent
+        assigns some of them directly — ``self.skills = SkillRegistry(self)`` —
+        so they have no ``_attr_map`` entry, and keying only on ownership left
+        exactly those unguarded. Binding an existing object to its own name is
+        still allowed, which is how a skill assigned in ``__init__`` registers
+        itself. Both ``register()`` and ``load()`` consult this, so the explicit
+        and discovered paths cannot drift apart.
+        """
+        protected = getattr(type(self._agent), "__protected_skill_attrs__", frozenset())
+        if attr not in protected:
+            return None
+        owner = next(
+            (held for held, held_attr in self._attr_map.items() if held_attr == attr), None
+        )
+        if owner is not None:
+            return None if owner == name else f"already provided by {owner!r}"
+        if hasattr(self._agent, attr) and getattr(self._agent, attr, None) is not skill:
+            return "assigned directly by the agent"
+        return None
 
     def register(
         self, name: str, skill_or_cls: "Skill | type[Skill] | None" = None, /, **kwargs
@@ -411,7 +578,18 @@ class SkillRegistry(Skill):
         attr = self._attr_name(name)
         if attr.startswith("_") or attr in _RESERVED_ATTRS:
             raise ValueError(f"Cannot register skill with reserved attr name {attr!r}")
-        if hasattr(self._agent, attr) and attr not in self._attr_map.values():
+        conflict = self._protected_conflict(name, attr, skill)
+        if conflict is not None:
+            # Colliding leaves are supported in general — reload disambiguates
+            # by fully-qualified name — but an agent may declare attributes that
+            # carry its own tools. Those must not be taken over: the previous
+            # check was suppressed once an attr was in _attr_map, so the second
+            # claimant silently won. That is how a repo-supplied `cmd.shell` or
+            # a client-supplied `mcp.shell` removed the agent's real shell while
+            # the model kept being told it still had one. Re-registering the
+            # same name is still fine.
+            raise ValueError(f"Cannot register skill {name!r} as agent attr {attr!r}: {conflict}")
+        if hasattr(self._agent, attr) and attr not in set(self._attr_map.values()):
             logger.warning("Skill %s overwrites existing agent attr '%s'", name, attr)
         setattr(self._agent, attr, skill)
         if hasattr(skill, "attach"):
@@ -421,11 +599,25 @@ class SkillRegistry(Skill):
                     skill.detach()
             if existing_agent is not self._agent:
                 skill.attach(self._agent)
+        newly_loaded = name not in self._loaded
         self._loaded.add(name)
         self._attr_map[name] = attr
+        if newly_loaded:
+            self._load_order.append(name)
         if name not in self._discovered:
             category = name.split(".")[0] if "." in name else ""
             self._discovered[name] = _SkillEntry(name=name, entry_point=None, category=category)
+        self._refresh_host_commands()
+
+    def _refresh_host_commands(self) -> None:
+        """Notify an attached interactive host that loaded commands changed."""
+        command_registry = getattr(self._agent, "_command_registry", None)
+        if command_registry is None or not hasattr(command_registry, "refresh_skill_commands"):
+            return
+        try:
+            command_registry.refresh_skill_commands()
+        except Exception:
+            logger.debug("Failed to refresh host slash commands", exc_info=True)
 
     # ------------------------------------------------------------------
     # Activation
@@ -634,13 +826,86 @@ class SkillRegistry(Skill):
         if skill is None:
             return f"Skill {name!r} has no instance on agent"
 
+        source = self._sources.get(name)
+        if source is not None:
+            return await self._reload_from_source(name, attr, source)
+
         mod_name = type(skill).__module__
         # For package modules (e.g. "excalidraw.__init__"), use the top-level package
         top_pkg = mod_name.split(".")[0]
 
         if top_pkg in self._NO_RELOAD or top_pkg.startswith("_"):
             return await self._reload_single_module(name, attr, skill, mod_name)
-        return await self._reload_package(name, attr, top_pkg)
+        return await self._reload_package(
+            name,
+            attr,
+            top_pkg,
+            mod_name,
+            type(skill).__name__,
+        )
+
+    async def _reload_from_source(
+        self,
+        name: str,
+        attr: str,
+        source: _SkillSource,
+    ) -> str:
+        """Construct fresh source code and swap only this agent's skill object."""
+        import asyncio
+
+        if source.kind == "text":
+            try:
+                new_skill = TextSkill(path=source.path)
+            except Exception as exc:
+                return f"Reload failed for {name}: {exc}"
+            return await self._install_reloaded_instance(name, attr, new_skill)
+
+        if source.kind == "python":
+            new_skill, module_name = await asyncio.to_thread(
+                _load_python_skill,
+                source.path,
+                module_instance_key=self._next_module_instance_key(),
+            )
+            if new_skill is None or module_name is None:
+                return f"Reload failed for {name}: could not load {source.path}"
+            new_skill._source_dir = source.path.parent
+            result = await self._install_reloaded_instance(name, attr, new_skill)
+            if not result.startswith("Reloaded "):
+                sys.modules.pop(module_name, None)
+                return result
+
+            previous_name = source.module_name
+            previous_module = self._python_modules.pop(previous_name, None)
+            if previous_name is not None and sys.modules.get(previous_name) is previous_module:
+                sys.modules.pop(previous_name, None)
+            self._python_modules[module_name] = sys.modules[module_name]
+            self._sources[name] = _SkillSource(
+                "python",
+                source.path,
+                module_name=module_name,
+            )
+            return result
+
+        module_name = (source.target or source.path.name).partition(":")[0]
+        top_package = module_name.split(".", 1)[0]
+        previous_modules: dict[str, Any] = {}
+        try:
+            new_skill = await asyncio.to_thread(
+                self._import_lib,
+                source.path,
+                source.path.name,
+                source.target,
+                previous_modules,
+            )
+        except Exception as exc:
+            return f"Reload failed for {name}: {exc}"
+        if new_skill is None:
+            return f"Reload failed for {name}: {source.path} does not export a Skill"
+        new_skill._source_dir = source.path
+        result = await self._install_reloaded_instance(name, attr, new_skill)
+        if not result.startswith("Reloaded "):
+            self._restore_package_modules(sys.modules, top_package, previous_modules)
+        return result
 
     async def _detach_old_for_reload(self, attr: str) -> tuple[Any, bool]:
         """Detach the existing agent skill before reloading its module code."""
@@ -668,13 +933,54 @@ class SkillRegistry(Skill):
                     exc_info=True,
                 )
 
-    async def _reload_package(self, name: str, attr: str, top_pkg: str) -> str:
+    async def _reload_package(
+        self,
+        name: str,
+        attr: str,
+        top_pkg: str,
+        module_name: str,
+        class_name: str,
+    ) -> str:
+        """Reload a package skill that has no explicit local source recipe."""
+        return await self._reload_package_exclusive(
+            name,
+            attr,
+            top_pkg,
+            module_name,
+            class_name,
+        )
+
+    @staticmethod
+    def _import_reloaded_package(top_pkg: str, module_name: str) -> tuple[Any, dict[str, Any]]:
+        """Purge and import one package while holding the import-state lock."""
+        prefix = top_pkg + "."
+        old_modules: dict[str, Any] = {}
+        with _PACKAGE_IMPORT_LOCK:
+            try:
+                old_modules = {
+                    key: value
+                    for key, value in sys.modules.items()
+                    if key == top_pkg or key.startswith(prefix)
+                }
+                for key in old_modules:
+                    del sys.modules[key]
+                return importlib.import_module(module_name), old_modules
+            except Exception:
+                SkillRegistry._restore_package_modules(sys.modules, top_pkg, old_modules)
+                raise
+
+    async def _reload_package_exclusive(
+        self,
+        name: str,
+        attr: str,
+        top_pkg: str,
+        module_name: str,
+        class_name: str,
+    ) -> str:
         """Purge and re-import an entire top-level package (user/lib skills)."""
         import asyncio
-        import importlib
-        import sys as _sys
 
-        if top_pkg not in _sys.modules:
+        if top_pkg not in sys.modules:
             return f"Package {top_pkg} not in sys.modules — cannot reload"
         old_skill = getattr(self._agent, attr, None)
         try:
@@ -682,32 +988,52 @@ class SkillRegistry(Skill):
         except Exception as e:
             await self._restore_old_after_reload_failure(name, old_skill, old_skill is not None)
             return f"Reload failed for {name}: {e}"
+        old_modules: dict[str, Any] = {}
         try:
-            # Clear all submodules so reimport gets fresh code from disk
-            prefix = top_pkg + "."
-            for key in [k for k in _sys.modules if k == top_pkg or k.startswith(prefix)]:
-                del _sys.modules[key]
-            mod = await asyncio.to_thread(importlib.import_module, top_pkg)
-            # Find the Skill subclass in the reloaded module
-            from nooa.skill import Skill as _Skill
+            mod, old_modules = await asyncio.to_thread(
+                self._import_reloaded_package, top_pkg, module_name
+            )
         except Exception as e:
             await self._restore_old_after_reload_failure(name, old_skill, old_detached)
             return f"Reload failed for {name}: {e}"
 
-        for obj in vars(mod).values():
-            if isinstance(obj, type) and issubclass(obj, _Skill) and obj is not _Skill:
-                try:
-                    return await self._install_reloaded(
-                        name,
-                        attr,
-                        obj,
-                        old_skill=old_skill,
-                        old_detached=old_detached,
-                    )
-                except Exception as e:
-                    return f"Reload failed for {name}: {e}"
+        new_class = getattr(mod, class_name, None)
+        if isinstance(new_class, type) and issubclass(new_class, Skill) and new_class is not Skill:
+            try:
+                result = await self._install_reloaded(
+                    name,
+                    attr,
+                    new_class,
+                    old_skill=old_skill,
+                    old_detached=old_detached,
+                )
+                if result.startswith("Reload failed") or result.startswith("Skill "):
+                    self._restore_package_modules(sys.modules, top_pkg, old_modules)
+                    if result.startswith("Skill "):
+                        return f"Reload failed for {name}: {result}"
+                return result
+            except Exception as e:
+                self._restore_package_modules(sys.modules, top_pkg, old_modules)
+                return f"Reload failed for {name}: {e}"
+        self._restore_package_modules(sys.modules, top_pkg, old_modules)
         await self._restore_old_after_reload_failure(name, old_skill, old_detached)
-        return f"Reloaded module {top_pkg} but no Skill subclass found"
+        return (
+            f"Reload failed for {name}: reloaded module {module_name!r} "
+            f"has no Skill class {class_name!r}"
+        )
+
+    @staticmethod
+    def _restore_package_modules(
+        modules: dict[str, Any],
+        top_pkg: str,
+        previous: dict[str, Any],
+    ) -> None:
+        """Restore the exact pre-reload package tree after a failed swap."""
+        prefix = top_pkg + "."
+        with _PACKAGE_IMPORT_LOCK:
+            for key in [key for key in modules if key == top_pkg or key.startswith(prefix)]:
+                del modules[key]
+            modules.update(previous)
 
     async def _reload_single_module(self, name: str, attr: str, skill: Any, mod_name: str) -> str:
         """Reload only the skill's own leaf module via ``importlib.reload``.
@@ -799,14 +1125,44 @@ class SkillRegistry(Skill):
         except Exception:
             await self._restore_old_after_reload_failure(name, old_skill, old_detached)
             raise
+        return await self._install_reloaded_instance(
+            name,
+            attr,
+            new_skill,
+            old_skill=old_skill,
+            old_detached=old_detached,
+        )
+
+    async def _install_reloaded_instance(
+        self,
+        name: str,
+        attr: str,
+        new_skill: Any,
+        *,
+        old_skill: Any | None = None,
+        old_detached: bool = False,
+    ) -> str:
+        """Atomically replace one agent's skill with a prepared local object."""
+        if old_skill is None:
+            old_skill = getattr(self._agent, attr, None)
+        if not old_detached:
+            try:
+                old_skill, old_detached = await self._detach_old_for_reload(attr)
+            except Exception as exc:
+                await self._restore_old_after_reload_failure(
+                    name,
+                    old_skill,
+                    old_skill is not None,
+                )
+                return f"Reload failed for {name}: {exc}"
         try:
             if hasattr(new_skill, "attach"):
                 result = new_skill.attach(self._agent)
                 if inspect.isawaitable(result):
                     await result
-        except Exception:
+        except Exception as exc:
             await self._restore_old_after_reload_failure(name, old_skill, old_detached)
-            raise
+            return f"Reload failed for {name}: {exc}"
         if name in self._activated:
             self._unregister_context_block(name)
         setattr(self._agent, attr, new_skill)
@@ -820,6 +1176,71 @@ class SkillRegistry(Skill):
             except Exception:
                 pass
         return f"Reloaded {name} (self.{attr})"
+
+    async def aclose(self) -> None:
+        """Detach this agent's skills and release its synthetic Python modules."""
+        detach_order: list[str] = []
+        visited: set[str] = set()
+
+        def visit(name: str) -> None:
+            if name in visited:
+                return
+            visited.add(name)
+            # Visit every dependent before the requirement it can still use.
+            for candidate in reversed(self._load_order):
+                attr = self._attr_map.get(candidate)
+                skill = getattr(self._agent, attr, None) if attr is not None else None
+                if name in getattr(skill, "requires", ()):
+                    visit(candidate)
+            detach_order.append(name)
+
+        for name in reversed(self._load_order):
+            visit(name)
+
+        for name in detach_order:
+            attr = self._attr_map.get(name)
+            skill = getattr(self._agent, attr, None) if attr is not None else None
+            if name in self._activated:
+                self._unregister_context_block(name)
+            if skill is not None and hasattr(skill, "detach"):
+                try:
+                    result = skill.detach()
+                    if inspect.isawaitable(result):
+                        await result
+                except Exception:
+                    logger.warning("Failed to detach skill %s during shutdown", name, exc_info=True)
+            if attr is not None and getattr(self._agent, attr, None) is skill:
+                try:
+                    delattr(self._agent, attr)
+                except AttributeError:
+                    pass
+        self._loaded.clear()
+        self._activated.clear()
+        self._attr_map.clear()
+        self._load_order.clear()
+        self._sources.clear()
+
+        for module_name, module in tuple(self._python_modules.items()):
+            if sys.modules.get(module_name) is module:
+                sys.modules.pop(module_name, None)
+        self._python_modules.clear()
+
+        if self.context_block and hasattr(self._agent, "context_manager"):
+            key, _ = self.context_block
+            cm = self._agent.context_manager
+            if key in cm and key not in cm.protected_keys:
+                cm.pop(key, None)
+
+    def close(self) -> None:
+        """Synchronous shutdown helper for registries outside an event loop."""
+        import asyncio
+
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            asyncio.run(self.aclose())
+            return
+        raise RuntimeError("SkillRegistry.close() cannot run on an event loop; await aclose()")
 
     # ------------------------------------------------------------------
     # Access

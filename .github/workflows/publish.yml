@@ -1,4 +1,4 @@
-# Publishes the four workspace packages to PyPI.
+# Publishes the five workspace packages to PyPI.
 #
 # Trigger: a GitHub Release is *published* (the release's tag `vX.Y.Z` is what
 # uv-dynamic-versioning turns into the package version — see RELEASING.md).
@@ -51,7 +51,7 @@ jobs:
       - name: Build all packages
         run: |
           rm -rf dist
-          for pkg in nooa nooa-cli nooa-memory nooa-bench; do
+          for pkg in nooa nooa-cli nooa-acp nooa-memory nooa-bench; do
             uv build --no-sources --package "$pkg" --out-dir dist
           done
           ls -l dist
@@ -71,14 +71,14 @@ jobs:
 
           expected = Version(os.environ["TAG"].removeprefix("v"))
           wheels = sorted(pathlib.Path("dist").glob("*.whl"))
-          assert len(wheels) == 4, f"expected 4 wheels, got {[w.name for w in wheels]}"
+          assert len(wheels) == 5, f"expected 5 wheels, got {[w.name for w in wheels]}"
           for whl in wheels:
               _, version, _, _ = parse_wheel_filename(whl.name)
               if version.is_devrelease:
                   sys.exit(f"{whl.name}: dev version — the tag is not reachable from HEAD")
               if version != expected:
                   sys.exit(f"{whl.name}: built {version}, but the tag says {expected}")
-          print(f"OK — all four packages built as {expected}")
+          print(f"OK — all five packages built as {expected}")
           PY
 
       # Catches a broken wheel before it is on PyPI forever.
@@ -86,9 +86,12 @@ jobs:
         run: |
           uv venv /tmp/smoke --python 3.12
           VIRTUAL_ENV=/tmp/smoke uv pip install \
-            dist/nooa-*.whl dist/nooa_cli-*.whl dist/nooa_memory-*.whl dist/nooa_bench-*.whl
-          /tmp/smoke/bin/python -c "import nooa, nooa_cli, nooa_memory, nooa_bench; print(nooa.__version__)"
+            dist/nooa-*.whl dist/nooa_cli-*.whl dist/nooa_acp-*.whl \
+            dist/nooa_memory-*.whl dist/nooa_bench-*.whl
+          /tmp/smoke/bin/python -c "import nooa, nooa_cli, nooa_acp, nooa_memory, nooa_bench; print(nooa.__version__)"
           /tmp/smoke/bin/nooa --version
+          /tmp/smoke/bin/nooa --help
+          /tmp/smoke/bin/nooa-acp --help
 
       - uses: actions/upload-artifact@v4
         with:
@@ -98,7 +101,7 @@ jobs:
   # One job per package, each in its OWN environment (`pypi-<package>`).
   #
   # PyPI keys a *pending* trusted publisher on
-  # (owner, repo, workflow filename, environment). Four packages sharing one
+  # (owner, repo, workflow filename, environment). Five packages sharing one
   # environment collide: PyPI rejects the 2nd registration with "a pending
   # trusted publisher matching this configuration has already been registered
   # for a different project name", because it cannot tell which project to
@@ -112,7 +115,7 @@ jobs:
     strategy:
       fail-fast: false  # a partial publish is recoverable; a cancelled one is messier
       matrix:
-        package: [nooa, nooa-cli, nooa-memory, nooa-bench]
+        package: [nooa, nooa-cli, nooa-acp, nooa-memory, nooa-bench]
     environment:
       name: testpypi-${{ matrix.package }}
       url: https://test.pypi.org/p/${{ matrix.package }}
@@ -158,7 +161,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        package: [nooa, nooa-cli, nooa-memory, nooa-bench]
+        package: [nooa, nooa-cli, nooa-acp, nooa-memory, nooa-bench]
     environment:
       name: pypi-${{ matrix.package }}
       url: https://pypi.org/p/${{ matrix.package }}

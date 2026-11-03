@@ -6,8 +6,7 @@
 uv run python examples/quickstart/04_strategies.py
 """
 
-import os  # for LLM exec_globals (visible by default)
-from typing import Annotated
+from typing import Annotated, Literal
 
 from nooa.config import CodeActConfig
 from nooa.tools import ShellTools
@@ -17,10 +16,15 @@ from nooa.util.quickstart import *
 class AnalysisAgent(Agent, llm=llm):
     """Agent demonstrating different strategy options."""
 
-    shell = ShellTools()  # External tool - LLM can call this too
+    shell: ShellTools
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        # ShellTools owns a persistent session. Keep it local to this agent.
+        self.shell = ShellTools(cwd=".")
 
     @strategy(PredictStrategy())
-    async def classify_sentiment(self, text: str) -> str:
+    async def classify_sentiment(self, text: str) -> Literal["positive", "negative", "neutral"]:
         """Classify as positive, negative, or neutral."""
         ...
 
@@ -37,7 +41,7 @@ class AnalysisAgent(Agent, llm=llm):
 async def main():
     agent = AnalysisAgent()
 
-    # PredictStrategy (fast, single-shot)
+    # PredictStrategy (structured, without a tool loop; validation may retry)
     sentiment = await agent.classify_sentiment("I love this product! Best purchase ever!")
     print("Sentence: I love this product! Best purchase ever!")
     print(f"Sentiment: {sentiment}\n")

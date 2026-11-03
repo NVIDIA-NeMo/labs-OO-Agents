@@ -12,16 +12,21 @@ from nooa.util.quickstart import *
 
 
 class FeedbackAnalysis(BaseModel):
-    sentiment: Literal["positive", "negative", "neutral", "mixed"]
-    topics: list[str]
-    urgency: Literal["low", "medium", "high"]
-    summary: str
-    confidence: float = Field(ge=0, le=1)  # Pydantic constraints enforced!
+    sentiment: Literal["positive", "negative", "neutral", "mixed"] = Field(
+        description="Overall tone of the feedback."
+    )
+    topics: list[str] = Field(description="Specific subjects mentioned by the customer.")
+    urgency: Literal["low", "medium", "high"] = Field(
+        description="How quickly the feedback needs a response."
+    )
+    summary: str = Field(description="One-sentence faithful summary.")
+    confidence: float = Field(ge=0, le=1, description="Confidence in the analysis from 0 to 1.")
 
 
 class FeedbackAgent(Agent, llm=llm):
     """Agent for analyzing customer feedback with structured output."""
 
+    @strategy(PredictStrategy())
     async def analyze_feedback(self, text: str) -> FeedbackAnalysis:
         """Analyze customer feedback comprehensively."""
         ...

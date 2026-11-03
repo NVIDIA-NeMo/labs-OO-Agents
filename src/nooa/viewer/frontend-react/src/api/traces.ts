@@ -1,3 +1,4 @@
+import { assertOk } from './http';
 import type {
   PaginatedTraceResponse,
   TraceResponse,
@@ -27,13 +28,13 @@ export async function fetchTraces(params: {
   if (params.sort_dir) searchParams.set('sort_dir', params.sort_dir);
 
   const res = await fetch(`/api/traces?${searchParams}`);
-  if (!res.ok) throw new Error(`Failed to fetch traces: ${res.statusText}`);
+  assertOk(res, 'Failed to fetch traces');
   return res.json();
 }
 
 export async function fetchTrace(sessionId: string): Promise<TraceResponse> {
   const res = await fetch(`/api/trace?session_id=${encodeURIComponent(sessionId)}`);
-  if (!res.ok) throw new Error(`Failed to fetch trace: ${res.statusText}`);
+  assertOk(res, 'Failed to fetch trace');
   return res.json();
 }
 
@@ -44,7 +45,7 @@ export async function fetchTraceResource(
   const res = await fetch(`/api/trace/resource?session_id=${encodeURIComponent(sessionId)}`, {
     signal,
   });
-  if (!res.ok) throw new Error(`Failed to fetch trace resource: ${res.statusText}`);
+  assertOk(res, 'Failed to fetch trace resource');
   return res.json();
 }
 
@@ -52,7 +53,7 @@ export async function deleteTrace(sessionId: string): Promise<void> {
   const res = await fetch(`/api/traces/${encodeURIComponent(sessionId)}`, {
     method: 'DELETE',
   });
-  if (!res.ok) throw new Error(`Failed to delete trace: ${res.statusText}`);
+  assertOk(res, 'Failed to delete trace');
 }
 
 // OTLP attribute parsing

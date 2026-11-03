@@ -389,6 +389,9 @@ def init_db() -> int:
         _db.execute("ALTER TABLE llm_calls ADD COLUMN span_id TEXT")
     # Always ensure the span index exists (safe to re-create)
     _db.execute("CREATE INDEX IF NOT EXISTS idx_llm_calls_span ON llm_calls(span_id)")
+    # Free-form JSON a client attaches to its call record (journal_llm_call(extra=...)).
+    if not _has_column(_db, "llm_calls", "extra"):
+        _db.execute("ALTER TABLE llm_calls ADD COLUMN extra TEXT")
 
     # FTS5 index for fast text search across span content
     _db.execute("""
@@ -1120,6 +1123,7 @@ def _resolve_message(msg: dict[str, Any], blocks: dict[str, str]) -> dict[str, A
 
     * ``parts: [{block_hash}]`` / ``[{text}]`` -> ``content`` (string, parts joined).
     * ``tool_calls[i].function.arguments_hash`` -> ``arguments``.
+    * ``reasoning_content_hash`` -> ``reasoning_content``.
     * ``image_hashes`` -> ``images`` (placeholder URLs in resolution order).
 
     Block hashes that don't resolve (``hash`` not in *blocks*) are kept as a
@@ -1130,6 +1134,10 @@ def _resolve_message(msg: dict[str, Any], blocks: dict[str, str]) -> dict[str, A
     unchanged -- the v3 protocol can carry both shapes simultaneously.
     """
     out = dict(msg)
+
+    reasoning_hash = out.pop("reasoning_content_hash", None)
+    if reasoning_hash is not None and "reasoning_content" not in out:
+        out["reasoning_content"] = blocks.get(reasoning_hash, f"<missing block: {reasoning_hash}>")
 
     parts = out.pop("parts", None)
     if parts is not None and "content" not in out:
@@ -1794,7 +1802,8 @@ def ingest_journal_call(call: dict[str, Any]) -> dict[str, Any]:
 
     Expected keys: ``call_id``, ``session_id``, ``model``, ``ts_start``,
     ``ts_end``, ``input_skeleton`` (list), ``output_messages`` (list),
-    ``tokens`` (dict or None), ``span_id`` (str or None).
+    ``tokens`` (dict or None), ``span_id`` (str or None), ``extra`` (JSON
+    object or None, e.g. an external response id).
 
     Called from the single-writer executor thread via main.py.
     """
@@ -1810,6 +1819,7 @@ def ingest_journal_call(call: dict[str, Any]) -> dict[str, Any]:
         tokens_json = (
             json.dumps(call["tokens"], separators=(",", ":")) if call.get("tokens") else None
         )
+        extra_json = json.dumps(call["extra"], separators=(",", ":")) if call.get("extra") else None
     except (TypeError, ValueError) as e:
         log.warning(
             "ingest_journal_call: JSON serialization failed for call_id=%s: %s",
@@ -1819,25 +1829,37 @@ def ingest_journal_call(call: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(f"Invalid call data: {e}") from e
     import time as _time
 
+    columns = [
+        "call_id",
+        "session_id",
+        "span_id",
+        "model",
+        "ts_start",
+        "ts_end",
+        "input_skeleton",
+        "output_messages",
+        "tokens",
+    ]
+    values: list[Any] = [
+        call["call_id"],
+        call["session_id"],
+        call.get("span_id"),
+        call.get("model", ""),
+        call.get("ts_start"),
+        call.get("ts_end"),
+        input_skeleton_json,
+        output_messages_json,
+        tokens_json,
+    ]
+    if extra_json is not None:
+        columns.append("extra")
+        values.append(extra_json)
+
     t0 = _time.monotonic()
     db.execute(
-        """
-        INSERT OR REPLACE INTO llm_calls
-            (call_id, session_id, span_id, model, ts_start, ts_end,
-             input_skeleton, output_messages, tokens)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            call["call_id"],
-            call["session_id"],
-            call.get("span_id"),
-            call.get("model", ""),
-            call.get("ts_start"),
-            call.get("ts_end"),
-            input_skeleton_json,
-            output_messages_json,
-            tokens_json,
-        ),
+        f"INSERT OR REPLACE INTO llm_calls ({', '.join(columns)}) "
+        f"VALUES ({', '.join('?' * len(columns))})",
+        values,
     )
     db.commit()
     elapsed_ms = (_time.monotonic() - t0) * 1000
@@ -1886,6 +1908,8 @@ def get_session_calls(session_id: str) -> list[dict[str, Any]]:
         }
         if row["span_id"]:
             rec["span_id"] = row["span_id"]
+        if "extra" in row.keys() and row["extra"]:
+            rec["extra"] = json.loads(row["extra"])
         result.append(rec)
     return result
 

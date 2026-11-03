@@ -28,14 +28,14 @@
 [![Blog](https://img.shields.io/badge/blog-NVIDIA-76B900?logo=nvidia&logoColor=white)](https://developer.nvidia.com/blog/six-agent-harness-capabilities-for-higher-model-performance/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/LICENSE)
 
-**[Quick Start](#quick-start)** &nbsp;·&nbsp; **[Examples](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/examples/README.md)** &nbsp;·&nbsp; **[Paper](https://arxiv.org/abs/2607.20709)** &nbsp;·&nbsp; **[Blog](https://developer.nvidia.com/blog/six-agent-harness-capabilities-for-higher-model-performance/)**
+**[Docs](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/docs/README.md)** &nbsp;·&nbsp; **[Quick Start](#quick-start)** &nbsp;·&nbsp; **[Notebook Tutorials](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/notebook_tutorials/README.md)** &nbsp;·&nbsp; **[Examples](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/examples/README.md)** &nbsp;·&nbsp; **[Paper](https://arxiv.org/abs/2607.20709)** &nbsp;·&nbsp; **[Blog](https://developer.nvidia.com/blog/six-agent-harness-capabilities-for-higher-model-performance/)**
 
 <br />
 
 </div>
 
 
-NVIDIA-labs OO Agents (NOOA) is a model-agnostic Python framework designed to support reliable AI agent development. Many agent frameworks represent prompts, tools, callbacks, and workflows as separate abstractions. NOOA offers an alternative object-oriented interface that brings these concepts together in a Python class. NOOA lets developers express an agent’s state, capabilities, prompts, and typed interfaces through a single Python class:
+NVIDIA-labs Object Oriented Agents (NOOA) is a model-agnostic Python framework designed to support reliable AI agent development. Many agent frameworks represent prompts, tools, callbacks, and workflows as separate abstractions. NOOA offers an alternative object-oriented interface that brings these concepts together in a Python class. NOOA lets developers express an agent’s state, capabilities, prompts, and typed interfaces through a single Python class:
 
 ```python
 from nooa import Agent
@@ -61,10 +61,13 @@ class SupportAgent(Agent):
 
 - **Agents are Python objects.** Fields are state, methods are capabilities, docstrings are prompts, type annotations are contracts.
 - **`...` bodies are LLM-driven.** A method with `...` becomes an agentic loop; a real body stays deterministic Python.
+- **Generation commits one result.** Deterministic generators are supported, but generated streams need a separate stream contract and are rejected clearly.
 - **Code as action.** The model acts by writing Python in a Jupyter-style REPL with access to `self`, imports, and helpers — Python methods and type annotations supply the callable interfaces, reducing the need to write separate tool-schema definitions.
 - **Pythonic and agent-ready.** Typed I/O with auto-retry, live-object arguments passed by reference, and model-callable context and event APIs — designed around agent-oriented Python workflows.
 
-This design supports familiar Python testing, tracing, refactoring, and version-control workflows — **just like the rest of your software**. Read the paper for the design principles and evaluation results: [NVIDIA OO Agents: Native Python Object-Oriented Agents](https://arxiv.org/abs/2607.20709).
+This design supports familiar Python testing, tracing, refactoring, and version-control workflows — **just like the rest of your software**. Read [the paper](https://arxiv.org/abs/2607.20709) for the design principles and evaluation results.
+
+Want to see how the pieces compose? Take the [**10-minute tour**](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/docs/tour.md), from one thinking method through tools, typed contracts, deterministic orchestration, and object composition.
 
 ## Installation
 
@@ -77,16 +80,19 @@ cd my-agent-project
 uv add nooa
 ```
 
+> **Windows:** use [WSL 2](https://learn.microsoft.com/windows/wsl/install). Native Windows is not supported: `import nooa` and the `nooa` command stop with an error that points to WSL 2. Setting `NOOA_SKIP_PLATFORM_CHECK=1` skips that check. The pure-Python core (agents, PredictStrategy, in-process CodeAct, in-memory storage) and `nooa connect` are tested on native Windows. Other features may work but are unsupported; those that need POSIX (shell tools, the CodeAct sandbox, file-backed SQLite storage, `monitor()`) stop with a `PosixOnlyFeatureError`.
+
 <details>
-<summary><b>Optional sub-packages</b> — CLI, memory, benchmarks, evaluation pipeline</summary>
+<summary><b>Optional sub-packages</b> — CLI, ACP, memory, benchmarks, evaluation pipeline</summary>
 
 <br />
 
-The CLI, memory, and benchmark packages are separate distributions. Install
+The CLI, ACP, memory, and benchmark packages are separate distributions. Install
 them by name, or pull them in as extras of the core package:
 
 ```bash
 uv add nooa-cli                 # or: uv add "nooa[cli]"
+uv add nooa-acp                 # or: uv add "nooa[acp]"
 uv add nooa-memory              # or: uv add "nooa[memory]"
 uv add nooa-bench               # or: uv add "nooa[bench]"
 
@@ -95,7 +101,8 @@ uv add "nooa[cli,memory]"       # several at once
 
 | Package | Extra | What it adds |
 |---|---|---|
-| `nooa-cli` | `nooa[cli]` | the `nooa` command, trace viewer, eval runner |
+| `nooa-cli` | `nooa[cli]` | the `nooa` command, trace-viewer command, eval runner |
+| `nooa-acp` | `nooa[acp]` | coding agent for Agent Client Protocol hosts such as Zed — [setup](packages/nooa-acp/README.md) |
 | `nooa-memory` | `nooa[memory]` | long-term memory subsystem (`MemoryManager`) |
 | `nooa-bench` | `nooa[bench]` | `BenchAgent` and the Harbor benchmark runner |
 
@@ -129,18 +136,38 @@ NOOA is **research software**, and agents can be configured to execute LLM-gener
 NOOA validates generated code (AST checks) and applies module deny-lists before execution. **These are defense-in-depth guardrails, not a containment boundary.** They exist to keep generated code from freezing the event loop and to catch common mistakes early — not to stop code that is actively trying to escape. A static checker over Python cannot provide that guarantee: `open()` gives arbitrary file access, `importlib` can load modules straight from a path, and reflection reaches the rest. **The containment boundary is OS-level isolation** — always run agents that execute generated code inside a sandbox such as a container, VM, or [NVIDIA OpenShell](https://github.com/NVIDIA/OpenShell). Do not rely on the in-process validators alone.
 
 
-### 1. Choose a model
+### 1. Connect a model
 
-Choose from supported hosted or local [LiteLLM-supported](https://docs.litellm.ai/) model:
+Install the CLI and run the guided setup:
+
+```bash
+uv add "nooa[cli]"
+uv run nooa connect
+```
+
+Choose your provider or endpoint, API key, exact model, and an alias such as
+`my-model`. Connect helps your agents run smoothly: it suggests and saves a
+reply/output token limit, records the context window when known (you can supply
+it), and lists your chosen media formats. It also tests the configured route,
+tools, reasoning, and caching. The checks send real requests and may incur
+provider charges. The wizard asks before checks and saving. Keep keys in
+environment variables or NOOA's secrets file, not in model configuration or
+committed code.
+
+Use the saved alias in Python:
 
 ```python
-from nooa.unifiedllm.registry import get_llm_client
+from nooa.unifiedllm import get_llm_client
 
-llm = get_llm_client("claude-haiku-4-5")                                            # Anthropic (after `export ANTHROPIC_API_KEY=...`)
-llm = get_llm_client("gpt-5-mini")                                                  # OpenAI    (after `export OPENAI_API_KEY=...`)
-llm = get_llm_client("ollama_chat/qwen3:1.7b", api_base="http://localhost:11434")   # Ollama    (no key)
-llm = get_llm_client("hosted_vllm/Qwen/Qwen3-1.7B", api_base="http://localhost:8000/v1")  # vLLM (no key)
+llm = get_llm_client("my-model")
 ```
+
+See [Connect setup](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/docs/model-connect.md)
+for providers, model settings, editing, and diagnostic stages.
+
+You can also construct clients directly using
+[LiteLLM-supported model names](https://docs.litellm.ai/), with your endpoint
+and credentials. See [Model configuration](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/docs/model-configuration.md).
 
 ### 2. Your first agent
 
@@ -161,37 +188,85 @@ class FeedbackAgent(Agent, llm=llm):
 
 
 async def main():
-    agent = FeedbackAgent()
-    result = await agent.analyze_feedback("Great product, but shipping was slow")
-    print(result)
+    try:
+        agent = FeedbackAgent()
+        result = await agent.analyze_feedback("Great product, but shipping was slow")
+        print(result)
+    finally:
+        await llm.aclose()
 
 
 asyncio.run(main())
 ```
 
-Run the same code from your own project with `python`. You can run the checked-in example:
+Save the model-selection and agent snippets together as `first_agent.py`, then
+run `uv run python first_agent.py` in your project. After your final call,
+`await llm.aclose()` releases client resources.
 
-```bash
-uv run python examples/quickstart/01_first_generation_method.py
-```
+The [checked-in first example](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/examples/quickstart/01_first_generation_method.py)
+is a separate source-checkout example: it chooses its own client from environment
+credentials and does not automatically use your `my-model` alias.
 
 Rename `analyze_feedback` to `analyze_feedback_briefly` and the output changes — your method name, parameters, and docstring *are* the prompt.
 
-Ready for more? See [**examples/**](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/examples/README.md) for the full progressive tutorial — structured output, tools, strategies, tracing, context blocks, MCP, and more.
+Prefer a guided notebook path? Start with the [**notebook tutorials**](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/notebook_tutorials/README.md), which walk through the same ideas in Colab-friendly steps, with more notebooks planned.
+
+Ready to run something specific? Use the [**examples catalog**](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/examples/README.md) to find quickstarts for structured output, tools, strategies, tracing, context blocks, MCP, and more.
 
 ### 3. See what your agent is doing
 
 Every LLM call, code execution, and method invocation is traced by default — orchestrators, generation methods, and helpers, with parent-child spans preserved. If you installed the CLI and viewer dependencies, start the trace viewer and open the run in your browser:
 
 ```bash
+uv add "nooa[cli,viewer]"    # includes viewer runtime dependencies
 uv run nooa start-dev        # trace viewer on http://localhost:5001
 ```
 
 If the viewer isn't running, tracing is silently disabled — no configuration needed either way.
 
+### 4. Give your agent media inputs
+
+Pass `Image`, `Audio`, `Video`, or PDF `File` objects as method arguments.
+CodeAct can also use `show()` to see media created while it runs.
+
+NOOA assumes models are text-only until configured. Set `media_inputs`, such
+as `[image, pdf]`, in the model entry. Connect lets you choose formats manually
+or test them with generated samples. If you enable a format the provider does
+not accept, requests may fail.
+
+```python
+from nooa import Agent, PredictStrategy, strategy
+from nooa.media import Image
+from nooa.unifiedllm import get_llm_client
+
+# This alias must allow image input and use an endpoint that accepts it.
+vision = get_llm_client("vision")
+
+class PhotoReader(Agent, llm=vision):
+    @strategy(PredictStrategy())
+    async def describe(self, image: Image) -> str:
+        """Describe the image briefly. Do not invent details."""
+        ...
+
+# In your async application, with permission to send the photo:
+# result = await PhotoReader().describe(Image.from_file("photo.png"))
+# await vision.aclose()
+```
+
+Load media with `from_file`, `from_bytes(..., media_type=...)`, or `from_url`.
+URL support depends on the provider. `File` supports PDFs. Formats left out of
+`media_inputs` are replaced with text notices when sending a request.
+
+See the [media API guide](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/docs/media.md)
+for a complete example, CodeAct `show()`, audio/video/PDF inputs, and limits.
+
 ## Learn more
 
-- **[examples/README.md](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/examples/README.md)** — the full progressive tutorial: structured output, tools via `self`, strategies, progressive disclosure with `doc()`, tracing, dynamic prompts, context blocks, summarization, skills, MCP, sandbox, and more.
+- **[Documentation](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/docs/README.md)** — human-oriented reading paths, core concepts, architecture, and safety guidance.
+- **[Framework tour](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/docs/tour.md)** — a concise conceptual showcase of NOOA's core ideas and Python-first design.
+- **[Decision models](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/docs/concepts/decisions.md)** — route classification, yes/no, and scoring methods to a calibrated decision model such as `typesafe/jev-1.13` with `DecideStrategy`; agents that only make decisions need no chat LLM. Runnable example: [`16_decisions.py`](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/examples/quickstart/16_decisions.py).
+- **[Notebook tutorials](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/notebook_tutorials/README.md)** — the primary hands-on path for your first agent, strategy selection, CodeAct's live-object workflow, and composing subagents. More notebooks are planned.
+- **[Examples catalog](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/examples/README.md)** — runnable quickstarts, advanced mechanics, and complete benchmark systems, indexed by capability and setup requirements.
 - **[Paper](https://arxiv.org/abs/2607.20709)** — design principles, harness details, capability tests, and SWE-bench Verified / Terminal-Bench 2.0 results.
 - **[Blog post](https://developer.nvidia.com/blog/six-agent-harness-capabilities-for-higher-model-performance/)** — Six Agent Harness Capabilities for Higher Model Performance.
 - **[AGENTS.md](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/AGENTS.md)** — conventions used inside this repo (helpful when reading the source).
@@ -226,7 +301,7 @@ See [CONTRIBUTING.md](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/CO
 
 ## Citation
 
-If you use NVIDIA-labs OO Agents in your research, please cite:
+If you use NVIDIA-labs Object Oriented Agents in your research, please cite:
 
 ```bibtex
 @techreport{nvidia_oo_agents_2026,

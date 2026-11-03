@@ -22,7 +22,9 @@ class InventoryAgent(Agent, llm=llm):
 
     def __init__(self):
         super().__init__()
-        self.inventory = {
+        # Private application state stays out of the model-visible state block.
+        # The LLM gets the bounded get_stock()/get_price() capability instead.
+        self._inventory = {
             "apple": {"stock": 50, "price": 0.75},
             "banana": {"stock": 30, "price": 0.50},
             "orange": {"stock": 0, "price": 0.80},  # Out of stock
@@ -31,11 +33,11 @@ class InventoryAgent(Agent, llm=llm):
     # SW1: Deterministic Python - automatically available as "tools" for the LLM
     def get_stock(self, item: str) -> int:
         """Get current stock for an item."""
-        return self.inventory.get(item, {}).get("stock", 0)
+        return self._inventory.get(item, {}).get("stock", 0)
 
     def get_price(self, item: str) -> float:
         """Get price for an item."""
-        return self.inventory.get(item, {}).get("price", 0.0)
+        return self._inventory.get(item, {}).get("price", 0.0)
 
     # SW3: Generation method - LLM implements this, calling SW1 methods as needed
     async def can_fulfill_order(self, items: list[str], budget: float) -> Result:

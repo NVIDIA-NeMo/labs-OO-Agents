@@ -1,10 +1,10 @@
 ---
 name: nooa-agent-authoring
-description: Author agents with the NVIDIA OO Agents (nooa) framework. Use when writing or modifying an Agent subclass, agentic methods (ellipsis bodies), docstring prompts, structured output contracts, strategy selection (CodeAct/Predict), visibility control, orchestrators, or subagent composition.
-compatibility: Python >= 3.12, uv, nooa package (CLI: nooa)
+description: Author agents with NVIDIA-labs Object Oriented Agents (NOOA). Use when writing or modifying an Agent subclass, agentic methods (ellipsis bodies), docstring prompts, structured output contracts, strategy selection (CodeAct/Predict), visibility control, orchestrators, or subagent composition.
+compatibility: 'Python >= 3.12, uv, nooa package (CLI: nooa)'
 ---
 
-# Authoring NVIDIA OO Agents (nooa)
+# Authoring NVIDIA-labs Object Oriented Agents (NOOA)
 
 An agent is a Python class; its methods are its capabilities. Three rules drive everything:
 
@@ -20,7 +20,7 @@ from typing import Annotated
 from nooa import Agent
 from nooa.unifiedllm import get_llm_client
 
-llm = get_llm_client("gpt-4o-mini")    # any litellm model name, or a registry alias
+llm = get_llm_client("my-model")    # alias saved by nooa connect; configure it first
 
 class Summarizer(Agent, llm=llm):
     """Produce concise, faithful summaries."""          # class docstring → static prefix
@@ -43,18 +43,18 @@ Use `Annotated[type, "description"]` on parameters and return types to give the 
 
 ## LLM clients and cascading
 
-```python
-from nooa.unifiedllm import get_llm_client, CompletionClient, RetryConfig
-
-llm = get_llm_client("gpt-4o-mini")                        # any litellm name passes through (needs provider key)
-llm = get_llm_client("qwen3.5-397b")                       # registry alias (public NIM via NVIDIA_API_KEY from build.nvidia.com)
-llm = get_llm_client("gpt-4o-mini", retry_config=RetryConfig(max_retries=5))  # retries default ON (max_retries=3)
-llm = CompletionClient(model="m", base_url="https://.../v1", api_key="...")  # any OpenAI-compatible endpoint
-```
-
-**Registry:** models are defined in YAML configs loaded from `~/.config/nooa/models.yaml` (user) and the package's built-in `model_registry.yaml`. Each entry maps an alias to `{model, base_url, api_key_env}`. Inspect with `nooa config show` (shows all config layers and resolved values) or programmatically via `from nooa.unifiedllm.registry import reload_registry; configs = reload_registry()`.
-
-Keys come from `.env` (library use) or `~/.config/nooa/secrets.yaml`.
+Use existing registry aliases with `get_llm_client("my-model")`. Before model
+onboarding, checks or configuration writes, follow
+[nooa-connect](../nooa-connect/SKILL.md), the canonical permission-first headless
+guide. Authoring an agent does not itself authorize configuring/testing models.
+For saved settings, precedence, reasoning levels and caching semantics, use
+[nooa-model-configuration](../nooa-model-configuration/SKILL.md).
+On Windows, run nooa inside WSL 2; native Windows stops at `import nooa`
+unless `NOOA_SKIP_PLATFORM_CHECK=1` is set.
+For images, audio, video, PDFs, and CodeAct `show()`, use
+[nooa-media](../nooa-media/SKILL.md). Configure each model's `media_inputs`
+with the formats your provider accepts.
+The rest of this section covers how an agent selects and inherits its client.
 
 **Resolution cascade** for which LLM a method uses — first match wins:
 
@@ -64,9 +64,20 @@ Keys come from `.env` (library use) or `~/.config/nooa/secrets.yaml`.
 4. `class MyAgent(Agent, llm=default)` — class default
 5. **Parent inheritance** — a subagent with no `llm=` of its own inherits from the agent that calls it
 
-The method override also accepts a **callable** taking the agent and returning
-a client, resolved on each call. Use it when the per-method model has to be
-chosen per instance (or per call) rather than fixed at import time:
+The method override accepts three spellings. A **registry alias or model
+string** resolves lazily on the first call per instance (no client constructed
+at import time) — the natural way to pin a method to a cheaper or stronger
+model:
+
+```python
+class SupportAgent(Agent, llm=default):       # agent default takes a client
+    @strategy(llm="gpt-5-mini")                 # alias or model string
+    async def summarize(self, text: str) -> str: ...
+```
+
+A **callable** taking the agent and returning a client is resolved on each
+call. Use it when the per-method model has to be chosen per instance (or per
+call) rather than fixed at import time:
 
 ```python
 class Researcher(Agent, llm=fast):
@@ -81,8 +92,8 @@ class Researcher(Agent, llm=fast):
     async def solve(self, problem: str) -> str: ...   # differs per call
 ```
 
-Standalone `@strategy` functions must pass a client, not a callable — they
-have no instance to resolve against.
+Standalone `@strategy` functions may pass a client or an alias string, but
+not a callable — they have no instance to resolve against.
 
 Child agents inherit the parent's LLM by default. Any explicit `llm=` on the child overrides it — that's how you run a cheap model for one phase:
 
@@ -105,9 +116,15 @@ To construct subagents in `__init__`, pass the LLM explicitly:
 class Orchestrator(Agent, llm=big_llm):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        # self._llm is resolved after super().__init__()
-        self.helper = HelperAgent(llm=self._llm)
+        # self.llm exposes the client resolved by super().__init__().
+        self.helper = HelperAgent(llm=self.llm)
 ```
+
+Agent documentation infers a direct constructor assignment like this from the
+`__init__` source. If a factory or injected value obscures the type, annotate
+the assignment in place (`self.helper: HelperAgent = make_helper(...)`). Use a
+private name such as `self._helper` when only deterministic Python orchestration
+should call the child; public fields are part of the model-visible API.
 
 ## Docstrings are prompts
 
@@ -125,13 +142,33 @@ async def summarize(self, text: str) -> str:
     ...
 ```
 
-There are cases where `{param}` is appropriate — e.g. when prefill is disabled and you need custom rendering, or when you want to embed a short value directly in the instruction. For advanced prefill and truncation control, see `nooa-codeact-advanced`.
+If the default argument rendering is unsuitable, customize or disable the
+prefill deliberately; do not silently fall back to raw argument interpolation.
+For advanced prefill and truncation control, see `nooa-codeact-advanced`.
+
+CodeAct and PurePython initially print bounded input previews (by default,
+2,000 characters per string, 25 items per container, depth 4). The complete
+objects remain available in the REPL, but the model may need to inspect more
+data. For a complete text input use `Annotated[str, spec(max_string=None)]`
+with imports `from typing import Annotated` and `from nooa import spec`.
+Method-level `@strategy(..., truncation=...)` settings also apply. A
+`PrefillTruncationWarning` reports actual omissions and suggests the relevant
+setting; stdout capture has its own 50,000-character budget, so removing a
+formatting limit alone does not guarantee the full printed input reaches the
+model. Check an execution trace when full inclusion matters.
 
 Template expansion is primarily for values the signature *can't* show: `{self.attr}` instance state and computed expressions like `{len(items)}`. Escape literal braces as `{{ }}`.
 
+Long trusted instructions may remain in a versioned prompt file. Read the file
+into a private instance attribute in `__init__`, then use
+`"""{self._instructions}"""` as the method docstring. Do not pass instruction
+files as method data or put them in a global context block that every method
+receives.
+
 **Glossary:**
-- **Static prefix** — the class docstring and context blocks prepended to every LLM call on the agent.
-- **Agentic method** — an async method with `...` body, implemented by an LLM at call time. Has an internal lock (only one concurrent execution per agent instance).
+- **Static prefix** — the class docstring and context blocks explicitly placed
+  in the cacheable prefix, prepended to every LLM call on the agent.
+- **Agentic method** — an async method with `...` body, implemented by an LLM at call time. The built-in CodeAct and Predict strategies lock the instance while it runs; custom strategies may set `requires_lock=False`.
 - **Generation method** — synonym for agentic method.
 
 Additional prompt mechanics:
@@ -157,27 +194,39 @@ async def analyze(self, text: str) -> Analysis:
 - For an annotated free-form string: `-> Annotated[str, "Your answer"]`.
 - When the LLM generates code, validate it in the model: a `@field_validator` that calls `ast.parse()` turns syntax errors into automatic retries.
 - Types used in signatures must be defined or imported at **module level** so they exist in the CodeAct execution namespace.
+- Keep validators local to the returned value. Claims that depend on files,
+  databases, APIs, or saved artifacts need a deterministic verification gate in
+  the Python orchestrator before the result is accepted or persisted.
 
 ## Strategies
 
 | Strategy | When | How inputs are passed | Behavior |
 |---|---|---|---|
 | `CodeActStrategy` (default) | anything needing code execution, tool calls, or iteration | Parameters are live Python objects in the REPL; the LLM sees source code + stdout/stderr from each execution | REPL loop: `execute_python(code)` + `return_result(value)` tools; `reasoning(text)` builtin for chain-of-thought |
-| `PredictStrategy` | single-shot classification/extraction returning a typed value | Parameters serialized as text with size caps | One LLM call, output validated against the return type |
+| `PredictStrategy` | classification/extraction returning a typed value without a tool loop | Parameters serialized as text with size caps | Structured provider attempt validated against the return type; validation failures may retry |
 
 ```python
 from nooa import strategy
 from nooa.strategies import CodeActStrategy, PredictStrategy
 from nooa.config import CodeActConfig, PredictConfig
 
-@strategy(PredictStrategy())                                   # fast single-shot
+@strategy(PredictStrategy())                                   # structured, no tool loop; validation may retry
 async def classify(self, text: str) -> Intent: ...
 
 @strategy(CodeActStrategy(config=CodeActConfig(max_iterations=10)))
 async def implement(self, task: str) -> str: ...
 ```
 
-**Constructors take `config=` only.** `PredictStrategy(max_retries=3)` and `CodeActStrategy(max_iterations=10)` are errors — wrap options in `PredictConfig(...)`/`CodeActConfig(...)`. Useful `CodeActConfig` fields: `max_iterations`, `max_retries`, `cell_timeout`, `max_tokens`, `temperature`, `max_consecutive_text_only`, `restrictions`.
+**Configuration fields go through `config=`.** `PredictStrategy(max_retries=3)` and `CodeActStrategy(max_iterations=10)` are errors — wrap options in `PredictConfig(...)`/`CodeActConfig(...)`. Strategy-level extension points such as `CodeActStrategy(on_text_only=...)` remain direct constructor arguments. Useful `CodeActConfig` fields: `max_iterations`, `max_retries`, `cell_timeout`, `max_tokens`, `temperature`, `max_consecutive_text_only`, `loop_guard`, `restrictions`.
+
+CodeAct preserves a model response that contains prose but no tool call. By
+default it appends an `Error` asking the model to use `execute_python` or
+`return_result`, then retries. For a method where prose is a valid final value,
+use `CodeActStrategy(on_text_only=return_text_as_result)`. `on_text_only`
+receives a sync or async callback; the callback receives
+`TextOnlyResponseContext` and returns `TextOnlyResponseAction`. The action is
+the callback result—it is not passed to `@strategy`. See
+`nooa-codeact-advanced` for custom retry and synthetic-tool examples.
 
 `max_iterations` is a safety net, not the main tuning dial — decompose the task instead of raising the cap. For prefill control, truncation tuning, code restrictions, and the full config surface, see `nooa-codeact-advanced`.
 
@@ -225,9 +274,14 @@ class SearchAgent(Agent, llm=llm):
 - **Orchestrators are pure Python.** The entrypoint that sequences phases has a real body and calls agentic methods; the LLM cannot skip steps you encode in Python. Enforce verification gates in the orchestrator, not the prompt.
 - **One method = one LLM task.** If a method classifies AND greps AND summarizes, split it.
 - **Helpers beat prompts.** Deterministic logic (exact matching, parsing, formatting) goes in regular methods the LLM calls as tools; LLM generation is for fuzzy interpretation. Define helpers as class methods, not lambdas assigned to `self`.
+- **Stateful tools are instance state.** Construct `ShellTools`, `TodoManager`,
+  MCP tools, and skills with mutable runtime state in `__init__` after
+  `super().__init__()`.
+  `shell = ShellTools()` on the class creates one shared session for every
+  instance, leaking cwd/environment state and serializing parallel work.
 - **Subagents** for context isolation, per-phase LLMs, or reusable sub-tasks: store an instance on `self`, `await` its methods. Subagents share nothing (no context blocks, no history) — pass data explicitly. Define them without `llm=` to inherit the parent's.
 - A class with no `...` methods doesn't need to subclass `Agent` at all.
-- **Concurrency:** each agentic method holds an internal lock on its agent instance — `asyncio.gather` on one instance's agentic methods runs them sequentially. For true parallelism, use one instance per concurrent task.
+- **Concurrency:** CodeAct and Predict hold an internal lock on their agent instance, so `asyncio.gather` on one instance runs those calls sequentially. Custom strategies may set `requires_lock=False`; otherwise, use one instance per concurrent task.
 - Keep interesting logic *inside* agent methods: preprocessing done in `main()` is invisible in traces and can't be adapted to by the agent.
 
 ## Debugging while authoring

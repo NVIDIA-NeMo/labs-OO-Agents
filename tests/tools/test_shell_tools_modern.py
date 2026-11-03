@@ -14,6 +14,7 @@ Strategy:
 
 from __future__ import annotations
 
+import json
 import random
 import shutil
 import string
@@ -121,6 +122,59 @@ async def test_match_anchor_is_editable(repo: Path):
     m = next(x for x in r.matches if x.path == "a.py")
     await sh.replace(m, "fooo = 999\n")
     assert "fooo = 999" in (repo / "a.py").read_text()
+
+
+@pytest.mark.asyncio
+async def test_repeated_noncontiguous_search_path_keeps_resolved_path(repo: Path, monkeypatch):
+    """A cached path must not inherit the preceding result's resolved path."""
+
+    class FakeSession:
+        async def run_with_timeout_flag(self, command, timeout):
+            del command, timeout
+            records = [
+                {
+                    "type": "match",
+                    "data": {"path": {"text": path}, "line_number": 1},
+                }
+                for path in ("a.py", "b.txt", "a.py")
+            ]
+            return "\n".join(json.dumps(record) for record in records), "", 0, False
+
+    async def fake_get_session():
+        return FakeSession()
+
+    sh = ShellTools(cwd=str(repo))
+    monkeypatch.setattr(sh, "_get_session", fake_get_session)
+
+    matches = await sh._harvest_matches(
+        "grep -rn 'match' .",
+        "a.py:1:match\nb.txt:1:match\na.py:1:match\n",
+    )
+
+    assert matches is not None
+    assert [match.path for match in matches] == ["a.py", "b.txt", "a.py"]
+    assert [Path(match.resolved_path) for match in matches] == [
+        repo / "a.py",
+        repo / "b.txt",
+        repo / "a.py",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_search_match_stays_bound_after_cwd_change(repo: Path):
+    sh = ShellTools(cwd=str(repo))
+    other = repo / "other"
+    other.mkdir()
+    (other / "a.py").write_text("fooo = 1\n")
+
+    result = await sh.run("grep -n 'fooo = 1' a.py")
+    assert result.matches
+    match = result.matches[0]
+    await sh.run("cd other")
+    await sh.replace(match, "fooo = 999\n")
+
+    assert "fooo = 999" in (repo / "a.py").read_text()
+    assert (other / "a.py").read_text() == "fooo = 1\n"
 
 
 # --------------------------------------------------------------------------

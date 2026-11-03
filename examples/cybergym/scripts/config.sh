@@ -3,7 +3,7 @@
 # Every other script in this directory sources this file. Override any value by
 # exporting it before you run a script, e.g.:
 #
-#   MODEL=openai/gpt-5.5 CYBERGYM_SERVER=http://127.0.0.1:9000 scripts/run_subset.sh
+#   MODEL=glm-5.2 CYBERGYM_SERVER=http://127.0.0.1:9000 scripts/run_subset.sh
 #
 # shellcheck shell=bash
 
@@ -35,7 +35,8 @@ if [ -z "${CYBERGYM_API_KEY:-}" ] && [ -f "$AGENT_REPO/.env" ]; then
 fi
 
 # Model + agent image.
-export MODEL="${MODEL:-openai/gpt-5.5}"
+export MODEL="${MODEL:-glm-5.2}"
+export REASONING_EFFORT="${REASONING_EFFORT:-xhigh}"
 export RUNNER_IMAGE="${RUNNER_IMAGE:-nooa/nooa-cybergym:latest}"
 
 # Hard per-task wall-clock limit (seconds). The container is killed at this cap.
@@ -43,7 +44,7 @@ export RUNNER_IMAGE="${RUNNER_IMAGE:-nooa/nooa-cybergym:latest}"
 # 13920s / 3h52m) so the agent can return its best PoC gracefully before the kill.
 export TIMEOUT="${TIMEOUT:-14400}"  # 4h
 
-# Python virtualenv used for all host-side commands.
+# Python virtualenv managed from this example's frozen uv lockfile.
 export VENV="${VENV:-$AGENT_REPO/.venv}"
 
 # The official CyberGym 10-task subset used by this example.

@@ -29,7 +29,7 @@ from nooa.context_blocks.events import (
     UserEvent,
 )
 from nooa.context_blocks.models import Role
-from nooa.events import LLMOutput, Task
+from nooa.events import LLMResponse, Task
 from nooa.runtime.event_backend import InMemoryBackend
 from nooa.storage.sqlite import SQLiteEventBackend
 
@@ -371,12 +371,12 @@ def test_tool_call_with_result_type_preserved(backend):
 
 
 def test_nemo_event_type_preserved(backend):
-    """nooa event types (Task, LLMOutput, etc.) must also round-trip."""
+    """nooa event types (Task, LLMResponse, etc.) must also round-trip."""
     backend.store("1", Task(prompt="do the thing"))
-    backend.store("2", LLMOutput(content="done"))
+    backend.store("2", LLMResponse(content="done"))
     events = list(backend.all_events())
     assert type(events[0]) is Task
-    assert type(events[1]) is LLMOutput
+    assert type(events[1]) is LLMResponse
 
 
 def test_context_blocks_roles_correct_after_roundtrip(backend):

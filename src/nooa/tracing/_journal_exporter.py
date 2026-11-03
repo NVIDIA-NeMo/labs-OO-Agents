@@ -79,7 +79,10 @@ class JournalExporter(SpanExporter):
 
         with _INSTALL_LOCK:
             for cb in litellm.callbacks:
-                if isinstance(cb, MessageJournalCallback):
+                # FileMessageJournalCallback subclasses MessageJournalCallback
+                # to reuse normalization, but is a different sink.  Match the
+                # exact class so exporter construction order cannot mix them.
+                if isinstance(cb, MessageJournalCallback) and type(cb) is MessageJournalCallback:
                     cb.add_destination(self._base_url)
                     return cb
 

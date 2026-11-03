@@ -43,6 +43,22 @@ def jsonl(trace_dir: str | Path | None = None) -> SpanExporter:
     return OtlpJsonFileExporter(trace_dir)
 
 
+def journal_file(trace_dir: str | Path | None = None) -> SpanExporter:
+    """Portable file exporter using NOOA's content-addressed message journal.
+
+    Writes ``<session_id>.nooa.jsonl`` with message-stripped standard OTLP span
+    envelopes plus typed journal block/call records.  The artifact is accepted
+    by ``nooa import-traces`` and ``nooa import-harbor`` and reconstructs full
+    OpenInference messages in the viewer.  This exporter is opt-in and does not
+    alter the behavior of :func:`jsonl` or the default live viewer exporter.
+    """
+    from nooa.tracing._journal_file_exporter import JournalFileExporter
+
+    if trace_dir is None:
+        trace_dir = _auto_detect_trace_dir()
+    return JournalFileExporter(trace_dir)
+
+
 def otlp(
     endpoint: str,
     headers: dict[str, str] | None = None,
