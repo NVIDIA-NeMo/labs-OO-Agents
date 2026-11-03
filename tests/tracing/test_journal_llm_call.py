@@ -230,3 +230,33 @@ def test_an_explicit_span_id_is_kept(writer):
     assert explicit["span_id"] == "ab" * 8
     # The default is a span of the call's own (or none without a tracer), never the explicit one.
     assert default.get("span_id") != "ab" * 8
+
+
+def test_generated_llm_span_takes_the_record_session(writer, monkeypatch):
+    """An explicit session_id that differs from the current trace session is used
+    for the generated LLM span too, so the viewer can attach the call to it."""
+    from opentelemetry import trace as otel_trace
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    from nooa.tracing._session_processor import SessionSpanProcessor
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SessionSpanProcessor())
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    monkeypatch.setattr(otel_trace, "get_tracer", lambda *a, **k: provider.get_tracer("t"))
+
+    set_session("ambient-session")
+    journal_llm_call(
+        model="m", messages=[{"role": "user", "content": "hi"}], session_id="explicit-session"
+    )
+    journal_llm_call(model="m", messages=[{"role": "user", "content": "hi"}])
+
+    (s1, explicit), (s2, ambient) = writer.calls
+    spans = {format(s.context.span_id, "016x"): s for s in exporter.get_finished_spans()}
+    assert s1 == explicit["session_id"] == "explicit-session"
+    assert spans[explicit["span_id"]].attributes["session.id"] == "explicit-session"
+    assert s2 == ambient["session_id"] == "ambient-session"
+    assert spans[ambient["span_id"]].attributes["session.id"] == "ambient-session"
