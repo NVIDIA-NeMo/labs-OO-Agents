@@ -8,7 +8,7 @@ Captures all context needed by strategies to generate code for a method call.
 import inspect
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Annotated, Any, get_type_hints
+from typing import TYPE_CHECKING, Annotated, Any, TypedDict, get_type_hints
 from uuid import uuid4
 
 from nooa.ellipsis_detection import get_pre_ellipsis_code
@@ -57,6 +57,45 @@ def merge_call_arguments(
     merged.update(bound.arguments)
 
     return merged
+
+
+class SignatureParameterNames(TypedDict):
+    """Parameter-name metadata that :class:`CurrentCall` takes from a live signature."""
+
+    param_names: list[str] | None
+    positional_param_names: list[str] | None
+    var_positional_param_name: str | None
+    var_keyword_param_name: str | None
+
+
+def signature_parameter_names(signature: inspect.Signature | None) -> SignatureParameterNames:
+    """Classify a live signature's parameters (``self`` excluded) for :class:`CurrentCall`.
+
+    Every place that builds a ``CurrentCall`` uses this, so the runtime's top-level
+    call and :meth:`CurrentCall.from_method` cannot drift apart. Taking the names
+    from the live signature avoids reparsing the display-only signature string and
+    keeps fixed, variadic and keyword-only parameters apart. All values are
+    ``None`` when no signature is available.
+    """
+    if signature is None:
+        return SignatureParameterNames(
+            param_names=None,
+            positional_param_names=None,
+            var_positional_param_name=None,
+            var_keyword_param_name=None,
+        )
+    parameters = [parameter for name, parameter in signature.parameters.items() if name != "self"]
+    positional_kinds = (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    return SignatureParameterNames(
+        param_names=[parameter.name for parameter in parameters],
+        positional_param_names=[p.name for p in parameters if p.kind in positional_kinds],
+        var_positional_param_name=next(
+            (p.name for p in parameters if p.kind is inspect.Parameter.VAR_POSITIONAL), None
+        ),
+        var_keyword_param_name=next(
+            (p.name for p in parameters if p.kind is inspect.Parameter.VAR_KEYWORD), None
+        ),
+    )
 
 
 @dataclass
@@ -416,58 +455,6 @@ class CurrentCall:
         # Extract pre-ellipsis code (setup code before ... marker)
         pre_ellipsis_code = get_pre_ellipsis_code(method)
 
-        # Authoritative parameter metadata from the live signature (excludes
-        # 'self'). This avoids reparsing the display-only signature string and
-        # preserves the distinction between fixed, variadic, and keyword-only
-        # parameters.
-        live_parameters = (
-            [parameter for name, parameter in sig.parameters.items() if name != "self"]
-            if sig is not None
-            else None
-        )
-        live_param_names = (
-            [parameter.name for parameter in live_parameters]
-            if live_parameters is not None
-            else None
-        )
-        positional_param_names = (
-            [
-                parameter.name
-                for parameter in live_parameters
-                if parameter.kind
-                in (
-                    inspect.Parameter.POSITIONAL_ONLY,
-                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                )
-            ]
-            if live_parameters is not None
-            else None
-        )
-        var_positional_param_name = (
-            next(
-                (
-                    parameter.name
-                    for parameter in live_parameters
-                    if parameter.kind is inspect.Parameter.VAR_POSITIONAL
-                ),
-                None,
-            )
-            if live_parameters is not None
-            else None
-        )
-        var_keyword_param_name = (
-            next(
-                (
-                    parameter.name
-                    for parameter in live_parameters
-                    if parameter.kind is inspect.Parameter.VAR_KEYWORD
-                ),
-                None,
-            )
-            if live_parameters is not None
-            else None
-        )
-
         return cls(
             id=call_id,
             method_name=method.__name__,
@@ -481,8 +468,5 @@ class CurrentCall:
             return_type=return_type,
             pre_ellipsis_code=pre_ellipsis_code,
             param_specs=param_specs,
-            param_names=live_param_names,
-            positional_param_names=positional_param_names,
-            var_positional_param_name=var_positional_param_name,
-            var_keyword_param_name=var_keyword_param_name,
+            **signature_parameter_names(sig),
         )

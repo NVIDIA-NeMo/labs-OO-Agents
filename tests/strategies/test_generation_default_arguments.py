@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 from typing import Annotated, Any
 
@@ -13,7 +14,7 @@ from nooa import Agent, strategy
 from nooa.agentdoc import spec
 from nooa.config import CodeActConfig
 from nooa.strategies import CodeActStrategy
-from nooa.strategies.current_call import CurrentCall
+from nooa.strategies.current_call import CurrentCall, signature_parameter_names
 from nooa.strategies.pure_python import PurePythonStrategy
 from nooa.unifiedllm import FakeLLMClient, LLMResponse, ToolCall
 
@@ -216,6 +217,44 @@ async def test_agent_default_preserves_annotated_parameter_overrides() -> None:
     assert capture.call.kwargs == {"greeting": "hello"}
     assert capture.call.bound_parameters() == {"greeting": "hello"}
     assert capture.call.param_specs == {"greeting": {"max_string": 7}}
+
+
+def test_signature_parameter_names_classifies_every_parameter_kind() -> None:
+    """One helper derives the positional, variadic and keyword parameter names."""
+
+    def render(self, head, /, body, *parts, suffix="", **metadata): ...
+
+    assert signature_parameter_names(inspect.signature(render)) == {
+        "param_names": ["head", "body", "parts", "suffix", "metadata"],
+        "positional_param_names": ["head", "body"],
+        "var_positional_param_name": "parts",
+        "var_keyword_param_name": "metadata",
+    }
+    assert signature_parameter_names(None) == {
+        "param_names": None,
+        "positional_param_names": None,
+        "var_positional_param_name": None,
+        "var_keyword_param_name": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_top_level_call_metadata_matches_from_method() -> None:
+    """The runtime's top-level call and from_method describe parameters identically."""
+    capture = _CaptureCallStrategy()
+
+    class RenderAgent(Agent, llm=FakeLLMClient()):
+        @strategy(capture)
+        async def render(self, head: str, /, *parts: str, suffix: str = "", **metadata: str) -> str:
+            """Render the parts."""
+            ...
+
+    await RenderAgent().render("h", "a", "b", source="x")
+
+    assert capture.call is not None
+    nested = CurrentCall.from_method(RenderAgent.render)
+    for field_name in signature_parameter_names(None):
+        assert getattr(capture.call, field_name) == getattr(nested, field_name), field_name
 
 
 @pytest.mark.asyncio

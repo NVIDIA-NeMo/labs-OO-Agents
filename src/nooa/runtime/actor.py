@@ -2935,7 +2935,11 @@ class ActorRuntime:
             # Strategy must be a GenerationStrategy instance
             if isinstance(strategy, GenerationStrategyABC):
                 # Use strategy's execute() method directly
-                from nooa.strategies.current_call import CurrentCall, merge_call_arguments
+                from nooa.strategies.current_call import (
+                    CurrentCall,
+                    merge_call_arguments,
+                    signature_parameter_names,
+                )
 
                 sig = inspect.signature(method)
                 merged_kwargs = merge_call_arguments(sig, args, kwargs)
@@ -2987,38 +2991,12 @@ class ActorRuntime:
                     return_type=return_type,
                     pre_ellipsis_code=pre_ellipsis_code,
                     session_locals=call_session_locals,
-                    # Authoritative ordered names from the live signature (excludes
-                    # 'self') so format_parameters_as_code never re-parses the string.
-                    param_names=[p for p in sig.parameters if p != "self"],
                     # Preserve Annotated parameter overrides on top-level calls,
                     # just as the nested method wrapper does.
                     param_specs=CurrentCall.from_method(method).param_specs,
-                    positional_param_names=[
-                        parameter.name
-                        for name, parameter in sig.parameters.items()
-                        if name != "self"
-                        and parameter.kind
-                        in (
-                            inspect.Parameter.POSITIONAL_ONLY,
-                            inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                        )
-                    ],
-                    var_positional_param_name=next(
-                        (
-                            parameter.name
-                            for name, parameter in sig.parameters.items()
-                            if name != "self" and parameter.kind is inspect.Parameter.VAR_POSITIONAL
-                        ),
-                        None,
-                    ),
-                    var_keyword_param_name=next(
-                        (
-                            parameter.name
-                            for name, parameter in sig.parameters.items()
-                            if name != "self" and parameter.kind is inspect.Parameter.VAR_KEYWORD
-                        ),
-                        None,
-                    ),
+                    # Same live-signature names as from_method (excludes 'self'), so
+                    # format_parameters_as_code never re-parses the string.
+                    **signature_parameter_names(sig),
                 )
 
                 # Store current call context in context vars for RuntimeServices.generate()
