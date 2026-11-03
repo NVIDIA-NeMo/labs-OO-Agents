@@ -141,6 +141,9 @@ async def test_root_and_child_name_the_server_in_the_first_request_and_hint_its_
     assert "NameError" in after_bare and name_hint + call in after_bare
     assert "AttributeError" in after_self and name_hint + call in after_self
     assert after_self.count(name_hint) == 2  # the bare call's hint, then the self.<tool> one
+    # One hint per cell error: the MCP one, not also the live-names one.
+    assert "Live names are listed" not in after_self
+    assert _prompt(llm, 3).count("Live names are listed") == 1  # undefined_thing gets it
     # Unrelated names get no MCP hint.
     assert _prompt(llm, 3).count("is a tool of MCP server") == 2
     assert _prompt(llm, 4).count("is a tool of MCP server") == 2

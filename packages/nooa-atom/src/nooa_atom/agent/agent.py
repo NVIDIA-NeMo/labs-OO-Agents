@@ -134,21 +134,62 @@ _TOOL_HINT: Annotated[str, hidden] = (
     "Atom's Python."
 )
 
-_NAME_ERROR_RE = re.compile(r"^NameError: name '(?P<name>\w+)' is not defined", re.MULTILINE)
+# What a cell error names, read from the exception or, on the sandbox path
+# (which reports the error as text), from the formatted text.
+_ERROR_TEXT = {
+    NameError: re.compile(r"^NameError: name '(?P<name>\w+)' is not defined", re.MULTILINE),
+    ModuleNotFoundError: re.compile(
+        r"^ModuleNotFoundError: No module named '(?P<name>[\w.]+)'", re.MULTILINE
+    ),
+    AttributeError: re.compile(
+        r"^AttributeError: '(?P<type>\w+)' object has no attribute '(?P<name>\w+)'",
+        re.MULTILINE,
+    ),
+}
 
 
-def _name_error_hint(error: BaseException, formatted: str) -> str | None:
-    """The hint for a cell's ``name 'x' is not defined``; counted in harness metrics.
+def _error_name(
+    error: BaseException, formatted: str, kind: type[BaseException], owner: Any = None
+) -> str | None:
+    """The name a ``kind`` error is about, else None.
 
-    The sandbox path reports the error as text, so the formatted text is
-    matched when the exception is not a plain ``NameError``.
+    For ``AttributeError`` only an attribute of ``owner`` counts (by identity,
+    or by type name in the text).
     """
-    name = getattr(error, "name", None) if type(error) is NameError else None
-    if not isinstance(name, str):
-        match = _NAME_ERROR_RE.search(formatted)
-        if match is None:
+    if type(error) is kind:
+        if kind is AttributeError and getattr(error, "obj", None) is not owner:
             return None
-        name = match.group("name")
+        name = getattr(error, "name", None)
+        if isinstance(name, str) and name:
+            return name
+    match = _ERROR_TEXT[kind].search(formatted)
+    if match is None:
+        return None
+    if kind is AttributeError and match.group("type") != type(owner).__name__:
+        return None
+    return match.group("name")
+
+
+def _mcp_tool_hint(agent: Any, error: BaseException, formatted: str) -> str | None:
+    """Name the MCP server of a tool called as a bare name or as ``self.<tool>``; counted."""
+    skills = getattr(agent, "skills", None)
+    if not isinstance(skills, SkillManager):
+        return None
+    name = _error_name(error, formatted, NameError) or _error_name(
+        error, formatted, AttributeError, agent
+    )
+    server = skills.mcp_tool_server(name) if name else None
+    if server is None:
+        return None
+    get_harness_metrics().mcp_tool_name_hint(f"{server}.{name}")
+    return f"`{name}` is a tool of MCP server {server}: await self.{server}.{name}(...)"
+
+
+def _name_error_hint(agent: Any, error: BaseException, formatted: str) -> str | None:
+    """Point a cell's ``name 'x' is not defined`` at the python_cell_state block; counted."""
+    name = _error_name(error, formatted, NameError)
+    if name is None:
+        return None
     hint = (
         "Live names are listed in the python_cell_state block; python_cell_state() lists up to "
         "20 (both may omit some). Check both and your context before recreating a name."
@@ -159,24 +200,14 @@ def _name_error_hint(error: BaseException, formatted: str) -> str | None:
     return hint
 
 
-_MODULE_NOT_FOUND_RE = re.compile(
-    r"^ModuleNotFoundError: No module named '(?P<name>[\w.]+)'", re.MULTILINE
-)
+def _module_not_found_hint(agent: Any, error: BaseException, formatted: str) -> str | None:
+    """Point a cell's ``No module named 'x'`` at the task's python3; counted.
 
-
-def _module_not_found_hint(error: BaseException, formatted: str) -> str | None:
-    """The hint for a cell's ``No module named 'x'``; counted in harness metrics.
-
-    A cell runs in Atom's Python, which usually lacks the task's packages
-    (the task's ``python3`` often has them). The sandbox path reports the
-    error as text, so the formatted text is matched too.
+    A cell runs in Atom's Python, which usually lacks the task's packages.
     """
-    name = getattr(error, "name", None) if type(error) is ModuleNotFoundError else None
-    if not isinstance(name, str) or not name:
-        match = _MODULE_NOT_FOUND_RE.search(formatted)
-        if match is None:
-            return None
-        name = match.group("name")
+    name = _error_name(error, formatted, ModuleNotFoundError)
+    if name is None:
+        return None
     module = name.split(".", 1)[0]
     get_harness_metrics().module_not_found_hint(name)
     return (
@@ -185,40 +216,8 @@ def _module_not_found_hint(error: BaseException, formatted: str) -> str | None:
     )
 
 
-_SELF_ATTRIBUTE_RE = re.compile(
-    r"^AttributeError: '(?P<type>\w+)' object has no attribute '(?P<name>\w+)'", re.MULTILINE
-)
-
-
-def _mcp_tool_hint(agent: Any, error: BaseException, formatted: str) -> str | None:
-    """Name the MCP server of a tool called as a bare name or as ``self.<tool>``.
-
-    ``NameError`` for ``X`` or ``AttributeError`` for ``self.X`` (the agent's
-    own type), when ``X`` is a tool of a connected MCP server; counted in
-    harness metrics. The sandbox path reports the error as text, so the
-    formatted text is matched too.
-    """
-    skills = getattr(agent, "skills", None)
-    if not isinstance(skills, SkillManager):
-        return None
-    name = None
-    if type(error) is NameError:
-        name = getattr(error, "name", None)
-    elif type(error) is AttributeError:
-        if getattr(error, "obj", None) is agent:
-            name = getattr(error, "name", None)
-    if not isinstance(name, str):
-        match = _NAME_ERROR_RE.search(formatted)
-        if match is None:
-            match = _SELF_ATTRIBUTE_RE.search(formatted)
-            if match is None or match.group("type") != type(agent).__name__:
-                return None
-        name = match.group("name")
-    server = skills.mcp_tool_server(name)
-    if server is None:
-        return None
-    get_harness_metrics().mcp_tool_name_hint(f"{server}.{name}")
-    return f"`{name}` is a tool of MCP server {server}: await self.{server}.{name}(...)"
+# The hints a failed cell can get; the first that applies is the only one added.
+_CELL_ERROR_HINTS = (_mcp_tool_hint, _name_error_hint, _module_not_found_hint)
 
 
 @hidden
@@ -315,22 +314,17 @@ class AtomCodeAct(CodeActV2):
             line += "; imports: " + listing(imports, more)
         return line
 
-    def _format_error(self, error: Exception, code: str | None = None, **kwargs: Any) -> str:
-        """Point a cell's NameError at the python_cell_state block (and ``sh = Shell()``).
-
-        A ModuleNotFoundError points at the task's python3 behind a Shell.
-        """
-        formatted = super()._format_error(error, code, **kwargs)
-        hint = _name_error_hint(error, formatted) or _module_not_found_hint(error, formatted)
-        return f"{formatted}\n\n{hint}" if hint else formatted
-
     def _format_execution_error(self, runtime: Any, result: Any, code: str, **kwargs: Any) -> str:
-        """Also name the MCP server of a tool the cell called as a bare name or ``self.<tool>``."""
+        """Add the first hint of ``_CELL_ERROR_HINTS`` that applies to a failed cell."""
         formatted = super()._format_execution_error(runtime, result, code, **kwargs)
         if result.error is None:
             return formatted
-        hint = _mcp_tool_hint(getattr(runtime, "agent", None), result.error, formatted)
-        return f"{formatted}\n{hint}" if hint else formatted
+        agent = getattr(runtime, "agent", None)
+        for hint_for in _CELL_ERROR_HINTS:
+            hint = hint_for(agent, result.error, formatted)
+            if hint:
+                return f"{formatted}\n\n{hint}"
+        return formatted
 
     def _build_execute_python_tool(self) -> Any:
         tool = super()._build_execute_python_tool()
