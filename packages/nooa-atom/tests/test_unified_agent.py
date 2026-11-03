@@ -124,9 +124,11 @@ async def test_one_shot_subagent_returns_its_task_result_and_notes_are_job_items
         assert tool.description.count("Blocked calls by module") == 1
         assert "`subprocess`" in tool.description and "literal dunder names" in tool.description
         assert (
-            "Run commands with `sh = Shell()` then `r = await sh.run(cmd, timeout=600)`"
-            in tool.description
-        )
+            "Run commands with `sh = Shell()`: `r = await sh.run(cmd)` waits for the result; "
+            '`self.jobs.launch(sh.run(cmd), name="build")` runs it in the background. Child '
+            "agents also go on `self.jobs`, documented in the python_cell_tools block."
+        ) in tool.description
+        assert "timeout=600" not in tool.description
         assert ENVIRONMENT_LINE in tool.description
         assert "self.shell" not in tool.description and "self.delegate" not in tool.description
         assert "Blocked imports:" not in rendered  # guidance is tool-local, not another block
@@ -485,7 +487,9 @@ async def test_first_call_offers_one_work_vocabulary(
     await asyncio.wait_for(root.prompt("hello"), TIMEOUT)
     call = models.llms[None].calls[0]
     tools = "\n".join(str(getattr(tool, "description", tool)) for tool in call.tools or ())
-    assert "Run commands with `sh = Shell()` then `r = await sh.run(cmd, timeout=600)`" in tools
+    assert (
+        "Run commands with `sh = Shell()`: `r = await sh.run(cmd)` waits for the result;" in tools
+    )
     assert ENVIRONMENT_LINE in tools
     messages = "\n".join(str(m.get("content", "")) for m in call.messages)
     rendered = messages + "\n" + tools  # what the model reads: the messages and the tool
@@ -526,10 +530,18 @@ async def test_first_call_offers_one_work_vocabulary(
         "persistence across restarts.",
         "- A job's stdout/stderr/media are in job.output / JobEvent.output, never in a later cell.",
         "registered queue producers",
-        'r = await sh.run("cd src && make", timeout=600)',
+        'r = await sh.run("cd src && make")  # wait for it',
         "Import anything else you need",
     ):
         assert wanted in rendered, wanted
+    # One Shell snippet, both forms (#517): wait for the result, or launch it.
+    flat = " ".join(prefix.split())
+    assert (
+        "Run a command with ``sh = Shell()``: ``r = await sh.run(cmd)`` waits for the result; "
+        '``self.jobs.launch(sh.run(cmd), name="build")`` runs it in the background while you '
+        "do other things (builds, servers; subagents too, see the python_cell_tools block)."
+    ) in flat
+    assert "sh.run(cmd, timeout=600)" not in rendered and "timeout=600)  # wait" not in rendered
     # The skills block is back (#517 P04), now the manager's own state: active
     # skills, connected MCP servers with the call form, and a count of the rest
     # pointing at self.skills.search. The old registry inventory never returns,

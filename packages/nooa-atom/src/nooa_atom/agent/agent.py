@@ -126,9 +126,9 @@ _LEGACY_TOOL_HINT: Annotated[str, hidden] = (
     "If `self` exposes delegation, inspect its documentation with `print(doc(self.delegate))`."
 )
 _TOOL_HINT: Annotated[str, hidden] = (
-    "Run commands with `sh = Shell()` then `r = await sh.run(cmd, timeout=600)`; "
-    "background work and child agents go on `self.jobs`, documented in the "
-    "python_cell_tools block. python_cell runs in Atom's own Python (your thinking "
+    "Run commands with `sh = Shell()`: `r = await sh.run(cmd)` waits for the result; "
+    '`self.jobs.launch(sh.run(cmd), name="build")` runs it in the background. Child agents '
+    "also go on `self.jobs`, documented in the python_cell_tools block. python_cell runs in Atom's own Python (your thinking "
     "environment). The task's code, packages and tests live in the task environment: run them "
     'through a Shell (e.g. sh.run("python3 script.py")); don\'t install task packages into '
     "Atom's Python."
@@ -606,7 +606,7 @@ def _tools_doc(text: str) -> str:
 _WORK_EXAMPLES: Annotated[str, hidden] = """\
 # Work: self.jobs is for background work.
 sh = Shell()  # make one; bash starts on first use
-r = await sh.run("cd src && make", timeout=600)  # wait for it
+r = await sh.run("cd src && make")  # wait for it
 job = self.jobs.launch(sh.run("make"), name="build", progress=Throttle(seconds=5))  # background
 job.set_progress(None)  # quiet again
 self.jobs.after(600, lambda: "Check the training loss.")  # done value: the reminder
@@ -651,9 +651,10 @@ class AtomAgent(AtomAgentBase):
     item you work on, append findings and checks to its ``comments``, complete
     it), and ``self.v`` keeps
     durable facts across restarts (handle locals last this live session). Run a
-    command with ``sh = Shell()`` then ``r = await sh.run(cmd, timeout=600)``;
-    ``self.jobs`` is only for work that runs while you do other things (builds,
-    servers, subagents; see the python_cell_tools block). Search inside the
+    command with ``sh = Shell()``: ``r = await sh.run(cmd)`` waits for the
+    result; ``self.jobs.launch(sh.run(cmd), name="build")`` runs it in the
+    background while you do other things (builds, servers; subagents too, see
+    the python_cell_tools block). Search inside the
     repository, never ``/``: a scan of the whole filesystem (``find /``,
     ``grep -r /``, ``du /``) can run until the timeout. Prefer ``rg`` to search
     for text and ``rg --files`` to list files: it's much faster than ``grep`` or

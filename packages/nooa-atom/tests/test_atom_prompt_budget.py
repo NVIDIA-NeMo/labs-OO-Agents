@@ -214,10 +214,14 @@ LIVE_NAMES_LINE = (
 # canonical function-tool JSON 2,259 -> 3,032 (+773); schema JSON stays 79.
 # Raised to 3,150 for the task-vs-thinking-environment line (2026-10-31, user request;
 # descriptions 2,894 -> 3,136).
-TOOL_DESCRIPTION_CHAR_LIMIT = 3_150
+# Raised to 3,250 for the #517 Shell snippet (2026-11-03, user decision): the first
+# sentence shows both forms, wait (sh.run) and background (self.jobs.launch);
+# descriptions 3,136 -> 3,198.
+TOOL_DESCRIPTION_CHAR_LIMIT = 3_250
 TOOL_SCHEMA_JSON_CHAR_LIMIT = 100
 # Raised to 3,350 with the description limit (2026-10-31; JSON 3,087 -> 3,331).
-TOOL_PAYLOAD_JSON_CHAR_LIMIT = 3_350
+# Raised to 3,450 with it (2026-11-03; JSON 3,331 -> 3,395).
+TOOL_PAYLOAD_JSON_CHAR_LIMIT = 3_450
 
 
 @pytest.fixture(autouse=True)
