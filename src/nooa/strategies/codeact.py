@@ -70,11 +70,11 @@ from nooa.runtime.sandbox.errors import SandboxExecutionError
 from nooa.strategies.base import RuntimeServices, build_sampling_kwargs
 from nooa.strategies.codeact_errors import (
     format_validation_error,
+    positional_result,
     return_alias_invalid_intro,
     return_alias_note,
     return_call_hint,
     return_doc_hint,
-    return_type_field_names,
 )
 from nooa.strategies.composite import CompositeStrategy
 from nooa.strategies.generated_code import (
@@ -1451,17 +1451,18 @@ Standard Python builtins and agent instance (`self`) are available."""
         )
 
     @staticmethod
-    def _return_result_alias(args: dict[str, Any]) -> dict[str, Any] | None:
-        """The ``{"result": value}`` of a provider ``return_result`` call, if it has one value.
+    def _return_result_alias(args: dict[str, Any], return_type: Any) -> dict[str, Any] | None:
+        """The arguments a provider ``return_result`` call gives the builtin, if it has one value.
 
-        Only for strategies whose sole tool is the Python cell: one ``value``
-        (the builtin's parameter name) or ``result`` argument. Anything else
-        (no argument, several fields) still gets the unknown-tool feedback.
+        Only for strategies whose sole tool is the Python cell: one ``result``
+        argument (the tool's shape) or one ``value`` (the builtin's parameter,
+        read as in a cell). Anything else (no argument, several fields) still
+        gets the unknown-tool feedback.
         """
-        if len(args) == 1:
-            [(key, value)] = args.items()
-            if key in ("value", "result"):
-                return {"result": value}
+        if list(args) == ["result"]:
+            return args
+        if list(args) == ["value"]:
+            return positional_result(args, return_type) or args
         return None
 
     def _unknown_tool_feedback(
@@ -1890,7 +1891,8 @@ Standard Python builtins and agent instance (`self`) are available."""
                 return _ToolCallsResult(completed=True, final_value=result[1])
 
         elif tool_call.name == "return_result" and (
-            self._supports_return_result() or self._return_result_alias(args) is not None
+            self._supports_return_result()
+            or self._return_result_alias(args, return_type) is not None
         ):
             # Return the final result
             alias_note: str | None = None
@@ -1898,7 +1900,7 @@ Standard Python builtins and agent instance (`self`) are available."""
             if not self._supports_return_result():
                 # Some models call the cell builtin as a provider tool: take its
                 # value as return_result(value) inside a cell would, and say so.
-                args = self._return_result_alias(args) or {}
+                args = self._return_result_alias(args, return_type) or {}
                 alias_note = return_alias_note(self._python_tool_name(), args.get("result"))
                 alias_intro = return_alias_invalid_intro(
                     self._python_tool_name(), args.get("result")
@@ -3760,20 +3762,9 @@ Standard Python builtins and agent instance (`self`) are available."""
                     raise _ReturnResultSignal(result=result)
                 # Single positional argument - treat as the 'result' field
                 raise _ReturnResultSignal(result={"result": list(args)[0]})
-            if len(kwargs) == 1:
-                [keyword] = kwargs
-                # return_result(value=x) / return_result(result=x) mean
-                # return_result(x) unless the return type has that field.
-                if (
-                    keyword in ("value", "result")
-                    and call.return_type is not None
-                    and call.return_type is not type(None)
-                    and keyword not in return_type_field_names(call.return_type)
-                ):
-                    get_harness_metrics().return_result_keyword_alias(keyword)
-                    raise _ReturnResultSignal(result={"result": kwargs[keyword]})
-            # Keyword arguments - pass as-is
-            raise _ReturnResultSignal(result=kwargs)
+            # return_result(value=x) is return_result(x) unless value is a field;
+            # other keyword arguments (result= included) pass as-is.
+            raise _ReturnResultSignal(result=positional_result(kwargs, call.return_type) or kwargs)
 
         # Start with module context (imports, type definitions)
         agent_module = inspect.getmodule(type(runtime.agent))

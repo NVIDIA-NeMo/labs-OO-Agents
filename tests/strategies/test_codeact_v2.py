@@ -146,6 +146,40 @@ async def test_integer_collapse_succeeds_without_warning():
 
 
 @pytest.mark.asyncio
+async def test_provider_return_result_value_is_the_field_when_the_type_has_one():
+    """As in a cell, value= is the return type's field when it has one (one rule, H2)."""
+    from pydantic import BaseModel
+
+    class Scored(BaseModel):
+        value: int
+
+    llm = FakeLLMClient(
+        scripted_responses=[
+            LLMResponse(
+                parts=(ToolCall(id="a", name="return_result", arguments='{"value": 7}'),),
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(
+                parts=(ToolCall(id="b", name="return_result", arguments='{"value": 8}'),),
+                finish_reason="tool_calls",
+            ),
+        ]
+    )
+
+    class TestAgent(Agent, llm=llm):
+        @strategy(CodeActV2(config=CodeActConfig(prefill=None)))
+        async def answer(self) -> Scored:
+            """Return the answer."""
+            ...
+
+    agent = TestAgent()
+    try:
+        assert await agent.answer() == Scored(value=7)  # the first call, not a retry
+    finally:
+        await agent.aclose()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("key", ["value", "result"])
 async def test_provider_return_result_with_one_value_finishes_like_the_builtin(key, monkeypatch):
     """Nemotron/GLM call return_result as a provider tool: take its value, validated."""

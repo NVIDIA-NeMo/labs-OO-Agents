@@ -33,6 +33,20 @@ def test_field_names_cover_every_union_member_and_typed_dicts():
     assert return_type_field_names(int) == set()
 
 
+def test_positional_result_reads_value_unless_it_is_a_field(monkeypatch):
+    from nooa.runtime import harness_metrics
+    from nooa.strategies.codeact_errors import positional_result
+
+    metrics = harness_metrics.HarnessMetrics()
+    monkeypatch.setattr(harness_metrics, "get_harness_metrics", lambda: metrics)
+    assert positional_result({"value": 3}, int) == {"result": 3}
+    assert positional_result({"value": 3}, Scored) is None  # Scored has a value field
+    assert positional_result({"result": 3}, int) is None  # already the canonical shape
+    assert positional_result({"value": 3, "note": "x"}, Scored) is None
+    assert positional_result({"value": 3}, None) is None
+    assert metrics.return_result_keyword_aliases == ["value"]
+
+
 def test_call_hint_names_each_model_with_its_required_fields():
     assert return_call_hint(Scored) == "Call it as return_result(Scored(value=...))."
     assert return_call_hint(Done | NeedInput) == (

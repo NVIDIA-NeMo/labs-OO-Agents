@@ -140,7 +140,7 @@ class HarnessMetrics(BaseModel):
     # ── Return Value Handling ──
     explicit_return_auto_completed: int = 0
     implicit_return_transformed: int = 0
-    # return_result(value=x)/(result=x) read as return_result(x); the keyword used
+    # return_result(value=x) read as return_result(x) (in a cell or as a provider tool call)
     return_result_keyword_aliases: list[str] = Field(default_factory=list)
     # Invalid return_result values sent back as a retryable cell error; the error type
     return_result_invalid_retries: list[str] = Field(default_factory=list)
@@ -328,7 +328,7 @@ class HarnessMetrics(BaseModel):
         self.implicit_return_transformed += 1
 
     def return_result_keyword_alias(self, keyword: str) -> None:
-        """return_result(value=x) or return_result(result=x) was read as return_result(x)."""
+        """return_result(value=x) was read as return_result(x)."""
         self._append(self.return_result_keyword_aliases, keyword)
 
     def return_result_invalid(self, error_type: str) -> None:
@@ -865,7 +865,7 @@ _SPAN_SCHEMA: tuple[SchemaEntry, ...] = (
     ),
     SchemaEntry(
         "harness.return_result_keyword_alias.count",
-        "return_result(value=/result=) read as return_result(x)",
+        "return_result(value=x) read as return_result(x)",
         "Return Value Handling",
         lambda m: len(m.return_result_keyword_aliases),
     ),

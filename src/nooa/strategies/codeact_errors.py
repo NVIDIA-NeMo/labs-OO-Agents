@@ -42,6 +42,26 @@ def return_type_field_names(return_type: Any) -> set[str]:
     return names
 
 
+def positional_result(kwargs: dict[str, Any], return_type: Any) -> dict[str, Any] | None:
+    """``{"result": x}`` for ``return_result(value=x)``, the builtin's parameter name.
+
+    Only when the return type has no ``value`` field (then ``value=`` is that
+    field); counted in harness metrics. Shared by the in-cell builtin and a
+    provider ``return_result`` call.
+    """
+    if (
+        list(kwargs) == ["value"]
+        and return_type is not None
+        and return_type is not type(None)
+        and "value" not in return_type_field_names(return_type)
+    ):
+        from nooa.runtime.harness_metrics import get_harness_metrics
+
+        get_harness_metrics().return_result_keyword_alias("value")
+        return {"result": kwargs["value"]}
+    return None
+
+
 def return_call_hint(
     return_type: Any, python_tool: str | None = None, *, cell_only: bool = False
 ) -> str | None:
