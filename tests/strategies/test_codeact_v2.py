@@ -247,6 +247,8 @@ async def test_aliased_return_result_says_how_it_was_taken_and_shows_the_cell_fo
         "Invalid result: Call python_cell with code one of: "
         "return_result(Done(explanation=...)), return_result(NeedInput(question=...))."
     )
+    # Done and NeedInput are not bound in this cell namespace: no doc() line.
+    assert "Fields: print(doc(" not in bad
     assert "JSON" not in bad and '{"result"' not in bad
     assert "Please call return_result again" not in bad
     assert results["ok"] == (

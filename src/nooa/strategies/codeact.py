@@ -72,6 +72,7 @@ from nooa.strategies.codeact_errors import (
     format_validation_error,
     return_alias_note,
     return_call_hint,
+    return_doc_hint,
     return_type_field_names,
 )
 from nooa.strategies.composite import CompositeStrategy
@@ -2555,6 +2556,9 @@ Standard Python builtins and agent instance (`self`) are available."""
                 call_hint = return_call_hint(
                     return_type, self._python_tool_name() if via_tool else None, cell_only=alias
                 )
+                doc_hint = return_doc_hint(return_type, session.session_locals)
+                if call_hint and doc_hint:
+                    call_hint = f"{call_hint}\n{doc_hint}"
                 if call_hint and alias:
                     error_msg = f"{call_hint}\n{error_msg}"
                 elif call_hint:

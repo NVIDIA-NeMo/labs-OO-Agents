@@ -7,7 +7,11 @@ from typing import TypedDict
 from pydantic import BaseModel
 
 from nooa.interactive import Done, NeedInput, Waiting
-from nooa.strategies.codeact_errors import return_call_hint, return_type_field_names
+from nooa.strategies.codeact_errors import (
+    return_call_hint,
+    return_doc_hint,
+    return_type_field_names,
+)
 
 
 class Scored(BaseModel):
@@ -56,6 +60,21 @@ def test_call_hint_for_an_aliased_call_shows_only_the_cell_form():
         "Call python_cell with code one of: return_result(Done(explanation=...)), "
         "return_result(NeedInput(question=...))."
     )
+
+
+def test_doc_hint_names_every_member_only_when_all_are_bound():
+    bound = {"Done": Done, "NeedInput": NeedInput, "Waiting": Waiting, "Scored": Scored}
+    assert return_doc_hint(Done | NeedInput | Waiting, bound) == (
+        "Fields: print(doc(Done, NeedInput, Waiting))"
+    )
+    assert return_doc_hint(Done, bound) == "Fields: print(doc(Done))"
+    assert return_doc_hint(Scored, bound) == "Fields: print(doc(Scored))"
+    # One member unbound, or bound to something else: no line.
+    assert return_doc_hint(Done | NeedInput, {"Done": Done}) is None
+    assert return_doc_hint(Done, {"Done": object()}) is None
+    assert return_doc_hint(Done, None) is None
+    assert return_doc_hint(int, {"int": int}) is None  # not a model
+    assert return_doc_hint(Row, {"Row": Row}) is None
 
 
 def test_alias_note_names_the_value_taken_and_is_bounded():

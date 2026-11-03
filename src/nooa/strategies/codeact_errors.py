@@ -82,6 +82,28 @@ def return_call_hint(
     )
 
 
+def return_doc_hint(return_type: Any, namespace: Any) -> str | None:
+    """``Fields: print(doc(Done, NeedInput))`` for a model return type, else None.
+
+    Only when every member's name is bound to that member in the cell
+    ``namespace``, so the call runs as written there.
+    """
+    if not isinstance(namespace, dict):
+        return None
+    names = []
+    for member in _return_type_members(return_type):
+        name = getattr(member, "__name__", None)
+        if (
+            not isinstance(member, type)
+            or not isinstance(getattr(member, "model_fields", None), dict)
+            or not name
+            or namespace.get(name) is not member
+        ):
+            return None
+        names.append(name)
+    return f"Fields: print(doc({', '.join(names)}))" if names else None
+
+
 def return_alias_note(python_tool: str, value: Any, limit: int = 200) -> str:
     """The line telling the model a provider ``return_result`` call was taken as the builtin."""
     shown = repr(value)

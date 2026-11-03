@@ -105,13 +105,36 @@ async def test_invalid_values_are_retryable_cell_errors(registry, options, model
     assert "ResultStatus.ERROR" in error
     assert (
         "Call it as one of: return_result(Done(explanation=...)), "
-        "return_result(NeedInput(question=...)), return_result(Waiting(explanation=..., on=...))"
+        "return_result(NeedInput(question=...)), return_result(Waiting(explanation=..., on=...))."
     ) in error
+    # The next line names the fields' doc; the cell has Done, NeedInput and Waiting.
+    assert "...)).\\nFields: print(doc(Done, NeedInput, Waiting))\\n" in error
     assert f"(attempt 1 of {_MAX_RESULT_RETRIES})" in error
     assert f"(attempt 3 of {_MAX_RESULT_RETRIES})" in _cell_output(models, 3)
     attrs = _merged(span_attributes)
     assert attrs["harness.return_result_invalid.count"] == 3
     assert attrs["harness.return_result_invalid.types"] == ["ValidationError"] * 3
+
+
+async def test_an_invalid_provider_return_result_names_the_fields_doc(registry, options, models):
+    import json
+
+    from nooa.unifiedllm import LLMResponse, ToolCall
+
+    call = ToolCall(id="bad", name="return_result", arguments=json.dumps({"value": "oops"}))
+    models.scripts[None] = [
+        LLMResponse(parts=(call,), finish_reason="tool_calls"),
+        done("fixed"),
+    ]
+    root = await registry.create(options)
+    assert await asyncio.wait_for(root.prompt("hi"), TIMEOUT) == Done(explanation="fixed")
+    seen = str(models.llms[None].calls[1].messages)
+    assert "this call was taken as return_result('oops')" in seen
+    assert (
+        "Invalid result: Call python_cell with code one of: return_result(Done(explanation=...)), "
+        "return_result(NeedInput(question=...)), return_result(Waiting(explanation=..., on=...))."
+        "\\nFields: print(doc(Done, NeedInput, Waiting))\\n"
+    ) in seen
 
 
 async def test_invalid_values_stay_bounded(registry, options, models):
