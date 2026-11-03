@@ -36,6 +36,10 @@ def test_wrong_puzzle_answer_alone_is_not_a_check_failure():
     from nooa.unifiedllm.connect._records import check_status
 
     record = {"outcome": "accepted", "reasoning_observed": True, "answer_correct": False}
+    entry = connect.configure_entry(
+        {"model_name": "openai/model", "reasoning_levels": {"high": {"reasoning_effort": "high"}}}
+    )
+    connect.stamp_verification(record, entry, "level:high")
     assert check_status("level:high", record, missing_reasoning=False) == "passed"
 
 

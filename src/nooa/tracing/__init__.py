@@ -24,11 +24,13 @@ Usage::
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import logging
 import os
 import sys
 import urllib.error
 import urllib.request
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from typing import Any, Literal
 from uuid import uuid4
@@ -66,6 +68,10 @@ logger = logging.getLogger(__name__)
 _enabled: bool = False
 _provider: TracerProvider | None = None
 _hooks: OpenInferenceHooks | None = None  # retained so we can re-register per-Task
+# Per execution context (thread / asyncio task), see quiet_trace_target().
+_announce_target: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "nooa_tracing_announce_target", default=True
+)
 
 
 class _IsolatedIdGenerator(RandomIdGenerator):
@@ -538,8 +544,25 @@ def _describe_exporter(exp: SpanExporter) -> str:
     return type(exp).__name__
 
 
+@contextlib.contextmanager
+def quiet_trace_target() -> Iterator[None]:
+    """Do not print the "OTel tracing enabled" line while inside this block.
+
+    Tracing itself is unchanged: it is still enabled and exported as usual. For
+    full-screen or step-by-step terminal output (e.g. ``nooa connect``) where
+    that line would land in the middle of the display.
+    """
+    token = _announce_target.set(False)
+    try:
+        yield
+    finally:
+        _announce_target.reset(token)
+
+
 def _print_trace_target(exporters: list[SpanExporter], experiment: str | None) -> None:
-    """Print where traces are being sent."""
+    """Print where traces are being sent (unless inside ``quiet_trace_target``)."""
+    if not _announce_target.get():
+        return
     session_id = get_session()
     descriptions: list[str] = []
     has_file_exporter = False
@@ -599,6 +622,7 @@ __all__ = [
     "end_active_spans",
     "exporters",
     "probe_otlp_endpoint",
+    "quiet_trace_target",
     "register_hooks_in_current_context",
     "resolve_otlp_endpoint",
     "set_session",

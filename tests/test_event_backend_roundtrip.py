@@ -30,6 +30,7 @@ from nooa.context_blocks.models import ResolvedBlock, Role
 from nooa.events import (
     AfterTurn,
     BeforeTurn,
+    DecisionRecord,
     Error,
     Feedback,
     LLMResponse,
@@ -166,6 +167,24 @@ _ALL_EVENTS = [
         ),
         AfterTurn,
         Role.RUNTIME_EVENT,
+    ),
+    (
+        "14",
+        DecisionRecord(
+            decision_call_id="decision-call-1",
+            method_name="urgent",
+            generation_id="gen-002",
+            state={"inputs": {"message": "Production is down"}},
+            questions={"result": {"type": "noul", "instructions": "Is this urgent?"}},
+            answers={"result": {"probability_true": 0.9}},
+            requested_model="decision-model",
+            resolved_model="decision-model-v1",
+            response_id="response-1",
+            usage={"input_tokens": 10, "output_tokens": 2},
+            success=True,
+        ),
+        DecisionRecord,
+        Role.METADATA,
     ),
 ]
 
@@ -578,3 +597,25 @@ def test_python_output_rich_diagnostic_roundtrip_preserves_every_channel(backend
     assert retrieved.error == diagnostic
     assert "start = sens.index('missing')" in retrieved.error
     assert "^^^^^^^^^^^^^^^^^^^^^" in retrieved.error
+
+
+def test_decision_record_raw_response_round_trips(backend):
+    raw = {"model": "loaded-model", "answers": {}, "metadata": {"calibration": "none"}}
+    backend.store(
+        "decision-raw",
+        DecisionRecord(
+            decision_call_id="decision-call-2",
+            method_name="urgent",
+            generation_id="gen-003",
+            state="Production is down",
+            questions={},
+            requested_model="decision-model",
+            raw_response=raw,
+            success=True,
+        ),
+    )
+
+    retrieved = backend.get("decision-raw")
+
+    assert isinstance(retrieved, DecisionRecord)
+    assert retrieved.model_dump(mode="json")["raw_response"] == raw

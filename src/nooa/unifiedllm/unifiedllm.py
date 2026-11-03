@@ -9,7 +9,7 @@ import math
 import re
 import warnings
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Coroutine, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -34,14 +34,26 @@ from nooa.unifiedllm.cache_policy import (
     reject_legacy_cache_config,
     wrap_responses_text,
 )
+from nooa.unifiedllm.media_inputs import (
+    MediaInput,
+    attachment_kind,
+    filter_media_messages,
+    validate_media_inputs,
+)
 
 from . import replay_state, response_parts
+from .admission import _current_admission_controller
 from .errors import EmptyContentError
 from .http_config import HttpConfig
 from .limits import REPLY_CAP_KEYS, ContextLimits
 from .reasoning import ReasoningConfig, apply_reasoning_level
 from .retry import sync_retry, with_retry
 from .retry_config import RetryConfig
+from .structured_output import (
+    StructuredOutputMode,
+    anthropic_output_format,
+    validate_structured_output_mode,
+)
 
 if TYPE_CHECKING:
     from .direct import DirectTransport
@@ -90,6 +102,19 @@ def _record_llm_metric(event: str, detail: Any = None) -> None:
             cb(event, detail)
         except Exception as e:  # noqa: BLE001
             logger.debug("Metric callback failed for event %r: %s", event, e)
+
+
+def _record_admission_observation(detail: dict[str, Any]) -> None:
+    """Record one admission outcome on the generation span and harness metrics."""
+    _record_llm_metric("llm_queue", detail)
+    try:
+        from opentelemetry import trace as otel_trace
+
+        span = otel_trace.get_current_span()
+        if span and span.is_recording():
+            span.add_event("llm.queue", attributes=detail)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("Could not record LLM admission event: %s", e)
 
 
 @contextmanager
@@ -236,7 +261,8 @@ class _ClientHttp:
             _, provider, dynamic_api_key, dynamic_api_base = litellm.get_llm_provider(
                 model,
                 api_key=config.get("api_key"),
-                api_base=config.get("api_base"),
+                api_base=config.get("api_base") or config.get("base_url"),
+                custom_llm_provider=config.get("custom_llm_provider"),
             )
         except Exception as e:  # noqa: BLE001
             # Unknown/ambiguous model — don't risk handing an incompatible client
@@ -259,8 +285,9 @@ class _ClientHttp:
 
         # OpenAI SDK path: client= must be an AsyncOpenAI / OpenAI wrapping httpx.
         api_key = config.get("api_key") or dynamic_api_key
-        api_base = config.get("api_base") or dynamic_api_base
-        common: dict[str, Any] = {"timeout": self._timeout}
+        api_base = config.get("api_base") or config.get("base_url") or dynamic_api_base
+        # CompletionClient's RetryConfig owns retries; calls set their own value.
+        common: dict[str, Any] = {"timeout": self._timeout, "max_retries": 0}
         if api_key:
             common["api_key"] = api_key
         if api_base:
@@ -1011,7 +1038,9 @@ def _needs_dummy_tool(model: str) -> bool:
     return model_lower.startswith(("anthropic/", "anthropic."))
 
 
-def _messages_have_tool_calls(messages: list[dict[str, Any] | LLMResponse | CacheBoundary]) -> bool:
+def _messages_have_tool_calls(
+    messages: Sequence[dict[str, Any] | LLMResponse | CacheBoundary],
+) -> bool:
     """Return True if any message contains tool_call blocks."""
     for msg in messages:
         if msg.get("role") == "assistant":
@@ -1161,7 +1190,7 @@ def _token_counter_messages(
 
 def _update_token_calibration(
     model: str,
-    messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
+    messages: Sequence[dict[str, Any] | LLMResponse | CacheBoundary],
     usage: LLMUsage,
     tools: list[dict[str, Any]] | None = None,
     *,
@@ -1188,12 +1217,13 @@ def _update_token_calibration(
         return
     # Responses lifts the leading system prompt out of input. It is still
     # billed input, so include it in the estimate without copying history.
+    message_list = list(messages)
     if instructions:
-        messages = [{"role": "system", "content": instructions}, *messages]
+        message_list = [{"role": "system", "content": instructions}, *message_list]
     # Calibration is best-effort: it must NEVER raise out of the (already paid)
     # response path. The whole estimate — primary AND fallback — is guarded.
     try:
-        counted = _token_counter_messages(messages)
+        counted = _token_counter_messages(message_list)
         try:
             estimated = litellm.token_counter(model=model, messages=counted)
             if tools:
@@ -1233,9 +1263,11 @@ class UnifiedLLM(ABC):
         model: str,
         *,
         direct: bool = False,
+        structured_output_mode: StructuredOutputMode = None,
         reasoning_levels: dict[str, dict[str, Any]] | None = None,
         reasoning_default: str | None = None,
         reasoning_level: str | None = None,
+        media_inputs: list[MediaInput] | tuple[MediaInput, ...] | None = None,
         **config,
     ):
         if type(direct) is not bool:
@@ -1246,6 +1278,11 @@ class UnifiedLLM(ABC):
         if isinstance(extra, Mapping) and "direct" in extra:
             raise ValueError("direct is a constructor-only setting, not a wire field")
         self.direct = direct
+        self.structured_output_mode = validate_structured_output_mode(structured_output_mode)
+        if self.structured_output_mode == "anthropic" and not isinstance(self, CompletionClient):
+            raise ValueError(
+                "structured_output_mode='anthropic' requires CompletionClient, not Responses"
+            )
         reject_legacy_cache_config(config)
         # Freeze prevents field assignment, not mutations inside nested Any
         # settings. Detach this small configuration once, never the history.
@@ -1255,6 +1292,7 @@ class UnifiedLLM(ABC):
         if reasoning_level is not None:
             self._reasoning_config.settings(reasoning_level)
         self.reasoning_level = reasoning_level
+        self.media_inputs = validate_media_inputs(media_inputs)
         self.model = model
         self.config = config
         self._registry_config = None
@@ -1282,14 +1320,78 @@ class UnifiedLLM(ABC):
         return self._reasoning_config.default
 
     def _prepare_call_config(self, overrides: dict[str, Any]) -> dict[str, Any]:
+        """Merge the client configuration with per-call ``overrides`` for one request.
+
+        ``api_base`` and ``base_url`` are two spellings of the same endpoint:
+
+        - An endpoint override of ``None`` counts as no override. Clearing the
+          configured endpoint would send the request, with its credentials, to
+          the provider's default endpoint instead of the configured gateway.
+        - A non-None override of one spelling also replaces the other spelling if
+          the client configuration sets it. Leaving the old value would give
+          LiteLLM two different endpoints, and Responses requests copy
+          ``base_url`` over ``api_base``. Both spellings are kept (rather than
+          dropping one) because LiteLLM's async provider detection reads
+          ``base_url``, and because an override equal to the configured URL must
+          leave the route, and therefore the media permissions, unchanged.
+        """
         extra = overrides.get("extra_body")
         if self.direct and extra is not None and not isinstance(extra, Mapping):
             raise ValueError("extra_body must be a mapping")
         if "direct" in overrides or (isinstance(extra, Mapping) and "direct" in extra):
             raise ValueError("direct is a constructor-only setting")
-        return apply_reasoning_level(
+        overrides = {
+            key: value
+            for key, value in overrides.items()
+            if not (key in ("api_base", "base_url") and value is None)
+        }
+        params = apply_reasoning_level(
             self._reasoning_config, self.model, self.config, overrides, self.reasoning_level
         )
+        for alias, other in (("api_base", "base_url"), ("base_url", "api_base")):
+            if alias in overrides and other not in overrides and other in params:
+                params[other] = overrides[alias]
+        return params
+
+    def _request_media_inputs(self, call_config: dict[str, Any]) -> tuple[MediaInput, ...]:
+        """A replacement route never inherits permissions from this connection.
+
+        ``api_base`` and ``base_url`` are compared as one endpoint, so the
+        configured URL under the other spelling keeps the permissions.
+        """
+        from nooa.unifiedllm.reasoning import _endpoint_changed
+
+        if (
+            self._effective_model(call_config) != self.model
+            or _endpoint_changed(self.config, call_config)
+            # A request with no endpoint goes to the provider default.
+            or (
+                any(self.config.get(key) for key in ("api_base", "base_url"))
+                and not any(call_config.get(key) for key in ("api_base", "base_url"))
+            )
+            or any(
+                call_config.get(key) != self.config.get(key)
+                for key in ("custom_llm_provider", "client")
+            )
+        ):
+            return ()
+        return validate_media_inputs(self.media_inputs)
+
+    def _prepare_media_messages(self, messages, call_config):
+        enabled = self._request_media_inputs(call_config)
+        filtered = filter_media_messages(messages, enabled)
+        self._validate_implemented_media(filtered, call_config)
+        return filtered
+
+    def _validate_implemented_media(self, messages, call_config):
+        from nooa.media_policy import reject_unsupported_media, resolved_input_interface
+
+        interface = resolved_input_interface(
+            self._effective_model(call_config),
+            call_config,
+            client_type="responses" if isinstance(self, ResponsesClient) else "completion",
+        )
+        reject_unsupported_media(messages, interface)
 
     def get_context_limits(
         self, overrides: dict[str, Any] | None = None, *, fallback_reserve: int = 0
@@ -1298,8 +1400,8 @@ class UnifiedLLM(ABC):
 
         Includes selected reasoning levels, per-call caps and extra_body. Does
         not infer a reply cap from model metadata. ``fallback_reserve`` is only
-        a planning allowance when no cap is configured. For a per-call model
-        switch, never reuse the original model's window; pass an explicit
+        a planning allowance when no cap is configured. For a per-call route
+        switch, never reuse the original endpoint's window; pass an explicit
         context_window or use a separately configured client for that model.
         """
         params = self._prepare_call_config(overrides or {})
@@ -1310,9 +1412,19 @@ class UnifiedLLM(ABC):
         cap = caps[0] if caps else None
         if cap is not None and (type(cap) is not int or cap <= 0):
             raise ValueError("Reply token limit must be a positive integer")
-        same_model = self._effective_model(params) == self.model
+        from nooa.unifiedllm.route_identity import same_context_route
+
+        client_type = "responses" if isinstance(self, ResponsesClient) else "completion"
+        same_route = same_context_route(
+            self.model,
+            self.config,
+            client_type,
+            self._effective_model(params),
+            params,
+            client_type,
+        )
         window = (overrides or {}).get("context_window")
-        if window is None and same_model:
+        if window is None and same_route:
             window = self.context_window
         if not isinstance(window, int) or window <= 0:
             window = None
@@ -1367,6 +1479,16 @@ class UnifiedLLM(ABC):
                 raise ValueError("Conversation fields are managed by UnifiedLLM; use messages")
             self._direct_transport().validate({"model": self.model, **call_config})
         reject_legacy_cache_config(call_config)
+        if "structured_output_mode" in call_config or (
+            isinstance(call_config.get("extra_body"), Mapping)
+            and "structured_output_mode" in call_config["extra_body"]
+        ):
+            raise ValueError("structured_output_mode is a framework-only profile setting")
+        if "media_inputs" in call_config or (
+            isinstance(call_config.get("extra_body"), Mapping)
+            and "media_inputs" in call_config["extra_body"]
+        ):
+            raise ValueError("media_inputs is a client setting, not a provider request parameter")
         if name in call_config:
             raise ValueError(
                 f"{name!r} is managed by UnifiedLLM; pass conversation data through "
@@ -1467,7 +1589,7 @@ class UnifiedLLM(ABC):
         Resolution order:
         1. Explicit ``context_window`` config passed to the client constructor
         2. Registry config (if created via get_llm_client())
-        3. Registry lookup by model name or model_name field
+        3. Unambiguous registry lookup by compatible route (direct clients only)
         4. litellm model info (for known models)
         5. None (unknown model)
 
@@ -1479,12 +1601,22 @@ class UnifiedLLM(ABC):
         if cw is not None:
             return cw
 
-        # Then check registry config (set by get_llm_client()).
+        from nooa.unifiedllm.route_identity import same_context_route
+
+        client_type = "responses" if isinstance(self, ResponsesClient) else "completion"
+        # Clients built by the registry carry their entry's settings. Use only
+        # that entry; if it declares no context_window, do not borrow one from
+        # another alias that happens to use the same model.
         if self._registry_config is not None:
-            cw = self._registry_config.get("context_window")
-            if cw is not None:
-                return cw
-            # Registry entry exists but lacks context_window — fall through
+            route = getattr(self, "_registry_context_route", None)
+            if route is None or same_context_route(
+                self.model, self.config, client_type, route[0], route[1], route[2]
+            ):
+                cw = self._registry_config.get("context_window")
+                if cw is not None:
+                    return cw
+            info = self.get_model_info()
+            return info.get("max_input_tokens") if info else None
 
         # Try registry lookup by model string. The property is reachable
         # from any UnifiedLLM instance — including ones constructed
@@ -1506,18 +1638,37 @@ class UnifiedLLM(ABC):
         with _registry_lock:
             models_snapshot = dict(MODELS)
 
-        # Direct key match
-        if model_str in models_snapshot:
-            cw = models_snapshot[model_str].get("context_window")
-            if cw is not None:
-                return cw
-
-        # Reverse lookup: check if any registry entry's model_name matches
-        for _key, cfg in models_snapshot.items():
-            if cfg.get("model_name") == model_str:
+        # A directly built client has no entry of its own. Use a registry
+        # context_window only if every alias with the same route declares the
+        # same positive value. If they disagree, or one of them declares none,
+        # the result would depend on YAML order, so fall back instead.
+        windows = set()
+        undeclared = False
+        for key, cfg in models_snapshot.items():
+            entry_client_type = cfg.get("client_type", "completion")
+            # Completion and Responses clients are never sent the registry-only
+            # ``endpoint`` key (the decision-route spelling), so leave it out of
+            # the comparison, as client_from_config does. Decision entries keep it.
+            route = (
+                cfg
+                if entry_client_type == "decision"
+                else {name: value for name, value in cfg.items() if name != "endpoint"}
+            )
+            if same_context_route(
+                model_str,
+                self.config,
+                client_type,
+                cfg.get("model_name", key),
+                route,
+                entry_client_type,
+            ):
                 cw = cfg.get("context_window")
-                if cw is not None:
-                    return cw
+                if type(cw) is int and cw > 0:
+                    windows.add(cw)
+                else:
+                    undeclared = True
+        if len(windows) == 1 and not undeclared:
+            return windows.pop()
 
         # Fallback to litellm
         info = self.get_model_info()
@@ -1575,6 +1726,17 @@ def _collect_sync(raw: Any) -> "litellm.ModelResponse":
     return raw
 
 
+def _with_sdk_retries(client: Any, max_retries: int) -> Any:
+    """Return a per-call copy of an OpenAI SDK client with its own retry setting.
+
+    LiteLLM writes ``max_retries`` onto the SDK client it is given, so a shared
+    client would let concurrent calls change each other's retry budget. The
+    copy keeps the same HTTP pool. Other client types are returned unchanged.
+    """
+    with_options = getattr(client, "with_options", None)
+    return with_options(max_retries=max_retries) if callable(with_options) else client
+
+
 async def _collect_async(raw: Any) -> "litellm.ModelResponse":
     """Consume an async streaming or non-streaming litellm response, returning ModelResponse."""
     if isinstance(raw, litellm.CustomStreamWrapper):
@@ -1590,29 +1752,76 @@ async def _collect_async(raw: Any) -> "litellm.ModelResponse":
     return raw
 
 
-async def _litellm_acompletion(api_params: dict[str, Any]) -> Any:
-    """Await LiteLLM without cancelling its nested provider coroutine.
+async def _run_async_provider_call[T](
+    call: Callable[[], Coroutine[Any, Any, T]],
+    *,
+    request_timeout: float | None,
+) -> T:
+    """Run one provider attempt, holding admission through its actual exit.
 
-    LiteLLM runs sync ``completion()`` in an executor for async chat calls.
-    OpenAI-compatible providers return ``OpenAIChatCompletion.acompletion``
-    from that sync frame, then LiteLLM awaits it on the event loop. If a TUI
-    soft-cancel lands in that handoff window, Python can garbage-collect the
-    provider coroutine before it is awaited and print::
+    Acquisition happens before the provider task is created, so cancelling a
+    queued caller cannot dispatch abandoned work.  Once dispatched, the
+    provider task owns the permit and releases it in ``finally``.  Shielding
+    keeps that accounting correct when the caller is cancelled while remote
+    work or a stream is still active.
 
-        RuntimeWarning: coroutine 'OpenAIChatCompletion.acompletion' was never awaited
-
-    Shielding lets LiteLLM finish consuming that provider coroutine while the
-    caller still receives ``CancelledError`` immediately.
+    ``request_timeout`` bounds the whole attempt, stream included. On expiry it
+    cancels the task and raises TimeoutError. None disables it.
     """
-    task = asyncio.create_task(litellm.acompletion(**api_params))
+    admission_controller = _current_admission_controller()
+    if admission_controller is None:
+        return await _await_provider_task(asyncio.create_task(call()), request_timeout)
+
+    permit = await admission_controller.acquire(_record_admission_observation)
+    if permit is None:
+        return await _await_provider_task(asyncio.create_task(call()), request_timeout)
+
+    async def run_and_release() -> T:
+        try:
+            return await call()
+        finally:
+            permit.release()
+
+    try:
+        task = asyncio.create_task(run_and_release())
+    except BaseException:
+        permit.release()
+        raise
+
+    return await _await_provider_task(task, request_timeout)
+
+
+async def _await_provider_task[T](task: asyncio.Task[T], request_timeout: float | None) -> T:
+    """Await a shielded provider task, bounded by ``request_timeout`` if set.
+
+    The deadline is armed on the task, not on this await, so it still fires
+    after the caller cancels. A caller cancel raises CancelledError, even when
+    it lands with the deadline.
+    """
+    task.add_done_callback(_consume_async_provider_result)
+    if request_timeout is None:
+        return await asyncio.shield(task)
+
+    timed_out = False
+
+    def _on_deadline() -> None:
+        nonlocal timed_out
+        if not task.done():
+            timed_out = True
+            task.cancel()
+
+    handle = asyncio.get_running_loop().call_later(request_timeout, _on_deadline)
+    task.add_done_callback(lambda _done: handle.cancel())
     try:
         return await asyncio.shield(task)
     except asyncio.CancelledError:
-        task.add_done_callback(_consume_litellm_acompletion_result)
+        current = asyncio.current_task()
+        if timed_out and (current is None or not current.cancelling()):
+            raise TimeoutError from None
         raise
 
 
-def _consume_litellm_acompletion_result(task: asyncio.Task[Any]) -> None:
+def _consume_async_provider_result(task: asyncio.Task[Any]) -> None:
     try:
         task.result()
     except BaseException:
@@ -1838,9 +2047,314 @@ def _apply_cache_control_preserve_patch():
 _apply_cache_control_preserve_patch()
 
 
+# The output schema of the native-output call running in this context, read by
+# the request hooks below. A ContextVar keeps concurrent calls separate.
+_NATIVE_OUTPUT_CONTRACT: ContextVar[dict[str, Any] | None] = ContextVar(
+    "nooa_native_output_contract", default=None
+)
+
+
+def _check_native_output_request(request):
+    """httpx request hook: verify the outgoing body still has the expected schema.
+
+    Raises ``ValueError`` (which stops the request) if
+    ``output_config.format`` is missing or differs from the schema built for
+    this call, or if another output format or tools were added. Requests
+    outside a native-output call are not checked. This is one module-level
+    function, so a shared httpx client gets a single hook that keeps no NOOA
+    client alive; the expected schema comes from the ContextVar set by the
+    active call's ``_native_output_request_scope``.
+    """
+    expected = _NATIVE_OUTPUT_CONTRACT.get()
+    if expected is None:
+        return
+    wire = json.loads(request.content)
+    output = wire.get("output_config")
+    if (
+        not isinstance(output, dict)
+        or output.get("format") != expected
+        or any(
+            key in wire
+            for key in (
+                "response_format",
+                "output_format",
+                "text_format",
+                "text.format",
+                "tools",
+                "tool_choice",
+            )
+        )
+        or isinstance(wire.get("text"), dict)
+        and "format" in wire["text"]
+    ):
+        raise ValueError(
+            "Native output_config.format schema was changed or dropped before send; "
+            "generic structured-output carriers are not permitted"
+        )
+
+
+async def _acheck_native_output_request(request):
+    """Async version of ``_check_native_output_request`` for ``httpx.AsyncClient``."""
+    _check_native_output_request(request)
+
+
 class CompletionClient(UnifiedLLM):
+    def _prepare_call_config(self, overrides: dict[str, Any]) -> dict[str, Any]:
+        """Validate and remove a per-call ``structured_output_mode`` before the base logic.
+
+        The mode is NOOA's own setting, so it must not reach the provider
+        parameters; ``_native_output_for_call`` reads it from the overrides.
+        """
+        overrides = dict(overrides)
+        if "structured_output_mode" in overrides:
+            validate_structured_output_mode(overrides.pop("structured_output_mode"))
+        return super()._prepare_call_config(overrides)
+
+    def _with_reduced_reply_limit(self, overrides: dict[str, Any], limit: int) -> dict[str, Any]:
+        params = super()._with_reduced_reply_limit(overrides, limit)
+        # _prepare_call_config removed structured_output_mode because it is a
+        # NOOA setting, not a provider parameter. Put an explicit per-call value
+        # (including None) back so the retry with a smaller reply limit uses it.
+        if "structured_output_mode" in overrides:
+            params["structured_output_mode"] = validate_structured_output_mode(
+                overrides["structured_output_mode"]
+            )
+        return params
+
+    def _call_endpoint_changed(self, call_config) -> bool:
+        """Whether this call sends to a different endpoint than the constructor's.
+
+        ``api_base`` and ``base_url`` are two spellings of one endpoint (the
+        same comparison as ``_request_media_inputs``); a call with no endpoint
+        while one is configured goes to the provider default, a change.
+        """
+        from nooa.unifiedllm.reasoning import _endpoint_changed
+
+        return _endpoint_changed(self.config, call_config) or (
+            any(self.config.get(key) for key in ("api_base", "base_url"))
+            and not any(call_config.get(key) for key in ("api_base", "base_url"))
+        )
+
+    def _native_output_for_call(self, overrides, call_config) -> bool:
+        """Return whether this call sends its output schema as ``output_config.format``.
+
+        The per-call ``structured_output_mode`` wins over the client's. The
+        client's ``"anthropic"`` mode is not applied when the call overrides the
+        model, base URL, provider or client: the endpoint is then different,
+        and the call must set ``structured_output_mode`` itself (else
+        ``ValueError``).
+        """
+        mode = validate_structured_output_mode(
+            overrides.get("structured_output_mode", self.structured_output_mode)
+        )
+        route_changed = (
+            self._effective_model(call_config) != self.model
+            or self._call_endpoint_changed(call_config)
+            or any(
+                call_config.get(key) != self.config.get(key)
+                for key in ("custom_llm_provider", "client")
+            )
+        )
+        if mode == "anthropic" and route_changed and "structured_output_mode" not in overrides:
+            raise ValueError(
+                "Route override cannot inherit structured_output_mode='anthropic'; "
+                "declare the replacement route's profile explicitly"
+            )
+        return mode == "anthropic"
+
     @staticmethod
-    def _response_from_chat(raw_response, scope, tools, output_model):
+    def _normalize_chat_extensions(api_params, effective_model):
+        """Move ``thinking`` and ``output_config`` into ``extra_body`` for OpenAI-SDK requests.
+
+        LiteLLM sends OpenAI and OpenAI-compatible providers through the OpenAI
+        Python SDK, which does not accept these fields as keyword arguments but
+        copies ``extra_body`` into the request JSON. Providers that LiteLLM
+        handles with its own HTTP code (such as Anthropic's Messages API) read
+        these fields as top-level parameters, so they are left unchanged.
+
+        This applies to any model and does not depend on ``output_model``. The
+        provider is resolved the same way LiteLLM resolves it, because a call
+        that overrides the endpoint may not use the SDK client NOOA created.
+
+        Raises:
+            ValueError: If a field is set both top-level and in ``extra_body``
+                with different values.
+        """
+        fields = ("thinking", "output_config")
+        if not any(key in api_params for key in fields):
+            return
+        _, provider, _, _ = litellm.get_llm_provider(
+            model=effective_model,
+            custom_llm_provider=api_params.get("custom_llm_provider"),
+            api_base=api_params.get("api_base") or api_params.get("base_url"),
+        )
+        if provider != "openai" and provider not in getattr(
+            litellm, "openai_compatible_providers", []
+        ):
+            return
+        # These OpenAI-compatible providers have their own LiteLLM HTTP
+        # handlers and do not go through the OpenAI SDK, so leave them alone.
+        if (
+            provider
+            in {
+                "deepseek",
+                "azure_ai",
+                "fireworks_ai",
+                "ragflow",
+                "xai",
+                "groq",
+                "cometapi",
+                "hosted_vllm",
+            }
+            or api_params.get("text_completion") is True
+        ):
+            return
+        from litellm.secret_managers.main import get_secret_bool
+
+        # With this LiteLLM setting, OpenAI requests use LiteLLM's own HTTP
+        # handler instead of the SDK; check it the same way LiteLLM does.
+        if get_secret_bool("EXPERIMENTAL_OPENAI_BASE_LLM_HTTP_HANDLER"):
+            return
+        extra = copy.deepcopy(dict(api_params.get("extra_body") or {}))
+        # Check every field for conflicts before moving any of them. Each
+        # field is moved as a whole; a conflicting extra_body value is an
+        # error rather than being merged or overwritten.
+        for key in fields:
+            if key in api_params and key in extra and api_params[key] != extra[key]:
+                raise ValueError(f"Conflicting {key} settings in extra_body")
+        for key in fields:
+            if key in api_params:
+                extra[key] = copy.deepcopy(api_params.pop(key))
+        api_params["extra_body"] = extra
+
+    @staticmethod
+    def _set_output_format(api_params, output_model, effective_model, native_output):
+        """Add the output schema of ``output_model`` to the request parameters.
+
+        Without native output this sets ``response_format``. With native
+        output (``structured_output_mode="anthropic"``) it sets
+        ``output_config.format``, merged with any other ``output_config``
+        settings, either as a top-level parameter (Anthropic provider) or in
+        ``extra_body`` (OpenAI-compatible gateways).
+
+        Raises:
+            ValueError: If native output is combined with another output
+                format, tools or a conflicting ``output_config``, or the
+                provider is neither Anthropic nor OpenAI-compatible.
+        """
+        if output_model is None:
+            return
+        if not native_output:
+            api_params["response_format"] = _maybe_sanitize_response_format(
+                effective_model, output_model
+            )
+            return
+        extra = dict(api_params.get("extra_body") or {})
+        for settings in (api_params, extra):
+            if any(
+                key in settings
+                for key in (
+                    "response_format",
+                    "text_format",
+                    "text",
+                    "output_format",
+                    "tools",
+                    "tool_choice",
+                )
+            ):
+                raise ValueError(
+                    "Native output_model conflicts with explicit structured format settings"
+                )
+            output_config = settings.get("output_config")
+            if output_config is not None and not isinstance(output_config, Mapping):
+                raise ValueError("output_config must be a mapping")
+            if isinstance(output_config, Mapping) and "format" in output_config:
+                raise ValueError("output_model conflicts with explicit output_config.format")
+        output_config = dict(api_params.pop("output_config", {}) or {})
+        for key, value in (extra.get("output_config") or {}).items():
+            if key in output_config and output_config[key] != value:
+                raise ValueError("Conflicting output_config settings")
+            output_config[key] = value
+        output_config["format"] = anthropic_output_format(output_model)
+        # The mode decides that output_config.format is sent; the provider
+        # only decides where it goes. The OpenAI SDK copies extra_body into
+        # the request JSON, while LiteLLM's Anthropic Messages handler expects
+        # a top-level parameter (it would nest an extra_body value).
+        _, provider, _, _ = litellm.get_llm_provider(
+            model=effective_model,
+            custom_llm_provider=api_params.get("custom_llm_provider"),
+            api_base=api_params.get("api_base") or api_params.get("base_url"),
+        )
+        if provider == "anthropic":
+            extra.pop("output_config", None)
+            api_params["output_config"] = output_config
+            if extra:
+                api_params["extra_body"] = extra
+            else:
+                api_params.pop("extra_body", None)
+        elif provider in {"openai", "azure"} or provider in getattr(
+            litellm, "openai_compatible_providers", []
+        ):
+            extra["output_config"] = output_config
+            api_params["extra_body"] = extra
+        else:
+            raise ValueError(
+                "Native Anthropic carrier requires Anthropic Messages or a Chat-compatible gateway"
+            )
+
+    @contextmanager
+    def _native_output_request_scope(self, api_params, output_model, native_output, *, is_async):
+        """Check the HTTP request LiteLLM sends during a native-output call.
+
+        Installs the request hook on the httpx client of this call's SDK client
+        and records the expected schema for the duration of the ``with``
+        block. Does nothing when the call does not use native output.
+
+        Raises:
+            ValueError: If the call has no per-client httpx client to hook.
+        """
+        if not native_output or output_model is None:
+            yield
+            return
+        import httpx
+
+        # Check the request body that is actually sent, not only the
+        # parameters given to LiteLLM, which could still drop or rewrite the
+        # schema. The hook is added to this call's httpx client, never to a
+        # global one. It is a module-level function, added once per httpx
+        # client, so a caller-owned client shared by several CompletionClients
+        # holds no reference to them; concurrent calls each see their own
+        # expected schema through the ContextVar.
+        if self.direct:
+            # Direct SDK clients borrow this client's own httpx pools, so the
+            # same hook checks the request the official SDK actually sends.
+            transport = self._direct_transport()
+            http = transport.httpx_async if is_async else transport.httpx_sync
+        else:
+            client = api_params.get("client")
+            http = getattr(client, "_client", None)
+            if http is None:
+                http = getattr(client, "client", None)
+        expected_type = httpx.AsyncClient if is_async else httpx.Client
+        if not isinstance(http, expected_type):
+            raise ValueError(
+                "Native structured output requires a verifiable per-client HTTP transport; "
+                "construct a separate CompletionClient for a replacement route"
+            )
+        hook = _acheck_native_output_request if is_async else _check_native_output_request
+        hooks = http.event_hooks.setdefault("request", [])
+        if hook not in hooks:
+            hooks.append(hook)
+        # Build the expected schema again from output_model instead of reusing
+        # the dict in api_params, which LiteLLM could modify in place.
+        token = _NATIVE_OUTPUT_CONTRACT.set(anthropic_output_format(output_model))
+        try:
+            yield
+        finally:
+            _NATIVE_OUTPUT_CONTRACT.reset(token)
+
+    @staticmethod
+    def _response_from_chat(raw_response, scope, tools, output_model, *, native_output=False):
         from .chat_parts import capture_chat_parts
 
         reasoning, usage = _extract_reasoning_and_usage(raw_response)
@@ -1851,6 +2365,16 @@ class CompletionClient(UnifiedLLM):
             finish_reason=_map_completion_finish_reason(raw_response),
             usage=usage,
         )
+        if native_output and output_model is not None:
+            if turn.finish_reason != "stop" or turn.tool_calls or not turn.content.strip():
+                raise ValueError(
+                    "Native structured output requires a complete final stop with JSON text, not tools or reasoning alone"
+                )
+            # Parse the whole reply as JSON for output_model; unlike the default
+            # path, there is no fallback that extracts JSON from fenced or
+            # surrounding text.
+            turn.parsed = output_model.model_validate_json(turn.content)
+            return turn
         if turn.tool_calls:
             turn.finish_reason = _finish_reason_for_tool_calls(turn.finish_reason)
             return turn
@@ -1886,6 +2410,8 @@ class CompletionClient(UnifiedLLM):
         cache_breakpoint: Literal["auto", "anthropic"] | None = "auto",
         *,
         direct: bool = False,
+        structured_output_mode: StructuredOutputMode = None,
+        media_inputs: list[MediaInput] | tuple[MediaInput, ...] | None = None,
         **config,
     ):
         """
@@ -1899,7 +2425,9 @@ class CompletionClient(UnifiedLLM):
                          disconnects, and unreachable endpoints. Pass
                          RetryConfig(max_retries=0, rate_limit_extra_retries=0) to disable endpoint retries. Set
                          retry_on_empty_content=True to also retry when reasoning
-                         models return empty content.
+                         models return empty content. The OpenAI SDK's own
+                         retries are disabled unless ``max_retries`` is passed
+                         in ``**config``.
             http_config: Optional per-client HTTP connection-pool and timeout
                          settings. Applied only to THIS client's requests: the
                          client builds its own httpx client from these values and
@@ -1912,16 +2440,29 @@ class CompletionClient(UnifiedLLM):
                 other routes use provider-default caching. ``None`` disables
                 NOOA markers. Without a boundary, only leading instructions
                 are marked.
+            structured_output_mode: Request field that carries the output
+                schema of ``output_model`` calls. ``'anthropic'`` sends
+                ``output_config.format``; ``None`` and ``'auto'`` send the
+                default ``response_format``. Applies only to this client's own
+                model and endpoint and is never chosen from the model name.
+            media_inputs: Explicit allowed inputs: image, audio, video, pdf.
+                Absent/empty is text-only. PDF means application/pdf only.
             direct: Strict boolean official SDK opt-in; default False keeps LiteLLM.
                 Constructor-only, never sent on the wire. See docs/direct-provider-sdks.md
                 for supported routes and the direct-mode tracing limitations.
-            **config: Additional provider configuration (api_key, api_base, etc.)
+            **config: Additional configuration passed to litellm (api_key, api_base, etc.)
         """
         if cache_breakpoint not in {None, "auto", "anthropic"}:
             raise ValueError(
                 "CompletionClient cache_breakpoint must be 'auto', 'anthropic', or None"
             )
-        super().__init__(model, direct=direct, **config)
+        super().__init__(
+            model,
+            direct=direct,
+            structured_output_mode=structured_output_mode,
+            media_inputs=media_inputs,
+            **config,
+        )
         self.retry_config = retry_config or RetryConfig()
         self.cache_breakpoint = cache_breakpoint
         self._http_config = http_config or HttpConfig()
@@ -1955,20 +2496,25 @@ class CompletionClient(UnifiedLLM):
             },
         }
 
-    def _completion_http_client(self, call_config: dict[str, Any], *, is_async: bool) -> Any:
+    def _completion_http_client(
+        self, call_config: dict[str, Any], *, is_async: bool, max_retries: int
+    ) -> Any:
         """Reuse the owned transport only while its constructor routing still applies."""
         if self.direct:
             return None
-        routing_fields = ("api_base", "base_url", "api_key", "custom_llm_provider")
-        if self._effective_model(call_config) != self.model or any(
-            call_config.get(key) != self.config.get(key) for key in routing_fields
+        routing_fields = ("api_key", "custom_llm_provider")
+        if (
+            self._effective_model(call_config) != self.model
+            or self._call_endpoint_changed(call_config)
+            or any(call_config.get(key) != self.config.get(key) for key in routing_fields)
         ):
             # LiteLLM uses a supplied OpenAI SDK client's bound URL/key, ignoring
             # the corresponding call parameters. Let it build the correct client
             # for overrides; these calls use LiteLLM's default HTTP pool settings.
             return None
         assert isinstance(self._http, _ClientHttp)
-        return self._http.async_client if is_async else self._http.sync_client
+        client = self._http.async_client if is_async else self._http.sync_client
+        return _with_sdk_retries(client, max_retries)
 
     def call(
         self,
@@ -1986,6 +2532,7 @@ class CompletionClient(UnifiedLLM):
         """
         call_config = self._prepare_call_config(kwargs)
         self._validate_request_config("messages", call_config)
+        native_output = self._native_output_for_call(kwargs, call_config)
         effective_model = self._effective_model(call_config)
         self._validate_cache_breakpoint_model(effective_model)
         state_scope = self._replay_scope(effective_model, "chat", call_config)
@@ -1993,16 +2540,19 @@ class CompletionClient(UnifiedLLM):
         # can disagree for gateway-routed models; the latter -- not scope --
         # decides whether Anthropic-style cache_control marking is applied.
         cache_mapping = self._resolve_cache_mapping(effective_model, responses=False)
-        messages = replay_state.prepare_chat_messages(
-            messages,
+        prepared_messages = replay_state.prepare_chat_messages(
+            self._prepare_media_messages(messages, call_config),
             state_scope,
             anthropic_cache_marking=cache_mapping == "anthropic",
+            media_inputs=self._request_media_inputs(call_config),
             direct=self.direct,
         )
 
+        self._validate_implemented_media(prepared_messages, call_config)
+
         # Choose the stable-prefix breakpoint on projected provider messages.
         prepared_messages, _, _ = self._prepare_cache_boundary(
-            messages, responses=False, model=effective_model
+            prepared_messages, responses=False, model=effective_model
         )
 
         api_params = {
@@ -2015,14 +2565,13 @@ class CompletionClient(UnifiedLLM):
             api_params["tools"] = [self._convert_tool_to_schema(tool) for tool in tools]
             api_params["parallel_tool_calls"] = False
 
-        if output_model is not None:
-            api_params["response_format"] = _maybe_sanitize_response_format(
-                effective_model, output_model
-            )
+        self._normalize_chat_extensions(api_params, effective_model)
+        self._set_output_format(api_params, output_model, effective_model, native_output)
 
         # Bedrock/Anthropic reject messages with tool_call blocks when tools= is absent.
         if (
             "tools" not in api_params
+            and not (native_output and output_model is not None)
             and _needs_dummy_tool(effective_model)
             and _messages_have_tool_calls(prepared_messages)
         ):
@@ -2039,19 +2588,37 @@ class CompletionClient(UnifiedLLM):
             api_params.pop("tool_choice")
 
         add_session_affinity_header(api_params)
+        # RetryConfig owns endpoint retries. LiteLLM otherwise has the OpenAI SDK
+        # retry each attempt twice more, tripling the configured budget. An
+        # explicit max_retries passthrough still opts into SDK retries.
+        if not self.direct:
+            # Direct SDK clients are built with max_retries=0 and reject a
+            # per-request SDK retry setting; RetryConfig owns retries there.
+            api_params.setdefault("max_retries", 0)
 
         retry_on_empty = self.retry_config.retry_on_empty_content if self.retry_config else False
 
-        http_client = self._completion_http_client(call_config, is_async=False)
-        if http_client is not None:
-            api_params.setdefault("client", http_client)
+        if not self.direct:
+            if "client" in api_params:
+                api_params["client"] = _with_sdk_retries(
+                    api_params["client"], api_params["max_retries"]
+                )
+            else:
+                http_client = self._completion_http_client(
+                    call_config, is_async=False, max_retries=api_params["max_retries"]
+                )
+                if http_client is not None:
+                    api_params["client"] = http_client
 
         def _make_call():
-            raw_response = (
-                self._direct_transport().call(api_params)
-                if self.direct
-                else _collect_sync(litellm.completion(**api_params))
-            )
+            with self._native_output_request_scope(
+                api_params, output_model, native_output, is_async=False
+            ):
+                raw_response = (
+                    self._direct_transport().call(api_params)
+                    if self.direct
+                    else _collect_sync(litellm.completion(**api_params))
+                )
             reasoning, _ = _extract_reasoning_and_usage(raw_response)
             if self.direct and not reasoning:
                 # Inspect for retry only; signed blocks own the public capture.
@@ -2083,7 +2650,9 @@ class CompletionClient(UnifiedLLM):
             _update_token_calibration(
                 effective_model, prepared_messages, usage, tools=api_params.get("tools")
             )
-        return self._response_from_chat(raw_response, state_scope, tools, output_model)
+        return self._response_from_chat(
+            raw_response, state_scope, tools, output_model, native_output=native_output
+        )
 
     async def acall(
         self,
@@ -2101,6 +2670,7 @@ class CompletionClient(UnifiedLLM):
         """
         call_config = self._prepare_call_config(kwargs)
         self._validate_request_config("messages", call_config)
+        native_output = self._native_output_for_call(kwargs, call_config)
         effective_model = self._effective_model(call_config)
         self._validate_cache_breakpoint_model(effective_model)
         state_scope = self._replay_scope(effective_model, "chat", call_config)
@@ -2108,16 +2678,19 @@ class CompletionClient(UnifiedLLM):
         # can disagree for gateway-routed models; the latter -- not scope --
         # decides whether Anthropic-style cache_control marking is applied.
         cache_mapping = self._resolve_cache_mapping(effective_model, responses=False)
-        messages = replay_state.prepare_chat_messages(
-            messages,
+        prepared_messages = replay_state.prepare_chat_messages(
+            self._prepare_media_messages(messages, call_config),
             state_scope,
             anthropic_cache_marking=cache_mapping == "anthropic",
+            media_inputs=self._request_media_inputs(call_config),
             direct=self.direct,
         )
 
+        self._validate_implemented_media(prepared_messages, call_config)
+
         # Choose the stable-prefix breakpoint on projected provider messages.
         prepared_messages, _, _ = self._prepare_cache_boundary(
-            messages, responses=False, model=effective_model
+            prepared_messages, responses=False, model=effective_model
         )
 
         api_params = {
@@ -2130,14 +2703,13 @@ class CompletionClient(UnifiedLLM):
             api_params["tools"] = [self._convert_tool_to_schema(tool) for tool in tools]
             api_params["parallel_tool_calls"] = False
 
-        if output_model is not None:
-            api_params["response_format"] = _maybe_sanitize_response_format(
-                effective_model, output_model
-            )
+        self._normalize_chat_extensions(api_params, effective_model)
+        self._set_output_format(api_params, output_model, effective_model, native_output)
 
         # Bedrock/Anthropic reject messages with tool_call blocks when tools= is absent.
         if (
             "tools" not in api_params
+            and not (native_output and output_model is not None)
             and _needs_dummy_tool(effective_model)
             and _messages_have_tool_calls(prepared_messages)
         ):
@@ -2154,18 +2726,40 @@ class CompletionClient(UnifiedLLM):
             api_params.pop("tool_choice")
 
         add_session_affinity_header(api_params)
+        # RetryConfig owns endpoint retries. LiteLLM otherwise has the OpenAI SDK
+        # retry each attempt twice more, tripling the configured budget. An
+        # explicit max_retries passthrough still opts into SDK retries.
+        if not self.direct:
+            # Direct SDK clients are built with max_retries=0 and reject a
+            # per-request SDK retry setting; RetryConfig owns retries there.
+            api_params.setdefault("max_retries", 0)
 
         retry_on_empty = self.retry_config.retry_on_empty_content if self.retry_config else False
 
-        http_client = self._completion_http_client(call_config, is_async=True)
-        if http_client is not None:
-            api_params.setdefault("client", http_client)
+        if not self.direct:
+            if "client" in api_params:
+                api_params["client"] = _with_sdk_retries(
+                    api_params["client"], api_params["max_retries"]
+                )
+            else:
+                http_client = self._completion_http_client(
+                    call_config, is_async=True, max_retries=api_params["max_retries"]
+                )
+                if http_client is not None:
+                    api_params["client"] = http_client
 
         async def _make_call():
-            raw_response = (
-                await self._direct_transport().acall(api_params)
-                if self.direct
-                else await _collect_async(await _litellm_acompletion(api_params))
+            async def provider_call():
+                with self._native_output_request_scope(
+                    api_params, output_model, native_output, is_async=True
+                ):
+                    if self.direct:
+                        return await self._direct_transport().acall(api_params)
+                    return await _collect_async(await litellm.acompletion(**api_params))
+
+            raw_response = await _run_async_provider_call(
+                provider_call,
+                request_timeout=self._http_config.request_timeout,
             )
             reasoning, _ = _extract_reasoning_and_usage(raw_response)
             if self.direct and not reasoning:
@@ -2198,7 +2792,9 @@ class CompletionClient(UnifiedLLM):
             _update_token_calibration(
                 effective_model, prepared_messages, usage, tools=api_params.get("tools")
             )
-        return self._response_from_chat(raw_response, state_scope, tools, output_model)
+        return self._response_from_chat(
+            raw_response, state_scope, tools, output_model, native_output=native_output
+        )
 
 
 class ReasoningCompletionClient(CompletionClient):
@@ -2302,26 +2898,6 @@ class ReasoningCompletionClient(CompletionClient):
 
 
 class ResponsesClient(UnifiedLLM):
-    def _prepare_call_config(self, overrides: dict[str, Any]) -> dict[str, Any]:
-        """Translate the shared reply cap once, respecting call and level overrides."""
-        config = super()._prepare_call_config(overrides)
-        names = {"max_tokens", "max_completion_tokens", "max_output_tokens"}
-        selected = names & overrides.keys()
-        if not selected:
-            level = overrides.get("reasoning_level", self.reasoning_level)
-            patch = self._reasoning_config.settings(level) if level is not None else {}
-            selected = names & patch.keys()
-        if not selected:
-            selected = names & config.keys()
-        if len(selected) > 1:
-            raise ValueError("Set only one reply limit: max_tokens or max_output_tokens")
-        if selected:
-            value = config[next(iter(selected))]
-            for name in names:
-                config.pop(name, None)
-            config["max_output_tokens"] = value
-        return config
-
     def __init__(
         self,
         model: str,
@@ -2330,6 +2906,7 @@ class ResponsesClient(UnifiedLLM):
         cache_breakpoint: Literal["auto", "openai"] | None = "auto",
         *,
         direct: bool = False,
+        media_inputs: list[MediaInput] | tuple[MediaInput, ...] | None = None,
         **config,
     ):
         """
@@ -2359,14 +2936,16 @@ class ResponsesClient(UnifiedLLM):
                 Anthropic cache mapping is supported by CompletionClient only.
                 With ``"openai"`` and no eligible stable block, warns and keeps
                 explicit mode without a breakpoint, avoiding all cache writes.
+            media_inputs: Explicit allowed inputs: image, audio, video, pdf.
+                Absent/empty is text-only. PDF means application/pdf only.
             direct: Strict boolean official SDK opt-in; default False keeps LiteLLM.
                 Constructor-only, never sent on the wire. See docs/direct-provider-sdks.md
                 for supported routes and the direct-mode tracing limitations.
-            **config: Additional provider configuration (api_key, api_base, etc.)
+            **config: Additional configuration passed to litellm (api_key, api_base, etc.)
         """
         if cache_breakpoint not in {None, "auto", "openai"}:
             raise ValueError("ResponsesClient cache_breakpoint must be 'auto', 'openai', or None")
-        super().__init__(model, direct=direct, **config)
+        super().__init__(model, direct=direct, media_inputs=media_inputs, **config)
         self.retry_config = retry_config or RetryConfig()
         self.cache_breakpoint = cache_breakpoint
         self._http_config = http_config or HttpConfig()
@@ -2435,8 +3014,14 @@ class ResponsesClient(UnifiedLLM):
             call_config, state_scope, direct=self.direct
         )
         input_messages, instructions, openai_explicit = self._prepare_input(
-            messages, state_scope, effective_model, native_encrypted_reasoning
+            self._prepare_media_messages(messages, call_config),
+            state_scope,
+            effective_model,
+            native_encrypted_reasoning,
+            media_inputs=self._request_media_inputs(call_config),
         )
+
+        self._validate_implemented_media(input_messages, call_config)
 
         api_params = {
             "model": self.model,
@@ -2521,8 +3106,14 @@ class ResponsesClient(UnifiedLLM):
             call_config, state_scope, direct=self.direct
         )
         input_messages, instructions, openai_explicit = self._prepare_input(
-            messages, state_scope, effective_model, native_encrypted_reasoning
+            self._prepare_media_messages(messages, call_config),
+            state_scope,
+            effective_model,
+            native_encrypted_reasoning,
+            media_inputs=self._request_media_inputs(call_config),
         )
+
+        self._validate_implemented_media(input_messages, call_config)
 
         api_params = {
             "model": self.model,
@@ -2559,9 +3150,15 @@ class ResponsesClient(UnifiedLLM):
                 api_params.setdefault("client", http_client.async_client)
 
         async def _make_call():
-            if self.direct:
-                return await self._direct_transport().acall(api_params)
-            return cast("litellm.ResponsesAPIResponse", await litellm.aresponses(**api_params))
+            async def call_provider():
+                if self.direct:
+                    return await self._direct_transport().acall(api_params)
+                return cast("litellm.ResponsesAPIResponse", await litellm.aresponses(**api_params))
+
+            return await _run_async_provider_call(
+                call_provider,
+                request_timeout=self._http_config.request_timeout,
+            )
 
         # Track LLM call for debugging (visible via SIGUSR2 if nooa debug handler installed)
         with _track_llm_call(model=effective_model, endpoint=self.config.get("api_base")):
@@ -2585,10 +3182,12 @@ class ResponsesClient(UnifiedLLM):
             raw_response, state_scope, usage, output_model, native_encrypted_reasoning
         )
 
-    def _prepare_input(self, messages, state_scope, model, native_encrypted_reasoning=False):
+    def _prepare_input(
+        self, messages, state_scope, model, native_encrypted_reasoning=False, *, media_inputs=None
+    ):
         """Choose cache markers only after canonical turn projection."""
         input_messages, instructions = self._transform_messages(
-            messages, state_scope, native_encrypted_reasoning
+            messages, state_scope, native_encrypted_reasoning, media_inputs=media_inputs
         )
         return self._prepare_cache_boundary(
             input_messages, responses=True, model=model, instructions=instructions
@@ -2615,11 +3214,60 @@ class ResponsesClient(UnifiedLLM):
             )
         return response
 
+    @staticmethod
+    def _transform_content_blocks(blocks, text_kind="input_text"):
+        """Project documented public slots, preserving request-owned metadata."""
+        from nooa.media_policy import reject_unsupported_media
+
+        reject_unsupported_media([{"content": blocks}], "responses")
+        result = copy.deepcopy(blocks)
+        for block in result:
+            if block.get("type") == "text":
+                block["type"] = text_kind
+            elif block.get("type") == "image_url":
+                image = block["image_url"]
+                if isinstance(image, dict):
+                    if not image.get("url"):
+                        raise ValueError("image_url dict has no 'url'")
+                    block["image_url"] = image["url"]
+                    if image.get("detail"):
+                        block["detail"] = image["detail"]
+                block["type"] = "input_image"
+            elif block.get("type") == "file":
+                file = block.get("file")
+                if not isinstance(file, Mapping):
+                    raise ValueError(
+                        "Responses file content requires a nested 'file' mapping; "
+                        "use {'type': 'file', 'file': {...}} or a native "
+                        "{'type': 'input_file', ...} block."
+                    )
+                if not any(file.get(key) for key in ("file_data", "file_id", "file_url")):
+                    raise ValueError(
+                        "Responses file mapping requires file_data, file_id or file_url."
+                    )
+                block.pop("file")
+                block.update(
+                    {
+                        key: value
+                        for key, value in file.items()
+                        if key in {"detail", "file_data", "file_id", "file_url", "filename"}
+                    }
+                )
+                block["type"] = "input_file"
+            elif block.get("type") == "input_file":
+                # A MIME hint only tells the media check that a file_id is a PDF;
+                # input_file has no such field, so strict endpoints reject it.
+                for key in ("mime_type", "media_type", "format"):
+                    block.pop(key, None)
+        return result
+
     def _transform_messages(
         self,
         messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
         state_scope: str | None = None,
         native_encrypted_reasoning: bool = False,
+        *,
+        media_inputs=None,
     ) -> tuple[list[dict[str, Any] | CacheBoundary], str | None]:
         """Expand turns at dispatch; only leading system messages become instructions."""
         instructions: list[str] = []
@@ -2636,6 +3284,7 @@ class ResponsesClient(UnifiedLLM):
                         original,
                         state_scope,
                         native_encrypted_reasoning=native_encrypted_reasoning,
+                        media_inputs=media_inputs,
                     )
                 )
                 continue
@@ -2675,13 +3324,19 @@ class ResponsesClient(UnifiedLLM):
                         (block["cache_control"] for block in content if "cache_control" in block),
                         cache_control,
                     )
-                    content = "".join(block.get("text", "") for block in content)
+                    if any(attachment_kind(block) for block in content):
+                        output = self._transform_content_blocks(content)
+                    else:
+                        output = [
+                            wrap_responses_text("".join(block.get("text", "") for block in content))
+                        ]
+                else:
+                    output = [wrap_responses_text(content)]
                 # Same stability rationale as the input_text wrapping below --
                 # a plain string here (including "") would render differently
                 # than its cache-marked list form once this tool result
                 # becomes history; apply_cache_policy's marker wraps a string
                 # unconditionally, so this must too.
-                output = [wrap_responses_text(content)]
                 item = {
                     "type": "function_call_output",
                     "call_id": msg["tool_call_id"],
@@ -2750,21 +3405,12 @@ class ResponsesClient(UnifiedLLM):
                     # wraps a string unconditionally, so this must too.
                     kind = "output_text" if item.get("role") == "assistant" else "input_text"
                     item["content"] = [wrap_responses_text(item["content"], kind)]
-                if isinstance(item.get("content"), list):
-                    for block in item["content"]:
-                        if block.get("type") == "text":
-                            block["type"] = (
-                                "output_text" if item.get("role") == "assistant" else "input_text"
-                            )
-                        elif block.get("type") == "image_url":
-                            image = block["image_url"]
-                            if isinstance(image, dict):
-                                if not image.get("url"):
-                                    raise ValueError("image_url dict has no 'url'")
-                                block["image_url"] = image["url"]
-                                if image.get("detail"):
-                                    block["detail"] = image["detail"]
-                            block["type"] = "input_image"
+                for slot in ("content", "output"):
+                    if isinstance(item.get(slot), list):
+                        item[slot] = self._transform_content_blocks(
+                            item[slot],
+                            "output_text" if item.get("role") == "assistant" else "input_text",
+                        )
                 if item.get("type") == "function_call_output" and isinstance(
                     item.get("output"), str
                 ):

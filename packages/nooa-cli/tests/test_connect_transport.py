@@ -111,7 +111,8 @@ def test_plan_and_interface_selection_propagates(monkeypatch, stage, litellm):
     assert result.exit_code == 0, result.output
     data = json.loads(result.stdout)["data"]
     entries = [data["entry"]] if stage == "plan" else [r["entry"] for r in data["results"].values()]
-    assert len(entries) == (1 if stage == "plan" else 3)
+    # An explicit --api-style limits interface discovery to that style (#474).
+    assert len(entries) == 1
     assert all(e["direct"] is (not litellm) for e in entries)
     if stage == "interfaces":
         assert all(
@@ -371,7 +372,7 @@ async def test_live_reasoning_progress_keeps_observed_transport(monkeypatch, dir
     updates = []
 
     class Progress:
-        def update(self, name, outcome, *, missing_reasoning):
+        def update(self, name, outcome, *, missing_reasoning, **kwargs):
             updates.append((name, missing_reasoning))
 
         def finish(self, *, summary):

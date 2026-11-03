@@ -38,7 +38,15 @@ directory. For code you can run immediately, use the
 2. If you want the runtime mechanics, skim
    [how a method call runs](architecture.md).
 
+### Connect a model and use media
+
+1. [Connect a model](model-connect.md) — guided setup for aliases, reply limits,
+   known context size, media formats, and model checks.
+2. [Media API](media.md) — images, audio, video, PDFs, and CodeAct `show()`.
+
 ### Learn by building
+
+First [connect a model](model-connect.md). Then:
 
 1. Work through the [notebook tutorials](../notebook_tutorials/README.md) in
    order.
@@ -55,7 +63,8 @@ directory. For code you can run immediately, use the
 ### Scale beyond one agent
 
 1. [Multi-agent systems](concepts/multi-agent-systems.md)
-2. [Architecture](architecture.md)
+2. [LLM admission control](concepts/llm-admission-control.md)
+3. [Architecture](architecture.md)
 
 ## Concepts at a glance
 
@@ -63,12 +72,17 @@ directory. For code you can run immediately, use the
 |---|---|
 | [Agents and methods](concepts/agents-and-methods.md) | What is an agent in NOOA, and what does `...` mean? |
 | [Strategies](concepts/strategies.md) | When should a method use Predict or CodeAct? |
+| [Decision models](concepts/decisions.md) | How do I use typed probability, choice, and score decisions? |
 | [Tools and visibility](concepts/tools-and-visibility.md) | How does generated code discover and call capabilities? |
 | [Prompts and context](concepts/prompts-and-context.md) | Where should instructions, inputs, and cross-call information live? |
+| [Connect a model](model-connect.md) | How do I configure and test an endpoint, then use an alias? |
+| [Model configuration](model-configuration.md) | What do model settings mean, and how do I find the effective configuration? |
+| [Media inputs](media.md) | How do I attach images, audio, video, or PDFs, and authorize them on a route? |
 | [Local models](local-models.md) | How do I run NOOA with local models? |
 | [Direct provider SDKs](direct-provider-sdks.md) | How do I opt into SDK routing while keeping LiteLLM as the default? |
 | [Orchestration](concepts/orchestration.md) | How do I make a workflow deterministic without turning it into one giant prompt? |
 | [Multi-agent systems](concepts/multi-agent-systems.md) | When should I use another agent, and what state does it share? |
+| [LLM admission control](concepts/llm-admission-control.md) | How can one process or application bound concurrent outbound LLM calls? |
 | [Tracing](concepts/tracing.md) | How do I inspect the complete Python and LLM call tree? |
 | [Safety](concepts/safety.md) | What security boundary does NOOA provide, and what must the deployment provide? |
 

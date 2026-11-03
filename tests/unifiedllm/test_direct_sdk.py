@@ -176,7 +176,7 @@ async def test_extensions_reach_wire_at_top_level(wire, style):
 async def test_anthropic_multimodal_success_on_wire(wire, block, expected):
     requests, behavior = wire
     behavior["style"] = "anthropic"
-    async with client("anthropic") as llm:
+    async with client("anthropic", media_inputs=["image", "pdf"]) as llm:
         await llm.acall([{"role": "user", "content": [block]}])
     body = json.loads(requests[0].content)
     assert requests[0].url.path == "/v1/messages"
@@ -473,7 +473,10 @@ async def test_cancellation_propagates_and_pool_can_be_reused(wire, monkeypatch,
         assert requests == []
         release.set()
         assert (await llm.acall([{"role": "user", "content": "test"}])).content == "42"
-    assert len(requests) == 1
+    # The caller's cancel does not abort the dispatched attempt: provider calls
+    # run in a shielded task (admission control holds its permit until the
+    # attempt exits), so the abandoned request still completes after release.
+    assert len(requests) == 2
 
 
 @pytest.mark.parametrize("asynchronous", [False, True])
@@ -1203,7 +1206,8 @@ async def test_default_extra_body_retains_existing_call_validation(
 @pytest.mark.parametrize("registered", [None, False, True])
 @pytest.mark.parametrize("override", [None, False, True])
 @pytest.mark.parametrize("client_type", ["completion", "responses"])
-def test_registry_base_url_only_forwarded_for_effective_direct(registered, override, client_type):
+def test_registry_forwards_base_url_for_either_transport(registered, override, client_type):
+    """base_url is a registry spelling of api_base (#497), forwarded on both transports."""
     from nooa.unifiedllm.registry import client_from_config
 
     config = {
@@ -1218,7 +1222,7 @@ def test_registry_base_url_only_forwarded_for_effective_direct(registered, overr
     effective = override if override is not None else bool(registered)
     with client_from_config("alias", config, **kwargs) as llm:
         assert llm.direct is effective
-        assert ("base_url" in llm.config) is effective
+        assert llm.config["base_url"] == "https://models.example/v1"
     with client_from_config("alias", config, base_url="https://caller.example/v1", **kwargs) as llm:
         assert llm.config["base_url"] == "https://caller.example/v1"
 
@@ -1238,7 +1242,6 @@ async def test_existing_alias_default_litellm_real_wire(
     config = {
         "model_name": "openai/test",
         "api_base": "https://models.example/v1",
-        "base_url": "https://must-not-forward.example/v1",
         "api_key_env": "TEST_DEFAULT_KEY",
         "client_type": "responses" if style == "responses" else "completion",
         "max_tokens": 100,

@@ -4,6 +4,7 @@
 
 import httpx
 import pytest
+from mcp.types import CallToolResult, TextContent
 
 from nooa.mcp.tool import MCPTool
 
@@ -56,6 +57,72 @@ def _make_tool(client, refresh_ctx=None):
 async def test_success_no_refresh():
     tool = _make_tool(_FakeClient(fail_times=0))
     assert await tool._call_tool("x", {}) == "ok"
+
+
+@pytest.mark.asyncio
+async def test_tool_level_error_is_not_returned_as_success():
+    class _ErrorSession:
+        async def call_tool(self, name, args):
+            return CallToolResult(
+                isError=True,
+                content=[TextContent(type="text", text="permission denied")],
+            )
+
+    class _ErrorClient:
+        def connect_to_server(self):
+            session = _ErrorSession()
+
+            class _CM:
+                async def __aenter__(self):
+                    return session
+
+                async def __aexit__(self, *a):
+                    return False
+
+            return _CM()
+
+    tool = _make_tool(_ErrorClient())
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await tool._call_tool("read", {})
+
+    message = str(exc_info.value)
+    assert "read" in message
+    assert "test-server" in message
+    assert "permission denied" in message
+
+
+@pytest.mark.asyncio
+async def test_tool_level_error_without_text_uses_fallback_message():
+    class _ErrorSession:
+        async def call_tool(self, name, args):
+            return CallToolResult(
+                isError=True,
+                content=[],
+            )
+
+    class _ErrorClient:
+        def connect_to_server(self):
+            session = _ErrorSession()
+
+            class _CM:
+                async def __aenter__(self):
+                    return session
+
+                async def __aexit__(self, *a):
+                    return False
+
+            return _CM()
+
+    tool = _make_tool(_ErrorClient())
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await tool._call_tool("read", {})
+
+    message = str(exc_info.value)
+    assert "read" in message
+    assert "test-server" in message
+    assert "returned an error" in message
 
 
 @pytest.mark.asyncio

@@ -130,7 +130,7 @@ async def test_run_transient_or_no_key_never_changes_environment(monkeypatch, ke
                     {
                         "index": 0,
                         "finish_reason": "stop",
-                        "message": {"role": "assistant", "content": "323"},
+                        "message": {"role": "assistant", "content": '{"value":323}'},
                     }
                 ],
             },
@@ -214,17 +214,10 @@ async def test_minimal_approval_posts_exact_plan_once(monkeypatch, style, suffix
     assert len(requests) == 1
     url, kwargs = requests[0]
     assert url.endswith(suffix)
-    expected = deepcopy(proposal.probes[0].body)
-    if style == "responses":
-        expected["truncation"] = "disabled"
-        expected["input"][0]["content"] = [
-            {"type": "input_text", "text": expected["input"][0]["content"]}
-        ]
-    elif style == "anthropic":
-        expected["messages"][0]["content"] = [
-            {"type": "text", "text": expected["messages"][0]["content"]}
-        ]
-    assert kwargs["json"] == expected
+    # Configured routing is a native typed generation, not the discovery
+    # prompt's exact wire body. Its generated schema enforces an integer.
+    assert "Compute 17 * 19" in json.dumps(kwargs["json"])
+    assert '"type": "integer"' in json.dumps(kwargs["json"])
     assert kwargs["json"][token_key] == 32768
     assert kwargs["json"]["model"] == "wire/model"
     assert result.entry["provenance"]["probes"]["routing"]["outcome"] == "accepted"
@@ -268,7 +261,7 @@ async def test_budget_stops_before_second_call_and_reconnect_skips_accepted(monk
                     {
                         "index": 0,
                         "finish_reason": "stop",
-                        "message": {"role": "assistant", "content": "323"},
+                        "message": {"role": "assistant", "content": '{"value":323}'},
                     }
                 ],
                 "usage": {"prompt_tokens": 100, "completion_tokens": 10, "total_tokens": 110},
@@ -351,8 +344,8 @@ def test_catalogue_metadata_is_not_claimed_as_probe_evidence():
         }
     )
     assert proposal.entry["context_window"] == 128000
-    assert proposal.entry["provenance"]["catalogue_limits"]["max_completion_tokens"] == 8192
-    assert proposal.entry["max_tokens"] == 8192
+    assert "max_completion_tokens" not in proposal.entry["provenance"]["catalogue_limits"]
+    assert proposal.entry["max_tokens"] == 32768
     assert "context_window" in proposal.entry["provenance"]["not_probed"]
 
 
@@ -392,7 +385,7 @@ def test_connect_uses_existing_registry_discovery(tmp_path, monkeypatch):
                         "finish_reason": "stop",
                         "message": {
                             "role": "assistant",
-                            "content": "323",
+                            "content": '{"value":323}',
                             "reasoning_content": "reason",
                         },
                     }
@@ -411,7 +404,7 @@ def test_connect_uses_existing_registry_discovery(tmp_path, monkeypatch):
                     {
                         "index": 0,
                         "finish_reason": "stop",
-                        "message": {"role": "assistant", "content": "323"},
+                        "message": {"role": "assistant", "content": '{"value":323}'},
                     }
                 ],
             },
@@ -428,7 +421,7 @@ def test_connect_uses_existing_registry_discovery(tmp_path, monkeypatch):
                     {
                         "index": 0,
                         "finish_reason": "stop",
-                        "message": {"role": "assistant", "content": "323"},
+                        "message": {"role": "assistant", "content": '{"value":323}'},
                     }
                 ],
             },
@@ -470,12 +463,6 @@ async def test_real_httpx_serialization_keeps_level_blocks(monkeypatch, style, p
         reasoning_levels={"high": patch},
     )
     result = await connect.run(proposal, approved="all")
-    if style == "chat" and "thinking" in patch:
-        # Explicitly preserving an incompatible field must not produce a green
-        # probe after silently dropping it. The legacy SDK rejects this shape.
-        assert len(sent) == 2
-        assert result.entry["provenance"]["probes"]["level:high"]["outcome"] == "not_probed"
-        return
     assert len(sent) == 3, result.entry["provenance"]["probes"]
     assert all(
         body.get("max_output_tokens", body.get("max_tokens", body.get("max_completion_tokens")))
@@ -505,7 +492,7 @@ async def test_budget_template_cannot_raise_approved_output_cap(monkeypatch):
                     {
                         "index": 0,
                         "finish_reason": "stop",
-                        "message": {"role": "assistant", "content": "323"},
+                        "message": {"role": "assistant", "content": '{"value":323}'},
                     }
                 ],
             },
@@ -519,8 +506,11 @@ async def test_budget_template_cannot_raise_approved_output_cap(monkeypatch):
         },
     )
     result = await connect.run(proposal, approved="all")
-    assert len(bodies) == 2
-    assert result.entry["provenance"]["probes"]["level:high"]["outcome"] == "not_probed"
+    assert len(bodies) == 3
+    assert bodies[-1]["thinking"] == {"type": "enabled", "budget_tokens": 4096}
+    assert bodies[-1]["max_tokens"] == 5120
+    assert all(body["max_tokens"] <= proposal.entry["max_tokens"] for body in bodies)
+    assert result.entry["provenance"]["probes"]["level:high"]["settings_sent"] is True
 
 
 @pytest.mark.asyncio
@@ -541,7 +531,7 @@ async def test_alternate_cap_cannot_bypass_budget(monkeypatch):
                     {
                         "index": 0,
                         "finish_reason": "stop",
-                        "message": {"role": "assistant", "content": "323"},
+                        "message": {"role": "assistant", "content": '{"value":323}'},
                     }
                 ],
             },
@@ -654,11 +644,16 @@ connect.write(proposal.entry, Path(sys.argv[1]), alias='local')
 
 
 def test_catalogue_efforts_propose_complete_blocks_and_default():
-    proposal = make_plan(
+    proposal = connect.plan(
+        "local",
+        "provider/model",
+        "chat",
+        "https://openrouter.ai/api/v1",
+        "",
         catalogue={
             "id": "provider/model",
             "reasoning": {"supported_efforts": ["low", "high"], "default_effort": "high"},
-        }
+        },
     )
     assert proposal.entry["reasoning_levels"] == {
         "low": {"reasoning_effort": "low"},
@@ -716,7 +711,7 @@ async def test_probe_cannot_multiply_generations_or_stream(monkeypatch, settings
                     {
                         "index": 0,
                         "finish_reason": "stop",
-                        "message": {"role": "assistant", "content": "323"},
+                        "message": {"role": "assistant", "content": '{"value":323}'},
                     }
                 ],
             },
@@ -761,6 +756,8 @@ async def test_reconnect_keeps_observed_tools_without_spending_again(monkeypatch
     async def post(self, url, **kwargs):
         calls.append(kwargs)
         data = response_body("chat")
+        if len(calls) == 1:
+            return httpx.Response(200, json=data)
         data["choices"][0]["finish_reason"] = "tool_calls"
         data["choices"][0]["message"]["tool_calls"] = [
             {
@@ -811,7 +808,7 @@ async def test_progress_events_arrive_before_and_after_each_request(monkeypatch)
                     {
                         "index": 0,
                         "finish_reason": "stop",
-                        "message": {"role": "assistant", "content": "323"},
+                        "message": {"role": "assistant", "content": '{"value":323}'},
                     }
                 ],
             },

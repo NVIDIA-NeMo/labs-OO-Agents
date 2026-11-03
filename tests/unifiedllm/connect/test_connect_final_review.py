@@ -18,6 +18,44 @@ def proposal(style="chat", **kwargs):
     return connect.plan("test", "model", style, "https://api.test/v1", "", **kwargs)
 
 
+def _windows_text_mode(monkeypatch):
+    """Make temporary files translate newlines like Windows text mode does."""
+    original = connect.tempfile.NamedTemporaryFile
+
+    def named_temporary_file(*args, **kwargs):
+        if "b" not in kwargs.get("mode", "w+b") and kwargs.get("newline") is None:
+            kwargs["newline"] = "\r\n"
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(connect.tempfile, "NamedTemporaryFile", named_temporary_file)
+
+
+@pytest.mark.parametrize("eol", [b"\r\n", b"\n"])
+def test_repeated_saves_keep_line_endings_under_windows_text_mode(tmp_path, monkeypatch, eol):
+    _windows_text_mode(monkeypatch)
+    target = tmp_path / "models.yaml"
+    lines = [
+        b"# preserved",
+        b"models:",
+        b"  other:",
+        b"    notes: |-",
+        b"      first",
+        b"      second",
+    ]
+    target.write_bytes(eol.join(lines) + eol)
+    for alias in ("one", "two", "one"):
+        connect.write(proposal().entry, target, alias=alias)
+    raw = target.read_bytes()
+    assert b"\r\r" not in raw
+    if eol == b"\r\n":
+        assert b"\n" not in raw.replace(b"\r\n", b"")
+    else:
+        assert b"\r" not in raw
+    models = yaml.safe_load(raw.decode())["models"]
+    assert models["other"] == {"notes": "first\nsecond"}
+    assert {"one", "two"} <= set(models)
+
+
 def test_writers_follow_symlinks_and_registry_preserves_mode_and_newlines(tmp_path):
     target = tmp_path / "real.yaml"
     target.write_bytes(b"# preserved\r\nmodels: {}\r\n")
@@ -118,7 +156,10 @@ async def test_insufficient_budget_never_substitutes_smaller_cap(monkeypatch):
     assert result.entry["provenance"]["tokens_charged_to_budget"] == 0
     assert all(r["outcome"] == "not_probed" for r in result.entry["provenance"]["probes"].values())
     assert not connect.verdict(result.entry).ok
-    assert any("unverified" in warning for warning in connect.entry_warnings(result.entry))
+    assert any(
+        "Reply limit not tested with the saved settings" in warning
+        for warning in connect.entry_warnings(result.entry)
+    )
 
 
 def test_refresh_after_edit_rebuilds_detached_requests_and_estimates():

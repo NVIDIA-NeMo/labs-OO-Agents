@@ -218,6 +218,7 @@ async def test_selected_reasoning_level_and_cache_defaults_reach_wire(monkeypatc
         "https://api.test/v1",
         "",
         reasoning_levels={"high": {"reasoning_effort": "high"}},
+        reasoning_level="high",
         reply_tokens=2048,
     )
     before = deepcopy(proposal.entry)
@@ -257,6 +258,7 @@ async def test_missing_settings_are_not_reported_as_missing_replay(monkeypatch):
         "",
         direct=False,  # Negative control: legacy parameter filtering.
         reasoning_levels={"max": {"reasoning_effort": "max"}},
+        reasoning_level="max",
         reply_tokens=2048,
     )
     proposal.entry.pop("allowed_openai_params", None)  # A pre-fix saved entry.
@@ -296,13 +298,14 @@ async def test_unlisted_model_declared_effort_reaches_level_and_session_requests
         "",
         direct=direct,
         reasoning_levels={"max": {"reasoning_effort": "max"}},
+        reasoning_level="max",
         session_checks=True,
         budget_tokens=65536,
         reply_tokens=2048,
     )
     result = await connect.run(proposal, approved="all", api_key="test-key")
     assert result.entry["provenance"]["probes"]["level:max"]["settings_sent"] is True
-    assert all(body["reasoning_effort"] == "max" for body in sent[2:])
+    assert all(body["reasoning_effort"] == "max" for body in sent if "reasoning_effort" in body)
     retention = result.entry["provenance"]["session_checks"]["reasoning_retention"]
     assert retention["state_retained"] is True
     assert retention["settings_retained"] is True
@@ -416,3 +419,114 @@ async def test_closing_progress_iterator_closes_owned_client(monkeypatch):
     http = clients[0]._http.httpx_async
     await steps.aclose()
     assert http.is_closed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("encrypted", [True, False])
+async def test_retention_accepts_multi_block_responses_summary(monkeypatch, encrypted):
+    """Summaries are joined for the public part but replayed as separate blocks."""
+    sent = []
+
+    def handle(request):
+        body = json.loads(request.content)
+        sent.append(body)
+        data = response_body("responses")
+        item = {
+            "type": "reasoning",
+            "id": "r1",
+            "summary": [
+                {"type": "summary_text", "text": "Part one"},
+                {"type": "summary_text", "text": "Part two"},
+            ],
+        }
+        if encrypted:
+            item["encrypted_content"] = "OPAQUE-secret"
+        data["output"].insert(0, item)
+        data["usage"]["input_tokens_details"] = {"cached_tokens": 0}
+        return httpx.Response(200, json=data)
+
+    mock_http(monkeypatch, handle)
+    proposal = connect.plan(
+        "test",
+        "azure/openai/gpt-6.1-sol",
+        "responses",
+        "https://hub.test/v1",
+        "",
+        reply_tokens=2048,
+    )
+    updates = [
+        u
+        async for u in session_steps(
+            "test", proposal.entry, api_key="temporary-secret", budget_tokens=TOKEN_RESERVATION
+        )
+    ]
+    records = {u.name: u.outcome for u in updates if u.outcome["outcome"] != "running"}
+    assert records["reasoning_retention"]["outcome"] == "confirmed"
+    assert records["reasoning_retention"]["state_retained"] is True
+    replay = json.dumps(sent[1])
+    assert "Part one" in replay and "Part two" in replay
+    assert ("OPAQUE-secret" in replay) is encrypted
+    for secret in ("Part one", "Part two", "OPAQUE-secret"):
+        assert secret not in repr(records)
+
+
+def test_retention_accepts_litellm_proxy_envelope_unwrapped_on_replay():
+    """The Hub wraps encrypted state; the LiteLLM client sends the inner state."""
+    from nooa.unifiedllm.connect._session import _replayed
+
+    inner = "gAAAA" + "x" * 64
+    envelope = "litellm_enc:bW9kZWxfaWQ6YXp1cmU=;" + inner
+    assert _replayed(envelope, [inner])
+    assert _replayed(inner, [inner])
+    assert not _replayed(envelope, ["gAAAA" + "y" * 64])
+    assert not _replayed(envelope, ["short"])
+    assert not _replayed(inner, [])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("direct", [False, True])
+async def test_retention_for_gemini_through_gateway_checks_thought_signatures(monkeypatch, direct):
+    """Gemini via an OpenAI-compatible gateway returns readable reasoning beside thought
+    signatures. The signatures carry the reasoning state; the readable text has no
+    reasoning field to go back in, so it is not required on the follow-up request."""
+    sent = []
+
+    def handle(request):
+        body = json.loads(request.content)
+        sent.append(body)
+        data = response_body("chat")
+        message = data["choices"][0]["message"]
+        message["reasoning_content"] = "Readable Gemini thoughts"
+        message["thinking_blocks"] = [{"type": "thinking", "thinking": "Readable Gemini thoughts"}]
+        message["provider_specific_fields"] = {"thought_signatures": ["SIGNATURE-secret"]}
+        return httpx.Response(200, json=data)
+
+    mock_http(monkeypatch, handle)
+    proposal = connect.plan(
+        "test",
+        "gcp/google/gemini-3-flash-preview",
+        "chat",
+        "https://hub.test/v1",
+        "",
+        reply_tokens=2048,
+        direct=direct,
+    )
+    updates = [
+        u
+        async for u in session_steps(
+            "test", proposal.entry, api_key="temporary-secret", budget_tokens=TOKEN_RESERVATION
+        )
+    ]
+    records = {u.name: u.outcome for u in updates if u.outcome["outcome"] != "running"}
+    if direct:
+        # provider_specific_fields.thought_signatures is LiteLLM's envelope; the
+        # direct OpenAI SDK route neither captures nor replays it, so retention
+        # is reported unconfirmed instead of being guessed.
+        assert "SIGNATURE-secret" not in list(_wire_reasoning(sent[1]))
+        assert records["reasoning_retention"]["outcome"] != "confirmed"
+        return
+    assert "SIGNATURE-secret" in list(_wire_reasoning(sent[1]))
+    assert records["reasoning_retention"]["outcome"] == "confirmed"
+    assert records["reasoning_retention"]["state_retained"] is True
+    for secret in ("Readable Gemini thoughts", "SIGNATURE-secret"):
+        assert secret not in repr(records)

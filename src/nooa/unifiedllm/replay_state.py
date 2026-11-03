@@ -309,6 +309,7 @@ def prepare_chat_messages(
     *,
     anthropic_cache_marking: bool = False,
     direct: bool = False,
+    media_inputs=None,
 ) -> list[dict | CacheBoundary]:
     """Project stored turns; retain explicit fields in caller-written dictionaries.
 
@@ -334,7 +335,10 @@ def prepare_chat_messages(
     for original in messages:
         if isinstance(original, LLMResponse):
             message, ids = project_chat_turn(
-                original, scope, anthropic_cache_marking=anthropic_cache_marking
+                original,
+                scope,
+                anthropic_cache_marking=anthropic_cache_marking,
+                media_inputs=media_inputs,
             )
             private_call_ids.update(ids)
             if (

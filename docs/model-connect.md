@@ -1,458 +1,788 @@
 # Configure a model with NOOA Connect
 
-`nooa connect` asks for approval of API-call costs upfront, checks the selected model with bounded
-requests, then asks before saving its registry entry. The same `nooa.unifiedllm.connect` library is available to
-the TUI: frontends supply consent and display; the library supplies the plan,
-UnifiedLLM checks and registry updates.
+**Agents: start with [nooa-connect](../skills/nooa-connect/SKILL.md), the canonical
+permission-first headless guide.** Obtain scoped permission before configuration,
+network/media checks and file/alias writes. Use `--stage`, not piped wizard
+answers or unattended masked-key prompts. This page also covers guided human
+setup and the library reference.
+
+`nooa connect` configures a model so your agents can run smoothly. It suggests
+and saves a reply/output token limit, records the context window when known
+(or supplied by you), and lists your chosen media formats. It tests the route,
+tools, reasoning, and caching, then saves a named entry (an *alias*) in
+`llm_config.yaml`. Your agents use the model by that alias.
+
+The checks send real requests and may incur provider charges.
+The interactive wizard asks before checks and saving. `--yes` confirms both
+without asking. For a reference to the saved settings and configuration files,
+see [Model configuration](model-configuration.md).
 
 ## CLI
 
-Start the guided setup with no arguments:
+Run the guided setup:
 
 ```sh
 uv run nooa connect
 ```
 
-## Independent stages for agents
+Choose a provider (NVIDIA, NVIDIA Inference Hub, OpenAI, Anthropic,
+Google, OpenRouter, or a custom endpoint), the connection/key, then choose the
+**model** from its list (or enter an exact ID). Connect reads server/OpenRouter
+metadata with GET requests. **Only after the model is selected** does it ask for
+its **Request interface**: a known interface or **Find what works**.
+The selected model is shown beside this choice; it never asks for an inference
+interface before the model picker. Provider defaults or `--listing-style` determine
+listing headers independently. No model call is used for these steps. It fills in a
+proposal while retaining your explicit limits, reasoning settings and media
+choices, then shows one concise **Proposed configuration** summary for the current
+proposal and asks:
 
-Endpoint `/models` limits take priority over public catalogue limits, with sources
-shown per field. An endpoint's `max_input_tokens` is retained separately and used
-as a conservative context-management bound when needed; it is not added to the
-output limit to invent a total context size. Explicit user edits still win.
-When a context bound is unknown, both library provenance and stage JSON warn.
+**Would you like to test these settings?**
 
-Save discovery JSON and reuse it with `--discovery-file discovery.json` on the
-wizard or a plan/check stage. The file must name the same normalized endpoint;
-limits are selected by exact model ID. This keeps `--stage plan` offline:
+Guided setup numbers its steps **1 / 5 Connection**, **2 / 5 Model**, **3 / 5
+Settings** (interface, discovery checks, media, reasoning and the proposal),
+**4 / 5 Test** (only when tests run) and **5 / 5 Save model**; each header is
+shown once, and **Start over?** begins again at step 1.
 
-```sh
-uv run nooa connect --stage discover --endpoint https://gateway.example/v1 \
-  --api-key-env MODEL_KEY > discovery.json
-uv run nooa connect your-model --stage plan --api-style chat \
-  --endpoint https://gateway.example/v1 --discovery-file discovery.json > model-plan.json
-```
+- **Test now** approves the selected checks with the displayed token budget.
+  If the request style is unknown, bounded interface discovery runs first;
+  metadata alone never proves an interface works. A known style is tested too.
+- **Save without testing** skips interface discovery and all model calls. If
+  the style is still unknown, choose a provider preset/manual interface before
+  saving an explicitly not-tested entry. Saving still needs final confirmation.
+- **Change settings** always opens **What would you like to change?** with only
+  the options that apply, in this order: **Reply limit and context**,
+  **Reasoning**, **Media**, **Answer format**, **Continue without catalogue
+  settings** and **Back** (Decision routes offer **Media** and **Back**). Each
+  edit changes only that setting, then shows an updated summary before the next
+  test/save decision; **Back** returns with nothing changed. It does not
+  fetch metadata again or discard explicit media declarations or custom
+  reasoning-level request blocks.
 
-Cache checks report both continuation readings. Substantial reuse on either
-confirms caching; a later miss does not erase that evidence. A stable request
-with implicit caching (Chat), or explicit cache markers but no reported reuse,
-produces a warning rather than making a working entry fail. Missing required
-markers or an unstable prefix still need attention. Reasoning rows show puzzle
-correctness separately from whether reasoning was returned.
+If deferred discovery selects an image-only decision route after a provisional
+all-media choice, explicitly review image-only inputs/tests, turn media off, or
+cancel. The revised proposal is shown before another test/save decision; no
+unsupported inputs are silently dropped. Explicit incompatible declarations
+require an affirmative correction or their existing validation errors prevent
+saving; known-style and headless validation remains unchanged.
 
-After an interface failure the wizard offers **retry one interface with a
-120-second timeout**. This is an explicit new routing check, charged against the
-same approved budget, not an automatic network retry. Both the SDK read timeout
-and whole-check deadline use the longer limit. Successful discovery plus timed-out
-model calls is described as a possibly slow route, not proof of bad credentials.
+No inference POST is sent before **Test now**. Media advertisements never
+silently enable inputs: keep the current/default choices or explicitly choose
+formats/tests. `--no-probe` removes **Test now**, skips all model calls, and still
+allows metadata GETs. For an entirely offline exact-ID setup, also supply
+`--no-catalogue` and the endpoint/interface; editing an existing alias does not
+fetch metadata. Omitting the model ID requests the model-list picker (a GET),
+even with `--no-catalogue`, which skips public and automatic limit lookups.
 
-`--stage` runs without prompts and writes one JSON result to stdout. It never
-saves implicitly. A generation stage runs directly within its configured limits;
-there is no separate spending-approval dialogue. The interactive wizard remains
-available when `--stage` is absent.
+### Continuing without catalogue settings
 
-| Stage | Purpose |
-|---|---|
-| `discover` | List the endpoint's models (not proof of authentication). |
-| `catalogue` | Read public model metadata; optional MODEL filters candidates. |
-| `interfaces` | Check API formats and report which worked. |
-| `plan` | Build an unsaved configuration and proposed requests; no network. |
-| `routing` | Test one basic request with the chosen interface. |
-| `tools` | Check whether the model produces the requested tool call; never execute it. |
-| `reasoning` | Check declared levels supplied by `--levels-file`. |
-| `session` | Check cache reuse and reasoning replay across turns. |
-| `all` | Run the basic and conversation checks. |
-| `save` | Write the entry from a JSON plan/result to a registry. |
+Choosing **Continue without catalogue settings** asks for **Context window
+(tokens)** and **Input token limit (tokens)** when exact server limits are
+unavailable, immediately after continuation and before the initial **Model details**,
+interface and media choices. Human `--no-catalogue` / `--no-metadata` setup follows the same path.
+Enter positive whole numbers of at least two tokens; Ctrl-C cancels without saving.
+`--context-window` prefills only the context value. **Change settings** lets you
+revise both values. Native decisions bypass these chat limits; `--yes` and stages
+remain noninteractive.
 
-For example:
+The initial **Model details** and current proposal review show both declarations as
+**Your settings**. A later native Decision choice discards these chat declarations
+and context bounds. The saved `context_window`
+is the smaller value, bounded by any known server limit. The reply cap is separate
+and is reserved against that saved bound. The saved configuration retains this
+effective bound, not the two raw declarations.
 
-```sh
-uv run nooa connect --stage discover \
-  --endpoint https://gateway.example/v1 --api-key-env MODEL_KEY
+Native Anthropic provider/endpoint setup defaults to **Anthropic Messages**, without
+an interface-discovery offer; an explicit interface override is retained. Model and
+media tests still require the ordinary **Test now** consent. Audio/video rows on
+Messages or Responses identify the native interface limitation, not missing tests.
+For native OpenAI only, a missing direct catalogue ID can match the exact
+`openai/<raw model ID>` namespace. This supplements identity-only server listings;
+it does not claim OpenAI-listed limits or change the wire model ID.
 
-uv run nooa connect your-model --stage routing --as work \
-  --endpoint https://gateway.example/v1 --api-style chat --api-key-env MODEL_KEY
+Media setup shows **Suggested inputs: Images** and **Test and enable Images**
+(or the actual suggested set). **Current inputs: Off** remains until a test passes.
+**Enable Images without testing** is the explicit untested alternative.
+**Save without testing** clears planned tests without enabling their inputs.
 
-uv run nooa connect your-model --stage plan --as work \
-  --endpoint https://gateway.example/v1 --api-style chat --api-key-env MODEL_KEY \
-  > model-plan.json
-
-uv run nooa connect --stage save --input model-plan.json --output llm_config.yaml
-```
-
-The diagnostic handoff names the target file, working directory, active registry
-files and effective alias source, installed version, credential availability
-(never the value), caps, timeouts and remaining budget. Interface failures include
-a quoted CLI reproduction command capped at three basic checks when budget remains.
-Timeouts are `not_confirmed`, with elapsed time and exception-chain class names;
-they do not prove that the server received the request. The handoff includes
-same-run discovery status, proxy-variable presence (never values), safe planned
-request settings, and the running package location. It resolves absolute local
-skill/doc paths from that installation, or supplies a checkout command pinned
-to its recorded commit or release version. Unknown revisions are stated, never
-silently replaced by main. A target outside the current registry chain is called
-out explicitly. The handoff is not new permission
-to spend money or overwrite other aliases.
-
-Use explicit endpoint/interface/key-variable options in stage mode; wizard
-presets and `--no-probe` do not apply. Stages normally never prompt; explicitly
-passing `--prompt-key` enables one masked credential prompt on stderr, leaving
-JSON on stdout. Pasted keys are not persisted or included in reproduction commands.
-`--budget-tokens` defaults to
-unlimited; it is only capped when the flag is passed explicitly.
-`--output-tokens` controls only initial interface discovery.
-Configured routing, tools, reasoning and conversation checks send the saved
-`--max-tokens` value, or the selected level's cap. `--reasoning-output-tokens`
-is retained for command compatibility but no longer overrides configured caps.
-Redirect stdout to keep stage reports; `--output` is
-the registry target for `save` only. Replacing an existing alias requires `--yes`
-and prints a warning to stderr. Saving an untested plan does not validate it.
-
-Reports have `version`, `stage`, `ok`, `data`, `checks`, `error`, `run_context`, `warnings`, and
-`diagnostic_prompt`. Exit 0 means the stage met its criterion; 1 means failure
-or missing evidence, not proof of unsupported features; 2 means invalid stage
-options. Request acceptance alone is not success for tools or enabled reasoning
-checks. A session requires retained reasoning; a provider cache miss with a stable
-prefix is a warning, not a broken connection.
-The diagnostic prompt includes safe route/credential-variable names and outcomes,
-not key values, raw provider error bodies, or returned reasoning. It asks an
-agent to investigate, repair, and rerun the affected stage within configured
-limits. Wizard failures print the same library-generated handoff; neither
-frontend launches another agent automatically.
-
-`data` contains the full library result, including the synthetic prompts in the
-probe plan/provenance; `checks` omits those request bodies. Neither contains
-returned reasoning or credential values. Local file failures retain their path;
-YAML failures identify the file, line and column without echoing file contents.
-
-## Library calls from NOOA agents
-
-The CLI is a frontend to `nooa.unifiedllm.connect`, not a subprocess requirement. Inside
-an async NOOA agent method, use:
-
-```python
-from nooa.unifiedllm import connect
-
-proposal = connect.plan(
-    "work", "your-model", "chat", "https://gateway.example/v1", "MODEL_KEY",
-    budget_tokens=65536,
-    reasoning_levels={"high": {"reasoning_effort": "high"}},
-)
-result = await connect.check_stage(proposal, "reasoning")
-checks = result.entry["provenance"]["probes"]
-handoff = connect.diagnostic_prompt("reasoning", result.entry, checks)
-# Explicit persistence, when wanted:
-# connect.write(result.entry, registry_path, alias=result.alias)
-```
-
-`check_stage` runs selected checks afresh and leaves the input plan unchanged.
-Other public stages are `discover`, `catalogue`, `match_models`, `plan`,
-`check_interfaces`, and `write`. Use `run_steps` for progress events on an approved
-plan. The library never prints, prompts, reads stdin, or launches an agent;
-frontends decide presentation and persistence.
-
-## Interactive setup
-
-Choose NVIDIA (build.nvidia.com), OpenAI, Anthropic, Google (Gemini), OpenRouter,
-or a custom endpoint. Presets fill in the public server URL and key variable;
-model names still come from the endpoint, not a bundled list. The order is
-server, credentials, model selection, then automatic interface checks. It tries
-Chat Completions, Responses and Anthropic Messages once each and offers only
-interfaces that returned the expected response format. One success is selected
-automatically; multiple successes give a choice. A timeout, authentication error
-or rejected request is not labelled “unsupported.” If no check succeeds, the wizard
-offers to change the key, edit the server and model, retry, or cancel without saving.
-Failed attempts remain charged to the original approved budget; correcting the
-connection does not increase it or ask for another spending approval. Exhausting
-that budget ends setup without saving. Scripted `--yes` runs still fail without
-prompting. A successful model listing is not described as authenticated: some
-servers list their models publicly. Provider help banners are hidden during CLI
-checks, while safe authentication, routing and timeout explanations remain visible.
-A server listing models is not evidence that every model on it uses the same
-interface. `--api-style` supplies an explicit choice and skips interface detection;
-scripted `--yes --provider ...` setup uses the preset default if none is supplied.
-The wizard shows published model details
-before asking to use them: context window, maximum reply length, reasoning levels,
-and default reasoning level. Missing values say “Not listed.”
-These come from OpenRouter's model listing; server limits may differ. The setup
-check's output cap is shown separately and does not become the model's default.
-Choose **use**, **edit**, **skip**, or **cancel**. Editing lets you change the
-context window, maximum output, reasoning levels and default reasoning level;
-Enter keeps each suggestion and `-` leaves a field unknown. The revised details
-are shown again before you accept them, and saved edits are attributed to you.
-Confirmed edits replace command-line limit/level settings; skipping the details
-keeps any explicit command-line settings. Skip means continue without these
-published details, not cancel. Cancel stops setup without saving.
-It then shows the remaining checks and budget. The initial warning explains that setup
-makes paid API calls and asks once for approval before any generation; there are no repeated approval prompts for these checks.
-Each check shows progress and its result as it runs. Saving is a separate
-confirmation; Ctrl-C cancels setup. A pasted key stays in memory unless you
-approve storing it in NOOA's secrets file at final save. The model entry names
-its environment variable, not its value.
-
-After the checks finish, the final **Save model** step asks “Save this model as”.
-The suggested name, existing-name completion and overwrite confirmation all live
-here. `--as` supplies the name without prompting; `--yes` still requires it.
-Naming or declining a replacement does not rerun checks. Cancelling at this step
-leaves the registry unchanged; any already-completed API calls have still occurred.
-
-The wizard replaces the active check line on a terminal and prints compact
-results with elapsed time, then counts passed, inconclusive and skipped checks.
-Conversation checks are numbered 1/3 through 3/3; cache reuse and reasoning
-retention have separate result rows. Piped output stays readable without cursor
-controls, and `NO_COLOR` disables colors. The full YAML is hidden by default;
-`--show-config` previews the final entry before the save question. The agent
-`--stage` JSON interface is unchanged.
-
-The displayed **reported reply ceiling** is capability metadata held under the
-session's `provenance.catalogue_limits.max_completion_tokens`, not a request default;
-it is never persisted to the registry.
-Every entry also has an actual **reply budget**, saved as `max_tokens` for all
-three interfaces. Responses translates that to `max_output_tokens` on the wire.
-Press Enter to accept the recommendation, choose a higher budget for high reasoning
-(65,536) or extended reasoning (131,072), choose the model's declared maximum output
-directly via "Model maximum" (no `--custom` needed to hit that ceiling exactly),
-choose a smaller 8,192- or 2,048-token budget, or choose Custom to edit the number.
-Higher options — including "Model maximum" — appear only above the recommendation
-and within known model limits; they do not change the reasoning level itself. High/
-extended presets are truncated against "Model maximum" when the model's declared
-ceiling is lower. Smaller options appear only when
-below the recommendation. Connect offers the catalogue's output recommendation when available,
-otherwise 32,768 (labelled NOOA default), bounded by the known ceiling and half the
-known context window. Explicit caps may exceed half the window but must leave
-room for input: a cap at or above the window is rejected before saving.
-Existing entries keep their current setting. The budget includes thinking
-and the final answer; short replies use fewer tokens. The custom editor shows the
-known upper limit as a constraint, not as a suggested allocation.
-`--max-tokens N` (also `--reply-tokens N`) sets it in scripted or interactive
-mode; `--output-tokens` controls only initial interface discovery.
-The library's `configure_entry()` and `write()` enforce the same defaults,
-including on stage-save input created before these fields were required.
-Keep reply caps, and Responses `store`/`include`, at the entry's top level:
-Connect rejects copies in `extra_body` that would override those settings.
-A large ceiling can be valid while being unsuitable
-as a default: input, reasoning and the answer must fit together in the context
-window. The wizard highlights ceilings close to that window. Published
-thinking on/off information is shown even when named effort levels are absent;
-this display does not invent request mappings. A declared thinking-token budget
-that would leave no room for the answer raises only that level's reply cap,
-with a warning. It must still fit the model limit; checks cannot exceed their
-approved cap to test such a level.
-
-If enabled reasoning-level checks succeed but return neither reasoning fields
-nor reported reasoning tokens, Connect warns once before saving and lists the
-affected levels. It suggests another API format or checking the server settings.
-Disabled reasoning settings are exempt, as are rejected or skipped checks. A
-server may hide reasoning information, so this warning does not claim that
-reasoning is off. The saved results keep acceptance and reasoning observation
-separate. The TUI can use `connect.unobserved_reasoning_levels(entry)` for the
-same warning. This does not add calls or prove reasoning quality; the setup
-question remains a small connection check.
-
-Full setup also runs a three-call conversation check through the saved entry's
-UnifiedLLM client and the default cached renderer. It seeds a longer reference
-prompt, replays the actual reply, then repeats that saved history with a different
-final question. It does not execute tools or invent reasoning state. It reports:
-
-- Cache reads as a fraction of input tokens, whether explicit markers were sent,
-  and whether the stable request prefix matched. Confirmation requires cache
-  reads covering at least half of the seed's input; a small tool-schema-only hit
-  is not enough.
-- Whether reasoning appeared in replies, whether its readable/native state reached
-  the follow-up's reasoning fields unchanged, and whether the selected reasoning
-  controls survived on the wire. Ordinary text fallback does not count as retained
-  reasoning. Missing evidence says “not confirmed,” not “reasoning is disabled.”
-
-These calls send the configured reply cap, including the selected reasoning
-level's override. The three-turn reservation is `3 * (8192 + 3 * cap)`, accounting
-for reusable input and earlier replies. If that does not fit the remaining approved
-budget, the conversation check is skipped; Connect never silently lowers the cap.
-For example, a 32,768 cap requires a 319,488-token conversation reservation;
-if an explicit `--budget-tokens` is set below that, choose a larger approved
-budget to run it — the default shared budget is unlimited and always covers
-it. Routing/tool/level checks each reserve their configured cap plus 512.
-There are no automatic length retries: truncation at the configured cap is
-inconclusive, and the partial response is never replayed. To try a larger cap,
-edit the configuration and rerun the affected checks within your allowance.
-Detailed JSON retains configured/tested caps, stop reasons and usage. A saved cap
-without an accepted wire-verified check is labelled unverified.
-These are estimates, not billing limits: servers can ignore caps. Use
-`--budget-tokens` before setup to choose another budget. Small context windows,
-incompatible reply caps, failures or insufficient budget leave the conversation
-check unconfirmed or untested. Results include sanitized counts and flags only;
-raw responses, signatures, encrypted state and captured bodies stay in memory.
-Responses entries use `store: false` and request
-`include: [reasoning.encrypted_content]` by default, with source `connect` recorded
-in provenance. The wizard explains that encrypted reasoning carries reasoning
-context between turns without requesting stored responses. This is a compatibility
-request, not a guarantee of reasoning availability; current native OpenAI APIs may
-return that state automatically. See [OpenAI's reasoning guide](https://developers.openai.com/api/docs/guides/reasoning).
-
-A 400/422 explicitly rejecting `include` or `encrypted_content` disables the option
-and records a sanitized rejection. Authentication, rate limits, server failures,
-and invalid input-history errors do not change it. The saved `include: []` opt-out
-omits the field on the wire, including on native endpoints. A routing rejection
-can lead to one new capped check without the option, charged to the original
-budget; no unchanged request is retried. A session rejection stops the conversation
-check and leaves retention unconfirmed. Reconnecting to the same route preserves
-the recorded rejection; changing routes tests the default again. Cache settings
-are still tested without overrides.
-`--no-probe` disables these calls too; `--yes` explicitly approves the selected
-checks as well as saving. Library frontends opt in with `plan(..., session_checks=True)`.
-
-If you do not want paid checks, use `--no-probe` or follow
-[manual model configuration](model-configuration.md), optionally with the
-`nooa-model-configuration` skill. With `--no-probe`, interface selection is manual.
-
-In a terminal, type part of a model name to filter a scrolling completion menu;
-Tab selects a match. Large catalogues do not print every model into the prompt.
-Provider, endpoint, API-format, alias, catalogue and confirmation prompts also
-complete their available choices. Server URL suggestions include every valid
-`api_base` in the existing target configuration file, as well as provider presets;
-duplicates and URLs with embedded credentials are excluded. The URL menu opens
-immediately: use arrow keys and Enter to pick a server, or type to filter or enter
-a different URL. Key-variable completion uses environment
-variable **names only**, never their values. Secret entry is masked and has no
-completion or history. Defaults appear as faint suggestions: Enter accepts one,
-typing replaces it, and Right Arrow brings it into the editor. Arrow keys,
-Home/End, Backspace and Delete edit the current answer. Existing alias names in
-the target file show a warning while typing; replacement still requires confirmation.
-The terminal groups setup into four steps, with a provider menu and F1 help.
-Piped input uses plain line prompts.
-
-Flags can prefill answers or support scripted setup:
+To prefill the connection details, pass the answers as flags. The wizard still
+asks about media choices, testing, changes, and saving unless you use `--yes`:
 
 ```sh
-uv run nooa connect --provider nvidia
-
-uv run nooa connect gateway/model --as work-model \
+uv run nooa connect your-model --as my-model \
   --endpoint https://gateway.example/v1 --api-style chat \
   --api-key-env MY_MODEL_KEY
 ```
 
-The model argument is the exact ID used by the endpoint, without the additional
-LiteLLM routing prefix. API styles are `chat`, `responses`, and `anthropic`.
-Omit MODEL to list and select from the endpoint's models. Discovery tries `/models`
-and then `/v1/models` if a root endpoint returns 404. For Anthropic, explicitly
-name the appropriate key environment variable. `--prompt-key` reads a masked key
-for this setup; Connect offers to save it at final confirmation and never changes
-process environment variables. A project or explicit override secrets file can
-shadow the user secrets file, just as an exported shell value can.
-An empty `--api-key-env ''` supports local servers without authentication.
-In the wizard, enter `-` at the key-variable prompt for no authentication.
+- `your-model` is the exact model ID the endpoint expects. Omit it to choose
+  from the endpoint's model list.
+- `--as` is the alias your agents use.
+- `--api-style` selects one known interface: `chat` (OpenAI-compatible Chat
+  Completions), `responses` (OpenAI Responses), `anthropic` (Anthropic Messages),
+  `systemone` (System One Decisions), or `openai` (OpenAI Decisions, not Chat).
+  An explicit style checks only that style. In guided setup, omit it to choose
+  **Find what works** or a known interface **after selecting the model**.
+  After **Test now**, Discover compares chat interfaces plus System One when
+  a known or explicit decision endpoint is available. It sends the exact same
+  model ID to every candidate; it never translates a completion model into a
+  decision model.
+- `--api-key-env` is the name of the environment variable that holds the key,
+  never the key itself. Use `--api-key-env ''` for a local server with no key.
+- `--prompt-key` lets you paste a masked key instead (even with `--yes`). At the
+  end Connect offers to save it in NOOA's `secrets.yaml`; persisting a key
+  requires a separate confirmation; `--yes` does not save a newly pasted key.
+- `--yes` confirms the test requests and saving without asking. It needs
+  `MODEL`, `--as`, and either `--provider` or `--endpoint` plus `--api-style`.
 
-Preset endpoints follow the public connection guides for
-[NVIDIA](https://docs.api.nvidia.com/nim/docs/api-quickstart),
-[OpenAI](https://developers.openai.com/api/reference/overview),
-[Anthropic](https://platform.claude.com/docs/en/api/overview),
-[Google's OpenAI-compatible API](https://ai.google.dev/gemini-api/docs/openai), and
-[OpenRouter](https://openrouter.ai/docs/quickstart). They do not certify that a
-particular model supports every optional feature; the approved probes check that
-endpoint. Frontends can reuse the defaults through `connect.PROVIDERS`.
+Run `uv run nooa connect --help` for all options.
 
-OpenRouter metadata supplies candidate model names, context and output limits,
-prices and reasoning levels where present. Confirm the candidate; a matching
-name does not prove that a gateway exposes the same capabilities. Ambiguous
-matches require a choice, including with `--yes`. Use `--catalogue-model` for an
-explicit choice or `--no-catalogue` to leave it unknown.
+### Model details from this server
 
-Use `--no-probe` to save without model calls, or `--probe minimal` for routing
-only (up to three interface attempts unless `--api-style` is supplied).
-The default plan also checks tools and each proposed reasoning level. The
-selected interface's successful routing request is reused, not sent twice.
-Initial interface discovery uses 200 output tokens and a 30-second deadline.
-Configured checks use the saved cap and a 120-second deadline;
-conversation-check calls also have 120 seconds per attempt. Only truncated
-conversation replies do not retry automatically. The CLI uses
-the fixed budget approved at the beginning. Each basic request reserves its
-output cap plus 512 estimated input tokens. An explicit `--budget-tokens` limits
-the entire setup, including interface detection; it is never increased. Connect
-warns before the remaining checks if that limit is too small. Larger reported
-usage increases the charge. The next request is skipped if the budget would be
-exceeded, and a warning lists checks left undone before saving. These are
-estimates, not billing caps: a gateway may ignore an output limit. There are no
-context-window or maximum-output capacity probes.
+Connect reads **server details first**, then uses the public OpenRouter catalogue
+to fill missing facts. The selected model ID stays unchanged. Unknown limits stay
+unknown until you supply them or select an explicit catalogue mapping; missing
+metadata never prevents choosing **Test now**. Listing failures do not trigger
+new authentication attempts: continue with an exact ID, or correct the connection
+in another run.
 
-When metadata has no levels, they remain unknown. You can supply candidates:
+- **Native OpenAI:** GET `/v1/models` with the configured Bearer key. Standard
+  listings often contain identity only; Connect does not invent model limits or
+  capability endpoints.
+- **Native Anthropic:** the same paginated `/v1/models` listing uses `x-api-key`
+  and `anthropic-version: 2023-06-01`. Connect reads `max_input_tokens`,
+  `max_tokens` (output limit), and the exact
+  `capabilities.image_input.supported` / `capabilities.pdf_input.supported`
+  booleans (Anthropic SDK 0.109.2 shape). These are advertisements, not test results.
+- **OpenRouter:** the public `https://openrouter.ai/api/v1/models` catalogue
+  supplies exact model records without an inference key. Global
+  `context_length`, `top_provider.context_length` and
+  `top_provider.max_completion_tokens` retain their field meanings; the tighter
+  context ceiling is used. The listing/picker is reused rather than fetched twice.
+  `--catalogue-model ID` explicitly maps a public metadata ID; automatic matches
+  must be exact, and suggestions require your selection. An OpenRouter reasoning
+  profile/default request allocation or price is not automatically imported into
+  a different inference route or different model ID. Limits and input advertisements
+  can fill gaps; explicit reasoning blocks and media permissions remain yours.
+- **LiteLLM:** use `--server-metadata litellm` for a custom deployment, or the
+  Hub preset (which validates LiteLLM automatically). This authorizes a bounded,
+  unauthenticated GET of the configured origin's `/openapi.json`, preserving a
+  deployment prefix and removing only a trailing `/v1`. The document must identify
+  `info.title: LiteLLM API` and advertise GET `/model_group/info` with the
+  `model_group` query parameter. Only then does Connect send one GET for the
+  **exact chosen group**, with the already configured work key. No hostname guess
+  or version header is required. Root or `/v1` bases are supported; other custom
+  paths use their listing only. No `/v2/model/info`, `/model/info`, `/health`,
+  admin/master key, or inference call is used to obtain details.
+
+LiteLLM group maxima aggregate backends. Group limits can only **tighten** a
+smaller listing/input ceiling; your smaller input/reply allocations remain in
+place. Positive finite integral numbers (including integral JSON floats) are
+accepted; null, fractional, nonpositive and boolean values are ignored. Group
+flags must be booleans and effort arrays must be bounded strings. False flags and
+empty/null effort lists remain descriptive; they do not remove media permissions,
+filter request parameters, or select a reasoning template. `mode: evaluation`
+suggests a decision-model class, not a wire API path: choose its known interface
+or approve test discovery.
+
+Metadata GETs have no redirects or retries. Model discovery and enrichment each
+have a 30-second overall deadline, 15-second request timeout, and 5 MiB response
+bounds; listings/groups are limited to 5,000 entries (Anthropic pagination is also
+bounded). HTTP 401/403/404, invalid JSON and missing details continue with known
+facts or manual settings. An already fetched selected listing is reused.
+Credentials/configuration embedded in provider objects are discarded. There is
+no persistent metadata/key cache, and supplied listing records must be reused
+only within their original approved connection/credential scope.
+
+For an **exact known connection**, `--no-metadata` bypasses all metadata, including
+the picker, server/OpenAPI/group details, and public catalogue. Supply MODEL,
+endpoint and interface; testing remains an independent choice. Combine it with
+`--no-probe` for zero network. Metadata URLs/files/mappings cannot be combined
+with this bypass. The historical exact MODEL + `--no-catalogue` bypass still
+works; without MODEL, `--no-catalogue` can still request the model picker.
 
 ```sh
-nooa connect gateway/model --as work-model \
+# Metadata only: no inference and no registry/key writes.
+uv run nooa connect exact-model --stage model-info \
+  --endpoint https://gateway.example/v1 --api-style chat \
+  --api-key-env MODEL_KEY --server-metadata litellm
+
+# Exact connection; review and decide whether to test, without any metadata GETs.
+uv run nooa connect exact-model --as work \
+  --endpoint https://gateway.example/v1 --api-style chat \
+  --api-key-env MODEL_KEY --no-metadata
+```
+
+`--stage model-info` emits selected `model_id`, effective `model` facts,
+source-bearing `records` (with raw field paths), concise `notices`, attempted GET
+`requests`, and an optional exact `catalogue_model` record for OpenRouter. Metadata
+unavailability is a successful stage result with notices, not a failed inference
+check. `--discovery-file` reuses a bounded saved listing; `--models-url`,
+`--listing-style`, and `--discovery-api-key-env` retain the independent listing
+URL/authentication contract. Across origins, explicitly supply the listing key
+variable (or `-` for no authentication). Neither `--no-metadata` nor
+`--no-catalogue` can authorize this metadata stage. `plan`, routing/interfaces and
+`all` remain metadata-independent; **plan is always offline**, even with
+`--server-metadata litellm`. Model-info is explicit, never inserted into `all`.
+
+The public library API is `await nooa.unifiedllm.connect.server_details(endpoint,
+model_id, ...) -> ModelDetails`. Pass a fetched `Discovery` as `listing` to avoid
+another GET, `litellm=True` to authorize validated group enrichment, or
+`metadata=False` for a complete bypass. `api_style`/`listing_style` choose known
+header/listing contracts, not a guessed runtime interface. `api_key` is used for
+server/group requests; a separately supplied `listing_api_key` is used only for
+an explicit listing (`None` means anonymous, while omission inherits the current
+server key for same-origin listing). `catalogue_id` selects an explicit additional
+OpenRouter mapping in the same public fetch. `connect.plan` enforces the same
+foreign-profile restriction for headless/library users; `catalogue_settings=True`
+is an explicit user-authored editor override, not automatic provider import.
+ID-less legacy library dictionaries remain hand-authored settings. Same-origin
+shared-list replay on a decision route requires an explicit decision style and
+listing URL; it never applies across unrelated server origins. No SDK implementation is changed.
+
+### Guided interaction
+
+- Use the arrow keys and Enter to pick from menus. Type to filter long lists.
+- Ctrl-C cancels. Nothing is saved until you confirm the final **Save model**
+  step.
+- Results show as **Passed**, **Not available**, **Skipped**, or **Failed**.
+- Add `--show-config` to see the full entry before saving, and
+  `--show-diagnostics` to see full details when a check fails.
+
+### Decision models
+
+Decision models use `client_type: decision`. Give the exact model ID and the
+full decisions request URL.
+
+For a System One endpoint:
+
+```sh
+uv run nooa connect typesafe/jev-1.13 --as decisions \
+  --endpoint https://openrouter.ai/api/alpha/decisions \
+  --api-style systemone --api-key-env OPENROUTER_API_KEY
+```
+
+For OpenAI's Decisions API:
+
+```sh
+uv run nooa connect gpt-6-luna --as openai-decisions \
+  --endpoint https://api.openai.com/v1/decisions \
+  --api-style openai --api-key-env OPENAI_API_KEY
+```
+
+`--probe minimal` sends one small typed decision request to check routing.
+`--probe all` also runs three fresh smoke cases: one multi-field boolean,
+literal choice and ordinal score result, followed by positive and negative
+boolean cases. These use the actual Agent `DecideStrategy`, including schema
+validation and typed reconstruction. A valid response and a correct answer
+are recorded separately. Finite probabilities, normalized distributions and
+a score consistent with its weighted distribution are part of the contract.
+Add `--no-probe` to save the connection as not tested, without model requests.
+
+Native decision media checks support **image only**. OpenAI/Hub Decisions
+send a named `Image` parameter as native `input_image` content. Direct TypeSafe
+needs explicit `--decision-image-transport typesafe_multipart` and
+`--typesafe-danger-zone-images` as well as image permission. The hostname never
+selects the transport. System One JSON blocks image requests before sending. To test images, use
+OpenAI Decisions or an approved direct TypeSafe multipart connection, or leave
+images off. Enabling images manually on System One JSON still blocks image calls. Decision audio,
+video and PDF are not implemented.
+
+Image checks run after text/state decision checks, using a generated red PNG.
+A pass requires the attachment on the actual HTTP request, a native typed
+access result, and the correct known color. A reported-access answer with the wrong color fails the check. Each fresh test makes at most one request, with no retries and a
+30-second deadline, sharing the approved token reservations. Routing acceptance
+can be reused during setup; fresh accuracy and image tests cannot.
+
+```sh
+uv run nooa connect decision-model --stage decision --as decisions \
+  --endpoint https://hub.example/v1/decisions --api-style openai --api-key-env MODEL_KEY
+
+uv run nooa connect decision-model --stage media --as decisions \
+  --endpoint https://hub.example/v1/decisions --api-style openai --api-key-env MODEL_KEY \
+  --test-media-inputs image
+
+uv run nooa connect typesafe-model --as decisions --endpoint https://typesafe.example/systemone \
+  --api-style systemone --api-key-env MODEL_KEY --test-media-inputs image \
+  --decision-image-transport typesafe_multipart --typesafe-danger-zone-images --yes
+```
+
+The permission (`media_inputs`), transport (`decision_image_transport`) and
+explicit TypeSafe opt-in (`typesafe_danger_zone_images`) survive saving and
+reloading. Checks and usage are evidence, kept out of runtime YAML. Changing
+the model, endpoint, interface or image transport resets inherited permissions.
+No fixtures, encoded images, raw replies or credentials are saved.
+
+The Hub preset knows its System One route at
+`https://inference-api.nvidia.com/v1/systemone`. Select **System One Decisions**
+in the post-model interface menu, or use `--provider hub --api-style systemone`. An explicit `--endpoint`
+always overrides the preset for a known style. Discover on Hub compares that
+known System One route with the chat-family routes and lists from the shared
+`/v1/models` catalogue regardless of your generation style.
+
+The **OpenRouter preset** also knows the published System One endpoint
+`https://openrouter.ai/api/alpha/decisions`. Its post-model **Discover request
+interfaces** choice compares Chat, Responses, Anthropic and **System One
+Decisions** only after **Test now**, using the **same exact selected model ID**,
+configured Bearer work key and existing shared request budget. A router may
+accept both chat-family and decision interfaces: choose among the observed working
+formats; its name or metadata never forces a class. Decision requests contain no
+chat reply limit, reasoning settings or chat media parameters. An accepted decision
+routing request is reused rather than repeated before saving.
+
+`--provider openrouter --api-style systemone` uses the alpha endpoint when
+`--endpoint` is omitted. An explicit full `--endpoint` overrides a known style;
+`--systemone-endpoint` overrides the preset's discovery/mapped System One route.
+Known styles check only that style; **Save without testing** sends no model calls.
+If a post-model selection switches to a different origin, reusing the current key
+requires `--share-interface-key`, just like mixed discovery. No admin/master key
+or repeated authentication request is added.
+
+The preset mapping is wizard-only. Headless `--stage interfaces` still needs the
+full decision URL through `--systemone-endpoint`; `--provider` remains a wizard
+option. Custom endpoints never acquire a guessed decision suffix, even when a
+model name includes “router” or “decision”.
+
+For mixed discovery on a custom chat server, pass `--systemone-endpoint` with
+the **full System One POST URL**. Connect never guesses a decision suffix from
+a custom base. Without this option, custom discovery compares chat interfaces
+only. `--stage interfaces` accepts the same option; omit `--api-style` for a
+comparison, or specify it to check just one interface. If a mapped interface
+has a different origin (scheme, host, or effective port), sharing a nonempty
+key or configured key variable requires explicit `--share-interface-key`. This
+also applies to Hub discovery when overriding the chat base to another origin.
+Same-origin paths need no opt-in; without a key, cross-origin checks are allowed.
+The flag does not authorize catalogue credentials: `--discovery-api-key-env`
+retains its separate safety rules.
+
+A successful decision interface check is reused during setup, rather than
+sending another routing request. The fresh smoke cases are still run when approved. Results show accepted client types.
+Mixed decision/chat results do not automatically favor chat merely because it
+returned reasoning; chat-only comparisons retain their reasoning preference.
+
+Model listing is independent of the inference interface. A server such as NVIDIA
+Inference Hub can advertise chat and decision models in the same `/models` list.
+For a custom decision route, supply `--models-url` with the **full catalogue GET
+URL** to use the picker or `--stage discover`; Connect never appends `/models` to
+the full decisions request URL. Without a listing URL, enter the exact model ID.
+The wizard's `--provider hub` preset uses its shared `/v1/models` catalogue while
+keeping your explicit `--endpoint` unchanged.
+
+```sh
+uv run nooa connect --stage discover \
+  --endpoint https://hub.example/v1/decisions --api-style systemone \
+  --models-url https://hub.example/v1/models --listing-style chat \
+  --api-key-env HUB_KEY > models.json
+
+uv run nooa connect decision-model --stage plan --as decisions \
+  --endpoint https://hub.example/v1/decisions --api-style systemone \
+  --models-url https://hub.example/v1/models --discovery-file models.json \
+  --api-key-env HUB_KEY
+```
+
+`--listing-style` selects listing auth and pagination (`chat`/`responses` use
+Bearer auth, `anthropic` uses its key header and pagination), not the inference
+interface. `openai` remains a **decision inference** style, not a listing style.
+Listing normally uses the inference key on the same origin. For a separate key,
+use `--discovery-api-key-env CATALOGUE_KEY`; use `-` for no authentication.
+A different catalogue origin requires this explicit credential choice; Connect
+never automatically forwards the inference key there.
+
+`--discovery-file` works for decision routes with `--models-url`, and is checked
+against that exact listing source. Advertised identity, interface/media hints,
+and limits remain in discovery output and transient plan provenance for review;
+they do not verify support, enable media, or add chat limits to a decision entry.
+As before, saving writes runtime settings only, not provenance. Decision checks
+support `plan`, `interfaces`, `routing`, `decision`, `media`, `all`, and `save`.
+A discovery file supplies metadata, never credentials.
+
+## What Connect tests
+
+For chat-family routes, the default `--probe all` runs:
+
+1. **Connection.** Discover sends one routing request per candidate API style
+   (and reasoning checks for chat styles); a known interface is checked alone.
+2. **Text baseline.** Asks the model for `17 * 19` as a typed NOOA result. The
+   model must return `323` as structured output. Without this pass, the
+   wizard does not save.
+3. **Tools.** Checks that the model makes a requested tool call. The call is
+   never run.
+4. **Reasoning levels.** Checks each level you set up.
+5. **Conversation.** Three requests that check caching and that reasoning carries
+   over between turns.
+6. **Media**, only if you choose to. See [below](#choose-media-inputs-during-setup).
+
+`--probe minimal` runs the typed arithmetic check using your settings. It skips
+tools, reasoning, conversation, and media checks. Connect may first try the API
+styles if you did not choose one.
+
+`--no-probe` (or `--probe none`) skips model requests and saves an **unverified**
+entry. It can still fetch model lists and catalogue details. To skip those too,
+supply the exact model, endpoint, and API style plus `--no-catalogue`.
+
+For chat-family routes, a failed connection or configured text baseline blocks
+wizard saving. Tool, reasoning, caching, or media results that need attention do not.
+
+Native decision routes instead require accepted decision routing to save in the
+wizard. With `--probe all`, three fresh typed decision smoke cases follow routing.
+Their failures remain visible and prevent image testing, but do not erase routing
+acceptance or block saving that route. `--probe minimal` checks decision routing
+only. Explicit `--stage save` blocks a known failed report unless you acknowledge
+it with `--allow-unverified`. Even then, its machine verification stays failed
+and the checks/troubleshooting handoff remain available; writing is not testing.
+
+### Configured typed text baseline
+
+The baseline uses your exact settings and one request with no retry. It fails if
+the answer is wrong, cut off, or not in the structured format. If your endpoint
+rejects the answer carrier, the human wizard offers **Review settings**, **Change
+answer format** (on Completion routes), or **Cancel**. Review the current proposal
+and choose **Test now** before another request. Saving untested after a failed
+baseline requires an explicit failure acknowledgement; it is not a successful test.
+With `--yes`, an approved baseline failure exits nonzero and writes neither a
+model entry nor a key. Cancellation after a failed approved test also exits
+nonzero; successful saving and an explicitly untested save exit successfully.
+
+## Profile controls, token budget and reply limit
+
+Changing the server/model after a failed check discards the old source, context,
+reasoning proposal and current test proof. Connect prepares only permitted
+metadata for the replacement, or collects the existing manual context/input pair
+when those facts are missing. New-origin credentials must be explicitly selected;
+listing credentials are not implicitly reused. The replacement proposal is
+reviewed and consented before its configured baseline or save. Explicit settings
+remain intent, bounded by the new model's actual facts.
+
+The wizard's approved token allowance is cumulative: interface checks, configured
+checks, failures and session checks all charge one ledger. Another **Test now**,
+format change, replan or server/model correction does not reset it. At exhaustion,
+additional requests are skipped rather than sent. Reservations are estimates,
+not hard provider billing limits; reported usage can increase a charge.
+
+For exact native thinking metadata advertising manual `enabled: true` and
+`adaptive: false`, the plain reasoning choice offers **On**/**Off**, not invented
+effort levels. **On** asks for a reasoning token allowance of at least 1,024,
+strictly below the saved reply cap because reasoning and the answer share it.
+If the current cap cannot fit, explicitly adjust it within known limits or cancel;
+Connect does not silently raise it or add a per-level cap override. An inactive
+manual On patch is not generated. Adaptive effort choices are unchanged, and
+advanced existing/custom reasoning profiles retain their current behavior.
+
+
+### Explicit native structured-output profile
+
+`--structured-output-mode anthropic` is a bounded, opt-in **Completion** profile
+for `--api-style chat` or `anthropic`. It is not inferred from the model ID,
+provider catalogue or a successful discovery ping. Responses and Decision routes
+reject explicit profile controls (including `none` and `auto`) before checks.
+Metadata/interface discovery stages reject the option; select an explicit
+Completion interface for wizard use. Plan, configured check and save stages carry
+it. Guided review offers **Change settings → Answer format** on every eligible Completion
+route, even without a prior flag. **Standard JSON** uses the usual request format;
+**Native JSON** selects the implemented Anthropic carrier, including on a gateway
+when you explicitly choose and test it. Connect never silently tries all formats.
+
+Exact native Anthropic Models API metadata with
+`capabilities.structured_outputs.supported: true` and a known Messages interface
+can recommend Native JSON by default. Only that bounded same-model, same-endpoint
+fact and its provenance are used—never a model-name guess or foreign catalogue.
+Explicit `none`, `auto`, or `anthropic` declarations win until you change them.
+Responses and Decisions do not offer this native-carrier choice.
+
+The library equivalents are `connect.plan(..., structured_output_mode="anthropic")`
+and `connect.configure_entry(entry, structured_output_mode="anthropic")`.
+Omitting the keyword preserves a saved same-route declaration; Python `None`,
+YAML `null`, and CLI `--structured-output-mode none` explicitly select the existing
+legacy carrier. `auto` also retains that carrier: neither `none` nor `auto`
+discovers native support or retries with a different format. Changing model,
+normalized endpoint, API style, client type or credential identity does not inherit
+a saved native declaration. Changing the declaration invalidates prior probe and
+session evidence, including checks whose generic planned request is unchanged.
+The field belongs on the entry, never in `extra_body` or reasoning-level patches.
+`--no-cache` is an independent control: cache removal does not select or prove a
+structured-output carrier.
+
+For typed calls with an object-root output model, native mode sends the actual
+compiled JSON Schema as **top-level**
+`output_config: {format: {type: "json_schema", schema: ...}}`. A configured
+`output_config.effort` is preserved. It does not send generic `response_format`,
+`text.format`, legacy `output_format` or schema-surrogate tools/tool choice.
+Combining tools/tool choice with a native `output_model` is rejected rather than
+using a schema-tool surrogate. Ordinary tool calls without an output model are
+unaffected. NOOA validates the original output model and requires a final-stop
+answer; this is not a raw-text ping or tool-based replacement for Predict.
+
+The shape agrees with the official Anthropic SDK **0.109.2** source contract
+(`anthropic/types/output_config_param.py`, `json_output_format_param.py`, and
+`resources/messages/messages.py`): format has required `type: json_schema` and
+`schema`, while output config can also carry effort; `create` serializes top-level
+`output_config`, and `parse` merges its transformed schema format with that config.
+This is source-contract evidence, **not** proof that a particular gateway accepts
+the schema or implements the SDK helpers' schema-subset transforms. NOOA's bounded
+compiler preserves the model contract rather than guessing gateway restrictions.
+No universal gateway acceptance is claimed. The runtime verifies the final SDK
+HTTP carrier before send and raises if a downstream adapter changes or drops the
+schema. A native typed call needs a verifiable per-client HTTP transport. For a
+replacement route, construct a separately configured client (registry constructor
+overrides clear an inherited profile unless it is explicitly redeclared). A
+per-call injected SDK client must expose its HTTP transport for this check.
+
+```python
+client = CompletionClient(
+    "openai/your-exact-gateway-model-id",  # no model-name profile inference
+    api_base="https://your-gateway.example/v1",
+    structured_output_mode="anthropic",
+    max_tokens=8192,
+    cache_breakpoint=None,  # independent explicit cache-marker opt-out
+)
+```
+
+The configured typed Predict baseline and media checks compare the actual wire
+format to the schema compiled from that call's original generated response model,
+check absence of conflicting carriers, and still verify configured settings/caps,
+typed validation, correctness (baseline) and final stop. Only bounded carrier,
+schema-observed and conflict flags are retained, not raw schema/request/reply text.
+A declared profile or HTTP 200 alone is not a pass; declaration and observed status
+are shown separately. Save without testing records an unverified profile, not live
+compatibility. Selecting this profile adds no carrier fallback, extra send or
+recovery UI. Existing retry and context-window reply-cap handling retain the
+selected carrier (including an explicit per-call opt-out).
+
+- `--budget-tokens N` limits the estimated total tokens for all checks. The
+  default is effectively unlimited (`10**15`). Actual use can differ from the
+  estimate; this is not a spending cap. Each invocation starts a new budget;
+  agents must track allowance across commands and get consent to raise it.
+- A check that does not fit the remaining budget is skipped. Connect does not
+  lower limits or ask for more budget.
+- For chat-family routes, `--no-cache` explicitly saves `cache_breakpoint: null`
+  for this profile, disabling explicit prompt-cache options and markers. It does
+  **not** disable provider automatic caching or prove live compatibility. The
+  library equivalent is `connect.plan(..., cache_enabled=False)` (or
+  `connect.configure_entry(entry, cache_enabled=False)`). Unspecified preserves
+  existing behavior, including a manually disabled cache when editing. Plan,
+  routing/all/check stages and save accept this control; metadata/interface
+  discovery stages do not. Decision models do not configure chat caching and
+  reject the option. Changes invalidate reusable routing evidence; there is no
+  automatic retry or silent cache fallback. Conflicting explicit cache options
+  in custom settings are rejected, not silently removed. Structured-output schemas remain
+  required for the configured typed baseline.
+- For chat-family routes, `--max-tokens N` (also `--reply-tokens`) sets the reply limit saved as
+  `max_tokens`. It covers reasoning and the answer. Without it, Connect suggests
+  the published recommendation, or 32,768. It must be less than the context
+  window. Native decision calls have no reply-token cap and do not save chat
+  limits or reasoning levels.
+- `--context-window N` records a known context window.
+
+## Reasoning levels
+
+Connect can use published reasoning levels for the exact OpenRouter model/route.
+A different server or metadata mapping does not import that profile. To supply
+your own known settings:
+
+```sh
+uv run nooa connect gateway/model --as work-model \
   --endpoint https://gateway.example/v1 --api-style chat \
   --api-key-env MY_MODEL_KEY --no-catalogue \
   --reasoning-template effort --levels low,medium,high
 ```
 
-Other templates are `adaptive`, `budget`, `toggle`, and `thinking`. They are
-candidate request shapes, not provider support tables. For exact route settings,
-`--levels-file` accepts a YAML mapping of labels to whole request blocks instead.
-Quote labels such as `"off"` that YAML otherwise treats as booleans. A template
-whose output allocation exceeds the approved cap is left untested; Connect does
-not silently increase the budget. `--context-window` supplies a known limit with
-user provenance; an unknown limit remains absent and the current runtime's
-fallback applies.
+Templates are `effort`, `adaptive`, `budget`, `toggle`, and `thinking`. For exact
+request settings, use `--levels-file` with a YAML mapping from each level name to
+its request settings. Quote names like `"off"`. See
+[reasoning levels](reasoning-levels.md).
 
-The saved entry uses the current `model_name`/`client_type` schema and the
-registry's reasoning-level mechanism. Every generation check uses UnifiedLLM,
-constructed from the unsaved entry through the same factory as `get_llm_client`.
-That tests runtime routing, settings translation and response parsing, not just
-whether the server accepts a hand-built request. Context and maximum-output limits are
-metadata, not permission to generate that many tokens on each call.
+Model details come from exact endpoint listing facts and the public OpenRouter
+catalogue, with server facts taking priority. Foreign-route reasoning defaults,
+reply recommendations and prices remain descriptive rather than request settings. Use `--catalogue-model ID` to pick the public entry, or `--no-catalogue`
+to skip public and automatic limit lookups. Missing limits stay unknown in the
+proposal; continue with NOOA defaults or choose **Change settings** to enter
+known limits. The proposal names its source; edits are your settings, not
+verified capabilities.
+
+## Known routes: configure from metadata without model calls
+
+For a known OpenRouter, native OpenAI or native Anthropic chat-family route,
+choose the exact model ID and interface explicitly. You do not need full Hub
+interface discovery or paid checks just to save settings. The wizard's
+`--no-probe` mode reads allowed metadata, lets you review settings/media and
+saves an unverified entry without inference requests.
+
+Agents can use a public metadata GET, an offline proposal, then an approved save:
+
+```sh
+# Public OpenRouter metadata, no inference key or generation request.
+uv run nooa connect openai/example-model --stage catalogue > catalogue.json
+
+# Exact native model and an explicit OpenRouter metadata mapping; no network.
+uv run nooa connect example-model --stage plan --as work \
+  --endpoint https://api.openai.com/v1 --api-style responses \
+  --api-key-env OPENAI_API_KEY --catalogue-file catalogue.json \
+  --catalogue-model openai/example-model > model-plan.json
+
+# Save only after reviewing/approving the proposal. No model calls.
+uv run nooa connect --stage save --input model-plan.json --output llm_config.yaml
+```
+
+These IDs are examples, not universal profiles. `--catalogue-file` is opt-in and
+works in plan/check stages, including decision routing, decision and media checks.
+It accepts a successful version-1 catalogue report (`data.source` and `data.models`) or an explicitly sourced raw
+object: `{"source": "https://openrouter.ai/api/v1/models", "models": [...]}`.
+The source must be that OpenRouter URL. Without `--catalogue-model`, the exact
+inference ID must occur once in the file; there is no fuzzy or suffix guessing.
+A native ID different from the OpenRouter ID needs an explicit mapping.
+
+For native decision models, mapped OpenRouter details are metadata only: bounded
+model descriptions, media advertisements and explicit source/ID provenance.
+Exact endpoint media facts take priority. They never initialize chat caps,
+context, reasoning, tools, sessions, store/include settings, image permissions or
+transport opt-ins, and add no inference checks. `typesafe/jev-router` is not an
+implicit match for Hub `nvidia/alexwortega/openjev-4b`. The wizard uses an exact
+OpenRouter ID or a match you explicitly select; `--no-catalogue` skips lookup,
+and editing and stage `plan` never fetch metadata.
+
+For chat-family models, review context limits, any initialized reasoning settings,
+the published ceiling
+in `provenance.catalogue_limits`, and the proposed `max_tokens` reply cap. The
+recommendation is conservatively clipped to known limits; the ceiling is not an
+allocation. `--max-tokens` overrides the proposed cap explicitly. Pricing,
+supported-parameter lists and miscellaneous default parameters are not copied
+into requests. Check your server's limits if they differ from OpenRouter's.
+Cached `--discovery-file` metadata from the selected native
+endpoint/model takes preference for reported limits. Missing limits remain
+unknown. Review `provenance.media_suggestions` for listed formats and their
+source, then explicitly choose which inputs to enable before saving.
+
+Checks are optional. With permission for those calls, repeat the same metadata
+and settings options for the chosen check stage; do not automatically run `all`.
+Saving to an existing alias still requires replacement approval and `--yes` in
+stage mode. The canonical [Connect skill](../skills/nooa-connect/SKILL.md) covers
+permissions, manual suggestions versus generated checks, source validation and
+headless review. Full checks remain available for unknown shared hubs.
+
+
+### Native NVIDIA model details
+
+NVIDIA's hosted `/v1/models` list provides model IDs. The Build catalogue and
+per-model API references provide additional specifications; Connect does not yet
+read those documents automatically. Use the server's limits or enter a published
+value manually. OpenRouter's general model context can fill a missing value,
+but its provider-specific input/output limits are used only for OpenRouter.
+
+For example, NVIDIA documents Nemotron 3 Ultra with up to **1,048,576** context
+tokens. Its distributed configuration defaults to **262,144**, with instructions
+for a larger deployment. The hosted chat API documents a **32,768** reply maximum.
+OpenRouter's BaseTen deployment has different limits (**202,800 / 182,520**).
+See [NVIDIA model specifications](https://build.nvidia.com/nvidia/nemotron-3-ultra-550b-a55b.md)
+and the [hosted API reference](https://docs.api.nvidia.com/nim/reference/nvidia-nemotron-3-ultra-550b-a55b-infer.md).
+
+## OpenRouter decision models
+
+Connect requests both text and decision-output models from OpenRouter using
+`output_modalities=text,decisions`. The default OpenRouter list omits models
+such as `typesafe/jev-1.14`; no separate search API is needed.
+
+A model declaring `output_modalities: [decisions]` suggests **System One
+Decisions** when the provider has that endpoint. You can still choose another
+interface. Jev Router is a separate model whose declared output is text.
+
+## Independent stages for agents
+
+Agents should follow the [nooa-connect skill](../skills/nooa-connect/SKILL.md)
+for the complete headless workflow. Get the user's permission to configure the
+model and agree on checks and writes before running Connect.
+
+`--stage NAME` runs one step and prints one JSON report to stdout. It does not
+ask for spending approval; obtain permission before paid stages. Only `save`
+writes the registry. Stages normally do not prompt, but `--prompt-key` asks for
+a masked credential on endpoint checks; use `--api-key-env` for unattended use.
+
+| Stage | What it does |
+|---|---|
+| `discover` | List the endpoint's models. |
+| `catalogue` | Read public model details. |
+| `model-info` | Read the selected model's details from the server and catalogue. No model calls. |
+| `interfaces` | Find which API styles work. |
+| `plan` | Build an unsaved entry. No network. |
+| `routing` | Chat: configured typed text baseline. Native decisions: routing acceptance. |
+| `tools` | Chat-family routes only: check tool calls. |
+| `reasoning` | Chat-family routes only: check levels from `--levels-file`. |
+| `media` | Run the text baseline and selected media tests; native decisions run the typed decision baseline first. |
+| `decision` | Native decisions only: fresh routing and three bounded typed decision smoke cases. |
+| `session` | Chat-family routes only: check caching and reasoning across turns. |
+| `all` | Chat: baseline, tools, declared reasoning, conversation and optional media. Native decisions: routing, fresh typed smoke cases and optional image checks. |
+| `save` | Write an entry from a plan or result file. |
+
+Minimal approved routing example (not an automatic save pipeline):
+
+```sh
+uv run nooa connect your-model --stage routing --as work \
+  --endpoint https://gateway.example/v1 --api-style chat \
+  --api-key-env MODEL_KEY --max-tokens 1024 --budget-tokens 4096 > result.json
+```
+
+Review `ok`, `checks`, `warnings` and the entry, then confirm file/alias writes
+are authorized. Save as a separate step:
+
+```sh
+uv run nooa connect --stage save --input result.json --output llm_config.yaml
+# Register this explicit output path for the application:
+export NEMO_OO_LLM_CONFIG="$PWD/llm_config.yaml"
+```
+
+- Pass `--endpoint`, `--api-style`, and `--api-key-env` explicitly.
+- Save `--stage discover` output and reuse it with `--discovery-file` to avoid
+  another listing request.
+- `--stage save` needs `--yes` to replace an existing alias. It can save an
+  unverified plan or a failed result; inspect the report before saving.
+- Exit code `0` means the stage passed, `1` means it failed or was inconclusive,
+  and `2` means the options were invalid.
+- Reports contain `version`, `stage`, `ok`, `data`, `error`, `checks`, `warnings`,
+  `run_context` and `diagnostic_prompt`. Inspect them, not exit status alone.
+  Parser/prevalidation failures can be plain Click stderr rather than JSON.
+  Library validation errors can return stage failure/exit 1 (for example decision
+  tools/media/session or reply-cap misuse), not invalid-option/exit 2.
+- `diagnostic_prompt` describes the failure. Active credentials are redacted,
+  but keep artifacts private: plan deliberately includes synthetic requests.
+- Save strips transient provenance and replaces the selected alias as a whole,
+  not a merge. Preserve other aliases and review/carry forward approved custom
+  fields from the selected alias. Retain reports as evidence.
+- Wizard exit 0 is not proof of save: failed baseline can return normally with
+  “Nothing was saved”. Stage save can succeed on an untested or failed proposal
+  (the latter emits a stderr warning); neither proves route support.
+
+## When something fails
+
+| Problem | What to do |
+|---|---|
+| No API style works | Check the endpoint URL, key, and model ID. The wizard offers to change them, retry with a 120-second timeout, or cancel. |
+| Timeout | Completion is unknown. Check the endpoint and server status; approve a retry within the remaining budget. |
+| Text baseline fails | Make sure the endpoint supports structured output. Otherwise save with `--no-probe`. |
+| Endpoint rejects `include` or `encrypted_content` (Responses) | Set `include: []` in the entry, then rerun the checks. Saving stays blocked until the baseline passes. |
+| Reply cut off | Raise `--max-tokens` and rerun the affected stage. |
+| Reasoning not shown | Some servers hide reasoning. Try another API style or check server settings. |
+| Saved alias has no effect | A later config file overrides it. Check `nooa.llm_config.llm_config_chain()`. |
+| Budget ran out | Rerun with a larger `--budget-tokens`. |
+
+Add `--show-diagnostics` in the wizard to see full details.
 
 ## Files and reconnecting
 
-To edit a model, run `uv run nooa connect --edit-model NAME`. With no name,
-`uv run nooa connect --edit-model` opens a registry selector. This skips server
-listing and catalogue discovery and opens the settings editor. Existing custom
-request fields and reasoning-level bodies are preserved; adding a new level
-requires its complete request settings in `--levels-file`. Checks use the edited
-entry, and changes are written only after save confirmation. The defining user,
-project or override file is edited; bundled defaults are copied into the user
-registry. `--output` chooses a different destination and `--as` renames the copy.
+- Connect saves to `llm_config.yaml` in NOOA's user configuration directory.
+  Use `--output FILE` for another file, or `-w DIR` for the project file
+  `DIR/.nooa/llm_config.yaml`.
+- Other aliases and comments are kept. Connect asks before replacing an alias.
+- The entry stores the key's variable name (`api_key_env`), never the key.
+- A key saved in `secrets.yaml` is overridden by an exported environment
+  variable with the same name.
+- To edit a saved model, run `uv run nooa connect --edit-model NAME`. Omit NAME
+  to pick from a list. Edits normally go back into the file that defines the
+  model. Use `--output FILE` to choose another file.
+- After saving to a custom file, set `NEMO_OO_LLM_CONFIG` to its path or load it
+  with `reload_registry(Path(...))`. `-w DIR` saves to `DIR/.nooa/llm_config.yaml`.
+- Editing a saved model runs fresh checks. Keep diagnostic reports separately
+  if you need a record of earlier results.
+- To load a config file from another path, add it to `NEMO_OO_LLM_CONFIG`.
 
-When an endpoint already appears in the registry, Connect selects its saved key
-variable automatically. Multiple saved variables open a selector; an explicit
-`--api-key-env` always wins. URL completion also uses all registry layers.
-
-You can choose `new` at the key-variable prompt, or use `--prompt-key`, to enter a
-masked key without first exporting an environment variable. At final save,
-Connect offers to store that key in NOOA's user `secrets.yaml`, under `env:`.
-The file is plain text with owner-only permissions (`0600`), written atomically;
-existing secret values are preserved but YAML formatting may change. The model
-entry contains only `api_key_env`, never the key. Cancelling before save writes
-neither file. `--yes` does not implicitly consent to storing a pasted key.
-NOOA loads the secrets file on startup; an exported shell value takes precedence,
-so unset or update an old exported value when replacing a key.
-
-Declared reasoning parameters are explicitly allowed through legacy parameter
-filtering. Level checks also inspect the serialized HTTP body: a request that
-succeeds after losing its settings is not a confirmed check. Session reports
-distinguish settings reaching the server from reasoning state surviving replay.
-Neither observation proves the server honoured an effort value.
-
-The default is `llm_config.yaml` in NOOA's user configuration directory. Connect
-warns before overwriting an existing alias, including a hand-written one, and
-asks for confirmation before replacing it. All selected checks run before the
-local alias is chosen. Names are reread at this step to catch entries added while
-checks ran. `--yes` skips save/overwrite confirmation;
-it still prints the overwrite warning. Other aliases and surrounding
-comments stay intact. Writes replace the file atomically, follow existing symlinks,
-and retain an existing registry's mode and CRLF newlines. Flow-style mappings may
-lose internal comments when rewritten; other alias values remain unchanged.
-Cooperating writers serialize the complete update through a retained adjacent
-`.FILENAME.lock` file. Files containing YAML anchors/aliases are refused with
-instructions to expand them first; Connect does not silently flatten them and
-discard comments. Literal credential fields are rejected at any nesting depth
-by the shared library, not only the JSON frontend.
-
-Unchanged accepted UnifiedLLM probes are reused when reconnecting. Older direct-HTTP
-checks are repeated: they did not test the runtime. Changing the route, transport, or
-level declarations changes which probe requests can be reused; unchanged requests
-on the same route remain reusable. `--output` chooses another
-file; load custom paths with `NEMO_OO_LLM_CONFIG` or `reload_registry(path)`.
-Later configuration layers can override the alias; inspect `llm_config_chain()`
-if a saved entry does not take effect. The wizard and save stage warn when a
-higher-priority file shadows the saved alias.
-
-### Saved routing and evidence fields
+### Inference transport: direct SDKs or LiteLLM
 
 Connect inference uses the official OpenAI/Anthropic SDKs by default. Add
 `--litellm` to use LiteLLM instead, in the full wizard (including editing) or
@@ -484,110 +814,247 @@ transport/capture diagnostics on failed probe requests. Direct SDK calls bypass
 LiteLLM callbacks, provider LLM spans and LiteLLM request/response journals;
 outer agent tracing and usage remain available, and unavailable provider cost
 is not a claim of free inference. See [direct provider SDKs](direct-provider-sdks.md).
-Connect does not infer a `replay_vendor` from an interface or model name.
 
-`provenance` contains diagnostic evidence and metadata, not runtime request
-settings. It lives in the connect session and in stage JSON, never in the
-saved registry: `connect.write` persists the discovered settings only, so the
-config stays the smallest capture of what Connect learned. Catalogue identity
-belongs under `provenance.catalogue.id`, not `underlying_model`. Successful
-tools are recorded in `provenance.probes.tools`; Connect does not write an
-unused `tools: true` capability switch.
+Over direct SDKs, Connect's native Anthropic structured-output check hooks the
+direct client's own HTTP pool, so `structured_output_mode: anthropic` is verified
+on the request the official SDK sends. Connect itself only writes `openai/` and
+`anthropic/` model names. A hand-written entry edited with `--edit-model` keeps
+its own prefix and still gets Connect's direct default: native provider routes the
+direct transport does not support (`bedrock/`, `vertex_ai/`, `sagemaker/`, Azure)
+are not silently sent through LiteLLM. Their checks fail before any request, and
+a `--no-probe` save keeps `direct: true`. Use `--litellm` for those routes. Other
+prefixes such as `gemini/` need an `api_base` and are sent over the OpenAI SDK.
+Extra fields that direct SDKs refuse (an `extra_body` key that duplicates a
+top-level setting, or `num_retries`) also fail the check rather than falling
+back. Decision models (`client_type: decision`) use their own HTTP client and
+are not affected by `direct`.
 
-## Library interface for the TUI
+## Choose media inputs during setup
+
+A model receives images, audio, video, or PDFs only if its entry lists them in
+`media_inputs`. NOOA assumes new entries are text-only (`media_inputs: []`)
+until you choose formats. See the [media guide](media.md) for examples and
+[migration](model-configuration.md#explicit-media-inputs-migration).
+
+After selecting the model and its request interface, Connect reads the allowed
+public/cached model information **before** offering media configuration. It shows
+advertised formats and the source for only the selected model/route. OpenRouter
+uses `architecture.input_modalities`; Anthropic uses the exact boolean flags
+`capabilities.image_input.supported` and `capabilities.pdf_input.supported`.
+For PDFs, use the specific PDF flag or a generated PDF check; a generic `file`
+listing leaves PDF support unknown. Connect reads only the allowlisted fields,
+not names, descriptions or arbitrary nested flags.
+
+When suggestions are available, choose **Enable listed inputs with test** (the default
+when tests are available), **Enable listed inputs without testing**,
+**Select media inputs manually**, or **Turn media inputs off**. The test option
+appears only when checks are enabled and implemented for that interface. The guided
+wizard still waits for **Test now** before sending any of those requests.
+Suggestions never enable anything themselves, never replace explicit current choices, and
+`--yes` never accepts suggestions without explicit media options. Missing/custom
+metadata uses the existing manual/test choice without an extra suggestion prompt.
+The proposed configuration and test/save/change decision follow media selection.
+`--no-probe --no-catalogue` with an exact model/interface remains offline; editing does not fetch new metadata or
+replace existing settings.
+
+Decision suggestions allow **image only**, even if a shared model list includes
+other inputs. System One JSON reports that image testing is unavailable; use
+OpenAI Decisions, or direct TypeSafe with explicit multipart transport and
+experimental opt-in, or leave images off. Responses/Anthropic audio and video
+listings remain visible as advertised facts, but native Messages and Responses
+implement image/PDF inputs only. Audio/video cannot be selected, enabled without
+testing, or saved on those interfaces. Choose Chat for implemented audio/video
+extensions; backend support remains unverified until tested. No transport is
+chosen from a model listing.
+
+The decision image menu offers **Leave images off** (the new-entry default),
+**Enable images without testing**, and **Test images before enabling**. An entry
+with existing images defaults to **Keep current image settings**. TTY menus use
+arrows and Enter; piped input accepts displayed numbers or `text`, `manual`,
+`test`, and `keep` when available. Image tests use a small generated sample,
+no user files, and the approved check budget.
+
+When there is no advertised suggestion, chat setup keeps its existing choices:
+
+- **Test all media inputs (generated samples).** Connect sends one small
+  generated sample per format to check that this model accepts it through this
+  connection. Formats that pass are enabled for this model entry. The checks
+  check that the model accepts each format. Test the model's answers on your
+  own examples before relying on it.
+- **Choose media inputs manually.** No requests. The choice is saved as
+  unverified.
+
+Before saving, you can keep the result or change it by hand. A failed retest
+keeps a previously enabled format. The summary shows **Images: off**,
+**enabled (test passed)**, **enabled (not confirmed by this test)** for retained
+failed inputs, or **enabled (not tested)** for manual/skipped inputs. These
+settings are separate from the recorded check outcome.
+
+Test limits:
+
+- For chat-family interfaces, image and PDF are tested on all three API styles.
+- Connect tests audio and video only with `--api-style chat`. Elsewhere it says
+  “unsupported media input” and sends no attachment request for those rows.
+  Native Messages/Responses audio/video permissions are invalid, not merely
+  untested. Choose Chat for audio/video extensions. Decision checks remain
+  image-only.
+- **Not available** means the check did not show that this model accepts that
+  format through this connection.
+
+From the command line:
+
+```sh
+# Test formats and enable those that pass:
+uv run nooa connect your-model --as vision --endpoint https://gateway.example/v1 \
+  --api-style chat --api-key-env MODEL_KEY --test-media-inputs image,audio,video,pdf \
+  --yes
+
+```
+
+For agents, first authorize generated formats/samples and the check allowance:
+
+```sh
+uv run nooa connect your-model --stage media --as vision \
+  --endpoint https://gateway.example/v1 --api-style chat --api-key-env MODEL_KEY \
+  --max-tokens 1024 --budget-tokens 16384 --test-media-inputs image,pdf > result.json
+```
+
+Review routing/media evidence before separately saving as shown above. Media
+pass confirms strict typed Boolean access, not general accuracy.
+
+Rules:
+
+- `--media-inputs ''` or `-` means text-only.
+- `--test-media-inputs` cannot be combined with `--media-inputs`, `--no-probe`,
+  or `--probe minimal` / `--probe none`.
+- In stage mode, `--test-media-inputs` works only with `plan`, `media`, and `all`.
+
+## Library calls from NOOA agents
+
+The CLI is a front end for `nooa.unifiedllm.connect`. Agent code can call it
+directly:
 
 ```python
 from nooa.unifiedllm import connect
 
-# Optional, before selecting the model (no generation calls):
-discovery = await connect.discover("https://gateway.example", api_key=temporary_key)
-# The frontend selects an ID from discovery.models.
 proposal = connect.plan(
-    "work-model", selected_model, "chat", discovery.api_base, "MY_MODEL_KEY",
-    catalogue=None,
+    "work", "your-model", "chat", "https://gateway.example/v1", "MODEL_KEY",
+    budget_tokens=65536,
 )
-# Show proposal.entry, proposal.probes and its estimates in the frontend.
-# Frontends own the cost warning or approval. plan() above performs no I/O;
-# run() below sends the approved requests and may incur charges.
-result = await connect.run(proposal, approved="minimal", api_key=temporary_key)
-# Separately obtain approval to save.
-connect.write(result.entry, destination, alias=result.alias)
+result = await connect.check_stage(proposal, "routing")
+# Save only when you mean to:
+# connect.write(result.entry, registry_path, alias=result.alias)
 ```
 
-`run` accepts `all`, `minimal` or `none`. Cancelling its task cancels the HTTP call.
-For inline feedback, consume `run_steps()` instead: it yields `ProbeUpdate`
-objects before and after each check, followed by the final `ConnectResult`.
-Use `contextlib.aclosing` if the frontend may stop reading early. `run()` uses
-the same iterator internally, so CLI and TUI checks cannot diverge.
-For interface detection, consume `check_interfaces(alias, model, api_base,
-api_key_env, ...)`. It yields `ProbeUpdate` events named for each interface and
-then an `InterfaceResult` containing `accepted`, the per-interface `results`,
-and `tokens_charged_to_budget`. Offer only `accepted`, pass the chosen result's
-entry to `plan(existing_entry=...)`, and deduct that charge from the remaining
-budget before running additional probes. This reuses the exact accepted routing
-request; level and tool requests still need their own checks.
-There are no callbacks, terminal imports, prompts, agent instances or tool
-execution. Discovery uses HTTPX; generation checks lazily load UnifiedLLM and
-the selected runtime (direct SDKs by default, or `direct=False` for LiteLLM). No temporary registry entries or global
-registry changes are needed. Each checked client is closed even if its call fails.
-The TUI keeps model selection, confirmation, secret persistence and switching;
-it can call these async functions directly without invoking Click or a subprocess.
-Its existing Ollama-specific adapter remains separate from these three API styles.
+`plan()` sends no requests. `run()`, `run_steps()`, and `check_stage()` send the
+test requests. `discover()`, `catalogue()`, `check_interfaces()`, and `write()`
+match the stages above. The library never prompts or prints.
 
-## What the observations mean
+### Mixed interface discovery
 
-Each record distinguishes successful runtime calls and observed reasoning.
-The stored request is the planned input, not a claim that every field survived
-runtime translation unchanged. Reasoning observations come from readable response
-text or reported reasoning-token usage. A successful call alone does not establish
-that a setting had an effect.
-Reasoning-level checks use an eight-job scheduling puzzle and request only the
-final order. `answer_correct` scores that public answer independently of
-`reasoning_observed`; a correct answer alone does not prove reasoning was enabled.
-The puzzle exists to elicit reasoning, not to prove the model can solve it: a
-wrong answer with reasoning genuinely observed does not flag the check for
-attention. Only a missing reasoning signal does.
-Per-call input, output and reasoning-token counts are included when usage is
-available. The final answer and reasoning text are not saved. The default
-reasoning-check cap is the configured reply limit; a `length` finish is inconclusive.
-An agent can explicitly revise it with `--stage reasoning --max-tokens 65536` within its approved
-`--budget-tokens` limit if more room is needed. There is no automatic retry.
-HTTP 400 is recorded as rejected, not unsupported. Auth, timeout and transient
-failures remain untested; failed routing or auth stops subsequent calls within
-that interface's plan. Interface detection still tries the other styles within
-the same budget, because their authentication conventions differ. Reasoning
-not being visible can be normal, especially at a disabled level. Returned tool
-calls are inspected as data and never executed. Raw model responses, server error
-bodies and credential headers are not retained. Limits and defaults keep their
-catalogue source and are explicitly marked as not probed.
-An endpoint speaking Responses does not imply it accepts explicit cache fields;
-the session checks inspect markers and reuse under the runtime's cache defaults.
-Responses entries use `store: false` and request `reasoning.encrypted_content`;
-an explicit `include: []` opts out. Checks use the same client as an agent.
+The library defaults remain the three chat-family styles. Explicit per-style
+`endpoints` overrides support mixed attempts; every decision style in a mixed
+comparison requires its own full URL. All routes are validated before any
+request, and all attempts share one token budget, bounded deadlines, and zero
+network retries. Decision styles use their own client/validator and never
+receive chat reasoning settings. With a nonempty `api_key` or configured
+`api_key_env`, a mapped endpoint on another origin requires explicit
+`allow_cross_origin_credentials=True`; the default is `False` and refusal occurs
+before any interface request. Origins compare normalized scheme, host and
+effective port, not paths. Only opt in for servers you trust to receive the key.
 
-## Code walkthrough: what and why
+```python
+async for event in connect.check_interfaces(
+    "candidate", "exact-model-id", "https://inference-api.nvidia.com/v1", "HUB_KEY",
+    styles=("chat", "responses", "anthropic", "systemone"),
+    endpoints={"systemone": "https://inference-api.nvidia.com/v1/systemone"},
+    reasoning_template="effort", budget_tokens=8192,
+):
+    if isinstance(event, connect.InterfaceResult):
+        print(event.accepted, event.accepted_client_types)
+        selected = event.results["systemone"].entry
+        # Pass selected as plan(existing_entry=selected) to reuse routing evidence.
+```
 
-- `src/nooa/unifiedllm/connect/__init__.py`: plans data first so either frontend can obtain consent;
-  runs bounded UnifiedLLM calls through the registry's shared client factory;
-  updates one alias while retaining other entries and comments.
-- `packages/nooa-cli/src/nooa_cli/commands/connect.py` and its `_connect_*`
-  helpers: argument parsing, interactive prompts, progress, preview and approval.
-  Click and prompt-toolkit belong to `nooa-cli`, not NOOA core. The CLI imports
-  the framework lazily; the Connect library never imports the CLI. The TUI can
-  call the library directly without these presentation dependencies.
-- `_connect_wizard.py` separates connection, model selection, interfaces,
-  metadata, configuration, checks and save steps. Both frontends use the library's
-  `verdict(entry)` policy; `ProbeRecord` in `connect/_records.py` documents optional
-  evidence fields. Missing fields mean unknown evidence, not zero or unsupported.
-  `public_record()` excludes private requests from public check summaries.
-  After changing an entry in a plan, call `refresh_plan()` to rebuild detached
-  requests and reservations before running checks.
-- `tests/unifiedllm/connect/`: library budgets, exact HTTP bodies, targeted writes
-  and the real registry on main, including a frontend-dependency isolation check.
-- `packages/nooa-cli/tests/test_connect*.py`: wizard approval, prompts, progress,
-  key privacy, cancellation and scripted stages.
+Each result retains its actual `endpoint` (decision) or `api_base` (chat), plus
+transient `provenance.interface_endpoint` describing the selected style/URL and
+whether it came from `endpoints` or the base argument. Accepted interfaces
+record which connections passed. Test media separately and review answers on
+your own examples before relying on the model.
 
-This is an internal organization, not a separately installable UnifiedLLM package.
+### Choose reasoning in guided setup
 
-Request-shape references: [OpenAI Responses](https://developers.openai.com/api/reference/python/resources/responses/methods/create)
-and [OpenRouter model metadata](https://openrouter.ai/docs/api/api-reference/models/list-all-models-and-their-properties).
+After model details and the request interface, Connect offers **Reasoning**
+when the selected route has known controls: for example **Low**, **Medium**,
+**High**, **Xhigh**, **Max**, or **Off**. Native Anthropic adaptive thinking uses
+the exact selected model's advertised mode and effort capabilities; model names
+and generic “supports reasoning” flags do not create choices. Unknown controls
+remain **Model default** rather than guessed settings. Native Decisions do not
+use chat reasoning.
+
+Your choice appears in the proposed configuration. **Change settings** lets you
+choose again; existing manual profiles offer **Keep current settings**.
+**Model default** clears an active level without adding a new override; existing
+base request settings remain intact. **Off** is offered only with a known route
+control. No manual thinking budget is invented and choosing an effort does not
+change your reply limit.
+
+A selected choice is saved as the active `reasoning_level`, alongside its exact
+`reasoning_levels` request settings. Loading that alias in an ordinary client or
+Agent uses the selected setting without additional flags or per-call arguments.
+`reasoning_default` remains descriptive metadata, not activation. Connection and
+session checks use the active selection and its saved reply cap; additional
+declared levels may be checked separately. Advertised support, request acceptance,
+reasoning observed, and replay are distinct results. **Save without testing**
+keeps the choice but clearly marks the setup untested.
+
+
+### Save confidence and replacement ownership
+
+Stage save adds `saved` (write completed), `save_status` (`saved`/`not_saved`)
+and a separate `verification` object without changing version 1 command `ok`.
+`ok: true` on save is **not** a passed test. Inspect `verification.state`:
+`verified` is a current genuine baseline plus all recorded/declared checks;
+`partial` is a good baseline with optional failed, stale or untested scopes;
+`untested` has no current baseline; `failed` retains an acknowledged failed
+input. Scope lists, `baseline_verified`, `current_fingerprint` and public
+`checks` explain the boundary. No whole-model certification is implied.
+Plan/manual saves are allowed as untested. Known failed input requires
+`--allow-unverified` (not `--yes`); absence blocks writing with exit 2 and a
+machine diagnostic. Acknowledged writes retain failure diagnostics and checks.
+Changed active parameters, caps, route or profile invalidate old proof; saved
+legacy `ok` booleans are never stamped into passes. Registry files contain only
+settings; loading an alias does not recover session verification evidence.
+
+Both frontends use compare-and-set consent under the stable registry sidecar:
+`--yes` allows replacing the alias **as reviewed**, not an unseen concurrent
+replacement. A missing alias differs from a null entry. If it changes, reload
+and review/confirm again. Unrelated updates and comments are preserved. The
+library `connect.write(..., expected_alias=...)` accepts a detached local target
+from `connect.alias_target(models, alias)`; omitting it deliberately preserves
+unconditional library writes for compatibility. Frontends must always pass it.
+Never store or report that raw target or a credential-derived revision hash.
+The writer validates normalization and the exact selected-file alias through
+`load_model_entries`, without globally reloading user state. Higher-priority
+layer shadowing is reported separately; use the selected path explicitly.
+
+Human new-key saves use a guarded create-only secret transaction: no unknown
+existing variable (including null) is overwritten. Choose a different approved
+variable name if needed. The secret lock is held through the model commit;
+if that fails, rollback restores only the bytes this transaction owns. Recovery
+holds the existing model sidecar through strict selected-file inspection and
+rollback; any remaining profile referencing the new variable, or an unreadable/
+unknown committed state, keeps the key and reports partial state. A
+concurrent/non-cooperating secret change or rollback failure is left untouched
+and reported as a **partial state**, with no success claim or key value echoed.
+Two filesystem writes are not atomic. Write/Replace declines and cancellation
+before commit do not write either file. Declining key storage still permits the
+model entry but warns that its environment variable must be set before use.
+
+Server metadata **Media types: Images** can include an exact selected server
+`supports_vision: true` advertisement, not a media type named “vision,” a tested
+result or permission. It says nothing about Audio, Video or PDF and does not
+enable inputs. Exact listing media (including empty/false declarations) takes
+priority; false group flags do not imply tested unsupported.
+Transport/API-style/replay-vendor labels remain metadata where the current
+registry does not select a backend from them; saving does not migrate dispatch.

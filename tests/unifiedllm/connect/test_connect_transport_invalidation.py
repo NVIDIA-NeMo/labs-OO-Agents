@@ -78,9 +78,7 @@ async def checked_session(monkeypatch, request):
     checked = await connect.run(proposal, approved="all", api_key="key")
     provenance = checked.entry["provenance"]
     assert {"session", "cache", "reasoning_retention"} <= set(connect.verdict(checked.entry).passed)
-    assert not any(
-        "Saved reply budget unverified" in w for w in connect.entry_warnings(checked.entry)
-    )
+    assert not any("Reply limit not tested" in w for w in connect.entry_warnings(checked.entry))
     provenance["interfaces"] = {style: deepcopy(provenance["probes"]["routing"])}
     provenance["catalogue"] = {"id": "fixture-model"}
     provenance["custom_note"] = {"source": "user", "value": "retain me"}
@@ -110,7 +108,7 @@ async def test_detached_switch_discards_all_certification(
 
     mock_http(monkeypatch, forbidden)
     assert not connect.verdict(edited).passed
-    assert any("Saved reply budget unverified" in w for w in connect.entry_warnings(edited))
+    assert any("Reply limit not tested" in w for w in connect.entry_warnings(edited))
     if path == "refresh":
         entry = connect.refresh_plan(changed).entry
     elif path == "run":
@@ -145,7 +143,7 @@ async def test_detached_switch_discards_all_certification(
     assert not {"session", "cache", "reasoning_retention"} & set(connect.verdict(entry).passed)
     if path != "stage":
         assert not connect.verdict(entry).passed
-        assert any("Saved reply budget unverified" in w for w in connect.entry_warnings(entry))
+        assert any("Reply limit not tested" in w for w in connect.entry_warnings(entry))
         assert all(r["outcome"] != "accepted" for r in evidence["probes"].values())
     if path != "replan":
         assert evidence["catalogue"] == {"id": "fixture-model"}
@@ -174,8 +172,12 @@ def test_booleanless_legacy_evidence_is_not_certification(direct, transport):
     assert not connect.verdict(entry).passed
     configured = connect.configure_entry(entry, direct=direct)
     assert configured["direct"] is direct
-    assert configured["provenance"]["probes"] == {}
-    assert "session_checks" not in configured["provenance"]
+    # Records may stay as history, but none certifies the selected transport:
+    # they carry no current verification fingerprint.
+    provenance = configured["provenance"]
+    for record in (*provenance["probes"].values(), *provenance.get("session_checks", {}).values()):
+        assert record["verification_current"] is False
+    assert not connect.verdict(configured).passed
 
 
 def test_isolated_mismatched_interface_record_invalidates_untagged_summaries():
@@ -214,7 +216,14 @@ def test_aggregate_only_evidence_cannot_be_relabeled(direct, tagged):
     entry.update(direct=not direct, transport="litellm" if direct else "direct")
     assert not connect.verdict(entry).passed
     configured = connect.configure_entry(entry)
-    assert "session_checks" not in configured["provenance"]
+    if tagged:
+        assert "session_checks" not in configured["provenance"]
+    else:
+        # Untagged records name no transport; they are kept as history but carry
+        # no current verification fingerprint, so they certify nothing.
+        records = configured["provenance"].get("session_checks", {}).values()
+        assert all(record["verification_current"] is False for record in records)
+    assert not connect.verdict(configured).passed
     assert "encrypted_reasoning" not in configured["provenance"]
 
 
@@ -230,3 +239,40 @@ def test_transport_switch_resets_only_learned_encrypted_opt_out(direct, learned)
     configured = connect.configure_entry(entry, direct=not direct)
     assert configured["include"] == (["reasoning.encrypted_content"] if learned else [])
     assert "encrypted_reasoning" not in configured["provenance"]
+
+
+@pytest.mark.parametrize("model", ["bedrock/model", "vertex_ai/model"])
+@pytest.mark.asyncio
+async def test_connect_route_without_direct_sdk_fails_check_without_fallback(monkeypatch, model):
+    """Connect saves its direct default for any route; one with no direct SDK fails its check."""
+    sent = []
+    mock_http(
+        monkeypatch,
+        lambda request: sent.append(request) or httpx.Response(200, json=response_body("chat")),
+    )
+    proposal = connect.plan("test", "model", "chat", "https://api.test/v1", "")
+    entry = connect.configure_entry({**proposal.entry, "model_name": model})
+    assert entry["direct"] is True and entry["transport"] == "direct"
+    result = await connect.check_stage(replace(proposal, entry=entry), "routing", api_key="key")
+    record = result.entry["provenance"]["probes"]["routing"]
+    assert sent == []  # no HTTP, and no silent LiteLLM fallback
+    assert record["outcome"] != "accepted" and record["error"] == "ValueError"
+    assert not connect.routing_allows_save(result.entry, result.entry)
+    # --litellm (direct=False) is the explicit way to check such a route.
+    litellm_entry = connect.configure_entry(entry, direct=False)
+    assert litellm_entry["direct"] is False and litellm_entry["transport"] == "litellm"
+
+
+@pytest.mark.asyncio
+async def test_connect_gemini_prefix_with_endpoint_uses_openai_sdk(monkeypatch):
+    """gemini/ has no native SDK here; with an api_base it goes over the OpenAI SDK."""
+    sent = []
+    mock_http(
+        monkeypatch,
+        lambda request: sent.append(request) or httpx.Response(200, json=response_body("chat")),
+    )
+    proposal = connect.plan("test", "model", "chat", "https://api.test/v1", "")
+    entry = connect.configure_entry({**proposal.entry, "model_name": "gemini/model"})
+    result = await connect.check_stage(replace(proposal, entry=entry), "routing", api_key="key")
+    assert [request.url.path for request in sent] == ["/v1/chat/completions"]
+    assert result.entry["provenance"]["probes"]["routing"]["transport"] == "direct"
