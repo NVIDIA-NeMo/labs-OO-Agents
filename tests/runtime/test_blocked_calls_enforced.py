@@ -239,6 +239,31 @@ def test_validator_allows_names_the_cell_rebinds(code, name, obj):
     assert _validate(code, exec_globals) == []
 
 
+@pytest.mark.parametrize(
+    "code,exec_globals",
+    [
+        (
+            "def helper():\n    ev = asyncio.Event()\nev.wait(0)",
+            {"asyncio": asyncio, "ev": threading.Event()},
+        ),
+        (
+            "import threading\nev = threading.Event()\ndef helper():\n    ev = asyncio.Event()\n"
+            "ev.wait(0)",
+            None,
+        ),
+        (
+            "lock = threading.Lock()\nhelpers = [lock for lock in [asyncio.Lock()]]\nlock.acquire()",
+            {"asyncio": asyncio, "threading": threading},
+        ),
+    ],
+    ids=["earlier cell", "same cell", "comprehension"],
+)
+def test_validator_ignores_nested_scope_bindings(code, exec_globals):
+    """A name bound inside a def/comprehension leaves the cell's blocking object in place."""
+    issues = _validate(code, exec_globals)
+    assert issues and issues[0].code == "E310", code
+
+
 @pytest.mark.parametrize("name", list(ALLOWED))
 def test_validator_allows_alternatives(name):
     assert _validate(ALLOWED[name]) == []

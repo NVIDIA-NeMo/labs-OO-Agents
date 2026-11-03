@@ -1275,6 +1275,8 @@ class _BlockingCallVisitor(ast.NodeVisitor):
         self.cell_members: dict[str, tuple[str, str]] = {}  # alias -> (module, name)
         # Names this cell assigns: they no longer mean an earlier cell's object.
         self.cell_bound: set[str] = set()
+        # >0 inside a def/lambda/class/comprehension body, whose names are local to it.
+        self.scope_depth = 0
 
     def _resolve_module_from_call(self, node: ast.Call) -> str | None:
         """Resolve the module of a chained call like asyncio.get_event_loop().
@@ -1344,9 +1346,20 @@ class _BlockingCallVisitor(ast.NodeVisitor):
                         self.cell_members[alias.asname or alias.name] = (child.module, alias.name)
         self.generic_visit(node)
 
+    def _visit_nested_scope(self, node: ast.AST) -> Any:
+        self.scope_depth += 1
+        try:
+            self.generic_visit(node)
+        finally:
+            self.scope_depth -= 1
+
+    visit_FunctionDef = visit_AsyncFunctionDef = visit_Lambda = visit_ClassDef = _visit_nested_scope
+    visit_ListComp = visit_SetComp = visit_DictComp = visit_GeneratorExp = _visit_nested_scope
+
     def visit_Name(self, node: ast.Name) -> Any:
         """Record every name the cell binds (assignment, for/with/walrus targets, ...)."""
-        if isinstance(node.ctx, ast.Store):
+        # A store inside a nested body binds a local there, not the cell's name.
+        if isinstance(node.ctx, ast.Store) and not self.scope_depth:
             self.cell_bound.add(node.id)
             self.tracked_locals.pop(node.id, None)
 
@@ -1376,7 +1389,11 @@ class _BlockingCallVisitor(ast.NodeVisitor):
             matched = match_blocked_module(ref[0], self.blocked_calls) if ref else None
             if ref and matched:
                 for name in names:
-                    self.tracked_locals[name] = (matched, ref[1])
+                    if self.scope_depth:
+                        # Track the nested local without replacing the cell's binding.
+                        self.tracked_locals.setdefault(name, (matched, ref[1]))
+                    else:
+                        self.tracked_locals[name] = (matched, ref[1])
         else:
             ref = self._resolve_ref(value)
             if ref and self._blocked_call(ref[0], ref[1]):
