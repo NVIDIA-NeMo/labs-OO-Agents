@@ -74,27 +74,30 @@ in the volatile suffix so the stable prefix remains reusable.
 The default context view marks where that volatile suffix begins. UnifiedLLM
 maps this boundary to provider-specific cache metadata when supported.
 
-Per-method event selection belongs to the context view:
+Per-method event selection belongs to the context view. To change only the
+history, subclass the strategy's default view and override `history()`; the
+system prompt, context blocks, cache boundary, and budget stay as they are:
 
 ```python
-from nooa import is_model_visible, replayable, strategy
+from nooa import strategy
+from nooa.default_context_view import CodeActView, visible_events
 
-class CurrentCallView:
-    async def assemble(self, agent, call):
-        for event in replayable(
-            event
-            for event in agent.event_manager.values()
-            if call.id in event.related_call_ids and is_model_visible(event)
-        ):
-            yield event
+class CurrentCallView(CodeActView):
+    def history(self, agent, call):
+        return (event for event in visible_events(agent) if call.id in event.related_call_ids)
 
 @strategy(context_view=CurrentCallView())
 async def solve(self, problem: str) -> str:
-    """Solves with a clean view: only this call's events, no prior history."""
+    """Solves with only this call's events, no prior history."""
     ...
 ```
 
-Pass any event selection through `replayable()` after filtering. It gives tool calls without a
+Use `PredictView` or `PurePythonView` as the base for those strategies. A view
+written from scratch is the whole request: if it yields only events, the model
+sees no system prompt, instructions, or context blocks.
+
+The default views pass `history()` through `replayable()`. In a view written
+from scratch, pass any event selection through `replayable()` after filtering. It gives tool calls without a
 recorded result an outcome-unknown result and omits tool-call turns or results the selection
 separated, on copies only; stored history is unchanged. Rendering rejects such gaps with
 `UnsupportedContextLayout` instead of repairing them.
