@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import threading
 import tracemalloc
 from pathlib import Path
 
@@ -32,6 +33,7 @@ from nooa.tools._bounded_io import (
     FileTooLargeError,
     iter_lines_keepends,
     read_specific_lines,
+    read_whole_file_checked,
 )
 from nooa.tools.shell_tools import Match, ShellTools
 
@@ -390,3 +392,72 @@ async def test_write_file_creates_parent_dirs(sh, tmp_path):
 def test_default_budget_is_documented_and_sane():
     assert DEFAULT_MAX_FILE_BYTES == 8 * 1024 * 1024
     assert ShellTools(cwd=os.getcwd()).max_file_bytes == DEFAULT_MAX_FILE_BYTES
+
+
+def test_whole_file_read_enforces_budget_when_stat_underreports(tmp_path, monkeypatch):
+    """The byte ceiling must hold even when pathname metadata becomes stale."""
+    path = tmp_path / "growing.txt"
+    path.write_text("x" * 1_000_000)
+
+    class _StaleStat:
+        st_size = 4
+
+    real_stat = Path.stat
+
+    def stale_size_only_for_target(candidate, *args, **kwargs):
+        if candidate == path:
+            return _StaleStat()
+        return real_stat(candidate, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", stale_size_only_for_target)
+
+    with pytest.raises(FileTooLargeError):
+        read_whole_file_checked(path, 10, hint="raise the limit")
+
+
+@pytest.mark.skipif(not os.path.exists("/dev/zero"), reason="needs /dev/zero")
+def test_whole_file_read_is_bounded_for_devices_that_report_size_zero():
+    """/dev/zero reports st_size 0 and never ends; the read must stop at the limit."""
+    with pytest.raises(FileTooLargeError, match="over the 1,024-byte limit"):
+        read_whole_file_checked(Path("/dev/zero"), 1024, hint="raise the limit")
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs FIFOs")
+def test_whole_file_read_is_bounded_for_fifos(tmp_path):
+    """A FIFO reports st_size 0; the read must stop at the limit, not drain it."""
+    fifo = tmp_path / "pipe"
+    os.mkfifo(fifo)
+
+    def writer():
+        try:
+            with open(fifo, "wb") as handle:
+                handle.write(b"y" * 10_000)
+        except BrokenPipeError:
+            pass  # the reader stops early by design
+
+    thread = threading.Thread(target=writer, daemon=True)
+    thread.start()
+    with pytest.raises(FileTooLargeError):
+        read_whole_file_checked(fifo, 100, hint="raise the limit")
+    thread.join(timeout=5)
+
+
+def test_whole_file_read_keeps_read_text_decoding(tmp_path):
+    """Universal newlines and the default encoding still match Path.read_text()."""
+    path = tmp_path / "mixed.txt"
+    path.write_bytes(b"a\r\nb\rc\n")
+    assert read_whole_file_checked(path, 1024, hint="") == path.read_text() == "a\nb\nc\n"
+
+
+def test_shell_tools_rejects_nonpositive_file_budget(tmp_path):
+    """A configured byte ceiling must be a meaningful positive bound."""
+    for invalid in (0, -1):
+        with pytest.raises(ValueError, match="max_file_bytes.*positive"):
+            ShellTools(cwd=str(tmp_path), max_file_bytes=invalid)
+
+
+@pytest.mark.parametrize("invalid", [True, 1.5, "8"])
+def test_shell_tools_rejects_non_integer_file_budget(tmp_path, invalid):
+    """Booleans, floats and strings are not byte counts."""
+    with pytest.raises(ValueError, match="max_file_bytes"):
+        ShellTools(cwd=str(tmp_path), max_file_bytes=invalid)

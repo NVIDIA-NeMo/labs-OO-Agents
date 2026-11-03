@@ -480,6 +480,12 @@ class ShellTools(Skill):
             or default_timeout <= 0
         ):
             raise ValueError("default_timeout must be a positive finite number of seconds")
+        if (
+            isinstance(max_file_bytes, bool)
+            or not isinstance(max_file_bytes, int)
+            or max_file_bytes <= 0
+        ):
+            raise ValueError("max_file_bytes must be a positive whole number of bytes")
         super().__init__(**kwargs)
         self.default_timeout = float(default_timeout)
         self.cwd = Path(cwd).resolve()

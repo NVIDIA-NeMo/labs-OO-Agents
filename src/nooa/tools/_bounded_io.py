@@ -33,6 +33,8 @@ locale default encoding and universal-newline translation, the same as
 
 from __future__ import annotations
 
+import io
+import os
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -185,16 +187,28 @@ def read_specific_lines(
 def read_whole_file_checked(path: Path, max_bytes: int, *, hint: str) -> str:
     """Read an entire file, refusing above ``max_bytes``.
 
-    The size is taken from ``stat()`` before opening, so an oversized file is
-    rejected without ever being allocated.
+    The file is opened once and read through that descriptor, at most
+    ``max_bytes + 1`` bytes, so the limit holds even when the reported size is
+    wrong: devices such as ``/dev/zero``, FIFOs, ``/proc`` entries, and files
+    that grow after their size was checked. A regular file that ``fstat``
+    already shows to be too large is refused before any data is read.
+
+    Decoding matches ``Path.read_text()``: locale default encoding and
+    universal newlines.
 
     Raises:
         FileTooLargeError: The file is larger than ``max_bytes``.
-        OSError: The file could not be stat'd or read.
+        OSError: The file could not be opened or read.
     """
-    size = path.stat().st_size
-    if size > max_bytes:
+    with open(path, "rb") as handle:
+        size = os.fstat(handle.fileno()).st_size
+        if size > max_bytes:
+            raise FileTooLargeError(
+                path, size, max_bytes, hint, f"is {size:,} bytes, over the {max_bytes:,}-byte limit"
+            )
+        data = handle.read(max_bytes + 1)
+    if len(data) > max_bytes:
         raise FileTooLargeError(
-            path, size, max_bytes, hint, f"is {size:,} bytes, over the {max_bytes:,}-byte limit"
+            path, len(data), max_bytes, hint, f"is over the {max_bytes:,}-byte limit"
         )
-    return path.read_text()
+    return io.TextIOWrapper(io.BytesIO(data)).read()
