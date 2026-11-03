@@ -50,6 +50,7 @@ from nooa.events import (
 from nooa.llm_types import CacheBoundary, LLMResponse, LLMUsage
 from nooa.runtime.context_vars import (
     _current_event_format_var,
+    _generation_call_var,
     _in_exec_middleware,
     _in_generation_session,
     _parent_agent_var,
@@ -816,7 +817,7 @@ class ActorRuntime:
         Example:
             # Inside a context view's assemble(agent, call):
             for event in agent.event_manager.values():
-                if call.invocation_id in event.related_call_ids:
+                if call.id in event.related_call_ids:
                     yield event
 
             # Or directly in code
@@ -2959,11 +2960,16 @@ class ActorRuntime:
                 original_method = getattr(method, "_original", method)
                 pre_ellipsis_code = get_pre_ellipsis_code(original_method)
 
-                # Use the call_id already pushed by the wrapper so events added
-                # during this call have call_id matching the agent
-                # call stack and runtime.current_call.id. CodeAct stores its
-                # display-only Task event tag separately on call.task_tag.
-                call_id = self._agent_call_id or str(uuid4())
+                # The method wrapper assigns the call id, also under @no_trace.
+                # Paths that bypass it on this agent (standalone functions) get
+                # a fresh id. CodeAct stores its display-only Task event tag
+                # separately on call.task_tag.
+                dispatched = _generation_call_var.get()
+                if dispatched is not None and dispatched[0] is self.agent.event_manager:
+                    call_id = dispatched[1]
+                else:
+                    call_id = str(uuid4())
+                enclosing_call = _current_call_var.get()
 
                 # Snapshot inherited + local context before CurrentCall is built.
                 parent_ctx = _decorator_context_var.get()
@@ -2980,9 +2986,7 @@ class ActorRuntime:
                     docstring=expanded_docstring,
                     args=args,
                     kwargs=merged_kwargs,
-                    parent_id=self._agent_call_stack[-2]
-                    if len(self._agent_call_stack) >= 2
-                    else None,
+                    parent_id=enclosing_call.id if enclosing_call is not None else None,
                     is_async=inspect.iscoroutinefunction(method),
                     return_type=return_type,
                     pre_ellipsis_code=pre_ellipsis_code,
@@ -3006,7 +3010,6 @@ class ActorRuntime:
                     _method=method,
                     _decorator_context=merged_ctx,
                     _scoped_context=_scoped_blocks_var.get(),
-                    _context_call_id=call_id,
                     # Preserve Annotated parameter overrides on top-level calls,
                     # just as the nested method wrapper does.
                     param_specs=CurrentCall.from_method(method).param_specs,
@@ -3015,6 +3018,9 @@ class ActorRuntime:
                 # Store current call context in context vars for RuntimeServices.generate()
                 # Using context vars (not instance attrs) allows parallel nested calls
                 call_token = _current_call_var.set(call)
+                generation_call_token = _generation_call_var.set(
+                    (self.agent.event_manager, call_id)
+                )
                 method_token = _current_method_var.set(method)
                 llm_token = _current_llm_var.set(llm_client)
                 decision_model_token = _current_decision_model_var.set(decision_model)
@@ -3042,6 +3048,7 @@ class ActorRuntime:
                 finally:
                     # Restore previous context var values
                     _current_call_var.reset(call_token)
+                    _generation_call_var.reset(generation_call_token)
                     _current_method_var.reset(method_token)
                     _current_llm_var.reset(llm_token)
                     _current_decision_model_var.reset(decision_model_token)
@@ -3161,7 +3168,7 @@ class ActorRuntime:
                 base_call = CurrentCall.from_method(method, call_args, call_kwargs or {})
             except (OSError, TypeError):
                 base_call = CurrentCall(
-                    id=self._agent_call_id or str(uuid4()),
+                    id=str(uuid4()),
                     method_name=getattr(method, "__name__", "generate"),
                     decorator="plan",
                     args=call_args,
@@ -3213,7 +3220,6 @@ class ActorRuntime:
             _method=method,
             _decorator_context=decorator_context,
             _scoped_context=_scoped_blocks_var.get(),
-            _context_call_id=base_call._context_call_id or self._agent_call_id or base_call.id,
         )
 
         view = _current_context_view_var.get()

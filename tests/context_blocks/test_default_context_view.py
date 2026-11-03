@@ -23,7 +23,7 @@ from nooa.events import Task
 from nooa.strategies.current_call import CurrentCall
 
 
-def _call(agent, *, strategy=None, decorator=None, scoped=None, invocation_id=None):
+def _call(agent, *, strategy=None, decorator=None, scoped=None):
     return CurrentCall(
         id="view-call",
         method_name="run",
@@ -33,7 +33,6 @@ def _call(agent, *, strategy=None, decorator=None, scoped=None, invocation_id=No
         _context_format=agent._truncation.context_block_format,
         _decorator_context=decorator,
         _scoped_context=scoped,
-        _context_call_id=invocation_id,
     )
 
 

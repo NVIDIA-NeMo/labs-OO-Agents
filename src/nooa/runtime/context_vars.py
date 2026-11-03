@@ -34,6 +34,14 @@ _parent_agent_var: contextvars.ContextVar["Agent | None"] = contextvars.ContextV
     "parent_agent", default=None
 )
 
+# The active generation-method call as (owning EventManager, call id). Events an
+# EventManager records take this id when it owns the call. Separate from the
+# agent call stack: that stack serves tracing, includes deterministic methods,
+# and skips @no_trace methods.
+_generation_call_var: contextvars.ContextVar[tuple[object, str] | None] = contextvars.ContextVar(
+    "generation_call", default=None
+)
+
 # Task-local stack for agent call tracking.
 # Uses immutable tuples to prevent accidental mutation and ensure
 # correct behavior with asyncio.gather() and other parallel execution patterns.

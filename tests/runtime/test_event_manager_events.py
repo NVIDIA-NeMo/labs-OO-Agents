@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for EventManager event bus pattern."""
 
+from contextlib import contextmanager
 from unittest.mock import MagicMock
 
 import pytest
@@ -9,6 +10,7 @@ import pytest
 from nooa import Agent
 from nooa.context_blocks import ResultStatus
 from nooa.events import LLMResponse, PythonOutput, Task
+from nooa.runtime.context_vars import _generation_call_var
 from nooa.runtime.event_manager import EventManager
 from nooa.runtime.events import EventsApi
 from nooa.unifiedllm import FakeLLMClient
@@ -308,52 +310,49 @@ class TestEventManagerQuery:
         assert all(e.call_id == "call_1" for e in call_1_events)
 
 
+@contextmanager
+def generation_call(manager: EventManager, call_id: str):
+    token = _generation_call_var.set((manager, call_id))
+    try:
+        yield
+    finally:
+        _generation_call_var.reset(token)
+
+
 class TestCallIdAutoInjection:
-    """Tests for automatic call_id injection from the agent call stack ContextVar."""
+    """Tests for automatic call_id injection from the active generation call."""
 
-    def test_add_auto_injects_call_id_nested_stacks(self):
-        """Nested call stacks should inject the innermost call_id."""
-        from nooa.runtime.context_vars import _pop_agent_call_id, _push_agent_call_id
-
+    def test_add_auto_injects_call_id_nested_calls(self):
+        """Nested generation calls should inject the innermost call_id."""
         manager = EventManager()
 
-        _push_agent_call_id("outer-call")
-        try:
+        with generation_call(manager, "outer-call"):
             manager.add(Task(prompt="Outer event"))
-
-            _push_agent_call_id("inner-call")
-            try:
+            with generation_call(manager, "inner-call"):
                 manager.add(Task(prompt="Inner event"))
-            finally:
-                _pop_agent_call_id()
-
-            # After inner pops, we're back to outer
             manager.add(Task(prompt="Back to outer"))
-        finally:
-            _pop_agent_call_id()
 
         outer_events = manager.filter(call_id="outer-call")
-        assert len(outer_events) == 2
-        assert outer_events[0].prompt == "Outer event"
-        assert outer_events[1].prompt == "Back to outer"
-
+        assert [e.prompt for e in outer_events] == ["Outer event", "Back to outer"]
         inner_events = manager.filter(call_id="inner-call")
-        assert len(inner_events) == 1
-        assert inner_events[0].prompt == "Inner event"
+        assert [e.prompt for e in inner_events] == ["Inner event"]
 
     def test_add_auto_injects_call_id_on_unrecorded_events(self):
         """call_id should be injected even for record=False events."""
-        from nooa.runtime.context_vars import _pop_agent_call_id, _push_agent_call_id
-
         manager = EventManager()
-        _push_agent_call_id("call-xyz")
-        try:
+        with generation_call(manager, "call-xyz"):
             event = Task(prompt="Not recorded")
             manager.add(event, record=False)
-            # call_id is injected before the record decision
-            assert event.call_id == "call-xyz"
-        finally:
-            _pop_agent_call_id()
+        # call_id is injected before the record decision
+        assert event.call_id == "call-xyz"
+
+    def test_other_managers_call_is_not_injected(self):
+        """A generation call of another agent does not own this manager's events."""
+        manager = EventManager()
+        with generation_call(EventManager(), "other-agent-call"):
+            event = Task(prompt="Recorded by a subagent helper")
+            manager.add(event)
+        assert event.call_id is None
 
 
 class TestEventsViewCallId:
@@ -361,21 +360,12 @@ class TestEventsViewCallId:
 
     def test_events_view_filter_by_call_id(self):
         """Events.filter(call_id=...) delegates to EventManager."""
-        from nooa.runtime.context_vars import _pop_agent_call_id, _push_agent_call_id
-
         agent = _TestAgent()
 
-        _push_agent_call_id("call-aaa")
-        try:
+        with generation_call(agent.event_manager, "call-aaa"):
             agent.event_manager.add(Task(prompt="Task A"))
-        finally:
-            _pop_agent_call_id()
-
-        _push_agent_call_id("call-bbb")
-        try:
+        with generation_call(agent.event_manager, "call-bbb"):
             agent.event_manager.add(Task(prompt="Task B"))
-        finally:
-            _pop_agent_call_id()
 
         events = EventsApi(agent)
 

@@ -43,6 +43,7 @@ from uuid import uuid4
 from nooa.context_blocks.scoped import _scoped_blocks_var
 from nooa.events import AfterAgentCall, BeforeAgentCall
 from nooa.runtime.context_vars import (
+    _generation_call_var,
     _get_agent_call_stack,
     _in_generation_session,
     _parent_agent_var,
@@ -261,10 +262,16 @@ def create_agent_method_wrapper(
                 # Shared dispatch logic used by both middleware and fast path.
                 async def _dispatch(a: tuple[Any, ...], kw: dict[str, Any]) -> Any:
                     if needs_generation:
-                        if _in_generation_session.get():
-                            return await runtime._execute_task(wrapper, a, kw)
-                        else:
-                            return await runtime._call_plan(wrapper, a, kw)
+                        # The generation call keeps this id even under @no_trace,
+                        # which only changes what the agent call stack records.
+                        call_token = _generation_call_var.set((self.event_manager, call_id))
+                        try:
+                            if _in_generation_session.get():
+                                return await runtime._execute_task(wrapper, a, kw)
+                            else:
+                                return await runtime._call_plan(wrapper, a, kw)
+                        finally:
+                            _generation_call_var.reset(call_token)
                     else:
                         return await original_func(self, *a, **kw)
 

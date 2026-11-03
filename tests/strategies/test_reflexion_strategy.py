@@ -67,7 +67,7 @@ async def test_reflexion_view_binds_base_strategy_without_mutating_outer_call():
     assert items[0].content == "base context"
     assert seen[0][0] is owner
     assert seen[0][1].strategy is base
-    assert seen[0][1].invocation_id == call.invocation_id
+    assert seen[0][1].id == call.id
     assert call.strategy is wrapper
 
 
