@@ -433,12 +433,12 @@ async def test_search_matches_mcp_tool_names_after_skills(agent):
     found = agent.skills.search("permit").splitlines()
     assert found[0].startswith("hcb_resources (mcp, active")
     assert found[1:] == [
-        "hcb_resources has issue_parking_permit (MCP tool: self.hcb_resources.issue_parking_permit)",
-        "hcb_resources has permit_status (MCP tool: self.hcb_resources.permit_status)",
+        "hcb_resources has issue_parking_permit (MCP tool: await self.hcb_resources.issue_parking_permit(...))",
+        "hcb_resources has permit_status (MCP tool: await self.hcb_resources.permit_status(...))",
     ]
     # Tool matches are bounded by the limit.
     assert agent.skills.search("permit", limit=1).splitlines()[1:] == [
-        "hcb_resources has issue_parking_permit (MCP tool: self.hcb_resources.issue_parking_permit)",
+        "hcb_resources has issue_parking_permit (MCP tool: await self.hcb_resources.issue_parking_permit(...))",
         "... 1 more tools; narrow the query",
     ]
     # Short words do not match tool names.
@@ -459,7 +459,7 @@ async def test_a_client_server_shown_under_its_key_is_called_on_its_attribute(ag
     await agent.skills.activate(["mcp.greeter"])
     assert agent.greeter is agent.skills.registry["mcp.greeter"]
     found = agent.skills.search("wave")
-    assert "mcp.greeter has wave_hello (MCP tool: self.greeter.wave_hello)" in found
+    assert "mcp.greeter has wave_hello (MCP tool: await self.greeter.wave_hello(...))" in found
     assert "self.mcp." not in found
     assert "self.mcp." not in agent.skills.search("greeter")
     assert "call: await self.greeter.<tool>(...)" in agent.skills.status()
@@ -522,4 +522,4 @@ def test_share_from_keeps_a_childs_skill_at_the_same_attribute(tmp_path):
 async def test_search_matches_a_connected_mcp_servers_tools(agent):
     approve(agent, "probe")
     await agent.skills.activate(["probe"])
-    assert "probe has probe (MCP tool: self.probe.probe)" in agent.skills.search("probe")
+    assert "probe has probe (MCP tool: await self.probe.probe(...))" in agent.skills.search("probe")

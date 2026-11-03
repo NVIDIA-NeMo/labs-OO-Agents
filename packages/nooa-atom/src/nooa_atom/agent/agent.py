@@ -33,7 +33,7 @@ from nooa_atom.agent.work_manager import Job, JobEvent, Throttle, WorkManager
 from nooa_atom.agent.work_shell import CommandResult, Shell
 from nooa_atom.agent.work_subagent import Question, Subagent, note_running_job
 from nooa_atom.session.items import TaskResult  # noqa: F401
-from nooa_atom.skills.manager import SkillManager
+from nooa_atom.skills.manager import SkillManager, call_form
 from nooa_atom.tools.repo_tools import RepoTools
 from nooa_atom.tools.todo_list import Todo, TodoList  # noqa: F401
 
@@ -182,7 +182,7 @@ def _mcp_tool_hint(agent: Any, error: BaseException, formatted: str) -> str | No
     if server is None:
         return None
     get_harness_metrics().mcp_tool_name_hint(f"{server}.{name}")
-    return f"`{name}` is a tool of MCP server {server}: await self.{server}.{name}(...)"
+    return f"`{name}` is a tool of MCP server {server}: {call_form(server, name)}"
 
 
 def _name_error_hint(agent: Any, error: BaseException, formatted: str) -> str | None:

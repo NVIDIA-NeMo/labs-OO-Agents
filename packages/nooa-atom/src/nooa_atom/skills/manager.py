@@ -65,7 +65,7 @@ class SkillEntry:
         if self.kind == "mcp" and self.state in ("active", "connected"):
             # The call form is otherwise invisible: attached servers are hidden
             # from doc(self).
-            state += f"; call: await self.{_call_attr(self.name, self.key)}.<tool>(...)"
+            state += f"; call: {call_form(_call_attr(self.name, self.key))}"
         text = f"{self.name} ({self.kind}, {state}): {self.description}"
         return text if len(text) <= 160 else text[:159] + "…"
 
@@ -80,6 +80,11 @@ def _public_methods(obj: Any) -> list[str]:
             if not name.startswith("_") and callable(value) and not is_hidden_method(value):
                 names.add(name)
     return sorted(names)
+
+
+def call_form(attr: str, tool: str = "<tool>") -> str:
+    """How a cell calls an MCP server's tool: ``await self.<attr>.<tool>(...)``."""
+    return f"await self.{attr}.{tool}(...)"
 
 
 def _server_tools(tool: Any) -> list[str]:
@@ -163,11 +168,11 @@ class SkillManager(Skill):
         tools.sort(key=lambda item: item[:3])
         shown = min(limit, _TOOL_MATCHES_SHOWN)
         for _, _, tool, entry in tools[:shown]:
-            kind = "MCP tool" if entry.kind == "mcp" else "method"
-            call = (
-                _call_attr(entry.name, entry.key) if entry.kind == "mcp" else attr_name(entry.name)
-            )
-            lines.append(f"{entry.name} has {tool} ({kind}: self.{call}.{tool})")
+            if entry.kind == "mcp":
+                call = f"MCP tool: {call_form(_call_attr(entry.name, entry.key), tool)}"
+            else:
+                call = f"method: self.{attr_name(entry.name)}.{tool}"
+            lines.append(f"{entry.name} has {tool} ({call})")
         if len(tools) > shown:
             lines.append(f"... {len(tools) - shown} more tools; narrow the query")
         return "\n".join(lines)
@@ -268,14 +273,13 @@ class SkillManager(Skill):
                 attr = _call_attr(name, key)
                 if kind == "mcp" and attr in connected:
                     continue  # named, with its call form, on the MCP line
-                active.append(
-                    f"{name} (mcp: await self.{attr}.<tool>(...))" if kind == "mcp" else name
-                )
+                mcp = kind == "mcp"
+                active.append((mcp, f"{name} (mcp: {call_form(attr)})" if mcp else name))
             else:
                 rest += 1
                 if _KIND_LABELS[kind] not in rest_kinds:
                     rest_kinds.append(_KIND_LABELS[kind])
-        mcp_last = sorted(active, key=lambda item: (" (mcp: await self." in item, item))
+        mcp_last = [text for _, text in sorted(active)]
         lines = [f"Active: {', '.join(mcp_last) or 'none'}"]
         if mcp_line:
             lines.append(mcp_line)
@@ -408,10 +412,10 @@ class SkillManager(Skill):
         more = len(servers) - _MCP_SERVERS_SHOWN
         if more > 0:
             shown.append(f"+{more} more: self.skills.search('query')")
-        target = f"self.{servers[0][1]}" if len(servers) == 1 else "self.<server>"
+        attr = servers[0][1] if len(servers) == 1 else "<server>"
         return (
             f"MCP servers (connected, no activation needed): {', '.join(shown)}; "
-            f"list tools: print(doc({target})); call: await {target}.<tool>(...)"
+            f"list tools: print(doc(self.{attr})); call: {call_form(attr)}"
         )
 
     @hidden
@@ -642,12 +646,7 @@ class SkillManager(Skill):
             return self.mcp.tool_names(entry.key) if self.mcp is not None else []
         if entry.kind == "text" or entry.key not in self.registry.loaded():
             return []
-        skill = self.registry[entry.key]
-        return (
-            tool_names(skill)
-            if entry.kind == "mcp" and tool_names(skill)
-            else _public_methods(skill)
-        )
+        return _server_tools(self.registry[entry.key])
 
     def _mcp_tool(self, entry: SkillEntry) -> Any:
         if entry.key.startswith("mcp."):
