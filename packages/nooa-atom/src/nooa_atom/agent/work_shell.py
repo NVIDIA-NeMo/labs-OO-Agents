@@ -385,7 +385,7 @@ class Shell:
         print(r.returncode, r.stdout)
 
     Reuse ``sh``: FIFO commands preserve cwd, variables, options and traps.
-    A new Shell starts fresh in the workspace; bash starts on first use.
+    A new Shell starts a fresh ``bash`` in the workspace directory on first use.
     A Shell runs one command at a time: use another Shell for a second concurrent command.
 
     ``timeout`` defaults to 600 s. Timeout returns 124 with ``timed_out=True``

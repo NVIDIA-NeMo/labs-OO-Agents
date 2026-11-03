@@ -113,3 +113,7 @@ def test_the_tools_doc_shows_after_every_and_the_tail_idiom():
     assert (
         "A Shell runs one command at a time: use another Shell for a second concurrent command."
     ) in shell_doc
+    assert "A new Shell starts a fresh ``bash`` in the workspace directory on first use." in (
+        shell_doc
+    )
+    assert "bash starts on first use" not in shell_doc
