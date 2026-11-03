@@ -96,7 +96,9 @@ async def test_an_earlier_atom_session_resumes_as_the_public_atom_agent(sessions
         text = str(getattr(tools, "content", None) or getattr(tools, "value", None) or tools)
         assert "Subagent" in text and "class JobsApi" not in text
         assert "queues" not in agent.context and "status" in agent.context
-        assert "skills" not in agent.context  # the earlier Atom's <skills> block is gone
+        # The earlier Atom's <skills> inventory is replaced by the current block,
+        # self.skills.status() (#517 P04), rendered on the next call.
+        assert "skills" in agent.context
         assert agent.context["user_notes"] == "USER-BLOCK"
 
         # History, todos, vars and the fake mesh identity carry over.
