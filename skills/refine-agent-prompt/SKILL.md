@@ -49,7 +49,7 @@ async def main():
 asyncio.run(main())
 ```
 
-Run with: `uv run python3 << 'EOF' ... EOF`
+Run it with the script on standard input: `uv run python3 - < script.py`, or from an agent's shell, `sh.run("uv run python3 -", stdin=script)`.
 
 To render a specific sub-method (e.g. `answer_question`, `brainstorm`, `implement_step`):
 
