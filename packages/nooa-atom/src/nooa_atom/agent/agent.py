@@ -661,7 +661,9 @@ class AtomAgent(AtomAgentBase):
     ``find``. If ``rg`` isn't installed, use another tool.
     Write shell commands as triple-quoted strings (``sh.run('''...''')``) so
     quotes need no escaping, and pass file contents to ``self.files`` the same
-    way, not as heredocs.
+    way, not as heredocs. Run Python in the task environment by passing the
+    code on stdin: ``sh.run("python3 -", stdin=code)``, not inside
+    ``python3 -c "..."``.
 
     A subagent sees only its brief: a Todo whose description carries the
     requirements, constraints and acceptance checks. Verify what it reports;
