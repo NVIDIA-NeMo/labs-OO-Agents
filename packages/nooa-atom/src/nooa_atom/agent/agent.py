@@ -216,6 +216,16 @@ def _module_not_found_hint(agent: Any, error: BaseException, formatted: str) -> 
     )
 
 
+# Added to the core cut marker of a cell print (kept in memory, not in a file).
+_CUT_PRINT_HINT = "Write large output to a file and read it with self.files.read(path)."
+_NOT_RECOVERABLE_RE = re.compile(r"^(The [\d,]+ chars in the middle are not recoverable\.)$", re.M)
+
+
+def _cut_print_hint(text: str) -> str:
+    """``text`` (a cut cell print) with ``_CUT_PRINT_HINT`` after its not-recoverable line."""
+    return _NOT_RECOVERABLE_RE.sub(rf"\1 {_CUT_PRINT_HINT}", text, count=1)
+
+
 # The hints a failed cell can get; the first that applies is the only one added.
 _CELL_ERROR_HINTS = (_mcp_tool_hint, _name_error_hint, _module_not_found_hint)
 
@@ -326,6 +336,15 @@ class AtomCodeAct(CodeActV2):
                 return f"{formatted}\n\n{hint}"
         return formatted
 
+    async def _execute_code(self, *args: Any, **kwargs: Any) -> Any:
+        """Run a cell; a cut print also says how to keep large output (``_cut_print_hint``)."""
+        result = await super()._execute_code(*args, **kwargs)
+        for stream in ("stdout", "stderr"):
+            text = getattr(result, stream, None)
+            if isinstance(text, str) and text.startswith("<truncated-output>"):
+                setattr(result, stream, _cut_print_hint(text))
+        return result
+
     def _build_execute_python_tool(self) -> Any:
         tool = super()._build_execute_python_tool()
         tool.description = tool.description.replace(_LEGACY_TOOL_HINT, _TOOL_HINT)
@@ -339,28 +358,6 @@ class AtomCodeAct(CodeActV2):
         if owner is not None:  # the session closes the Shells its cells start
             work_shell.shell_owner.set(owner)
         return super()._build_builtins(runtime, call)
-
-
-# How a cut cell print names its file (CaptureConfig.file_notice template).
-_CELL_NOTICE = "Full output: await self.files.read({quoted_path})"
-
-
-@hidden
-def _file_backed_cells(truncation: Any, owner: work_shell.ShellOwner) -> Any:
-    """``truncation`` with file-backed cell prints: full text in the session's directory.
-
-    The cell print limits stay as configured (e.g. 50,000 / 2,000 characters);
-    past them the text names its file. The files go when the session's
-    ``ShellOwner`` closes, with its Shells' output.
-    """
-    capture = truncation.capture.model_copy(
-        update={
-            "file_backed": True,
-            "file_dir": owner.cell_output_dir(),
-            "file_notice": _CELL_NOTICE,
-        }
-    )
-    return truncation.model_copy(update={"capture": capture})
 
 
 # ---- turn conditions ---------------------------------------------------------
@@ -758,7 +755,6 @@ class AtomAgent(AtomAgentBase):
             capture_factory=lambda: CaptureScope(self.runtime.truncation_config),
         )
         self._shells = work_shell.ShellOwner()
-        self._truncation = _file_backed_cells(self._truncation, self._shells)
         self.files = Files(self.shell)
         # Atom's own to-do list: membership on the list, content on each item.
         self._install_todo_list()

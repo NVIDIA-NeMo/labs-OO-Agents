@@ -31,8 +31,9 @@ def small_shell_view(monkeypatch):
     """Cut Shell texts at 10,000 characters here (1 MiB by default), so 20 kB is long."""
     from nooa_atom.agent import work_shell
 
-    monkeypatch.setattr(work_shell, "_VIEW_CHARS", 10_000)
-    monkeypatch.setattr(work_shell, "_VIEW_TAIL_CHARS", 7_500)
+    monkeypatch.setattr(work_shell, "_SUMMARY_BYTES", 10_000)
+    monkeypatch.setattr(work_shell, "_HEAD_BYTES", 2_500)
+    monkeypatch.setattr(work_shell, "_TAIL_BYTES", 7_500)
 
 
 class Clock:
@@ -345,7 +346,7 @@ async def past_old_preview_deadline(gate):
 
 def assert_full_capture(result, *, out=NOISY_OUT + "TAIL", err=NOISY_ERR):
     assert result.returncode == 0 and not result.timed_out
-    read = "Full output: await self.files.read("
+    read = "bytes omitted; full output: "
     assert read in result.stdout and read in result.stderr
     assert Path(result.stdout_path).read_text() == out
     assert Path(result.stderr_path).read_text() == err
