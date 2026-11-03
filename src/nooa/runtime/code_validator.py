@@ -1247,6 +1247,14 @@ class BlockingCallValidator:
         return visitor.issues
 
 
+# Runtime instance types whose class name differs from the listed constructor.
+_RUNTIME_CLASS_ALIASES: dict[tuple[str, str], tuple[str, str]] = {
+    ("_thread", "lock"): ("threading", "Lock"),
+}
+# C modules whose functions the listed module re-exports (os.system.__module__ == "posix").
+_RUNTIME_MODULE_ALIASES: dict[str, str] = {"posix": "os", "nt": "os"}
+
+
 class _BlockingCallVisitor(ast.NodeVisitor):
     """AST visitor that detects blocking calls using runtime-resolved names."""
 
@@ -1262,6 +1270,9 @@ class _BlockingCallVisitor(ast.NodeVisitor):
         # Track local variables assigned from constructors on blocked-call modules.
         # Maps var_name -> (module_name, class_name)
         self.tracked_locals: dict[str, tuple[str, str]] = {}
+        # Names bound by this cell's own imports (see visit_Module).
+        self.cell_modules: dict[str, str] = {}  # alias -> module name
+        self.cell_members: dict[str, tuple[str, str]] = {}  # alias -> (module, name)
 
     def _resolve_module_from_call(self, node: ast.Call) -> str | None:
         """Resolve the module of a chained call like asyncio.get_event_loop().
@@ -1282,6 +1293,10 @@ class _BlockingCallVisitor(ast.NodeVisitor):
         over-match if a broadly-used module like "io" were added.
         """
         if isinstance(node, ast.Name):
+            if node.id in self.cell_modules:
+                return self.cell_modules[node.id]
+            if node.id in self.cell_members:
+                return self.cell_members[node.id][0]
             obj = self.exec_globals.get(node.id)
             if isinstance(obj, types.ModuleType):
                 return obj.__name__
@@ -1306,18 +1321,43 @@ class _BlockingCallVisitor(ast.NodeVisitor):
             )
         )
 
+    def visit_Module(self, node: ast.Module) -> Any:
+        """Record this cell's own imports before checking its calls.
+
+        ``exec_globals`` only holds names bound before the cell runs, so without
+        this ``import os; os.system(...)`` or ``from time import sleep`` in the
+        same cell would resolve to nothing and slip through.
+        """
+        for child in ast.walk(node):
+            if isinstance(child, ast.Import):
+                for alias in child.names:
+                    if alias.asname:
+                        self.cell_modules[alias.asname] = alias.name
+                    else:
+                        top = alias.name.split(".")[0]
+                        self.cell_modules[top] = top
+            elif isinstance(child, ast.ImportFrom) and child.module and not child.level:
+                for alias in child.names:
+                    if alias.name != "*":
+                        self.cell_members[alias.asname or alias.name] = (child.module, alias.name)
+        self.generic_visit(node)
+
     def visit_Assign(self, node: ast.Assign) -> Any:
         """Track local variables assigned from constructors on blocked-call modules."""
         # Track: t = threading.Thread(...) -> tracked_locals["t"] = ("threading", "Thread")
-        if isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Attribute):
-            module_name = self._resolve_module(node.value.func.value)
-            if module_name:
-                matched = match_blocked_module(module_name, self.blocked_calls)
-                if matched:
-                    class_name = node.value.func.attr
-                    for target in node.targets:
-                        if isinstance(target, ast.Name):
-                            self.tracked_locals[target.id] = (matched, class_name)
+        # and aliases of a blocked function: s = os.system -> cell_members["s"]
+        names = [target.id for target in node.targets if isinstance(target, ast.Name)]
+        if isinstance(node.value, ast.Call):
+            ref = self._resolve_ref(node.value.func)
+            matched = match_blocked_module(ref[0], self.blocked_calls) if ref else None
+            if ref and matched:
+                for name in names:
+                    self.tracked_locals[name] = (matched, ref[1])
+        else:
+            ref = self._resolve_ref(node.value)
+            if ref and self._blocked_call(ref[0], ref[1]):
+                for name in names:
+                    self.cell_members[name] = ref
         self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> Any:
@@ -1351,6 +1391,17 @@ class _BlockingCallVisitor(ast.NodeVisitor):
                         dotted = f"{class_name}.{call_name}"
                         if dotted in blocked or call_name in blocked:
                             self._add_issue(node, tracked_module, call_name)
+                            return self.generic_visit(node)
+
+            # Check methods on an instance of a listed class: threading.Event().wait(),
+            # an Event/Lock/Thread/Queue bound in an earlier cell, ...
+            receiver = self._receiver_class(node.func.value)
+            if receiver:
+                dotted = f"{receiver[1]}.{call_name}"
+                matched = self._blocked_call(receiver[0], dotted)
+                if matched:
+                    self._add_issue(node, matched, dotted)
+                    return self.generic_visit(node)
 
             # Check chained calls: e.g. asyncio.get_event_loop().run_until_complete()
             if isinstance(node.func.value, ast.Call):
@@ -1361,22 +1412,76 @@ class _BlockingCallVisitor(ast.NodeVisitor):
                         self._add_issue(node, matched, call_name)
 
         elif isinstance(node.func, ast.Name):
-            # e.g., run(['ls']) where run = subprocess.run
-            obj = self.exec_globals.get(node.func.id)
-            if obj is not None:
-                obj_module = getattr(obj, "__module__", None)
-                if obj_module:
-                    matched_blocked = match_blocked_module(obj_module, self.blocked_modules)
-                    if matched_blocked:
-                        self._add_issue(node, matched_blocked, node.func.id)
-                    else:
-                        matched_calls = match_blocked_module(obj_module, self.blocked_calls)
-                        if matched_calls:
-                            fn_name = getattr(obj, "__name__", node.func.id)
-                            if fn_name in self.blocked_calls[matched_calls]:
-                                self._add_issue(node, matched_calls, fn_name)
+            # e.g., run(['ls']) where run = subprocess.run, or `from os import system`
+            ref = self._resolve_ref(node.func)
+            if ref:
+                matched_blocked = match_blocked_module(ref[0], self.blocked_modules)
+                if matched_blocked:
+                    self._add_issue(node, matched_blocked, node.func.id)
+                else:
+                    matched_calls = self._blocked_call(ref[0], ref[1])
+                    if matched_calls:
+                        self._add_issue(node, matched_calls, ref[1])
 
         self.generic_visit(node)
+
+    def _blocked_call(self, module_name: str, call_name: str) -> str | None:
+        """Return the blocked-calls key when ``module_name``'s ``call_name`` is listed."""
+        matched = match_blocked_module(module_name, self.blocked_calls)
+        if matched and call_name in self.blocked_calls[matched]:
+            return matched
+        return None
+
+    def _resolve_ref(self, node: ast.expr) -> tuple[str, str] | None:
+        """Resolve a callable expression to ``(module, name)``: ``os.system``, ``Event``."""
+        if isinstance(node, ast.Name):
+            if node.id in self.cell_members:
+                return self.cell_members[node.id]
+            if node.id in self.cell_modules:
+                return None
+            obj = self.exec_globals.get(node.id)
+            if obj is None or isinstance(obj, types.ModuleType):
+                return None
+            module_name = getattr(obj, "__module__", None)
+            name = getattr(obj, "__name__", None)
+            if isinstance(module_name, str) and isinstance(name, str):
+                return (_RUNTIME_MODULE_ALIASES.get(module_name, module_name), name)
+            return None
+        if isinstance(node, ast.Attribute):
+            module_name = self._module_of(node.value)
+            if module_name:
+                return (module_name, node.attr)
+        return None
+
+    def _module_of(self, node: ast.expr) -> str | None:
+        """The module an expression names (``os``, ``o`` after ``import os as o``), else None."""
+        if isinstance(node, ast.Name):
+            if node.id in self.cell_modules:
+                return self.cell_modules[node.id]
+            if node.id in self.cell_members:
+                return None
+            obj = self.exec_globals.get(node.id)
+            return obj.__name__ if isinstance(obj, types.ModuleType) else None
+        if isinstance(node, ast.Attribute):
+            parent = self._module_of(node.value)
+            return f"{parent}.{node.attr}" if parent else None
+        return None
+
+    def _receiver_class(self, node: ast.expr) -> tuple[str, str] | None:
+        """``(module, class)`` of the object a method is called on, when knowable statically."""
+        if isinstance(node, ast.Call):
+            # threading.Event().wait(): the receiver is what the constructor returns
+            return self._resolve_ref(node.func)
+        if isinstance(node, ast.Name) and node.id not in self.cell_modules:
+            if node.id in self.cell_members:
+                return None
+            obj = self.exec_globals.get(node.id)
+            if obj is None or isinstance(obj, (types.ModuleType, type)) or callable(obj):
+                return None
+            cls = type(obj)
+            key = (cls.__module__, cls.__name__)
+            return _RUNTIME_CLASS_ALIASES.get(key, key)
+        return None
 
 
 # =============================================================================

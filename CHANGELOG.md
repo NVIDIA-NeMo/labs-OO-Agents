@@ -6,6 +6,19 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- CodeAct cells now refuse every call in `DEFAULT_BLOCKED_CALLS` before the
+  cell runs, also when the module is imported in the same cell
+  (`import os; os.system(...)`, `from time import sleep`, `import time as t`),
+  for listed methods on instances (`threading.Event().wait()`,
+  `ev = Event(); ev.wait()`, `lock.acquire()`, `t.join()`, a multiprocessing
+  `Queue.get`/`put`, `Process.join`), and for such objects or functions bound in
+  an earlier cell. Previously only modules bound before the cell (in practice
+  `asyncio`) were checked, so `time.sleep`, `os.system`,
+  `threading.Event().wait()` and the others ran, and a wait could hang the
+  event loop. The check is static: a call reached only through a value it
+  cannot name (a function argument, a container item, `getattr`, a method
+  bound to another name) is still not caught.
+
 - Windows: WSL 2 is the supported way to run nooa on Windows. Native Windows is
   unsupported: `import nooa` raises `UnsupportedPlatformError` (an
   `ImportError`) and the `nooa` command exits with one line pointing to WSL 2,
