@@ -17,7 +17,7 @@ import time
 import tokenize
 import types
 import warnings
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import datetime
@@ -687,6 +687,8 @@ class ActorRuntime:
         """
         # Agent instance
         self.agent: Any = agent
+        # A provider's per-request image limit, once a request was refused for it.
+        self._request_image_limit: int | None = None
 
         # Lock for generation serialization (only one LLM generation session at a time)
         self._generation_lock = asyncio.Lock()
@@ -900,6 +902,18 @@ class ActorRuntime:
         if collapsed:
             get_harness_metrics().media_image_limit_collapsed(limit, collapsed)
         return collapsed
+
+    async def _with_image_recovery(
+        self, call: Callable[[], Awaitable[Any]], rebuild: Callable[[], Awaitable[None]]
+    ) -> Any:
+        """``await call()``; on a provider image limit, collapse old images, rebuild, call again."""
+        try:
+            return await call()
+        except Exception as exc:
+            if not self._recover_image_limit(exc):
+                raise
+            await rebuild()
+            return await call()
 
     def _recover_image_limit(self, exc: BaseException) -> bool:
         """A provider's per-request image limit: remember it, collapse old images; True to retry."""
@@ -1237,9 +1251,8 @@ class ActorRuntime:
         from nooa.unifiedllm.limits import context_limits_for, reduced_reply_params
 
         # A provider image limit learned earlier in this session: stay under it.
-        _image_limit = getattr(self, "_request_image_limit", None)
-        if _image_limit is not None:
-            self._collapse_images_over_limit(_image_limit)
+        if self._request_image_limit is not None:
+            self._collapse_images_over_limit(self._request_image_limit)
         # Build messages from context + events (timers inside _build_messages).
         # No proactive clamping — recovery is error-driven. If the API rejects
         # with ContextWindowExceededError, the except handler archives events,
@@ -1383,15 +1396,14 @@ class ActorRuntime:
                         self.event_manager, ctx.messages, current_generation_id or ""
                     )
 
+                async def _run_middleware() -> LLMCallContext:
+                    return await em.run_middleware("llm_call", ctx, _core_llm)
+
                 try:
                     try:
-                        try:
-                            ctx = await em.run_middleware("llm_call", ctx, _core_llm)
-                        except Exception as _img_exc:
-                            if not self._recover_image_limit(_img_exc):
-                                raise
-                            await _rebuild_middleware_messages()
-                            ctx = await em.run_middleware("llm_call", ctx, _core_llm)
+                        ctx = await self._with_image_recovery(
+                            _run_middleware, _rebuild_middleware_messages
+                        )
                     except Exception as _cw_exc:
                         if not _is_context_window_error(_cw_exc):
                             raise
@@ -1417,17 +1429,7 @@ class ActorRuntime:
                         # Re-build messages after archival so the retry sees the
                         # reduced event store.
                         ctx.params = reduced_reply_params(ctx.client, ctx.params, _reduced)
-                        ctx.messages = await self._build_messages(
-                            self._current_method,
-                            call_args=self._current_call.args if self._current_call else (),
-                            call_kwargs=self._current_call.kwargs if self._current_call else {},
-                            tools=ctx.params.get("tools"),
-                            request_params=ctx.params,
-                            llm_client=ctx.client,
-                        )
-                        _dynamic_context = _snapshot_llm_request(
-                            self.event_manager, ctx.messages, current_generation_id or ""
-                        )
+                        await _rebuild_middleware_messages()
                         ctx = await em.run_middleware("llm_call", ctx, _core_llm)
                 except Exception as _exc:
                     _emit_llm_end(success=False, exception_type=type(_exc).__name__)
@@ -1467,35 +1469,28 @@ class ActorRuntime:
                 )
                 _kwargs.setdefault("prompt_cache_key", f"{self.agent._agent_id}-{_strategy_tag}")
                 _emit_llm_start()
+
+                async def _rebuild_messages(request_params: dict[str, Any] = kwargs) -> None:
+                    nonlocal messages, _dynamic_context
+                    messages = await self._build_messages(
+                        self._current_method,
+                        call_args=self._current_call.args if self._current_call else (),
+                        call_kwargs=self._current_call.kwargs if self._current_call else {},
+                        tools=tools,
+                        request_params=request_params,
+                    )
+                    _dynamic_context = _snapshot_llm_request(
+                        self.event_manager, messages, current_generation_id or ""
+                    )
+
+                async def _call_llm() -> Any:
+                    return await llm_client.acall(
+                        messages, tools=tools, output_model=output_model, **_kwargs
+                    )
+
                 try:
                     try:
-                        try:
-                            response = await llm_client.acall(
-                                messages,
-                                tools=tools,
-                                output_model=output_model,
-                                **_kwargs,
-                            )
-                        except Exception as _img_exc:
-                            if not self._recover_image_limit(_img_exc):
-                                raise
-                            # Re-build after the collapse; the retry sends the newest images.
-                            messages = await self._build_messages(
-                                self._current_method,
-                                call_args=self._current_call.args if self._current_call else (),
-                                call_kwargs=self._current_call.kwargs if self._current_call else {},
-                                tools=tools,
-                                request_params=kwargs,
-                            )
-                            _dynamic_context = _snapshot_llm_request(
-                                self.event_manager, messages, current_generation_id or ""
-                            )
-                            response = await llm_client.acall(
-                                messages,
-                                tools=tools,
-                                output_model=output_model,
-                                **_kwargs,
-                            )
+                        response = await self._with_image_recovery(_call_llm, _rebuild_messages)
                     except Exception as _cw_exc:
                         if not _is_context_window_error(_cw_exc):
                             raise
@@ -1527,16 +1522,7 @@ class ActorRuntime:
                         # reduced event store. Retrying with the same messages would
                         # fail again when input tokens exceed the context window.
                         _recovery_kw = reduced_reply_params(llm_client, _kwargs, _reduced)
-                        messages = await self._build_messages(
-                            self._current_method,
-                            call_args=self._current_call.args if self._current_call else (),
-                            call_kwargs=self._current_call.kwargs if self._current_call else {},
-                            tools=tools,
-                            request_params=_recovery_kw,
-                        )
-                        _dynamic_context = _snapshot_llm_request(
-                            self.event_manager, messages, current_generation_id or ""
-                        )
+                        await _rebuild_messages(_recovery_kw)
                         # Reuse _kwargs (already has the per-(agent, strategy) key set)
                         # so recovery lands on the same shard as the original attempt.
                         response = await llm_client.acall(
