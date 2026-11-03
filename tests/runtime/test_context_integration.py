@@ -601,7 +601,7 @@ class TestViewCurrentCallFiltering:
             async def assemble(self, owner, call):
                 yield Block(key="instructions", content="Use execute_python and return_result.")
                 for event in owner.event_manager.values():
-                    if event.call_id == call.invocation_id and is_model_visible(event):
+                    if event.call_id == call.id and is_model_visible(event):
                         yield event
 
         class AnalysisAgent(Agent, llm=fake_llm):

@@ -73,7 +73,7 @@ class ResearchContextView:
         for event in replayable(
             event
             for event in owner.event_manager.values()
-            if call.invocation_id in event.related_call_ids and is_model_visible(event)
+            if call.id in event.related_call_ids and is_model_visible(event)
         ):
             yield event
         yield CacheBoundary()

@@ -34,14 +34,14 @@ class CurrentCall:
     did not provide ``session_locals``. Strategies without a REPL may leave it unset.
 
     Attributes:
-        id: Unique identifier for this call (for correlation/tracing).
+        id: Generation-method call ID; events recorded during the call carry it as ``call_id``.
         method_name: Name of the method being called.
         decorator: Type of decorator ('plan', 'agent').
         signature: Method signature string (optional).
         docstring: Method docstring (optional).
         args: Positional arguments passed to the method.
         kwargs: Keyword arguments passed to the method.
-        parent_id: ID of parent call for nested invocations (optional).
+        parent_id: ID of the enclosing generation call, if any.
         is_async: Whether the method is async (for proper def/async def in prompts).
         return_type: Return type annotation (optional, for prefill/error hints).
         pre_ellipsis_code: Setup code before `...` marker (optional, for prefill).
@@ -111,7 +111,6 @@ class CurrentCall:
     _method: Any | None = field(default=None, repr=False, compare=False)
     _decorator_context: dict[str, Any] | None = field(default=None, repr=False, compare=False)
     _scoped_context: dict[str, Any] | None = field(default=None, repr=False, compare=False)
-    _context_call_id: str | None = field(default=None, repr=False, compare=False)
 
     def __hash__(self) -> int:
         """Hash by id for use in sets/dicts."""
@@ -147,11 +146,6 @@ class CurrentCall:
     def scoped_context(self) -> dict[str, Any] | None:
         """Overrides active through ``ScopedContext`` for this invocation."""
         return self._scoped_context
-
-    @property
-    def invocation_id(self) -> str:
-        """Stable call ID used for event selection even if a strategy changes ``id``."""
-        return self._context_call_id or self.id
 
     def bound_parameters(self) -> dict[str, Any]:
         """Return effective parameter name → value, each input represented exactly once.

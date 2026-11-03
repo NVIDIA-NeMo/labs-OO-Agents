@@ -83,7 +83,7 @@ replayable(events) -> tuple[EventBase, ...]
 
 `context_text` formats one value; `collect_context_items` validates and retains yielded order; expression evaluation binds `self` to `owner`; `is_model_visible` identifies nonempty model-facing events without selecting history; `replayable` makes a selection sendable by giving tool calls without a recorded result an outcome-unknown result and omitting tool-call turns or results the selection separated, on copies, without changing stored events. Budgeting follows the caller's eviction order and counts blocks only, so it is not a full rendered-request limit. A source helper may retrieve, evaluate, or format one source. It does not select other sources or decide global precedence, placement, or order.
 
-Iterative views must explicitly include the task, model outputs, and execution feedback they need. Strategies produce these as typed events; rendering injects none. `self.events.query()` searches stored history, including archived events, so it is an inspection API rather than prompt selection. `call.invocation_id` stays stable while a strategy may change `call.id`. Tool schemas and execution policy remain strategy-owned.
+Iterative views must explicitly include the task, model outputs, and execution feedback they need. Strategies produce these as typed events; rendering injects none. `self.events.query()` searches stored history, including archived events, so it is an inspection API rather than prompt selection. Tool schemas and execution policy remain strategy-owned.
 
 Views select active history directly. For example, a current-invocation view uses:
 
@@ -91,7 +91,7 @@ Views select active history directly. For example, a current-invocation view use
 for event in replayable(
     event
     for event in agent.event_manager.values()
-    if call.invocation_id in event.related_call_ids and is_model_visible(event)
+    if call.id in event.related_call_ids and is_model_visible(event)
 ):
     yield event
 ```
@@ -161,6 +161,7 @@ resolve view
 
 - The selected view owns content, membership, materialization, filtering, global order, adaptation, and budget policy. Strategies retain method inputs, tool/output schemas, decision questions, execution, and result handling.
 - Views may compress their output. State summarizers independently compact stored events. When triggered, `TokenBudgetSummarizer` pauses the agent and applies completed summaries before the next turn. Parent-request cache reuse is an optimization, not a requirement for custom views.
+- `call.id` identifies one generation-method call, with or without `@no_trace`. Events recorded during it, including by deterministic helpers it calls, carry it as `call_id`; events recorded outside any generation call of the agent have none. Tracing keeps its own method call tree.
 - Events expose `call_id` (origin) and `related_call_ids` (represented calls; summaries retain their sources' union). Views filter with `id in event.related_call_ids`. `events.query(call_id=id)` matches origin; `events.query(related_call_ids={a, b})` matches either represented call. Both filters combine with AND; relevance is not call isolation.
 - Helpers and nested views provide explicit contributions; the selected view decides their inclusion and placement.
 - Source-specific helpers translate existing state APIs; they do not choose global placement.
