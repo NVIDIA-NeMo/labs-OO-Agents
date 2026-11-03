@@ -1913,7 +1913,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                 alias_intro = return_alias_invalid_intro(
                     self._python_tool_name(), args.get("result")
                 )
-                get_harness_metrics().return_result_tool_alias(self._python_tool_name())
+                get_harness_metrics().return_result_tool_alias()
             try:
                 validated, error_msg = self._handle_return_result(
                     runtime,

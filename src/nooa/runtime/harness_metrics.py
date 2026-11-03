@@ -433,7 +433,7 @@ class HarnessMetrics(BaseModel):
             self.media_image_limit_collapses.append(int(limit))
         self.media_image_limit_events_collapsed += int(events)
 
-    def record_media_rejected_retry(self, kind: Any) -> None:
+    def media_rejected_retry(self, kind: Any) -> None:
         """The provider rejected an attachment; the request was retried without it."""
         self._append(self.media_rejected_retries, str(kind or "unknown"))
 
@@ -528,9 +528,8 @@ class HarnessMetrics(BaseModel):
         """
         self._append(self.mcp_tool_name_hints, call)
 
-    def return_result_tool_alias(self, python_tool: str = "") -> None:
+    def return_result_tool_alias(self) -> None:
         """A provider-tool ``return_result(value=...)`` call was taken as the cell builtin."""
-        del python_tool
         self.return_result_tool_aliases += 1
 
     def mcp_result_error(self, call: str) -> None:
@@ -1095,20 +1094,20 @@ _SPAN_SCHEMA: tuple[SchemaEntry, ...] = (
     SchemaEntry(
         "harness.media_image_limit_collapsed.count",
         "Image-limit recoveries (oldest images collapsed)",
-        "LLM",
+        "Media Recovery",
         lambda m: len(m.media_image_limit_collapses),
     ),
     SchemaEntry(
         "harness.media_image_limit_collapsed.limits",
         "Provider image limits hit",
-        "LLM",
+        "Media Recovery",
         lambda m: m.media_image_limit_collapses,
         True,
     ),
     SchemaEntry(
         "harness.media_image_limit_collapsed.events",
         "Image events collapsed for the image limit",
-        "LLM",
+        "Media Recovery",
         lambda m: m.media_image_limit_events_collapsed,
     ),
     SchemaEntry(
@@ -1296,13 +1295,13 @@ _SPAN_SCHEMA: tuple[SchemaEntry, ...] = (
     SchemaEntry(
         "harness.mcp_result_error.count",
         "MCP results reporting failure in an 'error' field",
-        "Code Validation",
+        "Tool Usage",
         lambda m: len(m.mcp_result_errors),
     ),
     SchemaEntry(
         "harness.mcp_result_error.calls",
         "MCP tools whose result had an 'error' field, as <server>.<tool>",
-        "Code Validation",
+        "Tool Usage",
         lambda m: m.mcp_result_errors,
         True,
     ),

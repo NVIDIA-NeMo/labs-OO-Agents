@@ -247,7 +247,7 @@ class TestRecording:
 
     def test_media_rejected_retry(self):
         m = HarnessMetrics()
-        m.record_media_rejected_retry("image")
+        m.media_rejected_retry("image")
         attrs = m.to_span_attributes()
         assert attrs["harness.media_rejected_retry.count"] == 1
         assert attrs["harness.media_rejected_retry.kinds"] == ["image"]
@@ -267,7 +267,7 @@ class TestRecording:
 
     def test_return_result_tool_alias(self):
         m = HarnessMetrics()
-        m.return_result_tool_alias("python_cell")
+        m.return_result_tool_alias()
         assert m.to_span_attributes()["harness.return_result_tool_alias.count"] == 1
 
     def test_module_not_found_hint(self):
