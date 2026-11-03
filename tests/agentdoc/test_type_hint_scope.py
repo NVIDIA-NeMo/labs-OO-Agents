@@ -11,7 +11,7 @@ from dataclasses import dataclass
 import pytest
 
 from nooa.agentdoc import hidden, pformat, pprint, spec, truncating_pformat
-from nooa.agentdoc._visibility import _type_hint_scope, is_hidden_field
+from nooa.agentdoc._visibility import _is_hidden_field, _TypeHints
 
 
 @dataclass
@@ -59,28 +59,76 @@ def test_unresolved_annotations_can_resolve_later_in_scope(monkeypatch):
     class Forward:
         value: FutureHint  # noqa: F821 -- installed after the first resolution attempt
 
-    with _type_hint_scope():
-        assert not is_hidden_field(Forward, "value")
-        monkeypatch.setitem(globals(), "FutureHint", typing.Annotated[int, hidden])
-        assert is_hidden_field(Forward, "value")
+    hints = _TypeHints()
+    assert not _is_hidden_field(Forward, "value", _hints=hints)
+    monkeypatch.setitem(globals(), "FutureHint", typing.Annotated[int, hidden])
+    assert _is_hidden_field(Forward, "value", _hints=hints)
 
 
-def test_scope_restores_outer_cache_and_cleans_up_after_exception(monkeypatch):
-    calls = 0
+@pytest.mark.parametrize("fail", [False, True])
+def test_copied_context_does_not_retain_render_annotations(fail):
+    from contextvars import copy_context
+
+    from nooa.agentdoc._pformat import _pformat
+
+    @dataclass
+    class Mutable:
+        value: int = 1
+        other: int = 2
+
+    saved = []
+
+    class Capture:
+        def __repr__(self):
+            saved.append(copy_context())
+            return "Capture()"
+
+    class Sink:
+        def write(self, value):
+            if fail and "Capture()" in value:
+                raise RuntimeError("write failed")
+
+    if fail:
+        with pytest.raises(RuntimeError, match="write failed"):
+            _pformat([Mutable(), Capture()], Sink())
+    else:
+        pformat([Mutable(), Capture()])
+    Mutable.__annotations__["value"] = typing.Annotated[int, hidden]
+    assert saved
+    assert "value=1" not in saved[0].run(pformat, Mutable())
+    assert "other=2" in saved[0].run(pformat, Mutable())
+
+
+def test_reentrant_public_render_has_its_own_cache(monkeypatch):
+    calls = Counter()
     original = typing.get_type_hints
 
     def counted(obj, *args, **kwargs):
-        nonlocal calls
-        calls += 1
+        calls[id(obj)] += 1
+        return original(obj, *args, **kwargs)
+
+    class Nested:
+        def __repr__(self):
+            return pformat(Record(2))
+
+    monkeypatch.setattr(typing, "get_type_hints", counted)
+    result = pformat([Record(1), Nested(), Record(3)])
+    assert "PRIVATE" not in result
+    assert calls[id(Record)] == 2
+
+
+def test_value_summary_shares_annotations_across_repeated_objects(monkeypatch):
+    from nooa.agentdoc.doc_config import DocConfig
+    from nooa.agentdoc.format import format_value_summary
+
+    calls = Counter()
+    original = typing.get_type_hints
+
+    def counted(obj, *args, **kwargs):
+        calls[id(obj)] += 1
         return original(obj, *args, **kwargs)
 
     monkeypatch.setattr(typing, "get_type_hints", counted)
-    with pytest.raises(RuntimeError, match="render failed"), _type_hint_scope():
-        assert is_hidden_field(Record, "secret")
-        with _type_hint_scope():
-            assert is_hidden_field(Record, "secret")
-        assert is_hidden_field(Record, "secret")
-        assert calls == 1
-        raise RuntimeError("render failed")
-    assert is_hidden_field(Record, "secret")
-    assert calls == 2
+    result = format_value_summary([Record(1), Record(2)], DocConfig())
+    assert "PRIVATE" not in result
+    assert calls[id(Record)] == 1

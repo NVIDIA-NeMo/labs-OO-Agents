@@ -25,7 +25,7 @@ from nooa.agentdoc._format_observation import record_truncation
 from nooa.agentdoc._info import REQUIRED, CallableInfo, ModuleInfo, TypeInfo
 from nooa.agentdoc._metadata import is_expand_false
 from nooa.agentdoc._structured import _ClassRef, _InstanceRef
-from nooa.agentdoc._visibility import _resolve_type_hints, _type_hint_scope
+from nooa.agentdoc._visibility import _resolve_type_hints, _TypeHints
 from nooa.agentdoc.protocols import SupportsInstanceValues
 
 
@@ -135,7 +135,6 @@ def _field_type_docstring(
     return docstring.split("\n")[0].strip()
 
 
-@_type_hint_scope()
 def _pformat(
     _object: Any,
     _stream: Any,
@@ -149,6 +148,7 @@ def _pformat(
     instance_mode: str = "repr",
     _depth: int = 0,
     _indent: int = 0,
+    _hints: _TypeHints | None = None,
 ) -> None:
     """Write pretty-formatted representation of *_object* to *_stream*.
 
@@ -166,6 +166,9 @@ def _pformat(
         _depth: Current nesting depth (internal).
         _indent: Current indentation level (internal).
     """
+    if _hints is None:
+        _hints = _TypeHints()
+
     # Resolve inline_depth default
     if inline_depth is None:
         inline_depth = 0 if concise else 1
@@ -181,24 +184,24 @@ def _pformat(
                     max_length=max_length,
                     indent=_indent,
                     context_obj=None,
+                    _hints=_hints,
                 )
             )
         case CallableInfo():
             _stream.write(
                 _format_callable_info(
-                    _object,
-                    concise=concise,
-                    type_depth=inline_depth,
-                    indent=_indent,
+                    _object, concise=concise, type_depth=inline_depth, indent=_indent, _hints=_hints
                 )
             )
         case ModuleInfo():
-            _stream.write(_format_module_info(_object, concise=concise, indent=_indent))
+            _stream.write(
+                _format_module_info(_object, concise=concise, indent=_indent, _hints=_hints)
+            )
         case type():
             # Python type (class) - extract and format
-            from nooa.agentdoc._structured import extract_type_info
+            from nooa.agentdoc._structured import _extract_type_info
 
-            type_info = extract_type_info(_object)
+            type_info = _extract_type_info(_object, _hints=_hints)
             _stream.write(
                 _format_type_info(
                     type_info,
@@ -207,6 +210,7 @@ def _pformat(
                     max_length=max_length,
                     indent=_indent,
                     context_obj=_object,  # Pass the original type for discovery
+                    _hints=_hints,
                 )
             )
         case _ if inspect.ismodule(_object):
@@ -216,21 +220,22 @@ def _pformat(
             if extractor is not None:
                 module_info = extractor(_object)
             else:
-                from nooa.agentdoc._structured import extract_module_info
+                from nooa.agentdoc._structured import _extract_module_info
 
-                module_info = extract_module_info(_object)
+                module_info = _extract_module_info(_object, _hints=_hints)
             _stream.write(
                 _format_module_info(
                     module_info,
                     concise=concise,
                     concise_members=bool(getattr(_object, "__agentdoc_concise_members__", False)),
                     indent=_indent,
+                    _hints=_hints,
                 )
             )
         case _ if inspect.isfunction(_object) or inspect.ismethod(_object):
-            from nooa.agentdoc._structured import extract_callable_info
+            from nooa.agentdoc._structured import _extract_callable_info
 
-            callable_info = extract_callable_info(_object)
+            callable_info = _extract_callable_info(_object, _hints=_hints)
             _stream.write(
                 _format_callable_info(
                     callable_info,
@@ -238,6 +243,7 @@ def _pformat(
                     type_depth=inline_depth,
                     indent=_indent,
                     context_obj=_object,  # Pass the function/method for type discovery
+                    _hints=_hints,
                 )
             )
         case _ if _is_structured_instance(_object, respect_custom_repr=instance_mode != "type"):
@@ -245,8 +251,8 @@ def _pformat(
             # __repr__: documentation must retain the type's API contract.
             if instance_mode == "type":
                 # Show type structure with runtime values (for doc())
-                from nooa.agentdoc._structured import extract_type_info
-                from nooa.agentdoc._visibility import is_hidden_field
+                from nooa.agentdoc._structured import _extract_type_info
+                from nooa.agentdoc._visibility import _is_hidden_field
                 from nooa.agentdoc.registry import get_type_info_extractor
 
                 obj_type = type(_object)
@@ -265,13 +271,15 @@ def _pformat(
                         type_info, values = result
                     else:
                         type_info = result
-                        values = _extract_instance_values(_object, result)
+                        values = _extract_instance_values(_object, result, _hints=_hints)
                     # Filter with instance (supports instance-level spec() overrides)
                     type_info = TypeInfo(
                         name=type_info.name,
                         base=type_info.base,
                         fields=[
-                            f for f in type_info.fields if not is_hidden_field(_object, f.name)
+                            f
+                            for f in type_info.fields
+                            if not _is_hidden_field(_object, f.name, _hints=_hints)
                         ],
                         methods=type_info.methods,
                         docstring=type_info.docstring,
@@ -280,40 +288,44 @@ def _pformat(
                     if _has_instance_overrides:
                         # Get all fields (including class-hidden) then re-filter by instance.
                         # Use _skip_protocol to get raw fields; take methods from protocol path.
-                        raw_info = extract_type_info(
-                            obj_type, _skip_protocol=True, _include_hidden=True
+                        raw_info = _extract_type_info(
+                            obj_type, _skip_protocol=True, _include_hidden=True, _hints=_hints
                         )
-                        protocol_info = extract_type_info(obj_type)
+                        protocol_info = _extract_type_info(obj_type, _hints=_hints)
                         type_info = TypeInfo(
                             name=protocol_info.name,
                             base=protocol_info.base,
                             fields=[
-                                f for f in raw_info.fields if not is_hidden_field(_object, f.name)
+                                f
+                                for f in raw_info.fields
+                                if not _is_hidden_field(_object, f.name, _hints=_hints)
                             ],
                             methods=protocol_info.methods,
                             docstring=protocol_info.docstring,
                         )
                     else:
-                        type_info = extract_type_info(obj_type)
+                        type_info = _extract_type_info(obj_type, _hints=_hints)
                     values = _object.__instance_values__()
                 else:
                     if _has_instance_overrides:
-                        raw_info = extract_type_info(
-                            obj_type, _skip_protocol=True, _include_hidden=True
+                        raw_info = _extract_type_info(
+                            obj_type, _skip_protocol=True, _include_hidden=True, _hints=_hints
                         )
-                        protocol_info = extract_type_info(obj_type)
+                        protocol_info = _extract_type_info(obj_type, _hints=_hints)
                         type_info = TypeInfo(
                             name=protocol_info.name,
                             base=protocol_info.base,
                             fields=[
-                                f for f in raw_info.fields if not is_hidden_field(_object, f.name)
+                                f
+                                for f in raw_info.fields
+                                if not _is_hidden_field(_object, f.name, _hints=_hints)
                             ],
                             methods=protocol_info.methods,
                             docstring=protocol_info.docstring,
                         )
                     else:
-                        type_info = extract_type_info(obj_type)
-                    values = _extract_instance_values(_object, type_info)
+                        type_info = _extract_type_info(obj_type, _hints=_hints)
+                    values = _extract_instance_values(_object, type_info, _hints=_hints)
 
                 # Apply per-instance visibility in every extraction branch.
                 # This handles both hidden=False opt-ins and hidden=True overrides
@@ -321,7 +333,11 @@ def _pformat(
                 type_info = TypeInfo(
                     name=type_info.name,
                     base=type_info.base,
-                    fields=[f for f in type_info.fields if not is_hidden_field(_object, f.name)],
+                    fields=[
+                        f
+                        for f in type_info.fields
+                        if not _is_hidden_field(_object, f.name, _hints=_hints)
+                    ],
                     methods=type_info.methods,
                     docstring=type_info.docstring,
                 )
@@ -336,6 +352,7 @@ def _pformat(
                         context_obj=obj_type,
                         instance_values=values,
                         visibility_obj=_object,
+                        _hints=_hints,
                     )
                 )
             else:
@@ -347,6 +364,7 @@ def _pformat(
                         max_string=max_string,
                         max_depth=max_depth,
                         indent=_indent,
+                        _hints=_hints,
                     )
                 )
         case _:
@@ -360,6 +378,7 @@ def _pformat(
                 expand_all=expand_all,
                 depth=_depth,
                 indent=_indent,
+                _hints=_hints,
             )
 
 
@@ -375,6 +394,7 @@ def _pformat_to_str(
     instance_mode: str = "repr",
     _depth: int = 0,
     _indent: int = 0,
+    _hints: _TypeHints | None = None,
 ) -> str:
     """Convenience wrapper: call ``_pformat`` into an ``io.StringIO`` and return the string."""
     stream = io.StringIO()
@@ -390,6 +410,7 @@ def _pformat_to_str(
         instance_mode=instance_mode,
         _depth=_depth,
         _indent=_indent,
+        _hints=_hints,
     )
     return stream.getvalue()
 
@@ -509,6 +530,7 @@ def _format_type_info(
     context_obj: type | None = None,
     instance_values: dict[str, Any] | None = None,
     visibility_obj: Any = None,
+    _hints: _TypeHints | None = None,
 ) -> str:
     """Format TypeInfo as Python class syntax.
 
@@ -576,6 +598,7 @@ def _format_type_info(
                 max_string=50,
                 max_depth=1,
                 inline_depth=0,
+                _hints=_hints,
             )
             lines.append(f"{ind}    {field.name} = {value_str}")
 
@@ -609,6 +632,7 @@ def _format_type_info(
                 expand_all=False,
                 depth=0,
                 indent=0,
+                _hints=_hints,
             )
             line += f" = {default_str}"
         elif field.default is not ...:
@@ -620,6 +644,7 @@ def _format_type_info(
                 expand_all=False,
                 depth=0,
                 indent=0,
+                _hints=_hints,
             )
             line += f" = {default_str}"
         if field.description:
@@ -635,7 +660,7 @@ def _format_type_info(
     # Add extra instance attributes not in type fields (like tools assigned at runtime)
     if instance_values:
         extra_attrs = []
-        from nooa.agentdoc._visibility import is_hidden_field as _is_hidden_field
+        from nooa.agentdoc._visibility import _is_hidden_field as _is_hidden_field
 
         for name, value in sorted(instance_values.items()):
             if name in seen_field_names:
@@ -643,7 +668,9 @@ def _format_type_info(
             if name.startswith("_"):
                 continue
             visibility_target = visibility_obj if visibility_obj is not None else context_obj
-            if visibility_target is not None and _is_hidden_field(visibility_target, name):
+            if visibility_target is not None and _is_hidden_field(
+                visibility_target, name, _hints=_hints
+            ):
                 continue
             # Skip callables unless they're classes
             if callable(value) and not isinstance(value, type):
@@ -669,6 +696,7 @@ def _format_type_info(
                     expand_all=False,
                     depth=0,
                     indent=0,
+                    _hints=_hints,
                 )
                 lines.append(f"{ind}    {name}: {type_name} = {value_str}")
 
@@ -693,6 +721,7 @@ def _format_type_info(
                 type_depth=0,  # Don't show nested references for methods within a class
                 indent=indent + 1,
                 as_method=True,
+                _hints=_hints,
             )
             lines.append(method_lines)
 
@@ -706,8 +735,8 @@ def _format_type_info(
             _is_custom_type,
             discover_referenced_types,
         )
-        from nooa.agentdoc._structured import extract_type_info
-        from nooa.agentdoc._visibility import is_hidden_field as _is_hidden_field
+        from nooa.agentdoc._structured import _extract_type_info
+        from nooa.agentdoc._visibility import _is_hidden_field as _is_hidden_field
 
         visible_field_names = {field.name for field in info.fields}
         seed_set: set[type] = {
@@ -726,7 +755,9 @@ def _format_type_info(
             for name, value in instance_values.items():
                 if name.startswith("_"):
                     continue
-                if visibility_obj is not None and _is_hidden_field(visibility_obj, name):
+                if visibility_obj is not None and _is_hidden_field(
+                    visibility_obj, name, _hints=_hints
+                ):
                     continue
                 # Skip callables unless they're classes
                 if callable(value) and not isinstance(value, type):
@@ -754,7 +785,7 @@ def _format_type_info(
             lines.append(f"{ind}## Referenced Types")
 
             for ref_type in referenced_types:
-                ref_info = extract_type_info(ref_type)
+                ref_info = _extract_type_info(ref_type, _hints=_hints)
                 ref_doc = _format_type_info(
                     ref_info,
                     concise=True,
@@ -762,6 +793,7 @@ def _format_type_info(
                     max_length=max_length,
                     indent=indent,
                     context_obj=ref_type,
+                    _hints=_hints,
                 )
                 lines.append(ref_doc)
                 lines.append("")
@@ -777,6 +809,7 @@ def _format_callable_info(
     indent: int,
     as_method: bool = False,
     context_obj: Any = None,
+    _hints: _TypeHints | None = None,
 ) -> str:
     """Format CallableInfo as Python function/method syntax.
 
@@ -832,7 +865,7 @@ def _format_callable_info(
     # (not when formatting as a method within a class)
     if context_obj is not None and type_depth > 0 and not as_method:
         from nooa.agentdoc._discover import discover_referenced_types
-        from nooa.agentdoc._structured import extract_type_info
+        from nooa.agentdoc._structured import _extract_type_info
 
         seed_set = {t for t in discover_referenced_types(context_obj) if not is_expand_false(t)}
         referenced_types = _collect_referenced_types(
@@ -844,7 +877,7 @@ def _format_callable_info(
             lines.append(f"{ind}## Referenced Types")
 
             for ref_type in referenced_types:
-                ref_info = extract_type_info(ref_type)
+                ref_info = _extract_type_info(ref_type, _hints=_hints)
                 ref_doc = _format_type_info(
                     ref_info,
                     concise=True,
@@ -852,6 +885,7 @@ def _format_callable_info(
                     max_length=None,
                     indent=indent,
                     context_obj=ref_type,
+                    _hints=_hints,
                 )
                 lines.append(ref_doc)
                 lines.append("")
@@ -865,6 +899,7 @@ def _format_module_info(
     concise: bool,
     concise_members: bool = False,
     indent: int,
+    _hints: _TypeHints | None = None,
 ) -> str:
     """Format ModuleInfo as Python module syntax.
 
@@ -939,7 +974,7 @@ def _format_module_info(
                 in_value_run = False
             func = func_map[sym_name]
             func_lines = _format_callable_info(
-                func, concise=concise or concise_members, indent=indent
+                func, concise=concise or concise_members, indent=indent, _hints=_hints
             )
             lines.append(func_lines)
             lines.append("")
@@ -959,15 +994,25 @@ def _format_module_info(
 _MISSING = object()
 
 
-def _get_type_hints(obj_type: type) -> dict[str, Any]:
+def _get_type_hints(
+    obj_type: type,
+    *,
+    _hints: _TypeHints | None = None,
+) -> dict[str, Any]:
     """Resolve formatting metadata using the current render's cache."""
     try:
-        return _resolve_type_hints(obj_type)
+        return _resolve_type_hints(obj_type, _hints=_hints)
     except Exception:
         return {}
 
 
-def _field_spec_override(obj_type: type, field_name: str, key: str) -> Any:
+def _field_spec_override(
+    obj_type: type,
+    field_name: str,
+    key: str,
+    *,
+    _hints: _TypeHints | None = None,
+) -> Any:
     """Read a per-field ``spec()`` override from ``Annotated`` type hints.
 
     Returns the value of *key* (e.g. ``"max_string"``) from the first
@@ -978,12 +1023,12 @@ def _field_spec_override(obj_type: type, field_name: str, key: str) -> Any:
 
     from nooa.agentdoc._docs import SpecAnnotation
 
-    hints = _get_type_hints(obj_type)
+    hints = _get_type_hints(obj_type, _hints=_hints)
     hint = hints.get(field_name)
     if hint is None:
         field = inspect.getattr_static(obj_type, field_name, None)
         if isinstance(field, property) and field.fget is not None:
-            hint = _get_type_hints(field.fget).get("return")
+            hint = _get_type_hints(field.fget, _hints=_hints).get("return")
     if hint is None or typing.get_origin(hint) is not typing.Annotated:
         return _MISSING
     for metadata in typing.get_args(hint)[1:]:
@@ -1001,6 +1046,7 @@ def _format_instance_repr(
     max_string: int | None,
     max_depth: int | None,
     indent: int,
+    _hints: _TypeHints | None = None,
 ) -> str:
     """Format an instance in repr-style.
 
@@ -1018,7 +1064,7 @@ def _format_instance_repr(
     """
     from enum import Enum
 
-    from nooa.agentdoc._structured import extract_type_info
+    from nooa.agentdoc._structured import _extract_type_info
     from nooa.agentdoc.registry import get_type_info_extractor
 
     obj_type = type(obj)
@@ -1049,6 +1095,7 @@ def _format_instance_repr(
                 expand_all=False,
                 depth=0,
                 indent=0,
+                _hints=_hints,
             )
             values.append(f"{field_name}={value_str}")
         return f"{type_name}({', '.join(values)})"
@@ -1061,24 +1108,26 @@ def _format_instance_repr(
             type_info, values = result
         else:
             type_info = result
-            values = _extract_instance_values(obj, type_info)
+            values = _extract_instance_values(obj, type_info, _hints=_hints)
         # Registry extractors may return unfiltered fields; apply hidden rules.
         # Local import avoids a circular dependency: _pformat ← _visibility ← _metadata ← _pformat.
-        from nooa.agentdoc._visibility import is_hidden_field  # noqa: PLC0415
+        from nooa.agentdoc._visibility import _is_hidden_field  # noqa: PLC0415
 
         type_info = TypeInfo(
             name=type_info.name,
             base=type_info.base,
-            fields=[f for f in type_info.fields if not is_hidden_field(obj_type, f.name)],
+            fields=[
+                f for f in type_info.fields if not _is_hidden_field(obj_type, f.name, _hints=_hints)
+            ],
             methods=type_info.methods,
             docstring=type_info.docstring,
         )
     else:
-        type_info = extract_type_info(obj_type)
+        type_info = _extract_type_info(obj_type, _hints=_hints)
         if isinstance(obj, SupportsInstanceValues):
             values = obj.__instance_values__()
         else:
-            values = _extract_instance_values(obj, type_info)
+            values = _extract_instance_values(obj, type_info, _hints=_hints)
 
     # Determine if __instance_values__ was used (gives full control over what's shown)
     uses_instance_values_protocol = isinstance(obj, SupportsInstanceValues)
@@ -1133,7 +1182,7 @@ def _format_instance_repr(
         if callable(value) and not isinstance(value, type):
             continue
         # Per-field spec(max_string=...) overrides the caller's default.
-        field_max_string = _field_spec_override(obj_type, field.name, "max_string")
+        field_max_string = _field_spec_override(obj_type, field.name, "max_string", _hints=_hints)
         if field_max_string is _MISSING:
             field_max_string = max_string
         value_str = _format_value_to_str(
@@ -1144,26 +1193,27 @@ def _format_instance_repr(
             expand_all=False,
             depth=0,
             indent=0,
+            _hints=_hints,
         )
         parts.append(f"{field.name}={value_str}")
         field_count += 1
 
     # Add non-field attributes from __dict__ (skip hidden so they are not re-added)
     if _instance_dict(obj) is not None:
-        from nooa.agentdoc._visibility import is_hidden_field as _is_hidden_field
+        from nooa.agentdoc._visibility import _is_hidden_field as _is_hidden_field
 
         for name, value in sorted(values.items()):
             if any(f.name == name for f in type_info.fields):
                 continue
             if name.startswith("_"):
                 continue
-            if _is_hidden_field(obj_type, name):
+            if _is_hidden_field(obj_type, name, _hints=_hints):
                 continue
             if max_length and field_count >= max_length:
                 record_truncation("max_length")
                 break
 
-            field_max_string = _field_spec_override(obj_type, name, "max_string")
+            field_max_string = _field_spec_override(obj_type, name, "max_string", _hints=_hints)
             if field_max_string is _MISSING:
                 field_max_string = max_string
             value_str = _format_value_to_str(
@@ -1174,6 +1224,7 @@ def _format_instance_repr(
                 expand_all=False,
                 depth=0,
                 indent=0,
+                _hints=_hints,
             )
             parts.append(f"{name}={value_str}")
             field_count += 1
@@ -1205,7 +1256,12 @@ def _format_instance_repr(
     return f"{type_name}({', '.join(parts)})"
 
 
-def _extract_instance_values(obj: Any, type_info: TypeInfo) -> dict[str, Any]:
+def _extract_instance_values(
+    obj: Any,
+    type_info: TypeInfo,
+    *,
+    _hints: _TypeHints | None = None,
+) -> dict[str, Any]:
     """Extract current field values from an instance.
 
     Args:
@@ -1276,14 +1332,14 @@ def _extract_instance_values(obj: Any, type_info: TypeInfo) -> dict[str, Any]:
     # Also include runtime-only attributes that are not declared type fields.
     # Most objects store them in __dict__; Pydantic models with extra="allow"
     # store them separately in __pydantic_extra__.
-    from nooa.agentdoc._visibility import is_hidden_field as _is_hidden_field
+    from nooa.agentdoc._visibility import _is_hidden_field as _is_hidden_field
 
     def _include_dynamic(name: str, value: Any) -> bool:
         return (
             name not in values
             and not name.startswith("_")
             and not callable(value)
-            and not _is_hidden_field(obj, name)
+            and not _is_hidden_field(obj, name, _hints=_hints)
             and name not in _excluded_fields
         )
 
@@ -1313,6 +1369,7 @@ def _format_nested_instance(
     max_depth: int | None,
     depth: int,
     indent: int,
+    _hints: _TypeHints | None = None,
 ) -> str:
     """Format a structured instance in compact one-line form for nested display.
 
@@ -1330,7 +1387,7 @@ def _format_nested_instance(
     Returns:
         Compact one-line representation
     """
-    from nooa.agentdoc._structured import extract_type_info
+    from nooa.agentdoc._structured import _extract_type_info
     from nooa.agentdoc.registry import get_type_info_extractor
 
     obj_type = type(obj)
@@ -1349,18 +1406,18 @@ def _format_nested_instance(
             type_info, values = result
         else:
             type_info = result
-            values = _extract_instance_values(obj, type_info)
+            values = _extract_instance_values(obj, type_info, _hints=_hints)
     else:
-        type_info = extract_type_info(obj_type)
+        type_info = _extract_type_info(obj_type, _hints=_hints)
         if isinstance(obj, SupportsInstanceValues):
             values = obj.__instance_values__()
         else:
-            values = _extract_instance_values(obj, type_info)
+            values = _extract_instance_values(obj, type_info, _hints=_hints)
 
     # Collect field names in order (type fields first, then extra __dict__ attrs)
     # Only include fields that exist in values — fields absent from values are skipped
     # in the render loop below, so excluding them keeps truncated_count accurate.
-    from nooa.agentdoc._visibility import is_hidden_field
+    from nooa.agentdoc._visibility import _is_hidden_field
 
     excluded = {f.name for f in type_info.fields if not f.repr}
     excluded.update(
@@ -1369,14 +1426,16 @@ def _format_nested_instance(
     field_names = [
         f.name
         for f in type_info.fields
-        if f.name in values and f.name not in excluded and not is_hidden_field(obj, f.name)
+        if f.name in values
+        and f.name not in excluded
+        and not _is_hidden_field(obj, f.name, _hints=_hints)
     ]
     for name in values:
         if (
             name not in field_names
             and name not in excluded
             and not name.startswith("_")
-            and not is_hidden_field(obj, name)
+            and not _is_hidden_field(obj, name, _hints=_hints)
         ):
             field_names.append(name)
 
@@ -1393,7 +1452,7 @@ def _format_nested_instance(
         if name in values:
             value = values[name]
             # Per-field spec(max_string=...) overrides the caller's default.
-            field_max_string = _field_spec_override(obj_type, name, "max_string")
+            field_max_string = _field_spec_override(obj_type, name, "max_string", _hints=_hints)
             if field_max_string is _MISSING:
                 field_max_string = nested_max_string
             value_str = _format_value_to_str(
@@ -1404,6 +1463,7 @@ def _format_nested_instance(
                 expand_all=False,
                 depth=depth + 1,
                 indent=0,
+                _hints=_hints,
             )
             parts.append(f"{name}={value_str}")
 
@@ -1431,6 +1491,7 @@ def _format_value(
     depth: int,
     indent: int,
     _seen: set[int] | None = None,
+    _hints: _TypeHints | None = None,
 ) -> None:
     """Write a regular Python value to *_stream* with truncation.
 
@@ -1447,6 +1508,9 @@ def _format_value(
             Top-level callers leave this ``None``; recursive calls thread the
             same set through so nested containers can detect re-entry.
     """
+    if _hints is None:
+        _hints = _TypeHints()
+
     if _seen is None:
         _seen = set()
 
@@ -1471,6 +1535,7 @@ def _format_value(
             depth=depth,
             indent=indent,
             _seen=_seen,
+            _hints=_hints,
         )
         return
 
@@ -1485,6 +1550,7 @@ def _format_value(
             depth=depth,
             indent=indent,
             _seen=_seen,
+            _hints=_hints,
         )
         return
 
@@ -1510,6 +1576,7 @@ def _format_value(
                 max_depth=max_depth,
                 depth=depth,
                 indent=indent,
+                _hints=_hints,
             )
         )
         return
@@ -1551,6 +1618,7 @@ def _format_value_to_str(
     expand_all: bool = False,
     depth: int = 0,
     indent: int = 0,
+    _hints: _TypeHints | None = None,
 ) -> str:
     """Convenience wrapper: call ``_format_value`` into an ``io.StringIO`` and return the string."""
     tmp = io.StringIO()
@@ -1563,6 +1631,7 @@ def _format_value_to_str(
         expand_all=expand_all,
         depth=depth,
         indent=indent,
+        _hints=_hints,
     )
     return tmp.getvalue()
 
@@ -1660,6 +1729,7 @@ def _format_dict(
     depth: int,
     indent: int,
     _seen: set[int] | None = None,
+    _hints: _TypeHints | None = None,
 ) -> None:
     """Write a dictionary to *_stream*.
 
@@ -1700,6 +1770,7 @@ def _format_dict(
             depth=depth,
             indent=indent,
             _seen=_seen,
+            _hints=_hints,
         )
     finally:
         _seen.discard(id(d))
@@ -1717,6 +1788,7 @@ def _format_dict_body(
     depth,
     indent,
     _seen,
+    _hints: _TypeHints | None = None,
 ):
     """Inner rendering body — split out so the cycle-guard try/finally above stays compact."""
     all_items = list(d.items())
@@ -1749,6 +1821,7 @@ def _format_dict_body(
             depth=depth + 1,
             indent=current_indent,
             _seen=_seen,
+            _hints=_hints,
         )
         return k_str, tmp.getvalue()
 
@@ -1783,6 +1856,7 @@ def _format_dict_body(
                 depth=depth + 1,
                 indent=indent + 1,
                 _seen=_seen,
+                _hints=_hints,
             )
             _stream.write(",\n")
         _stream.write("    " * indent + "}")
@@ -1822,6 +1896,7 @@ def _format_dict_body(
             depth=depth + 1,
             indent=indent + 1,
             _seen=_seen,
+            _hints=_hints,
         )
         _stream.write(",\n")
     if tail_items:
@@ -1843,6 +1918,7 @@ def _format_dict_body(
                 depth=depth + 1,
                 indent=indent + 1,
                 _seen=_seen,
+                _hints=_hints,
             )
             _stream.write(",\n")
     _stream.write("    " * indent + "})")
@@ -1859,6 +1935,7 @@ def _format_sequence(
     depth: int,
     indent: int,
     _seen: set[int] | None = None,
+    _hints: _TypeHints | None = None,
 ) -> None:
     """Write a sequence (list, tuple, set, frozenset) to *_stream*.
 
@@ -1916,6 +1993,7 @@ def _format_sequence(
             depth=depth,
             indent=indent,
             _seen=_seen,
+            _hints=_hints,
         )
     finally:
         _seen.discard(id(seq))
@@ -1935,6 +2013,7 @@ def _format_sequence_body(
     depth,
     indent,
     _seen,
+    _hints: _TypeHints | None = None,
 ):
     """Inner rendering body — split out so the cycle-guard try/finally above stays compact."""
     all_items = list(seq)
@@ -1975,6 +2054,7 @@ def _format_sequence_body(
             depth=depth + 1,
             indent=current_indent,
             _seen=_seen,
+            _hints=_hints,
         )
         return tmp.getvalue()
 
@@ -2001,6 +2081,7 @@ def _format_sequence_body(
                 depth=depth + 1,
                 indent=indent + 1,
                 _seen=_seen,
+                _hints=_hints,
             )
             _stream.write(",\n")
         _stream.write("    " * indent + brackets[1])
@@ -2047,6 +2128,7 @@ def _format_sequence_body(
                 depth=depth + 1,
                 indent=indent + 2,
                 _seen=_seen,
+                _hints=_hints,
             )
             _stream.write(",\n")
         _stream.write(f"{inner_indent}{brackets[1]},\n")
@@ -2064,6 +2146,7 @@ def _format_sequence_body(
                     depth=depth + 1,
                     indent=indent + 2,
                     _seen=_seen,
+                    _hints=_hints,
                 )
                 _stream.write(",\n")
             _stream.write(f"{inner_indent}{brackets[1]},\n")
@@ -2082,6 +2165,7 @@ def _format_sequence_body(
                 depth=depth + 1,
                 indent=indent + 1,
                 _seen=_seen,
+                _hints=_hints,
             )
             _stream.write(",\n")
         # Internal "..." marker — partial-ness obvious from inside the braces too.

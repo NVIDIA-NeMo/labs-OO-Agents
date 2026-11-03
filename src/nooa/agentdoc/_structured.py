@@ -16,7 +16,7 @@ import typing
 from typing import Any
 
 from nooa.agentdoc._info import REQUIRED, CallableInfo, FieldInfo, ModuleInfo, TypeInfo
-from nooa.agentdoc._visibility import _resolve_type_hints
+from nooa.agentdoc._visibility import _resolve_type_hints, _TypeHints
 from nooa.agentdoc.protocols import SupportsCallableInfo, SupportsTypeInfo
 
 # Re-export REQUIRED for backward compatibility
@@ -108,11 +108,12 @@ def _convert_to_marker(value: Any) -> Any:
     return value
 
 
-def extract_type_info(
+def _extract_type_info(
     obj: type,
     *,
     _skip_protocol: bool = False,
     _include_hidden: bool = False,
+    _hints: _TypeHints | None = None,
 ) -> TypeInfo:
     """Extract TypeInfo from any class-like type.
 
@@ -134,7 +135,7 @@ def extract_type_info(
     Returns:
         TypeInfo with unified field/method information
     """
-    from nooa.agentdoc._visibility import is_hidden_field
+    from nooa.agentdoc._visibility import _is_hidden_field
 
     if not _skip_protocol:
         # 1. Check extractor registry first (for third-party types)
@@ -152,7 +153,9 @@ def extract_type_info(
                 fields = (
                     result.fields
                     if _include_hidden
-                    else [f for f in result.fields if not is_hidden_field(obj, f.name)]
+                    else [
+                        f for f in result.fields if not _is_hidden_field(obj, f.name, _hints=_hints)
+                    ]
                 )
                 result = TypeInfo(
                     name=result.name,
@@ -169,7 +172,7 @@ def extract_type_info(
             fields = (
                 result.fields
                 if _include_hidden
-                else [f for f in result.fields if not is_hidden_field(obj, f.name)]
+                else [f for f in result.fields if not _is_hidden_field(obj, f.name, _hints=_hints)]
             )
             result = TypeInfo(
                 name=result.name,
@@ -183,10 +186,10 @@ def extract_type_info(
     # 3. Automatic extraction
     name = obj.__name__
     base = _detect_base(obj)
-    fields = _extract_fields(obj, base)
+    fields = _extract_fields(obj, base, _hints=_hints)
     if not _include_hidden:
-        fields = [f for f in fields if not is_hidden_field(obj, f.name)]
-    methods = _extract_methods(obj)
+        fields = [f for f in fields if not _is_hidden_field(obj, f.name, _hints=_hints)]
+    methods = _extract_methods(obj, _hints=_hints)
     docstring = _extract_docstring(obj)
 
     return TypeInfo(
@@ -198,7 +201,11 @@ def extract_type_info(
     )
 
 
-def extract_callable_info(obj: Any) -> CallableInfo:
+def _extract_callable_info(
+    obj: Any,
+    *,
+    _hints: _TypeHints | None = None,
+) -> CallableInfo:
     """Extract CallableInfo from a function or method.
 
     Args:
@@ -239,7 +246,7 @@ def extract_callable_info(obj: Any) -> CallableInfo:
             hint_targets = (call_method,) if call_method is not None else (sig_obj,)
         for hint_target in hint_targets:
             try:
-                resolved = _resolve_type_hints(hint_target)
+                resolved = _resolve_type_hints(hint_target, _hints=_hints)
                 break
             except (NameError, AttributeError, TypeError):
                 continue
@@ -249,7 +256,7 @@ def extract_callable_info(obj: Any) -> CallableInfo:
 
         # Augment docstring with parameter and return descriptions from Annotated
         docstring = _augment_docstring_with_annotated_descriptions(
-            obj, sig, docstring, resolved_hints=resolved
+            obj, sig, docstring, resolved_hints=resolved, _hints=_hints
         )
     except (ValueError, TypeError):
         # Fallback for built-ins or C functions
@@ -266,7 +273,11 @@ def extract_callable_info(obj: Any) -> CallableInfo:
     )
 
 
-def extract_module_info(obj: Any) -> ModuleInfo:
+def _extract_module_info(
+    obj: Any,
+    *,
+    _hints: _TypeHints | None = None,
+) -> ModuleInfo:
     """Extract ModuleInfo from a module.
 
     Uses __all__ if present to determine the exported public API; otherwise
@@ -320,7 +331,7 @@ def extract_module_info(obj: Any) -> ModuleInfo:
             first_line = raw_doc.split("\n")[0].strip() or None
             classes.append((sym_name, first_line))
         elif callable(attr):
-            info = extract_callable_info(attr)
+            info = _extract_callable_info(attr, _hints=_hints)
             # Use the exported symbol name when the object has no __name__ (e.g. singletons)
             if info.name in ("unknown", ""):
                 from dataclasses import replace as _dc_replace
@@ -518,23 +529,28 @@ def _detect_base(obj: type) -> str | None:
     return None
 
 
-def _extract_fields(obj: type, base: str | None) -> list[FieldInfo]:
+def _extract_fields(
+    obj: type,
+    base: str | None,
+    *,
+    _hints: _TypeHints | None = None,
+) -> list[FieldInfo]:
     """Extract fields based on the type kind."""
     if base == "BaseModel":
         return _extract_pydantic_fields(obj)
     if base == "@dataclass":
-        return _extract_dataclass_fields(obj)
+        return _extract_dataclass_fields(obj, _hints=_hints)
     if base == "NamedTuple":
-        return _extract_namedtuple_fields(obj)
+        return _extract_namedtuple_fields(obj, _hints=_hints)
     if base == "TypedDict":
-        return _extract_typeddict_fields(obj)
+        return _extract_typeddict_fields(obj, _hints=_hints)
     if base == "@attrs":
-        return _extract_attrs_fields(obj)
+        return _extract_attrs_fields(obj, _hints=_hints)
     if base == "Enum":
         if not issubclass(obj, enum.Enum):
             raise TypeError(f"Expected Enum subclass, got {obj}")
         return _extract_enum_members(obj)
-    return _extract_plain_class_fields(obj)
+    return _extract_plain_class_fields(obj, _hints=_hints)
 
 
 def _extract_pydantic_fields(obj: type) -> list[FieldInfo]:
@@ -616,11 +632,15 @@ def _extract_pydantic_fields(obj: type) -> list[FieldInfo]:
     return fields
 
 
-def _extract_dataclass_fields(obj: type) -> list[FieldInfo]:
+def _extract_dataclass_fields(
+    obj: type,
+    *,
+    _hints: _TypeHints | None = None,
+) -> list[FieldInfo]:
     """Extract fields from dataclass."""
     # Resolve full hints (preserving Annotated metadata) for description extraction
     try:
-        resolved = _resolve_type_hints(obj)
+        resolved = _resolve_type_hints(obj, _hints=_hints)
     except (NameError, AttributeError, TypeError):
         resolved = {}
 
@@ -653,7 +673,7 @@ def _extract_dataclass_fields(obj: type) -> list[FieldInfo]:
 
     # Also extract @property and @cached_property descriptors (same as _extract_plain_class_fields step 4)
     from nooa.agentdoc._metadata import get_field_metadata
-    from nooa.agentdoc._visibility import is_hidden_field
+    from nooa.agentdoc._visibility import _is_hidden_field
 
     seen_names = {f.name for f in fields}
     for klass in reversed(obj.__mro__):
@@ -668,7 +688,7 @@ def _extract_dataclass_fields(obj: type) -> list[FieldInfo]:
                 continue
             explicitly_unhidden = get_field_metadata(obj, name).get("hidden") is False
             if not explicitly_unhidden:
-                if is_hidden_field(obj, name):
+                if _is_hidden_field(obj, name, _hints=_hints):
                     continue
                 if isinstance(value, property):
                     fget = value.fget
@@ -689,12 +709,16 @@ def _extract_dataclass_fields(obj: type) -> list[FieldInfo]:
     return fields
 
 
-def _extract_namedtuple_fields(obj: type) -> list[FieldInfo]:
+def _extract_namedtuple_fields(
+    obj: type,
+    *,
+    _hints: _TypeHints | None = None,
+) -> list[FieldInfo]:
     """Extract fields from NamedTuple."""
     fields = []
     field_names = obj._fields
     try:
-        field_types = _resolve_type_hints(obj)
+        field_types = _resolve_type_hints(obj, _hints=_hints)
     except (NameError, AttributeError, TypeError):
         field_types = inspect.get_annotations(obj)
     defaults = getattr(obj, "_field_defaults", {})
@@ -708,14 +732,18 @@ def _extract_namedtuple_fields(obj: type) -> list[FieldInfo]:
     return fields
 
 
-def _extract_typeddict_fields(obj: type) -> list[FieldInfo]:
+def _extract_typeddict_fields(
+    obj: type,
+    *,
+    _hints: _TypeHints | None = None,
+) -> list[FieldInfo]:
     """Extract fields from TypedDict.
 
     For optional fields (total=False), marks them with description="optional"
     rather than showing a default value (which would be semantically incorrect).
     """
     try:
-        annotations = _resolve_type_hints(obj)
+        annotations = _resolve_type_hints(obj, _hints=_hints)
     except (NameError, AttributeError, TypeError):
         annotations = inspect.get_annotations(obj)
     required = getattr(obj, "__required_keys__", set())
@@ -739,7 +767,11 @@ def _extract_typeddict_fields(obj: type) -> list[FieldInfo]:
     return fields
 
 
-def _extract_attrs_fields(obj: type) -> list[FieldInfo]:
+def _extract_attrs_fields(
+    obj: type,
+    *,
+    _hints: _TypeHints | None = None,
+) -> list[FieldInfo]:
     """Extract fields from attrs class."""
     fields = []
     try:
@@ -764,7 +796,7 @@ def _extract_attrs_fields(obj: type) -> list[FieldInfo]:
             )
     except ImportError:
         # attrs not installed, fall back to annotations
-        return _extract_plain_class_fields(obj)
+        return _extract_plain_class_fields(obj, _hints=_hints)
     return fields
 
 
@@ -784,6 +816,8 @@ def _augment_docstring_with_annotated_descriptions(
     sig: inspect.Signature,
     original_docstring: str | None,
     resolved_hints: dict[str, Any] | None = None,
+    *,
+    _hints: _TypeHints | None = None,
 ) -> str | None:
     """Augment a function's docstring with Args/Returns from Annotated metadata.
 
@@ -802,7 +836,7 @@ def _augment_docstring_with_annotated_descriptions(
     """
     if resolved_hints is None:
         try:
-            resolved = _resolve_type_hints(func)
+            resolved = _resolve_type_hints(func, _hints=_hints)
         except (NameError, AttributeError, TypeError):
             resolved = None
     else:
@@ -946,7 +980,11 @@ def _extract_annotated_description(type_hint: Any) -> str | None:
     return None
 
 
-def _extract_plain_class_fields(obj: type) -> list[FieldInfo]:
+def _extract_plain_class_fields(
+    obj: type,
+    *,
+    _hints: _TypeHints | None = None,
+) -> list[FieldInfo]:
     """Extract fields from plain class annotations, class-level attributes, and __init__.
 
     This handles:
@@ -962,7 +1000,7 @@ def _extract_plain_class_fields(obj: type) -> list[FieldInfo]:
     # (from `from __future__ import annotations`) and preserve Annotated metadata.
     # Fall back to raw __annotations__ if resolution fails (e.g. forward refs).
     try:
-        resolved_hints = _resolve_type_hints(obj)
+        resolved_hints = _resolve_type_hints(obj, _hints=_hints)
     except (NameError, AttributeError, TypeError):
         resolved_hints = None
 
@@ -1080,7 +1118,7 @@ def _extract_plain_class_fields(obj: type) -> list[FieldInfo]:
 
     # 4. Extract @property and @cached_property descriptors across the MRO
     from nooa.agentdoc._metadata import get_field_metadata
-    from nooa.agentdoc._visibility import is_hidden_field
+    from nooa.agentdoc._visibility import _is_hidden_field
 
     for klass in reversed(obj.__mro__):
         if klass is object:
@@ -1093,10 +1131,10 @@ def _extract_plain_class_fields(obj: type) -> list[FieldInfo]:
             if name in seen_names:
                 continue
             # spec(hidden=False) explicitly unhides — overrides @hidden markers.
-            # spec(hidden=True) and annotation-based hiding are checked via is_hidden_field.
+            # spec(hidden=True) and annotation-based hiding are checked via _is_hidden_field.
             explicitly_unhidden = get_field_metadata(obj, name).get("hidden") is False
             if not explicitly_unhidden:
-                if is_hidden_field(obj, name):
+                if _is_hidden_field(obj, name, _hints=_hints):
                     continue
                 if isinstance(value, property):
                     fget = value.fget
@@ -1507,7 +1545,11 @@ _PYDANTIC_METHODS = {
 }
 
 
-def _extract_methods(obj: type) -> list[CallableInfo]:
+def _extract_methods(
+    obj: type,
+    *,
+    _hints: _TypeHints | None = None,
+) -> list[CallableInfo]:
     """Extract public methods as CallableInfo objects.
 
     Filters out framework methods (Pydantic BaseModel methods, etc.)
@@ -1543,7 +1585,7 @@ def _extract_methods(obj: type) -> list[CallableInfo]:
             if is_hidden_method(value) or is_hidden_method(raw):
                 continue
             seen_names.add(name)
-            info = extract_callable_info(value)
+            info = _extract_callable_info(value, _hints=_hints)
             if isinstance(raw, classmethod):
                 info = dataclasses.replace(info, is_classmethod=True)
             methods.append(info)
@@ -1565,7 +1607,7 @@ def _extract_methods(obj: type) -> list[CallableInfo]:
         if value is None or not callable(value):
             continue
         seen_names.add(name)
-        methods.append(extract_callable_info(value))
+        methods.append(_extract_callable_info(value, _hints=_hints))
 
     # Sort by source-definition order: walk MRO (derived → base) and record
     # first occurrence of each __qualname__.  Keying by __qualname__ matches
@@ -1686,3 +1728,20 @@ def format_type(type_hint: Any) -> str:
     # Fallback: clean up typing module prefixes
     result = str(type_hint)
     return result.replace("typing.", "")
+
+
+def extract_type_info(
+    obj: type, *, _skip_protocol: bool = False, _include_hidden: bool = False
+) -> TypeInfo:
+    """Extract class fields, methods, and documentation, honoring registered protocols."""
+    return _extract_type_info(obj, _skip_protocol=_skip_protocol, _include_hidden=_include_hidden)
+
+
+def extract_callable_info(obj: Any) -> CallableInfo:
+    """Extract a function or method's signature and documentation."""
+    return _extract_callable_info(obj)
+
+
+def extract_module_info(obj: Any) -> ModuleInfo:
+    """Extract a module's public functions, types, and variables."""
+    return _extract_module_info(obj)

@@ -22,42 +22,27 @@ import sys
 import threading
 import types
 import typing
-from collections.abc import Iterator
-from contextlib import contextmanager
-from contextvars import ContextVar
 from typing import Annotated, Any, cast
 
-_type_hints: ContextVar[dict[int, tuple[Any, dict[str, Any]]] | None] = ContextVar(
-    "agentdoc_type_hints", default=None
-)
+
+class _TypeHints:
+    """Annotation results owned by one formatter invocation and passed explicitly."""
+
+    def __init__(self) -> None:
+        self._entries: dict[int, tuple[Any, dict[str, Any]]] = {}
+
+    def resolve(self, obj: Any) -> dict[str, Any]:
+        # Keep identity keys valid, including for unhashable callable instances.
+        key = id(obj)
+        if key not in self._entries:
+            self._entries[key] = (obj, typing.get_type_hints(obj, include_extras=True))
+        return self._entries[key][1]
 
 
-@contextmanager
-def _type_hint_scope() -> Iterator[None]:
-    """Reuse resolved annotations within a render, never across later renders.
-
-    Recursive formatting shares the cache. Instance/class visibility overrides
-    remain live; only successful type-hint resolution is memoized.
-    """
-    if _type_hints.get() is not None:
-        yield
-        return
-    token = _type_hints.set({})
-    try:
-        yield
-    finally:
-        _type_hints.reset(token)
-
-
-def _resolve_type_hints(obj: Any) -> dict[str, Any]:
-    cache = _type_hints.get()
-    if cache is None:
+def _resolve_type_hints(obj: Any, *, _hints: _TypeHints | None = None) -> dict[str, Any]:
+    if _hints is None:
         return typing.get_type_hints(obj, include_extras=True)
-    # Keep the object alive and key by identity: callable instances can be unhashable.
-    key = id(obj)
-    if key not in cache:
-        cache[key] = (obj, typing.get_type_hints(obj, include_extras=True))
-    return cache[key][1]
+    return _hints.resolve(obj)
 
 
 def _is_dunder(name: str) -> bool:
@@ -152,7 +137,12 @@ def is_hidden_method(func: Any) -> bool:
     return False
 
 
-def is_hidden_field(cls: Any, name: str) -> bool:
+def _is_hidden_field(
+    cls: Any,
+    name: str,
+    *,
+    _hints: _TypeHints | None = None,
+) -> bool:
     """Check if a field is hidden via Annotated[T, hidden] or spec() imperative annotation.
 
     Accepts both types and instances. Priority:
@@ -194,7 +184,7 @@ def is_hidden_field(cls: Any, name: str) -> bool:
             continue
         # get_type_hints resolves string annotations and forward refs
         try:
-            resolved = _resolve_type_hints(klass)
+            resolved = _resolve_type_hints(klass, _hints=_hints)
         except (NameError, AttributeError, TypeError):
             resolved = None
 
@@ -334,3 +324,8 @@ def filter_mro_module_globals(agent_class: type) -> dict[str, Any]:
     for module in iter_agent_mro_modules(agent_class):
         result.update(filter_module_globals(module))
     return result
+
+
+def is_hidden_field(cls: Any, name: str) -> bool:
+    """Check field visibility, honoring instance and class spec overrides first."""
+    return _is_hidden_field(cls, name)
