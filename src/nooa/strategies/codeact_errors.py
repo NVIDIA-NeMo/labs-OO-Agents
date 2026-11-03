@@ -75,7 +75,7 @@ def return_call_hint(
     if python_tool is None:
         return f"Call it as {call}."
     if cell_only:
-        return f"Call {python_tool} with code {call}."
+        return f"To finish, call {python_tool} with {call}."
     return (
         f"In {python_tool} code, call it as {call}. As a direct return_result tool call, "
         f"pass JSON arguments: {' or '.join(json_forms)}."
@@ -104,14 +104,25 @@ def return_doc_hint(return_type: Any, namespace: Any) -> str | None:
     return f"Fields: print(doc({', '.join(names)}))" if names else None
 
 
-def return_alias_note(python_tool: str, value: Any, limit: int = 200) -> str:
-    """The line telling the model a provider ``return_result`` call was taken as the builtin."""
+def _shown_value(value: Any, limit: int) -> str:
     shown = repr(value)
-    if len(shown) > limit:
-        shown = shown[: limit - 1] + "…"
+    return shown[: limit - 1] + "…" if len(shown) > limit else shown
+
+
+def return_alias_note(python_tool: str, value: Any, limit: int = 200) -> str:
+    """The note on an accepted provider ``return_result`` call taken as the builtin."""
     return (
-        f"return_result is a function inside {python_tool}; "
-        f"this call was taken as return_result({shown})"
+        f"return_result isn't a tool. It's a function you call inside {python_tool}; "
+        f"this call ran as return_result({_shown_value(value, limit)})"
+    )
+
+
+def return_alias_invalid_intro(python_tool: str, value: Any, limit: int = 200) -> str:
+    """The first line for an invalid provider ``return_result`` call taken as the builtin."""
+    return (
+        f"return_result isn't a tool. It's a function you call inside {python_tool}. "
+        f"I ran your call as {python_tool} code return_result({_shown_value(value, limit)}), "
+        "and that value isn't a valid result:"
     )
 
 

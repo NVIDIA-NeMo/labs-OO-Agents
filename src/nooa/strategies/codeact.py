@@ -70,6 +70,7 @@ from nooa.runtime.sandbox.errors import SandboxExecutionError
 from nooa.strategies.base import RuntimeServices, build_sampling_kwargs
 from nooa.strategies.codeact_errors import (
     format_validation_error,
+    return_alias_invalid_intro,
     return_alias_note,
     return_call_hint,
     return_doc_hint,
@@ -1893,11 +1894,15 @@ Standard Python builtins and agent instance (`self`) are available."""
         ):
             # Return the final result
             alias_note: str | None = None
+            alias_intro = ""
             if not self._supports_return_result():
                 # Some models call the cell builtin as a provider tool: take its
                 # value as return_result(value) inside a cell would, and say so.
                 args = self._return_result_alias(args) or {}
                 alias_note = return_alias_note(self._python_tool_name(), args.get("result"))
+                alias_intro = return_alias_invalid_intro(
+                    self._python_tool_name(), args.get("result")
+                )
                 get_harness_metrics().return_result_tool_alias(self._python_tool_name())
             try:
                 validated, error_msg = self._handle_return_result(
@@ -1933,7 +1938,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                     arguments=corrected_args,
                     result=ToolResult(
                         tool_call_id=tool_call.id,
-                        content="Result accepted." + (f"\n{alias_note}." if alias_note else ""),
+                        content="Result accepted." + (f" {alias_note}." if alias_note else ""),
                         result_status=ResultStatus.COMPLETE,
                     ),
                 )
@@ -1942,7 +1947,7 @@ Standard Python builtins and agent instance (`self`) are available."""
             # Validation error - update with error result
             if alias_note:
                 # No return_result tool exists: point only at the cell form.
-                content = f"{alias_note}.\nInvalid result: {error_msg}"
+                content = f"{alias_intro}\n{error_msg}"
             else:
                 content = (
                     f"Invalid result: {error_msg}\n"
@@ -2559,9 +2564,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                 doc_hint = return_doc_hint(return_type, session.session_locals)
                 if call_hint and doc_hint:
                     call_hint = f"{call_hint}\n{doc_hint}"
-                if call_hint and alias:
-                    error_msg = f"{call_hint}\n{error_msg}"
-                elif call_hint:
+                if call_hint:
                     error_msg = f"{error_msg}\n{call_hint}"
             logger.debug(f"[CODEACT] return_result validation failed: {e}")
 
@@ -2585,7 +2588,9 @@ Standard Python builtins and agent instance (`self`) are available."""
 
             # Offered back to the model as a cell error it can retry on.
             metrics.return_result_invalid(type(e).__name__)
-            if limit is not None:
+            if limit is not None and alias:
+                error_msg = f"{error_msg}\nThe turn goes on (attempt {attempts} of {budget})."
+            elif limit is not None:
                 error_msg = (
                     f"{error_msg}\nThe turn goes on: fix the value and call return_result "
                     f"again (attempt {attempts} of {budget})."

@@ -182,7 +182,9 @@ async def test_provider_return_result_with_one_value_finishes_like_the_builtin(k
     try:
         assert await agent.answer() == 42
         rendered = str(llm.last_messages)
-        assert "Invalid result" in rendered  # the same validation and retry as the builtin
+        # The same validation and retry as the builtin, in the alias wording.
+        assert "and that value isn't a valid result:" in rendered
+        assert "Invalid result" not in rendered
         assert "Unknown tool" not in rendered
         assert [tool.name for tool in llm.last_tools] == ["python_cell"]
     finally:
@@ -239,12 +241,14 @@ async def test_aliased_return_result_says_how_it_was_taken_and_shows_the_cell_fo
         await agent.aclose()
     bad = results["bad"]
     assert bad.splitlines()[0] == (
-        "return_result is a function inside python_cell; this call was taken as "
-        "return_result(\"NeedInput(question='which?')\")."
+        "return_result isn't a tool. It's a function you call inside python_cell. I ran your "
+        "call as python_cell code return_result(\"NeedInput(question='which?')\"), and that "
+        "value isn't a valid result:"
     )
-    # The cell form comes first and no JSON arguments are suggested.
-    assert bad.splitlines()[1].startswith(
-        "Invalid result: Call python_cell with code one of: "
+    # The validation errors follow; the cell form comes last and no JSON arguments.
+    assert bad.splitlines()[1].startswith("return_result() failed")
+    assert bad.splitlines()[-1] == (
+        "To finish, call python_cell with one of: "
         "return_result(Done(explanation=...)), return_result(NeedInput(question=...))."
     )
     # Done and NeedInput are not bound in this cell namespace: no doc() line.
@@ -252,8 +256,8 @@ async def test_aliased_return_result_says_how_it_was_taken_and_shows_the_cell_fo
     assert "JSON" not in bad and '{"result"' not in bad
     assert "Please call return_result again" not in bad
     assert results["ok"] == (
-        "Result accepted.\nreturn_result is a function inside python_cell; this call was "
-        "taken as return_result({'explanation': 'done'})."
+        "Result accepted. return_result isn't a tool. It's a function you call inside "
+        "python_cell; this call ran as return_result({'explanation': 'done'})."
     )
 
 

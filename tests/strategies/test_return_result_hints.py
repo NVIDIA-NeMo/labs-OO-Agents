@@ -57,8 +57,11 @@ def test_call_hint_for_a_direct_tool_call_labels_code_and_gives_json():
 
 def test_call_hint_for_an_aliased_call_shows_only_the_cell_form():
     assert return_call_hint(Done | NeedInput, "python_cell", cell_only=True) == (
-        "Call python_cell with code one of: return_result(Done(explanation=...)), "
+        "To finish, call python_cell with one of: return_result(Done(explanation=...)), "
         "return_result(NeedInput(question=...))."
+    )
+    assert return_call_hint(Done, "python_cell", cell_only=True) == (
+        "To finish, call python_cell with return_result(Done(explanation=...))."
     )
 
 
@@ -81,7 +84,20 @@ def test_alias_note_names_the_value_taken_and_is_bounded():
     from nooa.strategies.codeact_errors import return_alias_note
 
     assert return_alias_note("python_cell", 42) == (
-        "return_result is a function inside python_cell; this call was taken as return_result(42)"
+        "return_result isn't a tool. It's a function you call inside python_cell; "
+        "this call ran as return_result(42)"
     )
     long = return_alias_note("python_cell", "x" * 1000)
-    assert len(long) < 300 and long.endswith("…)")
+    assert len(long) < 320 and long.endswith("…)")
+
+
+def test_alias_invalid_intro_says_how_the_call_ran_and_is_bounded():
+    from nooa.strategies.codeact_errors import return_alias_invalid_intro
+
+    assert return_alias_invalid_intro("python_cell", "hello") == (
+        "return_result isn't a tool. It's a function you call inside python_cell. "
+        "I ran your call as python_cell code return_result('hello'), and that value isn't "
+        "a valid result:"
+    )
+    assert "taken as" not in return_alias_invalid_intro("python_cell", "hello")
+    assert len(return_alias_invalid_intro("python_cell", "x" * 1000)) < 400

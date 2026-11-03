@@ -128,13 +128,24 @@ async def test_an_invalid_provider_return_result_names_the_fields_doc(registry, 
     ]
     root = await registry.create(options)
     assert await asyncio.wait_for(root.prompt("hi"), TIMEOUT) == Done(explanation="fixed")
-    seen = str(models.llms[None].calls[1].messages)
-    assert "this call was taken as return_result('oops')" in seen
-    assert (
-        "Invalid result: Call python_cell with code one of: return_result(Done(explanation=...)), "
-        "return_result(NeedInput(question=...)), return_result(Waiting(explanation=..., on=...))."
-        "\\nFields: print(doc(Done, NeedInput, Waiting))\\n"
-    ) in seen
+    [seen] = [
+        str(m.get("content", ""))
+        for m in models.llms[None].calls[1].messages
+        if "isn't a tool" in str(m.get("content", ""))
+    ]
+    lines = seen.splitlines()
+    assert lines[0] == (
+        "return_result isn't a tool. It's a function you call inside python_cell. I ran your "
+        "call as python_cell code return_result('oops'), and that value isn't a valid result:"
+    )
+    assert lines[1].startswith("return_result() failed")  # the validation errors, unchanged
+    assert lines[-3:] == [
+        "To finish, call python_cell with one of: return_result(Done(explanation=...)), "
+        "return_result(NeedInput(question=...)), return_result(Waiting(explanation=..., on=...)).",
+        "Fields: print(doc(Done, NeedInput, Waiting))",
+        f"The turn goes on (attempt 1 of {_MAX_RESULT_RETRIES}).",
+    ]
+    assert "taken as" not in seen and "Invalid result:" not in seen
 
 
 async def test_invalid_values_stay_bounded(registry, options, models):
