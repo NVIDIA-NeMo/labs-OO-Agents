@@ -625,6 +625,12 @@ class MemoryManager:
         return todos[:k]
 
     def _format_recall(self, queries: list[str]) -> str:
+        """Render recall, then account only for memories identifiable in the result.
+
+        A partial record counts as injected once its complete ``[type#id]``
+        marker survives the budget. A cut inside that marker does not count.
+        """
+        self._last_injected_ids = []
         if not queries:
             return ""
         sp = self.config.spontaneous
@@ -637,9 +643,11 @@ class MemoryManager:
                 seen.setdefault(m.id, m)
         shown = list(seen.values())[:k]
         lines: list[str] = []
+        record_lines: list[tuple[Memory, int]] = []
         if shown:
             lines.append("## Recalled memories (associative)")
             for m in shown:
+                record_lines.append((m, len(lines)))
                 lines.extend(self._memory_lines(m))
         extra: list[Memory] = []
         if sp.inject_open_todos == "always":
@@ -648,20 +656,32 @@ class MemoryManager:
             if extra:
                 lines.append("## Open todos")
                 for t in extra:
+                    record_lines.append((t, len(lines)))
                     lines.extend(self._memory_lines(t))
         if not lines:
-            self._last_injected_ids = []
             return ""
-        injected = shown + extra
+        text = "\n".join(lines)
+        visible_end = len(text)
+        if len(text) > sp.context_char_budget:
+            prefix = text[: sp.context_char_budget].rstrip()
+            visible_end = len(prefix)
+            text = prefix + " …"
+        offsets: list[int] = []
+        position = 0
+        for line in lines:
+            offsets.append(position)
+            position += len(line) + 1  # newline between rendered lines
+        injected = [
+            memory
+            for memory, line_index in record_lines
+            if offsets[line_index] + lines[line_index].index("]") + 1 <= visible_end
+        ]
         self._last_injected_ids = [m.id for m in injected]
         if self.config.observability.log_injections:
             # Logged WITHOUT touching: injection stays invisible to ACT-R.
             for m in injected:
                 m.log_access(self._access("injected"), cap=self.config.observability.access_log_cap)
                 self.store.save(m)
-        text = "\n".join(lines)
-        if len(text) > sp.context_char_budget:
-            text = text[: sp.context_char_budget].rstrip() + " …"
         return text
 
     def _on_task(self, event: object) -> None:
@@ -691,12 +711,14 @@ class MemoryManager:
             self.stats.injected_chars += len(text)
             self._emit(
                 MemoryInjected(
-                    n_memories=text.count("\n- "),
+                    n_memories=len(self._last_injected_ids),
                     chars=len(text),
                     memory_ids=list(self._last_injected_ids),
                 )
             )
-            mem_logger.debug("memory.inject %d chars (%d memories)", len(text), text.count("\n- "))
+            mem_logger.debug(
+                "memory.inject %d chars (%d memories)", len(text), len(self._last_injected_ids)
+            )
         elif key in cm:
             del cm[key]
         self._last_query_hash = qhash
