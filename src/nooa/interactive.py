@@ -494,7 +494,8 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
     # proxy for dot-attribute reads/writes (``self.v.spec = "..."``).
     vars: SnapshotVars
 
-    def __init__(self, llm=None, **kwargs):
+    def __init__(self, llm=None, *, producers: bool = True, **kwargs):  # noqa: F811 (not the module)
+        """``producers=False``: no ``self.producers`` (a subclass with its own timers)."""
         super().__init__(llm=llm or _DEFAULT_LLM, **kwargs)
         self._render_message = None
         self.vars = SnapshotVars()
@@ -503,7 +504,8 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
         self.user_messages = self._user_messages_in.reader
         self.event_manager.on_close(self.queue_manager.shutdown)
         self.turns = TurnLoop(self)
-        self.producers = ProducersSkill()
+        if producers:
+            self.producers = ProducersSkill()
         # Surface pending-queue counts (and a short preview of each item)
         # to the LLM every turn — the agent reads queue depth straight
         # from the ``queues`` context block. Composed via

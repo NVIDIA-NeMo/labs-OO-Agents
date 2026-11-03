@@ -729,7 +729,9 @@ class AtomAgent(AtomAgentBase):
         self._reflection_candidate = None
         self._namespace_restart_notified = False
         self._session_namespace_was_live = False
-        super().__init__(*args, **kwargs)
+        # Core's ``self.producers`` (QueueManager.spawn helpers) is not Atom's:
+        # its timers are ``self.jobs.after/every``; tails are ``tail -F`` in a Shell.
+        super().__init__(*args, producers=False, **kwargs)
         self._reflection_gate = reflection_gate
         if policy not in ("interactive", "unattended", "orchestrator", "child"):
             raise ValueError(f"unknown policy {policy!r}")
@@ -745,9 +747,6 @@ class AtomAgent(AtomAgentBase):
         self._role_instructions = text or None
         # The legacy JobsApi never started anything; drop it and its cancel hint.
         self.queue_manager._cancel_hints.pop("jobs", None)
-        # Core's ``self.producers`` (QueueManager.spawn helpers) is not Atom's:
-        # its timers are ``self.jobs.after/every``; tails are ``tail -F`` in a Shell.
-        self.__dict__.pop("producers", None)
         self._work_records = []
         self.jobs = _AgentJobs(
             self,
@@ -1120,6 +1119,7 @@ class AtomAgent(AtomAgentBase):
         raise TypeError(_ONE_TURN_METHOD)
 
 
+# "producers" is also core's nemo.producers entry-point skill, which doc() would list.
 for _name in ("shell", "delegates", "producers", "system_messages", "cwd"):
     spec(AtomAgent, _name, hidden=True)
 spec(AtomAgent, "jobs", description="Run and track work: see WorkManager")

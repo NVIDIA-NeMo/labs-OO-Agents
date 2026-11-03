@@ -28,19 +28,6 @@ _DESCRIPTION_WIDTH = 100
 _TOOL_MATCHES_SHOWN = 10  # tool/method-name matches a search lists
 _MCP_SERVERS_SHOWN = 8  # connected servers the MCP line names
 
-# Timers and ticks are built into ``self.jobs``, and a file tail is a Shell command,
-# not skills: a search for them points there instead of answering "No skills match".
-_WORK_WORDS = frozenset(
-    "timer timers schedule scheduler scheduled cron remind reminder later after every "
-    "periodic periodically monitor watch tail follow delay sleep wait".split()
-)
-_BUILT_IN_WORK = (
-    "self.jobs (built in, no skill needed): self.jobs.after(seconds, fn) calls fn once after "
-    "seconds, self.jobs.every(seconds, fn) calls it every seconds (fn optional); watch a "
-    "command or follow a file: "
-    'self.jobs.launch(Shell().run("tail -F app.log"), name=..., progress=Throttle(seconds=5))'
-)
-
 
 @dataclass(frozen=True)
 class SkillEntry:
@@ -145,7 +132,6 @@ class SkillManager(Skill):
         public methods of loaded code skills. Searching loads nothing.
         """
         words = [word for word in query.lower().split() if word]
-        hint = [_BUILT_IN_WORK] if any(w.strip(".,;:!?\"'()") in _WORK_WORDS for w in words) else []
         scored = []
         tools = []
         for entry in self.entries():
@@ -160,9 +146,9 @@ class SkillManager(Skill):
                 if tool_hits:
                     tools.append((-tool_hits, entry.name, tool, entry))
         if not scored and not tools:
-            return hint[0] if hint else f"No skills match {query!r}."
+            return f"No skills match {query!r}."
         scored.sort(key=lambda item: item[:3])
-        lines = hint + [entry.line() for *_, entry in scored[:limit]]
+        lines = [entry.line() for *_, entry in scored[:limit]]
         if len(scored) > limit:
             lines.append(f"... {len(scored) - limit} more; narrow the query or raise limit")
         tools.sort(key=lambda item: item[:3])

@@ -377,49 +377,6 @@ async def test_read_of_a_non_text_skill_names_the_working_doc_call(agent):
     assert agent.skills.doc("probe").startswith("probe")
 
 
-@pytest.mark.parametrize(
-    "query",
-    [
-        "timer",
-        "schedule",
-        "cron",
-        "remind",
-        "later",
-        "after",
-        "every",
-        "periodic",
-        "monitor",
-        "watch",
-        "tail",
-        "follow",
-        "Schedule a reading in 120 s",
-    ],
-)
-async def test_search_for_timers_and_tails_points_to_self_jobs(agent, query):
-    found = agent.skills.search(query)
-    assert "No skills match" not in found
-    first = found.splitlines()[0]
-    assert first.startswith("self.jobs (built in, no skill needed):")
-    for call in (
-        "self.jobs.after(seconds, fn) calls fn once",
-        "self.jobs.every(seconds, fn) calls it every seconds (fn optional)",
-        'Shell().run("tail -F',
-        "progress=Throttle(",
-    ):
-        assert call in first
-    assert "own Shell" not in first and "one command at a time" not in first
-    assert "self.jobs.tail(" not in first
-    assert "subtract" not in first
-
-
-async def test_search_hint_comes_before_matching_skills(agent):
-    assert agent.skills.search("greet later").splitlines() == [
-        agent.skills.search("later"),
-        "greeter (code, available): Greet people by name.",
-        "greeter has greet (method: self.greeter.greet)",
-    ]
-
-
 async def test_search_matches_mcp_tool_names_after_skills(agent):
     class Resources:
         """MCP server 'hcb_resources'."""
@@ -443,8 +400,6 @@ async def test_search_matches_mcp_tool_names_after_skills(agent):
     ]
     # Short words do not match tool names.
     assert not any(" has " in line for line in agent.skills.search("is").splitlines())
-    # The self.jobs hint still comes first.
-    assert agent.skills.search("permit later").splitlines()[0].startswith("self.jobs (built in")
 
 
 async def test_a_client_server_shown_under_its_key_is_called_on_its_attribute(agent):
