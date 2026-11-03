@@ -1338,8 +1338,9 @@ async def test_a_module_not_found_error_points_at_the_task_python_and_is_counted
     assert (
         "python_cell runs in Atom's own Python, not the task's; the task's python3 may have "
         "no_such_task_pkg_xyz: check with "
-        "await sh.run(\"python3 -c 'import no_such_task_pkg_xyz'\")"
+        'await sh.run("python3 -", stdin="import no_such_task_pkg_xyz")'
     ) in seen
+    assert "python3 -c 'import" not in seen
     assert "Live names are listed" not in seen
     [attrs] = [a for a in flushed if "harness.module_not_found_hint.count" in a]
     assert attrs["harness.module_not_found_hint.count"] == 1

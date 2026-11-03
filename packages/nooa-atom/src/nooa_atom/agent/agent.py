@@ -181,7 +181,7 @@ def _module_not_found_hint(error: BaseException, formatted: str) -> str | None:
     get_harness_metrics().module_not_found_hint(name)
     return (
         "python_cell runs in Atom's own Python, not the task's; the task's python3 may have "
-        f"{module}: check with await sh.run(\"python3 -c 'import {module}'\")"
+        f'{module}: check with await sh.run("python3 -", stdin="import {module}")'
     )
 
 
