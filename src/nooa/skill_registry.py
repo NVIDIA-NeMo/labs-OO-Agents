@@ -492,6 +492,7 @@ class SkillRegistry(Skill):
                         held_by,
                     )
                     continue
+                self._replace_inactive_owner(name, attr_name)
                 if hasattr(self._agent, attr_name) and attr_name not in set(
                     self._attr_map.values()
                 ):
@@ -515,8 +516,10 @@ class SkillRegistry(Skill):
     def _protected_conflict(self, name: str, attr: str, skill: Any = None) -> str | None:
         """Describe why *name* may not take over *attr*, or None if it may.
 
-        Each normalized agent attribute has one registry owner. Agents also
-        declare the attributes carrying their own tools via
+        Each normalized agent attribute has one registry owner. A different
+        skill may replace an inactive owner (see ``_replace_inactive_owner``),
+        but not an active one: the model has already been told about it.
+        Agents also declare the attributes carrying their own tools via
         ``__protected_skill_attrs__``. Those may be claimed once: a second
         claimant removes the tool while the model is still told it has one.
 
@@ -528,17 +531,38 @@ class SkillRegistry(Skill):
         itself. Both ``register()`` and ``load()`` consult this, so the explicit
         and discovered paths cannot drift apart.
         """
-        owner = next(
-            (held for held, held_attr in self._attr_map.items() if held_attr == attr), None
-        )
-        if owner is not None:
-            return None if owner == name else f"already provided by {owner!r}"
+        owner = self._attr_owner(attr)
+        if owner == name:
+            return None
+        if owner is not None and owner in self._activated:
+            return f"already provided by active skill {owner!r}"
         protected = getattr(type(self._agent), "__protected_skill_attrs__", frozenset())
         if attr not in protected:
             return None
+        if owner is not None:
+            return f"already provided by {owner!r}"
         if hasattr(self._agent, attr) and getattr(self._agent, attr, None) is not skill:
             return "assigned directly by the agent"
         return None
+
+    def _attr_owner(self, attr: str) -> str | None:
+        """Return the registry name that owns *attr*, if any."""
+        return next((held for held, held_attr in self._attr_map.items() if held_attr == attr), None)
+
+    def _replace_inactive_owner(self, name: str, attr: str) -> None:
+        """Unload the inactive skill holding *attr* so *name* becomes its only owner."""
+        owner = self._attr_owner(attr)
+        if owner is None or owner == name:
+            return
+        previous: Any = getattr(self._agent, attr, None)
+        if previous is not None and getattr(previous, "_agent", None) is self._agent:
+            detach = getattr(previous, "detach", None)
+            if callable(detach):
+                detach()
+        self._loaded.discard(owner)
+        del self._attr_map[owner]
+        self._load_order.remove(owner)
+        logger.warning("Skill %s replaces inactive skill %s as agent attr '%s'", name, owner, attr)
 
     def register(
         self, name: str, skill_or_cls: "Skill | type[Skill] | None" = None, /, **kwargs
@@ -578,6 +602,7 @@ class SkillRegistry(Skill):
         conflict = self._protected_conflict(name, attr, skill)
         if conflict is not None:
             raise ValueError(f"Cannot register skill {name!r} as agent attr {attr!r}: {conflict}")
+        self._replace_inactive_owner(name, attr)
         if hasattr(self._agent, attr) and attr not in set(self._attr_map.values()):
             logger.warning("Skill %s overwrites existing agent attr '%s'", name, attr)
         setattr(self._agent, attr, skill)
