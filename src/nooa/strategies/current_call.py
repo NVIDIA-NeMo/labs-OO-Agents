@@ -163,8 +163,6 @@ class CurrentCall:
         dict[str, Any] | None,
         "Live per-invocation REPL namespace for dynamic context, including new cell names and internals",
     ] = None
-    # Opt-in coherent namespace owner; never copied into snapshot/user state.
-    execution_namespace: Any = None
     # Per-parameter spec overrides extracted from Annotated metadata.
     # Each value is a dict of kwargs from spec() — e.g. {"max_length": 20,
     # "max_string": 500}. Used by format_parameters_as_code to override the
@@ -184,6 +182,9 @@ class CurrentCall:
     positional_param_names: list[str] | None = None
     var_positional_param_name: str | None = None
     var_keyword_param_name: str | None = None
+    # Opt-in coherent namespace owner; never copied into snapshot/user state.
+    # Last so main's positional constructor order above stays unchanged.
+    execution_namespace: Any = None
 
     def __hash__(self) -> int:
         """Hash by id for use in sets/dicts."""
