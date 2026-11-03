@@ -1273,6 +1273,8 @@ class _BlockingCallVisitor(ast.NodeVisitor):
         # Names bound by this cell's own imports (see visit_Module).
         self.cell_modules: dict[str, str] = {}  # alias -> module name
         self.cell_members: dict[str, tuple[str, str]] = {}  # alias -> (module, name)
+        # Names this cell assigns: they no longer mean an earlier cell's object.
+        self.cell_bound: set[str] = set()
 
     def _resolve_module_from_call(self, node: ast.Call) -> str | None:
         """Resolve the module of a chained call like asyncio.get_event_loop().
@@ -1342,23 +1344,44 @@ class _BlockingCallVisitor(ast.NodeVisitor):
                         self.cell_members[alias.asname or alias.name] = (child.module, alias.name)
         self.generic_visit(node)
 
+    def visit_Name(self, node: ast.Name) -> Any:
+        """Record every name the cell binds (assignment, for/with/walrus targets, ...)."""
+        if isinstance(node.ctx, ast.Store):
+            self.cell_bound.add(node.id)
+            self.tracked_locals.pop(node.id, None)
+
     def visit_Assign(self, node: ast.Assign) -> Any:
         """Track local variables assigned from constructors on blocked-call modules."""
+        # The value runs before the targets are bound.
+        self.visit(node.value)
+        for target in node.targets:
+            self.visit(target)
+        names = [target.id for target in node.targets if isinstance(target, ast.Name)]
+        self._track_assignment(names, node.value)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> Any:
+        """Track ``ev: threading.Event = threading.Event()`` like a plain assignment."""
+        self.visit(node.annotation)
+        if node.value is not None:
+            self.visit(node.value)
+        self.visit(node.target)
+        if isinstance(node.target, ast.Name) and node.value is not None:
+            self._track_assignment([node.target.id], node.value)
+
+    def _track_assignment(self, names: list[str], value: ast.expr) -> None:
         # Track: t = threading.Thread(...) -> tracked_locals["t"] = ("threading", "Thread")
         # and aliases of a blocked function: s = os.system -> cell_members["s"]
-        names = [target.id for target in node.targets if isinstance(target, ast.Name)]
-        if isinstance(node.value, ast.Call):
-            ref = self._resolve_ref(node.value.func)
+        if isinstance(value, ast.Call):
+            ref = self._resolve_ref(value.func)
             matched = match_blocked_module(ref[0], self.blocked_calls) if ref else None
             if ref and matched:
                 for name in names:
                     self.tracked_locals[name] = (matched, ref[1])
         else:
-            ref = self._resolve_ref(node.value)
+            ref = self._resolve_ref(value)
             if ref and self._blocked_call(ref[0], ref[1]):
                 for name in names:
                     self.cell_members[name] = ref
-        self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> Any:
         """Check each call against blocked modules and blocked calls."""
@@ -1473,7 +1496,7 @@ class _BlockingCallVisitor(ast.NodeVisitor):
             # threading.Event().wait(): the receiver is what the constructor returns
             return self._resolve_ref(node.func)
         if isinstance(node, ast.Name) and node.id not in self.cell_modules:
-            if node.id in self.cell_members:
+            if node.id in self.cell_members or node.id in self.cell_bound:
                 return None
             obj = self.exec_globals.get(node.id)
             if obj is None or isinstance(obj, (types.ModuleType, type)) or callable(obj):

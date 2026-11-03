@@ -68,6 +68,16 @@ CASES: dict[str, tuple[str, str, str]] = {
         "Event.wait",
         "from threading import Event\nev = Event()\nev.wait(0)",
     ),
+    "annotated ev: Event = threading.Event()": (
+        "threading",
+        "Event.wait",
+        "import threading\nev: threading.Event = threading.Event()\nev.wait(0)",
+    ),
+    "annotated alias s: object = time.sleep": (
+        "time",
+        "sleep",
+        "import time\ns: object = time.sleep\ns(0)",
+    ),
     "lock.acquire()": (
         "threading",
         "Lock.acquire",
@@ -204,6 +214,29 @@ def test_validator_refuses_objects_from_earlier_cells(code, obj):
     name = code.split(".")[0].split("(")[0]
     issues = _validate(code, {name: obj})
     assert issues and issues[0].code == "E310", code
+
+
+@pytest.mark.parametrize(
+    "code,name,obj",
+    [
+        ("lock = asyncio.Lock()\nawait lock.acquire()", "lock", threading.Lock()),
+        ("ev = asyncio.Event()\nawait ev.wait()", "ev", threading.Event()),
+        ("q: asyncio.Queue = asyncio.Queue()\nawait q.get()", "q", multiprocessing.Queue()),
+        (
+            "for ev in [asyncio.Event()]:\n    ev.set()\n    await ev.wait()",
+            "ev",
+            threading.Event(),
+        ),
+        ("t = threading.Thread(target=print)\nt = ' '\nt.join(['a'])", "t", None),
+    ],
+    ids=["Lock", "Event", "annotated Queue", "for target", "rebound local"],
+)
+def test_validator_allows_names_the_cell_rebinds(code, name, obj):
+    """A name the cell assigns no longer means the blocking object an earlier cell bound."""
+    exec_globals = {"asyncio": asyncio, "threading": threading}
+    if obj is not None:
+        exec_globals[name] = obj
+    assert _validate(code, exec_globals) == []
 
 
 @pytest.mark.parametrize("name", list(ALLOWED))
