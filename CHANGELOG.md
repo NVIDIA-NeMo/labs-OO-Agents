@@ -6,6 +6,13 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- Text skills now load as regular `Skill` objects with documentation from
+  `SKILL.md`, a stable `files: list[SkillFile]` manifest, and a skill-local
+  `ShellTools` whose working directory is the skill root. `TextSkill(path=...)`
+  remains available as the compatibility constructor. The `read_file()` /
+  `run_script()` helpers are removed; use `skill.shell.read()` /
+  `skill.shell.run()` instead. Unlike `read_file()`, the shell does not restrict
+  paths to the skill directory.
 - Windows: WSL 2 is the supported way to run nooa on Windows. Native Windows is
   unsupported: `import nooa` raises `UnsupportedPlatformError` (an
   `ImportError`) and the `nooa` command exits with one line pointing to WSL 2,
@@ -435,11 +442,6 @@ to follow semantic versioning.
   inspect `original_type`, `original_error`, and `diagnostic` for worker-side details.
 - Add composable, context-scoped instrumentation hooks and trace-session scopes so hosts can observe NOOA execution without replacing native tracing.
 - Initial public release of NVIDIA Object-Oriented Agents (NOOA).
-- Text skills now load as regular `Skill` objects with documentation from
-  `SKILL.md`, a stable `files: list[SkillFile]` manifest, and a skill-root-scoped
-  `ShellTools` dependency. `TextSkill(path=...)` remains available as the
-  compatibility constructor; migrate `read_file()` / `run_script()` calls to
-  `skill.shell.read()` / `skill.shell.run()`.
 - Security: MCP server configurations no longer expand host environment variables
   from `${VAR}` placeholders. Trusted caller code must resolve secrets and pass
   their values explicitly.

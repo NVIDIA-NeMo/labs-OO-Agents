@@ -466,7 +466,7 @@ def test_connect_skill_loads_as_text_skill_and_links_resolve():
     assert skill.id == "nooa-connect"
     assert "permission-first" in skill.description
     assert "--stage" in type(skill).__doc__
-    assert skill.read_file("SKILL.md") == SKILL.read_text()
+    assert "SKILL.md" in [file.path for file in skill.files]
     paths = [
         SKILL,
         GUIDE,

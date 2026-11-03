@@ -54,7 +54,8 @@ capability you need rather than treating the remaining files as required steps.
 ### Text skill API
 
 `TextSkill(path=...)` returns a regular `Skill` whose documentation comes from
-`SKILL.md`. Use its root-relative file manifest and root-scoped `ShellTools`:
+`SKILL.md`. Use its root-relative file manifest and its `ShellTools`, which starts in the
+skill root (paths are not restricted to it):
 
 ```python
 skill = TextSkill(path=ASSETS / "frontend-design")

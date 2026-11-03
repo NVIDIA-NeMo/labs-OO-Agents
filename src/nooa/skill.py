@@ -403,7 +403,8 @@ class TextSkill(Skill):
     """Compatibility factory for loading a SKILL.md directory as a normal Skill.
 
     The returned object is a generated ``Skill`` with documentation from
-    ``SKILL.md``, a skill-root-scoped ``shell``, and a ``files`` manifest.
+    ``SKILL.md``, a ``shell`` whose working directory is the skill root, and a
+    ``files`` manifest.
     ``TextSkill`` remains importable so existing construction sites continue
     to work, but the returned object has no text-skill-specific tool methods.
     """
