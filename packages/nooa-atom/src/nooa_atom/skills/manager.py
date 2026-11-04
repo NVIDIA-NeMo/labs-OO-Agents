@@ -252,21 +252,16 @@ class SkillManager(Skill):
         the rest with the search call; never the catalog itself.
         """
         mcp_line = self.mcp_line()
-        connected = {attr for _, attr, _ in self.connected_mcp()} if mcp_line else set()
         active, rest_kinds, rest = [], [], 0
         for name, kind, key in self._index():
             if self._is_active(kind, key):
-                attr = _call_attr(name, key)
-                if kind == "mcp" and attr in connected:
-                    continue  # named, with its call form, on the MCP line
-                mcp = kind == "mcp"
-                active.append((mcp, f"{name} (mcp: {call_form(attr)})" if mcp else name))
+                if kind != "mcp":  # an active MCP server is connected: on the MCP line
+                    active.append(name)
             else:
                 rest += 1
                 if _KIND_LABELS[kind] not in rest_kinds:
                     rest_kinds.append(_KIND_LABELS[kind])
-        mcp_last = [text for _, text in sorted(active)]
-        lines = [f"Active: {', '.join(mcp_last) or 'none'}"]
+        lines = [f"Active: {', '.join(sorted(active)) or 'none'}"]
         if mcp_line:
             lines.append(mcp_line)
         if rest:
@@ -628,13 +623,16 @@ class SkillManager(Skill):
 
     def _tool_names(self, entry: SkillEntry) -> list[str]:
         """Tool names known without loading: connected MCP servers, loaded code skills."""
-        if entry.kind == "mcp" and not entry.key.startswith("mcp."):
-            return self.mcp.tool_names(entry.key) if self.mcp is not None else []
-        if entry.kind == "text" or entry.key not in self.registry.loaded():
+        if entry.kind == "mcp":
+            tool = self._mcp_tool(entry)
+        elif entry.kind != "text" and entry.key in self.registry.loaded():
+            tool = self.registry[entry.key]
+        else:
             return []
-        return _server_tools(self.registry[entry.key])
+        return _server_tools(tool) if tool is not None else []
 
     def _mcp_tool(self, entry: SkillEntry) -> Any:
+        """The tool object of a connected MCP server (configured or client), else None."""
         if entry.key.startswith("mcp."):
             return self.registry[entry.key] if entry.key in self.registry.loaded() else None
         return self.mcp.tool(entry.key) if self.mcp is not None else None
