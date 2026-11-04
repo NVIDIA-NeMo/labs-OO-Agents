@@ -2627,8 +2627,10 @@ def configure_checks(state: WizardState) -> bool:
             merged.pop(field, None)
             if field in state.proposal.entry:
                 merged[field] = deepcopy(state.proposal.entry[field])
-        merged["direct"] = state.direct
-        merged["transport"] = "direct" if state.direct else "litellm"
+        if merged.get("client_type") != "decision":
+            # Decision models use their own HTTP client, not an LLM transport.
+            merged["direct"] = state.direct
+            merged["transport"] = "direct" if state.direct else "litellm"
         # The plan was built with no media inputs, because its route is only
         # an approximation of the saved entry. Put the user's media choice on
         # the saved entry; refresh_plan below checks it before any test call
