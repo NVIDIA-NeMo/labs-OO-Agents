@@ -224,19 +224,6 @@ async def test_an_error_result_raises_mcp_tool_error_with_the_servers_message():
 
 
 @pytest.mark.asyncio
-async def test_a_snake_case_is_error_result_raises_too():
-    from types import SimpleNamespace
-
-    from nooa.mcp import MCPToolError
-
-    result = SimpleNamespace(
-        is_error=True, structured_content={"error": {"code": "denied"}}, content=[]
-    )
-    with pytest.raises(MCPToolError, match='"code": "denied"'):
-        await _make_tool(_OneResultClient(result))._call_tool("read", {})
-
-
-@pytest.mark.asyncio
 async def test_structured_content_is_returned_as_a_dict():
     result = CallToolResult(
         content=[TextContent(type="text", text='{"receipt": "PUB-1"}')],

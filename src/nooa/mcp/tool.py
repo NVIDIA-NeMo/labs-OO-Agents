@@ -684,11 +684,8 @@ class MCPTool:
         async with self._client.connect_to_server() as session:
             result = await session.call_tool(tool_name, clean_args)
 
-        # ``is_error``/``structured_content``: the snake_case names of newer SDKs.
         structured = getattr(result, "structuredContent", None)
-        if structured is None:
-            structured = getattr(result, "structured_content", None)
-        if getattr(result, "isError", None) is True or getattr(result, "is_error", None) is True:
+        if getattr(result, "isError", None) is True:
             details = None
             if hasattr(result, "content") and result.content:
                 for content in result.content:
@@ -829,12 +826,9 @@ def _wraps_text(structured: dict[str, Any], result: Any) -> bool:
 
 
 def _tool_output_schema(tool: Any) -> dict[str, Any] | None:
-    """The tool's declared output schema, across MCP SDK field naming conventions."""
-    for attribute in ("output_schema", "outputSchema"):
-        schema = getattr(tool, attribute, None)
-        if isinstance(schema, dict):
-            return schema
-    return None
+    """The tool's declared output schema (``Tool.outputSchema``), if any."""
+    schema = getattr(tool, "outputSchema", None)
+    return schema if isinstance(schema, dict) else None
 
 
 async def _list_server_tools(server_name: str, client: Any) -> Any:
