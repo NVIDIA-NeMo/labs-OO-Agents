@@ -38,6 +38,11 @@ class AdmissionControl(UnifiedLLM):
         return getattr(self.base_llm, "context_window", None)
 
     @property
+    def retry_config(self) -> Any:
+        """Return the wrapped client's retry configuration (the base declares None)."""
+        return getattr(self.base_llm, "retry_config", None)
+
+    @property
     def reasoning_levels(self) -> tuple[str, ...] | None:
         """Return the wrapped client's selectable reasoning levels."""
         return getattr(self.base_llm, "reasoning_levels", None)
