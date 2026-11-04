@@ -72,6 +72,8 @@ from nooa.snapshot._model import (
     Snapshot,
     Text,
     Unavailable,
+    cut_text,
+    whole_text,
 )
 
 __all__ = [
@@ -347,7 +349,7 @@ def _cut_text(
         if encoded_size <= max_size:
             if whole_scalar:
                 return _Built(Scalar(whole), encoded_size)
-            return _Built(Text(whole, whole[:0], length, unit, True, None), encoded_size)
+            return _Built(whole_text(whole, length, unit), encoded_size)
         if chars:
             return _cut_chars(length, whole, whole, length, max_size, limits)
         return _cut_byte_parts(length, whole, whole, 0, length - 1, max_size, limits)
@@ -424,9 +426,7 @@ def _cut_byte_parts(
 
     # parts(0) is empty (cost 2 <= max_size), so the largest fitting cut always fits.
     head, tail = parts(_largest(lambda kept: cost(kept) <= max_size, kept_cap))
-    node = Text(
-        head, tail, length, "bytes", False, "max_length", omitted=length - len(head) - len(tail)
-    )
+    node = cut_text(head, tail, length, "bytes", "max_length")
     return _Built(node, _string_cost(decode(head), decode(tail)))
 
 

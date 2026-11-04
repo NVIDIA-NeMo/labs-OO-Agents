@@ -119,6 +119,29 @@ class Text:
     omitted: int = 0
 
 
+def whole_text(
+    content: str | bytes, length: int, unit: Literal["chars", "bytes"], full: Spill | None = None
+) -> Text:
+    """A complete ``Text`` holding all of ``content`` (the producers' one way to build it)."""
+    return Text(content, content[:0], length, unit, True, None, full)
+
+
+def cut_text(
+    head: str | bytes,
+    tail: str | bytes,
+    length: int,
+    unit: Literal["chars", "bytes"],
+    reason: Reason,
+    full: Spill | None = None,
+) -> Text:
+    """An incomplete ``Text`` of kept ``head`` and ``tail`` (the producers' one way to build it).
+
+    ``omitted`` is derived: ``length - len(head) - len(tail)``. A bytes caller
+    passes parts already cut on UTF-8 code point boundaries.
+    """
+    return Text(head, tail, length, unit, False, reason, full, length - len(head) - len(tail))
+
+
 @dataclass(frozen=True)
 class Sequence:
     """A list or tuple: ``length`` items originally, ``items`` kept from the start.

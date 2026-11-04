@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from typing import IO, Literal
 
 from nooa.snapshot._codec import complete_prefix, safe_end, safe_start
-from nooa.snapshot._model import Spill, Text
+from nooa.snapshot._model import Spill, Text, cut_text, whole_text
 
 __all__ = ["DEFAULT_SPILL_BYTES", "SpillTarget", "TextStream", "merge"]
 
@@ -77,12 +77,7 @@ class TextStream:
         self.tail = tail
         self._spill_target = spill
         self._total = 0  # units written
-        self._head_bytes = bytearray()
-        self._tail_bytes = bytearray()
-        self._head_chars: list[str] = []
-        self._head_len = 0
-        self._tail_chars: collections.deque[str] = collections.deque()
-        self._tail_len = 0
+        self._window = _Window(head, tail, b"" if unit == "bytes" else "")
         # The last bytes (up to 4) of a bytes stream, whatever head and tail
         # keep: ``since()`` stops before an incomplete UTF-8 sequence in them.
         self._last = b""
@@ -155,65 +150,20 @@ class TextStream:
         if self._closed is not None:
             raise ValueError("write to a closed TextStream")
         if self.unit == "bytes":
-            raw = _encode(data) if isinstance(data, str) else bytes(data)
-            self._spill(raw)
-            self._write_bytes(raw)
-            return
-        if not isinstance(data, str):
+            data = _encode(data) if isinstance(data, str) else bytes(data)
+            self._spill(data)
+            self._last = (self._last + data[-4:])[-4:]
+        elif not isinstance(data, str):
             raise TypeError(
                 f"a chars TextStream takes str, not {type(data).__name__}; "
                 "write bytes to a bytes stream"
             )
-        if self._file is not None:
+        elif self._file is not None:
             self._spill(_encode(data))
-        self._write_chars(data)
-
-    def _write_bytes(self, data: bytes) -> None:
         self._total += len(data)
-        self._last = (self._last + data[-4:])[-4:]
-        room = self.head - len(self._head_bytes)
-        if room > 0:
-            self._head_bytes += data[:room]
-            data = data[room:]
-        if not data:
-            return
-        if self.tail == 0:
-            return
-        self._tail_bytes += data[-self.tail :]
-        excess = len(self._tail_bytes) - self.tail
-        if excess > 0:
-            del self._tail_bytes[:excess]
-
-    def _write_chars(self, data: str) -> None:
-        self._total += len(data)
-        room = self.head - self._head_len
-        if room > 0:
-            part = data[:room]
-            self._head_chars.append(part)
-            self._head_len += len(part)
-            data = data[room:]
-        if not data or self.tail == 0:
-            return
-        data = data[-self.tail :]
-        self._tail_chars.append(data)
-        self._tail_len += len(data)
-        while self._tail_len > self.tail:
-            oldest = self._tail_chars[0]
-            excess = self._tail_len - self.tail
-            if len(oldest) <= excess:
-                self._tail_chars.popleft()
-                self._tail_len -= len(oldest)
-            else:
-                self._tail_chars[0] = oldest[excess:]
-                self._tail_len -= excess
+        self._window.write(data)
 
     # --- describing -------------------------------------------------------
-
-    def _memory(self) -> tuple[int, int]:
-        """(units in head, units in tail)."""
-        if self.unit == "bytes":
-            return len(self._head_bytes), len(self._tail_bytes)
-        return self._head_len, self._tail_len
 
     def _full(self, cut: bool) -> Spill | None:
         if self._path is None or self._spill_failed:
@@ -224,38 +174,18 @@ class TextStream:
 
     def _text(self, start: int, end: int) -> Text:
         """What memory holds of units ``[start, end)``, as a ``Text`` (reads only)."""
-        held_head, held_tail = self._memory()
-        tail_from = self._total - held_tail
+        window = self._window
+        tail_from = self._total - window.tail_len
         length = max(0, end - start)
         first = max(start, tail_from)
-        head_slice = slice(min(start, held_head), min(end, held_head))
-        tail_slice = slice(first - tail_from, max(first, end) - tail_from)
-        if self.unit == "bytes":
-            head_bytes = bytes(self._head_bytes[head_slice])
-            tail_bytes = bytes(self._tail_bytes[tail_slice])
-            if length <= len(head_bytes) + len(tail_bytes):
-                whole = head_bytes + tail_bytes
-                return Text(whole, b"", length, "bytes", True, None, self._full(False))
-            head_bytes = head_bytes[: complete_prefix(head_bytes)]  # whole code points only
-            tail_bytes = tail_bytes[safe_start(tail_bytes, 0) :]
-            omitted = length - len(head_bytes) - len(tail_bytes)
-            return Text(
-                head_bytes,
-                tail_bytes,
-                length,
-                "bytes",
-                False,
-                "max_length",
-                self._full(True),
-                omitted,
-            )
-        # Join without storing back: a read never rebinds the writer's state.
-        head = "".join(self._head_chars)[head_slice]
-        tail = "".join(self._tail_chars)[tail_slice]
-        gap = length - len(head) - len(tail)
-        if gap <= 0:
-            return Text(head + tail, "", length, "chars", True, None, self._full(False))
-        return Text(head, tail, length, "chars", False, "max_length", self._full(True), gap)
+        head = window.head()[min(start, window.head_len) : min(end, window.head_len)]
+        tail = window.tail()[first - tail_from : max(first, end) - tail_from]
+        if length <= len(head) + len(tail):
+            return whole_text(head + tail, length, self.unit, self._full(False))  # type: ignore[operator]
+        if isinstance(head, bytes) and isinstance(tail, bytes):  # whole code points only
+            head = head[: complete_prefix(head)]
+            tail = tail[safe_start(tail, 0) :]
+        return cut_text(head, tail, length, self.unit, "max_length", self._full(True))
 
     def snapshot(self) -> Text:
         """The whole stream so far (the final ``Text`` once closed)."""
@@ -312,6 +242,52 @@ class TextStream:
         self.close()
 
 
+class _Window:
+    """The first ``head`` and the last ``tail`` units of one stream, as written parts.
+
+    The same for both units: a part is ``bytes`` in a bytes stream and
+    ``str`` in a chars stream. Memory stays at ``head + tail`` units; a read
+    joins the parts without storing the result back.
+    """
+
+    def __init__(self, head: int, tail: int, empty: str | bytes) -> None:
+        self._empty = empty
+        self._head_room = head
+        self._tail_room = tail
+        self._head: list[str | bytes] = []
+        self._tail: collections.deque[str | bytes] = collections.deque()
+        self.head_len = 0  # units kept in the head
+        self.tail_len = 0  # units kept in the tail
+
+    def write(self, data: str | bytes) -> None:
+        room = self._head_room - self.head_len
+        if room > 0 and data:
+            part = data[:room]
+            self._head.append(part)
+            self.head_len += len(part)
+            data = data[room:]
+        if not data or self._tail_room == 0:
+            return
+        data = data[-self._tail_room :]
+        self._tail.append(data)
+        self.tail_len += len(data)
+        while self.tail_len > self._tail_room:
+            oldest = self._tail[0]
+            excess = self.tail_len - self._tail_room
+            if len(oldest) <= excess:
+                self._tail.popleft()
+                self.tail_len -= len(oldest)
+            else:
+                self._tail[0] = oldest[excess:]
+                self.tail_len -= excess
+
+    def head(self) -> str | bytes:
+        return self._empty.join(self._head)  # type: ignore[arg-type]
+
+    def tail(self) -> str | bytes:
+        return self._empty.join(self._tail)  # type: ignore[arg-type]
+
+
 def _encode(text: str) -> bytes:
     """UTF-8 for the file: raw bytes for surrogate escapes, else ``\\udXXX`` text."""
     try:
@@ -352,8 +328,7 @@ def merge(a: Text, b: Text, head: int, tail: int) -> Text:
         return empty.join(parts)  # type: ignore[arg-type]
 
     if None not in pieces and sum(len(piece) for piece in pieces) <= head + tail:  # type: ignore[arg-type]
-        whole = joined(pieces)
-        return Text(whole, empty, length, unit, True, None, full)
+        return whole_text(joined(pieces), length, unit, full)
 
     head_parts: list[str | bytes | None] = []
     room, index = head, 0
@@ -386,7 +361,5 @@ def merge(a: Text, b: Text, head: int, tail: int) -> Text:
             0, piece[safe_start(piece, start) if isinstance(piece, bytes) else start :]
         )
         break
-    new_head, new_tail = joined(head_parts), joined(tail_parts)
-    omitted = length - len(new_head) - len(new_tail)
     reason = a.reason or b.reason or "max_length"
-    return Text(new_head, new_tail, length, unit, False, reason, full, omitted)
+    return cut_text(joined(head_parts), joined(tail_parts), length, unit, reason, full)

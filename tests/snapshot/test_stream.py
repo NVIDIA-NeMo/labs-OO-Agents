@@ -44,8 +44,9 @@ def test_memory_stays_bounded_with_huge_writes() -> None:
     for _ in range(100):
         stream.write("x" * 100_000)
 
-    assert stream._head_len == 10 and stream._tail_len == 10
-    assert sum(len(chunk) for chunk in stream._tail_chars) == 10
+    window = stream._window
+    assert window.head_len == 10 and window.tail_len == 10
+    assert sum(len(chunk) for chunk in window._tail) == 10
     assert stream.snapshot().length == 10_000_000
 
 
@@ -305,13 +306,13 @@ def test_text_reads_do_not_rebind_the_writer_buffers() -> None:
     stream = _stream("chars", head=4, tail=4)
     for piece in ("ab", "cd", "ef", "gh", "ij"):
         stream.write(piece)
-    head, tail = stream._head_chars, stream._tail_chars
+    head, tail = stream._window._head, stream._window._tail
     pieces = (list(head), list(tail))
 
     stream.snapshot()
     stream.since(3)
 
-    assert stream._head_chars is head and stream._tail_chars is tail
+    assert stream._window._head is head and stream._window._tail is tail
     assert (list(head), list(tail)) == pieces
 
 
