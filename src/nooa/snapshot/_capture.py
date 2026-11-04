@@ -31,8 +31,10 @@ internal ``object_like`` shapes over their privileged field readers.
 from __future__ import annotations
 
 import dataclasses
+import functools
 import itertools
 import math
+import operator
 import types
 import typing
 import weakref
@@ -462,14 +464,23 @@ def _opaque(value: Any, max_size: int, state: _State) -> _Built:
 # --- containers ---------------------------------------------------------------
 
 
-def _enter(value: Any, path: str, kind: Any, state: _State) -> Ref | None:
-    """Mark a container active, or return a ``Ref`` to its active ancestor."""
+def _entered(
+    value: Any,
+    path: str,
+    kind: Literal["sequence", "mapping", "object"],
+    state: _State,
+    build: Callable[[], _Built],
+) -> _Built:
+    """``build()`` the container ``value`` while it is active, or a ``Ref`` to its active ancestor."""
     marker = id(value)
     found = state.active.get(marker)
     if found is not None:
-        return Ref(found[0], found[1])
+        return _Built(Ref(found[0], found[1]), 2)
     state.active[marker] = (path, kind)
-    return None
+    try:
+        return build()
+    finally:
+        state.active.pop(marker, None)
 
 
 class _Container:
@@ -520,19 +531,17 @@ def _build_sequence(
 ) -> _Built:
     """Build a bounded sequence node from an exact list or tuple."""
     type_name = "list" if type(value) is list else "tuple"
-    if type(value) is list:
-        length = list.__len__(cast(list[Any], value))
-    else:
-        length = tuple.__len__(cast(tuple[Any, ...], value))
+    length = len(value)  # an exact built-in: no user hook
     if depth >= state.max_depth:
         return _Built(Sequence(type_name, length, (), False, "max_depth"), 2)
-    ref = _enter(value, path, "sequence", state)
-    if ref is not None:
-        return _Built(ref, 2)
-    try:
-        get = list.__getitem__ if type(value) is list else tuple.__getitem__
-        head_n, tail_n = _plan(length, state.limits, has_tail=True)
-        return _container(
+    get = list.__getitem__ if type(value) is list else tuple.__getitem__
+    head_n, tail_n = _plan(length, state.limits, has_tail=True)
+    return _entered(
+        value,
+        path,
+        "sequence",
+        state,
+        lambda: _container(
             (get(cast(Any, value), index) for index in range(head_n)),
             length,
             type_name,
@@ -544,9 +553,8 @@ def _build_sequence(
             head_n,
             tail_n,
             lambda: (get(cast(Any, value), index) for index in range(length - tail_n, length)),
-        )
-    finally:
-        state.active.pop(id(value), None)
+        ),
+    )
 
 
 def _build_dict(
@@ -556,12 +564,13 @@ def _build_dict(
     length = dict.__len__(value)
     if depth >= state.max_depth:
         return _Built(Mapping("dict", length, (), False, "max_depth"), 2)
-    ref = _enter(value, path, "mapping", state)
-    if ref is not None:
-        return _Built(ref, 2)
-    try:
-        head_n, tail_n = _plan(length, state.limits, has_tail=True)
-        return _container(
+    head_n, tail_n = _plan(length, state.limits, has_tail=True)
+    return _entered(
+        value,
+        path,
+        "mapping",
+        state,
+        lambda: _container(
             dict.items(value),
             length,
             "dict",
@@ -573,9 +582,8 @@ def _build_dict(
             head_n,
             tail_n,
             lambda: list(itertools.islice(reversed(dict.items(value)), tail_n))[::-1],
-        )
-    finally:
-        state.active.pop(id(value), None)
+        ),
+    )
 
 
 def _container(
@@ -817,23 +825,21 @@ class _Part:
 
     Private: only the shape builders of this module make parts (users register
     shapes, never parts). ``build(max_size, depth, path)`` builds it in its
-    slot; ``min_size`` / ``min_nodes`` are what a later sibling reserves for it.
+    slot; a later sibling reserves ``min_nodes`` and 2 characters for it.
     ``exhausted(max_size)``: what a structural part (an items sequence, an
     ndarray level) becomes when no node work is left for it; ``None`` for a
-    part that captures a value, whose ``_build`` charges itself.
+    part that captures a value (``_lazy``), whose ``_build`` charges itself.
     """
 
-    __slots__ = ("build", "exhausted", "min_nodes", "min_size")
+    __slots__ = ("build", "exhausted", "min_nodes")
 
     def __init__(
         self,
         build: Callable[[int, int, str], _Built],
-        min_size: int = 2,
-        min_nodes: int = 1,
+        min_nodes: int,
         exhausted: Callable[[int], _Built] | None = None,
     ) -> None:
         self.build = build
-        self.min_size = min_size
         self.min_nodes = min_nodes
         self.exhausted = exhausted
 
@@ -989,7 +995,7 @@ def _min_size(child: Any) -> int:
     ``__eq__`` must not run).
     """
     if type(child) is _Part:
-        return child.min_size
+        return 2
     name = _builtin_name(child)
     return len(dumps(fallback_candidates(name)[0])) if name else 2
 
@@ -1419,14 +1425,6 @@ def _guarded(iterator: typing.Iterator[Any], pairs: bool) -> typing.Iterator[Any
         yield item
 
 
-def _empty(
-    node_type: Any, type_name: str, length: int | None, max_size: int, reason: Reason
-) -> _Built:
-    if max_size < 2:
-        return _Built(Unavailable(reason, "list" if node_type is Sequence else "dict"), 1)
-    return _Built(node_type(type_name, length, (), False, reason), 2)
-
-
 def _collection(
     shape: _ArrayLike | _MappingLike,
     value: Any,
@@ -1448,37 +1446,42 @@ def _collection(
     return _container(items, length, type_name, keyed, max_size, depth, path, state, head_n)
 
 
-def _field_part(function: Callable[[Any], Any], value: Any, state: _State) -> _Part:
-    """A field whose accessor runs only when the field is built (kept), captured normally."""
+def _lazy(read: Callable[[], Any], state: _State) -> _Part:
+    """A part that captures ``read()``, called only when its slot is kept.
+
+    ``read`` is a part's accessor (a field, an element, a label): when it
+    raises, that part is ``Unavailable("error")``.
+    """
 
     def build(max_size: int, depth: int, path: str) -> _Built:
         try:
-            child = function(value)
+            child = read()
         except Exception:
             return _error("", max_size)
         return _build(child, max_size, depth, path, state)
 
-    return _Part(build, 2, _OBJECT_MIN_NODES)
+    return _Part(build, _OBJECT_MIN_NODES)
 
 
 def _structure_part(
     node_type: Any, length: int | None, build: Callable[[int, int, str], _Built], state: _State
 ) -> _Part:
     """A ``Sequence`` / ``Mapping`` field of a shape (``items``, ``data``, ``labels``): one node."""
+    name = "list" if node_type is Sequence else "dict"
+
+    def empty(max_size: int, reason: Reason) -> _Built:
+        if max_size < 2:
+            return _Built(Unavailable(reason, name), 1)
+        return _Built(node_type(name, length, (), False, reason), 2)
 
     def built(max_size: int, depth: int, path: str) -> _Built:
-        if depth >= state.max_depth or max_size < 2:
-            reason: Reason = "max_depth" if depth >= state.max_depth else "max_length"
-            return _empty(
-                node_type, "list" if node_type is Sequence else "dict", length, max_size, reason
-            )
+        if depth >= state.max_depth:
+            return empty(max_size, "max_depth")
+        if max_size < 2:
+            return empty(max_size, "max_length")
         return build(max_size, depth, path)
 
-    def exhausted(max_size: int) -> _Built:
-        name = "list" if node_type is Sequence else "dict"
-        return _empty(node_type, name, length, max_size, "max_nodes")
-
-    return _Part(built, 2, 1, exhausted)
+    return _Part(built, 1, lambda max_size: empty(max_size, "max_nodes"))
 
 
 def _build_object(
@@ -1501,51 +1504,75 @@ def _build_object(
     """
     type_name = _bounded_type_name(value, _MAX_TYPE_NAME)
     module = _module_name(type(value), state)
-    kind = None if isinstance(shape, _FieldReader) else shape.kind
-    if depth >= state.max_depth:
-        return _Built(Object(type_name, (), False, "max_depth", module, kind), 2)
-    ref = _enter(value, path, "object", state)
-    if ref is not None:
-        return _Built(ref, 2)
-    try:
-        if isinstance(shape, _FieldReader):  # one of this module's shapes: no user hook
-            selected = shape.read(value, mro, carrier, state)
-            return _object_fields(type_name, module, selected, max_size, depth, path, state)
-        entries: list[tuple[str, Any]] = [
-            (name, _field_part(function, value, state)) for name, function in shape.fields
-        ]
-        max_items = state.limits.max_items
-        cut = max_items is not None and len(entries) > max_items
-        del entries[max_items if cut else len(entries) :]
-        try:
-            entries += _structure(shape, value, type_name, max_size, state)
-        except _ShapeError:
-            return _error(type_name, max_size)
-        reserves, _nodes = _field_reserves(entries)
-
-        def fields() -> _Fields:
-            if cut:
-                yield _Omitted("max_items")
-            for entry in entries:
-                if not state.take_node():
-                    yield _Omitted("max_nodes")
-                    return
-                yield entry
-
-        return _object_fields(
-            type_name,
-            module,
-            fields(),
-            max_size,
-            depth,
+    if isinstance(shape, _FieldReader):  # one of this module's shapes: no user hook
+        if depth >= state.max_depth:
+            return _Built(Object(type_name, (), False, "max_depth", module), 2)
+        reader = shape.read
+        return _entered(
+            value,
             path,
+            "object",
             state,
-            kind,
-            reserves=reserves,
-            capped=False,
+            lambda: _object_fields(
+                type_name, module, reader(value, mro, carrier, state), max_size, depth, path, state
+            ),
         )
-    finally:
-        state.active.pop(id(value), None)
+    if depth >= state.max_depth:
+        return _Built(Object(type_name, (), False, "max_depth", module, shape.kind), 2)
+    accessors = shape
+    return _entered(
+        value,
+        path,
+        "object",
+        state,
+        lambda: _shape_fields(accessors, value, type_name, module, max_size, depth, path, state),
+    )
+
+
+def _shape_fields(
+    shape: _ObjectLike | _ArrayLike | _MappingLike | _NdarrayLike,
+    value: Any,
+    type_name: str,
+    module: str,
+    max_size: int,
+    depth: int,
+    path: str,
+    state: _State,
+) -> _Built:
+    """A registered shape's ``Object``: its accessor fields, then its structure."""
+    entries: list[tuple[str, Any]] = [
+        (name, _lazy(functools.partial(function, value), state)) for name, function in shape.fields
+    ]
+    max_items = state.limits.max_items
+    cut = max_items is not None and len(entries) > max_items
+    del entries[max_items if cut else len(entries) :]
+    try:
+        entries += _structure(shape, value, type_name, max_size, state)
+    except _ShapeError:
+        return _error(type_name, max_size)
+    reserves, _nodes = _field_reserves(entries)
+
+    def fields() -> _Fields:
+        if cut:
+            yield _Omitted("max_items")
+        for entry in entries:
+            if not state.take_node():
+                yield _Omitted("max_nodes")
+                return
+            yield entry
+
+    return _object_fields(
+        type_name,
+        module,
+        fields(),
+        max_size,
+        depth,
+        path,
+        state,
+        shape.kind,
+        reserves=reserves,
+        capped=False,
+    )
 
 
 def _structure(
@@ -1654,71 +1681,70 @@ def _ndarray_structure(
 ) -> list[tuple[str, Any]]:
     """``shape``, ``labels`` and ``data`` of an ``ndarray_like`` value."""
     dims = _ndarray_dims(shape, value)
-    ndim = len(dims)
     selection = _ndarray_selection(dims, len(shape.labels), max_size, state)
+    entries: list[tuple[str, Any]] = [("shape", dims)]
+    if shape.labels:
+        labels = [
+            (axis, _ndarray_labels(function, value, dims, selection, axis, state))
+            for axis, function in shape.labels
+        ]
+        count = len(labels)
 
-    def element(index: tuple[int, ...]) -> _Part:
         def build(slot: int, depth: int, path: str) -> _Built:
-            try:
-                child = shape.element(value, index)
-            except Exception:
-                return _error("", slot)
-            return _build(child, slot, depth, path, state)
+            return _container(labels, count, "dict", True, slot, depth, path, state, count)
 
-        return _Part(build, 2, _OBJECT_MIN_NODES)
+        entries.append(("labels", _structure_part(Mapping, count, build, state)))
+    entries.append(("data", _ndarray_part(shape, value, dims, selection, (), state)))
+    return entries
 
-    def level(axis: int, prefix: tuple[int, ...], slot: int, depth: int, path: str) -> _Built:
+
+def _ndarray_part(
+    shape: _NdarrayLike,
+    value: Any,
+    dims: tuple[int, ...],
+    selection: list[tuple[int, int]],
+    index: tuple[int, ...],
+    state: _State,
+) -> _Part:
+    """The part at ``index``: an element once every axis is indexed, else the next axis's level."""
+    axis = len(index)
+    if axis == len(dims):
+        return _lazy(functools.partial(shape.element, value, index), state)
+
+    def level(slot: int, depth: int, path: str) -> _Built:
         def child(i: int) -> _Part:
-            index = (*prefix, i)
-            if axis + 1 == ndim:
-                return element(index)
-            return _structure_part(
-                Sequence,
-                dims[axis + 1],
-                lambda s, d, p: level(axis + 1, index, s, d, p),
-                state,
-            )
+            return _ndarray_part(shape, value, dims, selection, (*index, i), state)
 
         return _indexed(dims[axis], selection[axis], child, slot, depth, path, state)
 
-    entries: list[tuple[str, Any]] = [("shape", dims)]
-    if shape.labels:
+    return _structure_part(Sequence, dims[axis], level, state)
 
-        def labels(slot: int, depth: int, path: str) -> _Built:
-            parts = [(axis, label_part(axis, function)) for axis, function in shape.labels]
-            count = len(parts)
-            return _container(parts, count, "dict", True, slot, depth, path, state, count)
 
-        def label_part(axis: int, function: Callable[[Any], Any]) -> _Part:
-            def build(slot: int, depth: int, path: str) -> _Built:
-                if axis >= ndim:
-                    return _error("", slot)
-                try:
-                    found = function(value)
-                except Exception:
-                    return _error("", slot)
+def _ndarray_labels(
+    function: Callable[[Any], Any],
+    value: Any,
+    dims: tuple[int, ...],
+    selection: list[tuple[int, int]],
+    axis: int,
+    state: _State,
+) -> _Part:
+    """The labels of ``axis``: ``function(value)[i]`` for each shown ``i``."""
+    in_range = axis < len(dims)
 
-                def label(i: int) -> _Part:
-                    def read(s: int, d: int, p: str) -> _Built:
-                        try:
-                            child = found[i]
-                        except Exception:
-                            return _error("", s)
-                        return _build(child, s, d, p, state)
+    def build(slot: int, depth: int, path: str) -> _Built:
+        if not in_range:
+            return _error("", slot)
+        try:
+            found = function(value)
+        except Exception:
+            return _error("", slot)
 
-                    return _Part(read, 2, _OBJECT_MIN_NODES)
+        def label(i: int) -> _Part:
+            return _lazy(functools.partial(operator.getitem, found, i), state)
 
-                return _indexed(dims[axis], selection[axis], label, slot, depth, path, state)
+        return _indexed(dims[axis], selection[axis], label, slot, depth, path, state)
 
-            return _structure_part(Sequence, dims[axis] if axis < ndim else None, build, state)
-
-        entries.append(("labels", _structure_part(Mapping, len(shape.labels), labels, state)))
-    if ndim == 0:
-        entries.append(("data", element(())))
-    else:
-        data = _structure_part(Sequence, dims[0], lambda s, d, p: level(0, (), s, d, p), state)
-        entries.append(("data", data))
-    return entries
+    return _structure_part(Sequence, dims[axis] if in_range else None, build, state)
 
 
 # --- text_like ---------------------------------------------------------------------
@@ -1796,13 +1822,13 @@ def _build_shape(
         return _error(type_name, max_size)
     if depth >= state.max_depth:
         return _Built(node_type(type_name, length, (), False, "max_depth"), 2)
-    ref = _enter(value, path, "sequence" if node_type is Sequence else "mapping", state)
-    if ref is not None:
-        return _Built(ref, 2)
-    try:
-        return _collection(collection, value, type_name, length, max_size, depth, path, state)
-    finally:
-        state.active.pop(id(value), None)
+    return _entered(
+        value,
+        path,
+        "sequence" if node_type is Sequence else "mapping",
+        state,
+        lambda: _collection(collection, value, type_name, length, max_size, depth, path, state),
+    )
 
 
 def _field_reserves(pairs: list[tuple[Any, Any]]) -> tuple[list[tuple[int, int]], int]:
