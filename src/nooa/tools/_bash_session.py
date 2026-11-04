@@ -137,8 +137,12 @@ class BashSession:
 
     @property
     def cwd(self) -> Path:
-        """Current working directory of the session."""
+        """Current working directory of the session; set it to choose where bash starts next."""
         return self._cwd
+
+    @cwd.setter
+    def cwd(self, value: str | Path) -> None:
+        self._cwd = Path(value).resolve()
 
     def __del__(self) -> None:
         """Best-effort cleanup: kill the bash subprocess if still running."""

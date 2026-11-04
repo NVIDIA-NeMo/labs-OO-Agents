@@ -52,7 +52,7 @@ import tempfile
 import weakref
 from dataclasses import dataclass
 from pathlib import Path
-from typing import IO, Annotated, Any
+from typing import IO, Annotated, Any, Literal
 
 from nooa import hidden
 from nooa.agentdoc import spec
@@ -62,6 +62,9 @@ from nooa_atom.agent.work_manager import _progress_sink, current_name, describe,
 from nooa_atom.agent.work_progress import _ShellProgress
 
 __all__ = ["CommandResult", "Shell", "ShellOwner", "default_cwd", "shell_owner"]
+
+# How bash ended during a command: its own exit (``exit N``, errexit) or a signal.
+_Ended = Literal["exit", "signal"] | None
 
 default_cwd: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "nooa_work_shell_cwd", default=None
@@ -763,16 +766,13 @@ class Shell:
             self._check_open(generation)
             await self._settle([pump for pump, _, _ in pumps])
             self._read_status(statusfile)
-            ended = exited = False
+            ended: _Ended = None
             if code == -1:  # no status from bash: did it exit (`exit 7`, errexit)?
-                status = await self._exit_status(session)
-                if status is not None:
-                    ended, code = True, status
-                    # Its own `exit N` or errexit, not a signal from outside.
-                    proc = getattr(session, "_process", None)
-                    exited = proc is not None and (proc.returncode or 0) >= 0
+                exit_status = await self._exit_status(session)
+                if exit_status is not None:
+                    code, ended = exit_status
             if restart_notes is None:
-                notes = self._check_bash(pidfile, code, timed_out, ended, exited)
+                notes = self._check_bash(pidfile, code, timed_out, ended)
             else:  # restarted at the deadline: this result says so
                 notes = restart_notes
             if cwd_note:
@@ -868,8 +868,9 @@ class Shell:
         self._options, self._user_usr1 = "", False
 
     @staticmethod
-    async def _exit_status(session: BashSession) -> int | None:
-        """The status bash exited with (``exit 7``, or errexit); None if it has not exited."""
+    async def _exit_status(session: BashSession) -> tuple[int, _Ended] | None:
+        """How bash ended: its status and ``exit`` (its own ``exit N`` or errexit) or
+        ``signal`` (killed from outside); None if it has not exited."""
         proc = getattr(session, "_process", None)
         if proc is None:
             return None
@@ -878,7 +879,7 @@ class Shell:
         returncode = proc.returncode
         if returncode is None:
             return None
-        return 128 - returncode if returncode < 0 else returncode
+        return (128 - returncode, "signal") if returncode < 0 else (returncode, "exit")
 
     async def _settle(self, pumps: list[asyncio.Task[None]]) -> None:
         """Wait briefly for the output still in the pipes."""
@@ -887,12 +888,11 @@ class Shell:
                 asyncio.shield(asyncio.gather(*pumps, return_exceptions=True)), _DRAIN_SECONDS
             )
 
-    def _check_bash(
-        self, pidfile: Path, code: int, timed_out: bool, ended: bool, exited: bool = False
-    ) -> list[str]:
+    def _check_bash(self, pidfile: Path, code: int, timed_out: bool, ended: _Ended) -> list[str]:
         """Notice a bash that was replaced before, or died during, this command.
 
-        ``exited``: the command itself ended bash (``exit N`` or errexit).
+        ``ended``: how bash ended during it (``exit``: the command's own
+        ``exit N`` or errexit), else None.
         """
         notes = []
         if self._note:
@@ -916,7 +916,7 @@ class Shell:
             self._lost = True
             self._bash = None
             self._reset_tracked()
-            if exited:
+            if ended == "exit":
                 get_harness_metrics().shell_exit_hint(code)
                 notes.append(
                     f"[this command ended the Shell's bash (exit {code}); the next command "
@@ -944,7 +944,7 @@ class Shell:
         fallback = next((c for c in candidates if c and os.path.isdir(c)), None)
         if fallback is None:
             return ""
-        session._cwd = Path(fallback).resolve()  # where BashSession starts bash next
+        session.cwd = fallback  # where BashSession starts bash next
         self._confirmed_cwd = str(session.cwd)
         get_harness_metrics().shell_cwd_fallback(f"{kept} -> {session.cwd}")
         return (
