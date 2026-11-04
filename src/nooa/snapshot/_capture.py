@@ -69,9 +69,8 @@ from nooa.snapshot._model import (
     Scalar,
     Sequence,
     Snapshot,
+    Text,
     Unavailable,
-    cut_text,
-    whole_text,
 )
 
 __all__ = [
@@ -195,12 +194,12 @@ def _fallback(value: Any, reason: Reason, max_size: int) -> _Built:
     _candidate, size = fallback_json(_builtin_name(value), max_size)
     if size == 2 and value_type is str:
         length = str.__len__(value)
-        return _Built(cut_text("", "", length, "chars", reason), 2)
+        return _Built(Text(head="", length=length, unit="chars", reason=reason), 2)
     if size == 2 and (value_type is list or value_type is tuple):
         length = len(value)  # exact built-in: no user hook
-        return _Built(Sequence(value_type.__name__, length, (), False, reason), 2)
+        return _Built(Sequence(value_type.__name__, length, (), reason), 2)
     if size == 2 and value_type is dict:
-        return _Built(Mapping("dict", dict.__len__(value), (), False, reason), 2)
+        return _Built(Mapping("dict", dict.__len__(value), (), reason), 2)
     return _Built(Unavailable(reason, _builtin_name(value)), size)
 
 
@@ -347,7 +346,7 @@ def _cut_text(
         if encoded_size <= max_size:
             if whole_scalar:
                 return _Built(Scalar(whole), encoded_size)
-            return _Built(whole_text(whole, length, unit), encoded_size)
+            return _Built(Text(head=whole, length=length, unit=unit), encoded_size)
         if chars:
             return _cut_chars(length, whole, whole, length, max_size, limits)
         return _cut_byte_parts(length, whole, whole, 0, length - 1, max_size, limits)
@@ -386,8 +385,8 @@ def _cut_chars(
     head, tail = parts(_largest(lambda kept: _string_cost(*parts(kept)) <= max_size, kept_cap))
     kept = len(head) + len(tail)
     if kept >= length:
-        return _Built(whole_text(head, length, "chars"), len(dumps(head)))
-    node = cut_text(head, tail, length, "chars", "max_length")
+        return _Built(Text(head=head, length=length, unit="chars"), len(dumps(head)))
+    node = Text(head=head, tail=tail, length=length, unit="chars", reason="max_length")
     return _Built(node, _string_cost(head, tail))
 
 
@@ -424,7 +423,7 @@ def _cut_byte_parts(
 
     # parts(0) is empty (cost 2 <= max_size), so the largest fitting cut always fits.
     head, tail = parts(_largest(lambda kept: cost(kept) <= max_size, kept_cap))
-    node = cut_text(head, tail, length, "bytes", "max_length")
+    node = Text(head=head, tail=tail, length=length, unit="bytes", reason="max_length")
     return _Built(node, _string_cost(decode(head), decode(tail)))
 
 
@@ -529,7 +528,7 @@ def _build_sequence(
     type_name = "list" if type(value) is list else "tuple"
     length = len(value)  # an exact built-in: no user hook
     if depth >= state.limits.max_depth:
-        return _Built(Sequence(type_name, length, (), False, "max_depth"), 2)
+        return _Built(Sequence(type_name, length, (), "max_depth"), 2)
     get = list.__getitem__ if type(value) is list else tuple.__getitem__
     head_n, tail_n = _plan(length, state.limits, has_tail=True)
     return _entered(
@@ -559,7 +558,7 @@ def _build_dict(
     """Build a bounded mapping node without visiting rejected tail entries."""
     length = dict.__len__(value)
     if depth >= state.limits.max_depth:
-        return _Built(Mapping("dict", length, (), False, "max_depth"), 2)
+        return _Built(Mapping("dict", length, (), "max_depth"), 2)
     head_n, tail_n = _plan(length, state.limits, has_tail=True)
     return _entered(
         value,
@@ -656,11 +655,10 @@ def _container(
     reason = box.reason or omitted
     if reason is None and len(head) + len(kept_tail) < length:
         reason = "max_items"
-    complete = reason is None
     if keyed:
-        node: Snapshot = Mapping(type_name, length, tuple(head), complete, reason, tuple(kept_tail))
+        node: Snapshot = Mapping(type_name, length, tuple(head), reason, tuple(kept_tail))
     else:
-        node = Sequence(type_name, length, tuple(head), complete, reason, tuple(kept_tail))
+        node = Sequence(type_name, length, tuple(head), reason, tuple(kept_tail))
     return _Built(node, box.size)
 
 
@@ -877,7 +875,7 @@ def _pydantic_fields(mro: tuple[type[Any], ...], state: _State) -> dict[str, Fie
 
 def _closed(type_name: str, module: str) -> _Built:
     """A model whose fields cannot be read safely: no field at all (fail closed)."""
-    return _Built(Object(type_name, (), False, "unreadable", module), 2)
+    return _Built(Object(type_name, (), "unreadable", module), 2)
 
 
 def _copy_storage(obj_dict: Any, state: _State) -> dict[str, Any] | None:
@@ -979,7 +977,7 @@ def _object_fields(
         fields.append((name, built.node))
         box.commit(overhead, built.size)
     reason = box.reason or omitted
-    node = Object(type_name, tuple(fields), reason is None, reason, module, kind)
+    node = Object(type_name, tuple(fields), reason, module, kind)
     return _Built(node, box.size)
 
 
@@ -1468,7 +1466,7 @@ def _structure_part(
     def empty(max_size: int, reason: Reason) -> _Built:
         if max_size < 2:
             return _Built(Unavailable(reason, name), 1)
-        return _Built(node_type(name, length, (), False, reason), 2)
+        return _Built(node_type(name, length, (), reason), 2)
 
     def built(max_size: int, depth: int, path: str) -> _Built:
         if depth >= state.limits.max_depth:
@@ -1502,7 +1500,7 @@ def _build_object(
     module = _module_name(type(value), state)
     if isinstance(shape, _FieldReader):  # one of this module's shapes: no user hook
         if depth >= state.limits.max_depth:
-            return _Built(Object(type_name, (), False, "max_depth", module), 2)
+            return _Built(Object(type_name, (), "max_depth", module), 2)
         reader = shape.read
         return _entered(
             value,
@@ -1514,7 +1512,7 @@ def _build_object(
             ),
         )
     if depth >= state.limits.max_depth:
-        return _Built(Object(type_name, (), False, "max_depth", module, shape.kind), 2)
+        return _Built(Object(type_name, (), "max_depth", module, shape.kind), 2)
     accessors = shape
     return _entered(
         value,
@@ -1817,7 +1815,7 @@ def _build_shape(
     except _ShapeError:
         return _error(type_name, max_size)
     if depth >= state.limits.max_depth:
-        return _Built(node_type(type_name, length, (), False, "max_depth"), 2)
+        return _Built(node_type(type_name, length, (), "max_depth"), 2)
     return _entered(
         value,
         path,
@@ -1975,7 +1973,7 @@ def _field_placeholder(value: Any, state: _State) -> tuple[Any, Snapshot]:
     mro = _safe_mro(value, state)
     if mro is not None and any(base is BaseModel for base in mro):
         name = _bounded_type_name(value, _MAX_TYPE_NAME)
-        return {}, Object(name, (), False, "max_nodes", _module_name(type(value), state))
+        return {}, Object(name, (), "max_nodes", _module_name(type(value), state))
     return None, Unavailable("max_nodes", "NoneType")
 
 
@@ -2006,4 +2004,4 @@ def capture_fields(*, limits: Limits = DEFAULT_LIMITS, **fields: object) -> Mapp
             built = _Built(starved, reserved)
         items.append((name, built.node))
         total_size += built.size - reserved
-    return Mapping("dict", len(items), tuple(items), True, None, wrapper=True)
+    return Mapping("dict", len(items), tuple(items), wrapper=True)

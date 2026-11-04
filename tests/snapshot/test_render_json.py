@@ -121,7 +121,7 @@ def test_key_policies_capture_refuses_what_rendering_converts() -> None:
         assert isinstance(snapshot, Mapping) and snapshot.reason == "key"
         assert snapshot.items == (("a", Scalar(1)),)
     # Rendering reads detached keys: they convert as they are.
-    detached = Mapping("dict", 2, ((huge, Scalar(1)), (1.5, Scalar(2))), True, None)
+    detached = Mapping("dict", 2, ((huge, Scalar(1)), (1.5, Scalar(2))))
     assert json.loads(render_json(detached, max_chars=200)) == {str(huge): 1, "1.5": 2}
 
 
@@ -183,12 +183,10 @@ def test_preview_attributes_full_output() -> None:
         tail=b"t",
         length=100,
         unit="bytes",
-        complete=False,
         reason="max_length",
         full=Spill("/tmp/a", 100, 100),
-        omitted=98,
     )
-    snapshot = Mapping("dict", 2, (("stdout", spilled), ("again", spilled)), True, None)
+    snapshot = Mapping("dict", 2, (("stdout", spilled), ("again", spilled)))
 
     attributes = preview_attributes("output", snapshot)
 

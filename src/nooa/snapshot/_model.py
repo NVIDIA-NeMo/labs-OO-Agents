@@ -3,7 +3,7 @@
 """The snapshot model: small, detached, frozen trees describing a value or an output.
 
 A snapshot holds no live objects. Every node says whether it is complete and,
-if not, why (``reason``). Renderers (``nooa.snapshot.render_*``) turn a
+if not, why: ``complete`` is ``reason is None`` on every node. Renderers (``nooa.snapshot.render_*``) turn a
 snapshot into the notation a consumer shows; see ``docs/snapshot-model.md``.
 """
 
@@ -94,17 +94,17 @@ class Scalar:
 class Text:
     """A string or an output stream: kept head and tail, and how much there was.
 
-    ``length`` is the size of the original in ``unit``; ``omitted`` the units
-    left out between ``head`` and ``tail`` (0 when complete). A chars ``Text``
-    keeps ``str``; a bytes ``Text`` keeps the original ``bytes``, so
-    ``len(head)`` and ``len(tail)`` are its kept units and, for a ``Text``
-    that ``capture``, ``TextStream`` or ``merge`` produce,
-    ``length == len(head) + len(tail) + omitted``. Renderers decode bytes only
-    when they print.
+    ``length`` is the size of the original in ``unit``. A chars ``Text`` keeps
+    ``str``; a bytes ``Text`` keeps the original ``bytes``, so ``len(head)``
+    and ``len(tail)`` are its kept units and ``omitted`` (derived) is the rest:
+    ``length - len(head) - len(tail)``. Renderers decode bytes only when they
+    print.
 
-    Fields are keyword-only. The package's producers build every ``Text``
-    with ``whole_text`` or ``cut_text``, which derive ``complete``, ``tail``
-    (complete) and ``omitted`` (cut) in one place.
+    Fields are keyword-only. ``complete`` is derived too (``reason is None``),
+    so a ``Text`` is consistent by construction: building one whose parts do
+    not match its unit, that keeps more than ``length``, or that is complete
+    with a ``tail`` or omitted units raises ``ValueError``. An empty ``tail``
+    may be left out (it becomes ``head[:0]``).
 
     ``full``: where the whole content was written, if anywhere; ``None`` when
     nothing was spilled (no spill asked for, or the file could not be
@@ -114,53 +114,32 @@ class Text:
     """
 
     head: str | bytes
-    tail: str | bytes
+    tail: str | bytes = ""
     length: int
     unit: Literal["chars", "bytes"]
-    complete: bool
-    reason: Reason | None
+    reason: Reason | None = None
     full: Spill | None = None
-    omitted: int = 0
 
+    def __post_init__(self) -> None:
+        kept = str if self.unit == "chars" else bytes
+        if not self.tail:
+            object.__setattr__(self, "tail", self.head[:0])
+        if type(self.head) is not kept or type(self.tail) is not kept:
+            raise ValueError(f"a {self.unit} Text keeps {kept.__name__} parts")
+        if self.omitted < 0:
+            raise ValueError("a Text keeps at most length units")
+        if self.reason is None and (self.tail or self.omitted):
+            raise ValueError("a complete Text keeps everything in head")
 
-def whole_text(
-    content: str | bytes, length: int, unit: Literal["chars", "bytes"], full: Spill | None = None
-) -> Text:
-    """A complete ``Text`` holding all of ``content`` (the producers' one way to build it)."""
-    return Text(
-        head=content,
-        tail=content[:0],
-        length=length,
-        unit=unit,
-        complete=True,
-        reason=None,
-        full=full,
-    )
+    @property
+    def complete(self) -> bool:
+        """Whether nothing was cut (no ``reason``)."""
+        return self.reason is None
 
-
-def cut_text(
-    head: str | bytes,
-    tail: str | bytes,
-    length: int,
-    unit: Literal["chars", "bytes"],
-    reason: Reason,
-    full: Spill | None = None,
-) -> Text:
-    """An incomplete ``Text`` of kept ``head`` and ``tail`` (the producers' one way to build it).
-
-    ``omitted`` is derived: ``length - len(head) - len(tail)``. A bytes caller
-    passes parts already cut on UTF-8 code point boundaries.
-    """
-    return Text(
-        head=head,
-        tail=tail,
-        length=length,
-        unit=unit,
-        complete=False,
-        reason=reason,
-        full=full,
-        omitted=length - len(head) - len(tail),
-    )
+    @property
+    def omitted(self) -> int:
+        """The units left out between ``head`` and ``tail`` (0 when complete)."""
+        return self.length - len(self.head) - len(self.tail)
 
 
 @dataclass(frozen=True)
@@ -173,9 +152,13 @@ class Sequence:
     type_name: str
     length: int | None
     items: tuple[Snapshot, ...]
-    complete: bool
-    reason: Reason | None
+    reason: Reason | None = None
     tail: tuple[Snapshot, ...] = ()
+
+    @property
+    def complete(self) -> bool:
+        """Whether nothing was cut (no ``reason``)."""
+        return self.reason is None
 
 
 @dataclass(frozen=True)
@@ -189,10 +172,14 @@ class Mapping:
     type_name: str
     length: int | None
     items: tuple[tuple[Key, Snapshot], ...]
-    complete: bool
-    reason: Reason | None
+    reason: Reason | None = None
     tail: tuple[tuple[Key, Snapshot], ...] = ()
     wrapper: bool = False
+
+    @property
+    def complete(self) -> bool:
+        """Whether nothing was cut (no ``reason``)."""
+        return self.reason is None
 
 
 @dataclass(frozen=True)
@@ -206,10 +193,14 @@ class Object:
 
     type_name: str
     fields: tuple[tuple[str, Snapshot], ...]
-    complete: bool
-    reason: Reason | None
+    reason: Reason | None = None
     module: str = ""
     kind: str | None = None
+
+    @property
+    def complete(self) -> bool:
+        """Whether nothing was cut (no ``reason``)."""
+        return self.reason is None
 
     def field(self, name: str) -> Snapshot | None:
         """The kept field called ``name``, or ``None`` when it was not kept."""

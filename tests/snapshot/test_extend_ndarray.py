@@ -43,24 +43,21 @@ def test_ndarray_like_nodes(registered) -> None:
         (
             (
                 "dtype",
-                Text(head="float64", tail="", length=7, unit="chars", complete=True, reason=None),
+                Text(head="float64", tail="", length=7, unit="chars", reason=None),
             ),
-            ("shape", Sequence("tuple", 2, (Scalar(2), Scalar(3)), True, None)),
+            ("shape", Sequence("tuple", 2, (Scalar(2), Scalar(3)))),
             (
                 "data",
                 Sequence(
                     "list",
                     2,
                     (
-                        Sequence("list", 3, (Scalar(1.0), Scalar(2.0), Scalar(3.0)), True, None),
-                        Sequence("list", 3, (Scalar(4.0), Scalar(5.0), Scalar(6.0)), True, None),
+                        Sequence("list", 3, (Scalar(1.0), Scalar(2.0), Scalar(3.0))),
+                        Sequence("list", 3, (Scalar(4.0), Scalar(5.0), Scalar(6.0))),
                     ),
-                    True,
-                    None,
                 ),
             ),
         ),
-        True,
         None,
         "fakenumpy_7c1e",
         "numpy.ndarray",
@@ -130,7 +127,7 @@ def test_ndarray_like_odd_count_gives_the_head_one_more(registered) -> None:
     data = capture(array, Limits(max_items=3))
     assert isinstance(data, Object)
     assert data.field("data") == Sequence(
-        "list", 10, (Scalar(0.0), Scalar(1.0)), False, "max_items", (Scalar(9.0),)
+        "list", 10, (Scalar(0.0), Scalar(1.0)), "max_items", (Scalar(9.0),)
     )
     assert sorted(array.read) == [(0,), (1,), (9,)]
 
@@ -145,9 +142,7 @@ def test_ndarray_like_budget_picks_the_count(registered, limits, size) -> None:
 
     assert isinstance(snapshot, Object) and snapshot.kind == "numpy.ndarray"
     assert [name for name, _node in snapshot.fields] == ["dtype", "shape", "data"]
-    assert snapshot.field("shape") == Sequence(
-        "tuple", 2, (Scalar(size // 1000), Scalar(1000)), True, None
-    )
+    assert snapshot.field("shape") == Sequence("tuple", 2, (Scalar(size // 1000), Scalar(1000)))
     data = snapshot.field("data")
     assert isinstance(data, Sequence) and not data.complete and data.items and data.tail
     rows = [*data.items, *data.tail]
@@ -167,7 +162,7 @@ def test_ndarray_like_scalar_and_empty_axes(registered) -> None:
     empty = _FakeNdarray([], (0, 5))
     node = capture(empty)
     assert isinstance(node, Object)
-    assert node.field("data") == Sequence("list", 0, (), True, None)
+    assert node.field("data") == Sequence("list", 0, ())
     assert empty.read == []
 
 
@@ -202,22 +197,13 @@ def test_ndarray_like_labels_keep_only_the_shown_ones(registered) -> None:
                     "list",
                     1000,
                     (
-                        Text(
-                            head="c0", tail="", length=2, unit="chars", complete=True, reason=None
-                        ),
-                        Text(
-                            head="c1", tail="", length=2, unit="chars", complete=True, reason=None
-                        ),
+                        Text(head="c0", tail="", length=2, unit="chars", reason=None),
+                        Text(head="c1", tail="", length=2, unit="chars", reason=None),
                     ),
-                    False,
                     "max_items",
                     (
-                        Text(
-                            head="c998", tail="", length=4, unit="chars", complete=True, reason=None
-                        ),
-                        Text(
-                            head="c999", tail="", length=4, unit="chars", complete=True, reason=None
-                        ),
+                        Text(head="c998", tail="", length=4, unit="chars", reason=None),
+                        Text(head="c999", tail="", length=4, unit="chars", reason=None),
                     ),
                 ),
             ),
@@ -227,16 +213,11 @@ def test_ndarray_like_labels_keep_only_the_shown_ones(registered) -> None:
                     "list",
                     3,
                     tuple(
-                        Text(head=c, tail="", length=1, unit="chars", complete=True, reason=None)
-                        for c in "abc"
+                        Text(head=c, tail="", length=1, unit="chars", reason=None) for c in "abc"
                     ),
-                    True,
-                    None,
                 ),
             ),
         ),
-        True,
-        None,
     )
     assert sorted(reads) == [0, 1, 998, 999]
     assert render_python(snapshot).startswith(
@@ -260,7 +241,7 @@ def test_ndarray_like_errors(registered) -> None:
     snapshot = capture(Broken())
     assert isinstance(snapshot, Object)
     assert snapshot.field("data") == Sequence(
-        "list", 3, (Scalar(0), Unavailable("error"), Scalar(2)), True, None
+        "list", 3, (Scalar(0), Unavailable("error"), Scalar(2))
     )
     labels = snapshot.field("labels")
     assert isinstance(labels, Mapping)

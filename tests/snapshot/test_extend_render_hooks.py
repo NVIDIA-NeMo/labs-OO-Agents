@@ -36,7 +36,7 @@ _HOOK_NESTING = 64  # the bound hook nesting shares with nothing else: deeper no
 
 def _thing(**fields: Any) -> Object:
     nodes = tuple((name, capture(value)) for name, value in fields.items())
-    return Object("Thing", nodes, True, None, FAKE_MODULE, KIND)
+    return Object("Thing", nodes, None, FAKE_MODULE, KIND)
 
 
 # --- render_python hooks ---------------------------------------------------------------
@@ -53,7 +53,7 @@ def test_render_python_hook_dispatches_on_kind(hooks) -> None:
 
     assert render_python(_thing(a="x" * 10)) == "thing<'xxxxxxxxxx'>"
     assert isinstance(seen[0], PythonRenderer)
-    nested = Sequence("list", 1, (_thing(a=1),), True, None)
+    nested = Sequence("list", 1, (_thing(a=1),))
     assert render_python(nested) == "[thing<1>]"
     # Another kind, or no kind, is not dispatched to it.
     assert render_python(dataclasses.replace(_thing(a=1), kind="other")) == "Thing(a=1)"
@@ -63,7 +63,7 @@ def test_render_python_hook_dispatches_on_kind(hooks) -> None:
 def test_render_python_hook_children_keep_notation(hooks) -> None:
     hooks(render_python, KIND, lambda node, r: f"T({r.render(node.fields[0][1])})")
     cut = capture("abcdefghij", Limits(max_string=4, tail_share=0.5))
-    node = Object("Thing", (("s", cut),), True, None, "", KIND)
+    node = Object("Thing", (("s", cut),), None, "", KIND)
 
     assert render_python(node) == "T(str(len=10, [:2]='ab', [-2:]='ij'))"
 
@@ -71,7 +71,7 @@ def test_render_python_hook_children_keep_notation(hooks) -> None:
 def test_render_python_hook_children_use_their_hooks(hooks) -> None:
     hooks(render_python, KIND, lambda node, r: "<" + r.render(node.fields[0][1]) + ">")
     inner = _thing(a=1)
-    outer = Object("Thing", (("inner", inner),), True, None, "", KIND)
+    outer = Object("Thing", (("inner", inner),), None, "", KIND)
     assert render_python(outer) == "<<1>>"
 
 
@@ -123,7 +123,7 @@ def test_recursive_render_python_hook_stops_at_the_nesting_bound(hooks) -> None:
 def test_nesting_bound_counts_running_hooks_not_nodes(hooks) -> None:
     # Siblings don't add up: each subtree gets the whole bound.
     hooks(render_python, KIND, lambda node, r: "t")
-    many = Sequence("list", 200, tuple(_thing(a=n) for n in range(200)), True, None)
+    many = Sequence("list", 200, tuple(_thing(a=n) for n in range(200)))
     assert render_python(many) == "[" + ", ".join(["t"] * 200) + "]"
 
 
@@ -163,11 +163,9 @@ def test_render_output_and_render_json_ignore_render_python_hooks(hooks) -> None
         tail=b"tail",
         length=1_000,
         unit="bytes",
-        complete=False,
         reason="max_length",
-        omitted=992,
     )
-    node = Object("Log", (("text", cut),), True, None, "", KIND)
+    node = Object("Log", (("text", cut),), None, "", KIND)
 
     assert render_python(node) == "hooked"
     assert render_output(node) == (
@@ -179,9 +177,7 @@ def test_render_output_and_render_json_ignore_render_python_hooks(hooks) -> None
 
 
 def test_render_output_text_is_unchanged() -> None:
-    text = Text(
-        head="a", tail="b", length=10, unit="chars", complete=False, reason="max_length", omitted=8
-    )
+    text = Text(head="a", tail="b", length=10, unit="chars", reason="max_length")
     assert render_output(text) == "a\n[... 8 chars omitted; full output not kept]\nb"
 
 
@@ -196,12 +192,10 @@ def test_render_trace_is_render_json_and_preview_attributes() -> None:
         tail="",
         length=9,
         unit="chars",
-        complete=False,
         reason="max_length",
         full=Spill("/tmp/full.txt", 9, 9),
-        omitted=8,
     )
-    node = Sequence("list", 2, (_thing(s="x" * 1_000), spilled), True, None)
+    node = Sequence("list", 2, (_thing(s="x" * 1_000), spilled))
 
     text, attributes = render_trace(node, direction="output", max_chars=60)
     assert text == render_json(node, max_chars=60)

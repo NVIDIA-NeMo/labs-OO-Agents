@@ -25,9 +25,7 @@ def test_chars_complete_until_head_plus_tail() -> None:
     stream.write("abcd")
     stream.write("efgh")
 
-    assert stream.snapshot() == Text(
-        head="abcdefgh", tail="", length=8, unit="chars", complete=True, reason=None
-    )
+    assert stream.snapshot() == Text(head="abcdefgh", tail="", length=8, unit="chars", reason=None)
 
 
 def test_chars_keep_head_and_rolling_tail() -> None:
@@ -42,9 +40,7 @@ def test_chars_keep_head_and_rolling_tail() -> None:
         tail="mnop",
         length=16,
         unit="chars",
-        complete=False,
         reason="max_length",
-        omitted=8,
     )
     assert render_output(text) == "abcd\n[... 8 chars omitted; full output not kept]\nmnop"
 
@@ -252,9 +248,7 @@ def test_chars_lone_surrogate_without_spill_does_not_raise() -> None:
     stream = _stream("chars", head=10, tail=10)
     stream.write("a\ud800b")
 
-    assert stream.close() == Text(
-        head="a\ud800b", tail="", length=3, unit="chars", complete=True, reason=None
-    )
+    assert stream.close() == Text(head="a\ud800b", tail="", length=3, unit="chars", reason=None)
 
 
 def test_chars_lone_surrogate_spills_backslash_escaped(tmp_path: Path) -> None:
@@ -340,9 +334,7 @@ def test_chars_stream_rejects_bytes(data: object) -> None:
         stream.write(data)  # type: ignore[arg-type]
 
     # Nothing of the rejected chunk was counted or kept.
-    assert stream.close() == Text(
-        head="ok", tail="", length=2, unit="chars", complete=True, reason=None
-    )
+    assert stream.close() == Text(head="ok", tail="", length=2, unit="chars", reason=None)
 
 
 def test_bytes_stream_still_accepts_str() -> None:
@@ -350,9 +342,7 @@ def test_bytes_stream_still_accepts_str() -> None:
     stream.write("é")
     stream.write(b"!")
 
-    assert stream.close() == Text(
-        head="é!".encode(), tail=b"", length=3, unit="bytes", complete=True, reason=None
-    )
+    assert stream.close() == Text(head="é!".encode(), tail=b"", length=3, unit="bytes", reason=None)
 
 
 def test_since_returns_deltas_with_correct_lengths() -> None:
@@ -364,16 +354,13 @@ def test_since_returns_deltas_with_correct_lengths() -> None:
     stream.write("x" * 100 + "yz")
     third, mark = stream.since(mark)
 
-    assert first == Text(head="abc", tail="", length=3, unit="chars", complete=True, reason=None)
-    assert second == Text(head="defgh", tail="", length=5, unit="chars", complete=True, reason=None)
+    assert first == Text(head="abc", tail="", length=3, unit="chars", reason=None)
+    assert second == Text(head="defgh", tail="", length=5, unit="chars", reason=None)
     assert third.length == 102 and third.tail == "xxyz" and third.head == ""
     assert third.omitted == 98
     assert mark == 110
     nothing, same = stream.since(mark)
-    assert (
-        nothing == Text(head="", tail="", length=0, unit="chars", complete=True, reason=None)
-        and same == mark
-    )
+    assert nothing == Text(head="", tail="", length=0, unit="chars", reason=None) and same == mark
 
 
 def test_since_stops_before_an_incomplete_code_point() -> None:
@@ -389,15 +376,13 @@ def test_since_stops_before_an_incomplete_code_point() -> None:
 
 
 def test_merge_keeps_length_and_bounds() -> None:
-    a = Text(head="abcdef", tail="", length=6, unit="chars", complete=True, reason=None)
+    a = Text(head="abcdef", tail="", length=6, unit="chars", reason=None)
     b = Text(
         head="gh",
         tail="yz",
         length=40,
         unit="chars",
-        complete=False,
         reason="max_length",
-        omitted=36,
     )
 
     merged = merge(a, b, head=3, tail=3)
@@ -409,17 +394,17 @@ def test_merge_keeps_length_and_bounds() -> None:
 
 
 def test_merge_of_small_complete_deltas_is_complete() -> None:
-    a = Text(head="ab", tail="", length=2, unit="chars", complete=True, reason=None)
-    b = Text(head="cd", tail="", length=2, unit="chars", complete=True, reason=None)
+    a = Text(head="ab", tail="", length=2, unit="chars", reason=None)
+    b = Text(head="cd", tail="", length=2, unit="chars", reason=None)
 
     assert merge(a, b, head=2, tail=2) == Text(
-        head="abcd", tail="", length=4, unit="chars", complete=True, reason=None
+        head="abcd", tail="", length=4, unit="chars", reason=None
     )
 
 
 def test_merge_cuts_complete_deltas_that_are_too_long() -> None:
-    a = Text(head="abcde", tail="", length=5, unit="chars", complete=True, reason=None)
-    b = Text(head="fghij", tail="", length=5, unit="chars", complete=True, reason=None)
+    a = Text(head="abcde", tail="", length=5, unit="chars", reason=None)
+    b = Text(head="fghij", tail="", length=5, unit="chars", reason=None)
 
     merged = merge(a, b, head=2, tail=3)
 
@@ -444,8 +429,8 @@ def test_merge_of_since_deltas_matches_the_stream_length() -> None:
 
 
 def test_merge_bytes_cuts_on_code_points() -> None:
-    a = Text(head="😀😀".encode(), tail=b"", length=8, unit="bytes", complete=True, reason=None)
-    b = Text(head="😀😀".encode(), tail=b"", length=8, unit="bytes", complete=True, reason=None)
+    a = Text(head="😀😀".encode(), tail=b"", length=8, unit="bytes", reason=None)
+    b = Text(head="😀😀".encode(), tail=b"", length=8, unit="bytes", reason=None)
 
     merged = merge(a, b, head=5, tail=7)
 
@@ -456,8 +441,8 @@ def test_merge_bytes_cuts_on_code_points() -> None:
 def test_merge_rejects_mixed_units() -> None:
     with pytest.raises(ValueError):
         merge(
-            Text(head="", tail="", length=0, unit="chars", complete=True, reason=None),
-            Text(head=b"", tail=b"", length=0, unit="bytes", complete=True, reason=None),
+            Text(head="", tail="", length=0, unit="chars", reason=None),
+            Text(head=b"", tail=b"", length=0, unit="bytes", reason=None),
             1,
             1,
         )
@@ -494,9 +479,7 @@ def test_merge_keeps_raw_bytes_exactly() -> None:
     invalid, plain = closed(b"\xff"), closed(b"x")
 
     merged = merge(invalid, plain, head=1, tail=1)
-    assert merged == Text(
-        head=b"\xffx", tail=b"", length=2, unit="bytes", complete=True, reason=None
-    )
+    assert merged == Text(head=b"\xffx", tail=b"", length=2, unit="bytes", reason=None)
     cut = merge(closed(b"\xffab"), closed(b"cd\xfe"), head=1, tail=1)
     assert (cut.head, cut.tail, cut.omitted) == (b"\xff", b"\xfe", 4)
     dropped = merge(closed(b"\xffabc"), closed(b"de"), head=0, tail=2)

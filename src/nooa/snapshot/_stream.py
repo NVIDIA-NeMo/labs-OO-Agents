@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from typing import IO, Literal
 
 from nooa.snapshot._codec import complete_prefix, safe_end, safe_start
-from nooa.snapshot._model import Spill, Text, cut_text, whole_text
+from nooa.snapshot._model import Spill, Text
 
 __all__ = ["DEFAULT_SPILL_BYTES", "SpillTarget", "TextStream", "merge"]
 
@@ -182,11 +182,19 @@ class TextStream:
         head = window.head()[min(start, window.head_len) : min(end, window.head_len)]
         tail = window.tail()[first - tail_from : max(first, end) - tail_from]
         if length <= len(head) + len(tail):
-            return whole_text(head + tail, length, self.unit, self._full(False))  # type: ignore[operator]
+            whole = head + tail  # type: ignore[operator]
+            return Text(head=whole, length=length, unit=self.unit, full=self._full(False))
         if isinstance(head, bytes) and isinstance(tail, bytes):  # whole code points only
             head = head[: complete_prefix(head)]
             tail = tail[safe_start(tail, 0) :]
-        return cut_text(head, tail, length, self.unit, "max_length", self._full(True))
+        return Text(
+            head=head,
+            tail=tail,
+            length=length,
+            unit=self.unit,
+            reason="max_length",
+            full=self._full(True),
+        )
 
     def snapshot(self) -> Text:
         """The whole stream so far (the final ``Text`` once closed)."""
@@ -333,7 +341,7 @@ def merge(a: Text, b: Text, head: int, tail: int) -> Text:
         return empty.join(parts)  # type: ignore[arg-type]
 
     if None not in pieces and sum(len(piece) for piece in pieces) <= head + tail:  # type: ignore[arg-type]
-        return whole_text(joined(pieces), length, unit, full)
+        return Text(head=joined(pieces), length=length, unit=unit, full=full)
 
     head_parts: list[str | bytes | None] = []
     room, index = head, 0
@@ -367,4 +375,11 @@ def merge(a: Text, b: Text, head: int, tail: int) -> Text:
         )
         break
     reason = a.reason or b.reason or "max_length"
-    return cut_text(joined(head_parts), joined(tail_parts), length, unit, reason, full)
+    return Text(
+        head=joined(head_parts),
+        tail=joined(tail_parts),
+        length=length,
+        unit=unit,
+        reason=reason,
+        full=full,
+    )

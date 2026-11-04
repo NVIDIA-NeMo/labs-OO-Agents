@@ -32,9 +32,7 @@ def random_text(rng: random.Random) -> Text:
         head_kept, tail_kept = head, tail
     if rng.random() < 0.3:
         whole = head_kept + tail_kept  # type: ignore[operator]
-        return Text(
-            head=whole, tail=whole[:0], length=len(whole), unit=unit, complete=True, reason=None
-        )
+        return Text(head=whole, tail=whole[:0], length=len(whole), unit=unit, reason=None)
     omitted = rng.randint(1, 500)
     length = len(head_kept) + len(tail_kept) + omitted
     full = None
@@ -46,10 +44,8 @@ def random_text(rng: random.Random) -> Text:
         tail=tail_kept,
         length=length,
         unit=unit,
-        complete=False,
         reason="max_length",
         full=full,
-        omitted=omitted,
     )
 
 
@@ -79,13 +75,13 @@ def random_tree(rng: random.Random, depth: int = 0) -> Snapshot:
     if kind == 0:
         type_name = rng.choice(("list", "tuple"))
         length = len(children) + len(tail) + (5 if cut else 0)
-        return Sequence(type_name, length, tuple(children), not cut, reason, tail)
+        return Sequence(type_name, length, tuple(children), reason, tail)
     if kind == 1:
         keys = [rng.choice(("a", "b", "k" * 30, 1, 2.5, True, None, "~/")) for _ in children]
         items = tuple(zip(keys, children, strict=True))
         tail_items = tuple((f"t{n}", child) for n, child in enumerate(tail))
         wrapper = not tail_items and rng.random() < 0.3
         length = len(items) + len(tail_items) + (5 if cut else 0)
-        return Mapping("dict", length, items, not cut, reason, tail_items, wrapper)
+        return Mapping("dict", length, items, reason, tail_items, wrapper)
     fields = tuple((f"f{n}", child) for n, child in enumerate(children + list(tail)))
-    return Object("Thing", fields, not cut, reason, "pkg", rng.choice((None, "fake.thing")))
+    return Object("Thing", fields, reason, "pkg", rng.choice((None, "fake.thing")))

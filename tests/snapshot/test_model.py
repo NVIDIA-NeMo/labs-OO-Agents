@@ -5,7 +5,9 @@
 from __future__ import annotations
 
 import dataclasses
+import random
 import typing
+from typing import Any
 
 import pytest
 
@@ -22,6 +24,7 @@ from nooa.snapshot import (
     Text,
     Unavailable,
 )
+from tests.snapshot._random_trees import random_tree
 
 
 def test_reason_names() -> None:
@@ -59,23 +62,15 @@ def test_removed_names_are_gone() -> None:
 def test_every_node_says_whether_it_is_complete() -> None:
     nodes = [
         (Scalar(1), True, None),
-        (Text(head="a", tail="", length=1, unit="chars", complete=True, reason=None), True, None),
+        (Text(head="a", length=1, unit="chars"), True, None),
         (
-            Text(
-                head="a",
-                tail="z",
-                length=9,
-                unit="bytes",
-                complete=False,
-                reason="max_length",
-                omitted=7,
-            ),
+            Text(head="a", tail="z", length=9, unit="chars", reason="max_length"),
             False,
             "max_length",
         ),
-        (Sequence("list", 3, (), False, "max_items"), False, "max_items"),
-        (Mapping("dict", 0, (), True, None), True, None),
-        (Object("M", (), False, "unreadable"), False, "unreadable"),
+        (Sequence("list", 3, (), "max_items"), False, "max_items"),
+        (Mapping("dict", 0, ()), True, None),
+        (Object("M", (), "unreadable"), False, "unreadable"),
         (Unavailable("opaque", "Widget", "pkg"), False, "opaque"),
         (Unavailable("error", "Widget"), False, "error"),
         (Ref("/a", "mapping"), False, "cycle"),
@@ -91,7 +86,6 @@ def test_nodes_are_frozen_and_hashable() -> None:
         tail="",
         length=1,
         unit="chars",
-        complete=True,
         reason=None,
         full=Spill("/tmp/x", 1, 1),
     )
@@ -103,7 +97,6 @@ def test_nodes_are_frozen_and_hashable() -> None:
             tail="",
             length=1,
             unit="chars",
-            complete=True,
             reason=None,
             full=Spill("/tmp/x", 1, 1),
         )
@@ -112,17 +105,45 @@ def test_nodes_are_frozen_and_hashable() -> None:
 
 def test_text_fields_are_keyword_only() -> None:
     with pytest.raises(TypeError):
-        Text("a", "", 1, "chars", True, None)  # type: ignore[misc]
+        Text("a", "", 1, "chars")  # type: ignore[misc]
 
 
-def test_producer_constructors_derive_the_accounting() -> None:
-    from nooa.snapshot._model import cut_text, whole_text
-
-    assert whole_text(b"ab", 2, "bytes") == Text(
-        head=b"ab", tail=b"", length=2, unit="bytes", complete=True, reason=None
-    )
-    cut = cut_text("ab", "z", 9, "chars", "max_length")
+def test_text_derives_complete_and_omitted() -> None:
+    whole = Text(head=b"ab", length=2, unit="bytes")
+    assert (whole.tail, whole.complete, whole.omitted) == (b"", True, 0)
+    cut = Text(head="ab", tail="z", length=9, unit="chars", reason="max_length")
     assert (cut.complete, cut.reason, cut.omitted) == (False, "max_length", 6)
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"head": "ab", "length": 2, "unit": "bytes"},  # str parts in a bytes Text
+        {"head": b"ab", "tail": "z", "length": 9, "unit": "bytes", "reason": "max_length"},
+        {"head": "abc", "length": 2, "unit": "chars", "reason": "max_length"},  # keeps > length
+        {"head": "ab", "tail": "z", "length": 3, "unit": "chars"},  # complete with a tail
+        {"head": "ab", "length": 9, "unit": "chars"},  # complete with omitted units
+    ],
+)
+def test_an_inconsistent_text_cannot_be_built(fields: dict[str, Any]) -> None:
+    with pytest.raises(ValueError):
+        Text(**fields)
+
+
+def test_random_trees_are_consistent() -> None:
+    for seed in range(300):
+        stack = [random_tree(random.Random(seed))]
+        while stack:
+            node = stack.pop()
+            assert node.complete is (node.reason is None)
+            if isinstance(node, Text):
+                assert node.omitted >= 0
+            elif isinstance(node, Sequence):
+                stack += [*node.items, *node.tail]
+            elif isinstance(node, Mapping):
+                stack += [child for _key, child in (*node.items, *node.tail)]
+            elif isinstance(node, Object):
+                stack += [child for _name, child in node.fields]
 
 
 def test_spill_cut() -> None:

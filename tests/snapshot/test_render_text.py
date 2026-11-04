@@ -39,18 +39,14 @@ def _cut(unit: str = "bytes", full: Spill | None = None, reason: Any = "max_leng
         tail=tail,
         length=1_234_575,
         unit=unit,
-        complete=False,
         reason=reason,
         full=full,
-        omitted=1_234_567,
     )  # type: ignore[arg-type]
 
 
 def test_render_output_complete_passes_through() -> None:
     assert (
-        render_output(
-            Text(head=b"all of it\n", tail=b"", length=10, unit="bytes", complete=True, reason=None)
-        )
+        render_output(Text(head=b"all of it\n", tail=b"", length=10, unit="bytes", reason=None))
         == "all of it\n"
     )
 
@@ -90,18 +86,14 @@ def test_render_output_without_head_or_tail() -> None:
         tail="TAIL",
         length=10,
         unit="chars",
-        complete=False,
         reason="max_length",
-        omitted=6,
     )
     no_tail = Text(
         head="HEAD",
         tail="",
         length=10,
         unit="chars",
-        complete=False,
         reason="max_length",
-        omitted=6,
     )
 
     assert render_output(no_head) == "[... 6 chars omitted; full output not kept]\nTAIL"
@@ -189,9 +181,9 @@ def test_render_python_notation_for_other_nodes() -> None:
     assert render_python(Unavailable("opaque", "Widget", "m")) == "<opaque: Widget>"
     assert render_python(Ref("", "sequence")) == "<cycle>"
     assert render_python(Unavailable("error", "Widget")) == "<unavailable: error>"
-    assert render_python(Object("M", (("a", Scalar(1)),), False, "max_nodes")) == "M(a=1, ...)"
-    assert render_python(Sequence("tuple", 1, (Scalar(1),), True, None)) == "(1,)"
-    assert render_python(Sequence("list", None, (Scalar(1),), False, "max_nodes")) == (
+    assert render_python(Object("M", (("a", Scalar(1)),), "max_nodes")) == "M(a=1, ...)"
+    assert render_python(Sequence("tuple", 1, (Scalar(1),))) == "(1,)"
+    assert render_python(Sequence("list", None, (Scalar(1),), "max_nodes")) == (
         "list(len=?, [:1]=[1])"
     )
     assert render_python(
@@ -200,9 +192,7 @@ def test_render_python_notation_for_other_nodes() -> None:
             tail="end",
             length=10,
             unit="chars",
-            complete=False,
             reason="max_length",
-            omitted=7,
         )
     ) == ("str(len=10, [-3:]='end')")
 
@@ -230,7 +220,7 @@ def test_render_python_of_a_bytes_stream_with_a_surrogate_escape() -> None:
 
 
 def test_complete_bytes_text_renders_as_a_bytes_literal() -> None:
-    text = Text(head=b"a\xffb", tail=b"", length=3, unit="bytes", complete=True, reason=None)
+    text = Text(head=b"a\xffb", tail=b"", length=3, unit="bytes", reason=None)
 
     assert render_python(text) == "b'a\\xffb'"
     assert render_output(text) == "a\ufffdb"

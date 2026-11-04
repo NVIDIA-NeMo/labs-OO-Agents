@@ -105,24 +105,18 @@ def test_complete_values_are_plain_nodes() -> None:
         (
             (
                 "a",
-                Sequence(
-                    "list", 4, (Scalar(1), Scalar(2.5), Scalar(None), Scalar(True)), True, None
-                ),
+                Sequence("list", 4, (Scalar(1), Scalar(2.5), Scalar(None), Scalar(True))),
             ),
             (
                 "b",
                 Sequence(
                     "tuple",
                     1,
-                    (Text(head="x", tail="", length=1, unit="chars", complete=True, reason=None),),
-                    True,
-                    None,
+                    (Text(head="x", tail="", length=1, unit="chars", reason=None),),
                 ),
             ),
             ("c", Scalar(b"raw")),
         ),
-        True,
-        None,
     )
 
 
@@ -134,8 +128,8 @@ def test_max_nodes_is_shared_by_the_whole_tree() -> None:
     # root + first list + 3 items + second list = 6 inspections; then nothing more.
     assert isinstance(snapshot, Sequence)
     first, second = snapshot.items
-    assert first == Sequence("list", 3, (Scalar(1), Scalar(2), Scalar(3)), True, None)
-    assert second == Sequence("list", 3, (), False, "max_nodes")
+    assert first == Sequence("list", 3, (Scalar(1), Scalar(2), Scalar(3)))
+    assert second == Sequence("list", 3, (), "max_nodes")
     assert snapshot.length == 3 and snapshot.reason == "max_nodes"
     assert render_python(snapshot) == "list(len=3, [:2]=[[1, 2, 3], list(len=3, [:0]=[])])"
 
@@ -183,9 +177,7 @@ def test_max_string_splits_head_and_tail() -> None:
         tail="hij",
         length=100,
         unit="chars",
-        complete=False,
         reason="max_length",
-        omitted=93,
     )
 
 
@@ -278,7 +270,7 @@ def test_dataclass_properties_and_hooks_are_not_called() -> None:
 
     snapshot = capture(Point(1, 2))
 
-    assert snapshot == Object("Point", (("x", Scalar(1)), ("y", Scalar(2))), True, None, __name__)
+    assert snapshot == Object("Point", (("x", Scalar(1)), ("y", Scalar(2))), None, __name__)
 
 
 def test_custom_dict_descriptor_fails_closed() -> None:
@@ -716,7 +708,7 @@ def test_registering_again_replaces(registry) -> None:
     registry(Dog, _constant([1]))
     registry(Dog, _constant([2]))
 
-    assert capture(Dog("d")) == Sequence("Dog", 1, (Scalar(2),), True, None)
+    assert capture(Dog("d")) == Sequence("Dog", 1, (Scalar(2),))
 
 
 def test_registration_overrides_pydantic_view_for_subclass(registry) -> None:

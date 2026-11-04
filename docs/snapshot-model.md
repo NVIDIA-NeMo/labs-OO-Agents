@@ -34,16 +34,17 @@ A snapshot is a small, detached tree. It holds no live objects. Every node says 
 ```python
 Snapshot = Scalar | Text | Sequence | Mapping | Object | Unavailable | Ref
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class Text:
     head: str | bytes         # kept start: str for chars, the original bytes for bytes
-    tail: str | bytes         # kept end ("" / b"" when complete)
+    tail: str | bytes = ""    # kept end ("" / b"" when complete)
     length: int               # total size of the original, in `unit`
     unit: Literal["chars", "bytes"]
-    complete: bool
-    reason: str | None        # "max_length", ... (None when complete)
+    reason: Reason | None = None  # "max_length", ... (None when complete)
     full: Spill | None = None # where the whole content was kept, if anywhere
-    omitted: int = 0          # units left out between head and tail
+    # derived: complete = reason is None; omitted = length - len(head) - len(tail)
+    # an inconsistent Text (wrong part type, omitted < 0, complete with a tail
+    # or omitted units) raises ValueError when built
 
 @dataclass(frozen=True)
 class Spill:
@@ -53,7 +54,7 @@ class Spill:
     # cut (kept < total): the file is itself cut; `Text.full` is None when nothing was kept
 ```
 
-`Sequence`, `Mapping` and `Object` carry `length` (the original count), their kept children, `complete` and `reason`. `Object` also carries an optional `kind`, a rendering key (see *Extending for third-party types*). `Unavailable(reason, type_name="", module=None)` stands for a value with no content kept: with reason `opaque`, a value of a type NOOA will not inspect (`module` is its type's module; it renders as `<opaque: Type>`), otherwise a read that failed or was refused. `Ref(id)` stands for a repeated or cyclic reference.
+`Sequence`, `Mapping` and `Object` carry `length` (the original count), their kept children and `reason`. On every node `complete` is derived: `reason is None`. `Object` also carries an optional `kind`, a rendering key (see *Extending for third-party types*). `Unavailable(reason, type_name="", module=None)` stands for a value with no content kept: with reason `opaque`, a value of a type NOOA will not inspect (`module` is its type's module; it renders as `<opaque: Type>`), otherwise a read that failed or was refused. `Ref(id)` stands for a repeated or cyclic reference.
 
 Reason names (`Reason`; `REASONS = typing.get_args(Reason)`), each saying why a node is incomplete:
 
@@ -68,7 +69,7 @@ Reason names (`Reason`; `REASONS = typing.get_args(Reason)`), each saying why a 
 
 Whether the whole content was kept in a file is not a reason: it is `Text.full` (`None`: no file; `full.cut`: the file holds only the first `full.kept` bytes).
 
-Relative to the proposal, `Text` gains `unit` and `full` for spilling, and `omitted` (see *The implementation*) for exact accounting. A bytes `Text` keeps the original bytes (principle 2): `len(head)` and `len(tail)` are its kept units, so `length == len(head) + len(tail) + omitted` holds for every `Text` that `capture`, `TextStream` and `merge` produce. Renderers decode only when they print: `render_output` and `render_json` decode as UTF-8 with replacement, `render_python` shows `bytes` literals of the kept bytes.
+Relative to the proposal, `Text` gains `unit` and `full` for spilling, and `omitted` (see *The implementation*) for exact accounting. A bytes `Text` keeps the original bytes (principle 2): `len(head)` and `len(tail)` are its kept units, so `length == len(head) + len(tail) + omitted` holds for every `Text` by construction. Renderers decode only when they print: `render_output` and `render_json` decode as UTF-8 with replacement, `render_python` shows `bytes` literals of the kept bytes.
 
 ## Two ways to produce a snapshot
 

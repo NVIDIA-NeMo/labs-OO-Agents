@@ -60,7 +60,7 @@ MAPPING = mapping_like(lambda v: v.length(), lambda v: v.pairs())
 
 
 def _text(value: str) -> Text:
-    return Text(head=value, tail="", length=len(value), unit="chars", complete=True, reason=None)
+    return Text(head=value, tail="", length=len(value), unit="chars", reason=None)
 
 
 # --- array_like ------------------------------------------------------------------------
@@ -70,7 +70,7 @@ def test_array_like_without_fields_is_a_sequence(registered) -> None:
     Bag = _named("Bag", qualname="Bag")
     registered(Bag, array_like(lambda v: 3, lambda v: ["a", 1, None]))
 
-    assert capture(Bag()) == Sequence("Bag", 3, (_text("a"), Scalar(1), Scalar(None)), True, None)
+    assert capture(Bag()) == Sequence("Bag", 3, (_text("a"), Scalar(1), Scalar(None)))
     assert render_python(capture(Bag())) == "['a', 1, None]"
     assert render_json(capture(Bag()), max_chars=100) == '["a", 1, null]'
 
@@ -87,8 +87,7 @@ def test_array_like_with_fields_is_an_object_with_items(registered) -> None:
 
     assert snapshot == Object(
         "Bag",
-        (("maxlen", Scalar(5)), ("items", Sequence("list", 2, (Scalar(1), Scalar(2)), True, None))),
-        True,
+        (("maxlen", Scalar(5)), ("items", Sequence("list", 2, (Scalar(1), Scalar(2))))),
         None,
         FAKE_MODULE,
         "fake.deque",
@@ -122,7 +121,7 @@ def test_array_like_keeps_items_beyond_length_out(registered) -> None:
     Liar = _named("Liar")
     registered(Liar, array_like(lambda v: 2, lambda v: iter(range(100))))
 
-    assert capture(Liar()) == Sequence("Liar", 2, (Scalar(0), Scalar(1)), True, None)
+    assert capture(Liar()) == Sequence("Liar", 2, (Scalar(0), Scalar(1)))
 
 
 def test_array_like_errors(registered) -> None:
@@ -146,13 +145,12 @@ def test_array_like_errors(registered) -> None:
     registered(Broken, array_like(lambda v: 5, lambda v: 42))  # type: ignore[arg-type]  # not iterable
     assert capture(Broken()) == Unavailable("error", "Broken")
     registered(Broken, array_like(lambda v: 5, two_then_fail))  # the kept items stay
-    assert capture(Broken()) == Sequence("Broken", 5, (Scalar(1), Scalar(2)), False, "error")
+    assert capture(Broken()) == Sequence("Broken", 5, (Scalar(1), Scalar(2)), "error")
     # With fields, only the failing part.
     registered(Broken, array_like(lambda v: 5, fail, fields={"a": lambda v: 1, "b": fail}))
     assert capture(Broken()) == Object(
         "Broken",
         (("a", Scalar(1)), ("b", Unavailable("error")), ("items", Unavailable("error", "list"))),
-        True,
         None,
         FAKE_MODULE,
     )
@@ -167,7 +165,7 @@ def test_array_like_errors(registered) -> None:
 def test_mapping_like_nodes_and_bounded_pulls(registered) -> None:
     registered(_Counted, MAPPING)
     small = capture(_Counted(2))
-    assert small == Mapping("_Counted", 2, (("k0", Scalar(0)), ("k1", Scalar(1))), True, None)
+    assert small == Mapping("_Counted", 2, (("k0", Scalar(0)), ("k1", Scalar(1))))
     assert render_python(small) == "{'k0': 0, 'k1': 1}"
 
     value = _Counted(10**9)
@@ -193,8 +191,7 @@ def test_mapping_like_with_fields_and_errors(registered) -> None:
     snapshot = capture(Table())
     assert snapshot == Object(
         "Table",
-        (("name", _text("t")), ("items", Mapping("dict", 3, (("a", Scalar(1)),), False, "error"))),
-        True,
+        (("name", _text("t")), ("items", Mapping("dict", 3, (("a", Scalar(1)),), "error"))),
         None,
         FAKE_MODULE,
         "k",
@@ -266,7 +263,6 @@ def test_object_like_accessor_error_is_that_field(registered) -> None:
     assert capture(Partly()) == Object(
         "Partly",
         (("a", Scalar(1)), ("b", Unavailable("error")), ("c", _text("z"))),
-        True,
         None,
         FAKE_MODULE,
     )
@@ -280,7 +276,7 @@ def test_object_like_values_are_captured_normally(registered) -> None:
 
     snapshot = capture(Holder(), Limits(max_depth=1))
     assert isinstance(snapshot, Object)
-    assert snapshot.field("inner") == Object("Inner", (), False, "max_depth", FAKE_MODULE)
+    assert snapshot.field("inner") == Object("Inner", (), "max_depth", FAKE_MODULE)
     assert snapshot.field("other") == capture(object())
     assert render_python(capture(Holder())) == "Holder(inner=Inner(x=1), other=<opaque: object>)"
 
@@ -380,9 +376,7 @@ def test_text_like_bytes_cut_on_code_points(registered) -> None:
         tail="é".encode(),
         length=10**9,
         unit="bytes",
-        complete=False,
         reason="max_length",
-        omitted=10**9 - 6,
     )
     assert len(value.slices) == 2 and (0, 10**9) not in value.slices
     # Same cut as an exact bytes value of that content.
@@ -428,9 +422,7 @@ def test_text_like_cuts_exactly_like_str_and_bytes(registered) -> None:
         )
         rope, plain = capture(_Rope(data), limits), capture(data, limits)
         if plain == Scalar(data):  # exact bytes kept whole stay a Scalar
-            assert rope == Text(
-                head=data, tail=b"", length=len(data), unit="bytes", complete=True, reason=None
-            )
+            assert rope == Text(head=data, tail=b"", length=len(data), unit="bytes", reason=None)
         else:
             assert rope == plain
 
@@ -438,9 +430,7 @@ def test_text_like_cuts_exactly_like_str_and_bytes(registered) -> None:
 def test_text_like_small_text_is_complete(registered) -> None:
     registered(_BigText, BYTES)
     small = _BigText(4, "bytes")
-    assert capture(small) == Text(
-        head="éé".encode(), tail=b"", length=4, unit="bytes", complete=True, reason=None
-    )
+    assert capture(small) == Text(head="éé".encode(), tail=b"", length=4, unit="bytes", reason=None)
     assert small.slices == [(0, 4)]  # kept whole: one read
 
 
@@ -536,8 +526,8 @@ def test_pydantic_and_dataclasses_are_internal_object_shapes() -> None:
     snapshot = capture([Model(), Data(Model())], Limits(max_items=1))
     assert repr(snapshot) == (
         "Sequence(type_name='list', length=2, items=(Object(type_name='Model', fields=(('a', "
-        "Scalar(value=1)),), complete=False, reason='max_items', module='tests.snapshot."
-        "test_extend_shapes', kind=None),), complete=False, reason='max_items', tail=())"
+        "Scalar(value=1)),), reason='max_items', module='tests.snapshot."
+        "test_extend_shapes', kind=None),), reason='max_items', tail=())"
     )
     assert render_python(capture(Data(Model()))) == "Data(x=Model(a=1, b=[1, 2]))"
 
