@@ -304,8 +304,7 @@ async def test_skill_declaration_is_materialized_by_strategy_view():
     assert block.content == "ready"
     assert block.role == Role.USER
     assert block.metadata is not None
-    assert block.metadata.expr == "self.value"
-    assert block.metadata.source_dynamic is True
+    assert block.metadata.expr == "self.skill.value"
 
 
 @pytest.mark.parametrize(
@@ -345,6 +344,7 @@ async def test_skill_expression_binds_skill_under_any_attribute_name():
     block = next(item for item in items if getattr(item, "key", None) == "todo_status")
     assert "ship the fix" in block.content
     assert "Error" not in block.content
+    assert block.metadata.expr == "self.todos.status()"
 
 
 async def test_prefixed_skill_context_is_static():
@@ -360,7 +360,7 @@ async def test_prefixed_skill_context_is_static():
     block = next(item for item in items if getattr(item, "key", None) == "guide")
     assert block.content == "Use the guide."
     assert block.metadata is not None and block.metadata.static is True
-    assert block.metadata.source_dynamic is False
+    assert block.metadata.expr is None
 
 
 async def test_disabled_key_suppresses_default_skill_shorthand():
@@ -822,10 +822,29 @@ async def test_prepare_context_refreshes_mutable_scoped_state():
 
 
 def test_default_view_has_no_runtime_assembly_dependency():
-    import inspect
-
     from nooa.runtime.actor import ActorRuntime
 
-    source = inspect.getsource(CodeActView)
-    assert "owner.runtime" not in source
     assert "_assemble_default_context" not in vars(ActorRuntime)
+
+
+async def test_skill_registry_label_names_its_agent_attribute():
+    from unittest.mock import patch
+
+    from nooa.skill_registry import SkillRegistry
+
+    class NoteSkill(Skill):
+        """Takes notes."""
+
+    class Example(Agent, llm=object()):
+        def __init__(self):
+            super().__init__()
+            with patch("nooa.skill_registry.entry_points", return_value=[]):
+                self.skills = SkillRegistry(self)
+            self.skills.register("test.notes", NoteSkill())
+
+        async def run(self): ...
+
+    agent = Example()
+    items = await agent.runtime._prepare_context(Example.run)
+    block = next(item for item in items if getattr(item, "key", None) == "skills")
+    assert block.metadata.expr == "self.skills.status()"

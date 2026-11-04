@@ -524,7 +524,7 @@ class SummarizationAgent(Agent):
                 key=f"event_{tag}",
                 content=body,
                 role=event_role,
-                metadata=BlockMetadata(expr=f'self.events["{tag}"]', tag=str(tag)),
+                metadata=BlockMetadata(tag=str(tag)),
             )
             rendered.append(format_message_content(block, "markdown"))
 

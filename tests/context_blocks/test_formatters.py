@@ -108,27 +108,25 @@ class TestXMLBlockFormatter:
         )
         assert "Line 1\nLine 2\nLine 3" in messages[0].content
 
-    def test_with_metadata_expr_renders_only_for_dynamic(self):
-        # Dynamic-source block: expr is shown.
+    def test_with_metadata_expr_renders_only_when_set(self):
         dynamic = XMLBlockFormatter().format(
             [
                 ResolvedBlock(
                     key="notes",
                     content="My notes",
-                    metadata=BlockMetadata(expr="self.context['notes']", source_dynamic=True),
+                    metadata=BlockMetadata(expr="self.context['notes']"),
                 )
             ]
         )
         assert "expr=\"self.context['notes']\"" in dynamic[0].content
         assert "My notes" in dynamic[0].content
 
-        # Non-dynamic block with the same expr: expr is suppressed.
         static = XMLBlockFormatter().format(
             [
                 ResolvedBlock(
                     key="notes",
                     content="My notes",
-                    metadata=BlockMetadata(expr="self.context['notes']"),
+                    metadata=BlockMetadata(),
                 )
             ]
         )
@@ -389,13 +387,13 @@ class TestMarkdownBlockFormatter:
     def test_empty_blocks(self):
         assert MarkdownBlockFormatter().format([]) == []
 
-    def test_with_metadata_expr_renders_only_for_dynamic(self):
+    def test_with_metadata_expr_renders_only_when_set(self):
         dynamic = MarkdownBlockFormatter().format(
             [
                 ResolvedBlock(
                     key="notes",
                     content="My notes",
-                    metadata=BlockMetadata(expr="self.context['notes']", source_dynamic=True),
+                    metadata=BlockMetadata(expr="self.context['notes']"),
                 )
             ]
         )
@@ -407,7 +405,7 @@ class TestMarkdownBlockFormatter:
                 ResolvedBlock(
                     key="notes",
                     content="My notes",
-                    metadata=BlockMetadata(expr="self.context['notes']"),
+                    metadata=BlockMetadata(),
                 )
             ]
         )

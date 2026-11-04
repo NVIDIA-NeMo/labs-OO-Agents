@@ -37,14 +37,16 @@ class TestPurePythonStrategyProperties:
         strategy = PurePythonStrategy()
         assert strategy.name == "PURE_PYTHON"
 
-    def test_default_view_provides_strategy_prompt(self):
+    async def test_default_view_provides_strategy_prompt(self):
         """The PurePython view owns the strategy instruction block."""
+        from nooa import Agent
+        from nooa.strategies.current_call import CurrentCall
         from nooa.strategies.pure_python import PurePythonStrategy
 
         strategy = PurePythonStrategy()
-        blocks = strategy.default_context_view.instruction_blocks(None)
-        assert "strategy_prompt" in blocks
-        assert blocks["strategy_prompt"] is not None
+        call = CurrentCall(id="test", method_name="run", decorator="strategy", strategy=strategy)
+        blocks = await strategy.default_context_view.instruction_blocks(Agent(llm=object()), call)
+        assert blocks["strategy_prompt"].value
 
 
 class TestPurePythonStrategyConfig:

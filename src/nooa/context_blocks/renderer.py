@@ -140,7 +140,7 @@ def render_context(
                 key=f"event_{tag}",
                 content="",
                 role=getattr(item, "_role", Role.USER),
-                metadata=BlockMetadata(expr=f'self.events["{tag}"]', tag=tag),
+                metadata=BlockMetadata(tag=tag),
                 event=item,
             )
         else:

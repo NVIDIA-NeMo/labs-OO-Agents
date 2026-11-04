@@ -3193,6 +3193,7 @@ class ActorRuntime:
         llm_client = _current_llm_var.get() or getattr(self.agent, "_llm", None)
         if getattr(strategy, "uses_decision_model", False):
             llm_client = _current_decision_model_var.get()
+        strategy = strategy.context_strategy
         model = base_call.model or getattr(llm_client, "model", None)
         context_window = base_call.context_window
         if context_window is None:

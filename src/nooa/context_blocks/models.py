@@ -154,7 +154,11 @@ class BlockMetadata(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    expr: str | None = Field(default=None, description="Python expression for accessing this block")
+    expr: str | None = Field(
+        default=None,
+        description="Expression the model can evaluate in its REPL to get this block's content. "
+        "Rendered as the block's label when set.",
+    )
     tag: str | None = Field(default=None, description="Event position tag")
     truncated: bool = Field(default=False, description="Whether content was truncated")
     user_block: bool = Field(
@@ -167,12 +171,6 @@ class BlockMetadata(BaseModel):
         description="Author's declaration that the block's content is stable across "
         "turns. Renderers use this to place the block in a cacheable prefix. "
         "Does not affect truncation or correctness — only caching behavior.",
-    )
-    source_dynamic: bool = Field(
-        default=False,
-        description="Whether this block came from self.context.set_dynamic(). "
-        "Only these blocks render their ``expr`` attribute — static blocks, "
-        "framework blocks, strategy overrides, and events suppress it.",
     )
 
 
