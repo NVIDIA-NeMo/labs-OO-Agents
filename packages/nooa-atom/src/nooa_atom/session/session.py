@@ -1141,7 +1141,7 @@ class Session:
     async def inherit_tools(self, parent: "Session") -> list[str]:
         """Share ``parent``'s connected tools with this child; return warnings.
 
-        Awaits the agent's ``inherit_tools(parent_agent)`` hook if it has one
+        Calls the agent's ``inherit_tools(parent_agent)`` hook if it has one
         (the Atom agent shares the MCP servers its parent has connected,
         client-provided and workspace-configured, as the same objects: no
         new connection, and closing this child does not close them). The
@@ -1150,10 +1150,7 @@ class Session:
         hook = getattr(self._agent, "inherit_tools", None)
         if not callable(hook):
             return []
-        result = hook(parent._agent)
-        if inspect.isawaitable(result):
-            result = await result
-        return [str(warning) for warning in result or ()]
+        return [str(warning) for warning in hook(parent._agent) or ()]
 
     async def register_tools(self, tools: Mapping[str, Any]) -> dict[str, str]:
         """Register and activate each tool as an agent skill under its name.
