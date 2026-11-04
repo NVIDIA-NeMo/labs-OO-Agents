@@ -6,6 +6,10 @@ compatibility: nooa package; [mcp] extra for MCP
 
 # Tools, Skills, and Integrations
 
+For model onboarding or diagnostics, use
+[nooa-connect](../nooa-connect/SKILL.md), the canonical permission-first headless
+guide. Adding tools/skills does not authorize model checks or registry writes.
+
 ## Methods are the tools
 
 There is no tool-registration abstraction: **any visible method or attribute on `self` is callable from CodeAct-generated code**, with `doc(self)` telling the LLM what exists. Mix deterministic helpers (SW1) with generation methods (SW3):

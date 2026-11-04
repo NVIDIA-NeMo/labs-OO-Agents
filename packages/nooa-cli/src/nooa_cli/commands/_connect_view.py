@@ -252,6 +252,8 @@ def local_failure(exc, *, api_key=None, api_key_env=None):
     """Explain local setup errors without YAML excerpts or provider error bodies."""
     import yaml
 
+    from nooa._platform import PosixOnlyFeatureError
+
     if isinstance(exc, yaml.YAMLError):
         mark = getattr(exc, "problem_mark", None)
         detail = (
@@ -259,7 +261,7 @@ def local_failure(exc, *, api_key=None, api_key_env=None):
             if mark is not None
             else "Invalid YAML configuration."
         )
-    elif isinstance(exc, (OSError, ValueError)):
+    elif isinstance(exc, (OSError, ValueError, PosixOnlyFeatureError)):
         detail = str(exc)
     else:
         detail = "Check the connection and credentials; use --show-diagnostics for details."
