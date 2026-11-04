@@ -38,18 +38,16 @@ def interface_for_provider(provider: str | None) -> str:
     return "anthropic" if provider == "anthropic" else "chat"
 
 
-def implemented_input_kinds(
-    interface: str = "chat", provider: str | None = None
-) -> tuple[MediaInput, ...]:
+def implemented_input_kinds(interface: str = "chat") -> tuple[MediaInput, ...]:
     """Return the media kinds NOOA can send on ``interface``.
 
-    ``provider`` lets a caller pass the LiteLLM provider instead of an interface
-    name; ``anthropic`` gives the native Anthropic limits. The result is an upper
-    bound for the request code, not proof that a model accepts these kinds.
+    The result is an upper bound for the request code, not proof that a model
+    accepts these kinds. Use interface_for_provider() to map a LiteLLM provider
+    to its interface first.
     """
     if interface == "decision":
         return ("image",)
-    if interface == "responses" or interface == "anthropic" or provider == "anthropic":
+    if interface in ("responses", "anthropic"):
         return ("image", "pdf")
     return ALL_INPUT_KINDS
 
