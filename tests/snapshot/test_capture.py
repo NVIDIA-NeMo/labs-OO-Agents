@@ -7,6 +7,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import sys
+import warnings
 from dataclasses import dataclass, field
 from typing import Annotated, Any, ClassVar
 
@@ -793,7 +794,10 @@ class _CollidingKey:
 
 def test_class_namespace_foreign_key_is_never_compared() -> None:
     _CollidingKey.calls.clear()
-    with pytest.warns(RuntimeWarning):
+    # Python 3.13 warns about the non-str namespace key and 3.12 does not;
+    # the warning is incidental to what this test checks.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
         unknown = type("Unknown", (), {_CollidingKey("__dataclass_fields__"): 1})
 
     snapshot = capture(unknown())
