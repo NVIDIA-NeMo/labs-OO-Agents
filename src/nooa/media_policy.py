@@ -27,6 +27,7 @@ from nooa.media_inputs import MediaInput, attachment_kind, validate_media_inputs
 from nooa.request_interface import entry_input_interface as entry_input_interface
 from nooa.request_interface import interface_for_provider as interface_for_provider
 from nooa.request_interface import resolved_input_interface as resolved_input_interface
+from nooa.request_interface import resolved_provider as resolved_provider
 
 ALL_INPUT_KINDS: tuple[MediaInput, ...] = ("image", "audio", "video", "pdf")
 

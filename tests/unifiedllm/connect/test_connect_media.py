@@ -17,6 +17,7 @@ from dataclasses import replace
 import httpx
 import pytest
 
+from nooa.media_policy import unsupported_input_reason
 from nooa.unifiedllm import connect
 from nooa.unifiedllm.connect._media import pdf_fixture, png_fixture, video_fixture, wav_fixture
 from tests.unifiedllm.connect.connect_http import mock_http, response_body
@@ -292,11 +293,8 @@ async def test_unsupported_portable_probe_is_honestly_not_tested(monkeypatch, st
     assert len(calls) == 1
     assert result.entry["provenance"]["probes"][f"media:{kind}"] == {
         "outcome": "not_probed",
-        "reason": (
-            "This interface has no native video input mapping here; select video manually as unverified."
-            if kind == "video"
-            else "This interface has no portable inline WAV input shape here; select audio manually as unverified."
-        ),
+        "reason": unsupported_input_reason(style, [kind]),
+        "implementation_supported": False,
     }
 
 
@@ -780,3 +778,66 @@ def test_wire_evidence_rejects_duplicate_original_attachments(kind):
     duplicate["messages"][0]["content"].append(deepcopy(body["messages"][0]["content"][-1]))
     assert media_on_wire(kind, body, body)
     assert not media_on_wire(kind, body, duplicate)
+
+
+@pytest.mark.parametrize(
+    "message,kind",
+    [
+        ("nvcf/llama-70b-instruct is not a multimodal model", "image"),
+        ("nvcf/llama-70b-instruct is not a multimodal model", "audio"),
+        ("Unsupported chat content part type: 'file'. Supported types: image_url, text", "pdf"),
+        ("Unsupported chat content part type: 'video_url'.", "video"),
+    ],
+)
+def test_text_only_server_refusals_count_as_rejected(message, kind):
+    """Hub/vLLM refusals for media on text-only models are explicit, not inconclusive."""
+    from nooa.unifiedllm.connect._media import explicitly_rejected
+
+    class Error(Exception):
+        status_code = 400
+        body = {"error": {"message": message}}
+
+    assert explicitly_rejected(Error(message), kind)
+
+
+def test_unrelated_content_part_rejection_does_not_reject_other_formats():
+    from nooa.unifiedllm.connect._media import explicitly_rejected
+
+    class Error(Exception):
+        status_code = 400
+        body = {"error": {"message": "Unsupported chat content part type: 'file'."}}
+
+    assert not explicitly_rejected(Error("x"), "image")
+
+
+@pytest.mark.parametrize(
+    "message,kind",
+    [
+        ("Unsupported media type: audio_url. Supported types: image_url", "audio"),
+        ('messages[1]: unsupported content part type \\"input_audio\\"', "audio"),
+        ("model deepseek does not support video inputs", "video"),
+        (
+            "Failed to deserialize the JSON body into the target type: data did not match any "
+            "variant of untagged enum ChatCompletionRequestUserMessageContent at line 1",
+            "pdf",
+        ),
+    ],
+)
+def test_more_hub_media_refusal_phrasings(message, kind):
+    from nooa.unifiedllm.connect._media import explicitly_rejected
+
+    class Error(Exception):
+        status_code = 400
+        body = {"error": {"message": message}}
+
+    assert explicitly_rejected(Error(message), kind)
+
+
+def test_internal_errors_stay_inconclusive():
+    from nooa.unifiedllm.connect._media import explicitly_rejected
+
+    class Error(Exception):
+        status_code = 400
+        body = {"error": {"message": "an internal error occurred"}}
+
+    assert not explicitly_rejected(Error("x"), "image")
