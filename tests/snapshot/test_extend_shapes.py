@@ -390,6 +390,43 @@ def test_text_like_bytes_cut_on_code_points(registered) -> None:
         assert capture(small, limits) == capture(plain, limits)
 
 
+class _Rope:
+    """A ``str`` or ``bytes`` seen only through ``text_like``."""
+
+    def __init__(self, data: str | bytes) -> None:
+        self.data = data
+
+
+def test_text_like_cuts_exactly_like_str_and_bytes(registered) -> None:
+    import random
+
+    registered(_Rope, text_like(lambda v: len(v.data), lambda v, start, stop: v.data[start:stop]))
+    alphabet = ["a", "\u00e9", "\u20ac", "\U0001f600", "\n", '"', "\ud800"]
+    rng = random.Random(4)
+    for _ in range(300):
+        text = "".join(rng.choice(alphabet) for _ in range(rng.randrange(0, 60)))
+        limits = Limits(
+            max_chars=rng.randrange(4, 90),
+            max_string=rng.choice([None, 0, 1, 5, 20]),
+            tail_share=rng.choice([0, 0.25, 0.5, 1]),
+        )
+        assert capture(_Rope(text), limits) == capture(text, limits)
+    registered(_Rope, text_like(lambda v: len(v.data), lambda v, a, b: v.data[a:b], unit="bytes"))
+    for _ in range(300):
+        data = "".join(rng.choice(alphabet[:6]) for _ in range(rng.randrange(0, 40))).encode()
+        data += rng.choice([b"", b"\xff", b"\xe2\x82"])
+        limits = Limits(
+            max_chars=rng.randrange(4, 90),
+            max_string=rng.choice([None, 0, 1, 5, 20]),
+            tail_share=rng.choice([0, 0.25, 0.5, 1]),
+        )
+        rope, plain = capture(_Rope(data), limits), capture(data, limits)
+        if plain == Scalar(data):  # exact bytes kept whole stay a Scalar
+            assert rope == Text(data, b"", len(data), "bytes", True, None)
+        else:
+            assert rope == plain
+
+
 def test_text_like_small_text_is_complete(registered) -> None:
     registered(_BigText, BYTES)
     small = _BigText(4, "bytes")
