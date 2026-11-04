@@ -420,7 +420,7 @@ count on demand. Agents that expose the optional `<skills>` block show that same
 
 ```text
 <skills>
-Active: libwriting, methodwriting, repo, shell, todo, workspace_settings, github (mcp)
+Active: methodwriting, repo, shell, skill_writing, todo, workspace_settings, github (mcp)
 38 more (code, text, MCP): self.skills.search('query') (sync); print(self.skills.doc('name')) for full instructions/APIs (unconnected MCP: connection status); await self.skills.activate(['name']) (async)
 </skills>
 ```

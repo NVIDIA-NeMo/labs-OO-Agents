@@ -108,7 +108,8 @@ Three paths load workspace code at `session/new` and `session/load`:
   `.nooa/config.toml` may name *additional* skill roots. Those paths are not
   confined to the workspace: a relative path escaping it, an absolute path, or a
   symlink is accepted as written.
-- **Libraries.** `<workspace>/.nooa/libs/<package>/` is imported and its
+- **Agent-written skills.** `<workspace>/.nooa/skills/<package>/` (and an older
+  `<workspace>/.nooa/libs/<package>/`) is imported and its
   directory is prepended to `sys.path` for the life of the process. One ACP
   server serves several workspaces, so a package name there can shadow the same
   import for later sessions on other workspaces.

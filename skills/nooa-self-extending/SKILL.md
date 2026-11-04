@@ -1,6 +1,6 @@
 ---
 name: nooa-self-extending
-description: Let NOOA agents extend themselves — persistent skill libraries the agent writes and hot-reloads (SkillWriting / self.libs, LibraryManager), in-cell helper functions and standalone @strategy sub-calls (MethodWriting), and @slash_command user actions. Use when an agent should accumulate reusable code across sessions, define its own helpers or LLM-powered sub-functions at runtime, or ship user-typed /commands from a skill.
+description: Let NOOA agents extend themselves — persistent skills the agent writes — code packages it hot-reloads or SKILL.md text instructions (SkillWriting / self.skill_writing, LibraryManager), in-cell helper functions and standalone @strategy sub-calls (MethodWriting), and @slash_command user actions. Use when an agent should accumulate reusable code across sessions, define its own helpers or LLM-powered sub-functions at runtime, or ship user-typed /commands from a skill.
 compatibility: nooa package
 ---
 
@@ -12,7 +12,7 @@ Three escalating levels of agent-authored code, from ephemeral to persistent:
 |---|---|---|---|
 | In-cell helpers | plain `def` in a CodeAct cell | REPL locals, gone after the call | `MethodWriting` skill (guidance only) |
 | LLM-powered sub-calls | standalone `@strategy` functions in a cell | same cell scope | `MethodWriting` |
-| Persistent libraries | Python packages under a `libs/` dir | on disk, hot-reloaded, across sessions | `SkillWriting` (`self.libs`) |
+| Persistent skills | Python packages or SKILL.md text under `.nooa/skills/` | on disk, hot-reloaded, across sessions | `SkillWriting` (`self.skill_writing`) |
 
 ## In-cell helpers and standalone sub-calls (`MethodWriting`)
 
@@ -35,26 +35,27 @@ Standalone functions (`nooa.standalone`) are `@strategy`-decorated async functio
 
 Helpers defined in cells persist as REPL locals for the rest of the method call but are never attached to the agent (attaching callables to `self` is validator-rejected — see `nooa-codeact-advanced`).
 
-## Persistent libraries (`SkillWriting` / `self.libs`)
+## Persistent skills (`SkillWriting` / `self.skill_writing`)
 
-`SkillWriting` (`nooa.tools.library_writing_lib`) gives the agent a managed `libs/` directory of real Python packages. Requires the shell skill (`requires = ("nemo.shell",)`) since file I/O goes through `self.shell`.
+`SkillWriting` (`nooa.tools.library_writing_lib`) is how an agent makes the skills later sessions get, in a managed directory: `<workspace>/.nooa/skills` for Atom (an older `.nooa/libs` still loads; a name in `.nooa/skills` wins; new skills always go to `.nooa/skills`). A skill is either a code skill (a real Python package) or a text skill (a `SKILL.md` with front matter `name`/`description` and instructions). Both load in a later session as `local.<name>` (`self.<name>`, found by `self.skills.search`). Requires the shell skill (`requires = ("nemo.shell",)`) since file I/O goes through `self.shell`.
 
-The lifecycle the agent follows (documented to it via `doc(self.libs)`):
+The lifecycle the agent follows (documented to it via `doc(self.skill_writing)`):
 
 ```python
-await self.libs.create("stats", "Statistical utilities.")      # 1. scaffold package (pyproject + __init__)
-await self.shell.write(self.libs.path("stats", "stats.py"), source)   # 2. write code
-await self.libs.reload("stats")                                # 3. lint + hot-reload → self.stats exists
-await self.shell.edit(self.libs.path("stats", "stats.py"), old, new)  # 4. edit
-await self.libs.reload("stats")                                #    ...and reload again
-await self.libs.run_tests("stats")                             # 5. pytest on the lib's tests/
-await self.libs.list(); await self.libs.repo_tree()            # discovery
+await self.skill_writing.create("release", "How to cut a release.", text=steps)  # text skill: SKILL.md, active at once
+await self.skill_writing.create("stats", "Statistical utilities.")      # 1. scaffold package (pyproject + __init__)
+await self.shell.write(self.skill_writing.path("stats", "stats.py"), source)   # 2. write code
+await self.skill_writing.reload("stats")                                # 3. lint + hot-reload → self.stats exists
+await self.shell.edit(self.skill_writing.path("stats", "stats.py"), old, new)  # 4. edit
+await self.skill_writing.reload("stats")                                #    ...and reload again
+await self.skill_writing.run_tests("stats")                             # 5. pytest on the skill's tests/
+await self.skill_writing.list(); await self.skill_writing.repo_tree()   # discovery
 ```
 
-- **Skill contract:** each library's `__init__.py` exports a `Skill` subclass — the registry auto-attaches it as `self.<lib_name>` with full `doc()` discovery. Libraries without one get a `Skill(module)` fallback (docstring + attributes).
+- **Skill contract:** each code skill's `__init__.py` exports a `Skill` subclass — the registry auto-attaches it as `self.<lib_name>` with full `doc()` discovery. Libraries without one get a `Skill(module)` fallback (docstring + attributes).
 - **Linting on reload** (`LintReport`): hard errors E001 (forbidden builtins) and E003 (star imports) block the write; E002 warns when an import isn't in the agent's allowed set. Report says written/loaded status explicitly.
-- Library code is plain Python — no agent `self`, no `...` bodies, no async requirement. Attachment goes through `SkillRegistry.discover_libs(path)` + `activate(["local.*"])` when the agent has `self.skills`, else `LibraryManager.install(agent, libs_dir=...)`.
-- **Reload ≠ relearn:** after `self.libs.reload(...)`, the new API is live on `self.<lib>`; guide agents to re-read `doc(self.<lib>)` rather than assume.
+- Library code is plain Python — no agent `self`, no `...` bodies, no async requirement. Attachment goes through `SkillRegistry.discover_libs(path, agent_written=True)` + `activate(["local.*"])` when the agent has a skill registry, else `LibraryManager.install(agent, libs_dir=...)`.
+- **Reload ≠ relearn:** after `self.skill_writing.reload(...)`, the new API is live on `self.<lib>`; guide agents to re-read `doc(self.<lib>)` rather than assume.
 
 `LibraryManager` (`nooa.library_manager`) is the low-level loader you can also use directly from Python: `LibraryManager.install(agent, libs_dir=Path("libs"))` scans for subdirectories with a `pyproject.toml`, imports each, attaches as `agent.<lib_name>`; `mgr.reload()` hot-reloads all; `LibraryManager.discover(path)` lists without loading. Modules are attached as attributes only — never injected into exec_globals.
 
@@ -79,9 +80,9 @@ class MySkill(Skill):
 
 ## Pitfalls
 
-- `self.libs.create()` requires a meaningful description — it becomes the package docstring the LLM later reads.
+- `self.skill_writing.create()` requires a meaningful description — it becomes the docstring (or SKILL.md description) the LLM later reads.
 - Enforce "run `run_tests()` before claiming done" in the orchestrator, not just the prompt.
-- Use a library for logic worth naming and reusing; inline cell code for one-offs — libraries are forever, and a junk drawer of one-off libs pollutes `doc(self)` every turn.
+- Write a skill for logic or advice worth naming and reusing; inline cell code for one-offs — skills are forever, and a junk drawer of one-off skills pollutes `doc(self)` every turn.
 - Hot-reload replaces the module object; stale references held in REPL locals from earlier cells keep pointing at the old code until re-fetched via `self.<lib>`.
 
 ## Related skills
