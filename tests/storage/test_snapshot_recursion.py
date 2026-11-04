@@ -120,10 +120,10 @@ def test_cyclic_context_still_rejects_save(tmp_path, shape):
 
 @pytest.mark.parametrize("shape", _SHAPES)
 def test_recursive_codec_value_raises_serialization_error(shape):
-    """Preserve the original recursion failure as the documented error's cause."""
-    with pytest.raises(SerializationError) as caught:
+    """Cycles are detected explicitly, before any RecursionError can occur."""
+    with pytest.raises(SerializationError, match="contains a cycle") as caught:
         serialize(_cycle(shape))
-    assert isinstance(caught.value.__cause__, RecursionError)
+    assert caught.value.__cause__ is None
 
 
 @pytest.mark.parametrize("shape", _SHAPES)
