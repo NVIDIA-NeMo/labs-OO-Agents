@@ -287,7 +287,6 @@ class SkillRegistry(Skill):
             if entry.is_dir() and (entry / "pyproject.toml").exists()
         ]
         if agent_written:
-            libraries = [lib for lib in libraries if not self._attr_taken(f"local.{lib.name}")]
             for entry in sorted(libs_path.iterdir()):
                 if (
                     entry.is_dir()
@@ -300,6 +299,8 @@ class SkillRegistry(Skill):
             reg_name, target = self._read_skill_entry(lib_dir, lib_name)
             if reg_name in self._loaded:
                 continue
+            if agent_written and self._attr_taken(reg_name):
+                continue  # the attribute it registers as is another skill's
             try:
                 skill = self._import_lib(lib_dir, lib_name, target)
                 if skill is not None:

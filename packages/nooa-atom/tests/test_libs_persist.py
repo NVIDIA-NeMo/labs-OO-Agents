@@ -155,6 +155,26 @@ async def test_a_skill_in_the_older_nooa_libs_still_loads(tmp_path):
     assert not (libs / "fresh").exists()
 
 
+async def test_an_older_skill_with_another_entry_point_does_not_replace_a_newer_one(tmp_path):
+    old = tmp_path / ".nooa" / "libs" / "both"
+    old.mkdir(parents=True)
+    (old / "pyproject.toml").write_text(
+        '[project]\nname = "both"\n\n[project.entry-points."nooa.skills"]\n"other.both" = "both"\n'
+    )
+    (old / "__init__.py").write_text(
+        SOURCE.replace("Mean of numbers.", "From libs.").replace("class Stats", "class Lib")
+    )
+    newer = tmp_path / ".nooa" / "skills" / "both"
+    newer.mkdir(parents=True)
+    (newer / "SKILL.md").write_text("---\nname: both\ndescription: From skills.\n---\nNewer.\n")
+    agent = _agent(tmp_path)
+    try:
+        assert type(agent.both).__doc__.splitlines()[0] == "From skills."
+        assert "other.both" not in agent.skills.registry.loaded()
+    finally:
+        await agent.aclose()
+
+
 async def test_self_libs_is_gone(tmp_path):
     agent = _agent(tmp_path)
     try:
