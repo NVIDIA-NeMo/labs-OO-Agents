@@ -423,10 +423,9 @@ def test_kind_feeds_the_render_hooks(registered, hooks) -> None:
     Bag = _named("Bag")
     registered(Bag, array_like(lambda v: 1, lambda v: [1], fields={"n": lambda v: 1}, kind="k.bag"))
     hooks(render_python, "k.bag", lambda node, r: f"bag<{r.render(node.field('items'))}>")
-    hooks(render_output, "k.bag", lambda node, r: "bag!")
 
     assert render_python(capture([Bag()])) == "[bag<[1]>]"
-    assert render_output(capture(Bag())) == "bag!"
+    assert render_output(capture(Bag())) == "Bag(n=1, items=[1])"  # no hooks: generic
     # A Text has no kind: text_like's kind is for Object-shaped nodes only.
     assert isinstance(capture(_BigText(3)), Text)
 

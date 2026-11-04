@@ -21,11 +21,11 @@ from nooa import hidden, spec
 from nooa.snapshot import (
     DEFAULT_LIMITS,
     Limits,
-    _render,
     capture,
     capture_fields,
     preview_attributes,
     render_json,
+    render_trace,
 )
 from nooa.snapshot._capture import _pydantic_fields, _State
 
@@ -37,7 +37,7 @@ class TraceJSON(NamedTuple):
 
 def _preview(snapshot: Any, limits: Limits) -> TraceJSON:
     # The trace path: text and attributes from one walk, equal to the two public calls.
-    text, attributes = _render._preview("output", snapshot, max_chars=limits.max_chars)
+    text, attributes = render_trace(snapshot, direction="output", max_chars=limits.max_chars)
     assert text == render_json(snapshot, max_chars=limits.max_chars)
     assert attributes == preview_attributes("output", snapshot, max_chars=limits.max_chars)
     paths = attributes.get("nooa.output.preview.paths", ())

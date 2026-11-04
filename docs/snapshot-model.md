@@ -104,6 +104,7 @@ Rendering is the last step, and every consumer picks a renderer and limits:
 | `render_python(snapshot)` | CodeAct prefill, `pformat`, `pprint`, `CommandResult` display | `str(len=10_000_000, [:4]='xxxx', [-4:]='xxxx')` (today's prefill notation) |
 | `render_json(snapshot)` | trace `input.value` / `output.value` | plain JSON, as in #342; nothing embedded in user data |
 | `preview_attributes(direction, snapshot)` | trace spans | `nooa.{dir}.preview.version/incomplete/paths` (#342), plus `.reasons` and `.full_output` |
+| `render_trace(snapshot, direction=…, max_chars=…)` | trace hooks | both of the above, `(text, attributes)`, from one JSON walk |
 | `render_card(text)` | ACP activity cards | the output notation, then the card's "output omitted" flag from `complete` |
 
 The output notation is one line, with three variants built from `Text` alone:
@@ -185,10 +186,9 @@ When each part is built, and what bounds it:
 | Part | Built | Budget | Limits that apply |
 |---|---|---|---|
 | shape accessors (`length`, `items`, `element`, `slice`, field accessors) | during capture, only when their result is kept (see above) | the slot of the part they fill: its share of the capture budget, depth and path | capture `Limits`: `max_chars` (canonical JSON characters), shared `max_nodes`, `max_depth`, `max_items`, `max_string` |
-| `render_python` / `render_output` hook | when the snapshot is rendered | **none**: these renderers have no length limit | none: the hook formats nodes that capture already bounded. Its return value is not checked for length; a hook is trusted code, and its output is as long as the string it builds |
-| `render_json` hook | when the snapshot is rendered | the node's `r.max_chars` | it returns detached data, a snapshot node, which `render_json` encodes in the node's place with its normal accounting (cut to `r.max_chars`, cuts reported at the projection's paths); a hook that raises, returns no node or a node that can't be encoded means generic rendering |
+| `render_python` hook | when the snapshot is rendered | **none**: `render_python` has no length limit | hook nesting: at most 64 hooks run inside one another, deeper nodes render generically. Otherwise none: the hook formats nodes that capture already bounded. Its return value is not checked for length; a hook is trusted code, and its output is as long as the string it builds |
 
-Every part of a shape is built once, top-down, in its final slot: an accessor field and an element take the capture of what they return (one node of `max_nodes` work, as any value); a structure part (`items`, `labels`, a level of `data`) is one node, and a structure part left no node work is its empty, typed fallback with reason `max_nodes`. So capture limits bound what a snapshot holds, and only `render_json` bounds what a renderer produces. Children a text hook renders through `r` get the renderer's notation, cut markers and hooks, nothing more.
+Every part of a shape is built once, top-down, in its final slot: an accessor field and an element take the capture of what they return (one node of `max_nodes` work, as any value); a structure part (`items`, `labels`, a level of `data`) is one node, and a structure part left no node work is its empty, typed fallback with reason `max_nodes`. So capture limits bound what a snapshot holds, and only `render_json` bounds what a renderer produces. Children a hook renders through `r` get the renderer's notation, cut markers and hooks, nothing more.
 
 ### Rendering: a `kind` on objects and per-kind renderers
 
@@ -205,7 +205,7 @@ class Object:
     kind: str | None = None       # rendering key set by the shape, e.g. "numpy.ndarray"
 ```
 
-Each renderer has its own registry, keyed by `kind`:
+`render_python` has the one hook registry, keyed by `kind` (principle 3): `render_output` and `render_json` have none.
 
 ```python
 @render_python.register("numpy.ndarray")
@@ -215,19 +215,11 @@ def render_ndarray(node: Object, r: PythonRenderer) -> str:
     return f"array({data}, shape={shape}, dtype={r.render(node.field('dtype'))})"
 ```
 
-- A hook receives the node and the renderer `r`. It renders children only through `r`, so they keep the renderer's notation, cut markers and their own hooks. Nothing bounds the string a `render_python` / `render_output` hook returns (see [Extension contract](#extension-contract)): it formats nodes that capture already bounded, and it is trusted code.
-- No hook for a `kind`, or a hook that raises (or returns something other than a `str`): generic rendering (`ndarray(dtype=…, shape=…, data=…)`). Rendering never fails. A hook that renders its own node through `r` gets the generic rendering for it.
-- `render_python` and `render_output` accept hooks (`render_python.register(kind)` as a decorator, `register(kind, hook)`, `unregister(kind)`). `render_output` also takes any node now: a `Text` renders in the output notation exactly as before; other nodes use the Python notation, with nested `Text` in the output notation.
-- `render_json` stays generic by default, so trace files remain plain and tool-readable. It accepts hooks too, `hook(node, r: JsonRenderer) -> Snapshot`: the hook returns detached data, a snapshot node built from the node's fields and new nodes (not JSON text), and `render_json` encodes that projection in the node's place with its normal accounting. So it is cut to the node's budget `r.max_chars` like any node (data larger than the budget is cut, not refused), stays valid JSON, and its cuts are reported at the projection's own paths by `preview_attributes`, which uses the same hooks:
-
-  ```python
-  @render_json.register("numpy.ndarray")
-  def json_ndarray(node: Object, r: JsonRenderer) -> Snapshot:
-      fields = (("shape", node.field("shape")), ("values", node.field("data")))
-      return Mapping("dict", 2, fields, True, None)   # {"shape": [...], "values": [...]}
-  ```
-
-  A hook that raises, returns anything but a node (JSON text, plain data) or a node that can't be encoded (`Scalar(float("nan"))`, a non-node child) gives the generic rendering. A projection that returns or embeds the hook's own node gets the generic rendering for that node; projections nest at most 64 deep, deeper ones render generically, so a hook that builds a fresh node of its own kind each time still ends.
+- A hook receives the node and the renderer `r` (a `PythonRenderer`). It renders children only through `r.render(child)`, so they keep the renderer's notation, cut markers and their own hooks; `r.generic(node)` renders a node without its hook. Nothing bounds the string a hook returns (see [Extension contract](#extension-contract)): it formats nodes that capture already bounded, and it is trusted code.
+- No hook for a `kind`, or a hook that raises (or returns something other than a `str`): generic rendering (`ndarray(dtype=…, shape=…, data=…)`). Rendering never fails.
+- Hooks nest at most 64 deep, the one re-entry rule: a node met while 64 hooks are running renders generically. So a hook that renders its own node through `r`, or builds a fresh node of its kind each time, ends after 64 levels, well inside Python's recursion limit; no `RecursionError` is raised or swallowed. Siblings don't count: each running hook adds one level.
+- `render_python.register(kind)` as a decorator, `register(kind, hook)`, `unregister(kind)`; registering again replaces the hook.
+- `render_output` renders a `Text` in the output notation; other nodes use the generic Python notation, with nested `Text` in the output notation. `render_json` encodes every node generically, so trace files remain plain and tool-readable.
 - `kind` is a plain string, so render hooks don't need the type: a hook can be registered without importing the library.
 
 ### First users
@@ -245,13 +237,14 @@ Public API, all importable from `nooa.snapshot`:
 | `array_like`, `ndarray_like`, `mapping_like`, `object_like`, `text_like` | the five shapes `capture.register` takes (see *Capture: shapes, registered by type*) |
 | `capture_fields(**fields, limits=...)` | #342's `trace_fields`: a framework wrapper whose every root field survives with its type |
 | `TextStream`, `SpillTarget`, `DEFAULT_SPILL_BYTES`, `merge` | output that arrives over time; `merge` joins unread deltas |
-| `render_output`, `render_python`, `render_json`, `preview_attributes` | the renderers; the first three take per-kind hooks (`.register(kind)`) |
-| `PythonRenderer`, `OutputRenderer`, `JsonRenderer` | the `r` a render hook gets: `r.render(child)` for the text renderers, `r.max_chars` (the node's budget) for `render_json` |
+| `render_output`, `render_python`, `render_json`, `preview_attributes` | the renderers; only `render_python` takes per-kind hooks (`.register(kind)`) |
+| `render_trace(snapshot, direction=…, max_chars=…)` | the trace entry point: `(render_json text, preview_attributes)` from one JSON walk |
+| `PythonRenderer` | the `r` a `render_python` hook gets: `r.render(child)`, `r.generic(node)` |
 
 Details that the sections above leave open:
 
 - **`Limits`** has `max_chars`, `max_nodes`, `max_depth` (#342's defaults: 50,000 / 2,000 / 16), `max_items` and `max_string` (`None`: only the shared budget) and `tail_share`, the part of a cut string or container kept from its end (0: a prefix, as in trace previews; 0.5: agentdoc's split). `max_items` caps the items of every container, the fields of an `Object` too: an object keeps its first `max_items` fields (not a head and tail) and is marked `max_items` when a later field was left out. `max_string` is an upper bound: a byte value keeps only whole code points within it, so a code point wider than what is left is omitted.
-- **`max_chars` counts canonical JSON**, exactly as #342 does. So `render_json(capture(v, limits), max_chars=limits.max_chars)` gives #342's text and incomplete paths (checked against the original builder on random shapes). `render_json` also walks the snapshot with the same accounting, so it stays valid and within any smaller `max_chars`, and `preview_attributes(..., max_chars=...)` reports the cuts that rendering made. Text and metadata come from one walk: `preview_attributes` collects the spill files while it renders (the parts JSON leaves out, such as a `tail`, are only scanned for them), and the private `_render._preview(direction, snapshot, max_chars=…)` returns both the `render_json` text and the attributes, for the trace path, so a `render_json` hook runs once.
+- **`max_chars` counts canonical JSON**, exactly as #342 does. So `render_json(capture(v, limits), max_chars=limits.max_chars)` gives #342's text and incomplete paths (checked against the original builder on random shapes). `render_json` also walks the snapshot with the same accounting, so it stays valid and within any smaller `max_chars`, and `preview_attributes(..., max_chars=...)` reports the cuts that rendering made. For the trace path, `render_trace(snapshot, direction=…, max_chars=…)` returns the `render_json` text and the attributes from one JSON walk. Spill files (`.full_output`) are collected in their own small walk over the snapshot: every `Text.full` path, depth first, heads and tails, whatever the JSON shows, so they don't depend on `max_chars`.
 - **Nodes beyond the design's fields:** `Text.omitted` (the units left out between head and tail), `Sequence.tail` / `Mapping.tail` (items kept from the end), `Sequence.type_name` / `Mapping.type_name`, `Object.module`, `Unavailable.type_name` (picks #342's typed fallback), `Ref.kind`, and `Mapping.wrapper` (marks a `capture_fields` root). `Ref.id` is the JSON Pointer of the enclosing container that the cycle points back to. Repeated references that are not cycles are captured again each time, as in #342.
 - **Shape fields and reservation.** The accessor fields of a shape are built in order, and each leaves room (characters and node work) for the minimal value of every later field, as #342's `trace_fields` does for root fields; a later accessor field, whose value is not known before its accessor runs, counts as a 2-character value and 16 nodes, a structure field (`items`, `data`, …) as an empty container and one node. So in the ndarray example `dtype` and `shape` stay complete and `data` gets what is left: present, possibly cut, and incomplete with the reason that stopped it (`max_items`, `max_length` or `max_nodes`). A field is never held below its own minimal value (it gets `max(min(room, its minimum), room - reserved)` characters), and node work is held back only down to one node for the current field, so in a slot too small for all the minimums the later fields are cut. Each part is built in its slot's context: one level deeper than the object, under its field name, index or key (so `max_depth` holds for recursive registered types, and cycle `Ref` ids are field-name pointer paths). Fields that fit are kept whole.
 - **Reason `error`** is added to the list: a shape accessor that raised, or returned something its shape can't use (see *Errors* under the shapes).
@@ -276,7 +269,7 @@ Details that the sections above leave open:
 | `jobs.py` tails | `TruncatingStringIO(tail only)` | `TextStream(head=0, …)` |
 | Core `_bash_session` | 30,000-char `TruncatingStringIO` | `TextStream` + `render_output` |
 | ACP `activity.py` | own limits, own flags | `render_card` |
-| Trace hooks | #342's `trace_json` / `trace_fields` | `capture` + `render_json` + `preview_attributes` |
+| Trace hooks | #342's `trace_json` / `trace_fields` | `capture` + `render_trace` |
 | Prefill / `pformat` | agentdoc head/tail | `capture` + `render_python` |
 
 Configuration stays in `TruncationConfig`. `capture.max_stdout` etc. become `TextStream` limits, and `file_backed` becomes the spill switch, defaulting to on in Atom.

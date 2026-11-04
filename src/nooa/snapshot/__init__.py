@@ -16,8 +16,9 @@ node says whether it is complete and, if not, why. Two producers build it:
   counter and an optional spill file).
 
 Renderers turn it into what a consumer shows: ``render_output`` (command
-output), ``render_python`` (agentdoc's prefill notation), ``render_json`` and
-``preview_attributes`` (trace previews). See ``docs/snapshot-model.md``.
+output), ``render_python`` (agentdoc's prefill notation, the one renderer with
+per-kind hooks), ``render_json``, ``preview_attributes`` and ``render_trace``
+(trace previews). See ``docs/snapshot-model.md``.
 """
 
 from nooa.snapshot._capture import (
@@ -47,27 +48,24 @@ from nooa.snapshot._model import (
     Unavailable,
 )
 from nooa.snapshot._render import (
-    JsonRenderer,
-    OutputRenderer,
     PythonRenderer,
     preview_attributes,
     render_json,
     render_output,
     render_python,
+    render_trace,
 )
 from nooa.snapshot._stream import DEFAULT_SPILL_BYTES, SpillTarget, TextStream, merge
 
 __all__ = [
     "DEFAULT_LIMITS",
     "DEFAULT_SPILL_BYTES",
-    "JsonRenderer",
     "REASONS",
     "Key",
     "Limits",
     "Mapping",
     "Object",
     "Opaque",
-    "OutputRenderer",
     "PythonRenderer",
     "Reason",
     "Ref",
@@ -90,5 +88,6 @@ __all__ = [
     "render_json",
     "render_output",
     "render_python",
+    "render_trace",
     "text_like",
 ]

@@ -8,21 +8,22 @@
   (#342's trace preview semantics: nothing is embedded in user data).
 - ``preview_attributes(direction, snapshot)``: the trace span attributes that
   say whether and where a JSON preview is incomplete.
+- ``render_trace(snapshot, direction=..., max_chars=...)``: both, for a trace span.
 
-``render_python``, ``render_output`` and ``render_json`` each have a per-kind
-hook registry (``render_python.register("numpy.ndarray")``): an ``Object``
-whose ``kind`` has a hook renders through it: a text hook renders its
-children through the renderer ``r`` it is given, a JSON hook returns a
-snapshot node that ``render_json`` encodes in its place. A missing or failing hook means generic
-rendering; rendering never fails because of a hook. Only ``render_json``
-bounds its output (``max_chars``); the text renderers format what ``capture``
-kept (*Extension contract* in ``docs/snapshot-model.md``).
+Only ``render_python`` has hooks, one per kind (``render_python.register(
+"numpy.ndarray")``): an ``Object`` whose ``kind`` has a hook renders through
+it, and the hook renders its children through the renderer ``r`` it is given.
+A missing or failing hook, or one nested more than 64 deep, means generic
+rendering; rendering never fails because of a hook. ``render_output`` and
+``render_json`` are generic. Only ``render_json`` bounds its output
+(``max_chars``); the text renderers format what ``capture`` kept
+(*Extension contract* in ``docs/snapshot-model.md``).
 """
 
 from __future__ import annotations
 
 import sys
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from typing import Any, cast
 
 from nooa.snapshot._codec import (
@@ -48,13 +49,12 @@ from nooa.snapshot._model import (
 )
 
 __all__ = [
-    "JsonRenderer",
-    "OutputRenderer",
     "PythonRenderer",
     "preview_attributes",
     "render_json",
     "render_output",
     "render_python",
+    "render_trace",
 ]
 
 PREVIEW_VERSION = 1
@@ -138,35 +138,10 @@ def _length(length: int | None) -> str:
     return "?" if length is None else str(length)
 
 
-TextHook = Callable[[Object, Any], str]
-"""A per-kind render hook: ``hook(node, r) -> str``; it renders children only through ``r``."""
+TextHook = Callable[[Object, "PythonRenderer"], str]
+"""A ``render_python`` hook: ``hook(node, r) -> str``; it renders children only through ``r``."""
 
-
-class _Hooks:
-    """One renderer's per-kind hook registry (``kind`` is a plain string)."""
-
-    def __init__(self, renderer: str) -> None:
-        self.renderer = renderer
-        self.functions: dict[str, Callable[..., Any]] = {}
-
-    def register(self, kind: str, function: Callable[..., Any] | None = None) -> Any:
-        if type(kind) is not str or not kind:
-            raise TypeError(f"{self.renderer}.register needs a kind (a non-empty str)")
-
-        def add(function: Callable[..., Any]) -> Callable[..., Any]:
-            self.functions[kind] = function
-            return function
-
-        return add(function) if function is not None else add
-
-    def unregister(self, kind: str) -> None:
-        self.functions.pop(kind, None)
-
-    def find(self, node: Snapshot) -> Callable[..., Any] | None:
-        if type(node) is not Object:
-            return None
-        kind = node.kind
-        return self.functions.get(kind) if type(kind) is str else None
+_MAX_HOOK_NESTING = 64  # hooks running inside hooks: deeper nodes render generically
 
 
 class PythonRenderer:
@@ -174,26 +149,29 @@ class PythonRenderer:
 
     Children rendered through ``r`` use the renderer's own notation and cut
     markers (and their own hooks). ``r.generic(node)`` renders a node without
-    its hook. There is no output-length limit: the nodes were bounded by
-    ``capture``, and the string a hook returns is not checked for length
-    (*Extension contract* in ``docs/snapshot-model.md``).
+    its hook. Hooks nest at most 64 deep: a node met while 64 hooks are running
+    renders generically, so a hook that renders its own node, or builds new
+    nodes of its kind, still ends. There is no output-length limit: the nodes
+    were bounded by ``capture``, and the string a hook returns is not checked
+    for length (*Extension contract* in ``docs/snapshot-model.md``).
     """
 
-    def __init__(self, hooks: _Hooks) -> None:
+    def __init__(self, hooks: dict[str, TextHook]) -> None:
         self._hooks = hooks
-        self._active: list[int] = []  # ids of the nodes whose hook is running
+        self._depth = 0  # hooks running
 
     def render(self, node: Snapshot) -> str:
         """``node`` in this renderer's notation, through its hook when one is registered."""
-        hook = self._hooks.find(node)
-        if hook is not None and id(node) not in self._active:
-            self._active.append(id(node))
+        kind = node.kind if type(node) is Object else None
+        hook = self._hooks.get(kind) if kind is not None else None
+        if hook is not None and self._depth < _MAX_HOOK_NESTING:
+            self._depth += 1
             try:
-                rendered = hook(node, self)
+                rendered = hook(node, self)  # type: ignore[arg-type]
             except Exception:
                 rendered = None
             finally:
-                self._active.pop()
+                self._depth -= 1
             if type(rendered) is str:
                 return rendered
         return self.generic(node)
@@ -262,49 +240,18 @@ class PythonRenderer:
         return f"{node.type_name}(" + ", ".join(parts) + ")"
 
 
-class OutputRenderer(PythonRenderer):
-    """What a ``render_output`` hook renders children with: ``Text`` in the output notation."""
+class _OutputNotation(PythonRenderer):
+    """``render_output``'s walk: ``Text`` in the output notation, no hooks."""
 
     def text(self, text: Text) -> str:
-        """A ``Text`` node: whole, or head and tail around the omitted-output line."""
         return _output_text(text)
 
 
-class _TextRender:
-    """A text renderer entry point: ``render(snapshot)`` plus its own hook registry.
-
-    ``render_python`` and ``render_output`` are instances of the two tiny
-    subclasses below; they differ only in the renderer class a hook gets (and
-    their docstrings). Each has an independent registry. Hooks format nodes
-    that ``capture`` already bounded: there is no output-length cap here (see
-    *Extension contract* in ``docs/snapshot-model.md``).
-    """
-
-    _renderer: type[PythonRenderer] = PythonRenderer
-
-    def __init__(self, name: str) -> None:
-        self._hooks = _Hooks(name)
-
-    def __call__(self, snapshot: Snapshot) -> str:
-        return self._renderer(self._hooks).render(snapshot)
-
-    def register(self, kind: str, function: TextHook | None = None) -> Any:
-        """Register ``hook(node: Object, r) -> str`` for objects of ``kind``.
-
-        ``r`` is this renderer's ``PythonRenderer`` / ``OutputRenderer``. Use as
-        ``@render_python.register("numpy.ndarray")`` or ``register(kind, hook)``;
-        registering again replaces it. A hook that raises or returns a non-``str``
-        falls back to the generic notation.
-        """
-        return self._hooks.register(kind, function)
-
-    def unregister(self, kind: str) -> None:
-        """Remove the hook for ``kind`` (no-op when absent)."""
-        self._hooks.unregister(kind)
-
-
-class _RenderPython(_TextRender):
+class _RenderPython:
     """``render_python(snapshot)``, with ``render_python.register(kind)`` for per-kind hooks."""
+
+    def __init__(self) -> None:
+        self._hooks: dict[str, TextHook] = {}
 
     def __call__(self, snapshot: Snapshot) -> str:
         """``snapshot`` in agentdoc's ``pformat`` / CodeAct prefill notation, not column-wrapped.
@@ -314,52 +261,58 @@ class _RenderPython(_TextRender):
         and ``dict(len=N, items={..., ...})``; depth cuts ``[list: N items]``;
         cycles ``<cycle>``; uninspected values ``<opaque: Type>``. An ``Object``
         whose ``kind`` has a hook renders through it; a hook that raises or
-        returns a non-``str`` falls back to the generic notation.
+        returns a non-``str``, or one nested more than 64 deep, falls back to
+        the generic notation.
         """
-        return super().__call__(snapshot)
+        return PythonRenderer(self._hooks).render(snapshot)
 
+    def register(self, kind: str, function: TextHook | None = None) -> Any:
+        """Register ``hook(node: Object, r: PythonRenderer) -> str`` for objects of ``kind``.
 
-class _RenderOutput(_TextRender):
-    """``render_output(snapshot)``, with ``render_output.register(kind)`` for per-kind hooks."""
-
-    _renderer = OutputRenderer
-
-    def __call__(self, snapshot: Snapshot) -> str:
-        """``snapshot`` as the model sees command output.
-
-        A ``Text`` is whole, or head and tail around one line that says how
-        much was left out and where the whole output is::
-
-            [... 1,234 bytes omitted; full output: /path]
-            [... 1,234 bytes omitted; /path holds the first 65,536 of 99,999 bytes]
-            [... 1,234 bytes omitted; full output not kept]
-
-        Other nodes use ``render_python``'s notation, with nested ``Text`` in
-        the output notation. An ``Object`` whose ``kind`` has a hook renders
-        through it; a hook that raises falls back to the generic notation.
+        Use as ``@render_python.register("numpy.ndarray")`` or
+        ``register(kind, hook)``; registering again replaces it. A hook that
+        raises or returns a non-``str`` falls back to the generic notation.
         """
-        return super().__call__(snapshot)
+        if type(kind) is not str or not kind:
+            raise TypeError("render_python.register needs a kind (a non-empty str)")
+
+        def add(function: TextHook) -> TextHook:
+            self._hooks[kind] = function
+            return function
+
+        return add(function) if function is not None else add
+
+    def unregister(self, kind: str) -> None:
+        """Remove the hook for ``kind`` (no-op when absent)."""
+        self._hooks.pop(kind, None)
 
 
-render_python = _RenderPython("render_python")
-render_output = _RenderOutput("render_output")
+render_python = _RenderPython()
+
+
+def render_output(snapshot: Snapshot) -> str:
+    """``snapshot`` as the model sees command output.
+
+    A ``Text`` is whole, or head and tail around one line that says how
+    much was left out and where the whole output is::
+
+        [... 1,234 bytes omitted; full output: /path]
+        [... 1,234 bytes omitted; /path holds the first 65,536 of 99,999 bytes]
+        [... 1,234 bytes omitted; full output not kept]
+
+    Other nodes use ``render_python``'s generic notation (no hooks), with
+    nested ``Text`` in the output notation.
+    """
+    return _OutputNotation({}).render(snapshot)
 
 
 # --- JSON notation (trace previews) ---------------------------------------------------
 
 
 class _Report:
-    """Incomplete JSON Pointer paths (bounded, collapsing to the root) and reasons.
+    """Incomplete JSON Pointer paths (bounded, collapsing to the root) and reasons."""
 
-    It also carries the render hooks of the walk (``None``: generic only) and,
-    for ``preview_attributes``, the spill files found (``spills``; ``None``:
-    not collected), so that text and metadata come from one walk.
-    """
-
-    def __init__(self, hooks: _Hooks | None = None, spills: list[str] | None = None) -> None:
-        self.hooks = hooks
-        self.spills = spills
-        self.active: list[int] = []  # ids of the nodes whose hook is running
+    def __init__(self) -> None:
         self.paths: list[str] = []
         self.path_chars = 0
         self.collapsed = False
@@ -381,28 +334,9 @@ class _Report:
         self.paths.append(path)
         self.path_chars += len(path)
 
-    def skipped(self, nodes: Iterable[Snapshot]) -> None:
-        """Nodes the walk does not render: only their spill files are collected."""
-        if self.spills is not None:
-            for node in nodes:
-                _spill_paths(node, self.spills)
 
-    def child(self) -> _Report:
-        """A fresh report for a hook's attempt, merged only if the hook succeeds.
-
-        It collects no spill files: those of the hooked node are its own fields'.
-        """
-        child = _Report(self.hooks)
-        child.active = self.active
-        return child
-
-    def merge(self, other: _Report) -> None:
-        for path in other.paths:
-            self.incomplete(path, None)
-        self.reasons |= other.reasons
-
-
-def _spill_paths(node: Snapshot, found: list[str]) -> None:
+def _spill_paths(node: Snapshot, found: list[str]) -> list[str]:
+    """Every spill file of ``node``, depth first (heads and tails, fields), once each."""
     node_type = type(node)
     if node_type is Text:
         assert isinstance(node, Text)
@@ -420,6 +354,7 @@ def _spill_paths(node: Snapshot, found: list[str]) -> None:
         assert isinstance(node, Object)
         for _name, child in node.fields:
             _spill_paths(child, found)
+    return found
 
 
 def _placeholder(node: Snapshot) -> Any:
@@ -473,7 +408,7 @@ def _json_entries(
 ) -> tuple[dict[str, Any], int, str | None]:
     output: dict[str, Any] = {}
     size = 2
-    for index, (key, child) in enumerate(entries):
+    for key, child in entries:
         key_text = json_key(key, live=False)  # a detached snapshot key
         separator = 2 if output else 0
         remaining = max_size - size - separator
@@ -490,77 +425,19 @@ def _json_entries(
                 size += separator + overhead + child_size
                 continue
             stop = "max_length"
-        report.skipped(child for _key, child in entries[index:])
         return output, size, stop
     return output, size, None
-
-
-class JsonRenderer:
-    """What a ``render_json`` hook gets: ``r.max_chars``, the node's budget.
-
-    A hook returns detached data, a snapshot node (its projection of the
-    node, which may hold the node's children), not JSON text. ``render_json``
-    encodes it with its normal accounting: cut to ``r.max_chars``, valid,
-    with its cuts reported at the paths of the projection. See *Extension
-    contract* in ``docs/snapshot-model.md``.
-    """
-
-    def __init__(self, max_chars: int) -> None:
-        self.max_chars = max_chars
-
-
-_NODE_TYPES = (Scalar, Text, Sequence, Mapping, Object, Opaque, Unavailable, Ref)
-_MAX_HOOK_NESTING = 64  # projections inside projections: deeper ones render generically
-
-
-def _json_hooked(
-    node: Object, hook: Callable[..., Any], max_size: int, path: str, report: _Report
-) -> tuple[Any, int] | None:
-    """The hook's projection of ``node``, encoded; ``None`` when it raises or is no node.
-
-    While the projection is encoded, ``node`` itself renders generically (a
-    hook that returns or embeds its own node). A projection that cannot be
-    encoded (a malformed node) counts as a failing hook.
-    """
-    if len(report.active) >= _MAX_HOOK_NESTING:
-        return None
-    attempt = report.child()
-    report.active.append(id(node))
-    try:
-        projection = hook(node, JsonRenderer(max_size))
-        if type(projection) not in _NODE_TYPES:
-            return None
-        value, size = _json(projection, max_size, path, attempt)
-        if not all(type(reason) is str for reason in attempt.reasons):
-            return None
-    except Exception:
-        return None
-    finally:
-        report.active.pop()
-    report.merge(attempt)
-    if not node.complete:
-        report.incomplete(path, node.reason)
-    return value, size
 
 
 def _json(node: Snapshot, max_size: int, path: str, report: _Report) -> tuple[Any, int]:
     """One node as a JSON-compatible value fitted to ``max_size`` (#342's accounting)."""
     node_type = type(node)
-    if report.hooks is not None and node_type is Object and id(node) not in report.active:
-        hook = report.hooks.find(node)
-        if hook is not None:
-            hooked = _json_hooked(node, hook, max_size, path, report)  # type: ignore[arg-type]
-            if hooked is not None:
-                report.skipped((node,))  # its spill files: the hook's output has none
-                return hooked
     if node_type is Text or (node_type is Scalar and type(node.value) is bytes):  # type: ignore[union-attr]
         head: Any = node.head if node_type is Text else node.value  # type: ignore[union-attr]
         chars = node_type is Text and node.unit == "chars"  # type: ignore[union-attr]
         if type(head) is not (str if chars else bytes):
             raise TypeError("a Text node's head is a str (chars) or bytes (bytes)")
         text = cast(str, head) if chars else decode_counted(cast(bytes, head))[0]  # bytes: decoded
-        if node_type is Text and report.spills is not None:
-            report.skipped((node,))
         value, size = fit_string(text, max_size)
         if type(value) is not str or len(value) < len(text):
             report.incomplete(path, "max_length")
@@ -577,7 +454,6 @@ def _json(node: Snapshot, max_size: int, path: str, report: _Report) -> tuple[An
     if node_type is Sequence or node_type is Mapping or node_type is Object or node_type is Ref:
         if max_size < 2:
             report.incomplete(path, getattr(node, "reason", None) or "max_length")
-            report.skipped((node,))
             name = "list" if node_type is Sequence else "dict"
             return fallback_json(name, max_size)
     if node_type is Sequence:
@@ -590,12 +466,10 @@ def _json(node: Snapshot, max_size: int, path: str, report: _Report) -> tuple[An
             available = max_size - size - separator
             if available < 1:
                 cut = True
-                report.skipped(node.items[index:])
                 break
             value, child_size = _json(child, available, pointer_child(path, str(index)), report)
             output.append(value)
             size += separator + child_size
-        report.skipped(node.tail)  # JSON shows the head only
         if cut:
             report.incomplete(path, "max_length")
         if not node.complete:
@@ -607,11 +481,8 @@ def _json(node: Snapshot, max_size: int, path: str, report: _Report) -> tuple[An
         if isinstance(node, Mapping) and node.wrapper:
             wrapped = _json_wrapper(entries, max_size, path, report)
             if wrapped is not None:
-                report.skipped(child for _key, child in node.tail)
                 return wrapped
         mapping, size, stop = _json_entries(entries, max_size, path, report)
-        if isinstance(node, Mapping):
-            report.skipped(child for _key, child in node.tail)
         if stop is not None:
             report.incomplete(path, stop)
         if not node.complete:
@@ -633,12 +504,11 @@ def _json(node: Snapshot, max_size: int, path: str, report: _Report) -> tuple[An
     raise TypeError(f"not a snapshot node: {node_type.__name__}")
 
 
-def _render(snapshot: Snapshot, max_chars: int, *, spills: bool = False) -> tuple[str, _Report]:
-    """The JSON text and its report, from one walk (``spills``: collect spill files too)."""
+def _render(snapshot: Snapshot, max_chars: int) -> tuple[str, _Report]:
+    """The JSON text and its report (incomplete paths and reasons), from one walk."""
     if max_chars < 1:
         raise ValueError("render_json max_chars must be at least 1")
-    hooks = render_json._hooks
-    report = _Report(hooks if hooks.functions else None, [] if spills else None)
+    report = _Report()
     value, size = _json(snapshot, max_chars, "", report)
     text = dumps(value)
     if len(text) != size or len(text) > max_chars:
@@ -646,45 +516,19 @@ def _render(snapshot: Snapshot, max_chars: int, *, spills: bool = False) -> tupl
     return text, report
 
 
-class _RenderJson:
-    """``render_json(snapshot, max_chars=...)``, with ``render_json.register(kind)``."""
+def render_json(snapshot: Snapshot, *, max_chars: int) -> str:
+    """``snapshot`` as plain, valid JSON of at most ``max_chars`` characters.
 
-    def __init__(self) -> None:
-        self._hooks = _Hooks("render_json")
-
-    def __call__(self, snapshot: Snapshot, *, max_chars: int) -> str:
-        """``snapshot`` as plain, valid JSON of at most ``max_chars`` characters.
-
-        Strings keep a prefix; containers their first items; uninspected values
-        become ``"<opaque: Type>"``; cycles ``[]`` / ``{}``. Nothing marks a cut
-        inside the data: ``preview_attributes`` reports where the preview is
-        incomplete. An ``Object`` whose ``kind`` has a hook renders as the
-        snapshot node the hook returns, encoded and cut like any other node; a
-        hook that raises or returns no node means generic rendering, so the
-        result stays valid and bounded either way.
-        """
-        return _render(snapshot, max_chars)[0]
-
-    def register(self, kind: str, function: Callable[..., Snapshot] | None = None) -> Any:
-        """Register ``hook(node: Object, r: JsonRenderer) -> Snapshot`` for ``kind``.
-
-        The hook returns detached data: a snapshot node to render in place of
-        ``node`` (built from its fields and new nodes), within ``r.max_chars``
-        or cut to it. Trace previews stay generic unless a hook is registered:
-        keep the projection plain data that tools can read.
-        """
-        return self._hooks.register(kind, function)
-
-    def unregister(self, kind: str) -> None:
-        """Remove the hook for ``kind`` (no-op when absent)."""
-        self._hooks.unregister(kind)
+    Strings keep a prefix; containers their first items; uninspected values
+    become ``"<opaque: Type>"``; cycles ``[]`` / ``{}``. Nothing marks a cut
+    inside the data: ``preview_attributes`` reports where the preview is
+    incomplete. There are no hooks: every node renders generically.
+    """
+    return _render(snapshot, max_chars)[0]
 
 
-render_json = _RenderJson()
-
-
-def _attributes(direction: str, report: _Report) -> dict[str, Any]:
-    """The span attributes a report gives (no further walk of the snapshot)."""
+def _attributes(direction: str, report: _Report, snapshot: Snapshot) -> dict[str, Any]:
+    """The span attributes of a report, plus the spill files of ``snapshot``."""
     prefix = f"nooa.{direction}.preview"
     attributes: dict[str, Any] = {
         f"{prefix}.version": PREVIEW_VERSION,
@@ -694,8 +538,9 @@ def _attributes(direction: str, report: _Report) -> dict[str, Any]:
         attributes[f"{prefix}.paths"] = tuple(report.paths)
     if report.reasons:
         attributes[f"{prefix}.reasons"] = tuple(sorted(report.reasons))
-    if report.spills:
-        attributes[f"{prefix}.full_output"] = tuple(report.spills)
+    spills = _spill_paths(snapshot, [])
+    if spills:
+        attributes[f"{prefix}.full_output"] = tuple(spills)
     return attributes
 
 
@@ -711,14 +556,17 @@ def preview_attributes(
     to ``render_json`` so that cuts made while rendering are reported too.
     """
     budget = sys.maxsize if max_chars is None else max_chars
-    return _attributes(direction, _render(snapshot, budget, spills=True)[1])
+    return _attributes(direction, _render(snapshot, budget)[1], snapshot)
 
 
-def _preview(direction: str, snapshot: Snapshot, *, max_chars: int) -> tuple[str, dict[str, Any]]:
-    """``render_json`` text and ``preview_attributes`` from one walk (the trace path).
+def render_trace(
+    snapshot: Snapshot, *, direction: str, max_chars: int
+) -> tuple[str, dict[str, Any]]:
+    """A trace span's preview of ``snapshot``: the JSON text and its span attributes.
 
     Equal to ``(render_json(snapshot, max_chars=m), preview_attributes(direction,
-    snapshot, max_chars=m))``, but each ``render_json`` hook runs once, not twice.
+    snapshot, max_chars=m))``, from one JSON walk (``direction``: ``"input"`` or
+    ``"output"``).
     """
-    text, report = _render(snapshot, max_chars, spills=True)
-    return text, _attributes(direction, report)
+    text, report = _render(snapshot, max_chars)
+    return text, _attributes(direction, report, snapshot)
