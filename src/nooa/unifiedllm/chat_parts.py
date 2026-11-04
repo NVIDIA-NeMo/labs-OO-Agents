@@ -121,7 +121,14 @@ def capture_chat_parts(message: Any, scope: str | None) -> tuple[AssistantPart, 
     if fields is not None and not isinstance(fields, dict):
         raise ReasoningReplayError("Malformed provider_specific_fields in provider response.")
     if fields:
-        _warn_unknown_fields(fields, {"thought_signatures"}, "a provider message")
+        known = {"thought_signatures"}
+        # LiteLLM moves a readable ``reasoning`` field (vLLM, NVIDIA Inference Hub)
+        # to ``reasoning_content`` but keeps a copy here. That copy is the text
+        # already captured above, not unknown provider state.
+        for key in ("reasoning", "reasoning_content"):
+            if isinstance(fields.get(key), str) and fields[key] == reasoning:
+                known.add(key)
+        _warn_unknown_fields(fields, known, "a provider message")
         if "thought_signatures" in fields:
             signatures = fields["thought_signatures"]
             if (
