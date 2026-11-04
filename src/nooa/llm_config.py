@@ -32,10 +32,9 @@ Priority (last wins):
 from __future__ import annotations
 
 import logging
-from importlib import metadata
 from pathlib import Path
 
-from nooa.layered_config import layered_paths
+from nooa.layered_config import entry_point_paths, layered_paths
 
 logger = logging.getLogger(__name__)
 
@@ -63,28 +62,7 @@ def bundled_config_paths() -> list[Path]:
     of its YAML, or ``None`` if the resource can't be materialised
     (zipped wheels, exotic install layouts).
     """
-    out: list[Path] = []
-    try:
-        eps = metadata.entry_points(group=_BUNDLED_ENTRY_POINT_GROUP)
-    except Exception:  # noqa: BLE001 — importlib.metadata can raise on broken installs
-        logger.warning("Failed to enumerate bundled-config entry points", exc_info=True)
-        return out
-
-    for ep in sorted(eps, key=lambda e: e.name):
-        try:
-            func = ep.load()
-            path = func()
-        except Exception:  # noqa: BLE001 — third-party entry-point code, be defensive
-            logger.warning(
-                "Bundled-config entry-point %r failed to load",
-                ep.name,
-                exc_info=True,
-            )
-            continue
-        if path is None:
-            continue
-        out.append(Path(path))
-    return out
+    return entry_point_paths(_BUNDLED_ENTRY_POINT_GROUP)
 
 
 def llm_config_chain() -> list[Path]:
