@@ -72,7 +72,8 @@ def otlp(
         from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
     except ImportError as err:
         raise ImportError(
-            "OTLP HTTP exporter not installed.  Install with: pip install opentelemetry-exporter-otlp-proto-http"
+            "OTLP HTTP exporter not installed. Install it in the environment running NOOA with: "
+            "uv pip install opentelemetry-exporter-otlp-proto-http"
         ) from err
 
     return OTLPSpanExporter(endpoint=endpoint, headers=headers or {})
