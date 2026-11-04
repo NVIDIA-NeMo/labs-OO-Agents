@@ -3142,6 +3142,33 @@ class TestCapabilityAwareFixHints:
     def test_time_sleep_points_to_asyncio_sleep(self):
         assert "Fix: `await asyncio.sleep(seconds)`" in self._error("time.sleep(1)")
 
+    @pytest.mark.parametrize(
+        "code",
+        ["time.sleep(1)", "import threading", "async def f():\n    return 1\nasyncio.run(f())"],
+    )
+    def test_a_stripped_asyncio_is_not_suggested(self, code):
+        import asyncio
+        import time
+
+        from nooa.runtime.restrictions import DEFAULT_BLOCKED_MODULES, RestrictionsConfig
+
+        def fix(blocked: frozenset[str], restricted: frozenset[str]) -> str:
+            # As the actor does: the same lists reach the context and the validator.
+            context = ValidationContext(
+                blocked_modules=blocked,
+                restricted_imports=restricted,
+                exec_globals={"asyncio": asyncio, "time": time},
+            )
+            config = RestrictionsConfig(blocked_modules=blocked, restricted_imports=restricted)
+            with pytest.raises(ValidationError) as exc_info:
+                UnifiedCodeValidator(restrictions=config).validate(code, context)
+            message = str(exc_info.value)
+            return message.split("Fix:", 1)[1] if "Fix:" in message else ""
+
+        base = DEFAULT_BLOCKED_MODULES | {"threading"}
+        assert fix(base | {"asyncio"}, frozenset()) == ""  # stripped from the namespace
+        assert "asyncio" in fix(base, frozenset({"asyncio"}))  # only restricted: still bound
+
     def test_hints_do_not_change_what_is_allowed(self):
         from nooa.runtime.restrictions import DEFAULT_BLOCKED_MODULES
 

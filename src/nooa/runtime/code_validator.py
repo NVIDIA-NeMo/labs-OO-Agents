@@ -214,12 +214,16 @@ def _module_fix_hint(
     shell: str | None,
     call: str | None = None,
     denied: frozenset[str] = frozenset(),
+    unavailable: frozenset[str] = frozenset(),
 ) -> str | None:
     """Point a blocked module/call at an alternative the agent actually has.
 
     ``shell`` is how the agent runs a command (``_shell_hint``), None if it
     has no shell.
     ``denied``: the active deny lists; a denied ``httpx`` is not recommended.
+    ``unavailable``: modules stripped from the cell namespace (``blocked_modules``);
+    a stripped ``asyncio`` is not recommended. A merely restricted import keeps
+    the preloaded ``asyncio`` binding, so it does not belong here.
     """
     root = match_blocked_module(module_name, _PROCESS_MODULES)
     if root is not None or (module_name, call) in _PROCESS_CALLS:
@@ -228,6 +232,10 @@ def _module_fix_hint(
         if match_blocked_module("httpx", denied) is not None:
             return f"curl: {shell}" if shell else None
         return f"{_HTTP_HINT}, or curl: {shell}" if shell else _HTTP_HINT
+    if module_name == "os" and call in ("wait", "waitpid", "waitid"):
+        return shell
+    if match_blocked_module("asyncio", unavailable) is not None:
+        return None  # every hint below needs the asyncio the cell no longer has
     if module_name == "asyncio" and call in ("run", "run_until_complete"):
         return (
             "cells already run inside an event loop: `await coro` directly, "
@@ -235,8 +243,6 @@ def _module_fix_hint(
         )
     if module_name == "time" and call == "sleep":
         return "`await asyncio.sleep(seconds)`"
-    if module_name == "os" and call in ("wait", "waitpid", "waitid"):
-        return shell
     if module_name in ("threading", "multiprocessing"):
         return _AWAIT_HINT
     return None
@@ -674,6 +680,7 @@ class _SecurityVisitor(ast.NodeVisitor):
                 module_name,
                 _shell_hint(self.context.agent),
                 denied=self.context.blocked_modules | self.context.restricted_imports,
+                unavailable=self.context.blocked_modules,
             ),
         )
 
@@ -1427,7 +1434,11 @@ class _BlockingCallVisitor(ast.NodeVisitor):
                 code="E310",
                 severity="error",
                 fix_hint=_module_fix_hint(
-                    module_name, self.shell_hint, call_name, denied=self.denied_modules
+                    module_name,
+                    self.shell_hint,
+                    call_name,
+                    denied=self.denied_modules,
+                    unavailable=self.blocked_modules,
                 ),
             )
         )
