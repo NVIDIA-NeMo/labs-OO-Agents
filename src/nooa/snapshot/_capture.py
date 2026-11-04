@@ -657,112 +657,126 @@ def _container(
 # --- visibility (agentdoc ``hidden`` / ``spec(hidden=...)``) ------------------------
 
 
-_MALFORMED = object()
+class _FailClosed(Exception):
+    """What can't be read safely: raised by a field reader and the helpers it calls.
+
+    A field reader's ``_FailClosed`` keeps no field of its object
+    (``_object_fields``); a dataclass field whose annotation raises it is
+    left out alone (``_dataclass_entries``).
+    """
 
 
-def _hidden_flag(raw: Any, state: _State) -> Any:
+def _namespace(cls: type[Any], state: _State) -> dict[str, Any]:
+    """``_raw_namespace``, or ``_FailClosed`` when it can't be read."""
+    namespace = _raw_namespace(cls, state)
+    if namespace is None:
+        raise _FailClosed
+    return namespace
+
+
+def _hidden_flag(raw: Any, state: _State) -> bool | None:
     """The ``hidden`` entry of raw metadata keywords: a ``bool``, ``None`` when absent.
 
-    ``_MALFORMED`` (fail closed) unless ``raw`` is an exact ``dict`` with exact
-    ``str`` keys, each charged one node, whose ``hidden`` is absent or a ``bool``.
+    ``_FailClosed`` unless ``raw`` is an exact ``dict`` with exact ``str``
+    keys, each charged one node, whose ``hidden`` is absent or a ``bool``.
     """
     if type(raw) is not dict:
-        return _MALFORMED
+        raise _FailClosed
     found = None
     for name, value in dict.items(raw):
         if not state.take_node() or type(name) is not str:
-            return _MALFORMED
+            raise _FailClosed
         if name == "hidden":
             found = value
-    return found if found is None or type(found) is bool else _MALFORMED
+    if found is not None and type(found) is not bool:
+        raise _FailClosed
+    return found
 
 
 def _visibility_overrides(
     obj_dict: dict[str, Any], mro: tuple[type[Any], ...], state: _State
-) -> dict[str, bool] | None:
-    """Read complete raw hidden overrides before exposing fields (None: fail closed)."""
+) -> dict[str, bool]:
+    """Read complete raw hidden overrides before exposing fields (``_FailClosed``)."""
     class_overrides: dict[str, bool] = {}
 
-    def read_map(raw: Any, *, overwrite: bool) -> bool:
+    def read_map(raw: Any, *, overwrite: bool) -> None:
         if raw is None:
-            return True
+            return
         if type(raw) is not dict:
-            return False
+            raise _FailClosed
         for field_name, metadata in dict.items(raw):
             if not state.take_node() or type(field_name) is not str:
-                return False
+                raise _FailClosed
             flag = _hidden_flag(metadata, state)
-            if flag is _MALFORMED:
-                return False
             if flag is not None and (overwrite or field_name not in class_overrides):
                 class_overrides[field_name] = flag
-        return True
 
     for base in mro:
         if not state.take_node():
-            return None
-        namespace = _raw_namespace(base, state)
-        if namespace is None:
-            return None
-        if not read_map(dict.get(namespace, _FIELD_METADATA_ATTR), overwrite=False):
-            return None
-
-    if not read_map(dict.get(obj_dict, _FIELD_METADATA_ATTR), overwrite=True):
-        return None
+            raise _FailClosed
+        read_map(dict.get(_namespace(base, state), _FIELD_METADATA_ATTR), overwrite=False)
+    read_map(dict.get(obj_dict, _FIELD_METADATA_ATTR), overwrite=True)
     return class_overrides
 
 
-def _metadata_hidden(metadata: Any, state: _State) -> bool | None:
-    """Whether recognized marker metadata hides a field (None: malformed, fail closed)."""
+def _metadata_hidden(metadata: Any, state: _State) -> bool:
+    """Whether recognized marker metadata hides a field (``_FailClosed``: malformed)."""
     if type(metadata) is not list and type(metadata) is not tuple:
-        return None
+        raise _FailClosed
     annotated_hidden = False
     for item in metadata:
         if not state.take_node():
-            return None
+            raise _FailClosed
         if item is hidden:
             annotated_hidden = True
         elif type(item) is SpecAnnotation:
             try:
                 kwargs = object.__getattribute__(item, "kwargs")
             except Exception:
-                return None
-            flag = _hidden_flag(kwargs, state)
-            if flag is _MALFORMED:
-                return None
-            if flag:
+                raise _FailClosed from None
+            if _hidden_flag(kwargs, state):
                 annotated_hidden = True
         # Foreign constraint metadata is deliberately ignored.
     return annotated_hidden
 
 
-def _field_hidden(field_info: FieldInfo, state: _State) -> bool | None:
+def _field_hidden(field_info: FieldInfo, state: _State) -> bool:
     """Read only recognized resolved visibility metadata of a Pydantic field."""
     try:
         metadata = object.__getattribute__(field_info, "metadata")
     except Exception:
-        return None
+        raise _FailClosed from None
     if type(metadata) is not list:
-        return None
+        raise _FailClosed
     return _metadata_hidden(metadata, state)
 
 
-def _alias_hidden(annotation: Any, state: _State) -> bool | None:
-    """Whether a resolved annotation is an ``Annotated`` whose raw metadata hides (None: unreadable).
+def _annotation_hidden(
+    name: str,
+    annotation: Any,
+    hints: Callable[[], dict[str, tuple[Any, ...]] | None],
+    state: _State,
+) -> bool:
+    """Whether a dataclass field's annotation hides it (``_FailClosed``: unreadable).
 
-    Only an exact ``typing`` ``Annotated`` alias (type identity) is inspected,
-    through its raw ``__metadata__``; anything else is visible.
+    A string annotation reads the class's resolved hint metadata, ``hints()``.
+    Otherwise only an exact ``typing`` ``Annotated`` alias (type identity) is
+    inspected, through its raw ``__metadata__``; anything else is visible.
     """
+    if type(annotation) is str:
+        resolved = hints()
+        metadata = None if resolved is None else dict.get(resolved, name)
+        if metadata is None:
+            raise _FailClosed
+        return _metadata_hidden(metadata, state)
     if type(annotation) is not _ANNOTATED_ALIAS:
         return False
     try:
         metadata = object.__getattribute__(annotation, "__metadata__")
     except Exception:
-        return None
+        raise _FailClosed from None
     return _metadata_hidden(metadata, state)
 
-
-_UNREAD = object()
 
 _HINTS: dict[int, tuple[weakref.ref[type[Any]], dict[str, tuple[Any, ...]] | None]] = {}
 """Per dataclass, keyed by ``id`` and re-checked by identity: its resolved hint metadata."""
@@ -846,14 +860,12 @@ def _build_slot(child: Any, max_size: int, depth: int, path: str, state: _State)
 # --- Pydantic models and dataclasses ---------------------------------------------
 
 
-def _pydantic_fields(mro: tuple[type[Any], ...], state: _State) -> dict[str, FieldInfo] | None:
-    """Find an already-built exact Pydantic field dictionary in raw namespaces."""
+def _pydantic_fields(mro: tuple[type[Any], ...], state: _State) -> dict[str, FieldInfo]:
+    """Find an already-built exact Pydantic field dictionary in raw namespaces (``_FailClosed``)."""
     for base in mro:
         if not state.take_node():
-            return None
-        namespace = _raw_namespace(base, state)
-        if namespace is None:
-            return None
+            raise _FailClosed
+        namespace = _namespace(base, state)
         # Pydantic stored the completed map directly as ``model_fields`` before
         # 2.10, then moved it to ``__pydantic_fields__``. Read raw namespaces so
         # neither layout invokes the metaclass descriptor exposed by newer
@@ -861,8 +873,10 @@ def _pydantic_fields(mro: tuple[type[Any], ...], state: _State) -> dict[str, Fie
         for key in ("__pydantic_fields__", "model_fields"):
             fields = dict.get(namespace, key)
             if fields is not None:
-                return fields if type(fields) is dict else None
-    return None
+                if type(fields) is not dict:
+                    raise _FailClosed
+                return fields
+    raise _FailClosed
 
 
 def _closed(type_name: str) -> _Built:
@@ -870,16 +884,16 @@ def _closed(type_name: str) -> _Built:
     return _Built(Object(type_name, (), "unreadable"), 2)
 
 
-def _copy_storage(obj_dict: Any, state: _State) -> dict[str, Any] | None:
-    """A copy of raw instance storage after checking every key (None: fail closed)."""
+def _copy_storage(obj_dict: Any, state: _State) -> dict[str, Any]:
+    """A copy of raw instance storage after checking every key (``_FailClosed``)."""
     if type(obj_dict) is not dict:
-        return None
+        raise _FailClosed
     # Storage can be mutated directly. Copy only after validating every key so
     # later fixed-string lookups cannot collide with hostile key objects.
     safe: dict[str, Any] = {}
     for stored_name, stored_value in dict.items(obj_dict):
         if not state.take_node() or type(stored_name) is not str:
-            return None
+            raise _FailClosed
         safe[stored_name] = stored_value
     return safe
 
@@ -897,10 +911,6 @@ class _Omitted:
 
     def __init__(self, reason: Reason) -> None:
         self.reason = reason
-
-
-class _FailClosed(Exception):
-    """Raised by a field reader whose object can't be read safely: no field is kept."""
 
 
 def _object_fields(
@@ -998,12 +1008,10 @@ def _pydantic_entries(
     except Exception:
         obj_dict = None
     storage = _copy_storage(obj_dict, state)
-    if storage is None:
-        raise _FailClosed
-    overrides = _visibility_overrides(storage, mro, state)
-    fields = _pydantic_fields(mro, state)
-    if overrides is None or fields is None:
-        raise _FailClosed
+    try:
+        overrides = _visibility_overrides(storage, mro, state)
+    finally:  # the field map is read (and charged) even when the overrides fail closed
+        fields = _pydantic_fields(mro, state)
     for name, field_info in dict.items(fields):
         if not state.take_node():
             yield _Omitted("max_nodes")
@@ -1021,10 +1029,7 @@ def _pydantic_entries(
             raise _FailClosed
         if excluded is True or represented is False:
             continue
-        metadata_hidden = _field_hidden(field_info, state)
-        if metadata_hidden is None:
-            raise _FailClosed
-        if overrides.get(name, metadata_hidden) or name not in storage:
+        if overrides.get(name, _field_hidden(field_info, state)) or name not in storage:
             continue
         yield name, dict.__getitem__(storage, name)
 
@@ -1032,7 +1037,7 @@ def _pydantic_entries(
 def _instance_storage(value: Any, mro: tuple[type[Any], ...], state: _State) -> Any:
     """Raw ``__dict__`` through the native getset descriptor; ``{}`` for slotted classes.
 
-    ``None`` when it can't be read safely (a custom ``__dict__``: refuse).
+    ``_FailClosed`` when it can't be read safely (a custom ``__dict__``: refuse).
     """
     for base in mro:
         namespace = _raw_namespace(base, state) if base is not object else None
@@ -1042,11 +1047,11 @@ def _instance_storage(value: Any, mro: tuple[type[Any], ...], state: _State) -> 
         if descriptor is None:
             continue
         if type(descriptor) is not types.GetSetDescriptorType:
-            return None
+            raise _FailClosed
         try:
             return descriptor.__get__(value, type(value))
         except Exception:
-            return None
+            raise _FailClosed from None
     return {}
 
 
@@ -1076,14 +1081,12 @@ def _dataclass_entries(
 ) -> _Fields:
     """The privileged field reader of a dataclass: declared fields of ``carrier``, raw values."""
     storage = _copy_storage(_instance_storage(value, mro, state), state)
-    namespace = _raw_namespace(carrier, state)
-    fields = dict.get(namespace, "__dataclass_fields__") if namespace is not None else None
-    if storage is None or type(fields) is not dict:
+    fields = dict.get(_namespace(carrier, state), "__dataclass_fields__")
+    if type(fields) is not dict:
         raise _FailClosed
     overrides = _visibility_overrides(storage, mro, state)
-    if overrides is None:
-        raise _FailClosed
-    resolved: Any = _UNREAD  # the class's resolved hints, read at the first string annotation
+    # The class's resolved hints, read once, at the first string annotation.
+    hints = functools.cache(functools.partial(_resolved_metadata, carrier))
     for name, field in dict.items(fields):
         if not state.take_node():
             yield _Omitted("max_nodes")
@@ -1102,14 +1105,9 @@ def _dataclass_entries(
             raise _FailClosed
         if represented is False or name.startswith("_"):
             continue
-        if type(annotation) is str:
-            if resolved is _UNREAD:
-                resolved = _resolved_metadata(carrier)
-            metadata = dict.get(resolved, name) if resolved is not None else None
-            annotation_hidden = None if metadata is None else _metadata_hidden(metadata, state)
-        else:
-            annotation_hidden = _alias_hidden(annotation, state)
-        if annotation_hidden is None:
+        try:
+            annotation_hidden = _annotation_hidden(name, annotation, hints, state)
+        except _FailClosed:
             # This field can't be shown safely: omit it, the object is incomplete.
             yield _Omitted("unreadable")
             continue
