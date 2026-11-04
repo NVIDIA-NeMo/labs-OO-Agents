@@ -253,7 +253,7 @@ def test_both_text_only_corrections_come_from_one_function():
         response=SimpleNamespace(reasoning=None),
         call=SimpleNamespace(method_name="answer"),
     )
-    v2 = CodeActV2._retry_text_only_response(context)
+    v2 = CodeActV2()._retry_text_only_response(context)
     expected = (
         "Your last reply was plain text with no tool call. It was preserved, but a bare message "
         "cannot end the turn or run code. To finish `answer`, call `python_cell` with "

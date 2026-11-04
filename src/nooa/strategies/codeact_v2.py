@@ -268,8 +268,7 @@ Restrictions (will throw):
         """{reason} Call `python_cell(code)`. To finish, call `return_result(value)` inside the cell."""
         ...
 
-    @staticmethod
-    def _retry_text_only_response(context: TextOnlyResponseContext) -> TextOnlyResponseAction:
+    def _retry_text_only_response(self, context: TextOnlyResponseContext) -> TextOnlyResponseAction:
         return TextOnlyResponseAction.retry(
-            _text_only_correction(context, python_tool="python_cell")
+            _text_only_correction(context, python_tool=self._python_tool_name())
         )
