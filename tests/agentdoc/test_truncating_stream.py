@@ -271,3 +271,18 @@ def test_unrecoverable_hint_follows_the_not_recoverable_line():
     plain = TruncatingStringIO(limit=10)
     plain.write("x" * 30)
     assert "The 20 chars in the middle are not recoverable.\n" in plain.getvalue()
+
+
+def test_docs_name_the_wrapper_the_stream_emits():
+    """The Agent prompt and CaptureConfig describe the marker TruncatingStringIO really writes."""
+    from nooa.agent import Agent
+    from nooa.agentdoc._truncating_stream import TruncatingStringIO
+    from nooa.config.truncation_config import CaptureConfig
+
+    buf = TruncatingStringIO(limit=50, tail_chars=10)
+    buf.write("x" * 500)
+    value = buf.getvalue()
+    assert value.startswith("<truncated-output>") and value.endswith("</truncated-output>")
+    for text in (Agent.__doc__, CaptureConfig.__doc__):
+        assert "<truncated-output>" in text and "</truncated-output>" in text
+        assert "<truncated>...</truncated>" not in text

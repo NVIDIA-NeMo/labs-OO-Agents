@@ -44,8 +44,9 @@ class CaptureConfig(BaseModel):
 
     These apply at *capture time* (when execute_python writes to stdout / stderr
     or formats an exception). The captured text is head/tail-truncated to fit
-    the budget, with a ``<truncated>...</truncated>`` wrapper indicating where
-    content was elided.
+    the budget, inside a ``<truncated-output>`` ... ``</truncated-output>``
+    wrapper that says how much was cut and where the full text is, if kept.
+    Error text past its hard cap ends in ``...<truncated>``.
 
     Field naming: ``max_<stream>`` — char count, no ``_chars`` suffix needed
     inside the capture config since every field here is char-based.
