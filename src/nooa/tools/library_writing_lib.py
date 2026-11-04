@@ -140,10 +140,13 @@ class SkillWriting(Skill):
     ## Where libraries are saved, and later sessions
 
     Each library is a package directory ``self.libs.path(name)`` in the
-    project's libs directory (``<workspace>/.nooa/libs``), kept on disk
-    across sessions. A later session in the same workspace loads every
-    library there at start: it is ``self.<lib_name>`` with nothing to
-    import or activate. ``await self.libs.list()`` names them.
+    agent's libs directory, kept on disk across sessions: ``<workspace>/.nooa/libs``
+    for an Atom agent, else ``.nooa/libs`` under the project root (or
+    ``$NEMO_OO_PROJECT_DIR/libs``). A later session with the same directory
+    loads each library there at start as ``self.<lib_name>``, with nothing to
+    import or activate, unless the agent already has that attribute (such as
+    ``shell``): that one keeps its attribute and is not loaded.
+    ``await self.libs.list()`` names them all.
 
     ## Discovery
 
