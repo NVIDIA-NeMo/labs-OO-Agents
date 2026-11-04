@@ -1482,7 +1482,12 @@ Standard Python builtins and agent instance (`self`) are available."""
         return None
 
     def _alias_note(self, args: dict[str, Any], *, valid: bool) -> str:
-        return return_alias_note(self._python_tool_name(), args.get("result"), valid=valid)
+        if "result" in args:
+            return return_alias_note(self._python_tool_name(), args["result"], valid=valid)
+        # ``value`` is the return type's own field: the call ran as return_result(value=x).
+        return return_alias_note(
+            self._python_tool_name(), args.get("value"), valid=valid, keyword="value"
+        )
 
     def _unknown_tool_feedback(
         self, tool_name: str, args: dict[str, Any], runtime: RuntimeServices

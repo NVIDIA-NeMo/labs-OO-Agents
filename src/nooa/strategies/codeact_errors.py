@@ -129,14 +129,19 @@ def _shown_value(value: Any, limit: int) -> str:
     return shown[: limit - 1] + "…" if len(shown) > limit else shown
 
 
-def return_alias_note(python_tool: str, value: Any, *, valid: bool, limit: int = 200) -> str:
+def return_alias_note(
+    python_tool: str, value: Any, *, valid: bool, limit: int = 200, keyword: str | None = None
+) -> str:
     """The note on a provider ``return_result`` call run as the builtin.
 
     ``valid``: the value was accepted (a note after "Result accepted.") or
-    not (the first line, before the validation errors).
+    not (the first line, before the validation errors). ``keyword``: the
+    value went in as that keyword (``value=`` for a return type's own field).
     """
     lead = f"return_result isn't a tool. It's a function you call inside {python_tool}"
     shown = _shown_value(value, limit)
+    if keyword:
+        shown = f"{keyword}={shown}"
     if valid:
         return f"{lead}; this call ran as return_result({shown})"
     return (

@@ -1193,3 +1193,51 @@ async def test_never_awaited_coroutine_warning_becomes_a_one_line_hint():
         assert "was never awaited" not in output
     finally:
         await agent.aclose()
+
+
+@pytest.mark.asyncio
+async def test_aliased_return_result_shows_a_value_field_it_was_given():
+    """A return type with its own ``value`` field: the note shows return_result(value=x)."""
+    from pydantic import BaseModel
+
+    class Answer(BaseModel):
+        value: int
+
+    llm = FakeLLMClient(
+        scripted_responses=[
+            LLMResponse(
+                parts=(ToolCall(id="bad", name="return_result", arguments='{"value": "many"}'),),
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(
+                parts=(ToolCall(id="ok", name="return_result", arguments='{"value": 5}'),),
+                finish_reason="tool_calls",
+            ),
+        ]
+    )
+
+    class TestAgent(Agent, llm=llm):
+        @strategy(CodeActV2(config=CodeActConfig(prefill=None)))
+        async def answer(self) -> Answer:
+            """Return the answer."""
+            ...
+
+    agent = TestAgent()
+    try:
+        assert (await agent.answer()).value == 5
+        results = {
+            event.tool_call_id: event.result.content
+            for event in agent.runtime.event_manager.all_events()
+            if isinstance(event, ToolCallEvent) and event.result is not None
+        }
+    finally:
+        await agent.aclose()
+    assert results["bad"].splitlines()[0] == (
+        "return_result isn't a tool. It's a function you call inside python_cell. I ran your "
+        "call as python_cell code return_result(value='many'), and that value isn't a valid "
+        "result:"
+    )
+    assert results["ok"] == (
+        "Result accepted. return_result isn't a tool. It's a function you call inside "
+        "python_cell; this call ran as return_result(value=5)."
+    )
