@@ -11,10 +11,10 @@ from typing import Any
 
 from nooa._immutable_json import json_containers
 from nooa.llm_types import AssistantPart, AssistantReasoning, AssistantText, LLMResponse, ToolCall
-from nooa.media_policy import interface_for_provider
+from nooa.request_interface import interface_for_provider
 from nooa.unifiedllm.cache_policy import wrap_anthropic_text
 
-from .media_inputs import guard_native_media
+from .media_inputs import check_replayed_native_media
 from .replay_state import (
     ReasoningReplayError,
     _field,
@@ -122,7 +122,14 @@ def capture_chat_parts(message: Any, scope: str | None) -> tuple[AssistantPart, 
     if fields is not None and not isinstance(fields, dict):
         raise ReasoningReplayError("Malformed provider_specific_fields in provider response.")
     if fields:
-        _warn_unknown_fields(fields, {"thought_signatures"}, "a provider message")
+        known = {"thought_signatures"}
+        # LiteLLM moves a readable ``reasoning`` field (vLLM, NVIDIA Inference Hub)
+        # to ``reasoning_content`` but keeps a copy here. That copy is the text
+        # already captured above, not unknown provider state.
+        for key in ("reasoning", "reasoning_content"):
+            if isinstance(fields.get(key), str) and fields[key] == reasoning:
+                known.add(key)
+        _warn_unknown_fields(fields, known, "a provider message")
         if "thought_signatures" in fields:
             signatures = fields["thought_signatures"]
             if (
@@ -218,7 +225,9 @@ def project_chat_turn(
             # This projection serves CompletionClient only, which sends either
             # native Anthropic Messages or OpenAI-compatible Chat. ResponsesClient
             # turns are projected in response_parts.py with interface="responses".
-            guard_native_media(native, media_inputs, interface=interface_for_provider(provider))
+            check_replayed_native_media(
+                native, media_inputs, interface=interface_for_provider(provider)
+            )
         if isinstance(part, ToolCall):
             call_id = part.id
             if signature := native.pop("inline_thought_signature", None):
