@@ -976,11 +976,12 @@ def _clock(seconds_from_now: float) -> str:
     return time.strftime("%H:%M:%S", time.localtime(time.time() + seconds_from_now))
 
 
-def _check_fn(fn: Any, call: str) -> None:
+def _check_fn(fn: Any, method: str) -> None:
     if fn is not None and not callable(fn):
+        call = f"self.jobs.{method}"
         raise TypeError(
-            f"{call} takes a function (or nothing) after seconds, got "
-            f'{type(fn).__name__}; e.g. {call.split("(")[0]}(600, lambda: "text")'
+            f"{call}(seconds, fn) takes a function (or nothing) after seconds, got "
+            f'{type(fn).__name__}; e.g. {call}(600, lambda: "text")'
         )
 
 
@@ -1109,9 +1110,22 @@ class WorkManager:
         **unexpected: Any,
     ) -> Job:
         """Start ``work`` (awaitable, async iterable or resource) and return its Job."""
+        if unexpected:
+            if inspect.iscoroutine(work):
+                work.close()
+            raise TypeError(_unexpected_launch_keywords(unexpected))
+        return self._launch(work, name=name, progress=progress)
+
+    def _launch(
+        self,
+        work: Any,
+        *,
+        name: str | None,
+        progress: Throttle | None = None,
+        summary: str = "",
+        coalesce: bool = False,
+    ) -> Job:
         try:
-            if unexpected:
-                raise TypeError(_unexpected_launch_keywords(unexpected))
             check_policy(progress)
             if self._closed:
                 raise RuntimeError("the work manager is closed")
@@ -1141,24 +1155,21 @@ class WorkManager:
             if inspect.iscoroutine(work):
                 work.close()
             raise
-        return self._start(name, work, kind, progress)
+        return self._start(name, work, kind, progress, summary=summary, coalesce=coalesce)
 
     def after(self, seconds: float, fn: Any = None, *, name: str | None = None) -> Job:
         """Timer: after ``seconds``, calls ``fn()`` (awaited if async); its return value is the job's done value (None without fn). A reminder for yourself: ``self.jobs.after(600, lambda: "Check the training loss; stop the run if it stopped improving.")``"""
         seconds = _seconds(seconds, zero_ok=True)
-        _check_fn(fn, "self.jobs.after(seconds, fn)")
-        job = self.launch(_after(seconds, fn), name=name)
-        job._summary = f"timer: {seconds:g} s, due {_clock(seconds)}"
-        return job
+        _check_fn(fn, "after")
+        summary = f"timer: {seconds:g} s, due {_clock(seconds)}"
+        return self._launch(_after(seconds, fn), name=name, summary=summary)
 
     def every(self, seconds: float, fn: Any = None, *, name: str | None = None) -> Job:
         """Calls ``fn()`` every ``seconds`` (awaited if async) and delivers each return value as an item; an exception is delivered as that tick's item and the timer goes on; at most one unread item (the newest). Without fn, items are 1, 2, 3... Example: ``self.jobs.every(30, self.check_status, name="status")``"""
         seconds = _seconds(seconds, zero_ok=False)
-        _check_fn(fn, "self.jobs.every(seconds, fn)")
-        job = self.launch(_every(seconds, fn), name=name)
-        job._coalesce = True
-        job._summary = f"every {seconds:g} s"
-        return job
+        _check_fn(fn, "every")
+        summary = f"every {seconds:g} s"
+        return self._launch(_every(seconds, fn), name=name, summary=summary, coalesce=True)
 
     def get(self, name: str) -> Job | None:
         """The newest job with this name (a running one, else the latest finished)."""
@@ -1208,12 +1219,21 @@ class WorkManager:
     # ---- internals ----------------------------------------------------------
 
     def _start(
-        self, name: str | None, work: Any, kind: str, progress: Throttle | None = None
+        self,
+        name: str | None,
+        work: Any,
+        kind: str,
+        progress: Throttle | None = None,
+        *,
+        summary: str = "",
+        coalesce: bool = False,
     ) -> Job:
         self._next_id += 1
         job_id = self._next_id
         job = Job(self, name or f"job#{job_id}", job_id, work, kind)
         job._progress_policy = progress
+        job._summary = summary
+        job._coalesce = coalesce
         if self._launch_info is not None:
             try:
                 info = self._launch_info(work, kind)
