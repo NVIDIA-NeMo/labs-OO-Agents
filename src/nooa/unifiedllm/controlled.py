@@ -56,6 +56,11 @@ class AdmissionControl(UnifiedLLM):
         with _admission_controller_scope(self.controller):
             return await self.base_llm.acall(*args, **kwargs)
 
+    # A delegating wrapper: call/acall forward whole calls (the wrapped
+    # client does its own media recovery), so the one-request hooks do too.
+    _call_once = call
+    _acall_once = acall
+
     def _prepare_call_config(self, overrides: dict[str, Any]) -> dict[str, Any]:
         """Delegate per-call configuration to the wrapped client."""
         return self.base_llm._prepare_call_config(overrides)

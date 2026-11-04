@@ -8,7 +8,7 @@ import logging
 import math
 import re
 import warnings
-from abc import ABC
+from abc import ABC, abstractmethod
 from collections.abc import Callable, Coroutine, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -1250,6 +1250,7 @@ def _update_token_calibration(
 class UnifiedLLM(ABC):
     _registry_config: dict[str, Any] | None
     cache_breakpoint: Literal["auto", "openai", "anthropic"] | None
+    retry_config: RetryConfig | None = None  # endpoint retries; also bounds media recovery
 
     def __init__(
         self,
@@ -1375,8 +1376,7 @@ class UnifiedLLM(ABC):
     def _media_recovery_attempts(self) -> int:
         # Shares the endpoint retry budget: max_retries=0 (e.g. a connect
         # probe, which must see the provider's own answer) disables it.
-        retry_config = getattr(self, "retry_config", None)
-        return max(0, retry_config.max_retries) if retry_config else 0
+        return max(0, self.retry_config.max_retries) if self.retry_config else 0
 
     @staticmethod
     def _unstage_media(staged: list[tuple[set, Any]]) -> None:
@@ -1660,6 +1660,7 @@ class UnifiedLLM(ABC):
             self._unstage_media(staged)
             raise
 
+    @abstractmethod
     def _call_once(
         self,
         messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
@@ -1667,9 +1668,9 @@ class UnifiedLLM(ABC):
         output_model: type[BaseModel] | None = None,
         **kwargs,
     ) -> LLMResponse:
-        """One request. A client implements this pair, or overrides ``call``/``acall``."""
-        raise NotImplementedError(f"{type(self).__name__} implements neither _call_once nor call")
+        """One request; ``call`` adds media recovery around it."""
 
+    @abstractmethod
     async def _acall_once(
         self,
         messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
@@ -1678,7 +1679,6 @@ class UnifiedLLM(ABC):
         **kwargs,
     ) -> LLMResponse:
         """Async ``_call_once``."""
-        raise NotImplementedError(f"{type(self).__name__} implements neither _acall_once nor acall")
 
 
 def _collect_sync(raw: Any) -> "litellm.ModelResponse":
