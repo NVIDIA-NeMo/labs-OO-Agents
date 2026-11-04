@@ -161,6 +161,8 @@ _NETWORK_MODULES = frozenset(
         "xmlrpc.client",
     }
 )
+# Modules an HTTP request is usually made with; httpx replaces them.
+_HTTP_MODULES = frozenset({"socket", "http.client", "urllib.request", "xmlrpc.client"})
 _SHELL_RUN_HINT = (
     'run the command with `await self.shell.run("...")` '
     "(result has .stdout, .stderr and .returncode)"
@@ -229,6 +231,8 @@ def _module_fix_hint(
     if root is not None or (module_name, call) in _PROCESS_CALLS:
         return shell
     if match_blocked_module(module_name, _NETWORK_MODULES) is not None:
+        if match_blocked_module(module_name, _HTTP_MODULES) is None:
+            return f"curl: {shell}" if shell else None  # FTP, mail: not HTTP
         if match_blocked_module("httpx", denied) is not None:
             return f"curl: {shell}" if shell else None
         return f"{_HTTP_HINT}, or curl: {shell}" if shell else _HTTP_HINT

@@ -2903,6 +2903,16 @@ class TestCapabilityAwareFixHints:
         assert "Fix: use `httpx.AsyncClient`" in message
         assert "or curl: run the command with `await self.shell.run" in message
 
+    @pytest.mark.parametrize("module", ["ftplib", "smtplib"])
+    @pytest.mark.parametrize("agent", ["with_shell", None])
+    def test_non_http_network_import_is_not_pointed_at_httpx(self, module, agent):
+        message = self._error(f"import {module}", self._WithShell() if agent else None)
+        assert "httpx" not in message
+        if agent:
+            assert "Fix: curl: run the command with `await self.shell.run" in message
+        else:
+            assert "Fix:" not in message
+
     @pytest.mark.parametrize("agent", ["with_shell", None])
     def test_network_hint_omits_httpx_when_it_is_restricted(self, agent):
         from nooa.runtime.restrictions import DEFAULT_BLOCKED_MODULES, RESTRICTED_MODULES
