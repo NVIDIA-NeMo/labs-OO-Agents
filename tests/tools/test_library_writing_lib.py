@@ -290,6 +290,15 @@ async def test_create_writes_pyproject_and_init(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_create_text_skill_without_a_registry_is_refused(tmp_path: Path):
+    """Without a skill registry nothing loads a SKILL.md, so none is written."""
+    libs = SkillWriting(_make_agent(), path=tmp_path)
+    result = await libs.create("notes", DESCRIPTION, text="Steps.")
+    assert result.startswith("Not created")
+    assert not (tmp_path / "notes").exists()
+
+
+@pytest.mark.asyncio
 async def test_create_does_not_write_source_file(tmp_path: Path):
     """create() only scaffolds the package — no code files are written."""
     libs = SkillWriting(_make_agent(), path=tmp_path)

@@ -269,6 +269,10 @@ class SkillWriting(Skill):
             Confirmation string with the skill path.
         """
         lib_dir = self._path / lib_name
+        registry = self._registry()
+        if text is not None:
+            if registry is None:  # LibraryManager loads only code skills
+                return f"Not created: this agent loads only code skills; '{lib_name}' needs code"
         lib_dir.mkdir(parents=True, exist_ok=True)
         first_line = description.strip().split("\n")[0]
 
@@ -279,13 +283,11 @@ class SkillWriting(Skill):
                 f"description: {json.dumps(first_line)}\n---\n\n{text.strip()}\n"
             )
             (lib_dir / "SKILL.md").write_text(skill_md, encoding="utf-8")
-            registry = self._registry()
-            if registry is not None:
-                if f"local.{lib_name}" in registry.loaded():
-                    await registry.reload(f"local.{lib_name}")
-                else:
-                    registry.discover_libs(self._path, agent_written=True)
-                registry.activate([f"local.{lib_name}"])
+            if f"local.{lib_name}" in registry.loaded():
+                await registry.reload(f"local.{lib_name}")
+            else:
+                registry.discover_libs(self._path, agent_written=True)
+            registry.activate([f"local.{lib_name}"])
             return f"Created text skill '{lib_name}' at {lib_dir / 'SKILL.md'}"
 
         pyproject = textwrap.dedent(f"""\
