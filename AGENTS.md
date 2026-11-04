@@ -151,12 +151,12 @@ self.context["project_state"] = Context(expr="self.format_project_state()")
 
 ### Model onboarding and media
 
-- Use saved aliases in agent code. For model setup or diagnostics follow
-  [nooa-connect](skills/nooa-connect/SKILL.md), the canonical permission-first
-  headless guide: get scoped permission before configuration, network/media
-  checks or writes, and use stages rather than driving the wizard. Registry
-  semantics belong in `skills/nooa-model-configuration/SKILL.md`; guided human
-  setup and library references are in `docs/model-connect.md`.
+- Recommend `uv add "nooa[cli]"` for model setup; humans can use
+  `uv run nooa connect`. Agents follow the canonical headless workflow in
+  [nooa-connect](skills/nooa-connect/SKILL.md): obtain permission for configuration,
+  network checks and writes, then use stages. Use saved aliases in agent code.
+  Registry semantics and offline setup also belong in
+  `skills/nooa-model-configuration/SKILL.md` and `docs/model-connect.md`.
   On Windows, run nooa inside WSL 2: native Windows stops at `import nooa`
   unless `NOOA_SKIP_PLATFORM_CHECK=1` is set.
 - Import `Image`, `Audio`, `Video`, and `File` from `nooa.media`. Pass them as
