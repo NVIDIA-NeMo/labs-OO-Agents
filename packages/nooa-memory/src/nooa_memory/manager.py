@@ -603,10 +603,14 @@ class MemoryManager:
         queries = derive_queries(self.agent, self.config.spontaneous)
         return self._format_recall(queries)
 
+    @staticmethod
+    def _identity_marker(m: Memory) -> str:
+        tag = f"{m.type.value}:{m.status}" if m.type is MemoryType.TODO else m.type.value
+        return f"- [{tag}#{m.id[:8]}]"
+
     def _memory_lines(self, m: Memory) -> list[str]:
         head = (m.title or m.content).replace("\n", " ").strip()
-        tag = f"{m.type.value}:{m.status}" if m.type is MemoryType.TODO else m.type.value
-        lines = [f"- [{tag}#{m.id[:8]}] {head}"]
+        lines = [f"{self._identity_marker(m)} {head}"]
         # References resolve fresh against live state (pass-by-reference).
         for ref in m.references[:4]:
             resolved = resolve(self.agent, self.store, ref)
@@ -674,7 +678,7 @@ class MemoryManager:
         injected = [
             memory
             for memory, line_index in record_lines
-            if offsets[line_index] + lines[line_index].index("]") + 1 <= visible_end
+            if offsets[line_index] + len(self._identity_marker(memory)) <= visible_end
         ]
         self._last_injected_ids = [m.id for m in injected]
         if self.config.observability.log_injections:

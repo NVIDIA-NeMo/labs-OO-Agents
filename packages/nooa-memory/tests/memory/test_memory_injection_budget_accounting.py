@@ -164,3 +164,22 @@ def test_always_visible_todos_use_same_accounting_rule(setup, monkeypatch, cut):
     expected = [first.id] + ([second.id] if f"[todo:open#{second.id}]" in text else [])
     assert manager._last_injected_ids == expected
     assert manager.store.get(second.id).injected_count == int(second.id in expected)
+
+
+def test_bracket_inside_memory_id_does_not_end_identity_marker(setup, monkeypatch):
+    _, manager, _, _ = setup
+    odd = Memory(id="ab]cdefgh", type=MemoryType.INFO, content="ODD_MARKER")
+    manager.store.add(odd)
+    monkeypatch.setattr(
+        manager.retrieval, "recall", lambda *args, **kwargs: [manager.store.get(odd.id)]
+    )
+    header = "## Recalled memories (associative)\n"
+    marker = "- [info#ab]cdefg]"
+    # Cut right after the ']' that belongs to the id: the marker is still incomplete.
+    _budget(manager, len(header) + marker.index("]") + 1)
+    manager._format_recall(["deployment"])
+    assert manager._last_injected_ids == []
+    # Cut right after the real closing ']': the marker is complete.
+    _budget(manager, len(header) + len(marker))
+    manager._format_recall(["deployment"])
+    assert manager._last_injected_ids == [odd.id]
