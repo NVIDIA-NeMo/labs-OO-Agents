@@ -242,6 +242,20 @@ def test_equivalent_per_call_endpoint_keeps_media_levels_and_window(spelling, sa
         )
 
 
+@pytest.mark.parametrize("spelling", ["api_base", "base_url"])
+@pytest.mark.parametrize("same", [BASE, BASE + "/", "HTTPS://GATEWAY.TEST/v1"])
+def test_factory_same_endpoint_override_keeps_media_and_levels(spelling, same):
+    levels = {"low": {"reasoning_effort": "low"}}
+    config = entry(media_inputs=["image"], reasoning_levels=levels, reasoning_default="low")
+    c = registry.client_from_config("local", deepcopy(config), **{spelling: same})
+    assert c.media_inputs == ("image",)
+    assert c.reasoning_levels == ("low",)
+    assert c._reasoning_config.default == "low"
+    other = registry.client_from_config("local", deepcopy(config), **{spelling: BASE + "/x"})
+    assert other.media_inputs == ()
+    assert other.reasoning_levels is None
+
+
 def test_direct_lookup_still_lazily_loads(monkeypatch):
     calls = []
 
