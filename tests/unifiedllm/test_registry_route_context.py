@@ -182,6 +182,16 @@ def test_direct_lookup_compares_the_entry_resolved_key(monkeypatch):
     assert CompletionClient(MODEL, api_base=BASE, custom_llm_provider="x").context_window is None
 
 
+def test_endpoint_whitespace_is_not_a_route_change():
+    """Surrounding whitespace in an endpoint does not change the route."""
+    from nooa.unifiedllm.route_identity import endpoint_changed, normalize_endpoint
+
+    assert normalize_endpoint(BASE + " ") == normalize_endpoint(BASE)
+    assert not endpoint_changed({"api_base": BASE}, {"api_base": BASE + " "})
+    assert not endpoint_changed({"api_base": BASE}, {"base_url": "\t" + BASE + "/\n"})
+    assert endpoint_changed({"api_base": BASE}, {"api_base": "https://other.test/v1 "})
+
+
 def test_direct_lookup_tolerates_a_malformed_api_key_env():
     """A non-string api_key_env must not crash the lookup; that entry just never matches a key."""
     registry.MODELS["local"] = entry(api_key_env=["NOT", "A", "NAME"])
