@@ -49,6 +49,7 @@ from pydantic.fields import FieldInfo
 from nooa.agentdoc._docs import SpecAnnotation
 from nooa.agentdoc._visibility import hidden
 from nooa.snapshot._codec import (
+    Container,
     decode,
     dumps,
     fallback_candidates,
@@ -442,38 +443,6 @@ def _enter(
         state.active.pop(marker, None)
 
 
-class _Container:
-    """Accounting for one container being built: its size, kept children and reason."""
-
-    def __init__(self, max_size: int) -> None:
-        self.max_size = max_size
-        self.size = 2
-        self.count = 0
-        self.reason: Reason | None = None
-
-    def stop(self, reason: Reason) -> None:
-        if self.reason is None:
-            self.reason = reason
-
-    def room(self, overhead: int = 0) -> int:
-        separator = 2 if self.count else 0
-        return self.max_size - self.size - separator - overhead
-
-    def commit(self, overhead: int, size: int) -> None:
-        separator = 2 if self.count else 0
-        self.size += separator + overhead + size
-        self.count += 1
-
-
-def _key_overhead(key: str, box: _Container) -> int | None:
-    """The encoded size of ``"key": `` if it can fit, without encoding an oversized key."""
-    # JSON escaping never makes a key shorter: reject an obviously oversized
-    # key before encoding it, then verify the exact size.
-    if len(key) + 2 > box.room():
-        return None
-    return len(dumps(key)) + 2
-
-
 def _plan(length: int, limits: Limits, has_tail: bool) -> tuple[int, int]:
     """The (head, tail) entries of a container of ``length`` that ``max_items`` keeps.
 
@@ -568,7 +537,7 @@ def _container(
     builders (see ``_build_slot``), or ``_Omitted`` notes. A mapping entry
     also costs one node for its key, checked before the pair is pulled.
     """
-    box = _Container(max_size)
+    box = Container(max_size)
 
     def add(entry: Any, index: int, kept: list[Any]) -> bool:
         if state.nodes_left <= 0:
@@ -582,16 +551,12 @@ def _container(
             if segment is None:
                 box.stop("key")
                 return False
-            overhead = _key_overhead(segment, box)
-            if overhead is None:
-                box.stop("max_length")
-                return False
         else:
-            child, segment, overhead = entry, str(index), 0
-        available = box.room(overhead)
-        if available < 1:
-            box.stop("max_length")
+            child, segment = entry, str(index)
+        slot = box.slot(segment if keyed else None)
+        if slot is None:
             return False
+        overhead, available = slot
         built = _build_slot(child, available, depth + 1, pointer_child(path, segment), state)
         kept.append((cast(Key, key), built.node) if keyed else built.node)
         box.commit(overhead, built.size)
@@ -910,7 +875,7 @@ def _object_fields(
     ``capped=False``: the caller already applied it (a shape's structural
     fields, such as ``items`` or ``data``, are never cut by it).
     """
-    box = _Container(max_size)
+    box = Container(max_size)
     omitted: Reason | None = None
     fields: list[tuple[str, Snapshot]] = []
     max_items = state.limits.max_items if capped else None
@@ -930,17 +895,13 @@ def _object_fields(
             box.stop("max_items")
             break
         name, child = cast(tuple[str, Any], entry)
-        overhead = _key_overhead(name, box)
-        if overhead is None:
-            box.stop("max_length")
+        slot = box.slot(name)
+        if slot is None:
             break
+        overhead, room = slot
         held_chars, held_nodes = (
             reserves[index] if reserves is not None and index < len(reserves) else (0, 0)
         )
-        room = box.room(overhead)
-        if room < 1:
-            box.stop("max_length")
-            break
         # Never hold back so much that this field loses its own minimal value.
         available = max(min(room, _min_size(child)), room - held_chars)
         held_nodes = min(held_nodes, max(0, state.nodes_left - 1))

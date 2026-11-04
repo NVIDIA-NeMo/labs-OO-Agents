@@ -26,6 +26,7 @@ from collections.abc import Callable
 from typing import Any, cast
 
 from nooa.snapshot._codec import (
+    Container,
     decode,
     dumps,
     fallback_candidates,
@@ -402,26 +403,20 @@ def _json_entries(
     entries: tuple[tuple[Any, Snapshot], ...], max_size: int, path: str, report: _Report
 ) -> tuple[dict[str, Any], int, str | None]:
     output: dict[str, Any] = {}
-    size = 2
+    box = Container(max_size)
     for key, child in entries:
         key_text = json_key(key, live=False)  # a detached snapshot key
-        separator = 2 if output else 0
-        remaining = max_size - size - separator
         if key_text is None or key_text in output:
-            stop = "key"
-        elif len(key_text) + 2 > remaining:
-            stop = "max_length"
-        else:
-            overhead = len(dumps(key_text)) + 2
-            available = remaining - overhead
-            if available >= 1:
-                value, child_size = _json(child, available, pointer_child(path, key_text), report)
-                output[key_text] = value
-                size += separator + overhead + child_size
-                continue
-            stop = "max_length"
-        return output, size, stop
-    return output, size, None
+            box.stop("key")
+            break
+        slot = box.slot(key_text)
+        if slot is None:
+            break
+        overhead, available = slot
+        value, child_size = _json(child, available, pointer_child(path, key_text), report)
+        output[key_text] = value
+        box.commit(overhead, child_size)
+    return output, box.size, box.reason
 
 
 # One rule per node type, looked up by exact type: ``_json`` dispatches, each
@@ -471,19 +466,18 @@ def _json_sequence(node: Sequence, max_size: int, path: str, report: _Report) ->
     if max_size < 2:
         return _json_no_room("list", node.reason, max_size, path, report)
     output: list[Any] = []
-    size = 2
+    box = Container(max_size)
     for index, child in enumerate(node.items):
-        separator = 2 if output else 0
-        available = max_size - size - separator
-        if available < 1:
-            report.incomplete(path, "max_length")
+        slot = box.slot()
+        if slot is None:
+            report.incomplete(path, box.reason)
             break
-        value, child_size = _json(child, available, pointer_child(path, str(index)), report)
+        value, child_size = _json(child, slot[1], pointer_child(path, str(index)), report)
         output.append(value)
-        size += separator + child_size
+        box.commit(0, child_size)
     if not node.complete:
         report.incomplete(path, node.reason)
-    return output, size
+    return output, box.size
 
 
 def _json_fields(

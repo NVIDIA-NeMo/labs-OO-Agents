@@ -68,6 +68,54 @@ def json_key(key: Any, *, live: bool) -> str | None:
     return None
 
 
+class Container:
+    """The accounting of one JSON array or object being built: its size, entries and stop reason.
+
+    ``size`` is the encoded size so far (``[]`` / ``{}``: 2); each entry after
+    the first costs a 2-character separator, an object entry also its
+    ``"key": `` (``overhead``). Shared by capture and ``render_json``, whose
+    sizes must agree exactly.
+    """
+
+    def __init__(self, max_size: int) -> None:
+        self.max_size = max_size
+        self.size = 2
+        self.count = 0
+        self.reason: Any = None  # the first reason to stop, a ``Reason``
+
+    def stop(self, reason: str) -> None:
+        if self.reason is None:
+            self.reason = reason
+
+    def room(self, overhead: int = 0) -> int:
+        separator = 2 if self.count else 0
+        return self.max_size - self.size - separator - overhead
+
+    def slot(self, key: str | None = None) -> tuple[int, int] | None:
+        """``(overhead, available)`` for the next entry (``key``: an object's), else None.
+
+        None stops the container with ``max_length``: the key, or a value of
+        at least one character, does not fit. JSON escaping never makes a
+        key shorter, so an obviously oversized key is rejected unencoded.
+        """
+        overhead = 0
+        if key is not None:
+            if len(key) + 2 > self.room():
+                self.stop("max_length")
+                return None
+            overhead = len(dumps(key)) + 2
+        available = self.room(overhead)
+        if available < 1:
+            self.stop("max_length")
+            return None
+        return overhead, available
+
+    def commit(self, overhead: int, size: int) -> None:
+        """Count an entry of ``size`` characters (plus its ``overhead``)."""
+        self.size += (2 if self.count else 0) + overhead + size
+        self.count += 1
+
+
 def fallback_candidates(type_name: str) -> tuple[Any, ...]:
     """#342's type-oriented smallest JSON fallbacks, by built-in type name."""
     if type(type_name) is not str:
