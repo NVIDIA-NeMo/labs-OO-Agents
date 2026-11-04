@@ -18,6 +18,7 @@ from nooa.unifiedllm.admission import (
     AdmissionPermit,
     AdmissionTimeoutError,
     AdmissionUnavailableError,
+    CooldownAdmissionPermit,
 )
 from nooa.unifiedllm.broker_admission import (
     AdmissionBroker,
@@ -37,6 +38,7 @@ from nooa.unifiedllm.http_config import HttpConfig
 from nooa.unifiedllm.registry import (
     MODELS,
     ensure_loaded,
+    get_decision_model,
     get_llm_client,
     get_registry_config,
     reload_registry,
@@ -66,6 +68,7 @@ __all__ = [
     "ResponsesClient",
     # Model registry
     "get_llm_client",
+    "get_decision_model",
     "get_registry_config",
     "reload_registry",
     "ensure_loaded",
@@ -96,6 +99,7 @@ __all__ = [
     "BrokerAdmissionConfig",
     "BrokerAdmissionController",
     "BrokerAdmissionSnapshot",
+    "CooldownAdmissionPermit",
     # HTTP config
     "HttpConfig",
     # Retry utilities

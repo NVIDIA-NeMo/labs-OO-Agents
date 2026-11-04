@@ -20,6 +20,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
+from nooa.media_inputs import MediaInputs
+
 
 class ModelConfig(BaseModel):
     """One model alias from ``llm_config.yaml`` (e.g. ``claude-opus-4-8``).
@@ -36,10 +38,13 @@ class ModelConfig(BaseModel):
     # the alias name itself when omitted (handled by the registry).
     model_name: str | None = None
     api_base: str | None = None
+    endpoint: str | None = None
     # Name of the env var holding the API key (NOT the key itself).
     api_key_env: str | None = None
     client_type: str | None = None
+    api_style: str | None = None
     context_window: int | None = None
+    media_inputs: MediaInputs = ()
     max_tokens: int | None = None
     temperature: float | None = None
     top_p: float | None = None

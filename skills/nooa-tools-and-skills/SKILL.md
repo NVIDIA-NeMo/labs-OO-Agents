@@ -6,6 +6,10 @@ compatibility: nooa package; [mcp] extra for MCP
 
 # Tools, Skills, and Integrations
 
+For model onboarding or diagnostics, use
+[nooa-connect](../nooa-connect/SKILL.md), the canonical permission-first headless
+guide. Adding tools/skills does not authorize model checks or registry writes.
+
 ## Methods are the tools
 
 There is no tool-registration abstraction: **any visible method or attribute on `self` is callable from CodeAct-generated code**, with `doc(self)` telling the LLM what exists. Mix deterministic helpers (SW1) with generation methods (SW3):
@@ -122,7 +126,7 @@ the resulting URL, header, argument, or environment value directly to
 ## Multimodal media
 
 ```python
-from nooa import Image, Audio, Video, File
+from nooa.media import Image, Audio, Video, File
 
 class MediaAgent(Agent, llm=llm):
     async def describe(self, image: Image) -> str:
@@ -133,7 +137,13 @@ img = Image.from_file("photo.png")     # also .from_bytes(media_type=...), .from
 await MediaAgent().describe(img)
 ```
 
-Only works with multimodal-capable models — text-only models error when handed media. See `examples/quickstart/13_multimodal.py`.
+Set the model's `media_inputs` to the formats your provider accepts, such as
+`[image, pdf]`. Formats left out are replaced with text notices in requests.
+
+Predict and default CodeAct attach direct media arguments. While CodeAct runs,
+use `show(obj)` for media created by generated code or tools. Outside execution,
+`show()` prints a not-captured notice. `File` supports PDFs with MIME type
+`application/pdf`. See [nooa-media](../nooa-media/SKILL.md) for examples and limits.
 
 ## Pitfalls
 

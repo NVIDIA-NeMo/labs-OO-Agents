@@ -52,6 +52,8 @@ class RLMBenchAgent(BenchAgent):
         for bounded work whose isolated context is an advantage; give each worker a
         self-contained request and inspect its report. The controller owns the plan,
         integration, final tests, and ``TaskResult``. Make the minimum sufficient
-        change and cite only verification you observed.
+        change and cite only verification you observed. If the task asks for a specific
+        output, put exactly that output in ``value`` and keep any explanation in the
+        other fields.
         """
         ...

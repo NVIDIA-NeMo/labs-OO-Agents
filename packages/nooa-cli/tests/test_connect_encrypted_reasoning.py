@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Encrypted reasoning defaults and bounded compatibility fallback on real HTTP bodies."""
+"""Encrypted reasoning defaults and one-shot baseline rejection on real HTTP bodies."""
 
 import json
 from copy import deepcopy
@@ -42,10 +42,10 @@ async def test_default_saved_and_sent_without_probe_side_effects(monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("budget, count, outcome", [(4096, 2, "accepted"), (712, 1, "not_probed")])
+@pytest.mark.parametrize("budget", [4096, 712])
 @pytest.mark.parametrize("api_base", ["https://api.openai.com/v1", "https://api.test/v1"])
-async def test_rejection_removes_wire_field_even_on_native_endpoint(
-    monkeypatch, budget, count, outcome, api_base
+async def test_configured_baseline_rejection_does_not_retry_or_change_include(
+    monkeypatch, budget, api_base
 ):
     bodies = []
 
@@ -54,32 +54,30 @@ async def test_rejection_removes_wire_field_even_on_native_endpoint(
         bodies.append(body)
         assert body["store"] is False
         assert body["max_output_tokens"] == 200
-        if len(bodies) == 1:
-            assert body["include"] == ["reasoning.encrypted_content"]
-            return httpx.Response(
-                400,
-                json={
-                    "error": {
-                        "message": "Unavailable for this deployment secret-never-persist",
-                        "param": "include",
-                    }
-                },
-            )
-        assert "include" not in body
-        return httpx.Response(200, json=response_body("responses"))
+        assert body["include"] == ["reasoning.encrypted_content"]
+        return httpx.Response(
+            400,
+            json={
+                "error": {
+                    "message": "Unavailable for this deployment secret-never-persist",
+                    "param": "include",
+                }
+            },
+        )
 
     mock_http(monkeypatch, handle)
     plan = proposal(budget_tokens=budget, api_base=api_base)
     result = await connect.run(plan, approved="minimal", api_key="key")
-    assert len(bodies) == count
-    assert result.entry["include"] == []
+    assert len(bodies) == 1
+    assert result.entry["include"] == ["reasoning.encrypted_content"]
     provenance = result.entry["provenance"]
-    assert provenance["probes"]["routing"]["outcome"] == outcome
-    assert provenance["encrypted_reasoning"]["outcome"] == "rejected"
-    assert provenance["tokens_charged_to_budget"] == count * 712
+    assert provenance["probes"]["routing"]["outcome"] == "rejected"
+    # No successful baseline exists from which to assess retained reasoning.
+    assert provenance["encrypted_reasoning"]["outcome"] == "not_probed"
+    assert provenance["tokens_charged_to_budget"] == 712
     assert "secret-never-persist" not in repr(provenance)
     again = proposal(existing_entry=result.entry, api_base=api_base)
-    assert again.entry["include"] == []
+    assert again.entry["include"] == ["reasoning.encrypted_content"]
     assert proposal().entry["include"] == ["reasoning.encrypted_content"]
 
 
