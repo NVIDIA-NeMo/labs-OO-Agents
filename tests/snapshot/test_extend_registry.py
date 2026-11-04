@@ -44,7 +44,7 @@ def test_register_decorator_form_and_unregister() -> None:
         assert render_python(capture(Gadget())) == "'gadget'"
     finally:
         capture.unregister(Gadget)
-    assert capture(Gadget()) == Unavailable("opaque", "Gadget", FAKE_MODULE)
+    assert capture(Gadget()) == Unavailable("opaque", "Gadget")
     capture.unregister(Gadget)  # absent: a no-op
 
 
@@ -68,9 +68,7 @@ def test_register_needs_a_shape() -> None:
             capture.register(Widget, not_a_shape)
     with pytest.raises(TypeError):
         capture.register(Widget)  # type: ignore[call-arg]
-    assert capture(Widget()) == Unavailable(
-        "opaque", "Widget", FAKE_MODULE
-    )  # nothing was registered
+    assert capture(Widget()) == Unavailable("opaque", "Widget")  # nothing was registered
 
 
 @pytest.mark.parametrize(
@@ -100,9 +98,7 @@ def test_register_matches_the_class_not_its_name(registered) -> None:
 
     assert render_python(capture(Inner())) == "'inner'"
     # Another class with the same module and qualname is not registered.
-    assert capture(_named("Inner", qualname="Outer.Inner")()) == Unavailable(
-        "opaque", "Inner", FAKE_MODULE
-    )
+    assert capture(_named("Inner", qualname="Outer.Inner")()) == Unavailable("opaque", "Inner")
 
 
 def test_subclass_matches_and_unregistered_stays_opaque(registered) -> None:
@@ -111,7 +107,7 @@ def test_subclass_matches_and_unregistered_stays_opaque(registered) -> None:
     registered(Base, _text("base"))
 
     assert render_python(capture(Child())) == "'base'"
-    assert capture(_named("Other")()) == Unavailable("opaque", "Other", FAKE_MODULE)
+    assert capture(_named("Other")()) == Unavailable("opaque", "Other")
 
 
 def test_nearest_registered_class_in_the_mro_wins(registered) -> None:
@@ -208,7 +204,6 @@ def test_dispatch_survives_a_class_rename(registered) -> None:
 
     renamed = capture(Target())
     assert isinstance(renamed, Object) and renamed.fields == (("ok", Scalar(True)),)
-    assert renamed.module == "renamed_module"
 
 
 def test_registration_retains_only_registered_classes(registered) -> None:

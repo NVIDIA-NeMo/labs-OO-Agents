@@ -55,7 +55,7 @@ def test_removed_names_are_gone() -> None:
     assert [field.name for field in dataclasses.fields(Unavailable)] == [
         "reason",
         "type_name",
-        "module",
+        "builtin",
     ]
 
 
@@ -71,7 +71,7 @@ def test_every_node_says_whether_it_is_complete() -> None:
         (Sequence("list", 3, (), "max_items"), False, "max_items"),
         (Mapping("dict", 0, ()), True, None),
         (Object("M", (), "unreadable"), False, "unreadable"),
-        (Unavailable("opaque", "Widget", "pkg"), False, "opaque"),
+        (Unavailable("opaque", "Widget"), False, "opaque"),
         (Unavailable("error", "Widget"), False, "error"),
         (Ref("/a", "mapping"), False, "cycle"),
     ]

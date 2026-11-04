@@ -265,14 +265,6 @@ def _raw_namespace(cls: type[Any], state: _State) -> dict[str, Any] | None:
     return _safe_dict(cls, namespace, state)
 
 
-def _module_name(cls: type[Any], state: _State) -> str:
-    namespace = _raw_namespace(cls, state)
-    if namespace is None:
-        return ""
-    module = dict.get(namespace, "__module__")
-    return module[:_MAX_TYPE_NAME] if type(module) is str else ""
-
-
 def _safe_mro(value: Any, state: _State) -> tuple[type[Any], ...] | None:
     """The value's MRO, each entry inspection-budgeted and with a raw namespace."""
     cls = type(value)
@@ -444,16 +436,16 @@ def _build_integer(value: int, max_size: int) -> _Built:
     return _Built(Scalar(value), len(encoded))
 
 
-def _opaque(value: Any, max_size: int, state: _State, module: str | None = None) -> _Built:
+def _opaque(value: Any, max_size: int) -> _Built:
     """An ``Unavailable("opaque")`` node for an unsupported value, sized as its bounded label.
 
-    ``module``: its type's module when known (a non-finite ``float``), else read raw.
+    ``builtin``: the value's type is an exact built-in one (a non-finite
+    ``float``), so its typed #342 fallback applies when the label does not fit.
     """
     name = _bounded_type_name(value, opaque_name_budget(max_size))
-    if module is None:
-        module = _module_name(type(value), state)
-    _label, size = opaque_json(name, _builtin_name(value), max_size)
-    return _Built(Unavailable("opaque", name, module), size)
+    fallback_type = _builtin_name(value)
+    _label, size = opaque_json(name, fallback_type, max_size)
+    return _Built(Unavailable("opaque", name, builtin=bool(fallback_type)), size)
 
 
 # --- containers ---------------------------------------------------------------
@@ -873,9 +865,9 @@ def _pydantic_fields(mro: tuple[type[Any], ...], state: _State) -> dict[str, Fie
     return None
 
 
-def _closed(type_name: str, module: str) -> _Built:
+def _closed(type_name: str) -> _Built:
     """A model whose fields cannot be read safely: no field at all (fail closed)."""
-    return _Built(Object(type_name, (), "unreadable", module), 2)
+    return _Built(Object(type_name, (), "unreadable"), 2)
 
 
 def _copy_storage(obj_dict: Any, state: _State) -> dict[str, Any] | None:
@@ -913,7 +905,6 @@ class _FailClosed(Exception):
 
 def _object_fields(
     type_name: str,
-    module: str,
     entries: Iterable[tuple[str, Any] | _Omitted],
     max_size: int,
     depth: int,
@@ -946,7 +937,7 @@ def _object_fields(
         except StopIteration:
             break
         except _FailClosed:
-            return _closed(type_name, module)
+            return _closed(type_name)
         if type(entry) is _Omitted:
             omitted = omitted or entry.reason
             continue
@@ -977,7 +968,7 @@ def _object_fields(
         fields.append((name, built.node))
         box.commit(overhead, built.size)
     reason = box.reason or omitted
-    node = Object(type_name, tuple(fields), reason, module, kind)
+    node = Object(type_name, tuple(fields), reason, kind)
     return _Built(node, box.size)
 
 
@@ -1458,7 +1449,7 @@ def _lazy(read: Callable[[], Any], state: _State) -> _Part:
 
 
 def _structure_part(
-    node_type: Any, length: int | None, build: Callable[[int, int, str], _Built], state: _State
+    node_type: Any, length: int, build: Callable[[int, int, str], _Built], state: _State
 ) -> _Part:
     """A ``Sequence`` / ``Mapping`` field of a shape (``items``, ``data``, ``labels``): one node."""
     name = "list" if node_type is Sequence else "dict"
@@ -1497,10 +1488,9 @@ def _build_object(
     by ``max_items``.
     """
     type_name = _bounded_type_name(value, _MAX_TYPE_NAME)
-    module = _module_name(type(value), state)
     if isinstance(shape, _FieldReader):  # one of this module's shapes: no user hook
         if depth >= state.limits.max_depth:
-            return _Built(Object(type_name, (), "max_depth", module), 2)
+            return _Built(Object(type_name, (), "max_depth"), 2)
         reader = shape.read
         return _entered(
             value,
@@ -1508,18 +1498,18 @@ def _build_object(
             "object",
             state,
             lambda: _object_fields(
-                type_name, module, reader(value, mro, carrier, state), max_size, depth, path, state
+                type_name, reader(value, mro, carrier, state), max_size, depth, path, state
             ),
         )
     if depth >= state.limits.max_depth:
-        return _Built(Object(type_name, (), "max_depth", module, shape.kind), 2)
+        return _Built(Object(type_name, (), "max_depth", shape.kind), 2)
     accessors = shape
     return _entered(
         value,
         path,
         "object",
         state,
-        lambda: _shape_fields(accessors, value, type_name, module, max_size, depth, path, state),
+        lambda: _shape_fields(accessors, value, type_name, max_size, depth, path, state),
     )
 
 
@@ -1527,7 +1517,6 @@ def _shape_fields(
     shape: _ObjectLike | _ArrayLike | _MappingLike | _NdarrayLike,
     value: Any,
     type_name: str,
-    module: str,
     max_size: int,
     depth: int,
     path: str,
@@ -1557,7 +1546,6 @@ def _shape_fields(
 
     return _object_fields(
         type_name,
-        module,
         fields(),
         max_size,
         depth,
@@ -1722,12 +1710,19 @@ def _ndarray_labels(
     axis: int,
     state: _State,
 ) -> _Part:
-    """The labels of ``axis``: ``function(value)[i]`` for each shown ``i``."""
-    in_range = axis < len(dims)
+    """The labels of ``axis``: ``function(value)[i]`` for each shown ``i``.
+
+    An axis the dims don't have is ``Unavailable("error")`` in every slot,
+    also when a limit leaves it no room (sized like the sequence would be).
+    """
+    if axis >= len(dims):
+
+        def error(slot: int, *_where: Any) -> _Built:
+            return _error("", slot)
+
+        return _Part(error, 1, error)
 
     def build(slot: int, depth: int, path: str) -> _Built:
-        if not in_range:
-            return _error("", slot)
         try:
             found = function(value)
         except Exception:
@@ -1738,7 +1733,7 @@ def _ndarray_labels(
 
         return _indexed(dims[axis], selection[axis], label, slot, depth, path, state)
 
-    return _structure_part(Sequence, dims[axis] if in_range else None, build, state)
+    return _structure_part(Sequence, dims[axis], build, state)
 
 
 # --- text_like ---------------------------------------------------------------------
@@ -1891,7 +1886,7 @@ def _build(value: Any, max_size: int, depth: int, path: str, state: _State) -> _
         return _build_integer(value, max_size)
     if value_type is float:
         if not math.isfinite(value):
-            return _opaque(value, max_size, state, module="builtins")
+            return _opaque(value, max_size)
         encoded = dumps(value)
         if len(encoded) <= max_size:
             return _Built(Scalar(value), len(encoded))
@@ -1909,7 +1904,7 @@ def _build(value: Any, max_size: int, depth: int, path: str, state: _State) -> _
     mro = _safe_mro(value, state)
     found = None if mro is None else _find_shape(mro, state)
     if mro is None or found is None:
-        return _opaque(value, max_size, state)
+        return _opaque(value, max_size)
     if max_size < 2:
         return _fallback(value, "max_length", max_size)
     carrier, shape = found
@@ -1973,7 +1968,7 @@ def _field_placeholder(value: Any, state: _State) -> tuple[Any, Snapshot]:
     mro = _safe_mro(value, state)
     if mro is not None and any(base is BaseModel for base in mro):
         name = _bounded_type_name(value, _MAX_TYPE_NAME)
-        return {}, Object(name, (), "max_nodes", _module_name(type(value), state))
+        return {}, Object(name, (), "max_nodes")
     return None, Unavailable("max_nodes", "NoneType")
 
 

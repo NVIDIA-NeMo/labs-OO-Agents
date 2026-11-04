@@ -60,7 +60,7 @@ def random_tree(rng: random.Random, depth: int = 0) -> Snapshot:
             return random_text(rng)
         if choice == 3:
             module = rng.choice(("builtins", "pkg"))
-            return Unavailable("opaque", rng.choice(("int", "Thing")), module)
+            return Unavailable("opaque", rng.choice(("int", "Thing")), module == "builtins")
         if choice == 4:
             return Unavailable(rng.choice(("error", "max_nodes")), rng.choice(("", "list", "int")))
         if choice == 5:
@@ -84,4 +84,4 @@ def random_tree(rng: random.Random, depth: int = 0) -> Snapshot:
         length = len(items) + len(tail_items) + (5 if cut else 0)
         return Mapping("dict", length, items, reason, tail_items, wrapper)
     fields = tuple((f"f{n}", child) for n, child in enumerate(children + list(tail)))
-    return Object("Thing", fields, reason, "pkg", rng.choice((None, "fake.thing")))
+    return Object("Thing", fields, reason, rng.choice((None, "fake.thing")))

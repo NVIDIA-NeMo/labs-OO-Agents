@@ -59,7 +59,6 @@ def test_ndarray_like_nodes(registered) -> None:
             ),
         ),
         None,
-        "fakenumpy_7c1e",
         "numpy.ndarray",
     )
     assert sorted(small.read) == [(i, j) for i in range(2) for j in range(3)]
@@ -246,6 +245,11 @@ def test_ndarray_like_errors(registered) -> None:
     labels = snapshot.field("labels")
     assert isinstance(labels, Mapping)
     assert labels.items == ((0, Unavailable("error")), (5, Unavailable("error")))  # 5: no such axis
+
+    # A missing axis is an error at every budget, also when a limit cuts it.
+    shallow = capture(Broken(), Limits(max_depth=2)).field("labels")  # type: ignore[union-attr]
+    assert isinstance(shallow, Mapping)
+    assert shallow.items[1] == (5, Unavailable("error"))
 
     for bad_shape in (fail, lambda v: [3], lambda v: (-1,), lambda v: (True, 2.0)):
         registered(Broken, ndarray_like(bad_shape, element))  # type: ignore[arg-type]

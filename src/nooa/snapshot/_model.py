@@ -150,7 +150,7 @@ class Sequence:
     """
 
     type_name: str
-    length: int | None
+    length: int
     items: tuple[Snapshot, ...]
     reason: Reason | None = None
     tail: tuple[Snapshot, ...] = ()
@@ -170,7 +170,7 @@ class Mapping:
     """
 
     type_name: str
-    length: int | None
+    length: int
     items: tuple[tuple[Key, Snapshot], ...]
     reason: Reason | None = None
     tail: tuple[tuple[Key, Snapshot], ...] = ()
@@ -194,7 +194,6 @@ class Object:
     type_name: str
     fields: tuple[tuple[str, Snapshot], ...]
     reason: Reason | None = None
-    module: str = ""
     kind: str | None = None
 
     @property
@@ -214,15 +213,16 @@ class Object:
 class Unavailable:
     """A value with no content kept, and why (``type_name``: its type, if known).
 
-    ``reason="opaque"``: a value of a type NOOA does not inspect (``module``:
-    its type's module, ``""`` when unknown); it renders as
-    ``<opaque: type_name>``. Any other reason: a read that failed or was
-    refused, or a limit that left no room (``module`` is ``None``).
+    ``reason="opaque"``: a value of a type NOOA does not inspect; it renders
+    as ``<opaque: type_name>``. ``builtin``: its type is an exact built-in
+    one (a non-finite ``float``), so where the label does not fit, the JSON
+    fallback is that type's (#342's ``0.0`` / ``0``). Any other reason: a
+    read that failed or was refused, or a limit that left no room.
     """
 
     reason: Reason
     type_name: str = ""
-    module: str | None = None
+    builtin: bool = False
 
     @property
     def complete(self) -> bool:

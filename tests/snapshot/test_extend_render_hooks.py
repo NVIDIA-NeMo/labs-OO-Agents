@@ -27,7 +27,6 @@ from nooa.snapshot import (
     render_python,
     render_trace,
 )
-from tests.snapshot._extend_support import FAKE_MODULE
 from tests.snapshot._random_trees import random_tree
 
 KIND = "fake.thing"
@@ -36,7 +35,7 @@ _HOOK_NESTING = 64  # the bound hook nesting shares with nothing else: deeper no
 
 def _thing(**fields: Any) -> Object:
     nodes = tuple((name, capture(value)) for name, value in fields.items())
-    return Object("Thing", nodes, None, FAKE_MODULE, KIND)
+    return Object("Thing", nodes, None, KIND)
 
 
 # --- render_python hooks ---------------------------------------------------------------
@@ -63,7 +62,7 @@ def test_render_python_hook_dispatches_on_kind(hooks) -> None:
 def test_render_python_hook_children_keep_notation(hooks) -> None:
     hooks(render_python, KIND, lambda node, r: f"T({r.render(node.fields[0][1])})")
     cut = capture("abcdefghij", Limits(max_string=4, tail_share=0.5))
-    node = Object("Thing", (("s", cut),), None, "", KIND)
+    node = Object("Thing", (("s", cut),), None, KIND)
 
     assert render_python(node) == "T(str(len=10, [:2]='ab', [-2:]='ij'))"
 
@@ -71,7 +70,7 @@ def test_render_python_hook_children_keep_notation(hooks) -> None:
 def test_render_python_hook_children_use_their_hooks(hooks) -> None:
     hooks(render_python, KIND, lambda node, r: "<" + r.render(node.fields[0][1]) + ">")
     inner = _thing(a=1)
-    outer = Object("Thing", (("inner", inner),), None, "", KIND)
+    outer = Object("Thing", (("inner", inner),), None, KIND)
     assert render_python(outer) == "<<1>>"
 
 
@@ -165,7 +164,7 @@ def test_render_output_and_render_json_ignore_render_python_hooks(hooks) -> None
         unit="bytes",
         reason="max_length",
     )
-    node = Object("Log", (("text", cut),), None, "", KIND)
+    node = Object("Log", (("text", cut),), None, KIND)
 
     assert render_python(node) == "hooked"
     assert render_output(node) == (

@@ -178,13 +178,13 @@ def test_uninspected_values_render_as_before(
 
 
 def test_render_python_notation_for_other_nodes() -> None:
-    assert render_python(Unavailable("opaque", "Widget", "m")) == "<opaque: Widget>"
+    assert render_python(Unavailable("opaque", "Widget")) == "<opaque: Widget>"
     assert render_python(Ref("", "sequence")) == "<cycle>"
     assert render_python(Unavailable("error", "Widget")) == "<unavailable: error>"
     assert render_python(Object("M", (("a", Scalar(1)),), "max_nodes")) == "M(a=1, ...)"
     assert render_python(Sequence("tuple", 1, (Scalar(1),))) == "(1,)"
-    assert render_python(Sequence("list", None, (Scalar(1),), "max_nodes")) == (
-        "list(len=?, [:1]=[1])"
+    assert render_python(Sequence("list", 3, (Scalar(1),), "max_nodes")) == (
+        "list(len=3, [:1]=[1])"
     )
     assert render_python(
         Text(

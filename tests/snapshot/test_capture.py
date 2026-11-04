@@ -229,7 +229,7 @@ def test_unknown_types_run_no_user_code() -> None:
     snapshot = capture({"x": value, "y": [value]})
 
     assert isinstance(snapshot, Mapping)
-    assert snapshot.items[0][1] == Unavailable("opaque", "Recorder", __name__)
+    assert snapshot.items[0][1] == Unavailable("opaque", "Recorder")
     assert Recorder.calls == []
     assert render_python(snapshot) == "{'x': <opaque: Recorder>, 'y': [<opaque: Recorder>]}"
     assert json.loads(render_json(snapshot, max_chars=1000)) == {
@@ -270,7 +270,7 @@ def test_dataclass_properties_and_hooks_are_not_called() -> None:
 
     snapshot = capture(Point(1, 2))
 
-    assert snapshot == Object("Point", (("x", Scalar(1)), ("y", Scalar(2))), None, __name__)
+    assert snapshot == Object("Point", (("x", Scalar(1)), ("y", Scalar(2))))
 
 
 def test_custom_dict_descriptor_fails_closed() -> None:

@@ -133,10 +133,6 @@ def _brackets(type_name: str) -> tuple[str, str]:
     return ("(", ")") if type_name == "tuple" else ("[", "]")
 
 
-def _length(length: int | None) -> str:
-    return "?" if length is None else str(length)
-
-
 TextHook = Callable[[Object, "PythonRenderer"], str]
 """A ``render_python`` hook: ``hook(node, r) -> str``; it renders children only through ``r``."""
 
@@ -211,8 +207,8 @@ class PythonRenderer:
         if node.complete:
             return self._items(node.type_name, node.items)
         if node.reason == "max_depth" and not node.items:
-            return f"{left}{node.type_name}: {_length(node.length)} items{right}"
-        parts = [f"{node.type_name}(len={_length(node.length)}"]
+            return f"{left}{node.type_name}: {node.length} items{right}"
+        parts = [f"{node.type_name}(len={node.length}"]
         parts.append(f"[:{len(node.items)}]={self._items(node.type_name, node.items)}")
         if node.tail:
             parts.append(f"[-{len(node.tail)}:]={self._items(node.type_name, node.tail)}")
@@ -225,12 +221,12 @@ class PythonRenderer:
         if node.complete:
             return "{" + ", ".join(self._entries(node.items)) + "}"
         if node.reason == "max_depth" and not node.items:
-            return f"{{{node.type_name}: {_length(node.length)} items}}"
+            return f"{{{node.type_name}: {node.length} items}}"
         parts = self._entries(node.items)
         if node.tail:
             parts.append("...")
             parts.extend(self._entries(node.tail))
-        return f"{node.type_name}(len={_length(node.length)}, items={{" + ", ".join(parts) + "})"
+        return f"{node.type_name}(len={node.length}, items={{" + ", ".join(parts) + "})"
 
     def _object(self, node: Object) -> str:
         parts = [f"{name}={self.render(value)}" for name, value in node.fields]
@@ -535,7 +531,7 @@ def _json_unavailable(
 ) -> tuple[Any, int]:
     report.incomplete(path, node.reason)
     if node.reason == "opaque":
-        fallback_type = node.type_name if node.module == "builtins" else ""
+        fallback_type = node.type_name if node.builtin else ""
         return opaque_json(node.type_name, fallback_type, max_size)
     return fallback_json(node.type_name, max_size)
 

@@ -30,7 +30,7 @@ from nooa.snapshot import (
     render_python,
     text_like,
 )
-from tests.snapshot._extend_support import FAKE_MODULE, _named
+from tests.snapshot._extend_support import _named
 
 
 class _Counted:
@@ -89,7 +89,6 @@ def test_array_like_with_fields_is_an_object_with_items(registered) -> None:
         "Bag",
         (("maxlen", Scalar(5)), ("items", Sequence("list", 2, (Scalar(1), Scalar(2))))),
         None,
-        FAKE_MODULE,
         "fake.deque",
     )
     assert render_python(snapshot) == "Bag(maxlen=5, items=[1, 2])"
@@ -152,7 +151,6 @@ def test_array_like_errors(registered) -> None:
         "Broken",
         (("a", Scalar(1)), ("b", Unavailable("error")), ("items", Unavailable("error", "list"))),
         None,
-        FAKE_MODULE,
     )
     assert render_python(capture(Broken())) == (
         "Broken(a=1, b=<unavailable: error>, items=<unavailable: error>)"
@@ -193,7 +191,6 @@ def test_mapping_like_with_fields_and_errors(registered) -> None:
         "Table",
         (("name", _text("t")), ("items", Mapping("dict", 3, (("a", Scalar(1)),), "error"))),
         None,
-        FAKE_MODULE,
         "k",
     )
     # A key that is not an exact built-in scalar stops the mapping, as for a dict.
@@ -264,7 +261,6 @@ def test_object_like_accessor_error_is_that_field(registered) -> None:
         "Partly",
         (("a", Scalar(1)), ("b", Unavailable("error")), ("c", _text("z"))),
         None,
-        FAKE_MODULE,
     )
 
 
@@ -276,7 +272,7 @@ def test_object_like_values_are_captured_normally(registered) -> None:
 
     snapshot = capture(Holder(), Limits(max_depth=1))
     assert isinstance(snapshot, Object)
-    assert snapshot.field("inner") == Object("Inner", (), "max_depth", FAKE_MODULE)
+    assert snapshot.field("inner") == Object("Inner", (), "max_depth")
     assert snapshot.field("other") == capture(object())
     assert render_python(capture(Holder())) == "Holder(inner=Inner(x=1), other=<opaque: object>)"
 
@@ -526,8 +522,7 @@ def test_pydantic_and_dataclasses_are_internal_object_shapes() -> None:
     snapshot = capture([Model(), Data(Model())], Limits(max_items=1))
     assert repr(snapshot) == (
         "Sequence(type_name='list', length=2, items=(Object(type_name='Model', fields=(('a', "
-        "Scalar(value=1)),), reason='max_items', module='tests.snapshot."
-        "test_extend_shapes', kind=None),), reason='max_items', tail=())"
+        "Scalar(value=1)),), reason='max_items', kind=None),), reason='max_items', tail=())"
     )
     assert render_python(capture(Data(Model()))) == "Data(x=Model(a=1, b=[1, 2]))"
 
