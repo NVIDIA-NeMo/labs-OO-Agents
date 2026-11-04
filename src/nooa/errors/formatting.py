@@ -865,9 +865,10 @@ class IPythonErrorFormatter:
         # Adjust line numbers for wrapper offset
         formatted = _adjust_line_numbers(formatted, line_offset)
 
-        for hint in (_maybe_heredoc_hint(error), _maybe_quote_hint(error)):
-            if hint:
-                formatted = f"{formatted}\n\n{hint}"
+        # The first hint that applies, as in Atom's cell-error hints.
+        hint = _maybe_heredoc_hint(error) or _maybe_quote_hint(error)
+        if hint:
+            formatted = f"{formatted}\n\n{hint}"
 
         return formatted
 

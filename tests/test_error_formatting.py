@@ -789,6 +789,20 @@ class TestHeredocHint:
         assert "unterminated string literal" in result
         self._assert_hint_present(result)
 
+    def test_heredoc_hint_wins_over_the_quote_hint(self):
+        """Both hints apply to this input; only the first (heredoc) is shown."""
+        from nooa.errors.formatting import _maybe_quote_hint
+
+        code = 'x = "cat <<EOF\nhello\nEOF\n'
+        try:
+            compile(code, "Cell In[1]", "exec")
+        except SyntaxError as error:
+            quote_hint = _maybe_quote_hint(error)
+        assert quote_hint
+        result = self._compile_and_format(code)
+        self._assert_hint_present(result)
+        assert quote_hint not in result
+
     def test_hint_on_invalid_syntax_forgot_comma(self):
         """Heredoc + implicit string concat shape → 'Perhaps you forgot a comma?'."""
         code = 'shell.run("cat <<EOF" b)'
