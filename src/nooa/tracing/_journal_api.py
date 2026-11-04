@@ -238,8 +238,9 @@ def _llm_span_id(
     ctx = current.get_span_context()
     kind = (getattr(current, "attributes", None) or {}).get(SpanAttributes.OPENINFERENCE_SPAN_KIND)
     if ctx.is_valid and kind == OpenInferenceSpanKindValues.LLM.value:
-        if failed:
-            current.set_status(Status(StatusCode.ERROR, "no response"))
+        status = getattr(current, "status", None)  # an SDK span exposes it
+        if failed and getattr(status, "status_code", None) is not StatusCode.ERROR:
+            current.set_status(Status(StatusCode.ERROR, "no response"))  # keep a caller's reason
         return format(ctx.span_id, "016x")
 
     attributes: dict[str, Any] = {

@@ -285,3 +285,23 @@ def test_a_failed_call_marks_the_reused_llm_span(writer, monkeypatch):
     ]
     assert failed.status.status_code is StatusCode.ERROR
     assert ok.status.status_code is StatusCode.UNSET
+
+
+def test_a_failed_call_keeps_the_reused_spans_error_description(writer):
+    from openinference.semconv.trace import OpenInferenceSpanKindValues, SpanAttributes
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+    from opentelemetry.trace import Status, StatusCode, use_span
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    llm_kind = {SpanAttributes.OPENINFERENCE_SPAN_KIND: OpenInferenceSpanKindValues.LLM.value}
+    span = provider.get_tracer("t").start_span("client", attributes=llm_kind)
+    with use_span(span, end_on_exit=True):
+        span.set_status(Status(StatusCode.ERROR, "rate limited"))
+        journal_llm_call(model="m", messages=[{"role": "user", "content": "hi"}], response=None)
+    (failed,) = exporter.get_finished_spans()
+    assert failed.status.status_code is StatusCode.ERROR
+    assert failed.status.description == "rate limited"
