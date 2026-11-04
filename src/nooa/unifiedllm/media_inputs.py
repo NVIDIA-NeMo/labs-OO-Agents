@@ -37,7 +37,7 @@ def filter_media_messages(messages, enabled: tuple[MediaInput, ...]):
     blocks of a ``content`` list (``output`` for ``function_call_output`` items).
     Tool arguments, reasoning and vendor extensions are not inspected.
     ``LLMResponse`` and ``CacheBoundary`` objects are passed through unchanged;
-    their native content is checked later by ``guard_native_media``. The input
+    their native content is checked later by ``check_replayed_native_media``. The input
     list and its messages are not modified.
     """
     result = []
@@ -88,7 +88,7 @@ def filter_media_messages(messages, enabled: tuple[MediaInput, ...]):
     return result
 
 
-def guard_native_media(
+def check_replayed_native_media(
     native: Mapping[str, Any], enabled: tuple[MediaInput, ...] | None, *, interface: str = "chat"
 ) -> None:
     """Check the native content of a replayed assistant turn before it is sent.
