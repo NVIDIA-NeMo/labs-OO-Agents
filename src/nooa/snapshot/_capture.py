@@ -92,7 +92,7 @@ _TYPE_NAME = type.__dict__["__name__"]
 _BASE_MODEL_DICT = BaseModel.__dict__["__dict__"]
 _DATACLASS_FIELD_TYPE = cast(Any, dataclasses)._FIELD
 _ANNOTATED_ALIAS = type(typing.Annotated[int, "x"])
-"""Longer string annotations are not parsed (the textual fail-closed rule applies)."""
+"""The type of an ``Annotated[...]`` hint, compared by identity (``type(hint) is ...``)."""
 _BUILTIN_PAIRS: tuple[tuple[type[Any], str], ...] = (
     (str, "str"),
     (bytes, "bytes"),
