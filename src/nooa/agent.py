@@ -255,14 +255,10 @@ class Agent(metaclass=AgentMeta):
         # view derives their content directly from the agent; declarations here
         # are therefore overrides only.
         cm = self.context_manager
-        cm.protect("system_prompt", static=True, expression="self._resolve_system_prompt()")
-        cm.protect("self", static=True, expression="doc(type(self))")
-        cm.protect("events_api", static=True, expression="self._events_api_prompt()")
-        cm.protect(
-            "state",
-            static=False,
-            expression="pformat(self, max_length=50, max_string=500, max_depth=4)",
-        )
+        cm.protect("system_prompt", static=True)
+        cm.protect("self", static=True)
+        cm.protect("events_api", static=True)
+        cm.protect("state", static=False)
 
         # Apply class-level context blocks (from __init_subclass__)
         class_context = getattr(self.__class__, "_agent_context_blocks", None)

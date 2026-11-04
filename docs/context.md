@@ -136,7 +136,7 @@ class CodeActView(ContextView[Agent]):
 
 The private phase methods contain source-specific detail. `assemble()` keeps global order, event placement, cache placement, and budgeting visible. `apply_block_overrides` preserves replacement, deletion, inherited placement, and explicit prefix hints. `history()` returns `visible_events` (active model-facing history) and is the override point for event selection; `replayable` then pairs its tool calls and results without reconstructing absent records.
 
-The three built-in helpers derive content directly from the agent. Protected-key registration selects which defaults apply; disable state and stored overrides are checked before evaluation. The manager stores those controls, user declarations, and the last materialized values for compatible named reads, but does not create defaults.
+The three built-in helpers derive content directly from the agent. Protected-key registration selects which defaults apply; disable state and stored overrides are checked before evaluation. The manager stores those controls and user declarations, but does not create defaults or store evaluated values: reading an expression block returns its `Context(expr=...)` declaration, so call the expression's code for its current value.
 
 The decision default evaluates explicit decorator/scoped context and includes no history by default. Custom views may select other agent state or active history. Here, `evaluate_value` resolves one literal or expression:
 

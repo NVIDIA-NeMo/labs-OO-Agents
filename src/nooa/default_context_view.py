@@ -114,7 +114,6 @@ async def materialize_manager_blocks(
 ) -> tuple[Block, ...]:
     """Materialize selected declarations from one ContextManager snapshot."""
     blocks: list[Block] = []
-    resolved_cache: dict[str, Any] = {}
     for key, value in manager.declarations():
         if (include is not None and key not in include) or key in exclude:
             continue
@@ -123,8 +122,6 @@ async def materialize_manager_blocks(
 
         is_dynamic = isinstance(value, DynamicContext)
         content = await _resolve_value(key, value, owner=agent, call=call)
-        if is_dynamic:
-            resolved_cache[key] = content
         protected = manager.is_protected(key)
         metadata = BlockMetadata(
             expr=value.expr if is_dynamic else None,
@@ -132,8 +129,6 @@ async def materialize_manager_blocks(
             static=manager.is_static(key),
         )
         blocks.append(_block(key, content, metadata))
-
-    manager.update_resolved(resolved_cache)
     return tuple(blocks)
 
 
@@ -419,8 +414,6 @@ class ManagedContextView(ContextView["Agent"]):
                 continue
             else:
                 block = await build(owner, call)
-                if block is not None:
-                    manager.update_resolved({key: block.content})
             if block is not None:
                 blocks_list.append(block)
 

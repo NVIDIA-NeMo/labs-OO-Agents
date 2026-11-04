@@ -141,15 +141,12 @@ class TestContextManager:
 
         manager = TestAgent().context_manager
         manager.disable("state")
-        manager.update_resolved({"state": "cached"})
 
         manager.remove_protected("state")
 
         assert manager.is_protected("state") is False
         assert manager.is_static("state") is False
         assert manager.is_disabled("state") is False
-        assert "state" not in manager._protected_expressions
-        assert "state" not in manager._dynamic_cache
 
     def test_disabled_context_blocks_round_trip_through_snapshot(self):
         """Disabled block keys survive save/restore snapshot serialization."""
@@ -269,9 +266,9 @@ class TestContextManager:
         with pytest.raises(KeyError):
             _ = agent.context_manager["missing"]
 
-    def test_dynamic_unresolved_raises_error(self):
-        """Reading a dynamic block before resolution raises DynamicNotResolvedError."""
-        from nooa.context_blocks.exceptions import DynamicNotResolvedError
+    def test_dynamic_read_returns_declaration(self):
+        """Reading an expression block returns its declaration, never a value."""
+        from nooa import Context
 
         fake_llm = FakeLLMClient()
 
@@ -280,8 +277,7 @@ class TestContextManager:
 
         agent = TestAgent()
         agent.context_manager.set_dynamic("status", "self.format_status()")
-        with pytest.raises(DynamicNotResolvedError, match="status"):
-            _ = agent.context_manager["status"]
+        assert agent.context_manager["status"] == Context(expr="self.format_status()")
 
     def test_delete_nonexistent_key_raises_keyerror(self):
         """del context['nonexistent'] raises KeyError."""
@@ -400,8 +396,10 @@ class TestBuildMessages:
         assert messages[0]["role"] == "system"
 
     @pytest.mark.asyncio
-    async def test_build_messages_resolves_dynamic_blocks(self):
-        """After _build_messages, dynamic blocks are readable via self.context."""
+    async def test_build_messages_leaves_dynamic_declarations_unchanged(self):
+        """Rendering evaluates expressions without storing their values."""
+        from nooa import Context
+
         fake_llm = FakeLLMClient()
 
         class TestAgent(Agent, llm=fake_llm):
@@ -415,18 +413,11 @@ class TestBuildMessages:
         agent = TestAgent()
         agent.context_manager.set_dynamic("status", "self.get_status()")
 
-        # Before build: dynamic block not yet resolved — raises error
-        from nooa.context_blocks.exceptions import DynamicNotResolvedError
-
-        with pytest.raises(DynamicNotResolvedError):
-            _ = agent.context_manager["status"]
-
-        # Build messages resolves dynamic blocks
         method = type(agent).test_method
-        await agent.runtime._build_messages(method)
+        messages = await agent.runtime._build_messages(method)
 
-        # After build: dynamic block is resolved
-        assert agent.context_manager["status"] == "Ready"
+        assert "Ready" in str(messages)
+        assert agent.context_manager["status"] == Context(expr="self.get_status()")
 
 
 class TestContextManagerGetPop:
