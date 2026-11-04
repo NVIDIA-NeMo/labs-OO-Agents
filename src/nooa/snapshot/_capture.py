@@ -583,8 +583,8 @@ def _container(
     Keeps the first ``head_n`` (at most ``length``) entries pulled from
     ``entries`` and, when every one of them fit, the last ``tail_n`` from
     ``tail()``, under the shared budget. Entries may be private ``_Part``
-    builders (see ``_build_slot``). A mapping entry also costs one node for
-    its key, checked before the pair is pulled.
+    builders (see ``_build_slot``), or ``_Omitted`` notes. A mapping entry
+    also costs one node for its key, checked before the pair is pulled.
     """
     box = _Container(max_size)
 
@@ -616,8 +616,9 @@ def _container(
         return True
 
     head: list[Any] = []
+    omitted: Reason | None = None
     iterator = iter(entries)
-    for index in range(head_n):
+    while len(head) < head_n:
         if keyed and state.nodes_left <= 0:
             box.stop("max_nodes")
             break
@@ -625,17 +626,20 @@ def _container(
             entry = next(iterator)
         except StopIteration:
             break
-        if not add(entry, index, head):
+        if type(entry) is _Omitted:
+            omitted = omitted or entry.reason
+            continue
+        if not add(entry, len(head), head):
             break
     kept_tail: list[Any] = []
     if box.reason is None and tail_n:
         for offset, entry in enumerate(tail()):
             if not add(entry, length - tail_n + offset, kept_tail):
                 break
-    complete = len(head) + len(kept_tail) >= length and box.reason is None
-    if not complete:
-        box.stop("max_items")
-    reason = None if complete else box.reason
+    reason = box.reason or omitted
+    if reason is None and len(head) + len(kept_tail) < length:
+        reason = "max_items"
+    complete = reason is None
     if keyed:
         node: Snapshot = Mapping(type_name, length, tuple(head), complete, reason, tuple(kept_tail))
     else:
@@ -875,10 +879,29 @@ def _copy_storage(obj_dict: Any, state: _State) -> dict[str, Any] | None:
     return safe
 
 
+class _Omitted:
+    """An entry stream's note that something was left out here, and why.
+
+    The one way a field reader or a shape's items say "incomplete because":
+    the builder keeps reading, and the first such reason is the node's when
+    the builder's own limits left it complete.
+    """
+
+    __slots__ = ("reason",)
+    reason: Reason
+
+    def __init__(self, reason: Reason) -> None:
+        self.reason = reason
+
+
+class _FailClosed(Exception):
+    """Raised by a field reader whose object can't be read safely: no field is kept."""
+
+
 def _object_fields(
     type_name: str,
     module: str,
-    selected: Iterable[tuple[str, Any] | None],
+    entries: Iterable[tuple[str, Any] | _Omitted],
     max_size: int,
     depth: int,
     path: str,
@@ -887,7 +910,7 @@ def _object_fields(
     reserves: list[tuple[int, int]] | None = None,
     capped: bool = True,
 ) -> _Built:
-    """Emit the selected (name, value) fields of an object; ``None`` entries fail closed.
+    """Emit the (name, value) fields of an object; a reader's ``_FailClosed`` keeps none.
 
     A field value may be a shape's ``_Part``, built in its field's slot (see
     ``_build_slot``). ``reserves[i]``: (chars, nodes) held back while field
@@ -900,15 +923,25 @@ def _object_fields(
     fields, such as ``items`` or ``data``, are never cut by it).
     """
     box = _Container(max_size)
+    omitted: Reason | None = None
     fields: list[tuple[str, Snapshot]] = []
     max_items = state.limits.max_items if capped else None
-    for index, entry in enumerate(selected):
-        if entry is None:
+    iterator = iter(entries)
+    while True:
+        try:
+            entry = next(iterator)
+        except StopIteration:
+            break
+        except _FailClosed:
             return _closed(type_name, module)
+        if type(entry) is _Omitted:
+            omitted = omitted or entry.reason
+            continue
+        index = len(fields)
         if max_items is not None and index >= max_items:
             box.stop("max_items")
             break
-        name, child = entry
+        name, child = cast(tuple[str, Any], entry)
         overhead = _key_overhead(name, box)
         if overhead is None:
             box.stop("max_length")
@@ -930,8 +963,8 @@ def _object_fields(
             state.nodes_left += held_nodes
         fields.append((name, built.node))
         box.commit(overhead, built.size)
-    complete = box.reason is None
-    node = Object(type_name, tuple(fields), complete, box.reason, module, kind)
+    reason = box.reason or omitted
+    node = Object(type_name, tuple(fields), reason is None, reason, module, kind)
     return _Built(node, box.size)
 
 
@@ -948,16 +981,13 @@ def _min_size(child: Any) -> int:
     return len(dumps(fallback_candidates(name)[0])) if name else 2
 
 
-_STOP = object()
-
-
-_Entries = tuple[typing.Iterator[tuple[str, Any] | None] | None, list[Reason]]
-"""A field reader's result: the (name, value) fields, ``None`` (fail closed), and why it stopped."""
+_Fields = typing.Iterator[tuple[str, Any] | _Omitted]
+"""A field reader's (name, value) fields and ``_Omitted`` notes; it raises ``_FailClosed``."""
 
 
 def _pydantic_entries(
     value: BaseModel, mro: tuple[type[Any], ...], carrier: type[Any], state: _State
-) -> _Entries:
+) -> _Fields:
     """The privileged field reader of a Pydantic v2 model: declared fields, raw stored values."""
     try:
         obj_dict = _BASE_MODEL_DICT.__get__(value, type(value))
@@ -965,57 +995,41 @@ def _pydantic_entries(
         obj_dict = None
     storage = _copy_storage(obj_dict, state)
     if storage is None:
-        return None, []
+        raise _FailClosed
     overrides = _visibility_overrides(storage, mro, state)
     fields = _pydantic_fields(mro, state)
     if overrides is None or fields is None:
-        return None, []
-    stopped: list[Reason] = []
-
-    def selected() -> typing.Iterator[tuple[str, Any] | None]:
-        for name, field_info in dict.items(fields):
-            if not state.take_node():
-                stopped.append("max_nodes")
-                return
-            if type(name) is not str or type(field_info) is not FieldInfo:
-                yield None
-                return
-            try:
-                excluded = object.__getattribute__(field_info, "exclude")
-                represented = object.__getattribute__(field_info, "repr")
-            except Exception:
-                yield None
-                return
-            if excluded is not None and type(excluded) is not bool:
-                yield None
-                return
-            if type(represented) is not bool:
-                yield None
-                return
-            if excluded is True or represented is False:
-                continue
-            metadata_hidden = _field_hidden(field_info, state)
-            if metadata_hidden is None:
-                yield None
-                return
-            if overrides.get(name, metadata_hidden) or name not in storage:
-                continue
-            yield name, dict.__getitem__(storage, name)
-
-    return selected(), stopped
+        raise _FailClosed
+    for name, field_info in dict.items(fields):
+        if not state.take_node():
+            yield _Omitted("max_nodes")
+            return
+        if type(name) is not str or type(field_info) is not FieldInfo:
+            raise _FailClosed
+        try:
+            excluded = object.__getattribute__(field_info, "exclude")
+            represented = object.__getattribute__(field_info, "repr")
+        except Exception:
+            raise _FailClosed from None
+        if excluded is not None and type(excluded) is not bool:
+            raise _FailClosed
+        if type(represented) is not bool:
+            raise _FailClosed
+        if excluded is True or represented is False:
+            continue
+        metadata_hidden = _field_hidden(field_info, state)
+        if metadata_hidden is None:
+            raise _FailClosed
+        if overrides.get(name, metadata_hidden) or name not in storage:
+            continue
+        yield name, dict.__getitem__(storage, name)
 
 
-def _with_stop(built: _Built, stopped: list[Reason]) -> _Built:
-    node = built.node
-    if stopped and type(node) is Object and node.complete:
-        node = dataclasses.replace(node, complete=False, reason=stopped[0])
-    return _Built(node, built.size)
+def _instance_storage(value: Any, mro: tuple[type[Any], ...], state: _State) -> Any:
+    """Raw ``__dict__`` through the native getset descriptor; ``{}`` for slotted classes.
 
-
-def _instance_storage(
-    value: Any, mro: tuple[type[Any], ...], state: _State
-) -> dict[str, Any] | None | object:
-    """Raw ``__dict__`` through the native getset descriptor; ``{}`` for slotted classes."""
+    ``None`` when it can't be read safely (a custom ``__dict__``: refuse).
+    """
     for base in mro:
         namespace = _raw_namespace(base, state) if base is not object else None
         if namespace is None:
@@ -1024,16 +1038,19 @@ def _instance_storage(
         if descriptor is None:
             continue
         if type(descriptor) is not types.GetSetDescriptorType:
-            return _STOP  # a custom __dict__: refuse
+            return None
         try:
             return descriptor.__get__(value, type(value))
         except Exception:
-            return _STOP
+            return None
     return {}
 
 
+_NO_SLOT = object()
+
+
 def _slot_value(name: str, mro: tuple[type[Any], ...], value: Any, state: _State) -> Any:
-    """A slotted field's value through its native member descriptor, else ``_STOP``."""
+    """A slotted field's value through its native member descriptor, else ``_NO_SLOT``."""
     for base in mro:
         namespace = _raw_namespace(base, state) if base is not object else None
         if namespace is None:
@@ -1042,73 +1059,64 @@ def _slot_value(name: str, mro: tuple[type[Any], ...], value: Any, state: _State
         if descriptor is None:
             continue
         if type(descriptor) is not types.MemberDescriptorType:
-            return _STOP
+            return _NO_SLOT
         try:
             return descriptor.__get__(value, type(value))
         except Exception:
-            return _STOP
-    return _STOP
+            return _NO_SLOT
+    return _NO_SLOT
 
 
 def _dataclass_entries(
     value: Any, mro: tuple[type[Any], ...], carrier: type[Any], state: _State
-) -> _Entries:
+) -> _Fields:
     """The privileged field reader of a dataclass: declared fields of ``carrier``, raw values."""
-    raw = _instance_storage(value, mro, state)
-    storage = _copy_storage(raw, state) if raw is not _STOP else None
+    storage = _copy_storage(_instance_storage(value, mro, state), state)
     namespace = _raw_namespace(carrier, state)
     fields = dict.get(namespace, "__dataclass_fields__") if namespace is not None else None
     if storage is None or type(fields) is not dict:
-        return None, []
+        raise _FailClosed
     overrides = _visibility_overrides(storage, mro, state)
     if overrides is None:
-        return None, []
-    stopped: list[Reason] = []
-
-    def selected() -> typing.Iterator[tuple[str, Any] | None]:
-        resolved: Any = _UNREAD  # the class's resolved hints, read at the first string annotation
-        for name, field in dict.items(fields):
-            if not state.take_node():
-                stopped.append("max_nodes")
-                return
-            if type(name) is not str or type(field) is not dataclasses.Field:
-                yield None
-                return
-            try:
-                field_type = object.__getattribute__(field, "_field_type")
-                represented = object.__getattribute__(field, "repr")
-                annotation = object.__getattribute__(field, "type")
-            except Exception:
-                yield None
-                return
-            if field_type is not _DATACLASS_FIELD_TYPE:
-                continue  # ClassVar / InitVar pseudo-fields
-            if type(represented) is not bool:
-                yield None
-                return
-            if represented is False or name.startswith("_"):
-                continue
-            if type(annotation) is str:
-                if resolved is _UNREAD:
-                    resolved = _resolved_metadata(carrier)
-                metadata = dict.get(resolved, name) if resolved is not None else None
-                annotation_hidden = None if metadata is None else _metadata_hidden(metadata, state)
-            else:
-                annotation_hidden = _alias_hidden(annotation, state)
-            if annotation_hidden is None:
-                # This field can't be shown safely: omit it, the object is incomplete.
-                stopped.append("unreadable")
-                continue
-            if overrides.get(name, annotation_hidden):
-                continue
-            if name in storage:
-                yield name, dict.__getitem__(storage, name)
-                continue
-            slot = _slot_value(name, mro, value, state)
-            if slot is not _STOP:
-                yield name, slot
-
-    return selected(), stopped
+        raise _FailClosed
+    resolved: Any = _UNREAD  # the class's resolved hints, read at the first string annotation
+    for name, field in dict.items(fields):
+        if not state.take_node():
+            yield _Omitted("max_nodes")
+            return
+        if type(name) is not str or type(field) is not dataclasses.Field:
+            raise _FailClosed
+        try:
+            field_type = object.__getattribute__(field, "_field_type")
+            represented = object.__getattribute__(field, "repr")
+            annotation = object.__getattribute__(field, "type")
+        except Exception:
+            raise _FailClosed from None
+        if field_type is not _DATACLASS_FIELD_TYPE:
+            continue  # ClassVar / InitVar pseudo-fields
+        if type(represented) is not bool:
+            raise _FailClosed
+        if represented is False or name.startswith("_"):
+            continue
+        if type(annotation) is str:
+            if resolved is _UNREAD:
+                resolved = _resolved_metadata(carrier)
+            metadata = dict.get(resolved, name) if resolved is not None else None
+            annotation_hidden = None if metadata is None else _metadata_hidden(metadata, state)
+        else:
+            annotation_hidden = _alias_hidden(annotation, state)
+        if annotation_hidden is None:
+            # This field can't be shown safely: omit it, the object is incomplete.
+            yield _Omitted("unreadable")
+            continue
+        if overrides.get(name, annotation_hidden):
+            continue
+        if name in storage:
+            yield name, dict.__getitem__(storage, name)
+            continue
+        slot = _slot_value(name, mro, value, state)
+        if slot is not _NO_SLOT:
+            yield name, slot
 
 
 # --- shapes: the extension API -------------------------------------------------------
@@ -1342,7 +1350,7 @@ class _FieldReader:
     ``carrier`` (the MRO entry that matched). Never registered by users.
     """
 
-    read: Callable[[Any, tuple[type[Any], ...], type[Any], _State], _Entries]
+    read: Callable[[Any, tuple[type[Any], ...], type[Any], _State], _Fields]
 
 
 _PYDANTIC = _FieldReader(_pydantic_entries)
@@ -1350,7 +1358,13 @@ _DATACLASS = _FieldReader(_dataclass_entries)
 
 
 class _ShapeError(Exception):
-    """An accessor failed in a way that leaves no sensible part: the whole value is an error."""
+    """An accessor failed in a way that leaves no sensible part: the whole value is an error.
+
+    Raised for the whole-value accessors (``length``, ``shape``, ``slice``) and
+    the value checks on their results. A part's accessor (a field, an element,
+    a label) that raises becomes that part's ``Unavailable("error")``; a shape's
+    ``items`` that raise end the items with an ``error`` omission (``_guarded``).
+    """
 
 
 def _call(function: Callable[..., Any], *args: Any) -> Any:
@@ -1373,30 +1387,23 @@ def _error(type_name: str, max_size: int) -> _Built:
     return _Built(Unavailable("error", type_name), fallback_json("", max_size)[1])
 
 
-def _guarded(
-    iterator: typing.Iterator[Any], failed: list[bool], pairs: bool
-) -> typing.Iterator[Any]:
-    """``iterator`` until it ends or raises (``failed``); ``pairs``: each item an exact 2-tuple."""
+def _guarded(iterator: typing.Iterator[Any], pairs: bool) -> typing.Iterator[Any]:
+    """A shape's items until they end, or raise (``pairs``: or one is not an exact 2-tuple).
+
+    A failure ends them with an ``error`` omission.
+    """
     while True:
         try:
             item = next(iterator)
         except StopIteration:
             return
         except Exception:
-            failed.append(True)
+            yield _Omitted("error")
             return
         if pairs and (type(item) is not tuple or tuple.__len__(item) != 2):
-            failed.append(True)
+            yield _Omitted("error")
             return
         yield item
-
-
-def _failed(built: _Built, failed: list[bool]) -> _Built:
-    """A sequence or mapping whose items raised: incomplete, reason ``error``."""
-    node = built.node
-    if failed and (type(node) is Sequence or type(node) is Mapping):
-        node = dataclasses.replace(cast(Any, node), complete=False, reason="error")
-    return _Built(node, built.size)
 
 
 def _empty(
@@ -1422,12 +1429,10 @@ def _collection(
         source = iter(shape.items(value))
     except Exception:
         return _error(type_name, max_size)
-    failed: list[bool] = []
     keyed = type(shape) is _MappingLike
     head_n, _tail_n = _plan(length, state.limits, has_tail=False)
-    items = _guarded(source, failed, pairs=keyed)
-    built = _container(items, length, type_name, keyed, max_size, depth, path, state, head_n)
-    return _failed(built, failed)
+    items = _guarded(source, pairs=keyed)
+    return _container(items, length, type_name, keyed, max_size, depth, path, state, head_n)
 
 
 def _field_part(function: Callable[[Any], Any], value: Any, state: _State) -> _Part:
@@ -1491,33 +1496,30 @@ def _build_object(
         return _Built(ref, 2)
     try:
         if isinstance(shape, _FieldReader):  # one of this module's shapes: no user hook
-            selected, stopped = shape.read(value, mro, carrier, state)
-            if selected is None:
-                return _closed(type_name, module)
-            built = _object_fields(type_name, module, selected, max_size, depth, path, state)
-            return _with_stop(built, stopped)
-        stopped = []
+            selected = shape.read(value, mro, carrier, state)
+            return _object_fields(type_name, module, selected, max_size, depth, path, state)
         entries: list[tuple[str, Any]] = [
             (name, _field_part(function, value, state)) for name, function in shape.fields
         ]
         max_items = state.limits.max_items
-        if max_items is not None and len(entries) > max_items:
-            del entries[max_items:]
-            stopped.append("max_items")
+        cut = max_items is not None and len(entries) > max_items
+        del entries[max_items if cut else len(entries) :]
         try:
             entries += _structure(shape, value, type_name, max_size, state)
         except _ShapeError:
             return _error(type_name, max_size)
         reserves, _nodes = _field_reserves(entries)
 
-        def fields() -> typing.Iterator[tuple[str, Any] | None]:
+        def fields() -> _Fields:
+            if cut:
+                yield _Omitted("max_items")
             for entry in entries:
                 if not state.take_node():
-                    stopped.append("max_nodes")
+                    yield _Omitted("max_nodes")
                     return
                 yield entry
 
-        built = _object_fields(
+        return _object_fields(
             type_name,
             module,
             fields(),
@@ -1529,7 +1531,6 @@ def _build_object(
             reserves=reserves,
             capped=False,
         )
-        return _with_stop(built, stopped)
     finally:
         state.active.pop(id(value), None)
 

@@ -384,6 +384,20 @@ def test_dataclass_unreadable_resolved_marker_fails_closed_per_field() -> None:
     assert not snapshot.complete and snapshot.reason == "unreadable"
 
 
+def test_an_unreadable_field_reason_yields_to_the_objects_own_limit() -> None:
+    Partly = dataclasses.make_dataclass(  # noqa: N806
+        "Partly", [("secret", "NoSuchName", 1), ("text", str, "x" * 50), ("count", int, 3)]
+    )
+
+    whole = capture(Partly())
+    assert [name for name, _ in whole.fields] == ["text", "count"]  # type: ignore[union-attr]
+    assert whole.reason == "unreadable"
+    assert capture(Partly(), Limits(max_nodes=4)).reason == "unreadable"
+    cut = capture(Partly(), Limits(max_chars=20))
+    assert isinstance(cut, Object) and [name for name, _ in cut.fields] == ["text"]
+    assert cut.reason == "max_length"  # the builder's own limit wins over the omission
+
+
 @pytest.mark.parametrize("name", ["UnknownMarker", "TypeCheckingOnly", "Unresolvable"])
 def test_dataclass_hints_that_cannot_be_evaluated_fail_closed_for_the_class(name: str) -> None:
     # ``get_type_hints`` raises (NameError): every string-annotated field is left out.
