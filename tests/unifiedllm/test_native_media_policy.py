@@ -415,6 +415,15 @@ def test_compatible_opaque_native_media_guard_before_reconstruction(monkeypatch,
     assert turn.model_dump() == before and bodies == []
 
 
+def test_interface_resolution_lives_outside_media_policy_and_stays_importable():
+    import nooa.media_policy as media_policy
+    import nooa.request_interface as request_interface
+
+    for name in ("interface_for_provider", "resolved_input_interface", "entry_input_interface"):
+        assert getattr(media_policy, name) is getattr(request_interface, name)
+        assert getattr(request_interface, name).__module__ == "nooa.request_interface"
+
+
 @pytest.mark.parametrize("interface", ["anthropic", "responses"])
 def test_native_media_check_without_permissions_keeps_direct_contract(interface):
     """``enabled=None`` (direct projection helpers) skips both checks, as on main."""

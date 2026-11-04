@@ -11,7 +11,7 @@ from typing import Any
 
 from nooa._immutable_json import json_containers
 from nooa.llm_types import AssistantPart, AssistantReasoning, AssistantText, LLMResponse, ToolCall
-from nooa.media_policy import interface_for_provider
+from nooa.request_interface import interface_for_provider
 from nooa.unifiedllm.cache_policy import wrap_anthropic_text
 
 from .media_inputs import check_replayed_native_media

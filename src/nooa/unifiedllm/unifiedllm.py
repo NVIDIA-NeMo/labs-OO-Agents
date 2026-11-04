@@ -1354,7 +1354,8 @@ class UnifiedLLM(ABC):
         return filter_media_messages(messages, enabled)
 
     def _validate_implemented_media(self, messages, call_config):
-        from nooa.media_policy import reject_unsupported_media, resolved_input_interface
+        from nooa.media_policy import reject_unsupported_media
+        from nooa.request_interface import resolved_input_interface
 
         interface = resolved_input_interface(
             self._effective_model(call_config),

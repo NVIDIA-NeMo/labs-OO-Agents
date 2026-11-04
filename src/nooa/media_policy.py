@@ -15,27 +15,20 @@ NOOA sends requests through one of four interfaces:
 
 These limits describe what NOOA's request code can send. They are not a claim
 about what a particular model accepts: a Chat backend may still reject audio or
-video. The interface is resolved from the actual LiteLLM dispatch (model, endpoint
-and ``custom_llm_provider``), never from the model name or ``api_style``.
+video. Which interface a client uses is decided in ``nooa.request_interface``.
 """
 
 from collections.abc import Mapping
-from typing import Any
 
 from nooa.media_inputs import MediaInput, attachment_kind, validate_media_inputs
 
+# Interface resolution lives in nooa.request_interface; these names stay
+# importable from here for existing callers.
+from nooa.request_interface import entry_input_interface as entry_input_interface
+from nooa.request_interface import interface_for_provider as interface_for_provider
+from nooa.request_interface import resolved_input_interface as resolved_input_interface
+
 ALL_INPUT_KINDS: tuple[MediaInput, ...] = ("image", "audio", "video", "pdf")
-
-
-def interface_for_provider(provider: str | None) -> str:
-    """Return the wire format a ``CompletionClient`` request uses for ``provider``.
-
-    ``provider`` is the LiteLLM provider name for the request. LiteLLM sends
-    ``anthropic`` requests as native Anthropic Messages; every other provider is
-    given an OpenAI-compatible Chat request. ``ResponsesClient`` does not use this
-    function: its requests always use the ``responses`` interface.
-    """
-    return "anthropic" if provider == "anthropic" else "chat"
 
 
 def implemented_input_kinds(interface: str = "chat") -> tuple[MediaInput, ...]:
@@ -50,46 +43,6 @@ def implemented_input_kinds(interface: str = "chat") -> tuple[MediaInput, ...]:
     if interface in ("responses", "anthropic"):
         return ("image", "pdf")
     return ALL_INPUT_KINDS
-
-
-def resolved_input_interface(
-    model: str, config: Mapping[str, Any], *, client_type: str = "completion"
-) -> str:
-    """Return the interface a client built from ``model`` and ``config`` would use.
-
-    ``client_type`` ``responses`` and ``decision`` fix the interface directly. For
-    completion clients, LiteLLM resolves the provider from the model, the endpoint
-    (``api_base`` or ``base_url``) and ``custom_llm_provider``, exactly as it does
-    when sending. No network call, key lookup or metadata is used. If the provider
-    cannot be resolved (for example an incomplete profile), the result is ``chat``,
-    which does not restrict any media kind.
-    """
-    if client_type in {"responses", "decision"}:
-        return client_type
-    if not model:
-        return "chat"
-    import litellm
-
-    try:
-        _, provider, _, _ = litellm.get_llm_provider(
-            model=model,
-            api_base=config.get("api_base") or config.get("base_url"),
-            custom_llm_provider=config.get("custom_llm_provider"),
-        )
-    except Exception:
-        # LiteLLM raises for model strings it cannot route; treat them as Chat,
-        # which is also how CompletionClient would try to send them.
-        return "chat"
-    return interface_for_provider(provider)
-
-
-def entry_input_interface(entry: Mapping[str, Any]) -> str:
-    """Return the interface for a registry entry (``model_name`` plus settings)."""
-    return resolved_input_interface(
-        entry.get("model_name") or "",
-        entry,
-        client_type=entry.get("client_type") or "completion",
-    )
 
 
 def unsupported_input_reason(interface: str, kinds) -> str:
