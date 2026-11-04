@@ -291,7 +291,7 @@ Configuration stays in `TruncationConfig`. `capture.max_stdout` etc. become `Tex
 
 1. **PR 1, the machinery, into `main`.** It adds `nooa.snapshot` (model, `capture` + registry, `TextStream`, `merge`, renderers, trace attributes) with tests, and changes no consumers. #342's builder is moved in, with credit to Severin. Tests cover: budget accounting, never calling user code on unknown types, hidden fields, cycles, UTF-8 cut points, spill file limits, `since`/`merge` lengths, and renderer output for every variant.
 2. **PR 2a, consumers the model doesn't read, into `main`:** traces (supersedes #342's consumer change, including its explorer notice) and ACP cards. Low risk; checked with trace and ACP tests.
-3. **PR 2b, consumers the model reads:** `Shell`, progress, cell output, jobs, the core bash tool and prefill. This changes what the model sees after every command, so it lands after an A/B on one SWE run and one TB run against the current notation.
+3. **PR 2b, consumers the model reads:** `Shell`, progress, cell output, jobs, the core bash tool and prefill. This changes what the model sees after every command, so it lands after an A/B on one SWE run and one TB run against the current notation. It ends when the last consumer has moved: `src/nooa/agentdoc/_truncating_stream.py` (`TruncatingStringIO` and `FileBackedTruncatingStringIO`) is then deleted.
 
 ## Out of scope
 
