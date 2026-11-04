@@ -331,21 +331,16 @@ class _Report:
 
 def _spill_paths(node: Snapshot, found: list[str]) -> list[str]:
     """Every spill file of ``node``, depth first (heads and tails, fields), once each."""
-    node_type = type(node)
-    if node_type is Text:
-        assert isinstance(node, Text)
+    if type(node) is Text:
         if node.full is not None and node.full.path not in found:
             found.append(node.full.path)
-    elif node_type is Sequence:
-        assert isinstance(node, Sequence)
+    elif type(node) is Sequence:
         for child in node.items + node.tail:
             _spill_paths(child, found)
-    elif node_type is Mapping:
-        assert isinstance(node, Mapping)
+    elif type(node) is Mapping:
         for _key, child in node.items + node.tail:
             _spill_paths(child, found)
-    elif node_type is Object:
-        assert isinstance(node, Object)
+    elif type(node) is Object:
         for _name, child in node.fields:
             _spill_paths(child, found)
     return found
@@ -400,8 +395,13 @@ def _json_wrapper(
 
 
 def _json_entries(
-    entries: tuple[tuple[Any, Snapshot], ...], max_size: int, path: str, report: _Report
-) -> tuple[dict[str, Any], int, str | None]:
+    entries: tuple[tuple[Any, Snapshot], ...],
+    reason: str | None,
+    max_size: int,
+    path: str,
+    report: _Report,
+) -> tuple[Any, int]:
+    """A ``Mapping``'s items or an ``Object``'s fields, cut with ``reason`` (``None``: whole)."""
     output: dict[str, Any] = {}
     box = Container(max_size)
     for key, child in entries:
@@ -416,11 +416,11 @@ def _json_entries(
         value, child_size = _json(child, available, pointer_child(path, key_text), report)
         output[key_text] = value
         box.commit(overhead, child_size)
-    return output, box.size, box.reason
-
-
-# One rule per node type, looked up by exact type: ``_json`` dispatches, each
-# rule gets its own node type and returns ``(value, size)``.
+    if box.reason is not None:
+        report.incomplete(path, box.reason)
+    if reason is not None:
+        report.incomplete(path, reason)
+    return output, box.size
 
 
 def _json_string(text: str, max_size: int, path: str, report: _Report) -> tuple[Any, int]:
@@ -454,17 +454,7 @@ def _json_scalar(node: Scalar, max_size: int, path: str, report: _Report) -> tup
     return fallback_json(type(scalar).__name__, max_size)
 
 
-def _json_no_room(
-    name: str, reason: str | None, max_size: int, path: str, report: _Report
-) -> tuple[Any, int]:
-    """A container with less than 2 characters left: no brackets fit."""
-    report.incomplete(path, reason or "max_length")
-    return fallback_json(name, max_size)
-
-
 def _json_sequence(node: Sequence, max_size: int, path: str, report: _Report) -> tuple[Any, int]:
-    if max_size < 2:
-        return _json_no_room("list", node.reason, max_size, path, report)
     output: list[Any] = []
     box = Container(max_size)
     for index, child in enumerate(node.items):
@@ -480,44 +470,6 @@ def _json_sequence(node: Sequence, max_size: int, path: str, report: _Report) ->
     return output, box.size
 
 
-def _json_fields(
-    node: Mapping | Object,
-    entries: tuple[tuple[Any, Snapshot], ...],
-    max_size: int,
-    path: str,
-    report: _Report,
-) -> tuple[Any, int]:
-    mapping, size, stop = _json_entries(entries, max_size, path, report)
-    if stop is not None:
-        report.incomplete(path, stop)
-    if not node.complete:
-        report.incomplete(path, node.reason)
-    return mapping, size
-
-
-def _json_mapping(node: Mapping, max_size: int, path: str, report: _Report) -> tuple[Any, int]:
-    if max_size < 2:
-        return _json_no_room("dict", node.reason, max_size, path, report)
-    if node.wrapper:
-        wrapped = _json_wrapper(node.items, max_size, path, report)
-        if wrapped is not None:
-            return wrapped
-    return _json_fields(node, node.items, max_size, path, report)
-
-
-def _json_object(node: Object, max_size: int, path: str, report: _Report) -> tuple[Any, int]:
-    if max_size < 2:
-        return _json_no_room("dict", node.reason, max_size, path, report)
-    return _json_fields(node, node.fields, max_size, path, report)
-
-
-def _json_ref(node: Ref, max_size: int, path: str, report: _Report) -> tuple[Any, int]:
-    if max_size < 2:
-        return _json_no_room("dict", "cycle", max_size, path, report)
-    report.incomplete(path, "cycle")
-    return ([], 2) if node.kind == "sequence" else ({}, 2)
-
-
 def _json_unavailable(
     node: Unavailable, max_size: int, path: str, report: _Report
 ) -> tuple[Any, int]:
@@ -528,23 +480,36 @@ def _json_unavailable(
     return fallback_json(node.type_name, max_size)
 
 
-_JSON_RULES: dict[type, Callable[[Any, int, str, _Report], tuple[Any, int]]] = {
-    Scalar: _json_scalar,
-    Text: _json_text,
-    Sequence: _json_sequence,
-    Mapping: _json_mapping,
-    Object: _json_object,
-    Ref: _json_ref,
-    Unavailable: _json_unavailable,
-}
-
-
 def _json(node: Snapshot, max_size: int, path: str, report: _Report) -> tuple[Any, int]:
-    """One node as a JSON-compatible value fitted to ``max_size`` (#342's accounting)."""
-    rule = _JSON_RULES.get(type(node))
-    if rule is None:
+    """One node as a JSON-compatible value fitted to ``max_size`` (#342's accounting).
+
+    One small rule per node type, by exact type. A container with less than
+    2 characters left has no room for its brackets: a fallback.
+    """
+    if type(node) is Scalar:
+        return _json_scalar(node, max_size, path, report)
+    if type(node) is Text:
+        return _json_text(node, max_size, path, report)
+    if type(node) is Unavailable:
+        return _json_unavailable(node, max_size, path, report)
+    if type(node) is Ref:
+        reason, empty = "cycle", ([], 2) if node.kind == "sequence" else ({}, 2)
+    elif type(node) is Sequence or type(node) is Mapping or type(node) is Object:
+        reason, empty = node.reason, None
+    else:
         raise TypeError(f"not a snapshot node: {type(node).__name__}")
-    return rule(node, max_size, path, report)
+    if max_size < 2:
+        report.incomplete(path, reason or "max_length")
+        return fallback_json("list" if type(node) is Sequence else "dict", max_size)
+    if empty is not None:  # a Ref
+        report.incomplete(path, reason)
+        return empty
+    if type(node) is Sequence:
+        return _json_sequence(node, max_size, path, report)
+    if type(node) is Mapping:
+        wrapped = _json_wrapper(node.items, max_size, path, report) if node.wrapper else None
+        return wrapped or _json_entries(node.items, reason, max_size, path, report)
+    return _json_entries(cast(Object, node).fields, reason, max_size, path, report)
 
 
 def _render(snapshot: Snapshot, max_chars: int) -> tuple[str, _Report]:
