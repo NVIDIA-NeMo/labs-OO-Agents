@@ -571,15 +571,11 @@ def client_from_config(
     # belong to the replacement route and are validated by its constructor.
     # The configured URL under the other spelling, or normalized differently
     # (trailing slash, host case), is the same route.
-    from nooa.unifiedllm.route_identity import endpoint_changed
+    from nooa.unifiedllm.route_identity import endpoint_or_provider_changed
 
     if config and (
         overrides.get("model", model) != model
-        or endpoint_changed(config, overrides)
-        or (
-            "custom_llm_provider" in overrides
-            and overrides["custom_llm_provider"] != config.get("custom_llm_provider")
-        )
+        or endpoint_or_provider_changed(config, overrides)
         or (client_type is not None and client_type != config.get("client_type", "completion"))
         or overrides.get("client") is not None
     ):

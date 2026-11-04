@@ -69,6 +69,19 @@ def endpoint_changed(defaults: Mapping[str, Any], overrides: Mapping[str, Any]) 
     return False
 
 
+def endpoint_or_provider_changed(defaults: Mapping[str, Any], overrides: Mapping[str, Any]) -> bool:
+    """Whether ``overrides`` change the endpoint or the ``custom_llm_provider``.
+
+    The endpoint is compared with endpoint_changed(). A ``custom_llm_provider``
+    override counts when it differs from the configured one. Callers add their
+    own model, client-type and client-object checks.
+    """
+    return endpoint_changed(defaults, overrides) or (
+        "custom_llm_provider" in overrides
+        and overrides["custom_llm_provider"] != defaults.get("custom_llm_provider")
+    )
+
+
 def _endpoint(config: Mapping[str, Any]) -> tuple[str, ...]:
     """Return the normalized endpoint URLs set in ``config``, sorted.
 

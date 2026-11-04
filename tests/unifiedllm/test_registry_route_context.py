@@ -192,6 +192,18 @@ def test_endpoint_whitespace_is_not_a_route_change():
     assert endpoint_changed({"api_base": BASE}, {"api_base": "https://other.test/v1 "})
 
 
+def test_endpoint_or_provider_changed_is_shared_by_reasoning_and_registry():
+    from nooa.unifiedllm import reasoning
+    from nooa.unifiedllm.route_identity import endpoint_or_provider_changed
+
+    configured = {"api_base": BASE, "custom_llm_provider": "openai"}
+    assert not endpoint_or_provider_changed(configured, {"base_url": BASE + "/"})
+    assert not endpoint_or_provider_changed(configured, {"custom_llm_provider": "openai"})
+    assert endpoint_or_provider_changed(configured, {"custom_llm_provider": "other"})
+    assert endpoint_or_provider_changed(configured, {"api_base": "https://other.test/v1"})
+    assert not hasattr(reasoning, "_endpoint_changed")
+
+
 def test_direct_lookup_tolerates_a_malformed_api_key_env():
     """A non-string api_key_env must not crash the lookup; that entry just never matches a key."""
     registry.MODELS["local"] = entry(api_key_env=["NOT", "A", "NAME"])
