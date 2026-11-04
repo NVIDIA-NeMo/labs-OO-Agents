@@ -1295,7 +1295,8 @@ class UnifiedLLM(ABC):
 
         ``api_base`` and ``base_url`` are two spellings of the same endpoint:
 
-        - An endpoint override of ``None`` counts as no override. Clearing the
+        - An endpoint override of ``None``, ``""`` or only whitespace counts as no
+          override. Clearing the
           configured endpoint would send the request, with its credentials, to
           the provider's default endpoint instead of the configured gateway.
         - A non-None override of one spelling also replaces the other spelling if
@@ -1306,10 +1307,12 @@ class UnifiedLLM(ABC):
           ``base_url``, and because an override equal to the configured URL must
           leave the route, and therefore the media permissions, unchanged.
         """
+        from nooa.unifiedllm.route_identity import no_endpoint_override
+
         overrides = {
             key: value
             for key, value in overrides.items()
-            if not (key in ("api_base", "base_url") and value is None)
+            if not (key in ("api_base", "base_url") and no_endpoint_override(value))
         }
         params = apply_reasoning_level(
             self._reasoning_config, self.model, self.config, overrides, self.reasoning_level

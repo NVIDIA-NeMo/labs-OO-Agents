@@ -256,6 +256,28 @@ def test_factory_same_endpoint_override_keeps_media_and_levels(spelling, same):
     assert other.reasoning_levels is None
 
 
+@pytest.mark.parametrize("spelling", ["api_base", "base_url"])
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_blank_endpoint_override_keeps_the_configured_endpoint(spelling, blank):
+    """An empty endpoint must not send the gateway key to the provider default."""
+    config = entry(media_inputs=["image"], api_key="gw-key")
+    c = registry.client_from_config("local", deepcopy(config), **{spelling: blank})
+    assert c.config["api_base"] == BASE
+    assert c.config.get("base_url") in (None, BASE)
+    assert c.media_inputs == ("image",)
+    assert c.context_window == 8192
+    params = c._prepare_call_config({spelling: blank})
+    assert params["api_base"] == BASE
+    assert params.get("base_url") in (None, BASE)
+    assert c._request_media_inputs(params) == ("image",)
+    assert c.get_context_limits({spelling: blank}).context_window == 8192
+    levels = {"low": {"reasoning_effort": "low"}}
+    d = CompletionClient(MODEL, base_url=BASE, reasoning_levels=levels, reasoning_level="low")
+    params = d._prepare_call_config({spelling: blank})
+    assert params["reasoning_effort"] == "low"
+    assert params["base_url"] == BASE
+
+
 def test_direct_lookup_still_lazily_loads(monkeypatch):
     calls = []
 

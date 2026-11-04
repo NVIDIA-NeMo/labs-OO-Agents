@@ -469,13 +469,16 @@ def client_from_config(
 
     # api_base and base_url are two spellings of the same endpoint. An override
     # of None counts as no override: clearing the configured endpoint would send
-    # requests and credentials to the provider's default endpoint. A non-None
-    # override of either spelling replaces every spelling the entry configures
-    # (set below), so the owned SDK client never binds the old endpoint.
+    # requests and credentials to the provider's default endpoint. An empty or
+    # whitespace-only string counts as None too. Any other override of either
+    # spelling replaces every spelling the entry configures (set below), so the
+    # owned SDK client never binds the old endpoint.
+    from nooa.unifiedllm.route_identity import no_endpoint_override
+
     overrides = {
         key: value
         for key, value in overrides.items()
-        if not (key in ("api_base", "base_url") and value is None)
+        if not (key in ("api_base", "base_url") and no_endpoint_override(value))
     }
     endpoint_override = next(
         (overrides[key] for key in ("api_base", "base_url") if key in overrides), None

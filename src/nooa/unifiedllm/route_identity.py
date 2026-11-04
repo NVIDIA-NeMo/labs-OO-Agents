@@ -34,13 +34,24 @@ def normalize_endpoint(value: Any) -> str | None:
         return None
 
 
+def no_endpoint_override(value: Any) -> bool:
+    """Whether an endpoint override value means "keep the configured endpoint".
+
+    ``None``, an empty string and a whitespace-only string count as no override:
+    treating them as a real value would send the request, with its credentials,
+    to the provider's default endpoint instead of the configured gateway.
+    """
+    return value is None or (isinstance(value, str) and not value.strip())
+
+
 def endpoint_changed(defaults: Mapping[str, Any], overrides: Mapping[str, Any]) -> bool:
     """Whether ``overrides`` set an endpoint other than the one ``defaults`` configure.
 
     ``api_base`` and ``base_url`` are two spellings of one endpoint, so the
     configured URL under the other spelling is not a change. URLs are compared
-    after normalize_endpoint(). A ``None`` override is no override; an override
-    that is not a valid URL string always counts as a change.
+    after normalize_endpoint(). A ``None`` or blank override is no override (see
+    no_endpoint_override); any other value that is not a valid URL string always
+    counts as a change.
     """
     configured = {
         normalize_endpoint(defaults[key])
@@ -49,7 +60,7 @@ def endpoint_changed(defaults: Mapping[str, Any], overrides: Mapping[str, Any]) 
     } - {None}
     for key in _ENDPOINT_ALIASES:
         value = overrides.get(key)
-        if value is None:
+        if no_endpoint_override(value):
             continue
         normalized = normalize_endpoint(value)
         if normalized is None or normalized not in configured:

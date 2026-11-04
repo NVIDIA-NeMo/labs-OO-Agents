@@ -107,7 +107,7 @@ def _endpoint_changed(defaults: Mapping[str, Any], overrides: Mapping[str, Any])
 
     ``api_base`` and ``base_url`` are two spellings of one endpoint, so passing the
     configured URL under the other spelling is not a route change. A ``None``
-    override is no override. URLs are normalized as for context windows (see
+    or blank override is no override. URLs are normalized as for context windows (see
     route_identity.endpoint_changed), so the three route checks agree.
     """
     from nooa.unifiedllm.route_identity import endpoint_changed
