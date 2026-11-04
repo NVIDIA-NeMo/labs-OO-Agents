@@ -316,70 +316,56 @@ def merge(a: Text, b: Text, head: int, tail: int) -> Text:
     """``a`` then ``b`` as one ``Text`` of at most ``head`` + ``tail`` kept units.
 
     For unread progress deltas: ``length`` is ``a.length + b.length``, and
-    what either delta had already omitted stays omitted. Each input keeps its
-    own units (bytes stay bytes), so the counts are exact:
-    ``length == len(head) + len(tail) + omitted``. A bytes cut keeps whole
-    code points, as ``TextStream`` does.
+    what either delta had already omitted stays omitted, so the head comes
+    only from what was kept before the first gap and the tail only from
+    what was kept after the last one. Each input keeps its own units (bytes
+    stay bytes), so the counts are exact. A bytes cut keeps whole code
+    points, as ``TextStream`` does, and never moves across the joint of two
+    inputs' parts.
     """
     if a.unit != b.unit:
         raise ValueError(f"cannot merge {a.unit} with {b.unit}")
     if head < 0 or tail < 0:
         raise ValueError("head and tail must be non-negative")
-    unit = a.unit
-    # The kept parts in order, ``None`` where an input omitted units.
-    pieces: list[str | bytes | None] = []
-    for text in (a, b):
-        pieces += [text.head, None, text.tail] if not text.complete else [text.head, text.tail]
-    pieces = [piece for piece in pieces if piece is None or len(piece)]
     length = a.length + b.length
-    full = (
-        b.full if a.full is not None and b.full is not None and a.full.path == b.full.path else None
-    )
-    empty = b"" if unit == "bytes" else ""
-
-    def joined(parts: list[str | bytes | None]) -> str | bytes:
-        return empty.join(parts)  # type: ignore[arg-type]
-
-    if None not in pieces and sum(len(piece) for piece in pieces) <= head + tail:  # type: ignore[arg-type]
-        return Text(head=joined(pieces), length=length, unit=unit, full=full)
-
-    head_parts: list[str | bytes | None] = []
-    room, index = head, 0
-    while index < len(pieces) and room > 0:
-        piece = pieces[index]
-        if piece is None:
-            break
-        if len(piece) <= room:
-            head_parts.append(piece)
-            room -= len(piece)
-            index += 1
-            continue
-        cut = safe_end(piece, room) if isinstance(piece, bytes) else room
-        head_parts.append(piece[:cut])
-        pieces[index] = piece[cut:]  # what the tail may still keep of it
-        break
-    tail_parts: list[str | bytes | None] = []
-    room, last = tail, len(pieces) - 1
-    while last >= index and room > 0:
-        piece = pieces[last]
-        if piece is None:
-            break
-        if len(piece) <= room:
-            tail_parts.insert(0, piece)
-            room -= len(piece)
-            last -= 1
-            continue
-        start = len(piece) - room
-        tail_parts.insert(
-            0, piece[safe_start(piece, start) if isinstance(piece, bytes) else start :]
-        )
-        break
-    reason = a.reason or b.reason or "max_length"
+    same_file = a.full is not None and b.full is not None and a.full.path == b.full.path
+    full = b.full if same_file else None
+    # The joints: where one input's part ends and the next begins. A bytes
+    # cut never moves across one, so each part is cut on its own code points.
+    gapless = a.complete and b.complete
+    if gapless:
+        whole = a.head + b.head  # type: ignore[operator]
+        if len(whole) <= head + tail:
+            return Text(head=whole, length=length, unit=a.unit, full=full)
+        left = right = whole
+        left_joints = right_joints = (len(a.head),)
+    else:
+        left = a.head if not a.complete else a.head + b.head  # type: ignore[operator]
+        right = b.tail if not b.complete else a.tail + b.head  # type: ignore[operator]
+        left_joints = () if not a.complete else (len(a.head),)
+        right_joints = () if not b.complete else (len(a.tail),)
+    kept_head = left[: _head_end(left, head, left_joints)]
+    low = len(kept_head) if gapless else 0  # the tail starts after the kept head
+    start = _tail_start(right, max(low, len(right) - tail), (*right_joints, low))
     return Text(
-        head=joined(head_parts),
-        tail=joined(tail_parts),
+        head=kept_head,
+        tail=right[start:],
         length=length,
-        unit=unit,
-        reason=reason,
+        unit=a.unit,
+        reason=a.reason or b.reason or "max_length",
         full=full,
     )
+
+
+def _head_end(text: str | bytes, end: int, joints: tuple[int, ...]) -> int:
+    """Where a head of at most ``end`` units of ``text`` stops (bytes: on a code point, not before a joint)."""
+    if isinstance(text, str):
+        return min(end, len(text))
+    return max([safe_end(text, end), *(joint for joint in joints if joint <= end)])
+
+
+def _tail_start(text: str | bytes, start: int, joints: tuple[int, ...]) -> int:
+    """Where a tail from ``start`` begins (bytes: on a code point, not past a joint)."""
+    if isinstance(text, str):
+        return start
+    return min([safe_start(text, start), *(joint for joint in joints if joint >= start)])
