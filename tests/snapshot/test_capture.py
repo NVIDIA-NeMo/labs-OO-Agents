@@ -443,7 +443,7 @@ def test_dataclass_foreign_constraint_metadata_stays_visible() -> None:
 def test_dataclass_hints_are_evaluated_once_per_class(monkeypatch) -> None:
     import typing
 
-    from nooa.snapshot import _capture
+    from nooa.snapshot import _visibility
 
     calls: list[object] = []
     real = typing.get_type_hints
@@ -465,12 +465,12 @@ def test_dataclass_hints_are_evaluated_once_per_class(monkeypatch) -> None:
     assert calls == [Counted]
     calls.clear()
     key = id(Counted)
-    assert key in _capture._HINTS
+    assert key in _visibility._HINTS
     del Counted
     import gc
 
     gc.collect()
-    assert key not in _capture._HINTS  # dropped with the class (weakref.finalize)
+    assert key not in _visibility._HINTS  # dropped with the class (weakref.finalize)
 
 
 class _Unhashable(type):
@@ -915,10 +915,10 @@ def test_class_namespace_foreign_key_is_never_compared() -> None:
 
 
 def test_safe_dict_survives_a_namespace_changing_during_the_key_check() -> None:
-    from nooa.snapshot import _capture
+    from nooa.snapshot import _limits, _raw
 
     namespace = {f"k{index}": index for index in range(8)}
-    code = _capture._safe_dict.__code__
+    code = _raw._safe_dict.__code__
     mutations: list[int] = []
 
     def local(frame: Any, event: str, arg: Any) -> Any:
@@ -935,9 +935,7 @@ def test_safe_dict_survives_a_namespace_changing_during_the_key_check() -> None:
     previous = sys.gettrace()
     sys.settrace(tracer)
     try:
-        checked = _capture._safe_dict(
-            namespace, namespace, _capture._State(_capture.DEFAULT_LIMITS)
-        )
+        checked = _raw._safe_dict(namespace, namespace, _limits._State(_limits.DEFAULT_LIMITS))
     finally:
         sys.settrace(previous)
 

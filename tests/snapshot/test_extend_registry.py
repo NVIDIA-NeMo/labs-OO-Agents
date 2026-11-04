@@ -12,7 +12,7 @@ from nooa.snapshot import (
     Object,
     Scalar,
     Unavailable,
-    _capture,
+    _shapes,
     array_like,
     capture,
     mapping_like,
@@ -61,7 +61,7 @@ def test_register_needs_a_shape() -> None:
         None,
         "array_like",
         {"length": len},
-        _capture._PYDANTIC,  # internal shapes are not public
+        _shapes._PYDANTIC,  # internal shapes are not public
     ]
     for not_a_shape in not_shapes:
         with pytest.raises(TypeError):
