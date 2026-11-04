@@ -39,6 +39,7 @@ from nooa.context_blocks import Metadata
 from nooa.context_blocks.roles import Role
 from nooa.runtime.turn_loop import ResultKind
 from nooa.storage.markers import nosnapshot
+from nooa.storage.persistent_vars import PersistentVars
 from nooa.storage.snapshot_vars import SnapshotVars
 
 with hidden:
@@ -400,18 +401,12 @@ def install_summarizer(config: SummarizationConfig, agent: Agent) -> None:
     summarizer._automatic_context_budget_percent = config.threshold_fraction
 
 
-def _var_name(key: Any) -> str:
-    if not isinstance(key, str):
-        raise TypeError(f"var names are str, got {type(key).__name__}")
-    return key
-
-
-class AgentVars:
+class AgentVars(PersistentVars):
     """An agent's persistent ``vars`` dict, also usable as attributes.
 
-    Mirrors ``TodoVars``: ``self.v.spec = "..."`` and ``self.v["spec"] = "..."``
-    write the same entry. Reads and writes go straight through to
-    ``self.vars`` so snapshot serialization is unaffected.
+    ``self.v.spec = "..."`` and ``self.v["spec"] = "..."`` write the same
+    entry. Reads and writes go straight through to ``self.vars`` so
+    snapshot serialization is unaffected.
 
     Use for variables that need to survive across turns and across
     sessions but aren't tied to a specific todo. (For per-todo state,
@@ -421,40 +416,10 @@ class AgentVars:
     snapshot-serialized (a live client, socket, callable, ...) logs a
     warning and is **not stored** — it won't survive ``/exit`` + resume.
     Store serializable data (dict/str/number/Pydantic model) instead.
+    Helper names (``keys``, ``items``, ``get``, ``set``, ``clear``) and
+    ``_``-prefixed names are read with ``get(name)`` and written with
+    ``set(name, value)``.
     """
-
-    def __init__(self, agent: Any):
-        object.__setattr__(self, "_agent", agent)
-
-    def __getattr__(self, key: str) -> Any:
-        try:
-            return self._agent.vars[key]
-        except KeyError:
-            raise AttributeError(f"No var {key!r} on agent") from None
-
-    def __setattr__(self, key: str, value: Any) -> None:
-        self._agent.vars[key] = value
-
-    def __getitem__(self, key: str) -> Any:
-        return self._agent.vars[_var_name(key)]
-
-    def __setitem__(self, key: str, value: Any) -> None:
-        self._agent.vars[_var_name(key)] = value
-
-    def __delitem__(self, key: str) -> None:
-        del self._agent.vars[_var_name(key)]
-
-    def __delattr__(self, key: str) -> None:
-        try:
-            del self._agent.vars[key]
-        except KeyError:
-            raise AttributeError(f"No var {key!r} on agent") from None
-
-    def __contains__(self, key: str) -> bool:
-        return key in self._agent.vars
-
-    def __repr__(self) -> str:
-        return repr(self._agent.vars)
 
 
 # The ``queues`` context block. Its expression is shown to the model, so it

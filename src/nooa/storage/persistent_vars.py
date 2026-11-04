@@ -3,9 +3,8 @@
 """Shared persistent-dict facade over an owner's existing ``vars`` mapping.
 
 This generalizes the ``TodoVars`` proxy formerly defined in ``nooa.tools.todo``;
-it does not implement a new persistence backend. Core ``Todo.v`` uses this proxy;
-applications may opt into it for ``self.v``. ``InteractiveAgent.v`` still uses
-its separate ``AgentVars`` proxy and reserved-name rules. It lives beside ``SnapshotVars``
+it does not implement a new persistence backend. Core ``Todo.v`` uses this proxy
+and ``InteractiveAgent.v`` its ``AgentVars`` subclass. It lives beside ``SnapshotVars``
 so the core Todo tool does not depend on the CLI or an interactive session host.
 Snapshot storage and its owner determine when values are saved and restored.
 """
@@ -80,7 +79,7 @@ class PersistentVars:
             raise TypeError(f"var names are str, got {type(key).__name__}")
         if key.startswith("_") or any(key in cls.__dict__ for cls in type(self).__mro__):
             hint = "; " + fix.format(key=key) if fix else ""
-            raise AttributeError(f"{key!r} is reserved by PersistentVars{hint}")
+            raise AttributeError(f"{key!r} is reserved by {type(self).__name__}{hint}")
 
     def __contains__(self, key: str) -> bool:
         return key in self._owner.vars
