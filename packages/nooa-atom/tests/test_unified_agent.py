@@ -806,6 +806,11 @@ async def test_reserved_names_and_snapshots(tmp_path):
         for name in ("jobs", "user_messages", "user", "delegates"):
             with pytest.raises(ValueError, match="names a channel"):
                 agent.jobs.launch(asyncio.sleep(1), name=name)
+            with pytest.raises(ValueError, match="names a channel"):
+                agent.jobs.after(60, name=name)
+            with pytest.raises(ValueError, match="names a channel"):
+                agent.jobs.every(30, name=name)
+        assert not agent.jobs.running()
         job = agent.jobs.launch(asyncio.sleep(30), name="nap")
         agent.v.job = job
         agent.v.shell = Shell()

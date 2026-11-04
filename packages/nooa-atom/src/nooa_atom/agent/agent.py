@@ -63,7 +63,6 @@ with hidden:
     from nooa_atom.agent.done_reflection import DoneReflectionPlan, reflect_accepted_done
     from nooa_atom.agent.reflection_gate import _ReflectionGate
     from nooa_atom.agent.roles import TurnPolicy
-    from nooa_atom.agent.work_manager import _public_signature
 
 __all__ = ["AtomAgent", "Files"]
 
@@ -101,24 +100,15 @@ class _AgentJobs(WorkManager):
         super().__init__(agent._jobs_in, **kwargs)
         self._agent = agent
 
-    @_public_signature
-    def launch(
-        self,
-        work: Any,
-        *,
-        name: str | None = None,
-        progress: Throttle | None = None,
-        **unexpected: Any,
-    ) -> Job:
-        if (
-            not unexpected
-            and name is not None
-            and (name in PERSON_NAMES or name in self._agent.queue_manager.channels())
+    def _launch(self, work: Any, *, name: str | None, **options: Any) -> Job:
+        # launch(), after() and every() all start here, so one check covers them.
+        if name is not None and (
+            name in PERSON_NAMES or name in self._agent.queue_manager.channels()
         ):
             if inspect.iscoroutine(work):
                 work.close()
             raise ValueError(f"{name!r} names a channel or the person; pick another job name")
-        return super().launch(work, name=name, progress=progress, **unexpected)
+        return super()._launch(work, name=name, **options)
 
 
 # CodeActV2's python_cell description names the legacy delegation method.
