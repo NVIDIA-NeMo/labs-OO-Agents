@@ -21,7 +21,7 @@ from acp.schema import (
     ElicitationCapabilities,
     ElicitationFormCapabilities,
 )
-from atom_test_agents import ScriptedModels
+from atom_test_agents import ModelFactory, ScriptedModels, reply
 from nooa_atom.acp import terminal_auth
 from nooa_atom.acp.protocol import initialize_response
 
@@ -315,3 +315,148 @@ async def test_clients_without_terminal_auth_keep_todays_connect(
     assert _CONNECT_TEXT in "".join(client.texts(AgentMessageChunk, session_id))
     assert not [entry for entry in client.log if entry[0] == "elicitation"]
     assert (user_dir / terminal_auth.RESULT_FILE).exists()
+
+
+# ---- after a save: the session uses the saved alias ---------------------------------
+
+
+@pytest.fixture
+def saving_wizard(monkeypatch, user_dir):
+    """The wizard's own save (``connect.write`` to the user registry), without its screens."""
+    from nooa import paths
+    from nooa.unifiedllm import connect
+
+    class Wizard:
+        alias = "second"
+
+    def run_wizard(**options):
+        connect.write(
+            {
+                "model_name": f"openai/{Wizard.alias}",
+                "api_base": "https://api.test/v1",
+                "api_key_env": "K",
+            },
+            paths.get_user_dir("llm_config.yaml"),
+            alias=Wizard.alias,
+        )
+        return Wizard.alias
+
+    monkeypatch.setattr("nooa_cli.commands._connect_wizard.run_wizard", run_wizard)
+    return Wizard
+
+
+class WorkspaceDefault(ModelFactory):
+    """Like the server's factory: no alias means the workspace's default model."""
+
+    def __call__(self, alias, workspace):
+        from nooa_atom.workspace.models import default_model
+
+        return super().__call__(alias or default_model(workspace), workspace)
+
+
+def _model_option(config_options):
+    (option,) = [option for option in config_options or [] if option.id == "model"]
+    return option.current_value, [choice.value for choice in option.options]
+
+
+async def _connected_session(make_adapter, workspace, user_dir, factory):
+    """A session on ``first``; its /connect asks for auth and the wizard saves ``second``."""
+    _save_user_model(user_dir, "first")
+    adapter = await make_adapter(
+        ScriptedModels({None: []}), capabilities=TERMINAL, llm_factory=factory
+    )
+    new = await adapter.new_session(str(workspace))
+    assert _model_option(new.config_options) == ("first", ["first"])
+    with pytest.raises(RequestError) as failed:
+        await _connect_prompt(adapter, new.session_id)
+    assert failed.value.code == -32000
+    assert _connect().exit_code == 0  # the client runs `nooa atom --connect`
+    return adapter, new.session_id
+
+
+async def test_a_retried_connect_switches_the_session_to_the_saved_alias(
+    make_adapter, workspace, client, user_dir, saving_wizard, no_server
+):
+    factory = WorkspaceDefault()
+    adapter, session_id = await _connected_session(make_adapter, workspace, user_dir, factory)
+    response = await _connect_prompt(adapter, session_id)
+    assert response.stop_reason == "end_turn"
+    assert adapter.session(session_id).info.model == "second"
+    (update,) = client.updates(session_id, ConfigOptionUpdate)
+    assert _model_option(update.config_options) == ("second", ["first", "second"])
+    text = "".join(client.texts(AgentMessageChunk, session_id))
+    assert "Saved model alias second: openai/second" in text
+    assert "This session uses it from now on." in text
+
+
+@pytest.mark.parametrize("then", ["prompt", "authenticate", "load", "new"])
+async def test_the_saved_alias_is_used_without_a_second_connect(
+    make_adapter, workspace, client, user_dir, saving_wizard, no_server, then
+):
+    factory = WorkspaceDefault({"second": [[reply("From the saved model.")]]})
+    adapter, session_id = await _connected_session(make_adapter, workspace, user_dir, factory)
+    if then == "prompt":
+        response = await adapter.prompt(session_id, [text_block("hello")])
+        assert response.stop_reason == "end_turn"
+        texts = client.texts(AgentMessageChunk, session_id)
+        assert texts[-1] == "From the saved model.\n\n"
+        assert any("This session uses it from now on." in text for text in texts)
+    elif then == "authenticate":
+        await adapter.authenticate(terminal_auth.CONNECT_METHOD_ID)
+    elif then == "load":
+        # The client reconnected and loads the session again.
+        await adapter.close_session(session_id)
+        loaded = await adapter.load_session(str(workspace), session_id)
+        assert _model_option(loaded.config_options) == ("second", ["first", "second"])
+    else:
+        # The client restarted the agent and started a new session.
+        await adapter.close()
+        adapter = await make_adapter(
+            ScriptedModels({None: []}), capabilities=TERMINAL, llm_factory=factory
+        )
+        new = await adapter.new_session(str(workspace))
+        session_id = new.session_id
+        assert _model_option(new.config_options) == ("second", ["first", "second"])
+    assert adapter.session(session_id).info.model == "second"
+    if then in {"prompt", "authenticate"}:
+        update = client.updates(session_id, ConfigOptionUpdate)[-1]
+        assert _model_option(update.config_options) == ("second", ["first", "second"])
+    # The save was taken: a later /connect runs the wizard again.
+    with pytest.raises(RequestError):
+        await _connect_prompt(adapter, session_id)
+
+
+async def test_first_start_uses_the_saved_alias(
+    make_adapter, workspace, user_dir, saving_wizard, no_server
+):
+    factory = WorkspaceDefault()
+    adapter = await make_adapter(
+        ScriptedModels({None: []}), capabilities=TERMINAL, llm_factory=factory
+    )
+    with pytest.raises(RequestError):
+        await adapter.new_session(str(workspace))
+    assert _connect().exit_code == 0
+    new = await adapter.new_session(str(workspace))
+    assert _model_option(new.config_options) == ("second", ["second"])
+    assert adapter.session(new.session_id).info.model == "second"
+    assert not (user_dir / terminal_auth.RESULT_FILE).exists()
+
+
+async def test_an_alias_the_workspace_cannot_use_is_reported_not_switched_to(
+    make_adapter, workspace, client, user_dir
+):
+    _save_user_model(user_dir, "first")
+    adapter = await make_adapter(
+        ScriptedModels({None: []}), capabilities=TERMINAL, llm_factory=WorkspaceDefault()
+    )
+    session_id = (await adapter.new_session(str(workspace))).session_id
+    terminal_auth.write_result("elsewhere", "openai/x", "")
+    await _connect_prompt(adapter, session_id)
+    assert adapter.session(session_id).info.model == "first"
+    assert "not in the model configuration" in "".join(client.texts(AgentMessageChunk, session_id))
+
+
+async def test_authenticate_rejects_an_unknown_method(make_adapter):
+    adapter = await make_adapter(ScriptedModels({None: []}), capabilities=TERMINAL)
+    with pytest.raises(RequestError):
+        await adapter.authenticate("other")
