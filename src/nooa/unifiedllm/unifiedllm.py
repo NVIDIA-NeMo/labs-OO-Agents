@@ -6,7 +6,6 @@ import inspect
 import json
 import logging
 import math
-import os
 import re
 import warnings
 from abc import ABC, abstractmethod
@@ -1571,6 +1570,7 @@ class UnifiedLLM(ABC):
         # import-time side effect.
         from nooa.unifiedllm.registry import (
             MODELS,
+            _lookup_api_key_env,
             _registry_lock,
             ensure_loaded,
         )
@@ -1605,9 +1605,12 @@ class UnifiedLLM(ABC):
         for key, cfg in models_snapshot.items():
             entry_client_type = cfg.get("client_type", "completion")
             if client_key is not None:
+                # Resolve the entry key as the registry does (validated name,
+                # NVIDIA synonyms, empty means unset), but without its warnings:
+                # this loop visits every entry. A malformed api_key_env gives None.
                 entry_key = cfg.get("api_key")
-                if entry_key is None and cfg.get("api_key_env"):
-                    entry_key = os.environ.get(cfg["api_key_env"])
+                if entry_key is None:
+                    entry_key, _ = _lookup_api_key_env(cfg)
                 if entry_key != client_key:
                     continue
             # Completion and Responses clients are never sent the registry-only

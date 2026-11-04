@@ -92,6 +92,38 @@ _NVIDIA_KEY_SYNONYMS = {
 _ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
+def _lookup_api_key_env(
+    config: Mapping[str, Any], *, allowed_env_vars: Collection[str] | None = None
+) -> tuple[str | None, str | None]:
+    """Return ``(key, problem)`` for the ``api_key_env`` of ``config``, without logging.
+
+    ``key`` is the value of the named env var (or its NVIDIA synonym); an empty
+    value counts as unset. ``problem`` is None on success or when ``api_key_env``
+    is not set, else one of ``"type"``, ``"name"``, ``"not_allowed"`` and
+    ``"unset"``; ``key`` is then None. Never raises for malformed values.
+    """
+    api_key_env = config.get("api_key_env")
+    if not api_key_env:
+        return None, None
+    # Defend against malformed YAML where api_key_env was written as a
+    # number, list, etc. — os.getenv would raise TypeError.
+    if not isinstance(api_key_env, str):
+        return None, "type"
+    if not _ENV_VAR_NAME_RE.fullmatch(api_key_env):
+        return None, "name"
+    if allowed_env_vars is not None and api_key_env not in allowed_env_vars:
+        return None, "not_allowed"
+    api_key = os.getenv(api_key_env)
+    if api_key:
+        return api_key, None
+    synonym = _NVIDIA_KEY_SYNONYMS.get(api_key_env)
+    if synonym:
+        api_key = os.getenv(synonym)
+        if api_key:
+            return api_key, None
+    return None, "unset"
+
+
 def resolve_api_key_from_config(
     model_name: str,
     config: Mapping[str, Any],
@@ -114,48 +146,37 @@ def resolve_api_key_from_config(
     partially untrusted config. When supplied, only those exact env-var names
     may be resolved.
     """
+    api_key, problem = _lookup_api_key_env(config, allowed_env_vars=allowed_env_vars)
+    if problem is None:
+        return api_key
     api_key_env = config.get("api_key_env")
-    if not api_key_env:
-        return None
-    # Defend against malformed YAML where api_key_env was written as a
-    # number, list, etc. — os.getenv would raise TypeError.
-    if not isinstance(api_key_env, str):
+    if problem == "type":
         logger.warning(
             "Model %r has invalid api_key_env %r: expected a string env var name, got %s.",
             model_name,
             api_key_env,
             type(api_key_env).__name__,
         )
-        return None
-    if not _ENV_VAR_NAME_RE.fullmatch(api_key_env):
+    elif problem == "name":
         logger.warning(
             "Model %r has invalid api_key_env %r: expected a shell-style env var name.",
             model_name,
             api_key_env,
         )
-        return None
-    if allowed_env_vars is not None and api_key_env not in allowed_env_vars:
+    elif problem == "not_allowed":
         logger.warning(
             "Model %r requested api_key_env %r, which is not in the caller's allowed env-var set.",
             model_name,
             api_key_env,
         )
-        return None
-    api_key = os.getenv(api_key_env)
-    if api_key:
-        return api_key
-    synonym = _NVIDIA_KEY_SYNONYMS.get(api_key_env)
-    if synonym:
-        api_key = os.getenv(synonym)
-        if api_key:
-            return api_key
-    logger.warning(
-        "Model %r is configured to read its API key from env var %r, but "
-        "that variable is unset or empty. Falling back to litellm defaults "
-        "(which may use OPENAI_API_KEY).",
-        model_name,
-        api_key_env,
-    )
+    else:
+        logger.warning(
+            "Model %r is configured to read its API key from env var %r, but "
+            "that variable is unset or empty. Falling back to litellm defaults "
+            "(which may use OPENAI_API_KEY).",
+            model_name,
+            api_key_env,
+        )
     return None
 
 

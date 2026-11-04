@@ -182,6 +182,20 @@ def test_direct_lookup_compares_the_entry_resolved_key(monkeypatch):
     assert CompletionClient(MODEL, api_base=BASE, custom_llm_provider="x").context_window is None
 
 
+def test_direct_lookup_tolerates_a_malformed_api_key_env():
+    """A non-string api_key_env must not crash the lookup; that entry just never matches a key."""
+    registry.MODELS["local"] = entry(api_key_env=["NOT", "A", "NAME"])
+    assert CompletionClient(MODEL, api_base=BASE, api_key="k").context_window is None
+    assert CompletionClient(MODEL, api_base=BASE).context_window == 8192
+
+
+def test_direct_lookup_treats_an_empty_env_var_as_unset(monkeypatch):
+    """As in the registry, an empty api_key_env value is no key, not the empty string."""
+    monkeypatch.setenv("LOCAL_SCOPE", "")
+    registry.MODELS["local"] = entry(api_key_env="LOCAL_SCOPE")
+    assert CompletionClient(MODEL, api_base=BASE, api_key="").context_window is None
+
+
 def test_registry_client_keeps_its_own_credential_scope(monkeypatch):
     monkeypatch.setenv("LOCAL_SCOPE", "same-value")
     registry.MODELS["local"] = entry(api_key_env="LOCAL_SCOPE")
