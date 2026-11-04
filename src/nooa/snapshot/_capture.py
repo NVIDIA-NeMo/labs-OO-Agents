@@ -451,12 +451,15 @@ def _build_integer(value: int, max_size: int) -> _Built:
     return _Built(Scalar(value), len(encoded))
 
 
-def _opaque(value: Any, max_size: int, state: _State) -> _Built:
-    """An ``Unavailable("opaque")`` node for an unsupported value, sized as its bounded label."""
-    cls = type(value)
+def _opaque(value: Any, max_size: int, state: _State, module: str | None = None) -> _Built:
+    """An ``Unavailable("opaque")`` node for an unsupported value, sized as its bounded label.
+
+    ``module``: its type's module when known (a non-finite ``float``), else read raw.
+    """
     name_budget = max(0, max_size - len(OPAQUE_PREFIX) - len(OPAQUE_SUFFIX) - 2)
     name = _bounded_type_name(value, name_budget)
-    module = _module_name(cls, state)
+    if module is None:
+        module = _module_name(type(value), state)
     _label, size = opaque_json(name, _builtin_name(value), max_size)
     return _Built(Unavailable("opaque", name, module), size)
 
@@ -671,6 +674,26 @@ def _container(
 # --- visibility (agentdoc ``hidden`` / ``spec(hidden=...)``) ------------------------
 
 
+_MALFORMED = object()
+
+
+def _hidden_flag(raw: Any, state: _State) -> Any:
+    """The ``hidden`` entry of raw metadata keywords: a ``bool``, ``None`` when absent.
+
+    ``_MALFORMED`` (fail closed) unless ``raw`` is an exact ``dict`` with exact
+    ``str`` keys, each charged one node, whose ``hidden`` is absent or a ``bool``.
+    """
+    if type(raw) is not dict:
+        return _MALFORMED
+    found = None
+    for name, value in dict.items(raw):
+        if not state.take_node() or type(name) is not str:
+            return _MALFORMED
+        if name == "hidden":
+            found = value
+    return found if found is None or type(found) is bool else _MALFORMED
+
+
 def _visibility_overrides(
     obj_dict: dict[str, Any], mro: tuple[type[Any], ...], state: _State
 ) -> dict[str, bool] | None:
@@ -683,23 +706,13 @@ def _visibility_overrides(
         if type(raw) is not dict:
             return False
         for field_name, metadata in dict.items(raw):
-            if not state.take_node():
+            if not state.take_node() or type(field_name) is not str:
                 return False
-            if type(field_name) is not str or type(metadata) is not dict:
+            flag = _hidden_flag(metadata, state)
+            if flag is _MALFORMED:
                 return False
-            hidden_value = None
-            for metadata_name, metadata_value in dict.items(metadata):
-                if not state.take_node():
-                    return False
-                if type(metadata_name) is not str:
-                    return False
-                if metadata_name == "hidden":
-                    hidden_value = metadata_value
-            if hidden_value is not None:
-                if type(hidden_value) is not bool:
-                    return False
-                if overwrite or field_name not in class_overrides:
-                    class_overrides[field_name] = hidden_value
+            if flag is not None and (overwrite or field_name not in class_overrides):
+                class_overrides[field_name] = flag
         return True
 
     for base in mro:
@@ -731,21 +744,11 @@ def _metadata_hidden(metadata: Any, state: _State) -> bool | None:
                 kwargs = object.__getattribute__(item, "kwargs")
             except Exception:
                 return None
-            if type(kwargs) is not dict:
+            flag = _hidden_flag(kwargs, state)
+            if flag is _MALFORMED:
                 return None
-            hidden_value = None
-            for metadata_name, metadata_value in dict.items(kwargs):
-                if not state.take_node():
-                    return None
-                if type(metadata_name) is not str:
-                    return None
-                if metadata_name == "hidden":
-                    hidden_value = metadata_value
-            if hidden_value is not None:
-                if type(hidden_value) is not bool:
-                    return None
-                if hidden_value:
-                    annotated_hidden = True
+            if flag:
+                annotated_hidden = True
         # Foreign constraint metadata is deliberately ignored.
     return annotated_hidden
 
@@ -1882,34 +1885,9 @@ def _find_shape(
 # --- the walk --------------------------------------------------------------------
 
 
-def _with_reason(built: _Built, reason: Reason) -> _Built:
-    """A committed fallback node, saying why it was used."""
-    node = built.node
-    node_type = type(node)
-    if (
-        node_type is Text
-        or node_type is Sequence
-        or node_type is Mapping
-        or node_type is Object
-        or node_type is Unavailable
-    ):
-        node = dataclasses.replace(cast(Any, node), reason=reason)
-    return _Built(node, built.size)
-
-
-def _build(
-    value: Any,
-    max_size: int,
-    depth: int,
-    path: str,
-    state: _State,
-    *,
-    committed_fallback: _Built | None = None,
-) -> _Built:
+def _build(value: Any, max_size: int, depth: int, path: str, state: _State) -> _Built:
     """Recursively build one bounded snapshot node (sized as its JSON encoding)."""
     if not state.take_node():
-        if committed_fallback is not None:
-            return _with_reason(committed_fallback, "max_nodes")
         return _fallback(value, "max_nodes", max_size)
 
     limits = state.limits
@@ -1920,37 +1898,32 @@ def _build(
         encoded = "null" if value is None else ("true" if value else "false")
         if len(encoded) <= max_size:
             return _Built(Scalar(value), len(encoded))
-        return committed_fallback or _fallback(value, "max_length", max_size)
+        return _fallback(value, "max_length", max_size)
     if value_type is int:
         return _build_integer(value, max_size)
     if value_type is float:
         if not math.isfinite(value):
-            name_budget = max(0, max_size - len(OPAQUE_PREFIX) - len(OPAQUE_SUFFIX) - 2)
-            name = "float"[:name_budget]
-            size = opaque_json(name, "float", max_size)[1]
-            return _Built(Unavailable("opaque", name, "builtins"), size)
+            return _opaque(value, max_size, state, module="builtins")
         encoded = dumps(value)
         if len(encoded) <= max_size:
             return _Built(Scalar(value), len(encoded))
-        return committed_fallback or _fallback(value, "max_length", max_size)
+        return _fallback(value, "max_length", max_size)
     if value_type is bytes:
         length = bytes.__len__(value)
         return _cut_text(length, _slicer(value), "bytes", max_size, limits, whole_scalar=True)
-    if value_type is list or value_type is tuple:
+    if value_type is list or value_type is tuple or value_type is dict:
         if max_size < 2:
-            return committed_fallback or _fallback(value, "max_length", max_size)
+            return _fallback(value, "max_length", max_size)
+        if value_type is dict:
+            return _build_dict(value, max_size, depth, path, state)
         return _build_sequence(value, max_size, depth, path, state)
-    if value_type is dict:
-        if max_size < 2:
-            return committed_fallback or _fallback(value, "max_length", max_size)
-        return _build_dict(value, max_size, depth, path, state)
 
     mro = _safe_mro(value, state)
     found = None if mro is None else _find_shape(mro, state)
     if mro is None or found is None:
         return _opaque(value, max_size, state)
     if max_size < 2:
-        return committed_fallback or _fallback(value, "max_length", max_size)
+        return _fallback(value, "max_length", max_size)
     carrier, shape = found
     return _build_shape(shape, value, mro, carrier, max_size, depth, path, state)
 
@@ -1997,30 +1970,23 @@ capture = _CaptureFunction()
 
 
 def _field_placeholder(value: Any, state: _State) -> tuple[Any, Snapshot]:
-    """Classify one framework wrapper field into a minimal JSON root shape and node."""
+    """One framework wrapper field's minimal JSON root value, and its node when no work is left.
+
+    An exact built-in type other than ``bytes`` reserves its smallest
+    fallback (``""``, ``[]``, ``{}``, ``0``, ...), a Pydantic model ``{}``,
+    anything else ``null`` (#342's ``trace_fields``).
+    """
     if not state.take_node():
         raise ValueError("snapshot max_nodes cannot classify wrapper fields")
-    value_type = type(value)
-    if value_type is str:
-        length = str.__len__(value)
-        return "", Text("", "", length, "chars", False, "max_length", omitted=length)
-    if value_type is list or value_type is tuple:
-        return [], Sequence(value_type.__name__, len(value), (), False, "max_length")
-    if value_type is dict:
-        return {}, Mapping("dict", dict.__len__(value), (), False, "max_length")
-    if value is None:
-        return None, Unavailable("max_length", "NoneType")
-    if value_type is bool:
-        return False, Unavailable("max_length", "bool")
-    if value_type is int:
-        return 0, Unavailable("max_length", "int")
-    if value_type is float:
-        return 0.0, Unavailable("max_length", "float")
+    name = _builtin_name(value)
+    if name and name != "bytes":
+        shape = fallback_candidates(name)[0]
+        return shape, _fallback(value, "max_nodes", len(dumps(shape))).node
     mro = _safe_mro(value, state)
     if mro is not None and any(base is BaseModel for base in mro):
         name = _bounded_type_name(value, _MAX_TYPE_NAME)
-        return {}, Object(name, (), False, "max_length", _module_name(type(value), state))
-    return None, Unavailable("max_length", "NoneType")
+        return {}, Object(name, (), False, "max_nodes", _module_name(type(value), state))
+    return None, Unavailable("max_nodes", "NoneType")
 
 
 def capture_fields(*, limits: Limits = DEFAULT_LIMITS, **fields: object) -> Mapping:
@@ -2028,7 +1994,8 @@ def capture_fields(*, limits: Limits = DEFAULT_LIMITS, **fields: object) -> Mapp
 
     Each field first reserves a minimal placeholder of its own type (``[]``,
     ``{}``, ``""``, ...); raises ``ValueError`` when ``limits`` cannot hold the
-    complete minimal wrapper (#342's ``trace_fields``).
+    complete minimal wrapper (#342's ``trace_fields``). A field reached with
+    no node work left keeps its placeholder.
     """
     _validate_limits(limits)
     state = _State(limits)
@@ -2040,12 +2007,13 @@ def capture_fields(*, limits: Limits = DEFAULT_LIMITS, **fields: object) -> Mapp
     items: list[tuple[Key, Snapshot]] = []
     total_size = len(skeleton)
     for name, value in fields.items():
-        shape, fallback_node = placeholders[name]
-        placeholder = _Built(fallback_node, len(dumps(shape)))
-        available = placeholder.size + (limits.max_chars - total_size)
-        built = _build(
-            value, available, 1, pointer_child("", name), state, committed_fallback=placeholder
-        )
+        shape, starved = placeholders[name]
+        reserved = len(dumps(shape))
+        if state.nodes_left > 0:
+            available = reserved + (limits.max_chars - total_size)
+            built = _build(value, available, 1, pointer_child("", name), state)
+        else:
+            built = _Built(starved, reserved)
         items.append((name, built.node))
-        total_size += built.size - placeholder.size
+        total_size += built.size - reserved
     return Mapping("dict", len(items), tuple(items), True, None, wrapper=True)
