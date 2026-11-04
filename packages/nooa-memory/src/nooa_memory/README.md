@@ -211,6 +211,13 @@ If no anchor can be derived (e.g. empty turn) **nothing is injected** — it nev
 memories are *not* reinforced (only memories the agent deliberately `recall()`s get their
 recency/strength bumped), so the ACT-R signal stays meaningful.
 
+Injection IDs, per-memory injection counters, and `MemoryInjected.n_memories`
+describe records retained after the character budget is applied. A partially
+rendered record counts once its complete `[type#id]` marker is visible (including
+the status in a todo marker); a cut inside that marker does not count. Omitted
+records are not logged as injected. This rule applies to both recalled memories
+and the additional open-todo section, without changing passive ACT-R behavior.
+
 **How to configure** (`SpontaneousConfig`):
 
 ```python
