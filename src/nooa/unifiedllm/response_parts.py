@@ -249,7 +249,7 @@ def project_turn(
             if native:
                 from .media_inputs import guard_native_media
 
-                guard_native_media(native, media_inputs)
+                guard_native_media(native, media_inputs, interface="responses")
                 _restore_text(native["content"], part.text, "")
                 item = native
             elif part.text:

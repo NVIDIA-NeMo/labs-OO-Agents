@@ -1,0 +1,118 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+"""Decide whether two client configurations send requests to the same route.
+
+A ``context_window`` is only valid for the route it was declared for. These
+checks compare configuration values only: they make no network calls, read no
+environment variables and do not guess providers from model prefixes.
+"""
+
+from collections.abc import Mapping
+from typing import Any
+from urllib.parse import urlsplit, urlunsplit
+
+_ENDPOINT_ALIASES = ("api_base", "base_url")
+
+
+def normalize_endpoint(value: Any) -> str | None:
+    """Return ``value`` as a comparable endpoint URL, or None if it is not one.
+
+    Scheme and host are lowercased and a trailing slash is dropped; URL userinfo,
+    path and query stay significant. A non-string or unparsable value gives None.
+    """
+    if not isinstance(value, str):
+        return None
+    try:
+        parts = urlsplit(value)
+        # DNS/scheme case is insignificant, URL userinfo is not.
+        userinfo, sep, host = parts.netloc.rpartition("@")
+        netloc = userinfo + sep + host.lower() if sep else parts.netloc.lower()
+        return urlunsplit(
+            (parts.scheme.lower(), netloc, parts.path.rstrip("/"), parts.query, parts.fragment)
+        )
+    except ValueError:
+        return None
+
+
+def no_endpoint_override(value: Any) -> bool:
+    """Whether an endpoint override value means "keep the configured endpoint".
+
+    ``None``, an empty string and a whitespace-only string count as no override:
+    treating them as a real value would send the request, with its credentials,
+    to the provider's default endpoint instead of the configured gateway.
+    """
+    return value is None or (isinstance(value, str) and not value.strip())
+
+
+def endpoint_changed(defaults: Mapping[str, Any], overrides: Mapping[str, Any]) -> bool:
+    """Whether ``overrides`` set an endpoint other than the one ``defaults`` configure.
+
+    ``api_base`` and ``base_url`` are two spellings of one endpoint, so the
+    configured URL under the other spelling is not a change. URLs are compared
+    after normalize_endpoint(). A ``None`` or blank override is no override (see
+    no_endpoint_override); any other value that is not a valid URL string always
+    counts as a change.
+    """
+    configured = {
+        normalize_endpoint(defaults[key])
+        for key in _ENDPOINT_ALIASES
+        if defaults.get(key) is not None
+    } - {None}
+    for key in _ENDPOINT_ALIASES:
+        value = overrides.get(key)
+        if no_endpoint_override(value):
+            continue
+        normalized = normalize_endpoint(value)
+        if normalized is None or normalized not in configured:
+            return True
+    return False
+
+
+def _endpoint(config: Mapping[str, Any]) -> tuple[str, ...]:
+    """Return the normalized endpoint URLs set in ``config``, sorted.
+
+    ``api_base``, ``base_url`` and ``endpoint`` are collected; scheme and host are
+    lowercased and a trailing slash is dropped. A non-string or unparsable value
+    gives an ``("<invalid>", key)`` marker so it never matches a real endpoint.
+    """
+    endpoints = set()
+    for key in ("api_base", "base_url", "endpoint"):
+        value = config.get(key)
+        if value is None:
+            continue
+        normalized = normalize_endpoint(value)
+        if normalized is None:
+            return ("<invalid>", key)
+        endpoints.add(normalized)
+    return tuple(sorted(endpoints))
+
+
+def same_context_route(
+    model: str,
+    config: Mapping[str, Any],
+    client_type: str,
+    other_model: str,
+    other: Mapping[str, Any],
+    other_client_type: str,
+) -> bool:
+    """Return True if both configurations send requests to the same route.
+
+    The model strings, client types, ``custom_llm_provider``, ``api_key_env`` and
+    ``api_key`` must be equal, and the endpoints must match after normalization.
+    ``api_base`` and ``base_url`` may spell the same endpoint, but a configuration
+    that sets two different URLs never matches. URL paths and queries are
+    significant. Client objects (``client``) must be the same object. Key values
+    are only compared here; they are never returned, hashed or logged.
+    """
+    endpoint, other_endpoint = _endpoint(config), _endpoint(other)
+    return (
+        model == other_model
+        and client_type == other_client_type
+        and len(endpoint) <= 1
+        and len(other_endpoint) <= 1
+        and endpoint == other_endpoint
+        and config.get("client") is other.get("client")
+        and config.get("custom_llm_provider") == other.get("custom_llm_provider")
+        and config.get("api_key_env") == other.get("api_key_env")
+        and config.get("api_key") == other.get("api_key")
+    )

@@ -9,7 +9,8 @@ These are instructions *for coding agents about the framework* — not `nooa.Ski
 | Skill | Use for |
 |---|---|
 | [`nooa-agent-authoring`](nooa-agent-authoring/SKILL.md) | Core authoring: Agent subclasses, generation methods (`...`), docstring prompts, structured output, strategies (CodeAct/Predict), visibility, orchestrators, subagents, prompt debugging |
-| [`nooa-model-configuration`](nooa-model-configuration/SKILL.md) | Model onboarding and diagnostics: Connect CLI/library, registry aliases, credentials, reply budgets, reasoning levels, caching and reasoning replay |
+| [`nooa-connect`](nooa-connect/SKILL.md) | Complete headless Connect workflow for agents: permission, discovery, model/media checks, JSON reports and saving aliases |
+| [`nooa-model-configuration`](nooa-model-configuration/SKILL.md) | Registry semantics, manual configuration, reply budgets, reasoning levels, caching and reasoning replay; refers to nooa-connect for headless operation |
 | [`nooa-media`](nooa-media/SKILL.md) | Typed image/audio/video/PDF inputs, CodeAct show(), route-local media permissions, MIME/URL/size limits, and text-only replay |
 | [`nooa-codeact-advanced`](nooa-codeact-advanced/SKILL.md) | Advanced strategy tuning: prefill (custom/disable/pre-ellipsis), loop guards, truncation tuning, code restrictions, execution internals, PredictConfig |
 | [`nooa-agentdoc`](nooa-agentdoc/SKILL.md) | Making types render beautiful docs for the LLM: `doc()`, `spec()`, `hidden`, `Annotated` descriptions, `pformat`/`pprint` tuning |
@@ -35,8 +36,11 @@ cp -R skills/nooa-* ~/.claude/skills/
 
 # Or the core authoring/setup/media skills into a project
 mkdir -p .claude/skills
-cp -R skills/nooa-agent-authoring skills/nooa-model-configuration skills/nooa-media .claude/skills/
+cp -R skills/nooa-agent-authoring skills/nooa-model-configuration skills/nooa-connect skills/nooa-media .claude/skills/
 ```
+
+When installing an authoring, model-configuration or tools skill, also install
+`nooa-connect` so its headless workflow reference is available.
 
 Other hosts read from different directories (e.g. `.codex/skills/`, `.agents/skills/`).
 

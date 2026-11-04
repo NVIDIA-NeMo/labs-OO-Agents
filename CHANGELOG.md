@@ -110,6 +110,18 @@ to follow semantic versioning.
   the older experimental-agent spellings, such as `ExperimentalTUIAgent` and
   `ExperimentalCodingAgent`, are session-restore aliases for
   `nooa_atom.agent:AtomAgent`).
+- Windows: WSL 2 is the supported way to run nooa on Windows. Native Windows is
+  unsupported: `import nooa` raises `UnsupportedPlatformError` (an
+  `ImportError`) and the `nooa` command exits with one line pointing to WSL 2,
+  unless `NOOA_SKIP_PLATFORM_CHECK=1` is set. With the override, the pure-Python
+  core (agents, PredictStrategy, in-process CodeAct, in-memory storage) and
+  `nooa connect` work and are tested in CI (the registry lock uses `filelock`
+  there; POSIX keeps `fcntl`), redirected CLI output is written as UTF-8, and
+  POSIX-only features (bash sessions and shell tools, the CodeAct sandbox,
+  file-backed SQLite storage, `monitor()`) raise `PosixOnlyFeatureError` naming
+  WSL 2. Previously `import nooa` failed on Windows with `fcntl`/`SIGUSR2`
+  errors. CI adds a native-Windows smoke, a WSL quick check on every PR, and a
+  nightly full suite under WSL.
 - CodeAct and PurePython `max_retries` now count only consecutive LLM API
   errors; a successful LLM call resets the count. Other errors, such as
   invalid tool calls and failed result validation, still add up across the
@@ -124,6 +136,10 @@ to follow semantic versioning.
   current versions and mcp stays on 1.x (1.30+) until NOOA is adapted to their
   newer releases: with them, opaque provider reasoning state reaches exported
   OTLP spans and MCP tool-level errors are no longer raised.
+- Registry entries' `base_url`, `timeout` and `custom_llm_provider` settings
+  are now passed to the clients built from them. They were ignored before, so
+  configs that set them may now send requests to a different endpoint or
+  provider, or use a different timeout.
 - Prompt inspection (`print_prompt()` and `build_prompt_data()`) now applies
   method-level truncation overrides for CodeAct and PurePython, matching runtime
   prefill rendering. Both strategies now use the resolved runtime settings for
