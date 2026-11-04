@@ -10,6 +10,18 @@ to follow semantic versioning.
   are now passed to the clients built from them. They were ignored before, so
   configs that set them may now send requests to a different endpoint or
   provider, or use a different timeout.
+- Native Anthropic Messages and OpenAI Responses clients now raise `ValueError`
+  locally, before any HTTP request, when a request carries an enabled audio or
+  video attachment. These interfaces can only send images and PDFs; before, the
+  attachment reached the provider. Chat routes are unchanged.
+- A `context_window` now belongs to the route it was declared for. Clients
+  built from a registry entry no longer reuse the entry's `context_window` when
+  an override changes the route (model, endpoint, client type, provider, client
+  object or credentials), and the registry logs one warning per alias naming
+  the settings it dropped. A client built directly borrows a registry
+  `context_window` only when an entry's route matches its own, including the
+  resolved key when the client passes `api_key`; otherwise it falls back to
+  LiteLLM model metadata.
 - Prompt inspection (`print_prompt()` and `build_prompt_data()`) now applies
   method-level truncation overrides for CodeAct and PurePython, matching runtime
   prefill rendering. Both strategies now use the resolved runtime settings for
