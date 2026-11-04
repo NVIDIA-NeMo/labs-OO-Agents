@@ -509,6 +509,17 @@ def _key_overhead(key: str, box: _Container) -> int | None:
     return len(dumps(key)) + 2
 
 
+def _plan(length: int, limits: Limits, has_tail: bool) -> tuple[int, int]:
+    """The (head, tail) entries of a container of ``length`` that ``max_items`` keeps.
+
+    A source that can only be read forwards (``has_tail=False``) keeps a head only.
+    """
+    max_items = limits.max_items
+    if max_items is None or length <= max_items:
+        return length, 0
+    return limits.split(max_items) if has_tail else (max_items, 0)
+
+
 def _build_sequence(
     value: list[Any] | tuple[Any, ...], max_size: int, depth: int, path: str, state: _State
 ) -> _Built:
@@ -525,96 +536,22 @@ def _build_sequence(
         return _Built(ref, 2)
     try:
         get = list.__getitem__ if type(value) is list else tuple.__getitem__
-        return _sequence_from(
-            (get(cast(Any, value), index) for index in range(length)),
+        head_n, tail_n = _plan(length, state.limits, has_tail=True)
+        return _container(
+            (get(cast(Any, value), index) for index in range(head_n)),
             length,
             type_name,
+            False,
             max_size,
             depth,
             path,
             state,
-            tail_source=lambda count: [
-                get(cast(Any, value), index) for index in range(length - count, length)
-            ],
+            head_n,
+            tail_n,
+            lambda: (get(cast(Any, value), index) for index in range(length - tail_n, length)),
         )
     finally:
         state.active.pop(id(value), None)
-
-
-def _sequence_from(
-    items: Iterable[Any],
-    length: int | None,
-    type_name: str,
-    max_size: int,
-    depth: int,
-    path: str,
-    state: _State,
-    *,
-    tail_source: Callable[[int], list[Any]] | None = None,
-    split: tuple[int, int] | None = None,
-) -> _Built:
-    """Kept items of a sequence: a head (and a tail when known), under the shared budget.
-
-    Items may be private ``_Part`` builders (see ``_build_slot``). ``split``:
-    the (head, tail) counts to keep instead of the ``max_items`` rule
-    (``ndarray_like``'s per-axis selection; it needs ``length`` and ``tail_source``).
-    """
-    limits = state.limits
-    box = _Container(max_size)
-    head_n: int | None = None
-    tail_n = 0
-    if split is not None:
-        if length is not None and split[0] + split[1] < length:
-            head_n, tail_n = split
-    elif limits.max_items is not None and (length is None or length > limits.max_items):
-        head_n, tail_n = limits.split(limits.max_items)
-        if tail_source is None or length is None:
-            head_n, tail_n = limits.max_items, 0
-
-    def add(child: Any, index: int, kept: list[Snapshot]) -> bool:
-        if state.nodes_left <= 0:
-            box.stop("max_nodes")
-            return False
-        available = box.room()
-        if available < 1:
-            box.stop("max_length")
-            return False
-        built = _build_slot(child, available, depth + 1, pointer_child(path, str(index)), state)
-        kept.append(built.node)
-        box.commit(0, built.size)
-        return True
-
-    head: list[Snapshot] = []
-    exhausted = True
-    iterator = iter(items)
-    index = 0
-    while True:
-        if head_n is not None and index >= head_n:
-            exhausted = False
-            break
-        try:
-            child = next(iterator)
-        except StopIteration:
-            break
-        if not add(child, index, head):
-            exhausted = False
-            break
-        index += 1
-    if length is None and exhausted:
-        length = index
-    tail: list[Snapshot] = []
-    if box.reason is None and tail_n and length is not None and tail_source is not None:
-        for offset, child in enumerate(tail_source(tail_n)):
-            if not add(child, length - tail_n + offset, tail):
-                break
-    kept = len(head) + len(tail)
-    complete = length is not None and kept >= length and box.reason is None
-    if not complete and box.reason is None:
-        box.stop("max_items")
-    node = Sequence(
-        type_name, length, tuple(head), complete, None if complete else box.reason, tuple(tail)
-    )
-    return _Built(node, box.size)
 
 
 def _build_dict(
@@ -628,97 +565,99 @@ def _build_dict(
     if ref is not None:
         return _Built(ref, 2)
     try:
-        limits = state.limits
-        tail_n = 0
-        head_n = length
-        if limits.max_items is not None and length > limits.max_items:
-            head_n, tail_n = limits.split(limits.max_items)
-        tail_items: list[tuple[Any, Any]] = []
-        if tail_n:
-            backwards = reversed(dict.items(value))
-            for _ in range(tail_n):
-                tail_items.append(next(backwards))
-            tail_items.reverse()
-        return _mapping_from(
-            dict.items(value), length, "dict", max_size, depth, path, state, head_n, tail_items
+        head_n, tail_n = _plan(length, state.limits, has_tail=True)
+        return _container(
+            dict.items(value),
+            length,
+            "dict",
+            True,
+            max_size,
+            depth,
+            path,
+            state,
+            head_n,
+            tail_n,
+            lambda: list(itertools.islice(reversed(dict.items(value)), tail_n))[::-1],
         )
     finally:
         state.active.pop(id(value), None)
 
 
-def _mapping_from(
-    items: Iterable[tuple[Any, Any]],
-    length: int | None,
+def _container(
+    entries: Iterable[Any],
+    length: int,
     type_name: str,
+    keyed: bool,
     max_size: int,
     depth: int,
     path: str,
     state: _State,
-    head_n: int | None,
-    tail_items: list[tuple[Any, Any]] | None = None,
+    head_n: int,
+    tail_n: int = 0,
+    tail: Callable[[], Iterable[Any]] = tuple,
 ) -> _Built:
+    """A ``Sequence`` of ``length`` items, or (``keyed``) a ``Mapping`` of ``(key, value)`` entries.
+
+    Keeps the first ``head_n`` (at most ``length``) entries pulled from
+    ``entries`` and, when every one of them fit, the last ``tail_n`` from
+    ``tail()``, under the shared budget. Entries may be private ``_Part``
+    builders (see ``_build_slot``). A mapping entry also costs one node for
+    its key, checked before the pair is pulled.
+    """
     box = _Container(max_size)
 
-    def add(key: Any, child: Any, kept: list[tuple[Key, Snapshot]]) -> bool:
+    def add(entry: Any, index: int, kept: list[Any]) -> bool:
         if state.nodes_left <= 0:
             box.stop("max_nodes")
             return False
-        if not state.take_node():
-            box.stop("max_nodes")
-            return False
-        key_text = json_key(key, live=True)
-        if key_text is None:
-            box.stop("key")
-            return False
-        overhead = _key_overhead(key_text, box)
-        if overhead is None:
-            box.stop("max_length")
-            return False
+        key: Any = None
+        if keyed:
+            key, child = entry
+            state.take_node()
+            segment = json_key(key, live=True)
+            if segment is None:
+                box.stop("key")
+                return False
+            overhead = _key_overhead(segment, box)
+            if overhead is None:
+                box.stop("max_length")
+                return False
+        else:
+            child, segment, overhead = entry, str(index), 0
         available = box.room(overhead)
         if available < 1:
             box.stop("max_length")
             return False
-        built = _build_slot(child, available, depth + 1, pointer_child(path, key_text), state)
-        kept.append((cast(Key, key), built.node))
+        built = _build_slot(child, available, depth + 1, pointer_child(path, segment), state)
+        kept.append((cast(Key, key), built.node) if keyed else built.node)
         box.commit(overhead, built.size)
         return True
 
-    head: list[tuple[Key, Snapshot]] = []
-    iterator = iter(items)
-    exhausted = True
-    count = 0
-    while True:
-        if length is not None and count >= length:
-            break
-        if head_n is not None and count >= head_n:
-            exhausted = False
-            break
-        if state.nodes_left <= 0:
-            exhausted = False
+    head: list[Any] = []
+    iterator = iter(entries)
+    for index in range(head_n):
+        if keyed and state.nodes_left <= 0:
             box.stop("max_nodes")
             break
         try:
-            key, child = next(iterator)
+            entry = next(iterator)
         except StopIteration:
             break
-        if not add(key, child, head):
-            exhausted = False
+        if not add(entry, index, head):
             break
-        count += 1
-    if length is None and exhausted:
-        length = count
-    tail: list[tuple[Key, Snapshot]] = []
-    if box.reason is None and tail_items:
-        for key, child in tail_items:
-            if not add(key, child, tail):
+    kept_tail: list[Any] = []
+    if box.reason is None and tail_n:
+        for offset, entry in enumerate(tail()):
+            if not add(entry, length - tail_n + offset, kept_tail):
                 break
-    kept = len(head) + len(tail)
-    complete = length is not None and kept >= length and box.reason is None
-    if not complete and box.reason is None:
+    complete = len(head) + len(kept_tail) >= length and box.reason is None
+    if not complete:
         box.stop("max_items")
-    node = Mapping(
-        type_name, length, tuple(head), complete, None if complete else box.reason, tuple(tail)
-    )
+    reason = None if complete else box.reason
+    if keyed:
+        node: Snapshot = Mapping(type_name, length, tuple(head), complete, reason, tuple(kept_tail))
+    else:
+        node = Sequence(type_name, length, tuple(head), complete, reason, tuple(kept_tail))
     return _Built(node, box.size)
 
 
@@ -1495,13 +1434,10 @@ def _collection(
     except Exception:
         return _error(type_name, max_size)
     failed: list[bool] = []
-    if type(shape) is _ArrayLike:
-        items = _guarded(itertools.islice(source, length), failed, pairs=False)
-        built = _sequence_from(items, length, type_name, max_size, depth, path, state)
-    else:
-        pairs = _guarded(source, failed, pairs=True)
-        head_n = state.limits.max_items
-        built = _mapping_from(pairs, length, type_name, max_size, depth, path, state, head_n)
+    keyed = type(shape) is _MappingLike
+    head_n, _tail_n = _plan(length, state.limits, has_tail=False)
+    items = _guarded(source, failed, pairs=keyed)
+    built = _container(items, length, type_name, keyed, max_size, depth, path, state, head_n)
     return _failed(built, failed)
 
 
@@ -1694,28 +1630,25 @@ def _indexed(
     length: int,
     split: tuple[int, int],
     child: Callable[[int], Any],
-    type_name: str,
     max_size: int,
     depth: int,
     path: str,
     state: _State,
 ) -> _Built:
-    """A ``Sequence`` of the entries ``child(i)`` at the head and tail indices of ``split``."""
+    """A ``list`` ``Sequence`` of the entries ``child(i)`` at the head and tail indices of ``split``."""
     head_n, tail_n = split
-
-    def tail(_count: int) -> list[Any]:
-        return [child(i) for i in range(length - tail_n, length)]
-
-    return _sequence_from(
+    return _container(
         (child(i) for i in range(head_n)),
         length,
-        type_name,
+        "list",
+        False,
         max_size,
         depth,
         path,
         state,
-        tail_source=tail,
-        split=split,
+        head_n,
+        tail_n,
+        lambda: (child(i) for i in range(length - tail_n, length)),
     )
 
 
@@ -1749,14 +1682,15 @@ def _ndarray_structure(
                 state,
             )
 
-        return _indexed(dims[axis], selection[axis], child, "list", slot, depth, path, state)
+        return _indexed(dims[axis], selection[axis], child, slot, depth, path, state)
 
     entries: list[tuple[str, Any]] = [("shape", dims)]
     if shape.labels:
 
         def labels(slot: int, depth: int, path: str) -> _Built:
             parts = [(axis, label_part(axis, function)) for axis, function in shape.labels]
-            return _mapping_from(parts, len(parts), "dict", slot, depth, path, state, None)
+            count = len(parts)
+            return _container(parts, count, "dict", True, slot, depth, path, state, count)
 
         def label_part(axis: int, function: Callable[[Any], Any]) -> _Part:
             def build(slot: int, depth: int, path: str) -> _Built:
@@ -1777,8 +1711,7 @@ def _ndarray_structure(
 
                     return _Part(read, 2, _OBJECT_MIN_NODES)
 
-                split = selection[axis]
-                return _indexed(dims[axis], split, label, "list", slot, depth, path, state)
+                return _indexed(dims[axis], selection[axis], label, slot, depth, path, state)
 
             return _structure_part(Sequence, dims[axis] if axis < ndim else None, build, state)
 
