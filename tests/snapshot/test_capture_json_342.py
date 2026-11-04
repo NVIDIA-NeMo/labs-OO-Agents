@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import math
+import random
 from typing import Annotated, Any, NamedTuple
 
 import pytest
@@ -89,6 +90,44 @@ def test_framework_fields_and_types_survive_truncation() -> None:
     assert isinstance(parsed["kwargs"], dict)
     assert len(result.text) <= 200
     assert result.incomplete_paths
+
+
+def test_wrapper_keeps_a_root_inf_field_at_the_capture_budget() -> None:
+    # A non-finite float reserves #342's 0.0; render_json once reserved null
+    # for its opaque node, overflowed the skeleton and dropped f2.
+    limits = Limits(max_chars=31, max_nodes=32, max_depth=2, tail_share=0.0)
+    inner = {"k0": {"k0": math.inf}, "k1": {"k0": -7, "k1": True}, "k2": None}
+    inner |= {"k3": {"k0": 2**70}, "k4": {"k0": 0, "k1": None}}
+    snapshot = capture_fields(limits=limits, f0=math.inf, f1=inner, f2="")
+
+    assert render_json(snapshot, max_chars=31) == '{"f0": "<", "f1": {}, "f2": ""}'
+
+
+def _random_shape(rng: random.Random, depth: int = 0) -> Any:
+    kind = rng.random()
+    if depth > 4 or kind < 0.35:
+        leaves = [None, True, 0, -7, 2**70, 1.5, math.inf, "", "a" * rng.randint(0, 60)]
+        return rng.choice([*leaves, 'q"\u00e9\U0001f600' * rng.randint(0, 5)])
+    if kind < 0.6:
+        return [_random_shape(rng, depth + 1) for _ in range(rng.randint(0, 6))]
+    return {f"k{i}": _random_shape(rng, depth + 1) for i in range(rng.randint(0, 6))}
+
+
+def test_every_root_field_survives_random_wrappers_at_the_capture_budget() -> None:
+    rng = random.Random(7)
+    wrappers = lost = 0
+    for _ in range(5000):
+        fields = {f"f{j}": _random_shape(rng, 3) for j in range(rng.randint(1, 4))}
+        limits = Limits(
+            max_chars=rng.randint(4, 300), max_nodes=rng.randint(1, 60), max_depth=rng.randint(0, 6)
+        )
+        try:
+            snapshot = capture_fields(limits=limits, **fields)
+        except ValueError:
+            continue
+        wrappers += 1
+        lost += set(json.loads(render_json(snapshot, max_chars=limits.max_chars))) != set(fields)
+    assert (wrappers, lost) == (4486, 0)
 
 
 def test_nested_pydantic_huge_string_is_prefix_bounded() -> None:

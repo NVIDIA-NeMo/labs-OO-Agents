@@ -366,6 +366,8 @@ def _placeholder(node: Snapshot) -> Any:
         return fallback_candidates(type(value).__name__)[0]
     if node_type is Unavailable:
         assert isinstance(node, Unavailable)
+        if node.builtin:  # a non-finite float: capture reserved its 0.0
+            return fallback_candidates("float")[0]
         if node.reason == "opaque" or not node.type_name:
             return None
         return fallback_candidates(node.type_name)[0]
@@ -475,7 +477,7 @@ def _json_unavailable(
 ) -> tuple[Any, int]:
     report.incomplete(path, node.reason)
     if node.reason == "opaque":
-        fallback_type = node.type_name if node.builtin else ""
+        fallback_type = "float" if node.builtin else ""  # builtin: a non-finite float
         return opaque_json(node.type_name, fallback_type, max_size)
     return fallback_json(node.type_name, max_size)
 
