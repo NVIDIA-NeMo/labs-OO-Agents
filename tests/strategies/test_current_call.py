@@ -193,7 +193,7 @@ class TestCurrentCallBoundParameters:
         assert bound == {"data": "hello", "count": 5}
 
     def test_var_positional_args_each_appear_once(self):
-        """*args: extra positionals land under arg_<i>; none are duplicated."""
+        """*args values are preserved once as the tuple visible to the method."""
         from nooa.strategies.current_call import CurrentCall
 
         def analyze(self, *imgs) -> dict:
@@ -204,10 +204,7 @@ class TestCurrentCallBoundParameters:
         call = CurrentCall.from_method(analyze, args=(a, b), kwargs={})
 
         bound = call.bound_parameters()
-        # First positional maps to the var-positional name; the rest get arg_<i>.
-        assert list(bound.values()) == [a, b]
-        # No object appears twice.
-        assert len(bound) == 2
+        assert bound == {"imgs": (a, b)}
 
     def test_keyword_only_param(self):
         """Keyword-only param: no stray '*' key leaks into the mapping."""

@@ -31,6 +31,7 @@ import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 
+from nooa._platform import require_posix
 from nooa.agentdoc import TruncatingStringIO
 
 logger = logging.getLogger(__name__)
@@ -232,6 +233,7 @@ class BashSession:
         """
         if self._ready:
             return
+        require_posix("The bash session (ShellTools, RepoTools, skills that run shell commands)")
         self._ensure_lock_on_current_loop()
         async with self._start_lock:
             # Callers that arrive while another start() runs the init command

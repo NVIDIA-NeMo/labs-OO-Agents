@@ -2432,11 +2432,22 @@ def write(entry: dict, path: Path, *, alias: str) -> None:
     entry.pop("provenance", None)
     path = Path(path).resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
-    # Lock a stable sidecar inode, not the registry inode replaced atomically.
-    # Keep the lock file: unlinking it would let a third writer bypass waiters.
+    # Lock a stable sidecar file, not the registry inode replaced atomically.
+    lock_path = path.with_name(f".{path.name}.lock")
+    from nooa._platform import is_native_windows
+
+    if is_native_windows():
+        # Windows has no fcntl; filelock uses LockFileEx there and manages the
+        # lock file itself.
+        from filelock import FileLock
+
+        with FileLock(lock_path):
+            _write_entry(entry, path, alias=alias)
+        return
+    # POSIX: keep the lock file; unlinking it would let a third writer bypass waiters.
     import fcntl
 
-    with path.with_name(f".{path.name}.lock").open("a") as lock:
+    with lock_path.open("a") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
         _write_entry(entry, path, alias=alias)
 
@@ -2517,7 +2528,14 @@ def _write_entry(entry: dict, path: Path, *, alias: str) -> None:
     temporary_path = None
     try:
         with tempfile.NamedTemporaryFile(
-            mode="w", encoding="utf-8", dir=path.parent, prefix=path.name + ".", delete=False
+            mode="w",
+            encoding="utf-8",
+            # Line endings are converted above; Windows text mode would turn
+            # each \r\n into \r\r\n.
+            newline="",
+            dir=path.parent,
+            prefix=path.name + ".",
+            delete=False,
         ) as temporary:
             temporary_path = Path(temporary.name)
             temporary.write(text.replace("\n", newline))
