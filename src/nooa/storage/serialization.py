@@ -69,19 +69,25 @@ _LEGACY_CLASS_PREFIXES = {
 # stack already is. Depth counts containers on the path from the root: a dict,
 # list, tuple, Pydantic model, dataclass or @snapshotable object is one level
 # (on restore a type envelope is one level, not two), so whatever serializes
-# also restores.
+# also restores. Data returned by ``__snapshot_data__`` is checked on save with
+# the same accounting restore uses.
 #
-# Measured cost per level on CPython 3.13: 2 frames on save (``_serialize`` ->
-# ``_child``), 2 on restore for plain lists/dicts/tuples and 3 for a type
-# envelope (``_deserialize`` -> ``_deserialize_envelope`` ->
-# ``_deserialize_child``). 200 levels therefore need at most ~610 frames, so the
-# limit is reached before Python's default recursion limit (1000) even when the
-# caller is already ~200 (up to ~390) frames deep, as Atom's checkpoint is.
-# Real snapshot data is far shallower than this.
+# Measured frames per level on CPython 3.13 (minimum recursion limit for 200
+# levels): save 1 for dicts, lists and tuples, 2 for models, dataclasses and
+# @snapshotable objects (``_serialize_fields``); restore 1 for dicts, 2 for
+# lists and tuples (``_deserialize_items``), ~3 for a type envelope
+# (``_deserialize_envelope`` -> ``_deserialize_fields``, a dataclass slightly
+# more for ``inspect.signature``). 200 levels therefore need at most ~615
+# frames, below Python's default recursion limit (1000) even when the caller is
+# already ~200 (up to ~380) frames deep. Real snapshot data is far shallower.
 MAX_SNAPSHOT_DEPTH = 200
 
 # Abbreviate error paths longer than this many segments.
 _MAX_PATH_SEGMENTS = 16
+
+# Exact types handled inline without a recursive call. Subclasses (enums,
+# marked str subclasses...) still take the full dispatch.
+_PRIMITIVE_TYPES = frozenset({str, int, float, bool, type(None)})
 
 
 # ---------------------------------------------------------------------------
@@ -89,8 +95,16 @@ _MAX_PATH_SEGMENTS = 16
 # ---------------------------------------------------------------------------
 
 
-def serialize(value: Any) -> tuple[Any, set[str]]:
+def serialize(value: Any, *, base_depth: int = 0) -> tuple[Any, set[str]]:
     """Serialize a value into a JSON-compatible structure.
+
+    Args:
+        value: The value to serialize.
+        base_depth: Number of containers that will sit above ``value`` once it
+            is embedded in a larger snapshot. The depth limit is applied as if
+            ``value`` were that deep, so a check made ahead of time (e.g. by
+            ``SnapshotVars``) agrees with the later full save. Paths in error
+            messages stay relative to ``value``.
 
     Returns:
         A tuple of (serialized_blob, allowlist) where allowlist is the set
@@ -106,7 +120,9 @@ def serialize(value: Any) -> tuple[Any, set[str]]:
     """
     state = _SerializeState()
     try:
-        blob = _serialize(value, state, 0)
+        blob = _serialize(value, state, base_depth)
+    except _PathError as exc:
+        raise SerializationError(exc.render("Snapshot value", base_depth)) from None
     except RecursionError as exc:
         # Cycles and over-deep values are detected above, so this is something
         # else, e.g. a recursive ``__snapshot_data__`` or a caller that is
@@ -136,9 +152,10 @@ def deserialize(blob: Any, allowlist: set[str]) -> Any:
             than ``MAX_SNAPSHOT_DEPTH``, or restoring hits Python's
             recursion limit.
     """
-    path: list[str] = []
     try:
-        return _deserialize(blob, allowlist, 0, path)
+        return _deserialize(blob, allowlist, 0)
+    except _PathError as exc:
+        raise DeserializationError(exc.render("Snapshot blob", 0)) from None
     except RecursionError as exc:
         raise DeserializationError(
             "Snapshot restore hit Python's recursion limit within the snapshot "
@@ -147,24 +164,37 @@ def deserialize(blob: Any, allowlist: set[str]) -> Any:
 
 
 # ---------------------------------------------------------------------------
-# Internal dispatch — serialize
+# Error paths — built only while an error unwinds
 # ---------------------------------------------------------------------------
 
 
-class _SerializeState:
-    """Per-call state: the allowlist and the containers on the current path.
+class _PathError(Exception):
+    """Internal cycle or depth failure, converted to the public error at the top.
 
-    ``active`` maps ``id()`` of each container being serialized to its index
-    in ``path``. Entries are removed when the container is finished, so a
-    value reachable twice without a cycle (a diamond) is not an error.
+    The happy path keeps no path at all. While this exception unwinds, each
+    container frame appends the segment (``['k']``, ``[0]``, ``.attr``) of the
+    child it was working on, so ``segments`` lists the path innermost first.
     """
 
-    __slots__ = ("active", "allowlist", "path")
+    def __init__(self, cycle_start: int | None = None, type_name: str = "") -> None:
+        super().__init__()
+        self.segments: list[str] = []
+        # Depth of the container a cycle refers back to (None: depth error).
+        self.cycle_start = cycle_start
+        self.type_name = type_name
 
-    def __init__(self) -> None:
-        self.allowlist: set[str] = set()
-        self.active: dict[int, int] = {}
-        self.path: list[str] = []
+    def render(self, subject: str, base_depth: int) -> str:
+        path = self.segments[::-1]
+        if self.cycle_start is None:
+            return (
+                f"{subject} nests deeper than the limit of {MAX_SNAPSHOT_DEPTH} "
+                f"levels at {_format_path(path)}"
+            )
+        back = path[: self.cycle_start - base_depth]
+        return (
+            f"{subject} contains a cycle: {_format_path(path)} "
+            f"refers back to {_format_path(back)} ({self.type_name})"
+        )
 
 
 def _format_path(segments: list[str]) -> str:
@@ -176,30 +206,39 @@ def _format_path(segments: list[str]) -> str:
     return "<root>" + "".join(segments)
 
 
-def _enter(value: Any, state: _SerializeState, depth: int) -> None:
-    """Check ``value`` for a cycle and the depth limit, then mark it active."""
-    key = id(value)
-    if (start := state.active.get(key)) is not None:
-        raise SerializationError(
-            f"Snapshot value contains a cycle: {_format_path(state.path)} "
-            f"refers back to {_format_path(state.path[:start])} "
-            f"({type(value).__name__})"
-        )
-    if depth >= MAX_SNAPSHOT_DEPTH:
-        raise SerializationError(
-            f"Snapshot value nests deeper than the limit of {MAX_SNAPSHOT_DEPTH} "
-            f"levels at {_format_path(state.path)}"
-        )
-    state.active[key] = len(state.path)
+# ---------------------------------------------------------------------------
+# Internal dispatch — serialize
+# ---------------------------------------------------------------------------
 
 
-def _child(value: Any, segment: str, state: _SerializeState, depth: int) -> Any:
-    """Serialize one child under ``segment`` of the current path."""
-    state.path.append(segment)
+class _SerializeState:
+    """Per-call state: the allowlist and the containers on the current path.
+
+    ``active`` maps ``id()`` of each container being serialized to its depth.
+    Entries are removed when the container is finished, so a value reachable
+    twice without a cycle (a diamond) is not an error.
+    """
+
+    __slots__ = ("active", "allowlist")
+
+    def __init__(self) -> None:
+        self.allowlist: set[str] = set()
+        self.active: dict[int, int] = {}
+
+
+def _serialize_fields(items: Any, state: _SerializeState, depth: int, data: dict) -> dict:
+    """Serialize ``(name, value)`` attribute pairs into ``data`` at ``depth``."""
+    name = None
     try:
-        return _serialize(value, state, depth)
-    finally:
-        state.path.pop()
+        for name, v in items:
+            if type(v) in _PRIMITIVE_TYPES:
+                data[name] = v
+            elif (s := _serialize(v, state, depth)) is not SKIP:
+                data[name] = s
+    except _PathError as exc:
+        exc.segments.append(f".{name}")
+        raise
+    return data
 
 
 def _serialize(value: Any, state: _SerializeState, depth: int) -> Any:
@@ -219,7 +258,13 @@ def _serialize(value: Any, state: _SerializeState, depth: int) -> Any:
     if is_nosnapshot_value(value):
         return SKIP
 
-    _enter(value, state, depth)
+    key = id(value)
+    active = state.active
+    if (start := active.get(key)) is not None:
+        raise _PathError(cycle_start=start, type_name=type(value).__name__)
+    if depth >= MAX_SNAPSHOT_DEPTH:
+        raise _PathError()
+    active[key] = depth
     depth += 1  # children of this container
     try:
         allowlist = state.allowlist
@@ -227,22 +272,34 @@ def _serialize(value: Any, state: _SerializeState, depth: int) -> Any:
         # 4. Collections — recurse (filtering out SKIP sentinels)
         if isinstance(value, dict):
             result = {}
-            for k, v in value.items():
-                if not isinstance(k, str):
-                    raise SerializationError(
-                        f"Dict key {k!r} (type: {type(k).__name__}) is not a string. "
-                        f"JSON requires string keys."
-                    )
-                serialized = _child(v, f"[{k!r}]", state, depth)
-                if serialized is not SKIP:
-                    result[k] = serialized
+            k = None
+            try:
+                for k, v in value.items():
+                    if not isinstance(k, str):
+                        raise SerializationError(
+                            f"Dict key {k!r} (type: {type(k).__name__}) is not a string. "
+                            f"JSON requires string keys."
+                        )
+                    if type(v) in _PRIMITIVE_TYPES:
+                        result[k] = v
+                    elif (serialized := _serialize(v, state, depth)) is not SKIP:
+                        result[k] = serialized
+            except _PathError as exc:
+                exc.segments.append(f"[{k!r}]")
+                raise
             return result
         if isinstance(value, (tuple, list)):
-            items = [
-                s
-                for i, item in enumerate(value)
-                if (s := _child(item, f"[{i}]", state, depth)) is not SKIP
-            ]
+            items = []
+            i = -1
+            try:
+                for i, item in enumerate(value):  # noqa: B007 - read by the except handler
+                    if type(item) in _PRIMITIVE_TYPES:
+                        items.append(item)
+                    elif (s := _serialize(item, state, depth)) is not SKIP:
+                        items.append(s)
+            except _PathError as exc:
+                exc.segments.append(f"[{i}]")
+                raise
             return {"__type__": _TUPLE, "data": items} if isinstance(value, tuple) else items
 
         # 5. Pydantic models
@@ -252,42 +309,40 @@ def _serialize(value: Any, state: _SerializeState, depth: int) -> Any:
             if snapshot_data := getattr(value, "__snapshot_data__", None):
                 # Durable JSON types can own their schema and migration. Other
                 # models still need recursive envelopes for arbitrary live fields.
-                return {"__type__": _PYDANTIC, "__class__": fqn, "data": snapshot_data()}
+                data = snapshot_data()
+                # Restore walks this data with the depth limit, so save must too.
+                _check_snapshot_data_depth(data, depth)
+                return {"__type__": _PYDANTIC, "__class__": fqn, "data": data}
             # Iterate over model_fields directly so nested non-Pydantic objects
             # (dataclasses, @snapshotable) are serialized with their type envelopes
             # instead of being flattened to plain dicts by model_dump().
-            data = {}
-            for field_name in type(value).model_fields:
-                serialized = _child(getattr(value, field_name), f".{field_name}", state, depth)
-                if serialized is not SKIP:
-                    data[field_name] = serialized
-            for field_name, extra in (value.model_extra or {}).items():
-                serialized = _child(extra, f".{field_name}", state, depth)
-                if serialized is not SKIP:
-                    data[field_name] = serialized
+            data = _serialize_fields(
+                ((name, getattr(value, name)) for name in type(value).model_fields),
+                state,
+                depth,
+                {},
+            )
+            if extra := value.model_extra:
+                _serialize_fields(extra.items(), state, depth, data)
             return {"__type__": _PYDANTIC, "__class__": fqn, "data": data}
 
         # 6. Dataclasses
         if dataclasses.is_dataclass(value) and not isinstance(value, type):
             fqn = _fqn(type(value))
             allowlist.add(fqn)
-            fields = dataclasses.fields(value)
-            data = {}
-            for f in fields:
-                serialized = _child(getattr(value, f.name), f".{f.name}", state, depth)
-                if serialized is not SKIP:
-                    data[f.name] = serialized
+            data = _serialize_fields(
+                ((f.name, getattr(value, f.name)) for f in dataclasses.fields(value)),
+                state,
+                depth,
+                {},
+            )
             return {"__type__": _DATACLASS, "__class__": fqn, "data": data}
 
         # 7. @snapshotable classes
         if is_snapshotable_class(type(value)):
             fqn = _fqn(type(value))
             allowlist.add(fqn)
-            data = {}
-            for k, v in vars(value).items():
-                serialized = _child(v, f".{k}", state, depth)
-                if serialized is not SKIP:
-                    data[k] = serialized
+            data = _serialize_fields(vars(value).items(), state, depth, {})
             return {"__type__": _DICT_CLASS, "__class__": fqn, "data": data}
 
         # 8. Unknown type — error with helpful message
@@ -300,7 +355,66 @@ def _serialize(value: Any, state: _SerializeState, depth: int) -> Any:
             f"  3. Wrap the value in a Pydantic BaseModel for automatic serialization"
         )
     finally:
-        del state.active[id(value)]
+        del active[key]
+
+
+def _check_snapshot_data_depth(data: Any, depth: int) -> None:
+    """Depth-check ``__snapshot_data__`` output the way restore will walk it.
+
+    Restore treats the returned dict as the envelope's fields, so its values
+    sit at ``depth`` (the envelope's own level is already counted).
+    """
+    if not isinstance(data, dict):
+        _check_blob_depth(data, depth)
+        return
+    name = None
+    try:
+        for name, v in data.items():  # noqa: B007 - read by the except handler
+            _check_blob_depth(v, depth)
+    except _PathError as exc:
+        exc.segments.append(f".{name}")
+        raise
+
+
+def _check_blob_depth(blob: Any, depth: int) -> None:
+    """Raise ``_PathError`` where ``_deserialize`` would hit the depth limit.
+
+    Mirrors ``_deserialize``'s accounting (a type envelope is one level). A
+    Python tuple is walked like a list, which is never more lenient.
+    """
+    if isinstance(blob, (list, tuple)):
+        if depth >= MAX_SNAPSHOT_DEPTH:
+            raise _PathError()
+        items: Any = blob
+    elif isinstance(blob, dict):
+        if depth >= MAX_SNAPSHOT_DEPTH:
+            raise _PathError()
+        envelope_type = blob.get("__type__")
+        if envelope_type == _TUPLE and "data" in blob:
+            items = blob["data"]
+        elif envelope_type in _ENVELOPE_TYPES and "__class__" in blob and "data" in blob:
+            _check_snapshot_data_depth(blob["data"], depth + 1)
+            return
+        else:
+            k = None
+            try:
+                for k, v in blob.items():  # noqa: B007 - read by the except handler
+                    if type(v) not in _PRIMITIVE_TYPES:
+                        _check_blob_depth(v, depth + 1)
+            except _PathError as exc:
+                exc.segments.append(f"[{k!r}]")
+                raise
+            return
+    else:
+        return
+    i = -1
+    try:
+        for i, item in enumerate(items):  # noqa: B007 - read by the except handler
+            if type(item) not in _PRIMITIVE_TYPES:
+                _check_blob_depth(item, depth + 1)
+    except _PathError as exc:
+        exc.segments.append(f"[{i}]")
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -308,29 +422,35 @@ def _serialize(value: Any, state: _SerializeState, depth: int) -> Any:
 # ---------------------------------------------------------------------------
 
 
-def _check_depth(depth: int, path: list[str]) -> None:
-    """Reject a blob container nested deeper than ``MAX_SNAPSHOT_DEPTH``."""
-    if depth >= MAX_SNAPSHOT_DEPTH:
-        raise DeserializationError(
-            f"Snapshot blob nests deeper than the limit of {MAX_SNAPSHOT_DEPTH} "
-            f"levels at {_format_path(path)}"
-        )
-
-
-def _deserialize_child(
-    blob: Any, segment: str, allowlist: set[str], depth: int, path: list[str]
-) -> Any:
-    """Restore one child under ``segment``; primitives skip the path bookkeeping."""
-    if blob is None or isinstance(blob, (bool, int, float, str)):
-        return blob
-    path.append(segment)
+def _deserialize_items(items: Any, allowlist: set[str], depth: int) -> list[Any]:
+    """Restore list (or tuple envelope) items, which sit at ``depth``."""
+    out = []
+    i = -1
     try:
-        return _deserialize(blob, allowlist, depth, path)
-    finally:
-        path.pop()
+        for i, item in enumerate(items):  # noqa: B007 - read by the except handler
+            out.append(
+                item if type(item) in _PRIMITIVE_TYPES else _deserialize(item, allowlist, depth)
+            )
+    except _PathError as exc:
+        exc.segments.append(f"[{i}]")
+        raise
+    return out
 
 
-def _deserialize(blob: Any, allowlist: set[str], depth: int, path: list[str]) -> Any:
+def _deserialize_fields(data: dict[str, Any], allowlist: set[str], depth: int) -> dict[str, Any]:
+    """Restore an envelope's fields, which sit at ``depth``."""
+    out = {}
+    k = None
+    try:
+        for k, v in data.items():
+            out[k] = v if type(v) in _PRIMITIVE_TYPES else _deserialize(v, allowlist, depth)
+    except _PathError as exc:
+        exc.segments.append(f".{k}")
+        raise
+    return out
+
+
+def _deserialize(blob: Any, allowlist: set[str], depth: int) -> Any:
     """Restore ``blob``; ``depth`` is the number of containers above it."""
     # Primitives
     if blob is None or isinstance(blob, (bool, int, float, str)):
@@ -338,37 +458,36 @@ def _deserialize(blob: Any, allowlist: set[str], depth: int, path: list[str]) ->
 
     # Lists
     if isinstance(blob, list):
-        _check_depth(depth, path)
-        return [
-            _deserialize_child(item, f"[{i}]", allowlist, depth + 1, path)
-            for i, item in enumerate(blob)
-        ]
+        if depth >= MAX_SNAPSHOT_DEPTH:
+            raise _PathError()
+        return _deserialize_items(blob, allowlist, depth + 1)
 
     # Dicts — check if envelope
     if isinstance(blob, dict):
-        _check_depth(depth, path)
+        if depth >= MAX_SNAPSHOT_DEPTH:
+            raise _PathError()
         envelope_type = blob.get("__type__")
         if envelope_type == _TUPLE and "data" in blob:
-            return tuple(
-                [
-                    _deserialize_child(item, f"[{i}]", allowlist, depth + 1, path)
-                    for i, item in enumerate(blob["data"])
-                ]
-            )
+            return tuple(_deserialize_items(blob["data"], allowlist, depth + 1))
         if envelope_type in _ENVELOPE_TYPES and "__class__" in blob and "data" in blob:
-            return _deserialize_envelope(blob, allowlist, depth + 1, path)
+            return _deserialize_envelope(blob, allowlist, depth + 1)
         # Regular dict — recurse values
-        return {
-            k: _deserialize_child(v, f"[{k!r}]", allowlist, depth + 1, path)
-            for k, v in blob.items()
-        }
+        result = {}
+        k = None
+        try:
+            for k, v in blob.items():
+                result[k] = (
+                    v if type(v) in _PRIMITIVE_TYPES else _deserialize(v, allowlist, depth + 1)
+                )
+        except _PathError as exc:
+            exc.segments.append(f"[{k!r}]")
+            raise
+        return result
 
     return blob
 
 
-def _deserialize_envelope(
-    blob: dict[str, Any], allowlist: set[str], depth: int, path: list[str]
-) -> Any:
+def _deserialize_envelope(blob: dict[str, Any], allowlist: set[str], depth: int) -> Any:
     """Reconstruct a typed object from an envelope dict; its fields are at ``depth``."""
     fqn = blob["__class__"]
     envelope_type = blob["__type__"]
@@ -384,34 +503,24 @@ def _deserialize_envelope(
 
     if envelope_type == _PYDANTIC:
         if restore_snapshot := getattr(cls, "__restore_snapshot__", None):
-            deserialized_data = {
-                k: _deserialize_child(v, f".{k}", allowlist, depth, path) for k, v in data.items()
-            }
-            return restore_snapshot(deserialized_data)
+            return restore_snapshot(_deserialize_fields(data, allowlist, depth))
         if cls.model_config.get("extra") != "allow":
             # Discard obsolete fields before restoring their values: removed
             # types need not be importable or allowlisted for schema drift.
             data = {k: v for k, v in data.items() if k in cls.model_fields}
         # Restore retained nested envelopes before Pydantic validates them.
-        deserialized_data = {
-            k: _deserialize_child(v, f".{k}", allowlist, depth, path) for k, v in data.items()
-        }
-        return cls.model_validate(deserialized_data)
+        return cls.model_validate(_deserialize_fields(data, allowlist, depth))
 
     if envelope_type == _DATACLASS:
         # Lenient: filter to accepted kwargs, let defaults fill gaps
-        deserialized_data = {
-            k: _deserialize_child(v, f".{k}", allowlist, depth, path) for k, v in data.items()
-        }
+        deserialized_data = _deserialize_fields(data, allowlist, depth)
         accepted = {p.name for p in inspect.signature(cls).parameters.values()}
         filtered = {k: v for k, v in deserialized_data.items() if k in accepted}
         return cls(**filtered)
 
     if envelope_type == _DICT_CLASS:
         # @snapshotable: deserialize data, filter extra keys to __init__ params
-        deserialized_data = {
-            k: _deserialize_child(v, f".{k}", allowlist, depth, path) for k, v in data.items()
-        }
+        deserialized_data = _deserialize_fields(data, allowlist, depth)
         accepted = {p.name for p in inspect.signature(cls.__init__).parameters.values()} - {"self"}
         filtered = {k: v for k, v in deserialized_data.items() if k in accepted}
         obj = cls(**filtered)

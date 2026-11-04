@@ -290,3 +290,65 @@ def test_deserialize_recursion_error_becomes_deserialization_error():
     with pytest.raises(DeserializationError, match="recursion limit") as caught:
         deserialize(blob, allowlist)
     assert isinstance(caught.value.__cause__, RecursionError)
+
+
+# -- __snapshot_data__ output -------------------------------------------------
+
+
+class _Durable(BaseModel):
+    """Model that owns its snapshot format, like ``LLMResponse``."""
+
+    payload: Any = None
+
+    def __snapshot_data__(self) -> dict:
+        return {"payload": self.payload}
+
+
+def _json_chain(kind: str, levels: int) -> Any:
+    """``levels`` JSON containers of one kind, as ``__snapshot_data__`` might return."""
+    blob: Any = None
+    for _ in range(levels):
+        if kind == "dict":
+            blob = {"c": blob}
+        elif kind == "list":
+            blob = [blob]
+        else:  # a hand-built tuple envelope: one level on restore
+            blob = {"__type__": "tuple", "data": [blob]}
+    return blob
+
+
+def test_snapshot_data_over_limit_fails_on_save():
+    """Deep ``__snapshot_data__`` output fails on save with a path, not later on restore."""
+    # The envelope is level 0, so the payload may hold MAX_SNAPSHOT_DEPTH - 1 containers.
+    fits = _Durable(payload=_json_chain("dict", MAX_SNAPSHOT_DEPTH - 1))
+    blob, allowlist = serialize(fits)
+    assert deserialize(blob, allowlist).payload == fits.payload
+
+    with pytest.raises(SerializationError) as caught:
+        serialize(_Durable(payload=_json_chain("dict", MAX_SNAPSHOT_DEPTH)))
+    message = str(caught.value)
+    assert f"deeper than the limit of {MAX_SNAPSHOT_DEPTH} levels" in message
+    assert "at <root>.payload['c']['c']" in message
+    assert "cycle" not in message
+
+
+@pytest.mark.parametrize("kind", ["dict", "list", "tuple-envelope"])
+@pytest.mark.parametrize("outer", [0, 3])
+def test_snapshot_data_saves_iff_it_restores(kind, outer):
+    """Save applies restore's accounting to ``__snapshot_data__`` output exactly."""
+    results = {}
+    for levels in range(MAX_SNAPSHOT_DEPTH - outer - 3, MAX_SNAPSHOT_DEPTH - outer + 2):
+        value: Any = _Durable(payload=_json_chain(kind, levels))
+        for _ in range(outer):
+            value = [value]
+        try:
+            blob, allowlist = serialize(value)
+        except SerializationError:
+            saved = False
+        else:
+            saved = True
+            deserialize(blob, allowlist)  # must not raise
+        results[levels] = saved
+    # Exactly the levels that fit: the envelope plus ``outer`` lists sit above.
+    limit = MAX_SNAPSHOT_DEPTH - outer - 1
+    assert results == {n: n <= limit for n in results}

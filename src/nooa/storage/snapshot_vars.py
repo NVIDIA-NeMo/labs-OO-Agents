@@ -22,9 +22,18 @@ from typing import Any
 
 from nooa.errors.storage import SerializationError
 from nooa.storage.markers import snapshotable
-from nooa.storage.serialization import serialize
+from nooa.storage.serialization import MAX_SNAPSHOT_DEPTH, serialize
 
 logger = logging.getLogger(__name__)
+
+# How many containers sit above a ``SnapshotVars`` value in a real checkpoint,
+# measured from the checkpoint paths (``AgentSnapshot.from_agent``):
+#   agent vars:  <attr vars>._data['k']                    -> 2
+#   todo vars:   <attr todo>._todos['id'].vars._data['k']  -> 5
+# The write-time check uses the deepest of these, so a value accepted here also
+# fits within ``MAX_SNAPSHOT_DEPTH`` at checkpoint. tests/storage/
+# test_snapshot_vars.py re-measures both placements and fails if this is short.
+CHECKPOINT_VALUE_DEPTH = 5
 
 
 @snapshotable
@@ -65,14 +74,22 @@ class SnapshotVars(MutableMapping):
             )
             return
         try:
-            serialize(value)
+            serialize(value, base_depth=CHECKPOINT_VALUE_DEPTH)
         except (SerializationError, TypeError, ValueError, RecursionError) as exc:
+            hint = ""
+            if "nests deeper than the limit" in str(exc):
+                hint = (
+                    f" (a vars value sits up to {CHECKPOINT_VALUE_DEPTH} levels deep in a "
+                    f"checkpoint, so it may nest at most "
+                    f"{MAX_SNAPSHOT_DEPTH - CHECKPOINT_VALUE_DEPTH} levels)"
+                )
             logger.warning(
                 "SnapshotVars: value for %r (%s) is not snapshot-serializable and "
-                "will NOT be persisted (it won't survive /exit + resume): %s",
+                "will NOT be persisted (it won't survive /exit + resume): %s%s",
                 key,
                 type(value).__name__,
                 exc,
+                hint,
             )
             return
         self._data[key] = value

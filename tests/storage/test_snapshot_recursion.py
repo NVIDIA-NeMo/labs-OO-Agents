@@ -15,7 +15,7 @@ from nooa import Agent
 from nooa.errors.storage import SerializationError
 from nooa.storage import SQLiteStorageManager
 from nooa.storage.markers import nosnapshot, snapshotable
-from nooa.storage.serialization import deserialize, serialize
+from nooa.storage.serialization import MAX_SNAPSHOT_DEPTH, deserialize, serialize
 from nooa.storage.snapshot import AgentSnapshot
 from nooa.unifiedllm import FakeLLMClient
 
@@ -161,3 +161,37 @@ def test_excessive_acyclic_depth_does_not_abort_checkpoint(tmp_path, caplog):
         assert restored.checkpoint == 4
         assert "deep_graph" not in restored.__dict__
     assert any("deep_graph" in record.message for record in caplog.records)
+
+
+def test_too_deep_attribute_warning_text(caplog):
+    """A too-deep attribute is skipped with a warning naming it, its type and the path."""
+    value: Any = None
+    for _ in range(MAX_SNAPSHOT_DEPTH + 1):
+        value = [value]
+    agent = _SnapshotAgent()
+    agent.deep_attr = value
+    with caplog.at_level(logging.WARNING, logger="nooa.storage.snapshot"):
+        snapshot = AgentSnapshot.from_agent(agent)
+    assert "deep_attr" not in snapshot.attributes
+    messages = [r.getMessage() for r in caplog.records if "deep_attr" in r.getMessage()]
+    assert len(messages) == 1
+    assert messages[0].startswith(
+        "Snapshot: skipping non-serializable attribute 'deep_attr' (list): "
+        f"Snapshot value nests deeper than the limit of {MAX_SNAPSHOT_DEPTH} levels "
+        "at <root>[0][0][0][0][0][0][0][0]...(184 more)...[0][0]"
+    )
+
+
+def test_too_deep_context_block_rejects_save():
+    """A too-deep context block still rejects the save, naming the block."""
+    value: Any = None
+    for _ in range(MAX_SNAPSHOT_DEPTH + 1):
+        value = [value]
+    agent = _SnapshotAgent()
+    agent.context_manager["deep_ctx"] = value
+    with pytest.raises(SerializationError) as caught:
+        AgentSnapshot.from_agent(agent)
+    assert str(caught.value).startswith(
+        "Context block 'deep_ctx' is not serializable: Snapshot value nests deeper "
+        f"than the limit of {MAX_SNAPSHOT_DEPTH} levels at <root>[0]"
+    )
