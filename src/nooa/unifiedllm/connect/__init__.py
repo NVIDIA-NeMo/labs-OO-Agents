@@ -3011,6 +3011,8 @@ def diagnostic_prompt(
                         "effective_alias_source",
                         "nooa_version",
                         "transport_override",
+                        "direct",
+                        "requested_transport",
                         "approved_budget_tokens",
                         "remaining_budget_tokens",
                         "output_tokens",
