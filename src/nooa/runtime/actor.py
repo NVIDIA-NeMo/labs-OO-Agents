@@ -33,7 +33,7 @@ from nooa.context_blocks import (
 from nooa.context_blocks.scoped import _scoped_blocks_var, _scoped_events_var
 
 if TYPE_CHECKING:
-    from nooa.config.truncation_config import TruncationConfig
+    from nooa.config.truncation_config import CaptureConfig, TruncationConfig
     from nooa.context_blocks.models import ContextWindowStats
     from nooa.decisions import (
         DecisionRequest,
@@ -566,13 +566,10 @@ def _rewrite_never_awaited_warnings(text: str, agent: Any = None) -> str:
     return _NEVER_AWAITED_RE.sub(hint, text)
 
 
-def _make_capture_buffer(
-    limit: int, tail_chars: int | None, file_backed: bool
-) -> TruncatingStringIO:
-    """Create a stdout/stderr capture buffer, optionally file-backed."""
-    if file_backed:
-        return FileBackedTruncatingStringIO(limit=limit, tail_chars=tail_chars)
-    return TruncatingStringIO(limit=limit, tail_chars=tail_chars)
+def _make_capture_buffer(limit: int, capture: "CaptureConfig") -> TruncatingStringIO:
+    """Create a stdout/stderr capture buffer, file-backed if ``capture`` says so."""
+    kind = FileBackedTruncatingStringIO if capture.file_backed else TruncatingStringIO
+    return kind(limit=limit, tail_chars=capture.tail, unrecoverable_hint=capture.unrecoverable_hint)
 
 
 def _extract_captured_locals(exec_globals: dict[str, Any]) -> dict[str, Any]:
@@ -1879,16 +1876,9 @@ class ActorRuntime:
                 stdout_buffer, stderr_buffer = capture_scope.stdout, capture_scope.stderr
                 media_buffer = capture_scope.media
             else:
-                stdout_buffer = _make_capture_buffer(
-                    limit=truncation_config.capture.max_stdout,
-                    tail_chars=truncation_config.capture.tail,
-                    file_backed=truncation_config.capture.file_backed,
-                )
-                stderr_buffer = _make_capture_buffer(
-                    limit=truncation_config.capture.max_stderr,
-                    tail_chars=truncation_config.capture.tail,
-                    file_backed=truncation_config.capture.file_backed,
-                )
+                capture = truncation_config.capture
+                stdout_buffer = _make_capture_buffer(capture.max_stdout, capture)
+                stderr_buffer = _make_capture_buffer(capture.max_stderr, capture)
                 stdout_token = _stdout_buffer_var.set(stdout_buffer)
                 stderr_token = _stderr_buffer_var.set(stderr_buffer)
                 # Block stdin reads for this async task (prevents hangs from input(), etc.)

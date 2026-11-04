@@ -46,7 +46,7 @@ with hidden:
 
     from nooa import no_trace
     from nooa.config import CodeActConfig, PredictConfig, TruncationConfig
-    from nooa.config.truncation_config import FormatConfig
+    from nooa.config.truncation_config import CaptureConfig, FormatConfig
     from nooa.interactive import InteractiveAgent, require_task_result
     from nooa.runtime.capture_scope import CaptureScope
     from nooa.runtime.channels import ChannelReader
@@ -216,14 +216,8 @@ def _module_not_found_hint(agent: Any, error: BaseException, formatted: str) -> 
     )
 
 
-# Added to the core cut marker of a cell print (kept in memory, not in a file).
+# After the core cut notice of a cell print kept only in memory (capture config).
 _CUT_PRINT_HINT = "Write large output to a file and read it with self.files.read(path)."
-_NOT_RECOVERABLE_RE = re.compile(r"^(The [\d,]+ chars in the middle are not recoverable\.)$", re.M)
-
-
-def _cut_print_hint(text: str) -> str:
-    """``text`` (a cut cell print) with ``_CUT_PRINT_HINT`` after its not-recoverable line."""
-    return _NOT_RECOVERABLE_RE.sub(rf"\1 {_CUT_PRINT_HINT}", text, count=1)
 
 
 # The hints a failed cell can get; the first that applies is the only one added.
@@ -335,15 +329,6 @@ class AtomCodeAct(CodeActV2):
             if hint:
                 return f"{formatted}\n\n{hint}"
         return formatted
-
-    async def _execute_code(self, *args: Any, **kwargs: Any) -> Any:
-        """Run a cell; a cut print also says how to keep large output (``_cut_print_hint``)."""
-        result = await super()._execute_code(*args, **kwargs)
-        for stream in ("stdout", "stderr"):
-            text = getattr(result, stream, None)
-            if isinstance(text, str) and text.startswith("<truncated-output>"):
-                setattr(result, stream, _cut_print_hint(text))
-        return result
 
     def _build_execute_python_tool(self) -> Any:
         tool = super()._build_execute_python_tool()
@@ -627,7 +612,10 @@ _REMOVED: Annotated[str, hidden] = (
 )
 
 
-class AtomAgent(AtomAgentBase):
+class AtomAgent(
+    AtomAgentBase,
+    truncation=TruncationConfig(capture=CaptureConfig(unrecoverable_hint=_CUT_PRINT_HINT)),
+):
     """You are a careful agent working in one local repository.
 
     Read the repository instructions and the code you touch before editing.

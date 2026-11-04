@@ -65,18 +65,8 @@ class CaptureScope:
 
         self.active = True
         capture = self.config.capture
-        self.stdout = _TextLease(
-            self,
-            _make_capture_buffer(
-                limit=capture.max_stdout, tail_chars=capture.tail, file_backed=capture.file_backed
-            ),
-        )
-        self.stderr = _TextLease(
-            self,
-            _make_capture_buffer(
-                limit=capture.max_stderr, tail_chars=capture.tail, file_backed=capture.file_backed
-            ),
-        )
+        self.stdout = _TextLease(self, _make_capture_buffer(capture.max_stdout, capture))
+        self.stderr = _TextLease(self, _make_capture_buffer(capture.max_stderr, capture))
         self.media = _MediaBuffer(
             max_attachments=self.config.media_capture.max_attachments_per_execution,
             accepts_write=self.accepts_write,

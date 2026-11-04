@@ -78,6 +78,15 @@ class CaptureConfig(BaseModel):
             ),
         ),
     ] = False
+    unrecoverable_hint: Annotated[
+        str | None,
+        Field(
+            description=(
+                "A sentence appended to the notice's 'not recoverable' line when a "
+                "stream is cut and no file keeps the full output (None: nothing)."
+            ),
+        ),
+    ] = None
 
     @model_validator(mode="after")
     def _check(self) -> "CaptureConfig":

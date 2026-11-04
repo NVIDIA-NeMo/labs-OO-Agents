@@ -262,3 +262,12 @@ class TestBoundedLines:
         reader.feed_eof()
         lines = [line async for line in bounded_lines(reader, max_line_chars=10)]
         assert lines == ["a\n", "b" * 10 + "[... 69,990 chars of this line omitted]\n", "c"]
+
+
+def test_unrecoverable_hint_follows_the_not_recoverable_line():
+    buf = TruncatingStringIO(limit=10, unrecoverable_hint="Write it to a file.")
+    buf.write("x" * 30)
+    assert "The 20 chars in the middle are not recoverable. Write it to a file.\n" in buf.getvalue()
+    plain = TruncatingStringIO(limit=10)
+    plain.write("x" * 30)
+    assert "The 20 chars in the middle are not recoverable.\n" in plain.getvalue()
