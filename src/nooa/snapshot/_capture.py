@@ -164,7 +164,6 @@ class _State:
     def __init__(self, limits: Limits) -> None:
         self.limits = limits
         self.nodes_left = limits.max_nodes
-        self.max_depth = limits.max_depth
         # id(container) -> (JSON Pointer, kind) of the containers being built.
         self.active: dict[int, tuple[str, Literal["sequence", "mapping", "object"]]] = {}
         # id(owner) -> (owner, checked copy of its namespace or None); see ``_safe_dict``.
@@ -258,9 +257,6 @@ def _safe_dict(owner: Any, raw: Any, state: _State) -> dict[str, Any] | None:
 
 def _raw_namespace(cls: type[Any], state: _State) -> dict[str, Any] | None:
     """A class's own namespace (no metaclass lookup), checked by ``_safe_dict``."""
-    cached = state.namespaces.get(id(cls))
-    if cached is not None and cached[0] is cls:
-        return cached[1]
     try:
         namespace = _TYPE_DICT.__get__(cls, type(cls))
     except Exception:
@@ -535,7 +531,7 @@ def _build_sequence(
     """Build a bounded sequence node from an exact list or tuple."""
     type_name = "list" if type(value) is list else "tuple"
     length = len(value)  # an exact built-in: no user hook
-    if depth >= state.max_depth:
+    if depth >= state.limits.max_depth:
         return _Built(Sequence(type_name, length, (), False, "max_depth"), 2)
     get = list.__getitem__ if type(value) is list else tuple.__getitem__
     head_n, tail_n = _plan(length, state.limits, has_tail=True)
@@ -565,7 +561,7 @@ def _build_dict(
 ) -> _Built:
     """Build a bounded mapping node without visiting rejected tail entries."""
     length = dict.__len__(value)
-    if depth >= state.max_depth:
+    if depth >= state.limits.max_depth:
         return _Built(Mapping("dict", length, (), False, "max_depth"), 2)
     head_n, tail_n = _plan(length, state.limits, has_tail=True)
     return _entered(
@@ -1478,7 +1474,7 @@ def _structure_part(
         return _Built(node_type(name, length, (), False, reason), 2)
 
     def built(max_size: int, depth: int, path: str) -> _Built:
-        if depth >= state.max_depth:
+        if depth >= state.limits.max_depth:
             return empty(max_size, "max_depth")
         if max_size < 2:
             return empty(max_size, "max_length")
@@ -1508,7 +1504,7 @@ def _build_object(
     type_name = _bounded_type_name(value, _MAX_TYPE_NAME)
     module = _module_name(type(value), state)
     if isinstance(shape, _FieldReader):  # one of this module's shapes: no user hook
-        if depth >= state.max_depth:
+        if depth >= state.limits.max_depth:
             return _Built(Object(type_name, (), False, "max_depth", module), 2)
         reader = shape.read
         return _entered(
@@ -1520,7 +1516,7 @@ def _build_object(
                 type_name, module, reader(value, mro, carrier, state), max_size, depth, path, state
             ),
         )
-    if depth >= state.max_depth:
+    if depth >= state.limits.max_depth:
         return _Built(Object(type_name, (), False, "max_depth", module, shape.kind), 2)
     accessors = shape
     return _entered(
@@ -1553,7 +1549,7 @@ def _shape_fields(
         entries += _structure(shape, value, type_name, max_size, state)
     except _ShapeError:
         return _error(type_name, max_size)
-    reserves, _nodes = _field_reserves(entries)
+    reserves = _field_reserves(entries)
 
     def fields() -> _Fields:
         if cut:
@@ -1823,7 +1819,7 @@ def _build_shape(
         length = _shape_length(collection.length, value)
     except _ShapeError:
         return _error(type_name, max_size)
-    if depth >= state.max_depth:
+    if depth >= state.limits.max_depth:
         return _Built(node_type(type_name, length, (), False, "max_depth"), 2)
     return _entered(
         value,
@@ -1834,11 +1830,8 @@ def _build_shape(
     )
 
 
-def _field_reserves(pairs: list[tuple[Any, Any]]) -> tuple[list[tuple[int, int]], int]:
-    """Per field: the (chars, nodes) every later field needs for its minimal fallback.
-
-    Also the node work all the fields need together.
-    """
+def _field_reserves(pairs: list[tuple[Any, Any]]) -> list[tuple[int, int]]:
+    """Per field: the (chars, nodes) every later field needs for its minimal fallback."""
     needs: list[tuple[int, int]] = []
     for name, child in pairs:
         # separator + "name": + minimal value; one node for the field, some for its value.
@@ -1851,7 +1844,7 @@ def _field_reserves(pairs: list[tuple[Any, Any]]) -> tuple[list[tuple[int, int]]
         chars += need_chars
         nodes += need_nodes
     reserves.reverse()
-    return reserves, nodes
+    return reserves
 
 
 _REGISTRY: list[tuple[type[Any], _Shape]] = []
