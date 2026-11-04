@@ -6,8 +6,8 @@ A stream keeps its first ``head`` and last ``tail`` units (characters or
 bytes) in memory, counts everything, and can spill every byte, up to
 ``SpillTarget.max_bytes``, to a file while it runs. ``snapshot()`` describes
 it at any time, ``since(mark)`` describes what arrived after a mark (progress)
-and ``merge`` joins two unread deltas. Byte streams are cut on UTF-8 code
-point boundaries and count the replacement characters decoding introduced.
+and ``merge`` joins two unread deltas. Byte streams keep the raw bytes, cut
+on UTF-8 code point boundaries, so every count is exact.
 """
 
 from __future__ import annotations
@@ -25,7 +25,8 @@ from nooa.snapshot._codec import (
     REPLACEMENT,
     REPLACEMENT_BYTES,
     complete_prefix,
-    decode_counted,
+    replaced_in,
+    safe_end,
     safe_start,
 )
 from nooa.snapshot._model import Reason, Spill, Text
@@ -268,58 +269,35 @@ class TextStream:
         if self.unit == "bytes":
             head_bytes = bytes(self._head_bytes[head_slice])
             tail_bytes = bytes(self._tail_bytes[tail_slice])
-            gap = length - len(head_bytes) - len(tail_bytes)
-            if gap <= 0:
-                text, replaced = decode_counted(head_bytes + tail_bytes)
+            if length <= len(head_bytes) + len(tail_bytes):
+                whole = head_bytes + tail_bytes
                 return Text(
-                    text,
-                    "",
-                    length,
-                    "bytes",
-                    True,
-                    None,
-                    self._full(False),
-                    replaced,
-                    head_units=len(head_bytes) + len(tail_bytes),
-                    tail_units=0,
+                    whole, b"", length, "bytes", True, None, self._full(False), replaced_in(whole)
                 )
-            head_bytes = head_bytes[: complete_prefix(head_bytes)]
+            head_bytes = head_bytes[: complete_prefix(head_bytes)]  # whole code points only
             tail_bytes = tail_bytes[safe_start(tail_bytes, 0) :]
-            head, replaced_head = decode_counted(head_bytes)
-            tail, replaced_tail = decode_counted(tail_bytes)
             omitted = length - len(head_bytes) - len(tail_bytes)
             return Text(
-                head,
-                tail,
+                head_bytes,
+                tail_bytes,
                 length,
                 "bytes",
                 False,
                 self._reason(),
                 self._full(True),
-                replaced_head + replaced_tail,
+                replaced_in(head_bytes, tail_bytes),
                 omitted,
-                len(head_bytes),
-                len(tail_bytes),
             )
         if replaced is None:
             replaced = self._replaced
         # Join without storing back: a read never rebinds the writer's state.
-        head_all = "".join(self._head_chars)
-        tail_all = "".join(self._tail_chars)
-        head, tail = head_all[head_slice], tail_all[tail_slice]
+        head = "".join(self._head_chars)[head_slice]
+        tail = "".join(self._tail_chars)[tail_slice]
         gap = length - len(head) - len(tail)
         if gap <= 0:
             return Text(head + tail, "", length, "chars", True, None, self._full(False), replaced)
         return Text(
-            head,
-            tail,
-            length,
-            "chars",
-            False,
-            self._reason(),
-            self._full(True),
-            replaced,
-            gap,
+            head, tail, length, "chars", False, self._reason(), self._full(True), replaced, gap
         )
 
     def snapshot(self) -> Text:
@@ -422,190 +400,76 @@ def _encode(text: str) -> bytes:
 # --- merging deltas ----------------------------------------------------------------
 
 
-def _units(text: str, unit: str) -> int:
-    return len(text) if unit == "chars" else len(text.encode("utf-8", errors="surrogateescape"))
-
-
-@dataclass(frozen=True)
-class _Piece:
-    """A kept head or tail of a merge input, with the original units it stands for."""
-
-    text: str
-    units: int
-    source: int  # 0: ``a``, 1: ``b``
-
-
-def _cut(piece: _Piece, budget: int, unit: str, *, back: bool, limit: int) -> tuple[int, int]:
-    """The longest prefix (``back``: suffix) of ``piece`` within ``budget`` original units.
-
-    Returns (characters kept, at most ``limit``; an upper bound of their
-    units). Chars and bytes without U+FFFD are exact. A bytes piece knows its
-    total units (``units``) but not each U+FFFD's width (1 to 3 original
-    bytes): the bound follows from the total and from what the rest of the
-    piece holds, and is exact when the part keeps none or all of the
-    piece's U+FFFD, or when all of them have one width.
-    """
-    if budget <= 0 or limit <= 0:
-        return 0, 0
-    text = piece.text
-    if unit == "chars":
-        kept = min(budget, limit, len(text))
-        return kept, kept
-    count = text.count(REPLACEMENT)
-    other = _units(text, unit) - 3 * count  # bytes of the characters that are not U+FFFD
-    other_part = count_part = 0
-    best = (0, 0)
-    for kept, char in enumerate(reversed(text) if back else text, 1):
-        if kept > limit:
-            break
-        if char == REPLACEMENT:
-            count_part += 1
-        else:
-            other_part += _units(char, unit)
-        rest_other, rest_count = other - other_part, count - count_part
-        high = min(other_part + 3 * count_part, piece.units - rest_other - rest_count)
-        if high > budget:
-            break
-        best = (kept, high)
-    return best
-
-
-def _min_replaced(piece: _Piece) -> int:
-    """Replacements ``piece`` holds at least: a genuine U+FFFD stands for 3 bytes, others 1-3."""
-    count = piece.text.count(REPLACEMENT)
-    if not count:
-        return 0
-    other = _units(piece.text, "bytes") - 3 * count
-    genuine_at_most = max(0, (piece.units - other - count) // 2)
-    return max(0, count - genuine_at_most)
-
-
 def merge(a: Text, b: Text, head: int, tail: int) -> Text:
     """``a`` then ``b`` as one ``Text`` of at most ``head`` + ``tail`` kept units.
 
     For unread progress deltas: ``length`` is ``a.length + b.length``, and
-    what either delta had already omitted stays omitted. Units are original
-    units, as each input records them (``Text.units()``): a byte decoded to
-    U+FFFD counts as the bytes it replaced. Whole parts are kept with their
-    exact units. Cutting inside a bytes part with U+FFFD of unknown widths
-    (see ``_cut``), the kept part counts its upper bound: the limits hold in
-    original units, ``length == head_units + tail_units + omitted`` and
-    ``omitted`` is then a lower bound. A bytes ``Text`` counts in
-    ``replaced`` only replacements it still holds (a lower bound when that
-    depends on which U+FFFD were genuine); a chars ``Text`` sums the windows.
+    what either delta had already omitted stays omitted. Each input keeps its
+    own units (bytes stay bytes), so the counts are exact:
+    ``length == len(head) + len(tail) + omitted``. A bytes cut keeps whole
+    code points, as ``TextStream`` does; its ``replaced`` counts what
+    decoding the kept bytes introduces. A chars ``Text`` sums the windows.
     """
     if a.unit != b.unit:
         raise ValueError(f"cannot merge {a.unit} with {b.unit}")
     if head < 0 or tail < 0:
         raise ValueError("head and tail must be non-negative")
     unit = a.unit
-    sources = (a, b)
-    pieces: list[_Piece | int] = []
-    for source, text in enumerate(sources):
-        head_units, tail_units = text.units()
-        pieces.append(_Piece(text.head, head_units, source))
-        if not text.complete:
-            pieces.append(max(1, text.omitted))
-        pieces.append(_Piece(text.tail, tail_units, source))
-    pieces = [piece for piece in pieces if not isinstance(piece, _Piece) or piece.text != ""]
+    # The kept parts in order, ``None`` where an input omitted units.
+    pieces: list[str | bytes | None] = []
+    for text in (a, b):
+        pieces += [text.head, None, text.tail] if not text.complete else [text.head, text.tail]
+    pieces = [piece for piece in pieces if piece is None or len(piece)]
     length = a.length + b.length
-    known = sum(piece.units for piece in pieces if isinstance(piece, _Piece))
-    gaps = any(isinstance(piece, int) for piece in pieces)
     full = (
         b.full if a.full is not None and b.full is not None and a.full.path == b.full.path else None
     )
+    empty = b"" if unit == "bytes" else ""
 
-    if not gaps and known <= head + tail:
-        joined = "".join(piece.text for piece in pieces if isinstance(piece, _Piece))
-        if unit == "chars":
-            return Text(joined, "", length, unit, True, None, full, a.replaced + b.replaced)
-        replaced = min(a.replaced + b.replaced, joined.count(REPLACEMENT))
-        return Text(joined, "", length, unit, True, None, full, replaced, 0, known, 0)
+    def joined(parts: list[str | bytes | None]) -> str | bytes:
+        return empty.join(parts)  # type: ignore[arg-type]
 
-    kept: list[tuple[_Piece, str]] = []  # what is kept of each piece
-    head_parts: list[str] = []
-    head_kept = 0
-    room = head
-    index = 0
-    cut_at, cut_chars = -1, 0  # the piece the head cut inside, and its characters kept
+    def replaced(*parts: str | bytes) -> int:
+        return replaced_in(*parts) if unit == "bytes" else a.replaced + b.replaced  # type: ignore[arg-type]
+
+    if None not in pieces and sum(len(piece) for piece in pieces) <= head + tail:  # type: ignore[arg-type]
+        whole = joined(pieces)
+        return Text(whole, empty, length, unit, True, None, full, replaced(whole))
+
+    head_parts: list[str | bytes | None] = []
+    room, index = head, 0
     while index < len(pieces) and room > 0:
         piece = pieces[index]
-        if not isinstance(piece, _Piece):
+        if piece is None:
             break
-        if piece.units <= room:
-            head_parts.append(piece.text)
-            kept.append((piece, piece.text))
-            room -= piece.units
-            head_kept += piece.units
+        if len(piece) <= room:
+            head_parts.append(piece)
+            room -= len(piece)
             index += 1
             continue
-        cut_at = index
-        cut_chars, used = _cut(piece, room, unit, back=False, limit=len(piece.text))
-        head_parts.append(piece.text[:cut_chars])
-        kept.append((piece, piece.text[:cut_chars]))
-        head_kept += used
+        cut = safe_end(piece, room) if isinstance(piece, bytes) else room
+        head_parts.append(piece[:cut])
+        pieces[index] = piece[cut:]  # what the tail may still keep of it
         break
-    tail_parts: list[str] = []
-    tail_kept = 0
-    room = tail
-    last = len(pieces) - 1
+    tail_parts: list[str | bytes | None] = []
+    room, last = tail, len(pieces) - 1
     while last >= index and room > 0:
         piece = pieces[last]
-        if not isinstance(piece, _Piece):
+        if piece is None:
             break
-        if last != cut_at and piece.units <= room:
-            tail_parts.insert(0, piece.text)
-            kept.append((piece, piece.text))
-            room -= piece.units
-            tail_kept += piece.units
+        if len(piece) <= room:
+            tail_parts.insert(0, piece)
+            room -= len(piece)
             last -= 1
             continue
-        limit = len(piece.text) - (cut_chars if last == cut_at else 0)
-        chars, used = _cut(piece, room, unit, back=True, limit=limit)
-        part = piece.text[len(piece.text) - chars :]
-        tail_parts.insert(0, part)
-        kept.append((piece, part))
-        tail_kept += used
-        break
-    new_head, new_tail = "".join(head_parts), "".join(tail_parts)
-    omitted = length - head_kept - tail_kept
-    reason = a.reason or b.reason or "max_length"
-    if unit == "chars":
-        return Text(
-            new_head, new_tail, length, unit, False, reason, full, a.replaced + b.replaced, omitted
+        start = len(piece) - room
+        tail_parts.insert(
+            0, piece[safe_start(piece, start) if isinstance(piece, bytes) else start :]
         )
+        break
+    new_head, new_tail = joined(head_parts), joined(tail_parts)
+    omitted = length - len(new_head) - len(new_tail)
+    reason = a.reason or b.reason or "max_length"
     return Text(
-        new_head,
-        new_tail,
-        length,
-        unit,
-        False,
-        reason,
-        full,
-        _kept_replaced(sources, pieces, kept),
-        omitted,
-        head_kept,
-        tail_kept,
+        new_head, new_tail, length, unit, False, reason, full, replaced(new_head, new_tail), omitted
     )
-
-
-def _kept_replaced(
-    sources: tuple[Text, Text], pieces: list[_Piece | int], kept: list[tuple[_Piece, str]]
-) -> int:
-    """The replacements a cut bytes merge still holds (at least; never one it dropped)."""
-    total = 0
-    for source, text in enumerate(sources):
-        own = [piece for piece in pieces if isinstance(piece, _Piece) and piece.source == source]
-        held = sum(piece.text.count(REPLACEMENT) for piece in own)
-        kept_parts = [(piece, part) for piece, part in kept if piece.source == source]
-        kept_count = sum(part.count(REPLACEMENT) for _piece, part in kept_parts)
-        # A replacement of this input not kept is one of the U+FFFD dropped.
-        by_total = text.replaced - (held - kept_count)
-        # Per piece: the replacements it must hold, minus the U+FFFD dropped from it.
-        by_piece = 0
-        for piece in own:
-            kept_here = sum(part.count(REPLACEMENT) for other, part in kept_parts if other is piece)
-            dropped = piece.text.count(REPLACEMENT) - kept_here
-            by_piece += max(0, _min_replaced(piece) - dropped)
-        total += min(kept_count, max(0, by_total, by_piece))
-    return total

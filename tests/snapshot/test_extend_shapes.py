@@ -376,15 +376,7 @@ def test_text_like_bytes_cut_on_code_points(registered) -> None:
     snapshot = capture(value, Limits(max_string=7, tail_share=0.5))
 
     assert snapshot == Text(
-        "éé",
-        "é",
-        10**9,
-        "bytes",
-        False,
-        "max_length",
-        omitted=10**9 - 6,
-        head_units=4,
-        tail_units=2,
+        "éé".encode(), "é".encode(), 10**9, "bytes", False, "max_length", omitted=10**9 - 6
     )
     assert len(value.slices) == 2 and (0, 10**9) not in value.slices
     # Same cut as an exact bytes value of that content.
@@ -401,7 +393,7 @@ def test_text_like_bytes_cut_on_code_points(registered) -> None:
 def test_text_like_small_text_is_complete(registered) -> None:
     registered(_BigText, BYTES)
     small = _BigText(4, "bytes")
-    assert capture(small) == Text("éé", "", 4, "bytes", True, None, head_units=4, tail_units=0)
+    assert capture(small) == Text("éé".encode(), b"", 4, "bytes", True, None)
     assert small.slices == [(0, 4)]  # kept whole: one read
 
 

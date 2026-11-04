@@ -100,7 +100,7 @@ def test_render_output_hook_uses_output_notation(hooks) -> None:
         return "log:\n" + r.render(node.fields[0][1])
 
     hooks(render_output, KIND, hook)
-    cut = Text("head", "tail", 1_000, "bytes", False, "max_length", omitted=992)
+    cut = Text(b"head", b"tail", 1_000, "bytes", False, "max_length", omitted=992)
     node = Object("Log", (("text", cut),), True, None, "", KIND)
 
     assert render_output(node) == "log:\nhead\n[... 992 bytes omitted; full output not kept]\ntail"

@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+import json
+import random
 from typing import Any
 
 import pytest
@@ -19,8 +21,10 @@ from nooa.snapshot import (
     Sequence,
     Spill,
     Text,
+    TextStream,
     Unavailable,
     capture,
+    render_json,
     render_output,
     render_python,
 )
@@ -29,11 +33,12 @@ from nooa.snapshot import (
 
 
 def _cut(unit: str = "bytes", full: Spill | None = None, reason: Any = "max_length") -> Text:
-    return Text("HEAD", "TAIL", 1_234_575, unit, False, reason, full, omitted=1_234_567)  # type: ignore[arg-type]
+    head, tail = (b"HEAD", b"TAIL") if unit == "bytes" else ("HEAD", "TAIL")
+    return Text(head, tail, 1_234_575, unit, False, reason, full, omitted=1_234_567)  # type: ignore[arg-type]
 
 
 def test_render_output_complete_passes_through() -> None:
-    assert render_output(Text("all of it\n", "", 10, "bytes", True, None)) == "all of it\n"
+    assert render_output(Text(b"all of it\n", b"", 10, "bytes", True, None)) == "all of it\n"
 
 
 def test_render_output_full_output() -> None:
@@ -130,3 +135,51 @@ def test_render_python_notation_for_other_nodes() -> None:
     assert render_python(Text("", "end", 10, "chars", False, "max_length", omitted=7)) == (
         "str(len=10, [-3:]='end')"
     )
+
+
+# --- bytes Text keeps raw bytes (principle 2) ---------------------------------------
+
+
+def test_render_python_shows_the_kept_original_bytes() -> None:
+    snapshot = capture(b"ab\xffcd" * 3000, Limits(max_string=10, tail_share=0.5))
+
+    assert isinstance(snapshot, Text) and snapshot.head == b"ab\xffcd"
+    assert render_python(snapshot) == ("bytes(len=15000, [:5]=b'ab\\xffcd', [-5:]=b'ab\\xffcd')")
+    assert render_output(snapshot).startswith("ab\ufffdcd\n[... 14,990 bytes omitted;")
+
+
+def test_render_python_of_a_bytes_stream_with_a_surrogate_escape() -> None:
+    stream = TextStream(unit="bytes", head=2, tail=2)
+    stream.write("x\udcff" * 10)  # a surrogate escape is written as its raw byte
+
+    text = stream.close()
+
+    assert (text.head, text.tail) == (b"x\xff", b"x\xff")
+    assert render_python(text) == "bytes(len=20, [:2]=b'x\\xff', [-2:]=b'x\\xff')"
+    assert render_output(text) == "x\ufffd\n[... 16 bytes omitted; full output not kept]\nx\ufffd"
+
+
+def test_complete_bytes_text_renders_as_a_bytes_literal() -> None:
+    text = Text(b"a\xffb", b"", 3, "bytes", True, None, replaced=1)
+
+    assert render_python(text) == "b'a\\xffb'"
+    assert render_output(text) == "a\ufffdb"
+
+
+def test_rendering_any_bytes_text_never_raises() -> None:
+    rng = random.Random("p2-render")
+    for _ in range(500):
+        data = bytes(rng.randrange(256) for _ in range(rng.randrange(40)))
+        limits = Limits(max_string=rng.randrange(0, 12), tail_share=rng.choice([0, 0.5, 1]))
+        stream = TextStream(unit="bytes", head=rng.randrange(6), tail=rng.randrange(6))
+        stream.write(data)
+        for node in (capture(data, limits), stream.snapshot(), stream.close()):
+            python = render_python(node)
+            output = render_output(node)
+            json.loads(render_json(node, max_chars=60))
+            if isinstance(node, Text):
+                assert isinstance(node.head, bytes) and isinstance(node.tail, bytes)
+                assert node.length == len(node.head) + len(node.tail) + node.omitted
+                if not node.complete:
+                    assert f"[:{len(node.head)}]={node.head!r}" in python or not node.head
+                assert node.head.decode("utf-8", "replace") in output

@@ -78,8 +78,8 @@ def test_bytes_head_and_tail_cut_on_code_points(char: str, size: int) -> None:
 
     text = stream.close()
 
-    assert text.head == char  # the split code point moves to the omitted part
-    assert text.tail == char
+    assert text.head == char.encode()  # the split code point moves to the omitted part
+    assert text.tail == char.encode()
     assert text.length == 10 * size
     assert text.omitted == 10 * size - 2 * size
     assert text.replaced == 0
@@ -92,7 +92,7 @@ def test_four_byte_code_point_written_one_byte_at_a_time() -> None:
 
     text = stream.close()
     # Neither 2-byte window can hold a whole 4-byte code point.
-    assert (text.head, text.tail, text.omitted, text.replaced) == ("", "", 8, 0)
+    assert (text.head, text.tail, text.omitted, text.replaced) == (b"", b"", 8, 0)
 
 
 def test_invalid_bytes_count_replacements() -> None:
@@ -101,7 +101,7 @@ def test_invalid_bytes_count_replacements() -> None:
     stream.write("\ufffd".encode())  # a genuine replacement character is not counted
 
     text = stream.close()
-    assert text.head == "ok\ufffd\ufffdend\ufffd"
+    assert text.head == b"ok\xff\xfeend\xef\xbf\xbd"  # the raw bytes
     assert text.replaced == 2
 
 
@@ -244,7 +244,7 @@ def test_spill_write_failure_falls_back_to_memory(tmp_path: Path) -> None:
     text = stream.close()
     assert text.full is None and text.reason == "not_kept"
     assert not path.exists()  # the partial file is removed
-    assert (text.head, text.tail, text.length) == ("ab", "gh", 8)
+    assert (text.head, text.tail, text.length) == (b"ab", b"gh", 8)
 
 
 def test_chars_lone_surrogate_without_spill_does_not_raise() -> None:
@@ -269,7 +269,7 @@ def test_bytes_stream_accepts_str_with_lone_surrogate() -> None:
     stream = _stream("bytes", head=20, tail=20)
     stream.write("a\ud800b")
 
-    assert stream.close().head == "a\\ud800b"
+    assert stream.close().head == b"a\\ud800b"
 
 
 def test_running_snapshot_and_since_match_the_file_on_disk(tmp_path: Path) -> None:
@@ -308,7 +308,7 @@ def test_spill_flush_failure_falls_back_to_memory(tmp_path: Path) -> None:
     text = stream.snapshot()
     assert text.full is None and text.reason == "not_kept"
     assert not path.exists()  # handled like a write failure
-    assert (text.head, text.tail, text.length) == ("ab", "gh", 8)
+    assert (text.head, text.tail, text.length) == (b"ab", b"gh", 8)
 
 
 def test_text_reads_do_not_rebind_the_writer_buffers() -> None:
@@ -396,8 +396,8 @@ def test_since_stops_before_an_incomplete_code_point() -> None:
     stream.write(data[3:])
     second, mark = stream.since(mark)
 
-    assert (first.head, first.length, mark) == ("a😀"[:1], 1, 5)
-    assert (second.head, second.length, second.replaced) == ("😀", 4, 0)
+    assert (first.head, first.length, mark) == (b"a", 1, 5)
+    assert (second.head, second.length, second.replaced) == ("😀".encode(), 4, 0)
 
 
 def test_merge_keeps_length_and_bounds() -> None:
@@ -440,24 +440,24 @@ def test_merge_of_since_deltas_matches_the_stream_length() -> None:
 
     assert merged is not None
     assert merged.length == stream.snapshot().length
-    assert len(merged.head.encode()) <= 8 and len(merged.tail.encode()) <= 8
-    assert merged.tail.endswith("😀")
-    assert merged.omitted == merged.length - len(merged.head.encode()) - len(merged.tail.encode())
+    assert len(merged.head) <= 8 and len(merged.tail) <= 8
+    assert merged.tail.endswith("😀".encode())
+    assert merged.omitted == merged.length - len(merged.head) - len(merged.tail)
 
 
 def test_merge_bytes_cuts_on_code_points() -> None:
-    a = Text("😀😀", "", 8, "bytes", True, None)
-    b = Text("😀😀", "", 8, "bytes", True, None)
+    a = Text("😀😀".encode(), b"", 8, "bytes", True, None)
+    b = Text("😀😀".encode(), b"", 8, "bytes", True, None)
 
     merged = merge(a, b, head=5, tail=7)
 
-    assert (merged.head, merged.tail) == ("😀", "😀")
+    assert (merged.head, merged.tail) == ("😀".encode(), "😀".encode())
     assert merged.omitted == 8
 
 
 def test_merge_rejects_mixed_units() -> None:
     with pytest.raises(ValueError):
-        merge(Text("", "", 0, "chars", True, None), Text("", "", 0, "bytes", True, None), 1, 1)
+        merge(Text("", "", 0, "chars", True, None), Text(b"", b"", 0, "bytes", True, None), 1, 1)
 
 
 def test_context_manager_closes() -> None:
@@ -521,7 +521,7 @@ def test_close_after_a_final_str_keeps_the_order() -> None:
     assert text.head == "a\ufffdx" and text.replaced == 1
 
 
-def test_merge_counts_replaced_bytes_as_original_units() -> None:
+def test_merge_counts_raw_bytes_exactly() -> None:
     def closed(data: bytes) -> Text:
         stream = _stream("bytes", head=10, tail=10)
         stream.write(data)
@@ -530,51 +530,43 @@ def test_merge_counts_replaced_bytes_as_original_units() -> None:
     invalid, plain = closed(b"\xff"), closed(b"x")
 
     merged = merge(invalid, plain, head=1, tail=1)
-    assert merged == Text(
-        "\ufffdx", "", 2, "bytes", True, None, replaced=1, head_units=2, tail_units=0
-    )
+    assert merged == Text(b"\xffx", b"", 2, "bytes", True, None, replaced=1)
     cut = merge(closed(b"\xffab"), closed(b"cd\xfe"), head=1, tail=1)
-    assert (cut.head, cut.tail, cut.omitted) == ("\ufffd", "\ufffd", 4)
+    assert (cut.head, cut.tail, cut.omitted) == (b"\xff", b"\xfe", 4)
     assert cut.replaced == 2
     dropped = merge(closed(b"\xffabc"), closed(b"de"), head=0, tail=2)
-    assert (dropped.tail, dropped.omitted, dropped.replaced) == ("de", 4, 0)
+    assert (dropped.tail, dropped.omitted, dropped.replaced) == (b"de", 4, 0)
 
 
-# --- merge: recorded original units (CodeRabbit 4432013584) -------------------------
-
-
-def test_merge_uses_recorded_units_for_genuine_and_decoded_replacements() -> None:
-    # Head: a genuine U+FFFD (3 bytes); tail: a decoding replacement of 1 byte.
+def test_merge_tells_genuine_and_decoded_replacements_apart() -> None:
+    # Head: a genuine U+FFFD (3 bytes); tail: an invalid byte (1 byte).
     stream = TextStream(unit="bytes", head=3, tail=1)
     stream.write(b"\xef\xbf\xbdX\xff")
     a = stream.snapshot()
-    assert (a.head, a.tail, a.omitted, a.replaced) == ("\ufffd", "\ufffd", 1, 1)
-    assert a.units() == (3, 1)
+    assert (a.head, a.tail, a.omitted, a.replaced) == (b"\xef\xbf\xbd", b"\xff", 1, 1)
     empty = TextStream(unit="bytes", head=3, tail=1).snapshot()
 
     merged = merge(a, empty, head=1, tail=0)
 
-    # The genuine U+FFFD stands for 3 bytes: it does not fit a 1-byte head.
-    assert (merged.head, merged.tail, merged.omitted, merged.replaced) == ("", "", 5, 0)
-    assert merged.units() == (0, 0)
+    # The genuine U+FFFD is 3 bytes: it does not fit a 1-byte head.
+    assert (merged.head, merged.tail, merged.omitted, merged.replaced) == (b"", b"", 5, 0)
     kept_genuine = merge(a, empty, head=3, tail=0)
-    assert (kept_genuine.head, kept_genuine.omitted) == ("\ufffd", 2)
+    assert (kept_genuine.head, kept_genuine.omitted) == (b"\xef\xbf\xbd", 2)
     assert kept_genuine.replaced == 0  # the kept U+FFFD is the genuine one
     kept_replacement = merge(a, empty, head=0, tail=1)
-    assert (kept_replacement.tail, kept_replacement.omitted) == ("\ufffd", 4)
+    assert (kept_replacement.tail, kept_replacement.omitted) == (b"\xff", 4)
     assert kept_replacement.replaced == 1
 
 
-def test_capture_of_bytes_records_units() -> None:
+def test_capture_of_bytes_keeps_the_raw_bytes() -> None:
     from nooa.snapshot import Limits, capture
 
     node = capture(b"\xff" * 50 + b"\xef\xbf\xbd" * 50, Limits(max_string=20, tail_share=0.5))
     assert isinstance(node, Text) and not node.complete
-    head_units, tail_units = node.units()
-    assert (node.head_units, node.tail_units) == (head_units, tail_units)
-    assert head_units == len(node.head)  # each \xff is one byte
-    assert tail_units == 3 * len(node.tail)  # each genuine U+FFFD is three
-    assert node.length == head_units + tail_units + node.omitted
+    assert isinstance(node.head, bytes) and node.head == b"\xff" * len(node.head)
+    assert isinstance(node.tail, bytes) and node.tail.endswith(b"\xef\xbf\xbd")
+    assert node.length == len(node.head) + len(node.tail) + node.omitted
+    assert node.replaced == len(node.head)  # each \xff decodes to one replacement
 
 
 _FRAGMENTS = {
@@ -590,71 +582,55 @@ def _random_bytes(rng: random.Random, kinds: list[str]) -> bytes:
     return b"".join(rng.choice(pool) for _ in range(rng.randint(0, 12)))
 
 
-def _decode(data: bytes) -> tuple[str, int]:
+def _replaced(data: bytes) -> int:
     text = data.decode("utf-8", errors="replace")
-    return text, text.count("\ufffd") - data.count(b"\xef\xbf\xbd")
+    return text.count("\ufffd") - data.count(b"\xef\xbf\xbd")
 
 
-def _check(text: Text, data: bytes, head: int, tail: int, *, exact: bool) -> None:
-    """``text`` describes ``data`` within ``head``/``tail`` original bytes."""
-    head_units, tail_units = text.units()
-    assert (text.head_units, text.tail_units) == (head_units, tail_units)
-    assert text.length == len(data)
-    assert text.length == head_units + tail_units + text.omitted
+def _check(text: Text, data: bytes, head: int, tail: int) -> None:
+    """``text`` describes ``data`` exactly: raw bytes within ``head``/``tail``."""
+    assert isinstance(text.head, bytes) and isinstance(text.tail, bytes)
+    assert text.length == len(data) == len(text.head) + len(text.tail) + text.omitted
     if text.complete:
-        assert (text.head + text.tail, text.omitted) == (_decode(data)[0], 0)
-        assert text.replaced == _decode(data)[1]
+        assert (text.head, text.tail, text.omitted) == (data, b"", 0)
+        assert text.replaced == _replaced(data)
         return
-    assert head_units <= head and tail_units <= tail
-    # The fewest original bytes the kept strings can stand for: within the counts.
-    fewest_head = min(k for k in range(len(data) + 1) if _decode(data[:k])[0] == text.head)
-    fewest_tail = min(
-        k for k in range(len(data) + 1) if _decode(data[len(data) - k :])[0] == text.tail
-    )
-    assert fewest_head <= head_units and fewest_tail <= tail_units
-    assert fewest_head + fewest_tail + text.omitted <= len(data)
-    kept_head = _decode(data[:head_units]) if exact else _decode(data[:fewest_head])
-    kept_tail = _decode(data[len(data) - (tail_units if exact else fewest_tail) :])
-    if exact:
-        assert kept_head[0] == text.head and kept_tail[0] == text.tail
-        assert text.replaced == kept_head[1] + kept_tail[1]
-    else:
-        # Never counts a replacement it dropped.
-        assert text.replaced <= text.head.count("\ufffd") + text.tail.count("\ufffd")
+    assert len(text.head) <= head and len(text.tail) <= tail
+    assert data.startswith(text.head) and data.endswith(text.tail)
+    assert text.replaced == _replaced(text.head) + _replaced(text.tail)
 
 
 @pytest.mark.parametrize(
-    ("kinds", "exact_merge"),
-    [
-        (["valid", "genuine"], True),
-        (["valid", "single"], True),
-        (["valid", "multi"], False),
-        (["valid", "genuine", "single", "multi"], False),
-    ],
+    "kinds",
+    [["valid", "genuine"], ["valid", "single"], ["valid", "multi"], list(_FRAGMENTS)],
 )
-def test_bytes_units_hold_for_random_streams(kinds: list[str], exact_merge: bool) -> None:
+def test_bytes_streams_and_merges_are_exact_for_random_splits(kinds: list[str]) -> None:
     rng = random.Random(f"units-{'-'.join(kinds)}")
     for _ in range(400):
         head, tail = rng.randint(0, 8), rng.randint(0, 8)
         stream = TextStream(unit="bytes", head=head, tail=tail)
         merge_head, merge_tail = rng.randint(0, 8), rng.randint(0, 8)
+        whole = b"".join(_random_bytes(rng, kinds) for _ in range(rng.randint(1, 5)))
+        # Random split points: multibyte characters are split across chunks.
+        cuts = sorted(rng.sample(range(len(whole) + 1), min(len(whole) + 1, rng.randint(1, 6))))
+        chunks = [whole[i:j] for i, j in zip([0, *cuts], [*cuts, len(whole)], strict=True)]
         data = b""
         mark = 0
         merged: Text | None = None
         merged_from = 0
-        for _chunk in range(rng.randint(1, 5)):
-            chunk = _random_bytes(rng, kinds)
+        for chunk in chunks:
             data += chunk
             stream.write(chunk)
             delta, new_mark = stream.since(mark)
-            # since(): a window of whole code points, exact.
-            _check(delta, data[mark:new_mark], head, tail, exact=True)
+            _check(delta, data[mark:new_mark], head, tail)
             if merged is None:
                 merged, merged_from = delta, mark
             else:
                 merged = merge(merged, delta, merge_head, merge_tail)
-                _check(
-                    merged, data[merged_from:new_mark], merge_head, merge_tail, exact=exact_merge
-                )
+                _check(merged, data[merged_from:new_mark], merge_head, merge_tail)
             mark = new_mark
-        _check(stream.snapshot(), data, head, tail, exact=True)
+        _check(stream.snapshot(), data, head, tail)
+        final = stream.close()
+        rest, _ = stream.since(mark)
+        _check(rest, data[mark:], head, tail)
+        _check(final, data, head, tail)

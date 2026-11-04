@@ -56,6 +56,7 @@ from nooa.snapshot._codec import (
     json_key,
     opaque_json,
     pointer_child,
+    replaced_in,
     safe_end,
     safe_start,
 )
@@ -430,11 +431,9 @@ def _cut_byte_parts(
                 low = midpoint
             else:
                 high = midpoint - 1
-    head_b, tail_b = parts(low)
+    head, tail = parts(low)
     if cost(low) > max_size:  # a whole code point did not fit
-        head_b, tail_b = b"", b""
-    head, replaced_head = decode_counted(head_b)
-    tail, replaced_tail = decode_counted(tail_b)
+        head, tail = b"", b""
     node = Text(
         head,
         tail,
@@ -442,12 +441,10 @@ def _cut_byte_parts(
         "bytes",
         False,
         "max_length",
-        replaced=replaced_head + replaced_tail,
-        omitted=length - len(head_b) - len(tail_b),
-        head_units=len(head_b),
-        tail_units=len(tail_b),
+        replaced=replaced_in(head, tail),
+        omitted=length - len(head) - len(tail),
     )
-    return _Built(node, _string_cost(head, tail))
+    return _Built(node, _string_cost(decode_counted(head)[0], decode_counted(tail)[0]))
 
 
 def _build_integer(value: int, max_size: int) -> _Built:
@@ -1857,8 +1854,9 @@ def _text_parts(shape: _TextLike, value: Any, max_size: int, limits: Limits) -> 
         decoded, replaced = decode_counted(whole)
         encoded_size = len(dumps(decoded))
         if encoded_size <= max_size:
-            node = Text(decoded, "", length, "bytes", True, None, None, replaced, 0, length, 0)
-            return _Built(node, encoded_size)
+            return _Built(
+                Text(whole, b"", length, "bytes", True, None, None, replaced), encoded_size
+            )
         return _cut_byte_parts(length, whole, whole, 0, length - 1, max_size, limits)
     head_n, tail_n = limits.split(keep_cap)
     empty: Any = "" if chars else b""

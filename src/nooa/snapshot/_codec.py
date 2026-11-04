@@ -182,6 +182,11 @@ def complete_prefix(data: bytes | bytearray) -> int:
     return index if size - index < need else size
 
 
+def replaced_in(*parts: bytes) -> int:
+    """Replacements that decoding each of ``parts`` on its own introduces."""
+    return sum(decode_counted(part)[1] for part in parts)
+
+
 def decode_counted(data: bytes | bytearray) -> tuple[str, int]:
     """``data`` decoded as UTF-8 with replacement, and the replacements introduced."""
     text = bytes(data).decode("utf-8", errors="replace")

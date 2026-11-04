@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import sys
 from collections.abc import Callable, Iterable
-from typing import Any
+from typing import Any, cast
 
 from nooa.snapshot._codec import (
     decode_counted,
@@ -66,10 +66,16 @@ _MAX_KEY_CHARS = 50
 # --- output notation ---------------------------------------------------------------
 
 
+def _shown(part: str | bytes) -> str:
+    """A kept part as text to print: bytes decode as UTF-8, with replacement."""
+    return part.decode("utf-8", errors="replace") if isinstance(part, bytes) else part
+
+
 def _output_text(text: Text) -> str:
     """``text`` in the output notation: whole, or head and tail around one line."""
+    head, tail = _shown(text.head), _shown(text.tail)
     if text.complete:
-        return text.head + text.tail
+        return head + tail
     omitted = f"[... {text.omitted:,} {text.unit} omitted; "
     full = text.full
     if full is None:
@@ -78,7 +84,7 @@ def _output_text(text: Text) -> str:
         line = omitted + f"{full.path} holds the first {full.kept:,} of {full.total:,} bytes]"
     else:
         line = omitted + f"full output: {full.path}]"
-    return (text.head + "\n" if text.head else "") + line + ("\n" + text.tail if text.tail else "")
+    return (head + "\n" if head else "") + line + ("\n" + tail if tail else "")
 
 
 # --- Python notation (agentdoc pformat / prefill) ------------------------------------
@@ -99,21 +105,19 @@ def _python_str(s: str) -> str:
 
 
 def _python_text(text: Text) -> str:
+    """A literal when complete, else ``str(len=N, [:h]=..., [-t:]=...)`` (``bytes(...)``).
+
+    A bytes ``Text`` shows the bytes it kept, as ``bytes`` literals.
+    """
+    head, tail = text.head, text.tail
     if text.complete:
-        return _python_str(text.head + text.tail)
-    if text.unit == "bytes":
-        head_b, tail_b = text.head.encode("utf-8"), text.tail.encode("utf-8")
-        parts = [f"bytes(len={text.length}"]
-        if head_b or not tail_b:
-            parts.append(f"[:{len(head_b)}]={head_b!r}")
-        if tail_b:
-            parts.append(f"[-{len(tail_b)}:]={tail_b!r}")
-        return ", ".join(parts) + ")"
-    parts = [f"str(len={text.length}"]
-    if text.head or not text.tail:
-        parts.append(f"[:{len(text.head)}]={text.head!r}")
-    if text.tail:
-        parts.append(f"[-{len(text.tail)}:]={text.tail!r}")
+        whole = head + tail  # type: ignore[operator]
+        return repr(whole) if isinstance(whole, bytes) else _python_str(whole)
+    parts = [f"{'bytes' if text.unit == 'bytes' else 'str'}(len={text.length}"]
+    if head or not tail:
+        parts.append(f"[:{len(head)}]={head!r}")
+    if tail:
+        parts.append(f"[-{len(tail)}:]={tail!r}")
     return ", ".join(parts) + ")"
 
 
@@ -550,12 +554,11 @@ def _json(node: Snapshot, max_size: int, path: str, report: _Report) -> tuple[An
                 report.skipped((node,))  # its spill files: the hook's output has none
                 return hooked
     if node_type is Text or (node_type is Scalar and type(node.value) is bytes):  # type: ignore[union-attr]
-        if node_type is Text:
-            text: str = node.head  # type: ignore[union-attr]
-        else:
-            text = decode_counted(node.value)[0]  # type: ignore[union-attr,arg-type]
-        if type(text) is not str:
-            raise TypeError("a Text node's head is a str")
+        head: Any = node.head if node_type is Text else node.value  # type: ignore[union-attr]
+        chars = node_type is Text and node.unit == "chars"  # type: ignore[union-attr]
+        if type(head) is not (str if chars else bytes):
+            raise TypeError("a Text node's head is a str (chars) or bytes (bytes)")
+        text = cast(str, head) if chars else decode_counted(cast(bytes, head))[0]  # bytes: decoded
         if node_type is Text and report.spills is not None:
             report.skipped((node,))
         value, size = fit_string(text, max_size)

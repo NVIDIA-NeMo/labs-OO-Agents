@@ -184,7 +184,7 @@ def test_bytes_are_cut_on_code_points() -> None:
 
     assert isinstance(snapshot, Text)
     assert snapshot.unit == "bytes"
-    assert snapshot.head == "éé"  # 4 bytes: the fifth would split a code point
+    assert snapshot.head == "éé".encode()  # 4 bytes: the fifth would split a code point
     assert snapshot.length == 200 and snapshot.omitted == 196
     assert render_python(snapshot) == "bytes(len=200, [:4]=b'\\xc3\\xa9\\xc3\\xa9')"
 
@@ -193,7 +193,7 @@ def test_invalid_bytes_count_replacements() -> None:
     snapshot = capture(b"ok\xff\xfe" + b"x" * 100, Limits(max_string=6))
 
     assert isinstance(snapshot, Text)
-    assert snapshot.head == "ok\ufffd\ufffdxx"
+    assert snapshot.head == b"ok\xff\xfexx"  # the original bytes
     assert snapshot.replaced == 2
 
 
@@ -962,10 +962,12 @@ def test_bytes_capture_omits_a_code_point_beyond_max_string() -> None:
     snapshot = capture(value, Limits(max_string=1))
 
     assert isinstance(snapshot, Text)
-    assert len((snapshot.head + snapshot.tail).encode()) <= 1
+    assert len(snapshot.head) + len(snapshot.tail) <= 1
     assert snapshot.omitted == len(value) and not snapshot.complete
     two_byte = capture("\u00e9\u00e9".encode(), Limits(max_string=3))
-    assert isinstance(two_byte, Text) and two_byte.head == "\u00e9" and two_byte.omitted == 2
+    assert (
+        isinstance(two_byte, Text) and two_byte.head == "\u00e9".encode() and two_byte.omitted == 2
+    )
 
 
 def test_object_fields_obey_max_items() -> None:
