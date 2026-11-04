@@ -6,6 +6,7 @@ import inspect
 import json
 import logging
 import math
+import os
 import re
 import warnings
 from abc import ABC, abstractmethod
@@ -1324,7 +1325,8 @@ class UnifiedLLM(ABC):
 
         ``api_base`` and ``base_url`` are two spellings of the same endpoint:
 
-        - An endpoint override of ``None`` counts as no override. Clearing the
+        - An endpoint override of ``None``, ``""`` or only whitespace counts as no
+          override. Clearing the
           configured endpoint would send the request, with its credentials, to
           the provider's default endpoint instead of the configured gateway.
         - A non-None override of one spelling also replaces the other spelling if
@@ -1335,6 +1337,8 @@ class UnifiedLLM(ABC):
           ``base_url``, and because an override equal to the configured URL must
           leave the route, and therefore the media permissions, unchanged.
         """
+        from nooa.unifiedllm.route_identity import no_endpoint_override
+
         extra = overrides.get("extra_body")
         if self.direct and extra is not None and not isinstance(extra, Mapping):
             raise ValueError("extra_body must be a mapping")
@@ -1343,7 +1347,7 @@ class UnifiedLLM(ABC):
         overrides = {
             key: value
             for key, value in overrides.items()
-            if not (key in ("api_base", "base_url") and value is None)
+            if not (key in ("api_base", "base_url") and no_endpoint_override(value))
         }
         params = apply_reasoning_level(
             self._reasoning_config, self.model, self.config, overrides, self.reasoning_level
@@ -1357,13 +1361,14 @@ class UnifiedLLM(ABC):
         """A replacement route never inherits permissions from this connection.
 
         ``api_base`` and ``base_url`` are compared as one endpoint, so the
-        configured URL under the other spelling keeps the permissions.
+        configured URL under the other spelling keeps the permissions. URLs are
+        normalized by route_identity.endpoint_changed, like context windows.
         """
-        from nooa.unifiedllm.reasoning import _endpoint_changed
+        from nooa.unifiedllm.route_identity import endpoint_changed
 
         if (
             self._effective_model(call_config) != self.model
-            or _endpoint_changed(self.config, call_config)
+            or endpoint_changed(self.config, call_config)
             # A request with no endpoint goes to the provider default.
             or (
                 any(self.config.get(key) for key in ("api_base", "base_url"))
@@ -1642,21 +1647,38 @@ class UnifiedLLM(ABC):
         # context_window only if every alias with the same route declares the
         # same positive value. If they disagree, or one of them declares none,
         # the result would depend on YAML order, so fall back instead.
+        #
+        # A direct client never has ``api_key_env``, so credentials are compared
+        # here rather than in same_context_route: a client without an api_key
+        # matches regardless of credentials; a client with one matches only an
+        # entry whose resolved key (api_key, else the value of api_key_env) is
+        # equal. Keys are compared in memory only and never logged.
+        client_key = self.config.get("api_key")
+        own_route = {
+            name: value
+            for name, value in self.config.items()
+            if name not in ("api_key", "api_key_env")
+        }
         windows = set()
         undeclared = False
         for key, cfg in models_snapshot.items():
             entry_client_type = cfg.get("client_type", "completion")
+            if client_key is not None:
+                entry_key = cfg.get("api_key")
+                if entry_key is None and cfg.get("api_key_env"):
+                    entry_key = os.environ.get(cfg["api_key_env"])
+                if entry_key != client_key:
+                    continue
             # Completion and Responses clients are never sent the registry-only
             # ``endpoint`` key (the decision-route spelling), so leave it out of
             # the comparison, as client_from_config does. Decision entries keep it.
-            route = (
-                cfg
-                if entry_client_type == "decision"
-                else {name: value for name, value in cfg.items() if name != "endpoint"}
+            skipped = ("api_key", "api_key_env") + (
+                () if entry_client_type == "decision" else ("endpoint",)
             )
+            route = {name: value for name, value in cfg.items() if name not in skipped}
             if same_context_route(
                 model_str,
-                self.config,
+                own_route,
                 client_type,
                 cfg.get("model_name", key),
                 route,
