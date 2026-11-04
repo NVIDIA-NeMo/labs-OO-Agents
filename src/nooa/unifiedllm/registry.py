@@ -72,6 +72,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 # Aliases already warned about a missing media_inputs setting (warn once each).
 _warned_text_only: set[str] = set()
+# Aliases already warned that an override dropped their route settings.
+_warned_route_override: set[str] = set()
 
 # Serializes the (_loaded, MODELS) check-and-mutate so concurrent
 # ensure_loaded() / reload_registry() calls — possible when async agent
@@ -90,6 +92,38 @@ _NVIDIA_KEY_SYNONYMS = {
     "NVIDIA_INTERNAL_API_KEY": "NVIDIA_INFERENCE_API_KEY",
 }
 _ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _lookup_api_key_env(
+    config: Mapping[str, Any], *, allowed_env_vars: Collection[str] | None = None
+) -> tuple[str | None, str | None]:
+    """Return ``(key, problem)`` for the ``api_key_env`` of ``config``, without logging.
+
+    ``key`` is the value of the named env var (or its NVIDIA synonym); an empty
+    value counts as unset. ``problem`` is None on success or when ``api_key_env``
+    is not set, else one of ``"type"``, ``"name"``, ``"not_allowed"`` and
+    ``"unset"``; ``key`` is then None. Never raises for malformed values.
+    """
+    api_key_env = config.get("api_key_env")
+    if not api_key_env:
+        return None, None
+    # Defend against malformed YAML where api_key_env was written as a
+    # number, list, etc. — os.getenv would raise TypeError.
+    if not isinstance(api_key_env, str):
+        return None, "type"
+    if not _ENV_VAR_NAME_RE.fullmatch(api_key_env):
+        return None, "name"
+    if allowed_env_vars is not None and api_key_env not in allowed_env_vars:
+        return None, "not_allowed"
+    api_key = os.getenv(api_key_env)
+    if api_key:
+        return api_key, None
+    synonym = _NVIDIA_KEY_SYNONYMS.get(api_key_env)
+    if synonym:
+        api_key = os.getenv(synonym)
+        if api_key:
+            return api_key, None
+    return None, "unset"
 
 
 def resolve_api_key_from_config(
@@ -114,48 +148,37 @@ def resolve_api_key_from_config(
     partially untrusted config. When supplied, only those exact env-var names
     may be resolved.
     """
+    api_key, problem = _lookup_api_key_env(config, allowed_env_vars=allowed_env_vars)
+    if problem is None:
+        return api_key
     api_key_env = config.get("api_key_env")
-    if not api_key_env:
-        return None
-    # Defend against malformed YAML where api_key_env was written as a
-    # number, list, etc. — os.getenv would raise TypeError.
-    if not isinstance(api_key_env, str):
+    if problem == "type":
         logger.warning(
             "Model %r has invalid api_key_env %r: expected a string env var name, got %s.",
             model_name,
             api_key_env,
             type(api_key_env).__name__,
         )
-        return None
-    if not _ENV_VAR_NAME_RE.fullmatch(api_key_env):
+    elif problem == "name":
         logger.warning(
             "Model %r has invalid api_key_env %r: expected a shell-style env var name.",
             model_name,
             api_key_env,
         )
-        return None
-    if allowed_env_vars is not None and api_key_env not in allowed_env_vars:
+    elif problem == "not_allowed":
         logger.warning(
             "Model %r requested api_key_env %r, which is not in the caller's allowed env-var set.",
             model_name,
             api_key_env,
         )
-        return None
-    api_key = os.getenv(api_key_env)
-    if api_key:
-        return api_key
-    synonym = _NVIDIA_KEY_SYNONYMS.get(api_key_env)
-    if synonym:
-        api_key = os.getenv(synonym)
-        if api_key:
-            return api_key
-    logger.warning(
-        "Model %r is configured to read its API key from env var %r, but "
-        "that variable is unset or empty. Falling back to litellm defaults "
-        "(which may use OPENAI_API_KEY).",
-        model_name,
-        api_key_env,
-    )
+    else:
+        logger.warning(
+            "Model %r is configured to read its API key from env var %r, but "
+            "that variable is unset or empty. Falling back to litellm defaults "
+            "(which may use OPENAI_API_KEY).",
+            model_name,
+            api_key_env,
+        )
     return None
 
 
@@ -587,15 +610,12 @@ def client_from_config(
     # belong to the replacement route and are validated by its constructor.
     # The configured URL under the other spelling, or normalized differently
     # (trailing slash, host case), is the same route.
-    from nooa.unifiedllm.route_identity import endpoint_changed
+    from nooa.unifiedllm.route_identity import endpoint_or_provider_changed
 
+    dropped: list[str] = []
     if config and (
         overrides.get("model", model) != model
-        or endpoint_changed(config, overrides)
-        or (
-            "custom_llm_provider" in overrides
-            and overrides["custom_llm_provider"] != config.get("custom_llm_provider")
-        )
+        or endpoint_or_provider_changed(config, overrides)
         or (client_type is not None and client_type != config.get("client_type", "completion"))
         or overrides.get("client") is not None
     ):
@@ -606,13 +626,12 @@ def client_from_config(
             "media_inputs",
             "structured_output_mode",
         ):
-            params.pop(key, None)
-        if "reasoning_levels" in config:
-            logger.warning(
-                "Route overridden for %r; inherited reasoning choices were cleared. "
-                "Declare reasoning_levels explicitly for the replacement route.",
-                name,
-            )
+            if params.pop(key, None) and key in (
+                "reasoning_levels",
+                "media_inputs",
+                "structured_output_mode",
+            ):
+                dropped.append(key)
 
     # A context_window belongs to one route. If an override changes the model,
     # endpoint, client type, provider, client object or credentials, drop the
@@ -642,8 +661,19 @@ def client_from_config(
         effective_route,
         selected_client_type,
     )
-    if not same_route:
-        config.pop("context_window", None)
+    if not same_route and config.pop("context_window", None) is not None:
+        dropped.insert(0, "context_window")
+    # Say once per alias what the override cleared. Name only the alias and the
+    # settings: never the override values, which may hold URLs or credentials.
+    if dropped and name not in _warned_route_override:
+        _warned_route_override.add(name)
+        logger.warning(
+            "Model %r: the overrides change its route, so its configured %s no longer "
+            "apply and were not used. Pass them with the overrides to set them for the "
+            "new route.",
+            name,
+            ", ".join(dropped),
+        )
 
     params.update(overrides)
     if config and "media_inputs" not in params and name not in _warned_text_only:

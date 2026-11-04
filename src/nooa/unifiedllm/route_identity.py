@@ -17,13 +17,14 @@ _ENDPOINT_ALIASES = ("api_base", "base_url")
 def normalize_endpoint(value: Any) -> str | None:
     """Return ``value`` as a comparable endpoint URL, or None if it is not one.
 
-    Scheme and host are lowercased and a trailing slash is dropped; URL userinfo,
-    path and query stay significant. A non-string or unparsable value gives None.
+    Surrounding whitespace is stripped, scheme and host are lowercased and a
+    trailing slash is dropped; URL userinfo, path and query stay significant. A
+    non-string or unparsable value gives None.
     """
     if not isinstance(value, str):
         return None
     try:
-        parts = urlsplit(value)
+        parts = urlsplit(value.strip())
         # DNS/scheme case is insignificant, URL userinfo is not.
         userinfo, sep, host = parts.netloc.rpartition("@")
         netloc = userinfo + sep + host.lower() if sep else parts.netloc.lower()
@@ -66,6 +67,19 @@ def endpoint_changed(defaults: Mapping[str, Any], overrides: Mapping[str, Any]) 
         if normalized is None or normalized not in configured:
             return True
     return False
+
+
+def endpoint_or_provider_changed(defaults: Mapping[str, Any], overrides: Mapping[str, Any]) -> bool:
+    """Whether ``overrides`` change the endpoint or the ``custom_llm_provider``.
+
+    The endpoint is compared with endpoint_changed(). A ``custom_llm_provider``
+    override counts when it differs from the configured one. Callers add their
+    own model, client-type and client-object checks.
+    """
+    return endpoint_changed(defaults, overrides) or (
+        "custom_llm_provider" in overrides
+        and overrides["custom_llm_provider"] != defaults.get("custom_llm_provider")
+    )
 
 
 def _endpoint(config: Mapping[str, Any]) -> tuple[str, ...]:

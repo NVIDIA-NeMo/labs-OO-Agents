@@ -182,6 +182,64 @@ def test_direct_lookup_compares_the_entry_resolved_key(monkeypatch):
     assert CompletionClient(MODEL, api_base=BASE, custom_llm_provider="x").context_window is None
 
 
+def test_endpoint_whitespace_is_not_a_route_change():
+    """Surrounding whitespace in an endpoint does not change the route."""
+    from nooa.unifiedllm.route_identity import endpoint_changed, normalize_endpoint
+
+    assert normalize_endpoint(BASE + " ") == normalize_endpoint(BASE)
+    assert not endpoint_changed({"api_base": BASE}, {"api_base": BASE + " "})
+    assert not endpoint_changed({"api_base": BASE}, {"base_url": "\t" + BASE + "/\n"})
+    assert endpoint_changed({"api_base": BASE}, {"api_base": "https://other.test/v1 "})
+
+
+def test_endpoint_or_provider_changed_is_shared_by_reasoning_and_registry():
+    from nooa.unifiedllm import reasoning
+    from nooa.unifiedllm.route_identity import endpoint_or_provider_changed
+
+    configured = {"api_base": BASE, "custom_llm_provider": "openai"}
+    assert not endpoint_or_provider_changed(configured, {"base_url": BASE + "/"})
+    assert not endpoint_or_provider_changed(configured, {"custom_llm_provider": "openai"})
+    assert endpoint_or_provider_changed(configured, {"custom_llm_provider": "other"})
+    assert endpoint_or_provider_changed(configured, {"api_base": "https://other.test/v1"})
+    assert not hasattr(reasoning, "_endpoint_changed")
+
+
+def test_route_override_warns_once_per_alias_what_it_dropped(caplog):
+    registry._warned_route_override.discard("local")
+    registry._warned_route_override.discard("same")
+    raw = entry(
+        media_inputs=["image"],
+        reasoning_levels={"low": {"reasoning_effort": "low"}},
+        api_key="secret-key",
+    )
+    other = "https://user:pw@other.test/v1"
+    with caplog.at_level("WARNING", logger="nooa.unifiedllm.registry"):
+        registry.client_from_config("local", deepcopy(raw), api_base=other).close()
+        registry.client_from_config("local", deepcopy(raw), api_base=other).close()
+        registry.client_from_config("same", deepcopy(raw), base_url=BASE).close()
+    warnings = [r.getMessage() for r in caplog.records if "change its route" in r.getMessage()]
+    assert len(warnings) == 1
+    assert "'local'" in warnings[0]
+    for setting in ("context_window", "reasoning_levels", "media_inputs"):
+        assert setting in warnings[0]
+    assert "other.test" not in warnings[0] and "pw" not in warnings[0]
+    assert "secret-key" not in caplog.text
+
+
+def test_direct_lookup_tolerates_a_malformed_api_key_env():
+    """A non-string api_key_env must not crash the lookup; that entry just never matches a key."""
+    registry.MODELS["local"] = entry(api_key_env=["NOT", "A", "NAME"])
+    assert CompletionClient(MODEL, api_base=BASE, api_key="k").context_window is None
+    assert CompletionClient(MODEL, api_base=BASE).context_window == 8192
+
+
+def test_direct_lookup_treats_an_empty_env_var_as_unset(monkeypatch):
+    """As in the registry, an empty api_key_env value is no key, not the empty string."""
+    monkeypatch.setenv("LOCAL_SCOPE", "")
+    registry.MODELS["local"] = entry(api_key_env="LOCAL_SCOPE")
+    assert CompletionClient(MODEL, api_base=BASE, api_key="").context_window is None
+
+
 def test_registry_client_keeps_its_own_credential_scope(monkeypatch):
     monkeypatch.setenv("LOCAL_SCOPE", "same-value")
     registry.MODELS["local"] = entry(api_key_env="LOCAL_SCOPE")
