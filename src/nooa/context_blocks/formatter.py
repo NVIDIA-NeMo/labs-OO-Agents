@@ -129,7 +129,7 @@ class BlockFormatter(ABC):
         """
         if _is_llm_response(event):
             return event.replay_content
-        if getattr(event, "_role", None) is Role.ASSISTANT:
+        if event.event_role is Role.ASSISTANT:
             content = getattr(event, "content", None)
             if isinstance(content, str):
                 return content

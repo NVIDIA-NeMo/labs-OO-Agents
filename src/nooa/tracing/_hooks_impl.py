@@ -465,6 +465,15 @@ class OpenInferenceHooks:
         if not span:
             return
 
+        # Attributes known only after execution, such as decision provenance.
+        for key, value in kwargs.items():
+            if value is not None:
+                with contextlib.suppress(Exception):
+                    span.set_attribute(
+                        f"generation.{key}",
+                        str(value) if not isinstance(value, (str, int, float, bool)) else value,
+                    )
+
         # Set result/error
         if exception:
             _record_error(span, exception)

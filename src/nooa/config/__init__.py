@@ -28,6 +28,7 @@ from nooa.config.resolved import (
 )
 from nooa.config.strategy_config import (
     CodeActConfig,
+    LoopGuardConfig,
     PredictConfig,
     ReflexionConfig,
 )
@@ -45,6 +46,7 @@ __all__ = [
     # In-code / strategy configs
     "ExecutionConfig",
     "CodeActConfig",
+    "LoopGuardConfig",
     "PredictConfig",
     "ReflexionConfig",
     "MethodSummarizerConfig",

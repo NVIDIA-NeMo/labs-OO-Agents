@@ -50,7 +50,7 @@ if TYPE_CHECKING:
 _INSTANCE_LLM_CACHE_ATTR = "_strategy_llm_alias_cache"
 
 
-def _is_llm_client(spec: Any) -> bool:
+def _is_client(spec: Any) -> bool:
     """True if *spec* is an LLM client rather than a resolver callable.
 
     Subclassing :class:`~nooa.unifiedllm.UnifiedLLM` is the normal case, but
@@ -81,7 +81,12 @@ def _is_llm_client(spec: Any) -> bool:
         return True
     if inspect.isclass(spec):
         return False
-    return hasattr(spec, "acall")
+    return callable(getattr(spec, "acall", None))
+
+
+def _is_llm_client(spec: Any) -> bool:
+    """Backward-compatible chat-client predicate used by existing tests."""
+    return _is_client(spec)
 
 
 def resolve_alias(
@@ -123,6 +128,11 @@ def resolve_alias(
     if cache is not None:
         cached = cache.get(alias)
         if cached is not None:
+            if not _is_client(cached):
+                raise TypeError(
+                    f"The cached {origin} alias {alias!r} for '{method_name}' is "
+                    f"incompatible: {type(cached).__name__} does not implement acall()."
+                )
             return cast("UnifiedLLM", cached)
 
     from nooa.unifiedllm import get_llm_client
@@ -135,7 +145,7 @@ def resolve_alias(
             f"resolved by get_llm_client: {type(exc).__name__}: {exc}"
         ) from exc
 
-    if not _is_llm_client(client):
+    if not _is_client(client):
         raise TypeError(
             f"The {origin} alias {alias!r} for '{method_name}' resolved to "
             f"{type(client).__name__}, not a UnifiedLLM instance."
@@ -146,7 +156,13 @@ def resolve_alias(
     return client
 
 
-def _resolve_alias(alias: str, agent: Any, method_name: str, *, origin: str) -> UnifiedLLM:
+def _resolve_alias(
+    alias: str,
+    agent: Any,
+    method_name: str,
+    *,
+    origin: str,
+) -> UnifiedLLM:
     """Resolve a registry alias / litellm model string against *agent*.
 
     The client is constructed once per (agent instance, alias) pair and
@@ -174,7 +190,12 @@ def _resolve_alias(alias: str, agent: Any, method_name: str, *, origin: str) -> 
     return resolve_alias(alias, cache, method_name, origin=origin)
 
 
-def validate_method_llm_spec(spec: Any, func_name: str, *, standalone: bool = False) -> None:
+def validate_method_llm_spec(
+    spec: Any,
+    func_name: str,
+    *,
+    standalone: bool = False,
+) -> None:
     """Validate an ``@strategy(llm=...)`` value at decoration time.
 
     Catches the mistakes that would otherwise surface much later, in the
@@ -194,7 +215,7 @@ def validate_method_llm_spec(spec: Any, func_name: str, *, standalone: bool = Fa
         TypeError: If *spec* is unusable. Raised at decoration time, so the
             failure points at the offending ``@strategy`` line.
     """
-    if _is_llm_client(spec):
+    if _is_client(spec):
         return
 
     if isinstance(spec, str):
@@ -209,7 +230,7 @@ def validate_method_llm_spec(spec: Any, func_name: str, *, standalone: bool = Fa
         if standalone:
             raise TypeError(
                 f"@strategy(llm=...) on standalone function '{func_name}' must be a "
-                f"UnifiedLLM instance or an alias string, not a callable. Callables "
+                f"UnifiedLLM client or an alias string, not a callable. Callables "
                 f"resolve against an agent instance, and standalone functions have "
                 f"none. Pass a client or a string alias, or make '{func_name}' a "
                 f"method on an Agent subclass."
@@ -217,15 +238,19 @@ def validate_method_llm_spec(spec: Any, func_name: str, *, standalone: bool = Fa
         return
 
     raise TypeError(
-        f"@strategy(llm=...) on '{func_name}' must be a UnifiedLLM instance, a "
-        f"registry alias / model string, or a callable taking the agent and "
+        f"@strategy(llm=...) on '{func_name}' must be a UnifiedLLM client, "
+        f"a registry alias / model string, or a callable taking the agent and "
         f"returning one, got {type(spec).__name__}. For a per-instance model, use "
         f"llm=lambda self: self.my_client."
     )
 
 
 def resolve_method_llm(
-    spec: Any, agent: Any, method_name: str, *, origin: str = "@strategy(llm=...)"
+    spec: Any,
+    agent: Any,
+    method_name: str,
+    *,
+    origin: str = "@strategy(llm=...)",
 ) -> UnifiedLLM:
     """Resolve an ``llm=`` value against an agent instance.
 
@@ -240,7 +265,7 @@ def resolve_method_llm(
             failure points at the line that supplied the value.
 
     Returns:
-        The resolved ``UnifiedLLM``.
+        The client required by the selected strategy.
 
     Raises:
         TypeError: If *spec* is not a client, string, or callable, an empty
@@ -253,7 +278,7 @@ def resolve_method_llm(
             generation — a bare AttributeError from a typo'd attribute or a
             404 from a typo'd model name is otherwise very hard to place.
     """
-    if _is_llm_client(spec):
+    if _is_client(spec):
         return cast("UnifiedLLM", spec)
 
     if isinstance(spec, str):
@@ -268,7 +293,7 @@ def resolve_method_llm(
 
     if not callable(spec):
         raise TypeError(
-            f"{origin} for '{method_name}' must be a UnifiedLLM instance, a "
+            f"{origin} for '{method_name}' must be a UnifiedLLM client, a "
             f"registry alias / model string, or a callable returning one, got "
             f"{type(spec).__name__}."
         )
@@ -280,10 +305,10 @@ def resolve_method_llm(
             f"The {origin} callable for '{method_name}' raised {type(exc).__name__}: {exc}"
         ) from exc
 
-    if not _is_llm_client(resolved):
+    if not _is_client(resolved):
         raise TypeError(
-            f"The {origin} callable for '{method_name}' must return a "
-            f"UnifiedLLM instance, got {type(resolved).__name__}."
+            f"The {origin} callable for '{method_name}' must return a UnifiedLLM instance, "
+            f"got {type(resolved).__name__}."
         )
 
     return cast("UnifiedLLM", resolved)

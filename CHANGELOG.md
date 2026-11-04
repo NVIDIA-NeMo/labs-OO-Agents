@@ -6,6 +6,155 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- Registry entries' `base_url`, `timeout` and `custom_llm_provider` settings
+  are now passed to the clients built from them. They were ignored before, so
+  configs that set them may now send requests to a different endpoint or
+  provider, or use a different timeout.
+- Native Anthropic Messages and OpenAI Responses clients now raise `ValueError`
+  locally, before any HTTP request, when a request carries an enabled audio or
+  video attachment. These interfaces can only send images and PDFs; before, the
+  attachment reached the provider. Chat routes are unchanged.
+- A `context_window` now belongs to the route it was declared for. Clients
+  built from a registry entry no longer reuse the entry's `context_window` when
+  an override changes the route (model, endpoint, client type, provider, client
+  object or credentials), and the registry logs one warning per alias naming
+  the settings it dropped. A client built directly borrows a registry
+  `context_window` only when an entry's route matches its own, including the
+  resolved key when the client passes `api_key`; otherwise it falls back to
+  LiteLLM model metadata.
+- Windows: WSL 2 is the supported way to run nooa on Windows. Native Windows is
+  unsupported: `import nooa` raises `UnsupportedPlatformError` (an
+  `ImportError`) and the `nooa` command exits with one line pointing to WSL 2,
+  unless `NOOA_SKIP_PLATFORM_CHECK=1` is set. With the override, the pure-Python
+  core (agents, PredictStrategy, in-process CodeAct, in-memory storage) and
+  `nooa connect` work and are tested in CI (the registry lock uses `filelock`
+  there; POSIX keeps `fcntl`), redirected CLI output is written as UTF-8, and
+  POSIX-only features (bash sessions and shell tools, the CodeAct sandbox,
+  file-backed SQLite storage, `monitor()`) raise `PosixOnlyFeatureError` naming
+  WSL 2. Previously `import nooa` failed on Windows with `fcntl`/`SIGUSR2`
+  errors. CI adds a native-Windows smoke, a WSL quick check on every PR, and a
+  nightly full suite under WSL.
+- CodeAct and PurePython `max_retries` now count only consecutive LLM API
+  errors; a successful LLM call resets the count. Other errors, such as
+  invalid tool calls and failed result validation, still add up across the
+  call. Previously a few scattered transient endpoint errors could end a long
+  turn even though every retry succeeded.
+- Dependency security update: the locked versions of Pillow, PyJWT,
+  cryptography, aiohttp, urllib3, AnyIO, filelock, multidict, Werkzeug,
+  setuptools, certifi, OpenTelemetry, and mcp now include their published
+  vulnerability fixes. The `exclude-newer` cutoff, documented as a 7-day window,
+  had been frozen at 2026-08-18 and blocked these releases; it now stands at
+  2026-10-21. LiteLLM and its OpenInference instrumentation stay at their
+  current versions and mcp stays on 1.x (1.30+) until NOOA is adapted to their
+  newer releases: with them, opaque provider reasoning state reaches exported
+  OTLP spans and MCP tool-level errors are no longer raised.
+- Prompt inspection (`print_prompt()` and `build_prompt_data()`) now applies
+  method-level truncation overrides for CodeAct and PurePython, matching runtime
+  prefill rendering. Both strategies now use the resolved runtime settings for
+  live prefill, and emit `PrefillTruncationWarning` when formatting or stdout
+  capture actually omits input, with advice for adjusting the relevant limits.
+- `RetryConfig` is the only endpoint retry budget for `CompletionClient` on
+  OpenAI-compatible routes. LiteLLM let the OpenAI SDK retry each attempt twice
+  more, so `RetryConfig(max_retries=2)` sent 9 requests for a persistent server
+  error instead of 3 (`max_retries + 1`; rate limits may also use
+  `rate_limit_extra_retries`). NOOA now passes `max_retries=0` to the SDK, on a
+  per-call copy of its client so concurrent calls cannot change each other's
+  setting. Passing `max_retries` to the client explicitly still enables SDK
+  retries.
+- The bench `TaskResult` gains an optional `value` field: the exact output the
+  task asks for, with no explanation. `_run_evaluation` returns a non-empty
+  `value` as `answer`, and the runner writes it to `/app/answer.txt` verbatim.
+  When `value` is empty, the answer file holds `how_to_verify`, as before.
+- LLM provider calls are bounded by an overall per-attempt deadline
+  (`HttpConfig.request_timeout`, default 600s). `read_timeout` only bounds the
+  gap between received bytes, so a stalled stream that still trickled keepalive
+  bytes was never timed out and the attempt awaited forever. On expiry the
+  attempt is cancelled and a retryable `TimeoutError` is raised, so the retry
+  layer recovers. Set `request_timeout=None` to disable.
+- Shell commands (`ShellTools.run`, `BashSession.run`) that print more than
+  30,000 characters on stdout or stderr keep the first and last 15,000, with the
+  standard truncation notice (`TruncatingStringIO`). Before, only the first
+  30,000 were kept, so the error at the end of a failing command was lost.
+- `nooa connect` says which variable its key comes from ("Using the key in
+  NVIDIA_INFERENCE_API_KEY."). When the server rejects the key while listing models,
+  it asks for another and tries again instead of exiting; `--yes` runs still stop.
+  `--provider` help and errors list every preset, including `hub`.
+- `nooa connect` offers the NVIDIA Inference Hub (`inference-api.nvidia.com`,
+  key in `NVIDIA_INFERENCE_API_KEY`) as a preset provider, after build.nvidia.com.
+- `import nooa` no longer loads the strategies, the LLM client or LiteLLM
+  (about 3.3 s down to 0.3 s here). The strategy names, `LLMResponse` and
+  `llm_config_chain` load on first use; `from nooa import CodeActStrategy`
+  and `from nooa import *` work as before.
+- Groundwork for the session tree design, in shared code:
+  - A cancelled CodeAct cell is now recorded for the model: an appended
+    `PythonOutput` with the new `ResultStatus.CANCELLED` carries the stdout
+    and stderr produced before the cancel. The cell's `ToolCallEvent` is
+    left as it was written. `execute_code` appends the partial
+    `ExecutionResult` (new `cancelled` flag) to the re-raised
+    `CancelledError`'s `execution_results` list, one entry per nested
+    cell, innermost first. The ACP bridge still shows
+    the cell as "Cancelled".
+  - `Notification.description` renders in full (up to 20,000 characters)
+    and `Notification.value` carries an optional object. Session hosts use
+    it for steering text, with a `source` that says in plain words who sent
+    the message.
+  - `nooa.interactive` adds the `Done`, `NeedInput` and `Waiting` turn
+    results and a `handle_batch()` turn method (`Done | Waiting`) for
+    unattended turns. `handle()` returns one of the three types.
+  - `RespondResult` and `RespondReason` are removed; `CodingAgent`, the ACP
+    dispatcher and the ARC-AGI-3 example use the typed results. To migrate,
+    return `Done` for `DONE`, `NeedInput` for `NEED_INPUT`, and `Waiting`
+    for `WAIT` or `GET_USER_INPUT`.
+  - The bench `TaskResult` gains an optional `report` field.
+  - A queue channel publishes two runtime events through the agent's event
+    manager: `ChannelItemConsumed` when `get()`, `drain()` or `race()` hands
+    an item to a consumer, and `ChannelItemsDiscarded` when `flush()`,
+    `clear()` or `remove_channel()` drops pending items. `remove()` and
+    `pop_last()` withdraw an item and publish nothing.
+    Subscribe with `event_manager.on(...)`; they are never recorded or shown
+    to the model.
+  - `nooa.strategies.codeact` names its two generation-limit messages,
+    `OUTPUT_TOKENS_EXHAUSTED_MESSAGE` and `MAX_ITERATIONS_MESSAGE`, so hosts
+    can map them without copying the wording.
+  - `TodoManager.status()` shows at most the two newest done todos when no
+    todo is active; the rest are counted.
+  - A session lock file records `<pid> <hostname>` and is blanked on a
+    clean close and after `delete_sqlite_database`, so another machine
+    sharing the directory can tell the session is in use.
+  - `Channel.remove(item)` withdraws one pending item by identity; it
+    publishes neither event.
+  - `EventBase.event_role` returns an event's provider role (its `_role`
+    class variable). It is not called `role` so a subclass can still
+    declare a field of that name.
+  - `SQLiteStorageManager.save_snapshot_json(data)` stores an already
+    serialised snapshot under the manager's own lock; with
+    `check_same_thread=False` it may be called from a worker thread.
+  - `SQLiteStorageManager` takes `must_exist=True` (a missing file raises
+    `sqlite3.OperationalError` and nothing is created, not even the lock
+    file) and `journal_mode="wal" | "delete"`
+    (default `None` keeps the virtiofs detection).
+  - `nooa.storage` exports `read_lock_owner`, which reads a session lock
+    file's owner record.
+  - `nooa.tools` exports `BashSession`, `StreamEvent` and `StreamDone`;
+    `nooa.runtime.channels.ChannelReader` is the public name of the channel
+    read facade; the private `_ChannelReader` name is removed.
+  - `nooa.tracing.register_hooks_in_current_context()` installs the tracing
+    hooks in a context that did not inherit them, for hosts that run agents
+    in fresh asyncio or thread contexts.
+- Tracing: a plain-HTTP `OTLP_ENDPOINT` for a viewer that serves HTTPS on
+  that port no longer counts as reachable. The probe recognises the 400
+  "HTTP request to an HTTPS server" reply, and `resolve_otlp_endpoint`
+  (used by the default exporter set-up and the bench runner) retries the
+  https twin and uses it, logging one warning that names both endpoints.
+  Before, tracing turned on and every export was dropped.
+- Connect no longer writes its session history into `llm_config.yaml`. Saved
+  aliases now contain only the discovered runtime settings; the whole
+  `provenance` block — probe requests and outcomes, token accounting,
+  catalogue metadata, limits, warnings — stays in the connect session
+  (visible via `--show-config` previews and `--stage` JSON) and never
+  reaches the registry. Existing verbose configs remain loadable; the next
+  save of an alias compacts it. A typical entry shrinks from ~550 lines to
+  ~40.
 - Remove `AnthropicProviderFormatter` and `ResponsesProviderFormatter` from
   `nooa.context_blocks`, and the runtime's client-type dispatch that swapped in
   the Responses one. Neither was on the live path: every client (including

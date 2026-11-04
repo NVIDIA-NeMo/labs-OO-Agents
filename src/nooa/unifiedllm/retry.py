@@ -14,6 +14,7 @@ import time
 from collections.abc import Callable
 from typing import Any, TypeVar
 
+from nooa.unifiedllm.admission import AdmissionError
 from nooa.unifiedllm.errors import EmptyContentError
 from nooa.unifiedllm.retry_config import RetryConfig
 
@@ -145,15 +146,27 @@ def _is_retryable_error(error: Exception, config: RetryConfig) -> tuple[bool, bo
     Returns:
         Tuple of (is_retryable, is_rate_limit)
     """
+    # Admission failures happen before the provider. Retrying a timeout would
+    # immediately rejoin the same queue, a call-cap rejection cannot succeed,
+    # and a controller outage should not be mistaken for a provider outage.
+    # A higher-level workflow may still retry later if appropriate.
+    if isinstance(error, AdmissionError):
+        return False, False
+
     # Check for empty content error (if enabled)
     if isinstance(error, EmptyContentError) and config.retry_on_empty_content:
         return True, False
 
-    # Prefer the structured status code when the exception exposes one (LiteLLM /
-    # OpenAI APIStatusError subclasses carry ``.status_code`` — e.g. BadGatewayError
-    # has 502). A present but non-retryable status is terminal; do not let broad
-    # endpoint text matching retry permanent 4xx/auth/model errors.
+    # Inspect structured status data before falling back to message heuristics.
+    # LiteLLM and OpenAI APIStatusError subclasses expose ``.status_code``
+    # directly, while HTTPX stores it on ``HTTPStatusError.response.status_code``.
+    # A known non-retryable status must remain terminal: if broad text matching
+    # ran first, an endpoint or provider message could accidentally make a
+    # permanent 4xx authentication/model error look transient and retry it.
     status_code = getattr(error, "status_code", None)
+    if not isinstance(status_code, int):
+        response = getattr(error, "response", None)
+        status_code = getattr(response, "status_code", None)
     if isinstance(status_code, int):
         if status_code == 429:
             return (True, True) if 429 in config.retryable_status_codes else (False, False)
