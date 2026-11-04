@@ -4,6 +4,7 @@
 
 import copy
 import json
+import os
 import socket
 
 import httpx
@@ -59,12 +60,21 @@ def reply(style, text="42"):
 @pytest.fixture(autouse=True)
 def no_network(monkeypatch):
     """Fail closed if an SDK or mock regression tries to open a real connection."""
+    # The SDK route reads these when a client has no endpoint; an inherited
+    # gateway or Azure URL would change the request host or fail construction.
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
 
     def forbidden(*args, **kwargs):
         raise AssertionError("Direct SDK tests must never connect to the network")
 
     monkeypatch.setattr(socket.socket, "connect", forbidden)
     monkeypatch.setattr(socket.socket, "connect_ex", forbidden)
+
+
+def test_inherited_provider_base_urls_are_cleared():
+    assert "OPENAI_BASE_URL" not in os.environ
+    assert "ANTHROPIC_BASE_URL" not in os.environ
 
 
 @pytest.fixture
