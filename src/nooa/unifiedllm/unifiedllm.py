@@ -1323,13 +1323,14 @@ class UnifiedLLM(ABC):
         """A replacement route never inherits permissions from this connection.
 
         ``api_base`` and ``base_url`` are compared as one endpoint, so the
-        configured URL under the other spelling keeps the permissions.
+        configured URL under the other spelling keeps the permissions. URLs are
+        normalized by route_identity.endpoint_changed, like context windows.
         """
-        from nooa.unifiedllm.reasoning import _endpoint_changed
+        from nooa.unifiedllm.route_identity import endpoint_changed
 
         if (
             self._effective_model(call_config) != self.model
-            or _endpoint_changed(self.config, call_config)
+            or endpoint_changed(self.config, call_config)
             # A request with no endpoint goes to the provider default.
             or (
                 any(self.config.get(key) for key in ("api_base", "base_url"))

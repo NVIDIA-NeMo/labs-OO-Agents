@@ -213,6 +213,35 @@ def test_equivalent_factory_override_retains_context():
     assert c.get_context_limits({"api_base": BASE}).context_window == 8192
 
 
+@pytest.mark.parametrize("spelling", ["api_base", "base_url"])
+@pytest.mark.parametrize(
+    "same", [BASE + "/", "HTTPS://GATEWAY.TEST/v1", "https://Gateway.test/v1/"]
+)
+def test_equivalent_per_call_endpoint_keeps_media_levels_and_window(spelling, same):
+    """Media, reasoning levels and context windows share one endpoint comparison."""
+    levels = {"low": {"reasoning_effort": "low"}}
+    c = CompletionClient(
+        MODEL,
+        api_base=BASE,
+        media_inputs=["image"],
+        reasoning_levels=levels,
+        reasoning_level="low",
+        context_window=8192,
+    )
+    params = c._prepare_call_config({spelling: same})
+    assert params["reasoning_effort"] == "low"
+    assert c._request_media_inputs(params) == ("image",)
+    assert c.get_context_limits({spelling: same}).context_window == 8192
+    for other in (BASE + "/other", "https://gateway.test/v2"):
+        with pytest.raises(ValueError, match="route-specific"):
+            c._prepare_call_config({spelling: other})
+        changed = c._prepare_call_config({spelling: other, "reasoning_level": None})
+        assert c._request_media_inputs(changed) == ()
+        assert (
+            c.get_context_limits({spelling: other, "reasoning_level": None}).context_window is None
+        )
+
+
 def test_direct_lookup_still_lazily_loads(monkeypatch):
     calls = []
 

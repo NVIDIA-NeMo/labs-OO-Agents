@@ -11,6 +11,51 @@ from collections.abc import Mapping
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
+_ENDPOINT_ALIASES = ("api_base", "base_url")
+
+
+def normalize_endpoint(value: Any) -> str | None:
+    """Return ``value`` as a comparable endpoint URL, or None if it is not one.
+
+    Scheme and host are lowercased and a trailing slash is dropped; URL userinfo,
+    path and query stay significant. A non-string or unparsable value gives None.
+    """
+    if not isinstance(value, str):
+        return None
+    try:
+        parts = urlsplit(value)
+        # DNS/scheme case is insignificant, URL userinfo is not.
+        userinfo, sep, host = parts.netloc.rpartition("@")
+        netloc = userinfo + sep + host.lower() if sep else parts.netloc.lower()
+        return urlunsplit(
+            (parts.scheme.lower(), netloc, parts.path.rstrip("/"), parts.query, parts.fragment)
+        )
+    except ValueError:
+        return None
+
+
+def endpoint_changed(defaults: Mapping[str, Any], overrides: Mapping[str, Any]) -> bool:
+    """Whether ``overrides`` set an endpoint other than the one ``defaults`` configure.
+
+    ``api_base`` and ``base_url`` are two spellings of one endpoint, so the
+    configured URL under the other spelling is not a change. URLs are compared
+    after normalize_endpoint(). A ``None`` override is no override; an override
+    that is not a valid URL string always counts as a change.
+    """
+    configured = {
+        normalize_endpoint(defaults[key])
+        for key in _ENDPOINT_ALIASES
+        if defaults.get(key) is not None
+    } - {None}
+    for key in _ENDPOINT_ALIASES:
+        value = overrides.get(key)
+        if value is None:
+            continue
+        normalized = normalize_endpoint(value)
+        if normalized is None or normalized not in configured:
+            return True
+    return False
+
 
 def _endpoint(config: Mapping[str, Any]) -> tuple[str, ...]:
     """Return the normalized endpoint URLs set in ``config``, sorted.
@@ -24,19 +69,10 @@ def _endpoint(config: Mapping[str, Any]) -> tuple[str, ...]:
         value = config.get(key)
         if value is None:
             continue
-        if not isinstance(value, str):
+        normalized = normalize_endpoint(value)
+        if normalized is None:
             return ("<invalid>", key)
-        try:
-            parts = urlsplit(value)
-            # DNS/scheme case is insignificant, URL userinfo is not.
-            userinfo, sep, host = parts.netloc.rpartition("@")
-            netloc = userinfo + sep + host.lower() if sep else parts.netloc.lower()
-            value = urlunsplit(
-                (parts.scheme.lower(), netloc, parts.path.rstrip("/"), parts.query, parts.fragment)
-            )
-        except ValueError:
-            return ("<invalid>", key)
-        endpoints.add(value)
+        endpoints.add(normalized)
     return tuple(sorted(endpoints))
 
 
