@@ -49,14 +49,13 @@ from pydantic.fields import FieldInfo
 from nooa.agentdoc._docs import SpecAnnotation
 from nooa.agentdoc._visibility import hidden
 from nooa.snapshot._codec import (
-    OPAQUE_PREFIX,
-    OPAQUE_SUFFIX,
     decode,
     dumps,
     fallback_candidates,
     fallback_json,
     json_key,
     opaque_json,
+    opaque_name_budget,
     pointer_child,
     safe_end,
     safe_start,
@@ -451,8 +450,7 @@ def _opaque(value: Any, max_size: int, state: _State, module: str | None = None)
 
     ``module``: its type's module when known (a non-finite ``float``), else read raw.
     """
-    name_budget = max(0, max_size - len(OPAQUE_PREFIX) - len(OPAQUE_SUFFIX) - 2)
-    name = _bounded_type_name(value, name_budget)
+    name = _bounded_type_name(value, opaque_name_budget(max_size))
     if module is None:
         module = _module_name(type(value), state)
     _label, size = opaque_json(name, _builtin_name(value), max_size)

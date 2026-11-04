@@ -75,7 +75,8 @@ class TextStream:
         self.unit: Literal["chars", "bytes"] = unit
         self.head = head
         self.tail = tail
-        self._spill_target = spill
+        self._spill_max = spill.max_bytes if spill is not None else 0
+        self._keep_file = spill is not None and spill.always  # kept even when nothing was cut
         self._total = 0  # units written
         self._window = _Window(head, tail, b"" if unit == "bytes" else "")
         # The last bytes (up to 4) of a bytes stream, whatever head and tail
@@ -118,9 +119,9 @@ class TextStream:
     def _spill(self, data: bytes) -> None:
         self._produced += len(data)
         file = self._file
-        if file is None or self._spill_target is None:
+        if file is None:
             return
-        room = self._spill_target.max_bytes - self._kept
+        room = self._spill_max - self._kept
         if room <= 0:
             return
         part = data if len(data) <= room else data[:room]
@@ -168,7 +169,7 @@ class TextStream:
     def _full(self, cut: bool) -> Spill | None:
         if self._path is None or self._spill_failed:
             return None
-        if not cut and not (self._spill_target is not None and self._spill_target.always):
+        if not cut and not self._keep_file:
             return None
         return Spill(self._path, self._kept, self._produced)
 
@@ -228,8 +229,12 @@ class TextStream:
             except OSError:
                 self._fail()
         text = self._text(0, self._total)
-        keep = self._spill_target is not None and self._spill_target.always
-        if text.complete and not keep and self._path is not None and not self._spill_failed:
+        if (
+            text.complete
+            and not self._keep_file
+            and self._path is not None
+            and not self._spill_failed
+        ):
             with contextlib.suppress(OSError):
                 os.unlink(self._path)
         self._closed = text

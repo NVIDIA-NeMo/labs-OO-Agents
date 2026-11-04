@@ -22,8 +22,8 @@ _JSON_KWARGS: dict[str, Any] = {
     "separators": (", ", ": "),
     "sort_keys": False,
 }
-OPAQUE_PREFIX = "<opaque: "
-OPAQUE_SUFFIX = ">"
+_OPAQUE_PREFIX = "<opaque: "
+_OPAQUE_SUFFIX = ">"
 
 
 # --- canonical JSON -----------------------------------------------------------------
@@ -119,13 +119,17 @@ def fit_string(value: str, max_size: int) -> tuple[Any, int]:
     return prefix, len(dumps(prefix))
 
 
+def opaque_name_budget(max_size: int) -> int:
+    """How many characters of a type name fit in an opaque label of ``max_size`` JSON characters."""
+    return max(0, max_size - len(_OPAQUE_PREFIX) - len(_OPAQUE_SUFFIX) - 2)
+
+
 def opaque_json(type_name: str, fallback_type: str, max_size: int) -> tuple[Any, int]:
     """#342's ``"<opaque: Type>"`` label fitted to ``max_size``, else a smallest fallback."""
     fallback = fallback_json(fallback_type, max_size)
     if max_size < 2:
         return fallback
-    name_budget = max(0, max_size - len(OPAQUE_PREFIX) - len(OPAQUE_SUFFIX) - 2)
-    label = f"{OPAQUE_PREFIX}{type_name[:name_budget]}{OPAQUE_SUFFIX}"
+    label = f"{_OPAQUE_PREFIX}{type_name[: opaque_name_budget(max_size)]}{_OPAQUE_SUFFIX}"
     built = fit_string(label, max_size)
     return built if built[1] <= max_size else fallback
 
