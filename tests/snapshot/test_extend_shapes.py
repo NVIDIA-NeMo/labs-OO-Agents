@@ -60,7 +60,7 @@ MAPPING = mapping_like(lambda v: v.length(), lambda v: v.pairs())
 
 
 def _text(value: str) -> Text:
-    return Text(value, "", len(value), "chars", True, None)
+    return Text(head=value, tail="", length=len(value), unit="chars", complete=True, reason=None)
 
 
 # --- array_like ------------------------------------------------------------------------
@@ -376,7 +376,13 @@ def test_text_like_bytes_cut_on_code_points(registered) -> None:
     snapshot = capture(value, Limits(max_string=7, tail_share=0.5))
 
     assert snapshot == Text(
-        "éé".encode(), "é".encode(), 10**9, "bytes", False, "max_length", omitted=10**9 - 6
+        head="éé".encode(),
+        tail="é".encode(),
+        length=10**9,
+        unit="bytes",
+        complete=False,
+        reason="max_length",
+        omitted=10**9 - 6,
     )
     assert len(value.slices) == 2 and (0, 10**9) not in value.slices
     # Same cut as an exact bytes value of that content.
@@ -422,7 +428,9 @@ def test_text_like_cuts_exactly_like_str_and_bytes(registered) -> None:
         )
         rope, plain = capture(_Rope(data), limits), capture(data, limits)
         if plain == Scalar(data):  # exact bytes kept whole stay a Scalar
-            assert rope == Text(data, b"", len(data), "bytes", True, None)
+            assert rope == Text(
+                head=data, tail=b"", length=len(data), unit="bytes", complete=True, reason=None
+            )
         else:
             assert rope == plain
 
@@ -430,7 +438,9 @@ def test_text_like_cuts_exactly_like_str_and_bytes(registered) -> None:
 def test_text_like_small_text_is_complete(registered) -> None:
     registered(_BigText, BYTES)
     small = _BigText(4, "bytes")
-    assert capture(small) == Text("éé".encode(), b"", 4, "bytes", True, None)
+    assert capture(small) == Text(
+        head="éé".encode(), tail=b"", length=4, unit="bytes", complete=True, reason=None
+    )
     assert small.slices == [(0, 4)]  # kept whole: one read
 
 

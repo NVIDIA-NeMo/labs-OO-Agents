@@ -179,7 +179,14 @@ def test_preview_attributes_reasons_are_sorted_and_unique() -> None:
 
 def test_preview_attributes_full_output() -> None:
     spilled = Text(
-        b"h", b"t", 100, "bytes", False, "max_length", Spill("/tmp/a", 100, 100), omitted=98
+        head=b"h",
+        tail=b"t",
+        length=100,
+        unit="bytes",
+        complete=False,
+        reason="max_length",
+        full=Spill("/tmp/a", 100, 100),
+        omitted=98,
     )
     snapshot = Mapping("dict", 2, (("stdout", spilled), ("again", spilled)), True, None)
 

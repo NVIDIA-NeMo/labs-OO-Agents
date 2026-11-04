@@ -41,7 +41,10 @@ def test_ndarray_like_nodes(registered) -> None:
     assert snapshot == Object(
         "ndarray",
         (
-            ("dtype", Text("float64", "", 7, "chars", True, None)),
+            (
+                "dtype",
+                Text(head="float64", tail="", length=7, unit="chars", complete=True, reason=None),
+            ),
             ("shape", Sequence("tuple", 2, (Scalar(2), Scalar(3)), True, None)),
             (
                 "data",
@@ -199,21 +202,36 @@ def test_ndarray_like_labels_keep_only_the_shown_ones(registered) -> None:
                     "list",
                     1000,
                     (
-                        Text("c0", "", 2, "chars", True, None),
-                        Text("c1", "", 2, "chars", True, None),
+                        Text(
+                            head="c0", tail="", length=2, unit="chars", complete=True, reason=None
+                        ),
+                        Text(
+                            head="c1", tail="", length=2, unit="chars", complete=True, reason=None
+                        ),
                     ),
                     False,
                     "max_items",
                     (
-                        Text("c998", "", 4, "chars", True, None),
-                        Text("c999", "", 4, "chars", True, None),
+                        Text(
+                            head="c998", tail="", length=4, unit="chars", complete=True, reason=None
+                        ),
+                        Text(
+                            head="c999", tail="", length=4, unit="chars", complete=True, reason=None
+                        ),
                     ),
                 ),
             ),
             (
                 0,
                 Sequence(
-                    "list", 3, tuple(Text(c, "", 1, "chars", True, None) for c in "abc"), True, None
+                    "list",
+                    3,
+                    tuple(
+                        Text(head=c, tail="", length=1, unit="chars", complete=True, reason=None)
+                        for c in "abc"
+                    ),
+                    True,
+                    None,
                 ),
             ),
         ),

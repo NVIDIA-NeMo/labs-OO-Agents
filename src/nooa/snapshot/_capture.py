@@ -70,7 +70,6 @@ from nooa.snapshot._model import (
     Scalar,
     Sequence,
     Snapshot,
-    Text,
     Unavailable,
     cut_text,
     whole_text,
@@ -197,7 +196,7 @@ def _fallback(value: Any, reason: Reason, max_size: int) -> _Built:
     _candidate, size = fallback_json(_builtin_name(value), max_size)
     if size == 2 and value_type is str:
         length = str.__len__(value)
-        return _Built(Text("", "", length, "chars", False, reason, omitted=length), 2)
+        return _Built(cut_text("", "", length, "chars", reason), 2)
     if size == 2 and (value_type is list or value_type is tuple):
         length = len(value)  # exact built-in: no user hook
         return _Built(Sequence(value_type.__name__, length, (), False, reason), 2)
@@ -388,8 +387,8 @@ def _cut_chars(
     head, tail = parts(_largest(lambda kept: _string_cost(*parts(kept)) <= max_size, kept_cap))
     kept = len(head) + len(tail)
     if kept >= length:
-        return _Built(Text(head, "", length, "chars", True, None), len(dumps(head)))
-    node = Text(head, tail, length, "chars", False, "max_length", omitted=length - kept)
+        return _Built(whole_text(head, length, "chars"), len(dumps(head)))
+    node = cut_text(head, tail, length, "chars", "max_length")
     return _Built(node, _string_cost(head, tail))
 
 

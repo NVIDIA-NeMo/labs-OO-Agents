@@ -90,7 +90,7 @@ class Scalar:
         return None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class Text:
     """A string or an output stream: kept head and tail, and how much there was.
 
@@ -101,6 +101,10 @@ class Text:
     that ``capture``, ``TextStream`` or ``merge`` produce,
     ``length == len(head) + len(tail) + omitted``. Renderers decode bytes only
     when they print.
+
+    Fields are keyword-only. The package's producers build every ``Text``
+    with ``whole_text`` or ``cut_text``, which derive ``complete``, ``tail``
+    (complete) and ``omitted`` (cut) in one place.
 
     ``full``: where the whole content was written, if anywhere; ``None`` when
     nothing was spilled (no spill asked for, or the file could not be
@@ -123,7 +127,15 @@ def whole_text(
     content: str | bytes, length: int, unit: Literal["chars", "bytes"], full: Spill | None = None
 ) -> Text:
     """A complete ``Text`` holding all of ``content`` (the producers' one way to build it)."""
-    return Text(content, content[:0], length, unit, True, None, full)
+    return Text(
+        head=content,
+        tail=content[:0],
+        length=length,
+        unit=unit,
+        complete=True,
+        reason=None,
+        full=full,
+    )
 
 
 def cut_text(
@@ -139,7 +151,16 @@ def cut_text(
     ``omitted`` is derived: ``length - len(head) - len(tail)``. A bytes caller
     passes parts already cut on UTF-8 code point boundaries.
     """
-    return Text(head, tail, length, unit, False, reason, full, length - len(head) - len(tail))
+    return Text(
+        head=head,
+        tail=tail,
+        length=length,
+        unit=unit,
+        complete=False,
+        reason=reason,
+        full=full,
+        omitted=length - len(head) - len(tail),
+    )
 
 
 @dataclass(frozen=True)

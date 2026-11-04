@@ -59,8 +59,20 @@ def test_removed_names_are_gone() -> None:
 def test_every_node_says_whether_it_is_complete() -> None:
     nodes = [
         (Scalar(1), True, None),
-        (Text("a", "", 1, "chars", True, None), True, None),
-        (Text("a", "z", 9, "bytes", False, "max_length", omitted=7), False, "max_length"),
+        (Text(head="a", tail="", length=1, unit="chars", complete=True, reason=None), True, None),
+        (
+            Text(
+                head="a",
+                tail="z",
+                length=9,
+                unit="bytes",
+                complete=False,
+                reason="max_length",
+                omitted=7,
+            ),
+            False,
+            "max_length",
+        ),
         (Sequence("list", 3, (), False, "max_items"), False, "max_items"),
         (Mapping("dict", 0, (), True, None), True, None),
         (Object("M", (), False, "unreadable"), False, "unreadable"),
@@ -74,10 +86,43 @@ def test_every_node_says_whether_it_is_complete() -> None:
 
 
 def test_nodes_are_frozen_and_hashable() -> None:
-    text = Text("a", "", 1, "chars", True, None, Spill("/tmp/x", 1, 1))
+    text = Text(
+        head="a",
+        tail="",
+        length=1,
+        unit="chars",
+        complete=True,
+        reason=None,
+        full=Spill("/tmp/x", 1, 1),
+    )
     with pytest.raises(dataclasses.FrozenInstanceError):
         text.head = "b"  # type: ignore[misc]
-    assert hash(text) == hash(Text("a", "", 1, "chars", True, None, Spill("/tmp/x", 1, 1)))
+    assert hash(text) == hash(
+        Text(
+            head="a",
+            tail="",
+            length=1,
+            unit="chars",
+            complete=True,
+            reason=None,
+            full=Spill("/tmp/x", 1, 1),
+        )
+    )
+
+
+def test_text_fields_are_keyword_only() -> None:
+    with pytest.raises(TypeError):
+        Text("a", "", 1, "chars", True, None)  # type: ignore[misc]
+
+
+def test_producer_constructors_derive_the_accounting() -> None:
+    from nooa.snapshot._model import cut_text, whole_text
+
+    assert whole_text(b"ab", 2, "bytes") == Text(
+        head=b"ab", tail=b"", length=2, unit="bytes", complete=True, reason=None
+    )
+    cut = cut_text("ab", "z", 9, "chars", "max_length")
+    assert (cut.complete, cut.reason, cut.omitted) == (False, "max_length", 6)
 
 
 def test_spill_cut() -> None:

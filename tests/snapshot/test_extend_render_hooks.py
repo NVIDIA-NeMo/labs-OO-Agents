@@ -158,7 +158,15 @@ def test_no_hook_for_kind_is_generic() -> None:
 
 def test_render_output_and_render_json_ignore_render_python_hooks(hooks) -> None:
     hooks(render_python, KIND, lambda node, r: "hooked")
-    cut = Text(b"head", b"tail", 1_000, "bytes", False, "max_length", omitted=992)
+    cut = Text(
+        head=b"head",
+        tail=b"tail",
+        length=1_000,
+        unit="bytes",
+        complete=False,
+        reason="max_length",
+        omitted=992,
+    )
     node = Object("Log", (("text", cut),), True, None, "", KIND)
 
     assert render_python(node) == "hooked"
@@ -171,7 +179,9 @@ def test_render_output_and_render_json_ignore_render_python_hooks(hooks) -> None
 
 
 def test_render_output_text_is_unchanged() -> None:
-    text = Text("a", "b", 10, "chars", False, "max_length", omitted=8)
+    text = Text(
+        head="a", tail="b", length=10, unit="chars", complete=False, reason="max_length", omitted=8
+    )
     assert render_output(text) == "a\n[... 8 chars omitted; full output not kept]\nb"
 
 
@@ -181,7 +191,16 @@ _BUDGETS = (1, 2, 5, 17, 60, 300, 5_000, sys.maxsize)
 
 
 def test_render_trace_is_render_json_and_preview_attributes() -> None:
-    spilled = Text("h", "", 9, "chars", False, "max_length", Spill("/tmp/full.txt", 9, 9), 8)
+    spilled = Text(
+        head="h",
+        tail="",
+        length=9,
+        unit="chars",
+        complete=False,
+        reason="max_length",
+        full=Spill("/tmp/full.txt", 9, 9),
+        omitted=8,
+    )
     node = Sequence("list", 2, (_thing(s="x" * 1_000), spilled), True, None)
 
     text, attributes = render_trace(node, direction="output", max_chars=60)

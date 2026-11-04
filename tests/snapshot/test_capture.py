@@ -109,7 +109,16 @@ def test_complete_values_are_plain_nodes() -> None:
                     "list", 4, (Scalar(1), Scalar(2.5), Scalar(None), Scalar(True)), True, None
                 ),
             ),
-            ("b", Sequence("tuple", 1, (Text("x", "", 1, "chars", True, None),), True, None)),
+            (
+                "b",
+                Sequence(
+                    "tuple",
+                    1,
+                    (Text(head="x", tail="", length=1, unit="chars", complete=True, reason=None),),
+                    True,
+                    None,
+                ),
+            ),
             ("c", Scalar(b"raw")),
         ),
         True,
@@ -169,7 +178,15 @@ def test_max_items_keeps_head_and_tail() -> None:
 def test_max_string_splits_head_and_tail() -> None:
     snapshot = capture("abcdefghij" * 10, Limits(max_string=7, tail_share=0.5))
 
-    assert snapshot == Text("abcd", "hij", 100, "chars", False, "max_length", omitted=93)
+    assert snapshot == Text(
+        head="abcd",
+        tail="hij",
+        length=100,
+        unit="chars",
+        complete=False,
+        reason="max_length",
+        omitted=93,
+    )
 
 
 def test_tail_items_are_charged_to_the_budget() -> None:

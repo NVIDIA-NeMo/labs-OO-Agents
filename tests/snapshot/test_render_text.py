@@ -34,11 +34,25 @@ from nooa.snapshot import (
 
 def _cut(unit: str = "bytes", full: Spill | None = None, reason: Any = "max_length") -> Text:
     head, tail = (b"HEAD", b"TAIL") if unit == "bytes" else ("HEAD", "TAIL")
-    return Text(head, tail, 1_234_575, unit, False, reason, full, omitted=1_234_567)  # type: ignore[arg-type]
+    return Text(
+        head=head,
+        tail=tail,
+        length=1_234_575,
+        unit=unit,
+        complete=False,
+        reason=reason,
+        full=full,
+        omitted=1_234_567,
+    )  # type: ignore[arg-type]
 
 
 def test_render_output_complete_passes_through() -> None:
-    assert render_output(Text(b"all of it\n", b"", 10, "bytes", True, None)) == "all of it\n"
+    assert (
+        render_output(
+            Text(head=b"all of it\n", tail=b"", length=10, unit="bytes", complete=True, reason=None)
+        )
+        == "all of it\n"
+    )
 
 
 def test_render_output_full_output() -> None:
@@ -71,8 +85,24 @@ def test_render_output_chars_unit() -> None:
 
 
 def test_render_output_without_head_or_tail() -> None:
-    no_head = Text("", "TAIL", 10, "chars", False, "max_length", omitted=6)
-    no_tail = Text("HEAD", "", 10, "chars", False, "max_length", omitted=6)
+    no_head = Text(
+        head="",
+        tail="TAIL",
+        length=10,
+        unit="chars",
+        complete=False,
+        reason="max_length",
+        omitted=6,
+    )
+    no_tail = Text(
+        head="HEAD",
+        tail="",
+        length=10,
+        unit="chars",
+        complete=False,
+        reason="max_length",
+        omitted=6,
+    )
 
     assert render_output(no_head) == "[... 6 chars omitted; full output not kept]\nTAIL"
     assert render_output(no_tail) == "HEAD\n[... 6 chars omitted; full output not kept]"
@@ -164,9 +194,17 @@ def test_render_python_notation_for_other_nodes() -> None:
     assert render_python(Sequence("list", None, (Scalar(1),), False, "max_nodes")) == (
         "list(len=?, [:1]=[1])"
     )
-    assert render_python(Text("", "end", 10, "chars", False, "max_length", omitted=7)) == (
-        "str(len=10, [-3:]='end')"
-    )
+    assert render_python(
+        Text(
+            head="",
+            tail="end",
+            length=10,
+            unit="chars",
+            complete=False,
+            reason="max_length",
+            omitted=7,
+        )
+    ) == ("str(len=10, [-3:]='end')")
 
 
 # --- bytes Text keeps raw bytes (principle 2) ---------------------------------------
@@ -192,7 +230,7 @@ def test_render_python_of_a_bytes_stream_with_a_surrogate_escape() -> None:
 
 
 def test_complete_bytes_text_renders_as_a_bytes_literal() -> None:
-    text = Text(b"a\xffb", b"", 3, "bytes", True, None)
+    text = Text(head=b"a\xffb", tail=b"", length=3, unit="bytes", complete=True, reason=None)
 
     assert render_python(text) == "b'a\\xffb'"
     assert render_output(text) == "a\ufffdb"

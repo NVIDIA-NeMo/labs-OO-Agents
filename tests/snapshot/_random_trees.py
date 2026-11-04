@@ -32,14 +32,25 @@ def random_text(rng: random.Random) -> Text:
         head_kept, tail_kept = head, tail
     if rng.random() < 0.3:
         whole = head_kept + tail_kept  # type: ignore[operator]
-        return Text(whole, whole[:0], len(whole), unit, True, None)
+        return Text(
+            head=whole, tail=whole[:0], length=len(whole), unit=unit, complete=True, reason=None
+        )
     omitted = rng.randint(1, 500)
     length = len(head_kept) + len(tail_kept) + omitted
     full = None
     if rng.random() < 0.5:
         total = length
         full = Spill(rng.choice(SPILLS), rng.choice((total, total // 2)), total)
-    return Text(head_kept, tail_kept, length, unit, False, "max_length", full, omitted)
+    return Text(
+        head=head_kept,
+        tail=tail_kept,
+        length=length,
+        unit=unit,
+        complete=False,
+        reason="max_length",
+        full=full,
+        omitted=omitted,
+    )
 
 
 def random_tree(rng: random.Random, depth: int = 0) -> Snapshot:
