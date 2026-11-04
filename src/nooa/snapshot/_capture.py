@@ -415,14 +415,22 @@ def _opaque(value: Any, max_size: int) -> _Built:
 # --- containers ---------------------------------------------------------------
 
 
-def _entered(
+def _enter(
     value: Any,
-    path: str,
     kind: Literal["sequence", "mapping", "object"],
+    empty: Snapshot,
+    depth: int,
+    path: str,
     state: _State,
     build: Callable[[], _Built],
 ) -> _Built:
-    """``build()`` the container ``value`` while it is active, or a ``Ref`` to its active ancestor."""
+    """``build()`` the container ``value`` while it is active.
+
+    At ``max_depth`` it is ``empty`` (a node without entries, cut ``max_depth``);
+    inside itself, a ``Ref`` to its active ancestor.
+    """
+    if depth >= state.limits.max_depth:
+        return _Built(empty, 2)
     marker = id(value)
     found = state.active.get(marker)
     if found is not None:
@@ -483,14 +491,15 @@ def _build_sequence(
     """Build a bounded sequence node from an exact list or tuple."""
     type_name = "list" if type(value) is list else "tuple"
     length = len(value)  # an exact built-in: no user hook
-    if depth >= state.limits.max_depth:
-        return _Built(Sequence(type_name, length, (), "max_depth"), 2)
     get = list.__getitem__ if type(value) is list else tuple.__getitem__
     head_n, tail_n = _plan(length, state.limits, has_tail=True)
-    return _entered(
+    empty = Sequence(type_name, length, (), "max_depth")
+    return _enter(
         value,
-        path,
         "sequence",
+        empty,
+        depth,
+        path,
         state,
         lambda: _container(
             (get(cast(Any, value), index) for index in range(head_n)),
@@ -513,13 +522,14 @@ def _build_dict(
 ) -> _Built:
     """Build a bounded mapping node without visiting rejected tail entries."""
     length = dict.__len__(value)
-    if depth >= state.limits.max_depth:
-        return _Built(Mapping("dict", length, (), "max_depth"), 2)
     head_n, tail_n = _plan(length, state.limits, has_tail=True)
-    return _entered(
+    empty = Mapping("dict", length, (), "max_depth")
+    return _enter(
         value,
-        path,
         "mapping",
+        empty,
+        depth,
+        path,
         state,
         lambda: _container(
             dict.items(value),
@@ -1152,19 +1162,14 @@ def _accessor_fields(fields: Any, shape: str) -> tuple[tuple[str, Callable[[Any]
 
 
 @dataclass(frozen=True)
-class _ArrayLike:
+class _Collection:
+    """``array_like``, or (``keyed``) ``mapping_like``, whose items are (key, value) pairs."""
+
     length: Callable[[Any], int]
     items: Callable[[Any], Iterable[Any]]
     fields: tuple[tuple[str, Callable[[Any], Any]], ...]
     kind: str | None
-
-
-@dataclass(frozen=True)
-class _MappingLike:
-    length: Callable[[Any], int]
-    items: Callable[[Any], Iterable[tuple[Any, Any]]]
-    fields: tuple[tuple[str, Callable[[Any], Any]], ...]
-    kind: str | None
+    keyed: bool
 
 
 @dataclass(frozen=True)
@@ -1190,14 +1195,8 @@ class _TextLike:
     kind: str | None
 
 
-_Shape = _ArrayLike | _MappingLike | _NdarrayLike | _ObjectLike | _TextLike
-_SHAPE_TYPES: tuple[type[Any], ...] = (
-    _ArrayLike,
-    _MappingLike,
-    _NdarrayLike,
-    _ObjectLike,
-    _TextLike,
-)
+_Shape = _Collection | _NdarrayLike | _ObjectLike | _TextLike
+_SHAPE_TYPES: tuple[type[Any], ...] = (_Collection, _NdarrayLike, _ObjectLike, _TextLike)
 
 
 def array_like(
@@ -1206,7 +1205,7 @@ def array_like(
     *,
     fields: dict[str, Callable[[Any], Any]] | None = None,
     kind: str | None = None,
-) -> _ArrayLike:
+) -> _Collection:
     """A shape for sequence-like values: ``length(v)`` items, pulled lazily from ``items(v)``.
 
     ``length(v)`` is called once; ``items(v)`` is iterated only as far as the
@@ -1215,11 +1214,12 @@ def array_like(
     fields the value becomes a ``Sequence``; with fields an ``Object`` whose
     fields are followed by ``items`` (that ``Sequence``).
     """
-    return _ArrayLike(
+    return _Collection(
         _accessor(length, "length"),
         _accessor(items, "items"),
         _accessor_fields(fields, "array"),
         _kind(kind),
+        keyed=False,
     )
 
 
@@ -1229,18 +1229,19 @@ def mapping_like(
     *,
     fields: dict[str, Callable[[Any], Any]] | None = None,
     kind: str | None = None,
-) -> _MappingLike:
+) -> _Collection:
     """A shape for mapping-like values: ``items(v)`` yields ``(key, value)`` pairs lazily.
 
     As ``array_like``: a ``Mapping``, or with ``fields`` an ``Object`` whose
     fields are followed by ``items`` (that ``Mapping``). Keys must be exact
     ``str``, ``int``, ``float``, ``bool`` or ``None``, as for a ``dict``.
     """
-    return _MappingLike(
+    return _Collection(
         _accessor(length, "length"),
         _accessor(items, "items"),
         _accessor_fields(fields, "mapping"),
         _kind(kind),
+        keyed=True,
     )
 
 
@@ -1373,7 +1374,7 @@ def _guarded(iterator: typing.Iterator[Any], pairs: bool) -> typing.Iterator[Any
 
 
 def _collection(
-    shape: _ArrayLike | _MappingLike,
+    shape: _Collection,
     value: Any,
     type_name: str,
     length: int,
@@ -1387,10 +1388,9 @@ def _collection(
         source = iter(shape.items(value))
     except Exception:
         return _error(type_name, max_size)
-    keyed = type(shape) is _MappingLike
     head_n, _tail_n = _plan(length, state.limits, has_tail=False)
-    items = _guarded(source, pairs=keyed)
-    return _container(items, length, type_name, keyed, max_size, depth, path, state, head_n)
+    items = _guarded(source, pairs=shape.keyed)
+    return _container(items, length, type_name, shape.keyed, max_size, depth, path, state, head_n)
 
 
 def _lazy(read: Callable[[], Any], state: _State) -> _Part:
@@ -1431,52 +1431,8 @@ def _structure_part(
     return _Part(built, 1, lambda max_size: empty(max_size, "max_nodes"))
 
 
-def _build_object(
-    shape: _ObjectLike | _ArrayLike | _MappingLike | _NdarrayLike | _FieldReader,
-    value: Any,
-    mro: tuple[type[Any], ...],
-    carrier: type[Any],
-    max_size: int,
-    depth: int,
-    path: str,
-    state: _State,
-) -> _Built:
-    """An ``Object`` of a shape: a field reader's fields, or accessor fields and structure parts.
-
-    Pydantic models and dataclasses are ``_FieldReader`` shapes: their
-    privileged reader yields the fields. Registered shapes add their accessor
-    fields (built only when kept, each leaving room for the later ones) and
-    their structure (``items``, ``shape`` / ``labels`` / ``data``), never cut
-    by ``max_items``.
-    """
-    type_name = _bounded_type_name(value, _MAX_TYPE_NAME)
-    if isinstance(shape, _FieldReader):  # one of this module's shapes: no user hook
-        if depth >= state.limits.max_depth:
-            return _Built(Object(type_name, (), "max_depth"), 2)
-        reader = shape.read
-        return _entered(
-            value,
-            path,
-            "object",
-            state,
-            lambda: _object_fields(
-                type_name, reader(value, mro, carrier, state), max_size, depth, path, state
-            ),
-        )
-    if depth >= state.limits.max_depth:
-        return _Built(Object(type_name, (), "max_depth", shape.kind), 2)
-    accessors = shape
-    return _entered(
-        value,
-        path,
-        "object",
-        state,
-        lambda: _shape_fields(accessors, value, type_name, max_size, depth, path, state),
-    )
-
-
 def _shape_fields(
-    shape: _ObjectLike | _ArrayLike | _MappingLike | _NdarrayLike,
+    shape: _ObjectLike | _Collection | _NdarrayLike,
     value: Any,
     type_name: str,
     max_size: int,
@@ -1492,7 +1448,7 @@ def _shape_fields(
     cut = max_items is not None and len(entries) > max_items
     del entries[max_items if cut else len(entries) :]
     try:
-        entries += _structure(shape, value, type_name, max_size, state)
+        entries += _structure(shape, value, max_size, state)
     except _ShapeError:
         return _error(type_name, max_size)
     reserves = _field_reserves(entries)
@@ -1520,26 +1476,23 @@ def _shape_fields(
 
 
 def _structure(
-    shape: _ObjectLike | _ArrayLike | _MappingLike | _NdarrayLike,
-    value: Any,
-    type_name: str,
-    max_size: int,
-    state: _State,
+    shape: _ObjectLike | _Collection | _NdarrayLike, value: Any, max_size: int, state: _State
 ) -> list[tuple[str, Any]]:
     """The structure fields that follow a shape's accessor fields (``_ShapeError``: whole value)."""
-    if type(shape) is _ArrayLike or type(shape) is _MappingLike:
-        collection = shape
-        length = _shape_length(collection.length, value)
-        node_type = Sequence if type(collection) is _ArrayLike else Mapping
-        name = "list" if node_type is Sequence else "dict"
+    match shape:
+        case _Collection():
+            collection = shape
+            length = _shape_length(collection.length, value)
+            node_type, name = (Mapping, "dict") if collection.keyed else (Sequence, "list")
 
-        def items(slot: int, depth: int, path: str) -> _Built:
-            return _collection(collection, value, name, length, slot, depth, path, state)
+            def items(slot: int, depth: int, path: str) -> _Built:
+                return _collection(collection, value, name, length, slot, depth, path, state)
 
-        return [("items", _structure_part(node_type, length, items, state))]
-    if type(shape) is _NdarrayLike:
-        return _ndarray_structure(shape, value, max_size, state)
-    return []
+            return [("items", _structure_part(node_type, length, items, state))]
+        case _NdarrayLike():
+            return _ndarray_structure(shape, value, max_size, state)
+        case _ObjectLike():
+            return []
 
 
 # --- ndarray_like ------------------------------------------------------------------
@@ -1701,13 +1654,14 @@ def _ndarray_labels(
 # --- text_like ---------------------------------------------------------------------
 
 
-def _build_text(shape: _TextLike, value: Any, max_size: int, state: _State) -> _Built:
+def _build_text(
+    shape: _TextLike, value: Any, type_name: str, max_size: int, state: _State
+) -> _Built:
     """A ``Text`` of a ``text_like`` value, reading only the head and tail it keeps.
 
     Any accessor error (``length``, ``slice``, a slice of the wrong type or
     size) leaves no sensible part: the whole value is ``Unavailable("error")``.
     """
-    type_name = _bounded_type_name(value, _MAX_TYPE_NAME)
     try:
         return _text_parts(shape, value, max_size, state.limits)
     except _ShapeError:
@@ -1753,33 +1707,59 @@ def _build_shape(
     path: str,
     state: _State,
 ) -> _Built:
-    """Build ``value`` (whose MRO entry ``carrier`` matched) as ``shape`` describes it."""
-    shape_type = type(shape)
-    if shape_type is _TextLike:
-        return _build_text(cast(_TextLike, shape), value, max_size, state)
-    if (
-        shape_type is _FieldReader
-        or shape_type is _ObjectLike
-        or shape_type is _NdarrayLike
-        or cast(Any, shape).fields
-    ):
-        return _build_object(cast(Any, shape), value, mro, carrier, max_size, depth, path, state)
-    collection = cast(_ArrayLike | _MappingLike, shape)
+    """Build ``value`` (whose MRO entry ``carrier`` matched) as ``shape`` describes it.
+
+    Pydantic models and dataclasses are ``_FieldReader`` shapes: their
+    privileged reader yields the fields of an ``Object``. A registered shape
+    with fields is an ``Object`` of its accessor fields (built only when kept,
+    each leaving room for the later ones) and its structure (``items``,
+    ``shape`` / ``labels`` / ``data``), never cut by ``max_items``.
+    """
     type_name = _bounded_type_name(value, _MAX_TYPE_NAME)
-    node_type = Sequence if shape_type is _ArrayLike else Mapping
-    try:
-        length = _shape_length(collection.length, value)
-    except _ShapeError:
-        return _error(type_name, max_size)
-    if depth >= state.limits.max_depth:
-        return _Built(node_type(type_name, length, (), "max_depth"), 2)
-    return _entered(
-        value,
-        path,
-        "sequence" if node_type is Sequence else "mapping",
-        state,
-        lambda: _collection(collection, value, type_name, length, max_size, depth, path, state),
-    )
+    match shape:
+        case _TextLike():
+            return _build_text(shape, value, type_name, max_size, state)
+        case _FieldReader(read=read):
+            return _enter(
+                value,
+                "object",
+                Object(type_name, (), "max_depth"),
+                depth,
+                path,
+                state,
+                lambda: _object_fields(
+                    type_name, read(value, mro, carrier, state), max_size, depth, path, state
+                ),
+            )
+        case _Collection(fields=()):
+            collection = shape
+            try:
+                length = _shape_length(collection.length, value)
+            except _ShapeError:
+                return _error(type_name, max_size)
+            node_type = Mapping if collection.keyed else Sequence
+            return _enter(
+                value,
+                "mapping" if collection.keyed else "sequence",
+                node_type(type_name, length, (), "max_depth"),
+                depth,
+                path,
+                state,
+                lambda: _collection(
+                    collection, value, type_name, length, max_size, depth, path, state
+                ),
+            )
+        case _:
+            accessors = shape
+            return _enter(
+                value,
+                "object",
+                Object(type_name, (), "max_depth", accessors.kind),
+                depth,
+                path,
+                state,
+                lambda: _shape_fields(accessors, value, type_name, max_size, depth, path, state),
+            )
 
 
 def _field_reserves(pairs: list[tuple[Any, Any]]) -> list[tuple[int, int]]:
