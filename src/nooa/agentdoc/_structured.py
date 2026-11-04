@@ -62,7 +62,7 @@ def _convert_to_marker(value: Any) -> Any:
     - Classes are converted to _ClassRef
     - Instances of custom classes are converted to _InstanceRef
 
-    This ensures that defaults format cleanly in documentation.
+    This ensures that defaults render cleanly in documentation.
     """
     # Return REQUIRED as-is
     if value is REQUIRED:
@@ -220,7 +220,7 @@ def extract_callable_info(obj: Any) -> CallableInfo:
 
     try:
         # For bound methods (instance and class), use __func__ so that inspect.signature()
-        # includes the first parameter (self / cls) in the formatted signature.
+        # includes the first parameter (self / cls) in the rendered signature.
         sig_obj = obj
         if inspect.ismethod(obj) and hasattr(obj, "__func__"):
             sig_obj = obj.__func__
@@ -306,7 +306,7 @@ def extract_module_info(obj: Any) -> ModuleInfo:
         resolved_names.add(sym_name)
 
         if inspect.ismodule(attr):
-            # Module-typed attributes format as submodule references, not raw repr
+            # Module-typed attributes render as submodule references, not raw repr
             module_attr_names.add(sym_name)
             qualified = attr.__name__
             raw_doc = inspect.getdoc(attr) or ""
@@ -440,10 +440,10 @@ def _format_signature_params(
 
         # Add default if present (VAR_POSITIONAL / VAR_KEYWORD never have defaults)
         if param.default is not inspect.Parameter.empty:
-            # Enum members: format as ClassName.MEMBER_NAME regardless of __repr__
+            # Enum members: render as ClassName.MEMBER_NAME regardless of __repr__
             if isinstance(param.default, enum.Enum):
                 default_repr = f"{type(param.default).__name__}.{param.default.name}"
-            # Functions and lambdas: format by __name__ (e.g. 'my_validator' or '<lambda>')
+            # Functions and lambdas: render by __name__ (e.g. 'my_validator' or '<lambda>')
             elif isinstance(param.default, types.FunctionType):
                 default_repr = param.default.__name__
             else:

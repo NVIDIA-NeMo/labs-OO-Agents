@@ -472,7 +472,7 @@ def _is_structured_instance(obj: Any, *, respect_custom_repr: bool = True) -> bo
     if obj_type.__module__ == "builtins":
         return False
 
-    # pformat() respects a custom __repr__, while doc() always formats the
+    # pformat() respects a custom __repr__, while doc() always renders the
     # type-level API contract and augments it with runtime instance fields.
     if respect_custom_repr:
         for klass in obj_type.__mro__:
@@ -483,7 +483,7 @@ def _is_structured_instance(obj: Any, *, respect_custom_repr: bool = True) -> bo
 
     # In doc mode, every non-builtin instance is documentable even when an
     # empty/private-only __slots__ leaves it with no runtime values. pformat()
-    # still requires a public slot before choosing structured value formatting.
+    # still requires a public slot before choosing structured value rendering.
     if _instance_dict(obj) is None:
         if not respect_custom_repr:
             return True
@@ -746,7 +746,7 @@ def _format_type_info(
                 if _is_custom_type(extra_type) and not is_expand_false(extra_type):
                     seed_set.add(extra_type)
 
-        # Collect referenced types to the requested depth, then format them flat.
+        # Collect referenced types to the requested depth, then render them flat.
         referenced_types = _collect_referenced_types(
             seed_set, exclude=context_obj, max_depth=type_depth
         )
@@ -903,14 +903,14 @@ def _format_module_info(
                 lines.append(f"{ind}#   {sub_name}")
         lines.append("")
 
-    # Build lookup dicts so we can format in __all__ declaration order
+    # Build lookup dicts so we can render in __all__ declaration order
     cls_map = dict(info.classes)
     func_map = {func.name: func for func in info.functions}
     val_map = dict(info.values)
 
     # Use ordered_names to interleave classes, callables, and values in
     # their __all__ declaration order rather than grouping by type.
-    names_to_format = (
+    render_names = (
         info.ordered_names
         if info.ordered_names
         else (
@@ -922,7 +922,7 @@ def _format_module_info(
 
     # Track whether we're in a value-run (dense, no blank lines between values)
     in_value_run = False
-    for sym_name in names_to_format:
+    for sym_name in render_names:
         if sym_name in cls_map:
             if in_value_run:
                 lines.append("")
@@ -1359,7 +1359,7 @@ def _format_nested_instance(
 
     # Collect field names in order (type fields first, then extra __dict__ attrs)
     # Only include fields that exist in values — fields absent from values are skipped
-    # in the formatting loop below, so excluding them keeps truncated_count accurate.
+    # in the render loop below, so excluding them keeps truncated_count accurate.
     from nooa.agentdoc._visibility import is_hidden_field
 
     excluded = {f.name for f in type_info.fields if not f.repr}
@@ -1443,7 +1443,7 @@ def _format_value(
         expand_all: Always expand containers.
         depth: Current nesting depth.
         indent: Current indentation level.
-        _seen: ``id()`` of containers currently being formatted (cycle guard).
+        _seen: ``id()`` of containers currently being rendered (cycle guard).
             Top-level callers leave this ``None``; recursive calls thread the
             same set through so nested containers can detect re-entry.
     """
@@ -1516,7 +1516,7 @@ def _format_value(
 
     # Fallback to repr for other types (numpy arrays, pandas frames, custom classes, …).
     # When the repr is over budget, emit the truncation 3.0 marker family —
-    # same shape as the rest of the formatter, prefixed with the actual type
+    # same shape as the rest of the renderer, prefixed with the actual type
     # name so the LLM can tell what was truncated:
     #     ndarray(repr_len=2773, [:H]='array([0, 1, 2, ...', [-T:]='...]')
     try:
@@ -1570,7 +1570,7 @@ def _format_value_to_str(
 def _format_string(s: str, max_string: int | None, *, reason: str = "max_string") -> str:
     """Format a string, potentially truncating.
 
-    Untruncated strings format with the usual repr (or triple-quote multiline
+    Untruncated strings render with the usual repr (or triple-quote multiline
     form when the content has newlines or mixed quote types).
 
     Truncated strings use the slice-keys marker — same shape as ordered
@@ -1579,7 +1579,7 @@ def _format_string(s: str, max_string: int | None, *, reason: str = "max_string"
 
         str(len=789516, [:250]='Lorem ipsum...', [-250:]='...end of string')
 
-    This is the same marker family the rest of the formatter uses.
+    This is the same marker family the rest of the renderer uses.
     """
     needs_multiline = "\n" in s or ("'" in s and '"' in s)
 
@@ -1663,7 +1663,7 @@ def _format_dict(
 ) -> None:
     """Write a dictionary to *_stream*.
 
-    Untruncated dicts format as plain Python literals (``{1: 2, 3: 4}``).
+    Untruncated dicts render as plain Python literals (``{1: 2, 3: 4}``).
 
     Truncated dicts use the truncation 3.0 ``items`` marker — the same outer
     wrapper as truncated sets, since dict keys aren't positional anchors::
@@ -1673,7 +1673,7 @@ def _format_dict(
     Cycles: if ``_seen`` already contains ``id(d)``, emit ``<cycle>`` and
     return. Same mechanism as ``_format_sequence`` — Python's built-in
     ``Py_ReprEnter`` handles this for ``dict.__repr__``; our recursive
-    formatter needs to replicate it explicitly.
+    renderer needs to replicate it explicitly.
     """
     if _seen is None:
         _seen = set()
@@ -1718,7 +1718,7 @@ def _format_dict_body(
     indent,
     _seen,
 ):
-    """Inner formatting body — split out so the cycle-guard try/finally above stays compact."""
+    """Inner rendering body — split out so the cycle-guard try/finally above stays compact."""
     all_items = list(d.items())
     n_total = len(all_items)
     truncated = max_length is not None and n_total > max_length
@@ -1862,7 +1862,7 @@ def _format_sequence(
 ) -> None:
     """Write a sequence (list, tuple, set, frozenset) to *_stream*.
 
-    Untruncated sequences format as plain Python literals (``[1, 2, 3]``).
+    Untruncated sequences render as plain Python literals (``[1, 2, 3]``).
 
     Truncated sequences use the truncation 3.0 marker family:
 
@@ -1881,7 +1881,7 @@ def _format_sequence(
 
     Cycles: if ``_seen`` already contains ``id(seq)``, emit ``<cycle>`` and
     return. This matches Python's built-in ``Py_ReprEnter`` behaviour for
-    ``list.__repr__``/``dict.__repr__``, which our recursive formatter
+    ``list.__repr__``/``dict.__repr__``, which our recursive renderer
     otherwise wouldn't replicate (would RecursionError on
     ``x = []; x.append(x)``).
     """
@@ -1899,7 +1899,7 @@ def _format_sequence(
         _stream.write(brackets[0] + brackets[1])
         return
 
-    # Register this container as currently being formatted. All recursive calls
+    # Register this container as currently being rendered. All recursive calls
     # below pass _seen, so any cycle back to this container emits ``<cycle>``.
     _seen.add(id(seq))
     try:
@@ -1936,7 +1936,7 @@ def _format_sequence_body(
     indent,
     _seen,
 ):
-    """Inner formatting body — split out so the cycle-guard try/finally above stays compact."""
+    """Inner rendering body — split out so the cycle-guard try/finally above stays compact."""
     all_items = list(seq)
     n_total = len(all_items)
     truncated = max_length is not None and n_total > max_length
