@@ -36,14 +36,14 @@ def isolated_registry(monkeypatch):
 
 
 def entry(**settings):
-    return dict(
-        model_name=MODEL,
-        api_base=BASE,
-        context_window=8192,
-        media_inputs=[],
-        retry_config=False,
+    return {
+        "model_name": MODEL,
+        "api_base": BASE,
+        "context_window": 8192,
+        "media_inputs": [],
+        "retry_config": False,
         **settings,
-    )
+    }
 
 
 @pytest.mark.parametrize(
@@ -127,7 +127,7 @@ def test_typed_factory_options_and_explicit_overrides(client_type):
 
 
 def test_compatible_routes_normalize_endpoint_spellings():
-    registry.MODELS["other"] = entry(api_key_env="OTHER_SCOPE")
+    registry.MODELS["other"] = entry(api_base="https://other.test/v1")
     registry.MODELS["local"] = entry()
     c = CompletionClient(MODEL, base_url="HTTPS://GATEWAY.TEST/v1/")
     assert c.context_window == 8192
@@ -163,11 +163,28 @@ def test_alias_key_collision_does_not_prove_model_identity():
     assert CompletionClient(MODEL, api_base=BASE).context_window is None
 
 
-def test_credential_scope_is_not_guessed_from_environment(monkeypatch):
+def test_direct_lookup_compares_the_entry_resolved_key(monkeypatch):
+    """A direct client's explicit key must equal the entry's resolved key."""
     monkeypatch.setenv("LOCAL_SCOPE", "same-value")
     registry.MODELS["local"] = entry(api_key_env="LOCAL_SCOPE")
-    assert CompletionClient(MODEL, api_base=BASE).context_window is None
+    # No client key: credentials do not take part.
+    assert CompletionClient(MODEL, api_base=BASE).context_window == 8192
+    assert CompletionClient(MODEL, api_base=BASE, api_key="same-value").context_window == 8192
+    assert CompletionClient(MODEL, api_base=BASE, api_key="different").context_window is None
+    registry.MODELS["literal"] = entry(api_key="literal-value", api_base="https://lit.test/v1")
+    lit = "https://lit.test/v1"
+    assert CompletionClient(MODEL, api_base=lit, api_key="literal-value").context_window == 8192
+    assert CompletionClient(MODEL, api_base=lit, api_key="same-value").context_window is None
+    assert CompletionClient(MODEL, api_base=lit).context_window == 8192
+    monkeypatch.delenv("LOCAL_SCOPE")
     assert CompletionClient(MODEL, api_base=BASE, api_key="same-value").context_window is None
+    # Other route parts still have to match.
+    assert CompletionClient(MODEL, api_base=BASE, custom_llm_provider="x").context_window is None
+
+
+def test_registry_client_keeps_its_own_credential_scope(monkeypatch):
+    monkeypatch.setenv("LOCAL_SCOPE", "same-value")
+    registry.MODELS["local"] = entry(api_key_env="LOCAL_SCOPE")
     c = registry.get_llm_client("local")
     assert c.context_window == 8192
     assert c.config["api_key"] == "same-value"
@@ -194,6 +211,71 @@ def test_equivalent_factory_override_retains_context():
     c = registry.client_from_config("local", entry(), api_base=BASE + "/")
     assert c.context_window == 8192
     assert c.get_context_limits({"api_base": BASE}).context_window == 8192
+
+
+@pytest.mark.parametrize("spelling", ["api_base", "base_url"])
+@pytest.mark.parametrize(
+    "same", [BASE + "/", "HTTPS://GATEWAY.TEST/v1", "https://Gateway.test/v1/"]
+)
+def test_equivalent_per_call_endpoint_keeps_media_levels_and_window(spelling, same):
+    """Media, reasoning levels and context windows share one endpoint comparison."""
+    levels = {"low": {"reasoning_effort": "low"}}
+    c = CompletionClient(
+        MODEL,
+        api_base=BASE,
+        media_inputs=["image"],
+        reasoning_levels=levels,
+        reasoning_level="low",
+        context_window=8192,
+    )
+    params = c._prepare_call_config({spelling: same})
+    assert params["reasoning_effort"] == "low"
+    assert c._request_media_inputs(params) == ("image",)
+    assert c.get_context_limits({spelling: same}).context_window == 8192
+    for other in (BASE + "/other", "https://gateway.test/v2"):
+        with pytest.raises(ValueError, match="route-specific"):
+            c._prepare_call_config({spelling: other})
+        changed = c._prepare_call_config({spelling: other, "reasoning_level": None})
+        assert c._request_media_inputs(changed) == ()
+        assert (
+            c.get_context_limits({spelling: other, "reasoning_level": None}).context_window is None
+        )
+
+
+@pytest.mark.parametrize("spelling", ["api_base", "base_url"])
+@pytest.mark.parametrize("same", [BASE, BASE + "/", "HTTPS://GATEWAY.TEST/v1"])
+def test_factory_same_endpoint_override_keeps_media_and_levels(spelling, same):
+    levels = {"low": {"reasoning_effort": "low"}}
+    config = entry(media_inputs=["image"], reasoning_levels=levels, reasoning_default="low")
+    c = registry.client_from_config("local", deepcopy(config), **{spelling: same})
+    assert c.media_inputs == ("image",)
+    assert c.reasoning_levels == ("low",)
+    assert c._reasoning_config.default == "low"
+    other = registry.client_from_config("local", deepcopy(config), **{spelling: BASE + "/x"})
+    assert other.media_inputs == ()
+    assert other.reasoning_levels is None
+
+
+@pytest.mark.parametrize("spelling", ["api_base", "base_url"])
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_blank_endpoint_override_keeps_the_configured_endpoint(spelling, blank):
+    """An empty endpoint must not send the gateway key to the provider default."""
+    config = entry(media_inputs=["image"], api_key="gw-key")
+    c = registry.client_from_config("local", deepcopy(config), **{spelling: blank})
+    assert c.config["api_base"] == BASE
+    assert c.config.get("base_url") in (None, BASE)
+    assert c.media_inputs == ("image",)
+    assert c.context_window == 8192
+    params = c._prepare_call_config({spelling: blank})
+    assert params["api_base"] == BASE
+    assert params.get("base_url") in (None, BASE)
+    assert c._request_media_inputs(params) == ("image",)
+    assert c.get_context_limits({spelling: blank}).context_window == 8192
+    levels = {"low": {"reasoning_effort": "low"}}
+    d = CompletionClient(MODEL, base_url=BASE, reasoning_levels=levels, reasoning_level="low")
+    params = d._prepare_call_config({spelling: blank})
+    assert params["reasoning_effort"] == "low"
+    assert params["base_url"] == BASE
 
 
 def test_direct_lookup_still_lazily_loads(monkeypatch):
