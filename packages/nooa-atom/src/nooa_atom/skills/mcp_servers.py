@@ -735,8 +735,8 @@ class MCPServers:
         """Attach the servers ``parent`` connected (a parent session's); return warnings.
 
         Each gets ``parent``'s tool object, active where it is active there,
-        and its definition when this workspace view lacks one (an in-memory
-        ``register``). No connection is opened and none is closed:
+        and the definition it was connected with when this workspace view
+        lacks one (inline or from the parent's ``.mcp.json``). No connection is opened and none is closed:
         ``disconnect`` and ``aclose`` only detach them from this agent.
         Nothing is shared when the approval scopes (workspaces) differ, and a
         server is not shared when this view defines it differently.
@@ -759,9 +759,18 @@ class MCPServers:
                 continue
             if name in parent._connected_requests:
                 self._connected_requests[name] = parent._connected_requests[name]
-            if name not in self._servers and name in parent._servers:
-                self._servers[name] = copy.deepcopy(parent._servers[name])
-                self._registered_server_names.add(name)
+            if name not in self.discovered():
+                # Copy the definition the parent connected with (inline or
+                # from its .mcp.json) so the server is listed here too.
+                request = parent._connected_requests.get(name)
+                if request is None:
+                    try:
+                        request = parent.approval_request(name)
+                    except (KeyError, ValueError):
+                        request = None
+                if request is not None:
+                    self._servers[name] = copy.deepcopy(request.config)
+                    self._registered_server_names.add(name)
             if name in parent._activated:
                 self._activated.add(name)
         return warnings

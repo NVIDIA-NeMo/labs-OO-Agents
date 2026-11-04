@@ -278,6 +278,21 @@ def test_share_from_compares_with_the_definition_the_parent_connected(tmp_path, 
     assert same._connected_requests["probe"] == parent._connected_requests["probe"]
 
 
+def test_share_from_lists_a_server_the_parent_defines_in_its_mcp_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("NEMO_OO_USER_DIR", str(tmp_path / "user"))
+    mcp_file = tmp_path / "parent.mcp.json"
+    mcp_file.write_text(json.dumps({"mcpServers": {"probe": {"command": "probe-a"}}}))
+    parent = _servers_at(tmp_path, tmp_path / ".nooa", {})
+    parent.mcp_file = mcp_file
+    tool = object()
+    parent._connected["probe"] = tool
+    child = _servers_at(tmp_path, tmp_path / ".nooa", {})
+    child.mcp_file = tmp_path / "missing.mcp.json"
+    assert child.share_from(parent) == [] and child.tool("probe") is tool
+    assert "probe" in child.discovered()
+    assert child.approval_request("probe") == parent.approval_request("probe")
+
+
 def test_share_from_shares_nothing_across_approval_scopes(tmp_path, monkeypatch):
     monkeypatch.setenv("NEMO_OO_USER_DIR", str(tmp_path / "user"))
     parent = _servers_at(tmp_path, tmp_path / "a" / ".nooa", {"probe": {"command": "probe-a"}})
