@@ -6,6 +6,9 @@ Provides ``serialize()`` and ``deserialize()`` — an 8-step isinstance dispatch
 that handles JSON primitives, enums, collections, nosnapshot values, Pydantic
 models, dataclasses, and ``@snapshotable``-decorated classes.
 
+Pydantic fields use canonical Python names for both storage and restoration,
+independently of external input aliases. Explicit restoration hooks own their format.
+
 Envelope format for non-primitive types::
 
     {"__type__": "pydantic"|"dataclass"|"dict_class",
@@ -59,6 +62,7 @@ _DATACLASS = "dataclass"
 _DICT_CLASS = "dict_class"
 _TUPLE = "tuple"
 _ENVELOPE_TYPES = frozenset({_PYDANTIC, _DATACLASS, _DICT_CLASS, _TUPLE})
+_VALIDATE_BY_NAME = "by_name" in inspect.signature(BaseModel.model_validate).parameters
 _LEGACY_CLASS_PREFIXES = {
     "nemo_oo_agents.": "nooa.",
 }
@@ -256,7 +260,7 @@ def _deserialize_envelope(blob: dict[str, Any], allowlist: set[str]) -> Any:
             data = {k: v for k, v in data.items() if k in cls.model_fields}
         # Restore retained nested envelopes before Pydantic validates them.
         deserialized_data = {k: _deserialize(v, allowlist) for k, v in data.items()}
-        return cls.model_validate(deserialized_data)
+        return _validate_model_snapshot(cls, deserialized_data)
 
     if envelope_type == _DATACLASS:
         # Lenient: filter to accepted kwargs, let defaults fill gaps
@@ -278,6 +282,52 @@ def _deserialize_envelope(blob: dict[str, Any], allowlist: set[str]) -> Any:
         return obj
 
     raise DeserializationError(f"Unknown envelope type: {envelope_type!r}")
+
+
+def _validate_model_snapshot(cls: type[BaseModel], data: dict[str, Any]) -> BaseModel:
+    """Validate canonical snapshot field names without changing external input aliases."""
+    if getattr(cls.model_validate, "__func__", None) is not getattr(
+        BaseModel.model_validate, "__func__", None
+    ):
+        # An application-supplied validation entry point retains its existing
+        # input contract, just like an explicit __restore_snapshot__ hook.
+        return cls.model_validate(data)
+    if _VALIDATE_BY_NAME:
+        # Pydantic 2.11–2.13 drops these flags inside wrap validators;
+        # that upstream limitation is fixed in 2.14 (pydantic/pydantic#13661).
+        return cls.model_validate(data, by_name=True, by_alias=False)
+
+    # Pydantic <2.11 has no per-call alias flags. Use a detached validation
+    # schema, including revalidated nested models, without changing live classes.
+    from pydantic_core import SchemaValidator
+
+    def by_name(schema: Any) -> Any:
+        """Copy validation lookups but leave defaults and user metadata opaque."""
+        if isinstance(schema, list):
+            return [by_name(item) for item in schema]
+        if isinstance(schema, tuple):
+            return tuple(by_name(item) for item in schema)
+        if not isinstance(schema, dict):
+            return schema
+        is_schema = isinstance(schema.get("type"), str)
+        detached = {
+            key: value
+            if is_schema and key in {"default", "metadata", "config", "function", "serialization"}
+            else by_name(value)
+            for key, value in schema.items()
+        }
+        if is_schema and detached["type"] in {"model-fields", "typed-dict"}:
+            detached["fields"] = {
+                name: {**field, "validation_alias": name}
+                for name, field in detached["fields"].items()
+            }
+        elif is_schema and detached["type"] == "dataclass-args":
+            detached["fields"] = [
+                {**field, "validation_alias": field["name"]} for field in detached["fields"]
+            ]
+        return detached
+
+    return SchemaValidator(by_name(cls.__pydantic_core_schema__)).validate_python(data)
 
 
 # ---------------------------------------------------------------------------
