@@ -74,15 +74,16 @@ class TestCodeActStrategyProperties:
         strat = CodeActStrategy(config=CodeActConfig())
         assert strat.name == "CODEACT"
 
-    def test_default_view_provides_strategy_prompt(self):
+    async def test_default_view_provides_strategy_prompt(self):
         """The CodeAct view owns the strategy instruction block."""
+        from nooa import Agent
         from nooa.strategies.current_call import CurrentCall
 
         strat = CodeActStrategy(config=CodeActConfig())
         call = CurrentCall(id="test", method_name="run", decorator="strategy", strategy=strat)
-        blocks = strat.default_context_view.instruction_blocks(call)
-        assert "strategy_prompt" in blocks
-        assert blocks["strategy_prompt"] is not None
+        blocks = await strat.default_context_view.instruction_blocks(Agent(llm=object()), call)
+        assert blocks["strategy_prompt"].value
+        assert blocks["strategy_prompt"].prefix is True
 
 
 class TestCodeActStrategyConfig:

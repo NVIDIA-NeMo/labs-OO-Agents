@@ -2,9 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Default context policy implemented against public framework interfaces."""
 
+import ast
 import inspect
 import logging
-from collections.abc import AsyncIterator, Callable, Iterable, Mapping, Sequence
+from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, cast
 
 from nooa.context_blocks import BlockMetadata, Context, DynamicContext, Role
@@ -126,10 +127,9 @@ async def materialize_manager_blocks(
             resolved_cache[key] = content
         protected = manager.is_protected(key)
         metadata = BlockMetadata(
-            expr=value.expr if is_dynamic else f'self.context["{key}"]',
+            expr=value.expr if is_dynamic else None,
             user_block=not protected,
             static=manager.is_static(key),
-            source_dynamic=is_dynamic,
         )
         blocks.append(_block(key, content, metadata))
 
@@ -184,15 +184,7 @@ async def system_prompt_block(agent: "Agent", call: "CurrentCall") -> Block | No
         content = context_text(value, call=call)
     except Exception as exc:
         content = _source_error("system_prompt", exc)
-    return _block(
-        "system_prompt",
-        content,
-        BlockMetadata(
-            expr="self._resolve_system_prompt()",
-            static=True,
-            source_dynamic=True,
-        ),
-    )
+    return _block("system_prompt", content, BlockMetadata(static=True))
 
 
 async def agent_interface_block(agent: "Agent", call: "CurrentCall") -> Block | None:
@@ -206,7 +198,7 @@ async def agent_interface_block(agent: "Agent", call: "CurrentCall") -> Block | 
     return _block(
         "self",
         content,
-        BlockMetadata(expr="doc(type(self))", static=True, source_dynamic=True),
+        BlockMetadata(expr="doc(type(self))", static=True),
     )
 
 
@@ -215,11 +207,7 @@ async def events_api_block(agent: "Agent", call: "CurrentCall") -> Block | None:
     content = agent._events_api_prompt()
     if not content:
         return None
-    return _block(
-        "events_api",
-        content,
-        BlockMetadata(expr="self._events_api_prompt()", static=True, source_dynamic=True),
-    )
+    return _block("events_api", content, BlockMetadata(static=True))
 
 
 async def agent_state_block(agent: "Agent", call: "CurrentCall") -> Block | None:
@@ -237,7 +225,6 @@ async def agent_state_block(agent: "Agent", call: "CurrentCall") -> Block | None
             expr="pformat(self, max_length=50, max_string=500, max_depth=4)",
             user_block=False,
             static=False,
-            source_dynamic=True,
         ),
     )
 
@@ -248,11 +235,12 @@ async def apply_block_overrides(
     *,
     agent: "Agent",
     call: "CurrentCall",
-    static_expr: Callable[[str], str],
-    static_keys: set[str] | None = None,
     disabled: set[str] | None = None,
 ) -> tuple[Block, ...]:
-    """Replace, append, or remove named blocks using one override source."""
+    """Replace, append, or remove named blocks using one override source.
+
+    Only expression overrides carry an ``expr`` label.
+    """
     if not overrides:
         return tuple(blocks)
 
@@ -283,14 +271,12 @@ async def apply_block_overrides(
             is_static = explicit_static
         elif existing_static is not None:
             is_static = existing_static
-        elif static_keys and key in static_keys:
-            is_static = True
         else:
             is_static = not isinstance(value, DynamicContext)
 
         content = await _resolve_value(key, value, owner=agent, call=call)
         metadata = BlockMetadata(
-            expr=value.expr if isinstance(value, DynamicContext) else static_expr(key),
+            expr=value.expr if isinstance(value, DynamicContext) else None,
             static=is_static,
         )
         replacement = _block(key, content, metadata)
@@ -343,6 +329,22 @@ def visible_events(agent: "Agent") -> tuple[EventBase, ...]:
     return tuple(event for event in agent.event_manager.values() if is_model_visible(event))
 
 
+class _SelfToAttribute(ast.NodeTransformer):
+    def __init__(self, attr: str):
+        self.attr = attr
+
+    def visit_Name(self, node: ast.Name) -> ast.AST:
+        if node.id != "self":
+            return node
+        attribute = ast.Attribute(value=ast.Name("self", ast.Load()), attr=self.attr, ctx=node.ctx)
+        return ast.copy_location(attribute, node)
+
+
+def _rebind_self(expr: str, attr: str) -> str:
+    """Rewrite a skill's ``self.status()`` as the agent's ``self.<attr>.status()``."""
+    return ast.unparse(_SelfToAttribute(attr).visit(ast.parse(expr, mode="eval")))
+
+
 async def collect_skill_blocks(
     agent: "Agent",
     call: "CurrentCall",
@@ -351,6 +353,9 @@ async def collect_skill_blocks(
     declaration_keys: frozenset[str],
 ) -> tuple[Block, ...]:
     """Evaluate active skill declarations without selecting their global placement."""
+    attrs: dict[int, str] = {}
+    for attr, value in agent.__instance_values__().items():
+        attrs.setdefault(id(value), attr)
     blocks: tuple[Block, ...] = ()
     for skill in active_skills(agent):
         if skill.context_block is None:
@@ -359,11 +364,11 @@ async def collect_skill_blocks(
         if key in disabled or key in declaration_keys or agent.context_manager.is_protected(key):
             continue
         content = await _resolve_value(key, declaration, owner=skill, call=call)
+        expr = declaration.expr
         metadata = BlockMetadata(
-            expr=declaration.expr,
+            expr=_rebind_self(expr, attrs[id(skill)]) if expr is not None else None,
             static=declaration.prefix,
             user_block=True,
-            source_dynamic=declaration.is_dynamic,
         )
         block = _block(key, content, metadata)
         blocks = replace_blocks_by_key(blocks, [block])
@@ -374,10 +379,9 @@ class ManagedContextView(ContextView["Agent"]):
     """Reusable assembly for the built-in manager-backed context policies."""
 
     block_order: tuple[str, ...] | None = None
-    static_keys: frozenset[str] = frozenset()
 
-    def instruction_blocks(self, call: "CurrentCall") -> Mapping[str, Any]:
-        """Return this view's instruction declarations."""
+    async def instruction_blocks(self, owner: "Agent", call: "CurrentCall") -> Mapping[str, Any]:
+        """Return this view's strategy instruction blocks, applied over the agent's blocks."""
         return {}
 
     def history(self, owner: "Agent", call: "CurrentCall") -> Iterable[EventBase]:
@@ -434,11 +438,9 @@ class ManagedContextView(ContextView["Agent"]):
     ) -> tuple[Block, ...]:
         blocks = await apply_block_overrides(
             blocks,
-            self.instruction_blocks(call),
+            await self.instruction_blocks(owner, call),
             agent=owner,
             call=call,
-            static_expr=lambda key: f"strategy.{key}",
-            static_keys=set(self.static_keys),
             disabled=disabled,
         )
 
@@ -447,7 +449,6 @@ class ManagedContextView(ContextView["Agent"]):
             call.decorator_context,
             agent=owner,
             call=call,
-            static_expr=lambda key: f'@strategy.context["{key}"]',
             disabled=disabled,
         )
         blocks = await apply_block_overrides(
@@ -455,7 +456,6 @@ class ManagedContextView(ContextView["Agent"]):
             call.scoped_context,
             agent=owner,
             call=call,
-            static_expr=lambda key: f'self.context["{key}"]',
             disabled=disabled,
         )
         return blocks
@@ -512,61 +512,52 @@ class CodeActView(ManagedContextView):
     """Execution protocol, environment, agent context, and active history."""
 
     block_order = ("system_prompt", "strategy_prompt", "sandbox", "execution_context", "self")
-    static_keys = frozenset({"execution_context", "strategy_prompt", "sandbox"})
 
-    def instruction_blocks(self, call: "CurrentCall") -> Mapping[str, Any]:
-        assert call.strategy is not None
-        blocks: dict[str, Any] = {
-            "strategy_prompt": DynamicContext("strategy.strategy_instructions(runtime)"),
-            "execution_context": DynamicContext("strategy.execution_context(runtime)"),
+    async def instruction_blocks(self, owner: "Agent", call: "CurrentCall") -> Mapping[str, Any]:
+        strategy, runtime = call.strategy, owner.runtime
+        assert strategy is not None
+        return {
+            "strategy_prompt": Context(await strategy.strategy_instructions(runtime), prefix=True),
+            "execution_context": Context(await strategy.execution_context(runtime), prefix=True),
+            **await _sandbox_block(strategy, runtime),
         }
-        config = call.strategy.config
-        if config.execution_backend == "sandbox" and config.sandbox.context_block:
-            blocks["sandbox"] = DynamicContext("strategy.sandbox_context(runtime)")
-        return blocks
+
+
+async def _sandbox_block(strategy: Any, runtime: Any) -> dict[str, Context]:
+    config = strategy.config
+    if config.execution_backend == "sandbox" and config.sandbox.context_block:
+        return {"sandbox": Context(await strategy.sandbox_context(runtime), prefix=True)}
+    return {}
 
 
 class PredictView(ManagedContextView):
     """Structured-answer instructions, agent context, and active history."""
 
-    def instruction_blocks(self, call: "CurrentCall") -> Mapping[str, Any]:
-        return {"strategy_prompt": DynamicContext("strategy.strategy_instructions(runtime)")}
+    async def instruction_blocks(self, owner: "Agent", call: "CurrentCall") -> Mapping[str, Any]:
+        assert call.strategy is not None
+        instructions = await call.strategy.strategy_instructions(owner.runtime)
+        return {"strategy_prompt": Context(instructions, prefix=True)}
 
 
-class PurePythonView(ManagedContextView):
+class PurePythonView(PredictView):
     """Python-only execution instructions, agent context, and active history."""
-
-    def instruction_blocks(self, call: "CurrentCall") -> Mapping[str, Any]:
-        return {"strategy_prompt": DynamicContext("strategy.strategy_instructions(runtime)")}
 
 
 class CodeActV2View(CodeActView):
     """Single-tool execution context; protocol instructions live on the tool."""
 
     block_order = ("system_prompt", "sandbox", "python_cell_context", "python_cell_state", "self")
-    static_keys = frozenset({"sandbox", "python_cell_context"})
 
-    def instruction_blocks(self, call: "CurrentCall") -> Mapping[str, Any]:
-        blocks = dict(super().instruction_blocks(call))
-        blocks["strategy_prompt"] = None
-        blocks["execution_context"] = None
-        blocks["python_cell_context"] = DynamicContext("strategy.python_cell_context(runtime)")
-        blocks["python_cell_state"] = DynamicContext("strategy.python_cell_state_context(runtime)")
-        return blocks
-
-
-class ReflexionView(ContextView["Agent"]):
-    """Delegate context assembly to a wrapped strategy using its call environment."""
-
-    def __init__(self, base_strategy: Any):
-        self.base_strategy = base_strategy
-
-    async def assemble(self, owner: "Agent", call: "CurrentCall") -> AsyncIterator[ContextItem]:
-        from dataclasses import replace
-
-        base_call = replace(call, strategy=self.base_strategy)
-        async for item in self.base_strategy.default_context_view.assemble(owner, base_call):
-            yield item
+    async def instruction_blocks(self, owner: "Agent", call: "CurrentCall") -> Mapping[str, Any]:
+        strategy, runtime = call.strategy, owner.runtime
+        assert strategy is not None
+        return {
+            **await _sandbox_block(strategy, runtime),
+            "python_cell_context": Context(
+                await strategy.python_cell_context(runtime), prefix=True
+            ),
+            "python_cell_state": Context(await strategy.python_cell_state_context(runtime)),
+        }
 
 
 __all__ = [
@@ -575,7 +566,6 @@ __all__ = [
     "PredictView",
     "PurePythonView",
     "CodeActV2View",
-    "ReflexionView",
     "collect_skill_blocks",
     "agent_interface_block",
     "agent_state_block",

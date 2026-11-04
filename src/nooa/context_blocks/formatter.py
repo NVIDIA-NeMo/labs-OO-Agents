@@ -151,15 +151,8 @@ class BlockFormatter(ABC):
 
 
 def _xml_system_block(block: ResolvedBlock) -> str:
-    """Wrap a system block's content in an XML tag.
-
-    ``expr=`` is only emitted for blocks produced by
-    :meth:`ContextApi.set_dynamic` — static blocks, framework blocks, and
-    strategy overrides render without the attribute so the prompt doesn't
-    leak internal accessor syntax the LLM can't use.
-    """
-    show_expr = block.metadata.source_dynamic and block.metadata.expr
-    attrs = f' expr="{block.metadata.expr}"' if show_expr else ""
+    """Wrap a system block's content in an XML tag, labelled with its ``expr`` if set."""
+    attrs = f' expr="{block.metadata.expr}"' if block.metadata.expr else ""
     return f"<{block.key}{attrs}>\n{block.content}\n</{block.key}>"
 
 
@@ -185,7 +178,7 @@ def _xml_message_content(block: ResolvedBlock) -> str:
         return block.content
     role_label = "sys" if block.role == Role.USER else f"{block.role.value}_message"
     attrs: list[str] = []
-    if block.metadata.source_dynamic and block.metadata.expr:
+    if block.metadata.expr:
         attrs.append(f'expr="{block.metadata.expr}"')
     if block.metadata.tag:
         attrs.append(f'tag="{block.metadata.tag}"')
@@ -196,7 +189,7 @@ def _xml_message_content(block: ResolvedBlock) -> str:
 def _markdown_system_block(block: ResolvedBlock) -> str:
     header = block.key.replace("_", " ").title()
     inline_meta = ""
-    if block.metadata.source_dynamic and block.metadata.expr:
+    if block.metadata.expr:
         inline_meta = ' `{"expr": "' + block.metadata.expr + '"}`'
     return f"# {header}{inline_meta}\n\n{block.content}"
 
@@ -204,7 +197,7 @@ def _markdown_system_block(block: ResolvedBlock) -> str:
 def _markdown_message_content(block: ResolvedBlock) -> str:
     role_label = block.role.value.replace("_", " ").title() + " Message"
     meta_parts: list[str] = []
-    if block.metadata.source_dynamic and block.metadata.expr:
+    if block.metadata.expr:
         meta_parts.append(f'"expr": "{block.metadata.expr}"')
     if block.metadata.tag:
         meta_parts.append(f'"tag": "{block.metadata.tag}"')
@@ -462,9 +455,9 @@ class XMLBlockFormatter(BlockFormatter):
 
     Example event output::
 
-        <user_message expr='self.events["1"]' tag="1">
+        <sys tag="1">
         Hello world
-        </user_message>
+        </sys>
     """
 
     @property
@@ -474,9 +467,8 @@ class XMLBlockFormatter(BlockFormatter):
     def format_description(self) -> str:
         return (
             "Your prompt is organized in XML context blocks: `<name>CONTENT</name>`.\n"
-            "Blocks produced by `self.context.set_dynamic()` carry an "
-            '`expr="..."` attribute whose value is the Python expression '
-            "re-evaluated each turn.\n"
+            'A block with an `expr="..."` attribute shows the Python expression '
+            "that produces its content.\n"
             'Event history: system entries in `<sys tag="N">`; '
             'reference via `self.events["N"]`. Your own messages appear '
             "as plain assistant turns."

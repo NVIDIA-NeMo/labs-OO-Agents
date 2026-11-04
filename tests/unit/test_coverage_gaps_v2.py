@@ -1387,13 +1387,12 @@ class TestDefaultContextViewNoneContent:
             {"my_key": DynamicContext("None")},
             agent=agent,
             call=call,
-            static_expr=lambda key: f'context["{key}"]',
         )
         assert len(result) == 1
         assert result[0].content == "None"
 
     async def test_protected_block_static_meta(self):
-        """Protected static block gets expr=f'self.context["{key}"]' meta and user_block=False."""
+        """A protected literal block has no expr label and user_block=False."""
         from nooa.default_context_view import materialize_manager_blocks
         from nooa.runtime.context_manager import ContextManager
         from nooa.strategies.current_call import CurrentCall
@@ -1409,8 +1408,7 @@ class TestDefaultContextViewNoneContent:
         )
         assert len(result) == 1
         assert result[0].key == "my_key"
-        # Meta should contain a static expr and user_block=False (protected)
-        assert "my_key" in result[0].metadata.expr
+        assert result[0].metadata.expr is None
         assert result[0].metadata.user_block is False
 
 

@@ -43,12 +43,11 @@ class ExampleAgent(Agent, llm=object()):
 
 
 class ExampleView(ManagedContextView):
-    def __init__(self, overrides=None, order=None, static_keys=None):
+    def __init__(self, overrides=None, order=None):
         self.overrides = overrides or {}
         self.block_order = order
-        self.static_keys = static_keys or set()
 
-    def instruction_blocks(self, call):
+    async def instruction_blocks(self, owner, call):
         return self.overrides
 
 
@@ -67,7 +66,9 @@ async def test_named_helpers_make_framework_sources_explicit():
     )
 
     assert [system.key, interface.key, state.key] == ["system_prompt", "self", "state"]
-    assert all(block.metadata.source_dynamic for block in (system, interface, state))
+    assert system.metadata.expr is None
+    assert interface.metadata.expr == "doc(type(self))"
+    assert state.metadata.expr.startswith("pformat(self")
     assert stored == ()
 
 
@@ -300,7 +301,6 @@ async def test_override_placement_inherits_or_uses_explicit_policy():
         },
         agent=agent,
         call=call,
-        static_expr=lambda key: key,
     )
     by_key = {block.key: block for block in blocks}
 
@@ -308,6 +308,8 @@ async def test_override_placement_inherits_or_uses_explicit_policy():
     assert by_key["new_dynamic"].role is Role.USER
     assert by_key["new_literal"].role is Role.SYSTEM
     assert by_key["forced_suffix"].role is Role.USER
+    assert by_key["new_dynamic"].metadata.expr == "'dynamic'"
+    assert by_key["new_literal"].metadata.expr is None
 
 
 async def test_dynamic_manager_value_updates_public_cache():
@@ -317,7 +319,7 @@ async def test_dynamic_manager_value_updates_public_cache():
     await collect_context_items(ManagedContextView(), agent, call)
     assert agent.context_manager["live"] == "dynamic value"
     blocks = await materialize_manager_blocks(agent.context_manager, agent, call)
-    assert next(block for block in blocks if block.key == "live").metadata.source_dynamic
+    assert next(block for block in blocks if block.key == "live").metadata.expr == "self.value"
 
 
 async def test_strategy_order_lists_keys_first_and_keeps_remainder_stable():

@@ -38,37 +38,29 @@ def make_smart_execute_nested(mock_runtime, base_results):
     return smart_side_effect
 
 
-async def test_reflexion_view_binds_base_strategy_without_mutating_outer_call():
-    from nooa.context_view import Block
-    from nooa.strategies.base import GenerationStrategy
-    from nooa.strategies.current_call import CurrentCall
+async def test_views_see_the_wrapped_strategy_under_reflexion():
+    """A custom CodeActView subclass works under Reflexion(CodeAct)."""
+    from nooa import Agent, strategy
+    from nooa.default_context_view import CodeActView
+    from nooa.strategies.codeact import CodeActStrategy
     from nooa.strategies.reflexion import ReflexionStrategy
 
     seen = []
 
-    class View:
-        async def assemble(self, owner, call):
-            seen.append((owner, call))
-            yield Block(key="test", content="base context")
+    class SpyView(CodeActView):
+        async def instruction_blocks(self, owner, call):
+            seen.append(call.strategy)
+            return await super().instruction_blocks(owner, call)
 
-    class Base(GenerationStrategy):
-        @property
-        def default_context_view(self):
-            return View()
+    base = CodeActStrategy()
 
-        async def execute(self, runtime, call):
-            return None
+    class Example(Agent, llm=object()):
+        @strategy(ReflexionStrategy(base=base), context_view=SpyView())
+        async def run(self) -> str: ...
 
-    base = Base()
-    wrapper = ReflexionStrategy(base=base)
-    call = CurrentCall(id="test", method_name="run", decorator="strategy", strategy=wrapper)
-    owner = object()
-    items = [item async for item in wrapper.default_context_view.assemble(owner, call)]
-    assert items[0].content == "base context"
-    assert seen[0][0] is owner
-    assert seen[0][1].strategy is base
-    assert seen[0][1].id == call.id
-    assert call.strategy is wrapper
+    items = await Example().runtime._prepare_context(Example.run)
+    assert seen == [base]
+    assert "strategy_prompt" in [getattr(item, "key", None) for item in items]
 
 
 class TestReflexionStrategyProperties:
@@ -91,14 +83,16 @@ class TestReflexionStrategyProperties:
         strategy = ReflexionStrategy(base=base)
         assert strategy.name == "REFLEXION[PURE_PYTHON]"
 
-    def test_default_view_delegates_to_base(self):
-        """Reflexion's view retains the wrapped strategy for assembly."""
+    def test_context_strategy_delegates_to_base(self):
+        """Context views see the wrapped strategy, through nested wrappers."""
+        from nooa.default_context_view import PurePythonView
         from nooa.strategies.pure_python import PurePythonStrategy
         from nooa.strategies.reflexion import ReflexionStrategy
 
         base = PurePythonStrategy()
-        strategy = ReflexionStrategy(base=base)
-        assert strategy.default_context_view.base_strategy is base
+        strategy = ReflexionStrategy(base=ReflexionStrategy(base=base))
+        assert strategy.context_strategy is base
+        assert isinstance(strategy.default_context_view, PurePythonView)
 
     def test_requires_lock_delegates_to_base(self):
         """ReflexionStrategy.requires_lock should inherit from base."""

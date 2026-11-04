@@ -41,7 +41,6 @@ def _dynamic_block(key: str, content: str, expr: str | None = None) -> Block:
             expr=expr,
             static=False,
             user_block=True,
-            source_dynamic=expr is not None,
         ),
     )
 
@@ -129,10 +128,8 @@ class TestCachedBlockFormatterPartition:
 
 class TestCachedRendererEndToEndOpenAI:
     def test_static_becomes_system_message(self):
-        # Non-dynamic-source block: ``expr=`` is suppressed even if provided
-        # in metadata. Only ``self.context.set_dynamic()`` blocks render it.
         result = render_context(
-            [_static_block("sys", "You are X.", expr="self._system_prompt()")],
+            [_static_block("sys", "You are X.")],
             block_formatter=CachedBlockFormatter(),
             provider_formatter=OpenAIProviderFormatter(),
         ).output

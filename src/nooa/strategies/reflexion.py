@@ -119,9 +119,12 @@ class ReflexionStrategy(GenerationStrategy):
     @property
     def default_context_view(self):
         """Use the wrapped strategy's assembly policy."""
-        from nooa.default_context_view import ReflexionView
+        return self.base.default_context_view
 
-        return ReflexionView(self.base)
+    @property
+    def context_strategy(self) -> GenerationStrategy:
+        """Present the wrapped strategy's instructions to context views."""
+        return self.base.context_strategy
 
     @property
     def requires_lock(self) -> bool:

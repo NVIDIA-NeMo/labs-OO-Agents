@@ -535,7 +535,8 @@ async def test_imported_capability_is_advertised_and_executes_without_generic_co
         await agent.aclose()
 
 
-def test_python_cell_owns_the_single_static_execution_context():
+async def test_python_cell_owns_the_single_static_execution_context():
+    from nooa import Agent
     from nooa.strategies.current_call import CurrentCall
 
     strategy_instance = CodeActV2()
@@ -543,9 +544,10 @@ def test_python_cell_owns_the_single_static_execution_context():
     call = CurrentCall(
         id="test", method_name="run", decorator="strategy", strategy=strategy_instance
     )
-    assert view.instruction_blocks(call)["execution_context"] is None
-    assert "execution_context" not in view.static_keys
-    assert "python_cell_context" in view.static_keys
+    blocks = await view.instruction_blocks(Agent(llm=object()), call)
+    assert "execution_context" not in blocks
+    assert blocks["python_cell_context"].prefix is True
+    assert blocks["python_cell_state"].prefix is False
     order = view.block_order
     assert "execution_context" not in order
     assert order.index("python_cell_state") == order.index("python_cell_context") + 1
