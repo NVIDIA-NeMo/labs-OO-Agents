@@ -1595,25 +1595,18 @@ Standard Python builtins and agent instance (`self`) are available."""
         # and would cascade into confusing errors. The calls after it still
         # get a "Not executed" result (see _skip_remaining_tool_calls).
         for index, tool_call in enumerate(tool_calls):
-            guard = session.loop_guard
-            if guard is None:
-                result = await self._process_one_tool_call(
+            try:
+                result = await self._process_guarded_tool_call(
                     tool_call, runtime, builtins, session, call, return_type, llm_response_id
                 )
-            else:
-                action, parsed_args = self._loop_guard_action(tool_call)
-                result = self._loop_guard_before(
-                    guard, action, parsed_args, tool_call, runtime, llm_response_id
+            except GenerationError:
+                # An exhausted return_result ends the generation from inside
+                # this call (which records its own error result); the calls
+                # after it still need theirs, or replay drops the whole turn.
+                self._skip_remaining_tool_calls(
+                    _ToolCallsResult(), tool_calls, index, runtime, llm_response_id
                 )
-                if result is None:
-                    first_new = len(runtime.event_manager.keys())
-                    result = await self._process_one_tool_call(
-                        tool_call, runtime, builtins, session, call, return_type, llm_response_id
-                    )
-                    if result is None or not result.completed:
-                        self._loop_guard_after(
-                            guard, action, parsed_args, tool_call, runtime, first_new
-                        )
+                raise
             if result is not None:  # failed or finished: the calls after it do not run
                 return self._skip_remaining_tool_calls(
                     result, tool_calls, index, runtime, llm_response_id
@@ -1621,6 +1614,35 @@ Standard Python builtins and agent instance (`self`) are available."""
 
         # All tool calls processed without completion or error-break
         return _ToolCallsResult()
+
+    async def _process_guarded_tool_call(
+        self,
+        tool_call: Any,
+        runtime: RuntimeServices,
+        builtins: dict[str, Any],
+        session: CodeActSession,
+        call: "CurrentCall",
+        return_type: Any,
+        llm_response_id: str | None,
+    ) -> _ToolCallsResult | None:
+        """Run one tool call, through the session's loop guard when it has one."""
+        guard = session.loop_guard
+        if guard is None:
+            return await self._process_one_tool_call(
+                tool_call, runtime, builtins, session, call, return_type, llm_response_id
+            )
+        action, parsed_args = self._loop_guard_action(tool_call)
+        result = self._loop_guard_before(
+            guard, action, parsed_args, tool_call, runtime, llm_response_id
+        )
+        if result is None:
+            first_new = len(runtime.event_manager.keys())
+            result = await self._process_one_tool_call(
+                tool_call, runtime, builtins, session, call, return_type, llm_response_id
+            )
+            if result is None or not result.completed:
+                self._loop_guard_after(guard, action, parsed_args, tool_call, runtime, first_new)
+        return result
 
     @staticmethod
     def _skip_remaining_tool_calls(
