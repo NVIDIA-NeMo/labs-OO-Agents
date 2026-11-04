@@ -314,7 +314,9 @@ Context expressions are resolved at call time. Decorator context is inherited
 by nested calls, and an active `with ScopedContext(...)` can add or override it.
 Ordinary persistent context blocks are not copied into native decision state
 automatically; reference one explicitly with, for example,
-`Context(expr='self.context["policy"]')`.
+`Context(expr='self.context["policy"]')`. That read returns the stored
+declaration, so it works for literal blocks; for an expression block, reference
+its expression directly.
 
 The selected view owns event selection; this example excludes metadata and
 runtime events with `is_model_visible` and keeps tool calls paired with their

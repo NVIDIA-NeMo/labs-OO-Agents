@@ -181,6 +181,9 @@ See `examples/advanced/memory.py` and `examples/quickstart/12_memory.py`.
 
 - Context blocks and events are **per-instance**. Subagents start empty — pass data explicitly (constructor args, shared dataclasses).
 - Expression blocks are evaluated every turn — keep them cheap and bounded (a huge `self.render_everything()` bloats every prompt).
+- Reading an expression block returns its declaration, not a value:
+  `self.context["progress"]` is `Context(expr="self.format_project_state()")`.
+  Call `self.format_project_state()` for the current value.
 - `self.context["k"] = None` suppresses a block from prompt rendering. Use
   `del self.context["k"]` / `.pop("k")` to remove a user block entirely.
 - A bare `self.context["k"] = value` is fixed content in the volatile suffix.

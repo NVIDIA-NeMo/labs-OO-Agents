@@ -8,7 +8,6 @@ import pytest
 
 from nooa import Agent, Context, DynamicContext, collect_context_items
 from nooa.context_blocks import Role
-from nooa.context_blocks.exceptions import DynamicNotResolvedError
 from nooa.default_context_view import (
     ManagedContextView,
     agent_interface_block,
@@ -93,16 +92,13 @@ async def test_framework_source_helpers_do_not_read_context_manager():
     ) == expected
 
 
-async def test_default_materialization_preserves_protected_named_reads():
-    agent = ExampleAgent()
-    with pytest.raises(DynamicNotResolvedError):
-        agent.context_manager["system_prompt"]
+async def test_assembly_does_not_write_to_the_context_manager():
+    agent = ExampleAgent(context={"live": Context(expr="self.value")})
+    await collect_context_items(ManagedContextView(), agent, _call(agent))
 
-    items = await collect_context_items(ManagedContextView(), agent, _call(agent))
-    by_key = {item.key: item for item in items if hasattr(item, "key")}
-    assert agent.context_manager["system_prompt"] == by_key["system_prompt"].content
-    assert agent.context_manager["self"] == by_key["self"].content
-    assert agent.context_manager["state"] == by_key["state"].content
+    assert agent.context_manager["live"] == Context(expr="self.value")
+    with pytest.raises(KeyError):
+        agent.context_manager["system_prompt"]
 
 
 async def test_unregistered_framework_defaults_are_not_built():
@@ -112,9 +108,6 @@ async def test_unregistered_framework_defaults_are_not_built():
 
         def declarations(self):
             return ()
-
-        def update_resolved(self, resolved):
-            assert resolved == {}
 
         def is_protected(self, key):
             return False
@@ -166,29 +159,6 @@ async def test_unselected_system_prompt_is_not_evaluated(policy):
     prompts = [item.content for item in items if getattr(item, "key", None) == "system_prompt"]
     assert prompts == ([] if policy == "disabled" else ["replacement"])
     assert agent.calls == 0
-
-
-async def test_framework_sources_publish_named_reads_in_source_order_each_turn():
-    class DependentAgent(
-        Agent,
-        llm=object(),
-        context={"state": Context(expr='self.context["system_prompt"]')},
-    ):
-        """prompt-{self.version}"""
-
-        version = "one"
-
-        async def run(self): ...
-
-    agent = DependentAgent()
-    first = await collect_context_items(ManagedContextView(), agent, _call(agent))
-    first_by_key = {item.key: item for item in first if hasattr(item, "key")}
-    assert first_by_key["state"].content == "prompt-one"
-
-    agent.version = "two"
-    second = await collect_context_items(ManagedContextView(), agent, _call(agent))
-    second_by_key = {item.key: item for item in second if hasattr(item, "key")}
-    assert second_by_key["state"].content == "prompt-two"
 
 
 async def test_malformed_system_prompt_is_materialized_as_an_error():
@@ -312,14 +282,12 @@ async def test_override_placement_inherits_or_uses_explicit_policy():
     assert by_key["new_literal"].metadata.expr is None
 
 
-async def test_dynamic_manager_value_updates_public_cache():
+async def test_dynamic_manager_value_is_labelled_with_its_expression():
     agent = ExampleAgent(context={"live": DynamicContext("self.value")})
-    call = _call(agent)
-
-    await collect_context_items(ManagedContextView(), agent, call)
-    assert agent.context_manager["live"] == "dynamic value"
-    blocks = await materialize_manager_blocks(agent.context_manager, agent, call)
-    assert next(block for block in blocks if block.key == "live").metadata.expr == "self.value"
+    blocks = await materialize_manager_blocks(agent.context_manager, agent, _call(agent))
+    live = next(block for block in blocks if block.key == "live")
+    assert live.content == "dynamic value"
+    assert live.metadata.expr == "self.value"
 
 
 async def test_strategy_order_lists_keys_first_and_keeps_remainder_stable():

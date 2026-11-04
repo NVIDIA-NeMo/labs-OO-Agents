@@ -127,9 +127,8 @@ class ContextApi(Skill):
             raise TypeError("set_static() requires either value or expr=")
 
     def __getitem__(self, key: str) -> Any:
-        # Protected keys are hidden from iteration (__contains__/keys()/len)
-        # but readable by name — the LLM already sees their rendered content
-        # in the prompt; mutations are guarded by ProtectedBlockError.
+        # Returns the declaration, not an evaluated value. Protected keys are
+        # hidden from iteration but an override is readable by name.
         return self._context[key]
 
     def __delitem__(self, key: str) -> None:

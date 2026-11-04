@@ -5,8 +5,8 @@
 import pytest
 
 from nooa import Agent
-from nooa.context_blocks import DynamicContext
-from nooa.context_blocks.exceptions import DynamicNotResolvedError, ProtectedBlockError
+from nooa.context_blocks import Context, DynamicContext
+from nooa.context_blocks.exceptions import ProtectedBlockError
 from nooa.runtime.context import ContextApi
 from nooa.unifiedllm import FakeLLMClient
 
@@ -72,18 +72,12 @@ def test_getitem_raises_for_missing_key():
         _ = ctx["missing"]
 
 
-def test_getitem_dynamic_raises_before_resolve():
+def test_getitem_expression_returns_its_declaration():
     ctx = _ctx()
     ctx.set_dynamic("dyn", "'hello'")
-    with pytest.raises(DynamicNotResolvedError):
-        _ = ctx["dyn"]
-
-
-def test_getitem_dynamic_returns_after_resolve():
-    ctx = _ctx()
-    ctx.set_dynamic("dyn", "'hello'")
-    ctx._context.update_resolved({"dyn": "hello"})
-    assert ctx["dyn"] == "hello"
+    ctx["pinned"] = Context(expr="'hi'", prefix=True)
+    assert ctx["dyn"] == Context(expr="'hello'")
+    assert ctx["pinned"] == Context(expr="'hi'", prefix=True)
 
 
 # ── set_dynamic ────────────────────────────────────────────────────────────────
@@ -181,8 +175,7 @@ def test_pop_static_block():
 def test_pop_dynamic_block():
     ctx = _ctx()
     ctx._context._blocks["dyn"] = DynamicContext("'hello'")
-    ctx._context._dynamic_cache["dyn"] = "hello"
-    assert ctx.pop("dyn") == "hello"
+    assert ctx.pop("dyn") == Context(expr="'hello'")
     assert "dyn" not in ctx
 
 
