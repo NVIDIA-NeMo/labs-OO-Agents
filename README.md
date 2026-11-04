@@ -80,8 +80,6 @@ cd my-agent-project
 uv add nooa
 ```
 
-Or with pip: `pip install nooa`.
-
 > **Windows:** use [WSL 2](https://learn.microsoft.com/windows/wsl/install). Native Windows is not supported: `import nooa` and the `nooa` command stop with an error that points to WSL 2. Setting `NOOA_SKIP_PLATFORM_CHECK=1` skips that check. The pure-Python core (agents, PredictStrategy, in-process CodeAct, in-memory storage) and `nooa connect` are tested on native Windows. Other features may work but are unsupported; those that need POSIX (shell tools, the CodeAct sandbox, file-backed SQLite storage, `monitor()`) stop with a `PosixOnlyFeatureError`.
 
 <details>
@@ -108,11 +106,9 @@ uv add "nooa[cli,memory]"       # several at once
 | `nooa-memory` | `nooa[memory]` | long-term memory subsystem (`MemoryManager`) |
 | `nooa-bench` | `nooa[bench]` | `BenchAgent` and the Harbor benchmark runner |
 
-`eval_pipeline` is not published to PyPI — install it from the repo:
-
-```bash
-uv add "eval_pipeline @ git+https://github.com/NVIDIA-NeMo/labs-OO-Agents.git@main#subdirectory=util/eval_pipeline"
-```
+For `eval_pipeline`, follow the [Contributing](#contributing) instructions to clone
+the repo and run `uv sync --group dev`. This installs it editable with the other
+workspace packages.
 
 </details>
 

@@ -402,3 +402,31 @@ def test_signed_reasoning_only_turn_survives():
     projected = prepare_chat_messages([turn], scope)
     assert projected[0]["thinking_blocks"] == source["thinking_blocks"]
     assert projected[0]["content"] == ""
+
+
+def test_litellm_copy_of_readable_reasoning_is_not_an_unknown_field(caplog):
+    """vLLM/Hub ``reasoning`` arrives as reasoning_content plus a provider field copy."""
+    source = Message(
+        role="assistant",
+        content="hi",
+        reasoning_content="I think so.",
+        provider_specific_fields={"reasoning": "I think so.", "refusal": None},
+    )
+    with caplog.at_level("WARNING", logger="nooa.unifiedllm.replay_state"):
+        parts = capture_chat_parts(source, "chat:openai:nvidia/nemotron")
+    assert "Ignoring unrecognized provider field" not in caplog.text
+    assert [part.text for part in parts if type(part).__name__ == "AssistantReasoning"] == [
+        "I think so."
+    ]
+
+
+def test_provider_reasoning_field_that_differs_is_still_reported(caplog):
+    source = Message(
+        role="assistant",
+        content="hi",
+        reasoning_content="I think so.",
+        provider_specific_fields={"reasoning": "something else"},
+    )
+    with caplog.at_level("WARNING", logger="nooa.unifiedllm.replay_state"):
+        capture_chat_parts(source, "chat:openai:nvidia/nemotron")
+    assert "Ignoring unrecognized provider field(s) reasoning" in caplog.text

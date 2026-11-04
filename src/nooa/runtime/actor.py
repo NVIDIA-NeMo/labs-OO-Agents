@@ -2947,32 +2947,24 @@ class ActorRuntime:
             # Strategy must be a GenerationStrategy instance
             if isinstance(strategy, GenerationStrategyABC):
                 # Use strategy's execute() method directly
-                from nooa.strategies.current_call import CurrentCall
+                from nooa.strategies.current_call import (
+                    CurrentCall,
+                    merge_call_arguments,
+                    signature_parameter_names,
+                )
+
+                sig = inspect.signature(method)
+                merged_kwargs = merge_call_arguments(sig, args, kwargs)
 
                 # Expand {placeholders} in method docstring using call arguments
                 raw_docstring = getattr(method, "__doc__", None)
                 expanded_docstring = None
                 if raw_docstring:
-                    # Build context: map parameter names to argument values
-                    sig = inspect.signature(method)
-                    param_names = list(sig.parameters.keys())[1:]  # Skip 'self'
-                    arg_context = dict(zip(param_names, args, strict=False))
-                    arg_context.update(kwargs)
                     expanded_docstring = await self.expand_variables(
-                        raw_docstring, extra_context=arg_context, error_mode="silent"
+                        raw_docstring, extra_context=merged_kwargs, error_mode="silent"
                     )
 
                 # Build CurrentCall for the strategy
-                # Map positional args to parameter names for kwargs (like from_method does)
-                sig = inspect.signature(method)
-                param_names = [p for p in sig.parameters.keys() if p != "self"]
-                merged_kwargs = dict(kwargs)
-                for i, value in enumerate(args):
-                    if i < len(param_names):
-                        param_name = param_names[i]
-                        if param_name not in merged_kwargs:
-                            merged_kwargs[param_name] = value
-
                 # Extract return type annotation — use get_type_hints to
                 # resolve PEP 563 stringified annotations.
                 return_type = None
@@ -3011,12 +3003,12 @@ class ActorRuntime:
                     return_type=return_type,
                     pre_ellipsis_code=pre_ellipsis_code,
                     session_locals=call_session_locals,
-                    # Authoritative ordered names from the live signature (excludes
-                    # 'self') so format_parameters_as_code never re-parses the string.
-                    param_names=[p for p in sig.parameters if p != "self"],
                     # Preserve Annotated parameter overrides on top-level calls,
                     # just as the nested method wrapper does.
                     param_specs=CurrentCall.from_method(method).param_specs,
+                    # Same live-signature names as from_method (excludes 'self'), so
+                    # format_parameters_as_code never re-parses the string.
+                    **signature_parameter_names(sig),
                 )
 
                 # Store current call context in context vars for RuntimeServices.generate()

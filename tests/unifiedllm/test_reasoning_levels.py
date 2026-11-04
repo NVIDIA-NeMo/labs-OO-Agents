@@ -206,6 +206,23 @@ def test_managed_level_cannot_follow_a_route_override(route):
 
 
 @pytest.mark.parametrize(
+    "configured,override", [("base_url", "api_base"), ("api_base", "base_url")]
+)
+def test_managed_level_accepts_the_same_endpoint_under_either_spelling(configured, override):
+    """api_base and base_url name one endpoint, so the same URL is not a route change."""
+    url = "https://gateway.test/v1"
+    with CompletionClient(
+        "openai/test", reasoning_levels=LEVELS, reasoning_level="low", **{configured: url}
+    ) as client:
+        params = client._prepare_call_config({override: url})
+        assert params["reasoning"] == LEVELS["low"]["reasoning"]
+        assert params[configured] == params[override] == url
+        assert client._prepare_call_config({override: None})[configured] == url
+        with pytest.raises(ValueError, match="route-specific"):
+            client._prepare_call_config({override: "https://other.test"})
+
+
+@pytest.mark.parametrize(
     "overrides",
     [
         {"reasoning_levels": LEVELS},

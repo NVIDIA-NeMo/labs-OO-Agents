@@ -1,6 +1,20 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Compile annotated Python return types into backend-neutral decision schemas."""
+"""Compile a decision method's return type into questions, and answers back into values.
+
+A decision method declares its result with a return annotation such as
+``bool``, ``float``, an ``Enum``, a ``Literal``, a detailed ``Decision`` type,
+or a Pydantic model whose fields are such types (a *composite* result).
+``compile_decision_schema`` turns that annotation into a ``DecisionSchema``:
+one ``DecisionOutputSchema`` (one question) per output. The schema then
+builds each ``DecisionRequest`` from the call's arguments and converts the
+model's ``DecisionResponse`` back into the declared Python value.
+
+Primitive results (``bool``, ``float``, ``Enum``, ``Literal``) return only the
+value. *Detailed* results (``BooleanDecision``, ``ChoiceDecision``,
+``ScoreDecision``) also carry the probabilities, so they and ``Threshold``
+require a decision model that provides real probabilities.
+"""
 
 from __future__ import annotations
 
@@ -26,6 +40,7 @@ from nooa.decisions.client import (
     ScoreAnswer,
     ScoreQuestion,
 )
+from nooa.decisions.media import collect_decision_attachments, reject_nested_media
 from nooa.decisions.types import (
     BooleanDecision,
     ChoiceDecision,
@@ -36,11 +51,12 @@ from nooa.decisions.types import (
     ScoreDecision,
     Threshold,
 )
+from nooa.media import Media
 
 
 @dataclass(frozen=True, slots=True)
 class ChoiceValue:
-    """Map a stable wire identifier to its declared Python choice."""
+    """One declared choice: the ID sent to the model, the Python value and its description."""
 
     wire_id: str
     value: Any
@@ -49,7 +65,7 @@ class ChoiceValue:
 
 @dataclass(frozen=True, slots=True)
 class DecisionOutputSchema:
-    """Compiled schema for one named decision output."""
+    """How to ask and answer one named decision output (one question)."""
 
     name: str
     kind: Literal["boolean", "choice", "score"]
@@ -57,12 +73,12 @@ class DecisionOutputSchema:
     criteria: Any
     threshold: float | None
     detailed: bool
-    # Detailed results and thresholds need real probability evidence.
+    # True for detailed results and thresholds, which need real probabilities.
     requires_probabilities: bool
     choices: tuple[ChoiceValue, ...] = ()
 
     def question(self) -> DecisionQuestion:
-        """Build the normalized backend question for this output."""
+        """Build the question sent to the decision model for this output."""
         if self.kind == "boolean":
             return BooleanQuestion(instructions=self.instructions, criteria=self.criteria)
         if self.kind == "choice":
@@ -75,7 +91,13 @@ class DecisionOutputSchema:
 
 @dataclass(frozen=True, slots=True)
 class DecisionSchema:
-    """Compiled request and reconstruction rules for a decision method."""
+    """Compiled form of a decision method: its outputs and how to build requests.
+
+    ``composite`` is true when the return type is a Pydantic model with one
+    output per field. ``shared_guidance`` is the method docstring, sent in the
+    state as ``shared_guidance`` when it is not used as a question's
+    instructions.
+    """
 
     outputs: tuple[DecisionOutputSchema, ...]
     result_type: Any
@@ -88,24 +110,38 @@ class DecisionSchema:
         *,
         context: Mapping[str, Any] | None = None,
         events: Sequence[Any] | None = None,
+        media_inputs: object = (),
     ) -> DecisionRequest:
-        """Build a decision request from arguments and explicitly selected state."""
+        """Build a decision request from the bound call arguments.
+
+        Image arguments become attachments and are replaced by their aliases
+        in the state. ``context`` and ``events`` are the context blocks and
+        events selected for this call (see ``nooa.decisions.state``).
+        """
+        references, attachments = collect_decision_attachments(parameters, media_inputs)
         state = render_decision_state(
             parameters,
             self.shared_guidance,
             context=context,
             events=events,
+            attachment_references=references,
         )
         return DecisionRequest(
             state=state,
             questions={output.name: output.question() for output in self.outputs},
+            attachments=attachments,
         )
 
     def reconstruct(self, response: DecisionResponse, *, include_raw_response: bool = False) -> Any:
-        """Validate a normalized response and create the declared return value.
+        """Validate a response and convert it into the declared return value.
 
-        With ``include_raw_response``, every detailed decision in the result
-        shares a reference to ``response.raw``.
+        The response must answer exactly the questions of this schema. With
+        ``include_raw_response``, every detailed decision in the result gets a
+        reference to the same ``response.raw`` body.
+
+        Raises:
+            ValueError, TypeError: If the answers are missing, unexpected or
+                inconsistent (for example probabilities that do not sum to one).
         """
         missing = {output.name for output in self.outputs} - set(response.answers)
         extra = set(response.answers) - {output.name for output in self.outputs}
@@ -117,7 +153,8 @@ class DecisionSchema:
         }
         if self.composite:
             result = self.result_type.model_validate(values)
-            # Attach after validation, which may rebuild nested decisions.
+            # Read the decisions back from the validated model: validation may
+            # have copied them, and the raw response must be set on the copies.
             decisions = [getattr(result, output.name) for output in self.outputs]
         else:
             result = values[self.outputs[0].name]
@@ -130,7 +167,19 @@ class DecisionSchema:
 
 
 def compile_decision_schema(return_type: Any, docstring: str | None) -> DecisionSchema:
-    """Compile a resolved method return annotation into a decision schema."""
+    """Compile a decision method's return annotation into a ``DecisionSchema``.
+
+    Args:
+        return_type: The resolved return annotation of the method.
+        docstring: The method docstring. For a single output it is the
+            question's instructions unless ``Instructions(...)`` is given; for
+            a composite result, where each field needs ``Instructions(...)``,
+            it is sent as shared guidance.
+
+    Raises:
+        TypeError, ValueError: If the annotation is not a supported decision
+            type or its metadata is incomplete.
+    """
     if return_type is None:
         raise TypeError("DecideStrategy requires a return type annotation")
     guidance = inspect.cleandoc(docstring or "").strip() or None
@@ -167,7 +216,12 @@ def _compile_output(
     *,
     require_instructions: bool,
 ) -> DecisionOutputSchema:
-    """Compile one primitive or detailed decision output annotation."""
+    """Compile one output annotation, with its ``Instructions``, ``Criteria`` and ``Threshold``.
+
+    ``fallback_instructions`` is used when the annotation has no
+    ``Instructions`` metadata; composite fields set ``require_instructions``
+    so that a missing ``Instructions`` raises ``TypeError``.
+    """
     base, metadata = _unwrap_annotated(annotation)
     base, nullable = _strip_none(base)
     base, nested_metadata = _unwrap_annotated(base)
@@ -260,7 +314,7 @@ def _compile_output(
 
 
 def _boolean_criteria(criteria: Criteria | None, name: str) -> dict[str, Criterion] | None:
-    """Normalize optional boolean criteria to the decision wire keys."""
+    """Convert ``Criteria(by_value={True: ..., False: ...})`` to ``"true"``/``"false"`` keys."""
     if criteria is None:
         return None
     if not isinstance(criteria.value, dict):
@@ -275,7 +329,12 @@ def _boolean_criteria(criteria: Criteria | None, name: str) -> dict[str, Criteri
 def _choice_values(
     choice_type: Any, criteria: Criteria | None, name: str
 ) -> tuple[ChoiceValue, ...]:
-    """Compile enum or literal choices with stable identifiers and descriptions."""
+    """Build the choices of an Enum or Literal output, with IDs and descriptions.
+
+    Literal values get the IDs ``choice_0``, ``choice_1``, ... and default to
+    describing themselves. Enum members use their member name as ID and must
+    be described by ``Criteria``.
+    """
     origin = get_origin(choice_type)
     if origin is Literal:
         values = list(get_args(choice_type))
@@ -353,12 +412,24 @@ def render_decision_state(
     *,
     context: Mapping[str, Any] | None = None,
     events: Sequence[Any] | None = None,
+    attachment_references: Mapping[str, str] | None = None,
 ) -> dict[str, JsonValue]:
-    """Render arguments, guidance, and opted-in state as deterministic JSON."""
+    """Build the JSON state sent to the decision model.
+
+    The state is an object with ``inputs`` (the call arguments, with Image
+    arguments replaced by their attachment alias), plus ``shared_guidance``,
+    ``context`` and ``events`` when they are given.
+
+    Raises:
+        TypeError: If a value cannot be converted to JSON.
+    """
     inputs: dict[str, JsonValue] = {}
     for name, value in parameters.items():
         try:
-            inputs[name] = _json_value(value)
+            if isinstance(value, Media) and attachment_references and name in attachment_references:
+                inputs[name] = attachment_references[name]
+            else:
+                inputs[name] = _json_value(value)
         except (TypeError, ValueError) as exc:
             raise TypeError(
                 f"Decision input parameter {name!r} is not JSON-compatible: {exc}"
@@ -390,7 +461,16 @@ def render_decision_state(
 
 
 def _json_value(value: Any) -> JsonValue:
-    """Convert supported Python values recursively into JSON-compatible values."""
+    """Convert a Python value recursively into a JSON-compatible value.
+
+    Supports JSON scalars, finite floats, Enums (by value), Pydantic models,
+    dataclasses, string-keyed mappings and sequences. Media objects are
+    rejected because images may only be passed as top-level named inputs.
+    """
+    if isinstance(value, Media):
+        raise TypeError(
+            "Native Media requires a permitted top-level named Image input; nested/context/event Media is unsupported"
+        )
     if value is None or isinstance(value, (str, bool, int)):
         return value
     if isinstance(value, float):
@@ -400,6 +480,9 @@ def _json_value(value: Any) -> JsonValue:
     if isinstance(value, Enum):
         return _json_value(value.value)
     if isinstance(value, BaseModel):
+        # Check for nested Media before model_dump: a custom serializer could
+        # turn an Image into text. Nested Media is rejected, never attached.
+        reject_nested_media(value)
         return _json_value(value.model_dump(mode="python"))
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
         return _json_value(dataclasses.asdict(value))
@@ -415,7 +498,7 @@ def _json_value(value: Any) -> JsonValue:
 def _validate_distribution(
     probabilities: Mapping[Any, float], expected: set[Any], name: str
 ) -> None:
-    """Validate that a probability distribution exactly covers its outcomes."""
+    """Check that probabilities cover exactly ``expected``, lie in [0, 1] and sum to one."""
     if set(probabilities) != expected:
         raise ValueError(f"{name} distribution does not cover the declared outcomes exactly")
     if any(not math.isfinite(value) or not 0.0 <= value <= 1.0 for value in probabilities.values()):
@@ -431,7 +514,13 @@ def _validate_probability(value: float, name: str) -> None:
 
 
 def _reconstruct_output(output: DecisionOutputSchema, answer: Any) -> Any:
-    """Reconstruct one declared Python output from a normalized answer."""
+    """Convert one answer into the declared Python value for ``output``.
+
+    Applies the threshold: a boolean is true when its probability reaches the
+    threshold (0.5 by default), and a thresholded choice becomes ``None`` when
+    the selected option's probability is below it. A score must equal the
+    expected value of its distribution.
+    """
     if output.kind == "boolean":
         if not isinstance(answer, BooleanAnswer):
             raise TypeError(f"Answer for {output.name!r} is not boolean")

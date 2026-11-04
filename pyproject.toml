@@ -91,7 +91,7 @@ members = [
 
 
 [project.optional-dependencies]
-# Convenience aliases for the sibling distributions, so `pip install
+# Convenience aliases for the sibling distributions, so `uv add
 # nooa[cli]` does what a user reasonably expects. Without these, that command
 # *succeeds* with only a warning and silently installs no CLI.
 #
@@ -105,7 +105,7 @@ memory = ["nooa-memory"]
 bench = ["nooa-bench"]
 acp = ["nooa-acp"]
 # ARC-AGI-3 example agent (examples/arc_agi_3): the public ARC-AGI-3 SDK + deps.
-# Install with `pip install "nooa[arc]"` (or `uv sync --extra arc`).
+# Install from the repo root with `uv sync --extra arc`.
 arc = [
     "arc-agi>=0.9.8",
     "arcengine>=0.9.3",
