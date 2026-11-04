@@ -167,11 +167,18 @@ class _Capture:
         """The stream's text, or its head and tail around a marker; and the path if cut."""
         self.file.flush()
         self.file.seek(0)
-        if self.total <= _SUMMARY_BYTES:
+        if self.total <= _SUMMARY_BYTES and self.total <= self.written:
             return self.file.read(self.total).decode("utf-8", errors="replace"), None
-        head = self.file.read(_HEAD_BYTES).decode("utf-8", errors="replace")
-        tail = bytes(self.tail[-_TAIL_BYTES:]).decode("utf-8", errors="replace")
-        omitted = self.total - _HEAD_BYTES - len(self.tail[-_TAIL_BYTES:])
+        # The file holds the first ``written`` bytes (maybe fewer than a head, under a
+        # small max_output) and memory the last ones; the marker counts what neither kept.
+        head_bytes = self.file.read(_HEAD_BYTES)
+        kept_tail = min(len(self.tail), self.total - len(head_bytes))
+        tail_bytes = bytes(self.tail[len(self.tail) - kept_tail :])
+        omitted = self.total - len(head_bytes) - kept_tail
+        if omitted == 0:  # head and tail meet: the text is whole even though the file is cut
+            return (head_bytes + tail_bytes).decode("utf-8", errors="replace"), None
+        head = head_bytes.decode("utf-8", errors="replace")
+        tail = tail_bytes.decode("utf-8", errors="replace")
         if self.total > self.written:
             where = (
                 f"over the {self.limit:,}-byte output limit: {self.path} holds only the "

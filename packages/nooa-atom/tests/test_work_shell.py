@@ -143,6 +143,18 @@ async def test_direct_run_output_limit_marker():
     assert not Path(r.stdout_path).exists()
 
 
+async def test_output_limit_under_the_summary_size_is_reported():
+    sh = Shell(max_output=1000)
+    small = await sh.run("head -c 2000 /dev/zero | tr '\\0' a")
+    assert small.stdout == "a" * 2000  # whole from memory although the file stops at 1,000
+    big = await sh.run("head -c 900000 /dev/zero | tr '\\0' a")
+    omitted = 900_000 - 1000 - (1_048_576 - 262_144)
+    assert f"[... {omitted:,} bytes omitted; over the 1,000-byte output limit" in big.stdout
+    assert big.stdout_path and big.stdout.startswith("a" * 1000 + "\n[... ")
+    assert big.stdout.endswith("]\n" + "a" * (900_000 - 1000 - omitted))
+    await sh.aclose()
+
+
 async def test_dropped_unowned_shell_keeps_files_while_the_result_lives():
     import gc
 
