@@ -36,14 +36,14 @@ def isolated_registry(monkeypatch):
 
 
 def entry(**settings):
-    return dict(
-        model_name=MODEL,
-        api_base=BASE,
-        context_window=8192,
-        media_inputs=[],
-        retry_config=False,
+    return {
+        "model_name": MODEL,
+        "api_base": BASE,
+        "context_window": 8192,
+        "media_inputs": [],
+        "retry_config": False,
         **settings,
-    )
+    }
 
 
 @pytest.mark.parametrize(
@@ -127,7 +127,7 @@ def test_typed_factory_options_and_explicit_overrides(client_type):
 
 
 def test_compatible_routes_normalize_endpoint_spellings():
-    registry.MODELS["other"] = entry(api_key_env="OTHER_SCOPE")
+    registry.MODELS["other"] = entry(api_base="https://other.test/v1")
     registry.MODELS["local"] = entry()
     c = CompletionClient(MODEL, base_url="HTTPS://GATEWAY.TEST/v1/")
     assert c.context_window == 8192
@@ -163,11 +163,28 @@ def test_alias_key_collision_does_not_prove_model_identity():
     assert CompletionClient(MODEL, api_base=BASE).context_window is None
 
 
-def test_credential_scope_is_not_guessed_from_environment(monkeypatch):
+def test_direct_lookup_compares_the_entry_resolved_key(monkeypatch):
+    """A direct client's explicit key must equal the entry's resolved key."""
     monkeypatch.setenv("LOCAL_SCOPE", "same-value")
     registry.MODELS["local"] = entry(api_key_env="LOCAL_SCOPE")
-    assert CompletionClient(MODEL, api_base=BASE).context_window is None
+    # No client key: credentials do not take part.
+    assert CompletionClient(MODEL, api_base=BASE).context_window == 8192
+    assert CompletionClient(MODEL, api_base=BASE, api_key="same-value").context_window == 8192
+    assert CompletionClient(MODEL, api_base=BASE, api_key="different").context_window is None
+    registry.MODELS["literal"] = entry(api_key="literal-value", api_base="https://lit.test/v1")
+    lit = "https://lit.test/v1"
+    assert CompletionClient(MODEL, api_base=lit, api_key="literal-value").context_window == 8192
+    assert CompletionClient(MODEL, api_base=lit, api_key="same-value").context_window is None
+    assert CompletionClient(MODEL, api_base=lit).context_window == 8192
+    monkeypatch.delenv("LOCAL_SCOPE")
     assert CompletionClient(MODEL, api_base=BASE, api_key="same-value").context_window is None
+    # Other route parts still have to match.
+    assert CompletionClient(MODEL, api_base=BASE, custom_llm_provider="x").context_window is None
+
+
+def test_registry_client_keeps_its_own_credential_scope(monkeypatch):
+    monkeypatch.setenv("LOCAL_SCOPE", "same-value")
+    registry.MODELS["local"] = entry(api_key_env="LOCAL_SCOPE")
     c = registry.get_llm_client("local")
     assert c.context_window == 8192
     assert c.config["api_key"] == "same-value"

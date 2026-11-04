@@ -6,6 +6,7 @@ import inspect
 import json
 import logging
 import math
+import os
 import re
 import warnings
 from abc import ABC, abstractmethod
@@ -1583,21 +1584,38 @@ class UnifiedLLM(ABC):
         # context_window only if every alias with the same route declares the
         # same positive value. If they disagree, or one of them declares none,
         # the result would depend on YAML order, so fall back instead.
+        #
+        # A direct client never has ``api_key_env``, so credentials are compared
+        # here rather than in same_context_route: a client without an api_key
+        # matches regardless of credentials; a client with one matches only an
+        # entry whose resolved key (api_key, else the value of api_key_env) is
+        # equal. Keys are compared in memory only and never logged.
+        client_key = self.config.get("api_key")
+        own_route = {
+            name: value
+            for name, value in self.config.items()
+            if name not in ("api_key", "api_key_env")
+        }
         windows = set()
         undeclared = False
         for key, cfg in models_snapshot.items():
             entry_client_type = cfg.get("client_type", "completion")
+            if client_key is not None:
+                entry_key = cfg.get("api_key")
+                if entry_key is None and cfg.get("api_key_env"):
+                    entry_key = os.environ.get(cfg["api_key_env"])
+                if entry_key != client_key:
+                    continue
             # Completion and Responses clients are never sent the registry-only
             # ``endpoint`` key (the decision-route spelling), so leave it out of
             # the comparison, as client_from_config does. Decision entries keep it.
-            route = (
-                cfg
-                if entry_client_type == "decision"
-                else {name: value for name, value in cfg.items() if name != "endpoint"}
+            skipped = ("api_key", "api_key_env") + (
+                () if entry_client_type == "decision" else ("endpoint",)
             )
+            route = {name: value for name, value in cfg.items() if name not in skipped}
             if same_context_route(
                 model_str,
-                self.config,
+                own_route,
                 client_type,
                 cfg.get("model_name", key),
                 route,
