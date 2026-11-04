@@ -13,6 +13,7 @@ import copy
 import inspect
 import json
 import os
+import time
 from collections.abc import Mapping
 from typing import Any
 from urllib.parse import urlsplit
@@ -37,6 +38,29 @@ _PREFIXES = {
     "gemini",
 }
 _LEGACY_OPTIONS = {"drop_params", "allowed_openai_params", "additional_drop_params"}
+
+
+def _journal(params, response, started):
+    """Record one direct SDK attempt in the installed message journals.
+
+    The journal sinks are LiteLLM callbacks, which never see a direct request,
+    so each attempt is handed over the way main's tracing docs ask clients that
+    bypass LiteLLM to do. A failed attempt (``response`` None) records its
+    prompt only. Does nothing without a journal exporter and never raises.
+    """
+    from nooa.tracing import journal_llm_call
+
+    messages = params.get("messages")
+    if messages is None:
+        messages = params.get("input")
+    if isinstance(messages, str):
+        messages = [{"role": "user", "content": messages}]
+    journal_llm_call(
+        model=str(params.get("model") or ""),
+        messages=messages or (),
+        response=response,
+        started_at=started,
+    )
 
 
 def _chat_token_limit(params: dict) -> dict:
@@ -680,13 +704,23 @@ class DirectTransport:
 
     def call(self, params):
         method, body = self._request(params, asynchronous=False)
-        response = method(**body)
-        return self._response(response, params)
+        started = time.time()
+        response = None
+        try:
+            response = self._response(method(**body), params)
+            return response
+        finally:
+            _journal(params, response, started)
 
     async def acall(self, params):
         method, body = self._request(params, asynchronous=True)
-        response = await method(**body)
-        return self._response(response, params)
+        started = time.time()
+        response = None
+        try:
+            response = self._response(await method(**body), params)
+            return response
+        finally:
+            _journal(params, response, started)
 
     def _response(self, response, params):
         if self.api_style == "anthropic":

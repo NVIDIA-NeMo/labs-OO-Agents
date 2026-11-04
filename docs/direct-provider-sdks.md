@@ -215,8 +215,13 @@ their existing public interfaces.
 
 This is a selective transport addition, **not a tracing rewrite**. Default
 LiteLLM tracing/journaling remains unchanged. Direct SDK requests bypass LiteLLM
-collectors and its instrumentation callbacks, so provider LLM spans and
-LiteLLM request/response journals are not emitted for this opt-in path. Existing
+collectors and its instrumentation callbacks, so LiteLLM's provider LLM spans
+are not emitted for this opt-in path. Each direct attempt, including a failed
+one, is instead handed to `nooa.tracing.journal_llm_call`, so an installed
+message journal (journal file or live viewer) still records it on an `llm_call`
+span of its own. Async direct attempts hold the same shared admission and
+pacing permit as LiteLLM calls, and an overload `Retry-After` from the official
+SDK error feeds the same shared cooldown. Existing
 outer agent/method tracing, call tracking, usage/calibration and applicable
 httpx debug logging remain available. Direct calls do not estimate provider cost;
 `usage.cost_usd` retains the existing `0.0` unavailable-cost default (not a

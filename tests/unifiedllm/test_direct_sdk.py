@@ -1488,3 +1488,71 @@ async def test_real_sdk_408_explicit_retry_policy(wire, monkeypatch, style, asyn
         assert "extra_headers" not in json.loads(request.content)
     if len(requests) == 2:
         assert requests[0].content == requests[1].content
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("style", ["chat", "responses", "anthropic"])
+async def test_direct_attempts_are_journaled(wire, monkeypatch, style, asynchronous):
+    """Direct calls bypass LiteLLM's journal callbacks, so each attempt is handed over."""
+    import nooa.tracing
+
+    records = []
+    monkeypatch.setattr(nooa.tracing, "journal_llm_call", lambda **kw: records.append(kw))
+    requests, behavior = wire
+    behavior.update(style=style, failure=429)
+    policy = RetryConfig(
+        max_retries=1,
+        rate_limit_extra_retries=0,
+        base_delay=0,
+        rate_limit_base_delay=0,
+        jitter_factor=0,
+    )
+    messages = [{"role": "user", "content": "question"}]
+    async with client(style, retry_config=policy) as llm:
+        result = await llm.acall(messages) if asynchronous else llm.call(messages)
+    assert result.content == "42"
+    assert len(requests) == 2
+    assert [record["response"] is None for record in records] == [True, False]
+    for record in records:
+        assert record["model"] == "anthropic/test" if style == "anthropic" else "openai/test"
+        assert record["started_at"] > 0
+        assert "question" in json.dumps(record["messages"], default=str)
+
+
+async def test_direct_async_attempts_hold_admission(wire):
+    """Direct async attempts use the same admission boundary as LiteLLM calls."""
+    from nooa.unifiedllm.admission import _admission_controller_scope
+
+    events = []
+
+    class Permit:
+        def release(self):
+            events.append("release")
+
+    class Controller:
+        async def acquire(self, observer):
+            events.append("acquire")
+            return Permit()
+
+    requests, behavior = wire
+    behavior["style"] = "chat"
+    async with client("chat") as llm:
+        with _admission_controller_scope(Controller()):
+            result = await llm.acall([{"role": "user", "content": "question"}])
+    assert result.content == "42"
+    assert len(requests) == 1
+    assert events == ["acquire", "release"]
+
+
+@pytest.mark.parametrize("sdk", ["openai", "anthropic"])
+def test_official_sdk_overload_errors_feed_shared_cooldown(sdk):
+    """The shared cooldown reads Retry-After from official SDK errors too."""
+    import importlib
+
+    from nooa.unifiedllm.cooldown import retry_after_delay
+
+    module = importlib.import_module(sdk)
+    request = httpx.Request("POST", "https://models.example/v1/test")
+    response = httpx.Response(429, headers={"Retry-After": "7"}, request=request)
+    error = module.RateLimitError("rate limited", response=response, body=None)
+    assert retry_after_delay(error) == 7.0
