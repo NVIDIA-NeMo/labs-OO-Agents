@@ -1103,8 +1103,8 @@ for _name in ("shell", "delegates", "producers", "system_messages", "cwd"):
 spec(AtomAgent, "jobs", description="Run and track work: see WorkManager")
 spec(
     AtomAgent,
-    "libs",
-    description="Reusable libraries, saved in .nooa/libs; later sessions get each as self.<name>",
+    "skill_writing",
+    description="Save skills (code or instructions) in .nooa/skills; later sessions get each one",
 )
 # Host-facing members of the work types stay out of the model's docs.
 for _cls, _members in (

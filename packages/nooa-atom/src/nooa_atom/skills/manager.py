@@ -104,6 +104,7 @@ class SkillManager(Skill):
     ``print(self.skills.doc(name))`` for full text instructions, code APIs or
     MCP tools now. An MCP server may first need the person's approval or
     sign-in; ``activate`` says so, and you get a notice when it connects.
+    New skills for later sessions are made with ``self.skill_writing``.
     """
 
     __nosnapshot__ = True
@@ -452,8 +453,8 @@ class SkillManager(Skill):
         self.registry.discover_skills_dirs(dirs)
 
     @hidden
-    def discover_libs(self, path: Any) -> None:
-        self.registry.discover_libs(path)
+    def discover_libs(self, path: Any, *, agent_written: bool = False) -> None:
+        self.registry.discover_libs(path, agent_written=agent_written)
 
     @hidden
     async def reload(self, name: str | None = None) -> str:

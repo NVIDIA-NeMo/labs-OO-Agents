@@ -80,7 +80,7 @@ def create_session_agent(options: SessionOptions, storage: StorageManager) -> In
             "cwd": workspace,
             "skills_dirs": atom_options.skills_dirs,
             "summarization": atom_options.summarization,
-            "libs_dir": workspace / ".nooa" / "libs",
+            "libs_dir": workspace / ".nooa" / "skills",
         }
         if issubclass(agent_class, AtomAgent):
             # One turn method (handle): the session's turn_method selects the role.

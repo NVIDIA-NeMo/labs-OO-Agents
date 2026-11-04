@@ -509,7 +509,7 @@ class CodingACPAdapter:
             # Same anchoring as the session store above: one ACP process
             # serves many workspaces, so project-local paths follow the
             # session's workspace rather than the process.
-            libs_dir=root / ".nooa" / "libs",
+            libs_dir=root / ".nooa" / "skills",
             skills_dirs=load_coding_skills_dirs(root),
         )
 

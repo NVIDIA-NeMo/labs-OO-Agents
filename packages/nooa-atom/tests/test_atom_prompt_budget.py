@@ -194,18 +194,27 @@ RESULT = (
 # (2026-11-03, #517 user decision): handle system / total 22,092 / 23,422 ->
 # 22,286 / 23,616. System limit set to the bench ceiling (measured plus 2% would
 # pass it); total still within its limit.
+# The handle_orchestrate system limit and the bench ceiling raised for the
+# self.skill_writing rename (2026-11-04, #517 user decision): the attribute line says
+# skills are code or instructions saved in .nooa/skills, and the SkillManager doc
+# says new skills are made with self.skill_writing. Measured system / total before
+# -> after: handle 22,366 / 23,696 -> 22,375 / 23,708, handle_batch 22,291 / 23,621
+# -> 22,300 / 23,633, handle_work 22,459 / 23,789 -> 22,468 / 23,801,
+# handle_orchestrate 22,594 / 23,924 -> 22,603 / 23,936. Only handle_orchestrate
+# passed its system limit (22,600), so it and the bench ceiling go to 22,700.
 LIMITS = {
     (ATOM, "handle"): (22_600, 23_800),
     (ATOM, "handle_batch"): (22_300, 23_900),
     (ATOM, "handle_work"): (22_500, 24_100),
-    (ATOM, "handle_orchestrate"): (22_600, 24_200),
+    (ATOM, "handle_orchestrate"): (22_700, 24_200),
 }
 # The bench guard's system-prompt ceiling; every agent stays under it.
 # Raised from 20,000 for the Done(message=...) guidance (2026-10-29, see above),
 # then from 21,200 to 22,600 for self.jobs.after/every/tail (2026-10-30), and
 # lowered to 22,300 when self.jobs.tail was dropped (2026-10-30), then raised to
-# 22,600 for the PR512 small fixes (2026-10-30, see above; handle_orchestrate 22,098).
-BENCH_SYSTEM_LIMIT = 22_600
+# 22,600 for the PR512 small fixes (2026-10-30, see above; handle_orchestrate 22,098),
+# then to 22,700 for the self.skill_writing rename (2026-11-04, see above).
+BENCH_SYSTEM_LIMIT = 22_700
 # The one line every agent (root and child) gets in python_cell_lifetime.
 LIVE_NAMES_LINE = (
     "The python_cell_state block lists up to 20 of your live Python names and "

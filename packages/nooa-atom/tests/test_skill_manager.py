@@ -138,7 +138,7 @@ async def test_manager_hides_internal_read_and_source_dir_only(agent, concise, t
 
 async def test_the_block_names_active_skills_and_counts_the_rest(agent):
     assert agent.skills.status() == (
-        "Active: libwriting, methodwriting, repo, shell, todo\n"
+        "Active: methodwriting, repo, shell, skill_writing, todo\n"
         f"4 more (code, text, MCP): {BLOCK_TAIL}"
     )
 
@@ -149,7 +149,7 @@ async def test_the_block_stays_the_same_until_something_is_activated(agent):
     agent.skills.doc("review")
     assert agent.skills.status() == first
     await agent.skills.activate(["greeter"])
-    assert agent.skills.status().startswith("Active: greeter, libwriting,")
+    assert agent.skills.status().startswith("Active: greeter, methodwriting,")
 
 
 async def test_search_matches_names_and_descriptions_of_every_kind(agent):
