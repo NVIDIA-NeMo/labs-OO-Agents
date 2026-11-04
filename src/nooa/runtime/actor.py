@@ -843,12 +843,27 @@ class ActorRuntime:
         from nooa.agentdoc import pformat
 
         em = self.event_manager
+        # Only the events this request renders (the query _phase_events applies):
+        # an excluded event neither uses the budget nor gets collapsed.
+        query = (
+            em.get_event_query()
+            or _scoped_events_var.get()
+            or _decorator_events_var.get()
+            or getattr(self.agent, "event_query", None)
+        )
+        included = (
+            {id(e) for e in query.apply(em.values(), current_call_id=self._agent_call_id)}
+            if query
+            else None
+        )
         bearing: list[tuple[str, int]] = []
         events: dict[str, Any] = {}
         for tag in em.keys():
             try:
                 event = em[tag]
             except Exception:  # noqa: BLE001
+                continue
+            if included is not None and id(event) not in included:
                 continue
             count = _image_block_count(event)
             if count:

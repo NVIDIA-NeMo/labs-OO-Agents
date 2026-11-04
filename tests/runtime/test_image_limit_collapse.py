@@ -209,3 +209,32 @@ async def test_the_context_window_retry_is_covered_by_image_recovery():
     errors[:] = [window]
     with pytest.raises(ContextWindowExceededError):
         await run(Runtime(), call, rebuild, lambda exc: False)
+
+
+def test_only_the_events_the_request_includes_count_toward_the_limit():
+    from nooa.events import ResultStatus
+    from nooa.runtime.event_query import EventQuery
+
+    done = ResultStatus.COMPLETE
+
+    def image(n: int) -> dict:
+        return {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{n}"}}
+
+    agent = ImageAgent()
+    em = agent.event_manager
+    em.add(
+        PythonOutput(
+            tool_call_id="old", execution_count=1, execution_status=done, images=[image(1)]
+        )
+    )
+    em.add(
+        PythonOutput(
+            tool_call_id="new", execution_count=2, execution_status=done, images=[image(2)]
+        )
+    )
+    em.set_event_query(EventQuery(limit=1))  # the request renders only the newest event
+    try:
+        assert agent.runtime._collapse_images_over_limit(1) == 0  # one included image: fits
+    finally:
+        em.set_event_query(None)
+    assert agent.runtime._collapse_images_over_limit(1) == 1  # without the query both count
