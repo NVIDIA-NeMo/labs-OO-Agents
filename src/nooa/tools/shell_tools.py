@@ -577,8 +577,6 @@ def _closest_region(content: str, old: str) -> tuple[int, int, float] | None:
     similar one (at least 60%). None when nothing is close, or the search
     would cost too much.
     """
-    import difflib
-
     old_lines = _old_lines(old)
     file_lines = content.split("\n")
     if (
@@ -624,7 +622,6 @@ def _closest_region_lines(content: str, old: str) -> list[str]:
     and cut at 160 characters, and says when a line differs only in
     whitespace. Empty when nothing is close.
     """
-    import difflib
 
     def excerpt(text: str) -> str:
         return _replace_diagnostic_excerpt(text, 0, len(text), 0, 160)

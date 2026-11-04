@@ -14,8 +14,6 @@ import struct
 import wave
 import zlib
 
-from nooa.unifiedllm.media_inputs import explicitly_rejected as explicitly_rejected
-
 from ._video_fixture import video_fixture
 
 
