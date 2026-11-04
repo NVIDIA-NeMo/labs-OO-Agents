@@ -72,6 +72,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 # Aliases already warned about a missing media_inputs setting (warn once each).
 _warned_text_only: set[str] = set()
+# Aliases already warned that an override dropped their route settings.
+_warned_route_override: set[str] = set()
 
 # Serializes the (_loaded, MODELS) check-and-mutate so concurrent
 # ensure_loaded() / reload_registry() calls — possible when async agent
@@ -573,6 +575,7 @@ def client_from_config(
     # (trailing slash, host case), is the same route.
     from nooa.unifiedllm.route_identity import endpoint_or_provider_changed
 
+    dropped: list[str] = []
     if config and (
         overrides.get("model", model) != model
         or endpoint_or_provider_changed(config, overrides)
@@ -580,13 +583,8 @@ def client_from_config(
         or overrides.get("client") is not None
     ):
         for key in ("reasoning_levels", "reasoning_default", "reasoning_level", "media_inputs"):
-            params.pop(key, None)
-        if "reasoning_levels" in config:
-            logger.warning(
-                "Route overridden for %r; inherited reasoning choices were cleared. "
-                "Declare reasoning_levels explicitly for the replacement route.",
-                name,
-            )
+            if params.pop(key, None) and key in ("reasoning_levels", "media_inputs"):
+                dropped.append(key)
 
     # A context_window belongs to one route. If an override changes the model,
     # endpoint, client type, provider, client object or credentials, drop the
@@ -616,8 +614,19 @@ def client_from_config(
         effective_route,
         selected_client_type,
     )
-    if not same_route:
-        config.pop("context_window", None)
+    if not same_route and config.pop("context_window", None) is not None:
+        dropped.insert(0, "context_window")
+    # Say once per alias what the override cleared. Name only the alias and the
+    # settings: never the override values, which may hold URLs or credentials.
+    if dropped and name not in _warned_route_override:
+        _warned_route_override.add(name)
+        logger.warning(
+            "Model %r: the overrides change its route, so its configured %s no longer "
+            "apply and were not used. Pass them with the overrides to set them for the "
+            "new route.",
+            name,
+            ", ".join(dropped),
+        )
 
     params.update(overrides)
     if config and "media_inputs" not in params and name not in _warned_text_only:

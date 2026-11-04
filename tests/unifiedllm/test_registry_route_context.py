@@ -204,6 +204,28 @@ def test_endpoint_or_provider_changed_is_shared_by_reasoning_and_registry():
     assert not hasattr(reasoning, "_endpoint_changed")
 
 
+def test_route_override_warns_once_per_alias_what_it_dropped(caplog):
+    registry._warned_route_override.discard("local")
+    registry._warned_route_override.discard("same")
+    raw = entry(
+        media_inputs=["image"],
+        reasoning_levels={"low": {"reasoning_effort": "low"}},
+        api_key="secret-key",
+    )
+    other = "https://user:pw@other.test/v1"
+    with caplog.at_level("WARNING", logger="nooa.unifiedllm.registry"):
+        registry.client_from_config("local", deepcopy(raw), api_base=other).close()
+        registry.client_from_config("local", deepcopy(raw), api_base=other).close()
+        registry.client_from_config("same", deepcopy(raw), base_url=BASE).close()
+    warnings = [r.getMessage() for r in caplog.records if "change its route" in r.getMessage()]
+    assert len(warnings) == 1
+    assert "'local'" in warnings[0]
+    for setting in ("context_window", "reasoning_levels", "media_inputs"):
+        assert setting in warnings[0]
+    assert "other.test" not in warnings[0] and "pw" not in warnings[0]
+    assert "secret-key" not in caplog.text
+
+
 def test_direct_lookup_tolerates_a_malformed_api_key_env():
     """A non-string api_key_env must not crash the lookup; that entry just never matches a key."""
     registry.MODELS["local"] = entry(api_key_env=["NOT", "A", "NAME"])
