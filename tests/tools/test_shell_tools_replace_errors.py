@@ -879,6 +879,20 @@ def test_closest_region_search_checks_its_deadline_on_skipped_windows():
     assert time.monotonic() - started < 0.5
 
 
+def test_closest_region_search_bounds_one_line_by_line_comparison():
+    """4,000 repeated short lines once took ~1.7 s in a single line ratio() call."""
+    import time
+
+    from nooa.tools.shell_tools import _closest_region_lines
+
+    old = "a\n" * 3_999 + "b"
+    content = "a\n" * 4_000
+    assert len(old) <= 8_000  # within the old-text bound, so the search runs
+    started = time.monotonic()
+    assert _closest_region_lines(content, old) == []
+    assert time.monotonic() - started < 0.5
+
+
 def test_closest_region_compares_large_old_text_line_by_line():
     """An old text too large for a character ratio() still gets a closest region."""
     from nooa.tools.shell_tools import _closest_region_lines

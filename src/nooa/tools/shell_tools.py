@@ -560,6 +560,10 @@ _CLOSEST_MAX_SECONDS = 0.25
 # so a window and ``old`` larger than this product of lengths (one call
 # ~0.05 s) are compared line by line instead, which is cheap.
 _CLOSEST_MAX_CHAR_CELLS = 1_500 * 1_500
+# A line ``ratio()`` is quadratic in line counts when short lines repeat
+# (4,000 x 4,000 identical lines took ~1.7 s, 700 x 700 ~0.05 s); past this
+# product the deadline could not interrupt it, so the hint is skipped.
+_CLOSEST_MAX_LINE_CELLS = 700 * 700
 
 
 def _old_lines(old: str) -> list[str]:
@@ -602,6 +606,8 @@ def _closest_region(content: str, old: str) -> tuple[int, int, float] | None:
             matcher = chars
             matcher.set_seq1(window)
         else:  # a character ratio() this large could block the loop for seconds
+            if len(window_lines) * size > _CLOSEST_MAX_LINE_CELLS:
+                return None  # so could a line ratio() over this many short lines
             matcher = by_line
             matcher.set_seq1(window_lines)
         if matcher.real_quick_ratio() <= best_ratio or matcher.quick_ratio() <= best_ratio:
