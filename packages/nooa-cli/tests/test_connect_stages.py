@@ -79,7 +79,8 @@ def test_explicit_prompt_key_keeps_stage_json_clean(monkeypatch):
 @pytest.mark.parametrize(
     "stage,count", [("routing", 1), ("tools", 1), ("reasoning", 2), ("session", 3), ("all", 7)]
 )
-def test_each_check_stage_is_independent_json(monkeypatch, tmp_path, stage, count):
+@pytest.mark.parametrize("litellm", [False, True])
+def test_each_check_stage_is_independent_json(monkeypatch, tmp_path, stage, count, litellm):
     monkeypatch.setenv("STAGE_TEST_KEY", "test-secret")
     requests = []
 
@@ -105,13 +106,26 @@ def test_each_check_stage_is_independent_json(monkeypatch, tmp_path, stage, coun
     mock_http(monkeypatch, handle)
     path = tmp_path / "levels.yaml"
     path.write_text("high: {reasoning_effort: high}\nlow: {reasoning_effort: low}\n")
-    args = [*BASE, "--stage", stage, "--levels-file", str(path)]
+    args = [
+        *BASE,
+        "--stage",
+        stage,
+        "--levels-file",
+        str(path),
+        *(["--litellm"] if litellm else []),
+    ]
     result = CliRunner().invoke(command, args, input="")
     assert result.exit_code == 0, result.output
     report = json.loads(result.stdout)
     assert report["ok"] is True
     assert report["version"] == 1
     assert report["diagnostic_prompt"] is None
+    assert report["data"]["entry"]["direct"] is (not litellm)
+    assert all(
+        record["transport"] == ("litellm" if litellm else "direct")
+        for record in report["checks"].values()
+        if "transport" in record
+    )
     assert len(requests) == count
     assert "private reasoning" not in result.output
     assert "Approve" not in result.output

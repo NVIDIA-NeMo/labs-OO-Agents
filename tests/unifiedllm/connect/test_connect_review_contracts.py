@@ -37,8 +37,10 @@ async def test_schema_tool(monkeypatch, kind, value):
         return httpx.Response(200, json=body)
 
     mock_http(monkeypatch, handle)
+    # LiteLLM carries Anthropic schemas as a json_tool_call tool; direct SDKs
+    # send output_config.format natively, so this carrier is LiteLLM-only.
     result = await connect.check_stage(
-        plan("anthropic", test_media_inputs=[kind]), "media", api_key="fake"
+        plan("anthropic", test_media_inputs=[kind], direct=False), "media", api_key="fake"
     )
     records = result.entry["provenance"]["probes"]
     r = records["media:" + kind]
@@ -77,17 +79,20 @@ async def test_selected_cap(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("direct", [False, True])
 @pytest.mark.parametrize("finish", [None, "unrecognized"])
-async def test_missing_finish(monkeypatch, finish):
+async def test_missing_finish(monkeypatch, finish, direct):
     def handle(req):
         body = response_body("chat")
         body["choices"][0]["finish_reason"] = finish
         return httpx.Response(200, json=body)
 
     mock_http(monkeypatch, handle)
-    result = await connect.check_stage(plan(), "routing", api_key="fake")
+    result = await connect.check_stage(plan(direct=direct), "routing", api_key="fake")
     r = result.entry["provenance"]["probes"]["routing"]
-    assert text_baseline_passed(r)
+    # LiteLLM normalizes a missing/unknown finish_reason to "stop". The direct
+    # OpenAI SDK keeps the server's value, so the baseline is not confirmed.
+    assert text_baseline_passed(r) is (not direct)
 
 
 @pytest.mark.parametrize(

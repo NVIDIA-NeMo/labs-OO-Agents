@@ -305,6 +305,7 @@ def run_stage(
     working_dir=False,
     no_metadata=False,
     server_metadata="listing",
+    direct=None,
 ):
     """Run one ``--stage`` step, print its JSON report and return the exit code.
 
@@ -408,6 +409,33 @@ def run_stage(
                 or not isinstance(data.get("entry"), dict)
             ):
                 raise click.UsageError("Save input requires an alias string and an entry mapping")
+            stored_direct = data["entry"].get("direct", False)
+            provenance = data["entry"].get("provenance", {})
+            if not isinstance(provenance, dict):
+                raise click.UsageError("provenance must be a mapping")
+            if (
+                direct is not None
+                and direct != stored_direct
+                and (
+                    any(
+                        provenance.get(field)
+                        for field in (
+                            "probes",
+                            "session_checks",
+                            "interfaces",
+                            "requests_accepted",
+                            "reasoning_observed",
+                        )
+                    )
+                    or provenance.get("encrypted_reasoning", {}).get("outcome")
+                    in {"accepted", "rejected"}
+                    or document.get("checks")
+                    or data.get("checks")
+                )
+            ):
+                raise click.UsageError(
+                    "Transport differs from tested input; run checks again with --litellm before saving"
+                )
             try:
                 imported_entry = data["entry"]
                 if context_window is not None or (
@@ -462,6 +490,7 @@ def run_stage(
                             ),
                         },
                         reply_tokens=reply_tokens,
+                        direct=stored_direct if direct is None else direct,
                         cache_enabled=cache_enabled,
                         **mode_kwargs,
                     ),
@@ -612,6 +641,7 @@ def run_stage(
                         style,
                         endpoint,
                         key_env,
+                        direct=True if direct is None else direct,
                         catalogue=read_catalogue(
                             catalogue_file, model, catalogue_model=catalogue_model
                         )
@@ -672,6 +702,7 @@ def run_stage(
                         )
                     )
                 )
+                entry = {}  # Discovery is metadata-only, not an inference proposal.
                 ok = True
             elif stage == "plan":
                 if not model or not api_style:
@@ -690,6 +721,7 @@ def run_stage(
                         budget_tokens=budget,
                         output_tokens=output_tokens,
                         api_key=key,
+                        direct=True if direct is None else direct,
                         reasoning_template=reasoning_template,
                         reasoning_level=reasoning_level or "medium",
                         reasoning_output_tokens=reasoning_output_tokens,
@@ -773,6 +805,13 @@ def run_stage(
         else None
     )
     run_context = diagnostic_context(
+        direct=entry.get("direct")
+        if entry and stage not in {"discover", "catalogue"}
+        else (
+            (True if direct is None else direct)
+            if stage not in {"discover", "catalogue", "save"}
+            else None
+        ),
         target=output,
         alias=alias,
         model=model,

@@ -105,6 +105,13 @@ async def test_every_behavior_edit_removes_current_routing_media_and_session_tru
     assert "session" not in connect.verdict(entry).passed
     edited = connect.configure_entry(entry)
     records = edited["provenance"]["probes"]
+    if "transport" in mutation:
+        # The transport label disagrees with the `direct` switch that ran the
+        # checks: configure_entry discards that evidence entirely (stricter
+        # than marking it stale), so nothing can be borrowed.
+        assert not set(records) & {"routing", "media:image", "media:pdf"}
+        assert "session_checks" not in edited["provenance"]
+        return
     for name in ("routing", "media:image", "media:pdf"):
         assert records[name]["verification_current"] is False
         assert not connect.verification_is_current(records[name], edited, name)
@@ -442,12 +449,20 @@ async def test_factory_backend_extra_body_precedence_matches_actual_http(
     )
     proposal = plan(style)
     proposal.entry.update(
+        direct=transport == "direct",
         transport=transport,
         temperature=0.9,
         top_p=0.8,
         extra_body={"temperature": 0.5, "top_p": 0.6},
     )
     result = await connect.check_stage(proposal, "routing", api_key="fake")
+    if transport == "direct":
+        # Direct SDKs refuse an extra_body that overwrites top-level fields
+        # instead of guessing a precedence: the check fails before any HTTP.
+        assert sent == []
+        assert result.entry["provenance"]["probes"]["routing"]["error"] == "ValueError"
+        assert not connect.routing_allows_save(result.entry, result.entry)
+        return
     snapshot = connect.effective_config_snapshot(result.entry)
     assert len(sent) == 1
     assert snapshot["params"]["temperature"] == sent[0]["temperature"]
@@ -590,6 +605,8 @@ def _openai_unprefixed(temperature):
             "api_base": "https://api.test/v1",
             "api_key_env": "SYNTHETIC_KEY",
             "api_style": "chat",
+            # LiteLLM's extra_body precedence is the subject; direct SDKs refuse it.
+            "direct": False,
             "temperature": temperature,
             "extra_body": {"temperature": 0.5},
         }

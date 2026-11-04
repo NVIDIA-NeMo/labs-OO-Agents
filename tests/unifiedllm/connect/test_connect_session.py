@@ -240,7 +240,7 @@ async def test_selected_reasoning_level_and_cache_defaults_reach_wire(monkeypatc
 @pytest.mark.asyncio
 async def test_missing_settings_are_not_reported_as_missing_replay(monkeypatch):
     # Regression for legacy parameter filtering, which direct does not perform.
-    monkeypatch.setenv("NOOA_LLM_TRANSPORT", "litellm")
+
     bodies = []
 
     def handle(request):
@@ -256,6 +256,7 @@ async def test_missing_settings_are_not_reported_as_missing_replay(monkeypatch):
         "chat",
         "https://api.test/v1",
         "",
+        direct=False,  # Negative control: legacy parameter filtering.
         reasoning_levels={"max": {"reasoning_effort": "max"}},
         reasoning_level="max",
         reply_tokens=2048,
@@ -275,7 +276,10 @@ async def test_missing_settings_are_not_reported_as_missing_replay(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_unlisted_model_declared_effort_reaches_level_and_session_requests(monkeypatch):
+@pytest.mark.parametrize("direct", [True, False])
+async def test_unlisted_model_declared_effort_reaches_level_and_session_requests(
+    monkeypatch, direct
+):
     sent = []
 
     def handle(request):
@@ -292,6 +296,7 @@ async def test_unlisted_model_declared_effort_reaches_level_and_session_requests
         "chat",
         "https://api.test/v1",
         "",
+        direct=direct,
         reasoning_levels={"max": {"reasoning_effort": "max"}},
         reasoning_level="max",
         session_checks=True,
@@ -479,7 +484,8 @@ def test_retention_accepts_litellm_proxy_envelope_unwrapped_on_replay():
 
 
 @pytest.mark.asyncio
-async def test_retention_for_gemini_through_gateway_checks_thought_signatures(monkeypatch):
+@pytest.mark.parametrize("direct", [False, True])
+async def test_retention_for_gemini_through_gateway_checks_thought_signatures(monkeypatch, direct):
     """Gemini via an OpenAI-compatible gateway returns readable reasoning beside thought
     signatures. The signatures carry the reasoning state; the readable text has no
     reasoning field to go back in, so it is not required on the follow-up request."""
@@ -503,6 +509,7 @@ async def test_retention_for_gemini_through_gateway_checks_thought_signatures(mo
         "https://hub.test/v1",
         "",
         reply_tokens=2048,
+        direct=direct,
     )
     updates = [
         u
@@ -511,6 +518,13 @@ async def test_retention_for_gemini_through_gateway_checks_thought_signatures(mo
         )
     ]
     records = {u.name: u.outcome for u in updates if u.outcome["outcome"] != "running"}
+    if direct:
+        # provider_specific_fields.thought_signatures is LiteLLM's envelope; the
+        # direct OpenAI SDK route neither captures nor replays it, so retention
+        # is reported unconfirmed instead of being guessed.
+        assert "SIGNATURE-secret" not in list(_wire_reasoning(sent[1]))
+        assert records["reasoning_retention"]["outcome"] != "confirmed"
+        return
     assert "SIGNATURE-secret" in list(_wire_reasoning(sent[1]))
     assert records["reasoning_retention"]["outcome"] == "confirmed"
     assert records["reasoning_retention"]["state_retained"] is True

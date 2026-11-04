@@ -337,8 +337,9 @@ async def test_native_parse_failure_keeps_usage_and_skips_next_sample(monkeypatc
     assert "private-bad-schema" not in json.dumps(connect.public_record(record))
 
 
+@pytest.mark.parametrize("direct", [False, True])
 @pytest.mark.parametrize("kind", ["image", "audio", "video", "pdf"])
-async def test_http_guard_blocks_sdk_retry_before_second_send(monkeypatch, kind):
+async def test_http_guard_blocks_sdk_retry_before_second_send(monkeypatch, kind, direct):
     sent = []
     real_factory = registry.client_from_config
 
@@ -355,7 +356,15 @@ async def test_http_guard_blocks_sdk_retry_before_second_send(monkeypatch, kind)
         return httpx.Response(503, json={"error": {"message": "private-failure"}})
 
     mock_http(monkeypatch, handle)
-    result = await connect.check_stage(plan(test_media_inputs=[kind]), "media", api_key="fake")
+    result = await connect.check_stage(
+        plan(test_media_inputs=[kind], direct=direct), "media", api_key="fake"
+    )
+    if direct:
+        # Direct SDKs refuse num_retries before any request (RetryConfig owns
+        # retries there), so the injected SDK retry never reaches HTTP.
+        assert sent == []
+        assert result.entry["provenance"]["probes"]["routing"]["error"] == "ValueError"
+        return
     assert len(sent) == 2
     record = result.entry["provenance"]["probes"][f"media:{kind}"]
     assert record["request_accepted"] is False

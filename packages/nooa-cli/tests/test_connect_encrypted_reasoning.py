@@ -37,6 +37,7 @@ async def test_default_saved_and_sent_without_probe_side_effects(monkeypatch):
     assert result.entry["provenance"]["encrypted_reasoning"] == {
         "source": "connect",
         "outcome": "accepted",
+        "transport": "direct",
     }
     assert plan.entry == before
 

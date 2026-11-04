@@ -782,6 +782,53 @@ Add `--show-diagnostics` in the wizard to see full details.
   if you need a record of earlier results.
 - To load a config file from another path, add it to `NEMO_OO_LLM_CONFIG`.
 
+### Inference transport: direct SDKs or LiteLLM
+
+Connect inference uses the official OpenAI/Anthropic SDKs by default. Add
+`--litellm` to use LiteLLM instead, in the full wizard (including editing) or
+any inference/plan stage. New entries persist `direct: true` by default, or
+`direct: false` with `--litellm`, and matching informational `transport`
+metadata. **The boolean `direct` selects the runtime path**; `transport` and
+`api_style` metadata alone do not. Ordinary clients and older aliases without
+an explicit `direct: true` still use LiteLLM; Connect does not migrate them.
+Native Messages uses `anthropic/<model>`, compatible Chat and Responses use
+`openai/<model>` with the selected client type.
+
+Programmatic `plan`, `configure_entry`, and `check_interfaces` share Connect's
+direct default. `configure_entry` preserves a stored `direct: false`, as does
+`plan(existing_entry=...)` unless its `direct` argument overrides it. The CLI
+wizard explicitly selects its default on both new and edited entries; `--litellm`
+wins over saved settings. Edited entries do not retain stale probe/session evidence.
+
+`--stage save` preserves the input's tested transport when no flag is supplied
+(including old inputs without a boolean, which ran through LiteLLM). Switching
+a tested direct input with `--litellm` is rejected: rerun checks on LiteLLM first.
+An untested input can be switched. Discovery and catalogue remain metadata-only
+HTTP operations, unaffected by inference selection.
+
+Completed checks report actual `client.direct` as `transport`; bounded
+`wire_evidence` describes owned HTTP request capture, the actual serialized
+model/reply-limit fields where available, and the selected interface. Missing
+capture is unknown, not proof of dropped settings. These hooks also preserve
+transport/capture diagnostics on failed probe requests. Direct SDK calls bypass
+LiteLLM callbacks, provider LLM spans and LiteLLM request/response journals;
+outer agent tracing and usage remain available, and unavailable provider cost
+is not a claim of free inference. See [direct provider SDKs](direct-provider-sdks.md).
+
+Over direct SDKs, Connect's native Anthropic structured-output check hooks the
+direct client's own HTTP pool, so `structured_output_mode: anthropic` is verified
+on the request the official SDK sends. Connect itself only writes `openai/` and
+`anthropic/` model names. A hand-written entry edited with `--edit-model` keeps
+its own prefix and still gets Connect's direct default: native provider routes the
+direct transport does not support (`bedrock/`, `vertex_ai/`, `sagemaker/`, Azure)
+are not silently sent through LiteLLM. Their checks fail before any request, and
+a `--no-probe` save keeps `direct: true`. Use `--litellm` for those routes. Other
+prefixes such as `gemini/` need an `api_base` and are sent over the OpenAI SDK.
+Extra fields that direct SDKs refuse (an `extra_body` key that duplicates a
+top-level setting, or `num_retries`) also fail the check rather than falling
+back. Decision models (`client_type: decision`) use their own HTTP client and
+are not affected by `direct`.
+
 ## Choose media inputs during setup
 
 A model receives images, audio, video, or PDFs only if its entry lists them in

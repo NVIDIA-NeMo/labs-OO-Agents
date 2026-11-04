@@ -86,6 +86,11 @@ class ConnectCommand(click.Command):
     ),
 )
 @click.option(
+    "--litellm",
+    is_flag=True,
+    help="Use LiteLLM for inference instead of the default direct provider SDKs.",
+)
+@click.option(
     "--api-key-env",
     help="Name of the environment variable holding your key (otherwise prompted).",
 )
@@ -263,6 +268,7 @@ def command(
     share_interface_key,
     api_style,
     api_key_env,
+    litellm,
     prompt_key,
     catalogue_model,
     catalogue_file,
@@ -375,6 +381,7 @@ def command(
 
             code = run_stage(
                 stage,
+                direct=False if litellm else None,
                 server_metadata=server_metadata,
                 no_metadata=no_metadata,
                 model=model,
@@ -440,6 +447,7 @@ def command(
         # and uses it for its exit status; the `nooa connect` CLI ignores it.
         return run_wizard(
             model=model,
+            direct=not litellm,
             edit_model=edit_model,
             provider=provider,
             alias=alias,

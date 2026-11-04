@@ -116,3 +116,23 @@ def test_wrapper_timeout_is_not_claimed_as_server_receipt():
     assert details["timeout_kind"] == "probe_deadline"
     assert "unknown" in details["reason"]
     assert "private" not in repr(details)
+
+
+def test_prompt_keeps_requested_transport(tmp_path, monkeypatch):
+    """The handoff says which client the failed run asked for."""
+    from nooa import llm_config
+
+    monkeypatch.setattr(llm_config, "llm_config_chain", lambda: [])
+    for direct, transport in ((True, "direct"), (False, "litellm")):
+        context = diagnostic_context(
+            target=tmp_path / "models.yaml",
+            alias="saved",
+            model="model",
+            endpoint="https://api.test/v1",
+            api_key_env="CHECK_KEY",
+            stage="interfaces",
+            direct=direct,
+        )
+        prompt = connect.diagnostic_prompt("interfaces", {}, {}, run_context=context)
+        assert f'"direct": {str(direct).lower()}' in prompt
+        assert f'"requested_transport": "{transport}"' in prompt

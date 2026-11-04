@@ -24,6 +24,18 @@ from nooa.unifiedllm.unifiedllm import _ClientHttp
 from tests.unifiedllm.connect.connect_http import response_body
 
 
+def _mock_direct_http(monkeypatch, transport):
+    """Send direct-SDK clients (Connect's default) through the same mock transport."""
+    from nooa.unifiedllm.direct import DirectTransport
+
+    original = DirectTransport._http_settings
+    monkeypatch.setattr(
+        DirectTransport,
+        "_http_settings",
+        staticmethod(lambda config: {**original(config), "transport": transport}),
+    )
+
+
 class OriginalResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
     value: int = Field(ge=300)
@@ -81,6 +93,7 @@ def http_fixture(monkeypatch, style="chat", text='{"value":323}', finish="stop",
         "_httpx_hardening",
         staticmethod(lambda: {"transport": transport, "trust_env": False}),
     )
+    _mock_direct_http(monkeypatch, transport)
     return bodies, paths
 
 
@@ -368,11 +381,13 @@ async def test_connect_native_wire_settings_evidence_and_media(monkeypatch, styl
             json=response_body(style, '{"value":323}' if len(bodies) == 1 else '{"value":true}'),
         )
 
+    transport = httpx.MockTransport(respond)
     monkeypatch.setattr(
         _ClientHttp,
         "_httpx_hardening",
-        staticmethod(lambda: {"transport": httpx.MockTransport(respond), "trust_env": False}),
+        staticmethod(lambda: {"transport": transport, "trust_env": False}),
     )
+    _mock_direct_http(monkeypatch, transport)
     proposal = connect.plan(
         "local",
         "model",

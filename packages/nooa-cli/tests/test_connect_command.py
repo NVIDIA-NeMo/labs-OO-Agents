@@ -289,9 +289,6 @@ def test_working_dir_reports_a_file_as_not_a_directory(tmp_path, monkeypatch):
 def test_enabled_reasoning_without_evidence_warns_once_before_save(
     tmp_path, monkeypatch, style, mode
 ):
-    if style == "anthropic" and mode == "usage":
-        # LiteLLM discards this non-native usage extension; direct can retain it.
-        monkeypatch.setenv("NOOA_LLM_TRANSPORT", "litellm")
     import json
 
     import httpx
@@ -810,7 +807,8 @@ def test_prompted_key_is_passed_to_probe_but_never_saved(tmp_path, monkeypatch):
     assert "temporary-secret" not in result.output + path.read_text()
 
 
-def test_bare_command_walks_through_setup_and_checks_inline(tmp_path, monkeypatch):
+@pytest.mark.parametrize("litellm", [False, True])
+def test_bare_command_walks_through_setup_and_checks_inline(tmp_path, monkeypatch, litellm):
     import click
     import httpx
 
@@ -847,17 +845,23 @@ def test_bare_command_walks_through_setup_and_checks_inline(tmp_path, monkeypatc
         return httpx.Response(
             200,
             json={
+                "id": "test",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "model",
                 "choices": [
                     {
+                        "index": 0,
                         "finish_reason": "stop",
                         "message": {
+                            "role": "assistant",
                             "content": '{"value":323}'
                             if "response_format" in json.loads(request.content)
                             else "323",
                             "reasoning_content": "private test reasoning",
                         },
                     }
-                ]
+                ],
             },
         )
 
@@ -869,7 +873,7 @@ def test_bare_command_walks_through_setup_and_checks_inline(tmp_path, monkeypatc
     mock_http(monkeypatch, handle)
     result = CliRunner().invoke(
         command,
-        [],
+        ["--litellm"] if litellm else [],
         input=(
             "custom\nhttps://api.test/v1\nCONNECT_WIZARD_KEY\ntemporary-secret\n"
             # Discovery saw reasoning respond to effort, so a reasoning menu is
@@ -886,6 +890,8 @@ def test_bare_command_walks_through_setup_and_checks_inline(tmp_path, monkeypatc
     assert [r.method for r in requests] == ["GET"] + ["POST"] * 9
     entry = yaml.safe_load((tmp_path / "llm_config.yaml").read_text())["models"]["my-model"]
     assert entry["model_name"] == "openai/example-model"
+    assert entry["direct"] is (not litellm)
+    assert entry["transport"] == ("litellm" if litellm else "direct")
     assert "temporary-secret" not in result.output + yaml.safe_dump(entry)
     assert "API formats that returned reasoning: OpenAI-compatible Chat" in result.output
     assert "acceptance alone" not in result.output
@@ -1305,8 +1311,6 @@ def test_model_settings_can_be_edited_skipped_or_cancelled(
 
 
 def test_default_budget_covers_explicit_small_cap_and_every_level(tmp_path, monkeypatch):
-    # The exact count below includes LiteLLM's pre-HTTP interface rejection.
-    monkeypatch.setenv("NOOA_LLM_TRANSPORT", "litellm")
     import json
 
     import httpx
@@ -1347,6 +1351,9 @@ def test_default_budget_covers_explicit_small_cap_and_every_level(tmp_path, monk
             "2048",
             "--output",
             str(path),
+            # The exact count below includes LiteLLM's pre-HTTP interface
+            # rejection (NOOA_LLM_TRANSPORT is no longer read).
+            "--litellm",
         ],
         input="262144\n262144\ndiscover\ntest\ndefault\ntest\ny\n",
     )

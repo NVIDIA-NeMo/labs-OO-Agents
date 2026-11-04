@@ -43,12 +43,15 @@ def registry(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("selector", [[], ["saved"]])
-def test_edit_jumps_to_settings_preserving_custom_fields(registry, monkeypatch, selector):
+@pytest.mark.parametrize("litellm", [False, True])
+def test_edit_jumps_to_settings_preserving_custom_fields(registry, monkeypatch, selector, litellm):
     from nooa_cli.commands import _connect_prompts as _connect_prompts
 
     from nooa.unifiedllm import connect
 
     path, original = registry
+    original["direct"] = litellm  # Opposite of the requested CLI selection.
+    path.write_text(yaml.safe_dump({"models": {"saved": original}}))
 
     async def forbidden(*args, **kwargs):
         raise AssertionError("Editing does not discover models or fetch metadata")
@@ -64,16 +67,24 @@ def test_edit_jumps_to_settings_preserving_custom_fields(registry, monkeypatch, 
     monkeypatch.setattr(_connect_prompts, "edit_model_details", edit)
     result = CliRunner().invoke(
         command,
-        ["--edit-model", *selector, "--media-inputs", "", "--no-probe"],
+        [
+            "--edit-model",
+            *selector,
+            "--media-inputs",
+            "",
+            "--no-probe",
+            *(["--litellm"] if litellm else []),
+        ],
         input=("saved\n" if not selector else "")
         + "default\nchange\nlimits\nrecommended\ndefault\nsave\ny\ny\n",
     )
     assert result.exit_code == 0, result.output
     actual = yaml.safe_load(path.read_text())["models"]["saved"]
     assert actual["context_window"] == 64000
+    assert actual["direct"] is (not litellm)
+    assert actual["transport"] == ("litellm" if litellm else "direct")
     for key in (
         "model_name",
-        "transport",
         "max_tokens",
         "reasoning_levels",
         "extra_body",
@@ -125,6 +136,30 @@ def test_edit_decision_model_preserves_flat_entry(registry):
     assert "max_tokens" not in actual
     assert "context_window" not in actual
     assert "No context window selected" not in result.output
+
+
+@pytest.mark.parametrize("litellm", [False, True])
+def test_edit_decision_model_does_not_record_llm_transport(registry, litellm):
+    """Decision models use their own client, so an edit keeps the fresh-plan transport."""
+    path, _ = registry
+    original = {
+        "model_name": "decision-model",
+        "client_type": "decision",
+        "api_style": "systemone",
+        "endpoint": "https://decision.example/v1/systemone",
+        "api_key_env": "EDIT_TEST_KEY",
+    }
+    path.write_text(yaml.safe_dump({"models": {"saved": original}}))
+
+    result = CliRunner().invoke(
+        command,
+        ["--edit-model", "saved", "--no-probe", "--yes", *(["--litellm"] if litellm else [])],
+    )
+
+    assert result.exit_code == 0, result.output
+    actual = yaml.safe_load(path.read_text())["models"]["saved"]
+    assert "direct" not in actual
+    assert actual["transport"] == "direct"  # As for a new decision entry.
 
 
 @pytest.mark.parametrize("explicit", [False, True])

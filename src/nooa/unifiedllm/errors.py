@@ -19,3 +19,13 @@ class EmptyContentError(Exception):
         super().__init__(
             f"Empty content with reasoning: {reasoning[:100]}..." if reasoning else "Empty content"
         )
+
+
+class UnsupportedStopReasonError(RuntimeError):
+    """A native stop requires unsupported server-managed continuation."""
+
+    def __init__(self, stop_reason):
+        self.stop_reason = stop_reason
+        super().__init__(
+            f"Unsupported Anthropic stop_reason {stop_reason!r}; server-managed continuation is not supported"
+        )
