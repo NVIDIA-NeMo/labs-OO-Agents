@@ -6,6 +6,10 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- Registry entries' `base_url`, `timeout` and `custom_llm_provider` settings
+  are now passed to the clients built from them. They were ignored before, so
+  configs that set them may now send requests to a different endpoint or
+  provider, or use a different timeout.
 - Prompt inspection (`print_prompt()` and `build_prompt_data()`) now applies
   method-level truncation overrides for CodeAct and PurePython, matching runtime
   prefill rendering. Both strategies now use the resolved runtime settings for
