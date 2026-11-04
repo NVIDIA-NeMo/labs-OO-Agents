@@ -133,10 +133,7 @@ class SandboxedExecutor:
                 "; ".join(missing),
             )
 
-        start_method = config.start_method
-        if start_method == "fork" and not caps.linux:
-            start_method = "spawn"
-        self._ctx = mp.get_context(start_method)
+        self._ctx = mp.get_context(config.start_method)
         self._proc: BaseProcess | None = None
         self._conn: Connection | None = None
         self._lock = asyncio.Lock()
