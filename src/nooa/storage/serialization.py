@@ -109,6 +109,7 @@ def deserialize(blob: Any, allowlist: set[str]) -> Any:
 
 
 def _serialize(value: Any, allowlist: set[str]) -> Any:
+    """Encode supported values recursively, omitting values marked nosnapshot."""
     # 1. Enums — unwrap to value (must be before primitives since StrEnum/IntEnum are isinstance str/int)
     if isinstance(value, enum.Enum):
         return _serialize(value.value, allowlist)
@@ -117,7 +118,11 @@ def _serialize(value: Any, allowlist: set[str]) -> Any:
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
 
-    # 3. Collections — recurse (filtering out SKIP sentinels)
+    # 3. nosnapshot — check before collections so marked subclasses are skipped
+    if is_nosnapshot_value(value):
+        return SKIP
+
+    # 4. Collections — recurse (filtering out SKIP sentinels)
     if isinstance(value, dict):
         result = {}
         for k, v in value.items():
@@ -138,10 +143,6 @@ def _serialize(value: Any, allowlist: set[str]) -> Any:
     if isinstance(value, list):
         return [s for item in value if (s := _serialize(item, allowlist)) is not SKIP]
 
-    # 4. nosnapshot — return SKIP sentinel
-    if is_nosnapshot_value(value):
-        return SKIP
-
     # 5. Pydantic models
     if isinstance(value, BaseModel):
         fqn = _fqn(type(value))
@@ -156,6 +157,10 @@ def _serialize(value: Any, allowlist: set[str]) -> Any:
         data = {}
         for field_name in type(value).model_fields:
             serialized = _serialize(getattr(value, field_name), allowlist)
+            if serialized is not SKIP:
+                data[field_name] = serialized
+        for field_name, extra in (value.model_extra or {}).items():
+            serialized = _serialize(extra, allowlist)
             if serialized is not SKIP:
                 data[field_name] = serialized
         return {"__type__": _PYDANTIC, "__class__": fqn, "data": data}
@@ -236,16 +241,16 @@ def _deserialize_envelope(blob: dict[str, Any], allowlist: set[str]) -> Any:
     cls = _import_class(fqn)
 
     if envelope_type == _PYDANTIC:
-        # Deserialize nested envelopes first (e.g. dataclass/snapshotable
-        # fields), then let Pydantic validate the reconstructed objects.
-        deserialized_data = {k: _deserialize(v, allowlist) for k, v in data.items()}
         if restore_snapshot := getattr(cls, "__restore_snapshot__", None):
+            deserialized_data = {k: _deserialize(v, allowlist) for k, v in data.items()}
             return restore_snapshot(deserialized_data)
-        # Filter to known fields for lenient restoration (handles extra="forbid"
-        # models that would reject extra fields from schema drift).
-        known_fields = set(cls.model_fields)
-        filtered = {k: v for k, v in deserialized_data.items() if k in known_fields}
-        return cls.model_validate(filtered)
+        if cls.model_config.get("extra") != "allow":
+            # Discard obsolete fields before restoring their values: removed
+            # types need not be importable or allowlisted for schema drift.
+            data = {k: v for k, v in data.items() if k in cls.model_fields}
+        # Restore retained nested envelopes before Pydantic validates them.
+        deserialized_data = {k: _deserialize(v, allowlist) for k, v in data.items()}
+        return cls.model_validate(deserialized_data)
 
     if envelope_type == _DATACLASS:
         # Lenient: filter to accepted kwargs, let defaults fill gaps
