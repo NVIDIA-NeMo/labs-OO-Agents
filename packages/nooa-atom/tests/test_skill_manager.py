@@ -441,6 +441,28 @@ async def test_search_omits_hidden_methods_of_code_skills(agent):
     assert "todo has from_dict" not in agent.skills.search("from_dict")
 
 
+async def test_search_finds_class_methods_of_code_skills(agent):
+    from nooa.agentdoc import hidden
+
+    class Stash(Skill):
+        """Keep things."""
+
+        @classmethod
+        def stash_make(cls) -> "Stash":
+            """A new stash."""
+            return cls()
+
+        @classmethod
+        @hidden
+        def stash_secret(cls) -> None:
+            """Host-only."""
+
+    agent.skills.register("tools.stash", Stash())
+    found = agent.skills.search("stash")
+    assert "stash has stash_make (method: self.stash.stash_make)" in found
+    assert "stash_secret" not in found
+
+
 def test_share_from_keeps_an_attachable_client_skill_with_its_parent(tmp_path):
     class Bound(Skill):
         """MCP server 'bound'."""

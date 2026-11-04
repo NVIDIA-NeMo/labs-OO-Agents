@@ -64,6 +64,10 @@ def _public_methods(obj: Any) -> list[str]:
         if cls in (Skill, TextSkill, object):
             break
         for name, value in cls.__dict__.items():
+            if is_hidden_method(value):
+                continue
+            if isinstance(value, classmethod | staticmethod):
+                value = value.__func__  # a class method's descriptor is not callable
             if not name.startswith("_") and callable(value) and not is_hidden_method(value):
                 names.add(name)
     return sorted(names)
