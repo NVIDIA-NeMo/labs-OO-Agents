@@ -12,7 +12,9 @@ for it to exit, reconnects and retries.
 On a save it writes a one-shot result file in the user's NOOA directory, so
 the next ``/connect`` (possibly in a new agent process: the client
 reconnects) can say what was saved instead of asking for authentication
-again. The file holds the alias, the model name, the server (without
+again. Whichever request of a terminal-auth client first finds a fresh
+result (``/connect``, ``authenticate``, a prompt, ``session/load`` or
+``session/new``) takes it and switches the session to the saved alias. The file holds the alias, the model name, the server (without
 credentials, query or fragment) and the time; never a key.
 """
 
@@ -145,7 +147,7 @@ def describe_result(result: dict) -> str:
         text += f": {result['model']}"
     if result.get("server"):
         text += f" at {result['server']}"
-    return text + ". Pick it in the model menu."
+    return text + "."
 
 
 # ---- the wizard ------------------------------------------------------------
