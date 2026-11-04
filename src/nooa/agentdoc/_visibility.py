@@ -43,12 +43,12 @@ _type_hints: ContextVar[_TypeHintCache | None] = ContextVar("agentdoc_type_hints
 
 @contextmanager
 def _type_hint_scope() -> Iterator[None]:
-    """Reuse resolved annotations within a render, never across later renders.
+    """Reuse resolved annotations within a formatting call, never across independent calls.
 
     Recursive and reentrant formatting on this thread share the cache, so resolved
-    annotations are stable until the outermost render ends. Instance/class spec()
+    annotations are stable until the outermost formatting call ends. Instance/class spec()
     overrides remain live. Copied contexts cannot extend the cache's lifetime or
-    share it with another thread; calls outside a render resolve without caching.
+    share it with another thread; calls outside a formatting call resolve without caching.
     """
     current = _type_hints.get()
     if current is not None and current.is_current():

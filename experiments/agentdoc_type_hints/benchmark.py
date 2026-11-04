@@ -50,11 +50,11 @@ def main() -> None:
     digests = set()
     for _ in range(args.repeats):
         start = time.perf_counter()
-        rendered = truncating_pformat(
+        formatted = truncating_pformat(
             records, max_chars=100_000, max_depth=12, max_length=200, max_string=10_000
         )
         timings.append(time.perf_counter() - start)
-        digests.add(hashlib.sha256(rendered.encode()).hexdigest())
+        digests.add(hashlib.sha256(formatted.encode()).hexdigest())
     assert len(digests) == 1, "Formatting changed between repetitions"
     print(
         json.dumps(

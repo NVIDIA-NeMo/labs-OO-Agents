@@ -25,8 +25,8 @@ class Record:
     secret: typing.Annotated[str, hidden] = "PRIVATE"
 
 
-@pytest.mark.parametrize("render", [pformat, truncating_pformat, pprint])
-def test_repeated_records_reuse_hints_but_keep_instance_overrides(render, monkeypatch, capsys):
+@pytest.mark.parametrize("formatter", [pformat, truncating_pformat, pprint])
+def test_repeated_records_reuse_hints_but_keep_instance_overrides(formatter, monkeypatch, capsys):
     calls = Counter()
     original = typing.get_type_hints
 
@@ -38,7 +38,7 @@ def test_repeated_records_reuse_hints_but_keep_instance_overrides(render, monkey
     shown = Record(1, "VISIBLE")
     spec(shown, "secret", hidden=False)
     records = [Record(0), shown] * 20
-    result = render(records)
+    result = formatter(records)
     if result is None:
         result = capsys.readouterr().out
     assert "PRIVATE" not in result
@@ -46,7 +46,7 @@ def test_repeated_records_reuse_hints_but_keep_instance_overrides(render, monkey
     assert calls[Record] == 1
 
 
-def test_later_render_observes_annotation_changes():
+def test_later_formatting_call_observes_annotation_changes():
     @dataclass
     class Mutable:
         value: int = 1
@@ -80,19 +80,19 @@ def test_scope_restores_outer_cache_and_cleans_up_after_exception(monkeypatch):
         return original(obj, *args, **kwargs)
 
     monkeypatch.setattr(typing, "get_type_hints", counted)
-    with pytest.raises(RuntimeError, match="render failed"), _type_hint_scope():
+    with pytest.raises(RuntimeError, match="formatting failed"), _type_hint_scope():
         assert is_hidden_field(Record, "secret")
         with _type_hint_scope():
             assert is_hidden_field(Record, "secret")
         assert is_hidden_field(Record, "secret")
         assert calls == 1
-        raise RuntimeError("render failed")
+        raise RuntimeError("formatting failed")
     assert is_hidden_field(Record, "secret")
     assert calls == 2
 
 
 @pytest.mark.parametrize("fail", [False, True])
-def test_copied_context_expires_with_render(fail):
+def test_copied_context_expires_with_formatting_call(fail):
     @dataclass
     class Mutable:
         value: int = 1
@@ -106,9 +106,9 @@ def test_copied_context_expires_with_render(fail):
             return "Capture()"
 
     if fail:
-        with pytest.raises(RuntimeError, match="render failed"), _type_hint_scope():
+        with pytest.raises(RuntimeError, match="formatting failed"), _type_hint_scope():
             pformat([Mutable(), Capture()])
-            raise RuntimeError("render failed")
+            raise RuntimeError("formatting failed")
     else:
         pformat([Mutable(), Capture()])
 
@@ -134,7 +134,7 @@ def test_copied_context_uses_separate_cache_in_another_thread():
         with ThreadPoolExecutor(max_workers=1) as pool:
             assert pool.submit(copied.run, is_hidden_field, Mutable, "value").result()
             assert "value=1" not in pool.submit(copied.run, pformat, Mutable()).result()
-        # Work in the other thread did not replace or expire our render cache.
+        # Work in the other thread did not replace or expire our formatting cache.
         assert not is_hidden_field(Mutable, "value")
 
 
@@ -153,7 +153,7 @@ def test_copied_context_does_not_retain_resolved_objects():
     assert copied.run(lambda: True)
 
 
-async def test_task_created_during_render_starts_with_fresh_annotations():
+async def test_task_created_during_formatting_starts_with_fresh_annotations():
     @dataclass
     class Mutable:
         value: int = 1
@@ -161,12 +161,12 @@ async def test_task_created_during_render_starts_with_fresh_annotations():
 
     tasks = []
 
-    async def render_later():
+    async def format_later():
         return pformat(Mutable())
 
     class Capture:
         def __repr__(self):
-            tasks.append(asyncio.create_task(render_later()))
+            tasks.append(asyncio.create_task(format_later()))
             return "Capture()"
 
     pformat([Mutable(), Capture()])
