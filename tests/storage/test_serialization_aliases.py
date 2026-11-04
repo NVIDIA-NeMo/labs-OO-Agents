@@ -4,11 +4,9 @@
 
 from __future__ import annotations
 
-import gc
 import json
-import weakref
 from concurrent.futures import ThreadPoolExecutor
-from typing import Annotated, Any, ClassVar, Generic, Literal, TypeVar
+from typing import Annotated, ClassVar, Literal
 
 import pytest
 from pydantic import (
@@ -18,15 +16,12 @@ from pydantic import (
     ConfigDict,
     Field,
     ValidationError,
-    create_model,
     field_validator,
     model_validator,
 )
-from pydantic.version import VERSION as PYDANTIC_VERSION
 from typing_extensions import TypedDict
 
 from nooa.errors.storage import DeserializationError
-from nooa.storage import serialization
 from nooa.storage.markers import snapshotable
 from nooa.storage.serialization import deserialize, serialize
 
@@ -261,7 +256,7 @@ class _NestedAlias(BaseModel):
 
 
 class _AliasedTree(BaseModel):
-    """A recursive model schema exercises the older Pydantic definitions wrapper."""
+    """Recursive model instances retain their aliased fields and child types."""
 
     value: int = Field(alias="apiValue")
     children: list[_AliasedTree] = Field(default_factory=list, alias="nodes")
@@ -318,54 +313,6 @@ def test_nested_and_recursive_alias_models(value):
     assert restored == value
 
 
-class _SchemaNamedFields(BaseModel):
-    """Field names may coincide with schema keys without becoming schema metadata."""
-
-    type: str = Field(alias="apiType")
-    metadata: _RevalidatedAlias = Field(alias="apiMetadata")
-    default: _RevalidatedAlias = Field(alias="apiDefault")
-    function: _RevalidatedAlias = Field(alias="apiFunction")
-    config: _RevalidatedAlias = Field(alias="apiConfig")
-    serialization: _RevalidatedAlias = Field(alias="apiSerialization")
-
-
-class _OpaqueDefault(BaseModel):
-    """A literal default dictionary must not be traversed as validation machinery."""
-
-    value: dict[str, Any] = Field(
-        alias="apiValue",
-        default={
-            "type": "model-fields",
-            "fields": {"value": {"validation_alias": "leave-me-alone", "schema": {"type": "int"}}},
-        },
-    )
-
-
-def test_schema_shaped_field_names_and_defaults_are_not_rewritten():
-    """Schema compatibility copying must distinguish names and defaults from schema nodes."""
-    value = _SchemaNamedFields(
-        apiType="record",
-        **{
-            name: {"apiValue": 7}
-            for name in [
-                "apiMetadata",
-                "apiDefault",
-                "apiFunction",
-                "apiConfig",
-                "apiSerialization",
-            ]
-        },
-    )
-    assert _roundtrip(value) == value
-    original = _OpaqueDefault()
-    blob, allowlist = serialize(original)
-    # Exercise the retained schema default, rather than only validating an
-    # explicitly stored copy of the same dictionary.
-    blob["data"].pop("value")
-    assert deserialize(blob, allowlist).value == original.value
-    assert original.value["fields"]["value"]["validation_alias"] == "leave-me-alone"
-
-
 class _TypedRecord(TypedDict):
     """TypedDict fields also store canonical names after input validation."""
 
@@ -406,14 +353,10 @@ def test_custom_model_validation_entry_point_remains_in_control():
     assert _CustomValidationEntry.calls == 1
 
 
-_T = TypeVar("_T")
-
-
-# Pydantic 2.5 predates PEP 695 generic models; retain the supported spelling.
-class _GenericAlias(BaseModel, Generic[_T]):  # noqa: UP046
+class _GenericAlias[T](BaseModel):
     """Concrete generic specializations retain their aliased typed values."""
 
-    value: _T = Field(alias="apiValue")
+    value: T = Field(alias="apiValue")
 
 
 @pytest.mark.parametrize(
@@ -449,12 +392,6 @@ class _DefaultWrapValidatedAlias(_WrapValidatedAlias):
 @pytest.mark.parametrize(
     "value", [_WrapValidatedAlias(apiValue=7), _DefaultWrapValidatedAlias(apiValue=7)]
 )
-@pytest.mark.xfail(
-    (2, 11) <= tuple(map(int, PYDANTIC_VERSION.split(".")[:2])) < (2, 14),
-    reason="Pydantic 2.11–2.13 drops runtime alias flags in wrap validators: "
-    "https://github.com/pydantic/pydantic/issues/13661",
-    strict=True,
-)
 def test_model_wrap_validator_remains_in_place(value):
     """Required and defaulted fields retain saved values without bypassing wrappers."""
     type(value).calls = []
@@ -462,74 +399,65 @@ def test_model_wrap_validator_remains_in_place(value):
     assert type(value).calls == ["enter", "exit"]
 
 
-class _CacheRecord(BaseModel):
-    """A neutral model isolates caching from version-specific alias behavior."""
+class _WrappedRevalidatingParent(BaseModel):
+    """A model wrap boundary must preserve revalidated child aliases."""
 
-    value: int = 0
+    child: _RevalidatedAlias
 
-
-@pytest.fixture
-def canonical_cache():
-    """Keep cache lifetime tests isolated from other codec tests."""
-    serialization._canonical_validator.cache_clear()
-    yield serialization._canonical_validator
-    serialization._canonical_validator.cache_clear()
+    @model_validator(mode="wrap")
+    @classmethod
+    def check_wrapped(cls, data, handler):
+        """Retain the original wrapper around child validation."""
+        return handler(data)
 
 
-def test_detached_validator_is_reused_for_unchanged_schema(canonical_cache):
-    """Repeated envelopes do not rebuild a model's detached validator."""
-    schema = _CacheRecord.__pydantic_core_schema__
-    first = canonical_cache(_CacheRecord, id(schema))
-    second = canonical_cache(_CacheRecord, id(schema))
-    assert first is second
-    assert first[0] is schema
-    assert first[1].validate_python({"value": 7}).value == 7
-    assert canonical_cache.cache_info().hits == 1
+class _FieldWrappedRevalidatingParent(BaseModel):
+    """A field wrap boundary must likewise forward canonical validation flags."""
+
+    child: _RevalidatedAlias
+
+    @field_validator("child", mode="wrap")
+    @classmethod
+    def check_wrapped(cls, value, handler):
+        """Retain the original field wrapper during child revalidation."""
+        return handler(value)
 
 
-def test_model_rebuild_invalidates_detached_validator(canonical_cache):
-    """A rebuilt class receives a new validator with its current defaults."""
-
-    class RebuiltRecord(BaseModel):
-        """A normal class supports rebuilding on the oldest supported Pydantic."""
-
-        value: int = 0
-
-    model = RebuiltRecord
-    original_schema = model.__pydantic_core_schema__
-    old = canonical_cache(model, id(original_schema))
-    model.model_fields["value"].default = 7
-    model.model_rebuild(force=True)
-    new_schema = model.__pydantic_core_schema__
-    new = canonical_cache(model, id(new_schema))
-    assert new_schema is not original_schema
-    assert new[0] is new_schema
-    assert new[1] is not old[1]
-    assert old[1].validate_python({}).value == 0
-    assert new[1].validate_python({}).value == 7
+@pytest.mark.parametrize("model", [_WrappedRevalidatingParent, _FieldWrappedRevalidatingParent])
+def test_wrapped_parent_preserves_revalidated_child_value(model):
+    """Saved child fields must not silently reset after either wrap boundary."""
+    value = model(child={"apiValue": 8})
+    restored = _roundtrip(value)
+    assert type(restored) is model
+    assert type(restored.child) is _RevalidatedAlias
+    assert restored.child.value == 8
+    assert restored == value
 
 
-def test_detached_validator_cache_is_bounded_and_releases_evicted_models(canonical_cache):
-    """Strong validator references do not retain unbounded dynamic model classes."""
-    model = create_model("TemporaryRecord", value=(int, 0))
-    reference = weakref.ref(model)
-    canonical_cache(model, id(model.__pydantic_core_schema__))
-    del model
-    gc.collect()
-    assert reference() is not None
-    for _ in range(129):
-        _CacheRecord.model_rebuild(force=True)
-        canonical_cache(_CacheRecord, id(_CacheRecord.__pydantic_core_schema__))
-    gc.collect()
-    assert canonical_cache.cache_info().currsize == 128
-    assert reference() is None
+class _CustomAliasedValidationEntry(_CustomValidationEntry):
+    """A passthrough override explicitly retains external input-alias rules."""
+
+    value: int = Field(alias="apiValue")
 
 
-def test_legacy_restoration_uses_cached_validator(monkeypatch, canonical_cache):
-    """The compatibility path actually reuses the cache during public restoration."""
-    monkeypatch.setattr(serialization, "_VALIDATE_BY_NAME", False)
-    value = _CacheRecord(value=7)
-    assert _roundtrip(value) == value
-    assert _roundtrip(value) == value
-    assert canonical_cache.cache_info().misses == 1
-    assert canonical_cache.cache_info().hits == 1
+def test_passthrough_override_retains_its_alias_contract():
+    """Document the opt-out instead of bypassing an application's validation entry point."""
+    blob, allowlist = serialize(_CustomAliasedValidationEntry(apiValue=7))
+    with pytest.raises(ValidationError, match="apiValue"):
+        deserialize(blob, allowlist)
+
+
+class _RenamedExtraAlias(BaseModel):
+    """External alias choices do not implicitly migrate canonical snapshot fields."""
+
+    model_config = ConfigDict(extra="allow")
+    current: int = Field(default=0, validation_alias=AliasChoices("current", "legacy"))
+
+
+def test_historical_alias_choice_key_remains_an_extra():
+    """Renamed fields need a restoration hook; legacy data remains available as extras."""
+    blob, allowlist = serialize(_RenamedExtraAlias(current=7))
+    blob["data"] = {"legacy": 7}
+    restored = deserialize(blob, allowlist)
+    assert restored.current == 0
+    assert restored.model_extra == {"legacy": 7}

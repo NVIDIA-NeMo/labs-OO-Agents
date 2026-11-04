@@ -8,6 +8,10 @@ models, dataclasses, and ``@snapshotable``-decorated classes.
 
 Pydantic fields use canonical Python names for both storage and restoration,
 independently of external input aliases. Explicit restoration hooks own their format.
+Models that override ``model_validate`` retain their own input-alias behavior,
+even if the override only delegates to ``super()``. With ``extra="allow"``, old
+keys matching renamed fields only through ``AliasChoices`` become extras rather
+than migrating; use ``__restore_snapshot__`` for such migrations.
 
 Envelope format for non-primitive types::
 
@@ -25,7 +29,6 @@ import dataclasses
 import enum
 import importlib
 import inspect
-from functools import lru_cache
 from typing import Any
 
 from pydantic import BaseModel
@@ -63,7 +66,6 @@ _DATACLASS = "dataclass"
 _DICT_CLASS = "dict_class"
 _TUPLE = "tuple"
 _ENVELOPE_TYPES = frozenset({_PYDANTIC, _DATACLASS, _DICT_CLASS, _TUPLE})
-_VALIDATE_BY_NAME = "by_name" in inspect.signature(BaseModel.model_validate).parameters
 _LEGACY_CLASS_PREFIXES = {
     "nemo_oo_agents.": "nooa.",
 }
@@ -293,55 +295,7 @@ def _validate_model_snapshot(cls: type[BaseModel], data: dict[str, Any]) -> Base
         # An application-supplied validation entry point retains its existing
         # input contract, just like an explicit __restore_snapshot__ hook.
         return cls.model_validate(data)
-    if _VALIDATE_BY_NAME:
-        # Pydantic 2.11–2.13 drops these flags inside wrap validators;
-        # that upstream limitation is fixed in 2.14 (pydantic/pydantic#13661).
-        return cls.model_validate(data, by_name=True, by_alias=False)
-
-    # Pydantic <2.11 has no per-call alias flags. Use a detached validation
-    # schema, including revalidated nested models, without changing live classes.
-    _, validator = _canonical_validator(cls, id(cls.__pydantic_core_schema__))
-    return validator.validate_python(data)
-
-
-@lru_cache(maxsize=128)
-def _canonical_validator(cls: type[BaseModel], _schema_id: int) -> tuple[Any, Any]:
-    """Cache a detached validator by class and source schema identity.
-
-    Retain the source schema so its identity cannot be reused while cached.
-    Bound the cache because validators strongly reference their model classes;
-    weak class keys alone would not release those classes.
-    """
-    from pydantic_core import SchemaValidator
-
-    schema = cls.__pydantic_core_schema__
-    return schema, SchemaValidator(_by_name_schema(schema))
-
-
-def _by_name_schema(schema: Any) -> Any:
-    """Copy validation lookups but leave defaults and user metadata opaque."""
-    if isinstance(schema, list):
-        return [_by_name_schema(item) for item in schema]
-    if isinstance(schema, tuple):
-        return tuple(_by_name_schema(item) for item in schema)
-    if not isinstance(schema, dict):
-        return schema
-    is_schema = isinstance(schema.get("type"), str)
-    detached = {
-        key: value
-        if is_schema and key in {"default", "metadata", "config", "function", "serialization"}
-        else _by_name_schema(value)
-        for key, value in schema.items()
-    }
-    if is_schema and detached["type"] in {"model-fields", "typed-dict"}:
-        detached["fields"] = {
-            name: {**field, "validation_alias": name} for name, field in detached["fields"].items()
-        }
-    elif is_schema and detached["type"] == "dataclass-args":
-        detached["fields"] = [
-            {**field, "validation_alias": field["name"]} for field in detached["fields"]
-        ]
-    return detached
+    return cls.model_validate(data, by_name=True, by_alias=False)
 
 
 # ---------------------------------------------------------------------------

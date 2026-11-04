@@ -3,7 +3,7 @@
 """Input aliases must not lose or exchange saved fields across SQLite resume."""
 
 import pytest
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from nooa import Agent
 from nooa.storage import SQLiteStorageManager
@@ -30,6 +30,24 @@ class _CrossedResult(BaseModel):
     second: int = Field(alias="first")
 
 
+class _RevalidatedResult(_DefaultedResult):
+    """A saved child is validated again while its parent is restored."""
+
+    model_config = ConfigDict(revalidate_instances="always")
+
+
+class _WrappedResult(_DefaultedResult):
+    """Wrapped parent and child values must both survive a real SQLite resume."""
+
+    child: _RevalidatedResult
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def check_wrapped(cls, data, handler):
+        """Preserve the parent's model validator during child revalidation."""
+        return handler(data)
+
+
 class _AliasAgent(Agent, llm=FakeLLMClient()):
     """Minimal agent exercising the supported persistence entry point."""
 
@@ -40,6 +58,7 @@ class _AliasAgent(Agent, llm=FakeLLMClient()):
         _RequiredResult(apiValue=7),
         _DefaultedResult(apiValue=7),
         _CrossedResult(second=11, first=22),
+        _WrappedResult(apiValue=7, child={"apiValue": 8}),
     ],
     ids=lambda value: type(value).__name__,
 )
