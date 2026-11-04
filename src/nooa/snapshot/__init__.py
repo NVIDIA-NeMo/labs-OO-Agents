@@ -1,24 +1,33 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""One snapshot model for values, output streams and spilled files.
+"""Bounded, detached snapshots of large values and output streams, and their renderers.
 
-A snapshot is a small, detached tree (``Scalar``, ``Text``, ``Sequence``,
-``Mapping``, ``Object``, ``Unavailable``, ``Ref``) in which every
-node says whether it is complete and, if not, why. Two producers build it:
+A snapshot is a small frozen tree of nodes (``Scalar``, ``Text``,
+``Sequence``, ``Mapping``, ``Object``, ``Unavailable``, ``Ref``; their
+union is ``Snapshot``). It holds no live objects. Every node says whether it
+is complete and, if not, why (``Reason``); a ``Text`` also says how much was
+left out and where the whole content is (``Spill``).
 
-- ``capture(value, limits)`` for finished Python values (no user code runs on
-  types it does not know). ``capture.register(T, shape)``, process-wide and
-  matched by class identity, extends it with a declarative shape that maps
-  out the type's structure: ``array_like``, ``ndarray_like``,
-  ``mapping_like``, ``object_like`` or ``text_like``. Capture builds the
-  snapshot itself, with the builders and size rules of the built-in types;
-- ``TextStream`` for output that arrives over time (head, rolling tail,
-  counter and an optional spill file).
+Producers:
 
-Renderers turn it into what a consumer shows: ``render_output`` (command
-output), ``render_python`` (agentdoc's prefill notation, the one renderer with
-per-kind hooks), ``render_json`` and ``render_trace`` (trace previews: the JSON
-text and its span attributes). See ``docs/snapshot-model.md``.
+- ``capture(value, limits=Limits())``: a finished Python value, without
+  running code on it. ``capture.register(T, shape)`` describes another type
+  with one of the shapes ``array_like``, ``ndarray_like``,
+  ``mapping_like``, ``object_like`` or ``text_like``.
+  ``capture_fields(**fields)`` captures a framework wrapper.
+- ``TextStream``: output that arrives over time, with an optional
+  ``SpillTarget`` file; ``merge`` joins two unread deltas.
+
+Renderers: ``render_output`` (command output), ``render_python``
+(agentdoc's prefill notation; its hooks receive a ``PythonRenderer``),
+``render_json`` and ``render_trace`` (trace previews).
+
+Every public name's docstring is its documentation; ``docs/snapshot-model.md``
+is the short contract.
+
+>>> from nooa.snapshot import Limits, capture, render_python
+>>> render_python(capture({"rows": list(range(1000))}, Limits(max_items=4, tail_share=0.5)))
+"{'rows': list(len=1000, [:2]=[0, 1], [-2:]=[998, 999])}"
 """
 
 from nooa.snapshot._capture import (

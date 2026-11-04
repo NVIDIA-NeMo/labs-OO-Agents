@@ -1,10 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""The budget of one capture: the public ``Limits`` and the traversal ``_State``.
+"""The budget of one capture: the public ``Limits`` and the private traversal ``_State``.
 
-The leaf of the capture modules (``_limits`` <- ``_raw`` <- ``_visibility``
-<- ``_shapes`` <- ``_walk`` <- ``_capture``): every layer charges the same
-``_State``, so it sits below them all. Nothing here reads a live value.
+The lowest of the capture layers (``_limits`` <- ``_raw`` <- ``_visibility``
+<- ``_shapes`` <- ``_walk`` <- ``_capture``). Every layer charges the same
+``_State``, so it lives below them all. Nothing here reads a live value.
 """
 
 from __future__ import annotations
@@ -15,15 +15,37 @@ from typing import Any, Literal
 
 @dataclass(frozen=True)
 class Limits:
-    """One shared budget for a capture.
+    """The one shared budget of a ``capture`` or ``capture_fields`` call.
 
-    ``max_chars`` counts the snapshot's canonical JSON encoding; ``max_nodes``
-    inspection work; ``max_depth`` nesting (the root is depth 0).
-    ``max_items`` caps the items kept per container and ``max_string`` the
-    characters kept per string (``None``: only the shared budget). When a
-    string or container is cut, ``tail_share`` of what is kept comes from its
-    end (0: a prefix, as in trace previews; 0.5: agentdoc's head/tail split,
-    the head taking the odd one).
+    Every knob bounds the whole snapshot, not one value. The defaults are
+    the bounds of #342's trace previews.
+
+    - ``max_chars`` (default 50,000): the size of the snapshot as canonical
+      JSON (``render_json``'s encoding), counted exactly, so
+      ``render_json(capture(v, limits), max_chars=limits.max_chars)`` cuts
+      nothing further. At least 4.
+    - ``max_nodes`` (default 2,000): inspection work. Each value, container
+      entry, MRO entry, stored instance field and visibility marker read
+      costs one unit. Greater than 0.
+    - ``max_depth`` (default 16): nesting. The root is depth 0; a container
+      at ``max_depth`` keeps no entries (reason ``"max_depth"``).
+      Non-negative.
+    - ``max_items`` (default ``None``): the items kept per container, and
+      the fields kept per object (the first ones). ``None``: only the shared
+      budget limits them. Non-negative.
+    - ``max_string`` (default ``None``): the units kept per string or bytes
+      value, an upper bound (a cut byte value keeps only whole UTF-8 code
+      points). ``None``: only the shared budget limits it. Non-negative.
+    - ``tail_share`` (default 0.0): the part of a cut string or container
+      kept from its end. 0.0 keeps a prefix (trace previews); 0.5 keeps both
+      ends (agentdoc's split; the head takes the odd unit). From 0 to 1.
+
+    ``Limits`` does not check itself: ``capture`` and ``capture_fields``
+    raise ``ValueError`` for values outside these ranges.
+
+    >>> from nooa.snapshot import capture, render_python
+    >>> render_python(capture(list(range(100)), Limits(max_items=4, tail_share=0.5)))
+    'list(len=100, [:2]=[0, 1], [-2:]=[98, 99])'
     """
 
     max_chars: int = 50_000

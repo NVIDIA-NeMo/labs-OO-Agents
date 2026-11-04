@@ -1,13 +1,24 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Which fields capture may show, and the privileged Pydantic / dataclass field readers.
+"""Which fields capture may show, and the field readers of Pydantic models and dataclasses.
 
-The hidden-field rules (agentdoc ``hidden`` / ``spec(hidden=...)`` markers
-and ``_agentdoc_fields_docs`` overrides), the annotation metadata of a class
-(``typing.get_type_hints(cls, include_extras=True)`` once per class, cached
-by class identity in ``_HINTS``, failing closed on errors), and the field
-readers of Pydantic v2 models and dataclasses. Live classes and instances
-are read only through ``_raw``.
+What lives here:
+
+- the hidden-field rules: agentdoc ``hidden`` / ``spec(hidden=...)``
+  markers and the ``_agentdoc_fields_docs`` overrides of a class or an
+  instance;
+- the annotation metadata of a dataclass with string annotations:
+  ``typing.get_type_hints(cls, include_extras=True)``, once per class,
+  cached by class identity in ``_HINTS``, failing closed on any error;
+- ``_pydantic_entries`` and ``_dataclass_entries``, the readers that yield
+  the visible declared fields of a Pydantic v2 model or a dataclass from
+  raw instance storage.
+
+Live classes and instances are read through ``_raw``; the only other
+reads are ``object.__getattribute__`` on metadata objects of an exact,
+checked type (see ``_raw``). A field whose visibility cannot be read is
+left out (``_Omitted("unreadable")``) or, when the field list itself cannot
+be read, the reader raises ``_FailClosed`` and the object keeps no field.
 """
 
 from __future__ import annotations

@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""The five public shape constructors and the shape classes they make.
+"""The five public shape constructors and the private shape classes they return.
 
 ``array_like``, ``mapping_like``, ``ndarray_like``, ``object_like`` and
-``text_like`` validate and copy their arguments into frozen shape classes;
-``_FieldReader`` is the internal shape of Pydantic models and dataclasses.
-No walking: ``_walk`` builds snapshots from these classes.
+``text_like`` check and copy their arguments into frozen shape objects, the
+only things ``capture.register`` accepts. ``_FieldReader`` is the internal
+shape of Pydantic models and dataclasses. Nothing here reads a captured
+value: ``_walk`` builds the snapshot nodes from these shapes.
 """
 
 from __future__ import annotations
@@ -80,7 +81,7 @@ def _accessor_fields(fields: Any, shape: str) -> tuple[tuple[str, Callable[[Any]
 
 @dataclass(frozen=True)
 class _Collection:
-    """``array_like``, or (``keyed``) ``mapping_like``, whose items are (key, value) pairs."""
+    """The shape ``array_like`` or (``keyed``) ``mapping_like`` returns; pass it to ``capture.register``."""
 
     length: Callable[[Any], int]
     items: Callable[[Any], Iterable[Any]]
@@ -91,6 +92,8 @@ class _Collection:
 
 @dataclass(frozen=True)
 class _NdarrayLike:
+    """The shape ``ndarray_like`` returns; pass it to ``capture.register``."""
+
     shape: Callable[[Any], tuple[int, ...]]
     element: Callable[[Any, tuple[int, ...]], Any]
     fields: tuple[tuple[str, Callable[[Any], Any]], ...]
@@ -100,12 +103,16 @@ class _NdarrayLike:
 
 @dataclass(frozen=True)
 class _ObjectLike:
+    """The shape ``object_like`` returns; pass it to ``capture.register``."""
+
     fields: tuple[tuple[str, Callable[[Any], Any]], ...]
     kind: str | None
 
 
 @dataclass(frozen=True)
 class _TextLike:
+    """The shape ``text_like`` returns; pass it to ``capture.register``."""
+
     length: Callable[[Any], int]
     slice: Callable[[Any, int, int], str | bytes]
     unit: Literal["chars", "bytes"]
@@ -123,13 +130,53 @@ def array_like(
     fields: dict[str, Callable[[Any], Any]] | None = None,
     kind: str | None = None,
 ) -> _Collection:
-    """A shape for sequence-like values: ``length(v)`` items, pulled lazily from ``items(v)``.
+    """A shape for sequence-like values, for ``capture.register``: a length and lazy items.
 
-    ``length(v)`` is called once; ``items(v)`` is iterated only as far as the
-    kept items (``max_items``, the budget), plus at most one. ``fields``: name
-    -> ``accessor(v)``, each called once, only when its field is kept. Without
-    fields the value becomes a ``Sequence``; with fields an ``Object`` whose
-    fields are followed by ``items`` (that ``Sequence``).
+    Arguments:
+
+    - ``length``: ``length(v) -> int``, called once; it must return a
+      non-negative exact ``int``.
+    - ``items``: ``items(v) -> iterable``, iterated only as far as the kept
+      items (``Limits.max_items`` and the budget) plus at most one. Only a
+      head is kept: the iterable is read forwards.
+    - ``fields`` (default ``None``): an ordered ``dict`` of field name ->
+      ``accessor(v)``. Names must be ``str`` (a subclass is copied) and
+      not taken by the shape's own parts. Each accessor is called at most
+      once, only when its field is kept. The first ``Limits.max_items``
+      fields are kept; each field leaves room for the minimal value of
+      every later one.
+    - ``kind`` (default ``None``): a ``str`` stored as ``Object.kind``; it
+      selects a ``render_python`` hook. Only an ``Object`` (a shape with
+      fields, or ``ndarray_like`` / ``object_like``) keeps it.
+
+    The value becomes a ``Sequence`` (``type_name``: the class name) or,
+    with ``fields``, an ``Object`` whose fields are followed by ``items``,
+    that ``Sequence`` (``type_name="list"``).
+
+    Errors: when ``length`` raises or returns something else, the whole
+    value is ``Unavailable("error")``. When ``items`` raises on the call,
+    the ``items`` part is ``Unavailable("error")`` with fields, the whole
+    value without; when it raises while being iterated, the items end there
+    and the ``Sequence`` gets reason ``"error"``. A field accessor that
+    raises makes its field ``Unavailable("error")``.
+
+    Accessors are trusted code; they run only when capture keeps their
+    result. What an accessor returns is captured like any value, under the
+    same budget: a list is a ``Sequence``, a registered type uses its own
+    shape, an unknown type is ``Unavailable("opaque")``, and ``v`` itself is
+    a ``Ref`` (a cycle).
+
+    Raises ``TypeError`` when an accessor is not callable, ``fields`` is not
+    a ``dict``, or a name or ``kind`` is not a ``str``.
+
+    >>> from nooa.snapshot import Limits, array_like, capture, render_python
+    >>> class Bag:
+    ...     def __init__(self, items):
+    ...         self.items = items
+    >>> capture.register(Bag, array_like(lambda b: len(b.items), lambda b: iter(b.items)))
+    >>> render_python(capture(Bag(list(range(50))), Limits(max_items=3)))
+    'Bag(len=50, [:3]=[0, 1, 2])'
+    >>> capture.unregister(Bag)
     """
     return _Collection(
         _accessor(length, "length"),
@@ -147,11 +194,40 @@ def mapping_like(
     fields: dict[str, Callable[[Any], Any]] | None = None,
     kind: str | None = None,
 ) -> _Collection:
-    """A shape for mapping-like values: ``items(v)`` yields ``(key, value)`` pairs lazily.
+    """A shape for mapping-like values, for ``capture.register``: a length and lazy pairs.
 
-    As ``array_like``: a ``Mapping``, or with ``fields`` an ``Object`` whose
-    fields are followed by ``items`` (that ``Mapping``). Keys must be exact
-    ``str``, ``int``, ``float``, ``bool`` or ``None``, as for a ``dict``.
+    Arguments:
+
+    - ``length``: ``length(v) -> int``, called once (a non-negative exact
+      ``int``).
+    - ``items``: ``items(v)`` yields ``(key, value)`` pairs (exact 2-tuples),
+      read forwards and only as far as the kept entries plus at most one.
+      Keys are kept as for a ``dict``: exact ``str``, ``int`` (at most 128
+      bits), finite ``float``, ``bool`` or ``None``; another key stops the
+      mapping with reason ``"key"``.
+    - ``fields`` (default ``None``): an ordered ``dict`` of field name ->
+      ``accessor(v)``. Names must be ``str`` (a subclass is copied) and
+      not taken by the shape's own parts. Each accessor is called at most
+      once, only when its field is kept. The first ``Limits.max_items``
+      fields are kept; each field leaves room for the minimal value of
+      every later one.
+    - ``kind`` (default ``None``): a ``str`` stored as ``Object.kind``; it
+      selects a ``render_python`` hook. Only an ``Object`` (a shape with
+      fields, or ``ndarray_like`` / ``object_like``) keeps it.
+
+    The value becomes a ``Mapping`` (``type_name``: the class name) or,
+    with ``fields``, an ``Object`` whose fields are followed by ``items``,
+    that ``Mapping`` (``type_name="dict"``). Errors are handled as for
+    ``array_like``; a yielded item that is not a pair also ends the items
+    with reason ``"error"``.
+
+    Accessors are trusted code; they run only when capture keeps their
+    result. What an accessor returns is captured like any value, under the
+    same budget: a list is a ``Sequence``, a registered type uses its own
+    shape, an unknown type is ``Unavailable("opaque")``, and ``v`` itself is
+    a ``Ref`` (a cycle).
+
+    Raises ``TypeError`` as ``array_like`` does.
     """
     return _Collection(
         _accessor(length, "length"),
@@ -170,15 +246,58 @@ def ndarray_like(
     labels: dict[int, Callable[[Any], Any]] | None = None,
     kind: str | None = None,
 ) -> _NdarrayLike:
-    """A shape for n-dimensional arrays: ``shape(v)``, and ``element(v, index)`` per shown element.
+    """A shape for n-dimensional arrays, for ``capture.register``: a shape tuple and elements.
 
-    The value becomes an ``Object`` with its ``fields``, then ``shape`` (the
-    tuple), ``labels`` (when given) and ``data``: nested ``Sequence`` nodes, one
-    level per axis, keeping the first and last entries along every axis like
-    numpy's summarised print (the rule: *Shapes* in ``docs/snapshot-model.md``).
-    ``element`` is called only for the shown elements. ``labels``: axis ->
-    ``accessor(v)`` returning that axis's labels (e.g. DataFrame columns);
-    only the shown ones are read (``labels[i]``) and kept.
+    Arguments:
+
+    - ``shape``: ``shape(v) -> tuple[int, ...]``, called once (a tuple of
+      non-negative exact ``int``).
+    - ``element``: ``element(v, index)``, with ``index`` a tuple of one
+      ``int`` per axis; called only for the elements kept.
+    - ``labels`` (default ``None``): a ``dict`` of axis (a non-negative
+      ``int``) -> ``accessor(v)`` returning that axis's labels (DataFrame
+      columns, an index). Only the shown labels are read, as
+      ``accessor(v)[i]``.
+    - ``fields`` (default ``None``): an ordered ``dict`` of field name ->
+      ``accessor(v)``. Names must be ``str`` (a subclass is copied) and
+      not taken by the shape's own parts. Each accessor is called at most
+      once, only when its field is kept. The first ``Limits.max_items``
+      fields are kept; each field leaves room for the minimal value of
+      every later one.
+    - ``kind`` (default ``None``): a ``str`` stored as ``Object.kind``; it
+      selects a ``render_python`` hook. Only an ``Object`` (a shape with
+      fields, or ``ndarray_like`` / ``object_like``) keeps it.
+
+    The value becomes an ``Object``: its ``fields``, then ``shape`` (the
+    tuple), ``labels`` (a ``Mapping`` axis -> ``Sequence`` of the shown
+    labels, when given) and ``data``: nested ``Sequence`` nodes, one level
+    per axis, each with its axis's length. A 0-d array's ``data`` is its one
+    element.
+
+    Selection, like numpy's summarised print: along every axis, the first
+    and last entries, ``K`` at most (all of a shorter axis), the start
+    taking the odd one; ``K = 4`` shows indices ``0, 1, n-2, n-1``. ``K``
+    is ``Limits.max_items`` when set, and never more than the budget
+    affords: the shown elements and labels (6 characters each) and the
+    brackets fit three quarters of the value's characters, and the elements
+    and levels three quarters of the inspection work left. ``tail_share`` is
+    ignored: both ends are always shown. Elements larger than assumed are
+    still cut by the budget, from the end.
+
+    Errors: when ``shape`` raises or returns something else, the whole
+    value is ``Unavailable("error")``. An ``element``, a label or a field
+    accessor that raises makes only that part ``Unavailable("error")``; so
+    does a ``labels`` axis the shape does not have.
+
+    Accessors are trusted code; they run only when capture keeps their
+    result. What an accessor returns is captured like any value, under the
+    same budget: a list is a ``Sequence``, a registered type uses its own
+    shape, an unknown type is ``Unavailable("opaque")``, and ``v`` itself is
+    a ``Ref`` (a cycle).
+
+    Raises ``TypeError`` when an accessor is not callable, ``fields`` or
+    ``labels`` is not a ``dict``, an axis is not a non-negative ``int``, or
+    a name or ``kind`` is not a ``str``.
     """
     label_accessors: list[tuple[int, Callable[[Any], Any]]] = []
     if labels is not None:
@@ -198,10 +317,29 @@ def ndarray_like(
 
 
 def object_like(fields: dict[str, Callable[[Any], Any]], *, kind: str | None = None) -> _ObjectLike:
-    """A shape for record-like values: ordered name -> ``accessor(v)``, an ``Object``.
+    """A shape for record-like values, for ``capture.register``: named fields.
 
-    Fields are built in order; each leaves room for the minimal value of every
-    later field, and an accessor runs only when its field is kept.
+    Arguments:
+
+    - ``fields``: an ordered ``dict`` of field name -> ``accessor(v)``.
+      Names must be ``str`` (a subclass is copied). Each accessor is called
+      at most once, only when its field is kept; the first
+      ``Limits.max_items`` fields are kept, and each leaves room for the
+      minimal value of every later one.
+    - ``kind`` (default ``None``): a ``str`` stored as ``Object.kind``; it
+      selects a ``render_python`` hook.
+
+    The value becomes an ``Object`` (``type_name``: the class name). A field
+    accessor that raises makes its field ``Unavailable("error")``.
+
+    Accessors are trusted code; they run only when capture keeps their
+    result. What an accessor returns is captured like any value, under the
+    same budget: a list is a ``Sequence``, a registered type uses its own
+    shape, an unknown type is ``Unavailable("opaque")``, and ``v`` itself is
+    a ``Ref`` (a cycle).
+
+    Raises ``TypeError`` when ``fields`` is not a ``dict``, an accessor is
+    not callable, or a name or ``kind`` is not a ``str``.
     """
     if not isinstance(fields, dict):
         raise TypeError("fields must be a dict of name -> accessor")
@@ -215,11 +353,43 @@ def text_like(
     unit: Literal["chars", "bytes"] = "chars",
     kind: str | None = None,
 ) -> _TextLike:
-    """A shape for text too large to copy: ``length(v)`` units, read with ``slice(v, start, stop)``.
+    """A shape for text too large to copy, for ``capture.register``: a length and slices.
 
-    ``slice`` returns ``str`` (``unit="chars"``) or ``bytes`` (``"bytes"``). It
-    is called only for the head and tail capture keeps, at most twice, never
-    for the whole of a text that is cut. The value becomes a ``Text``.
+    Arguments:
+
+    - ``length``: ``length(v) -> int``, the size in ``unit``, called once (a
+      non-negative exact ``int``).
+    - ``slice``: ``slice(v, start, stop)``, returning exactly ``stop -
+      start`` units: a ``str`` for ``"chars"`` (a subclass is copied), or
+      ``bytes`` for ``"bytes"`` (a ``bytearray`` or ``memoryview`` is
+      copied).
+    - ``unit`` (default ``"chars"``): ``"chars"`` or ``"bytes"``.
+    - ``kind`` (default ``None``): checked and stored on the shape; a
+      ``Text`` has no ``kind``, so no hook uses it.
+
+    The value becomes a ``Text`` with the right ``length``, ``omitted`` and
+    ``unit``, cut exactly as a ``str`` or ``bytes`` of that content would
+    be (UTF-8-safe for bytes). ``slice`` is called at most twice, only for
+    the head and the tail kept, never for the whole of a text that is cut;
+    for bytes, the head read takes one byte more, to see whether the head
+    ends on a code point boundary. A text short enough to be kept whole is
+    read in one call.
+
+    Errors: there is no partial result. When ``length`` or ``slice`` raises,
+    or a slice has the wrong type or size, the whole value is
+    ``Unavailable("error")``.
+
+    Raises ``TypeError`` when an accessor is not callable, ``unit`` is not
+    ``"chars"`` or ``"bytes"``, or ``kind`` is not a ``str``.
+
+    >>> from nooa.snapshot import Limits, capture, render_python, text_like
+    >>> class Rope:
+    ...     def __init__(self, text):
+    ...         self.text = text
+    >>> capture.register(Rope, text_like(lambda r: len(r.text), lambda r, a, b: r.text[a:b]))
+    >>> render_python(capture(Rope("y" * 100), Limits(max_string=6, tail_share=0.5)))
+    "str(len=100, [:3]='yyy', [-3:]='yyy')"
+    >>> capture.unregister(Rope)
     """
     if unit != "chars" and unit != "bytes":
         raise TypeError('unit must be "chars" or "bytes"')

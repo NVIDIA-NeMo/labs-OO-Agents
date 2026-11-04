@@ -1,23 +1,41 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""The reads of live classes and instances that must never run user code.
+"""The reads of live classes and instances of unknown type: none of them runs user code.
 
-This is the one module to audit for principle 1 ("never run code on
-values"). Every read of an arbitrary live class or instance that the
-capture walk makes goes through a helper here: the class namespace and MRO
-through ``type``'s own descriptors (no metaclass lookup), instance storage
-through the native ``__dict__`` getset or ``__slots__`` member descriptors,
-and namespaces and storage only after every key was checked to be an exact
-``str`` (no hashing or comparing a foreign key). The builtin-pair table
-names exact built-in types by identity. A read that can't be made safely
-gives ``None`` / ``_NO_SLOT`` or raises ``_FailClosed``; it never falls back
-to ``getattr``, ``repr``, ``==`` or iteration of a user object.
+This is the module to audit for principle 1 ("never run code on values").
+Its helpers read a class's name, namespace and MRO through ``type``'s own
+descriptors (no metaclass lookup), and instance storage through the native
+``__dict__`` getset descriptor or ``__slots__`` member descriptors. A
+namespace or storage dict is used only after every key was checked to be an
+exact ``str``, without hashing or comparing a key. Exact built-in types are
+named by identity (``_BUILTIN_PAIRS``). A read that cannot be made safely
+gives ``None`` / ``_NO_SLOT`` or raises ``_FailClosed``; nothing here falls
+back to ``getattr``, ``repr``, ``==``, ``hash`` or iteration of a user
+object.
 
-The other modules may only read live values in two ways: through these
-helpers, or natively on a value whose exact type was checked first
-(``type(v) is str``, a Pydantic ``FieldInfo``, a ``dataclasses.Field``, an
-``Annotated`` alias, agentdoc's ``SpecAnnotation``). Registered shapes'
-accessors are trusted extension code and run only in ``_walk``.
+Outside this module, the capture layers touch a live value or class only in
+these ways:
+
+- ``type(v)``, ``id(v)`` and ``is``, which run no user code;
+- native operations on a value whose exact type was checked first
+  (``type(v) is ...``): the built-in ``str``, ``bytes``, ``int``,
+  ``float``, ``bool``, ``list``, ``tuple`` and ``dict`` in ``_walk`` and
+  ``_codec``, and, in ``_visibility``, ``object.__getattribute__`` on a
+  Pydantic ``FieldInfo``, a ``dataclasses.Field``, an ``Annotated`` alias
+  and agentdoc's ``SpecAnnotation``;
+- class metadata, the way Python reads it: ``_visibility`` calls
+  ``typing.get_type_hints(cls, include_extras=True)`` once per dataclass
+  that has string annotations (cached by class identity; any exception
+  fails closed). This evaluates annotation code the class's author wrote;
+- registered shapes, in ``_walk`` only: their accessors (trusted extension
+  code), and what is done with their results: iterating ``items(v)``,
+  indexing ``labels(v)[i]``, and copying a ``slice`` result (``bytes()`` of
+  an exact ``bytearray`` / ``memoryview``, ``str.__str__`` of a ``str``
+  subclass).
+
+``_shapes`` also checks the arguments of the shape constructors
+(``callable``, ``isinstance(fields, dict)``); those come from the code that
+registers a shape, not from a captured value.
 """
 
 from __future__ import annotations

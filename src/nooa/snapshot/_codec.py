@@ -1,13 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Shared codecs and accounting of ``nooa.snapshot`` (private leaf module).
+"""Encoding and accounting shared by capture, rendering and streams (a leaf module).
 
-Canonical JSON encoding and size accounting (#342's fallbacks, the opaque
-label, string prefixes, pointers, mapping keys) and UTF-8 helpers (cut
-points, decoding with replacement). ``_capture``, ``_render`` and
-``_stream`` use them; each keeps its own safety policy: capture reads live
-values and never runs user code, rendering only reads detached nodes. These
-helpers take built-in values only and run no user code themselves.
+What lives here: the canonical JSON encoding (``dumps``) and its size
+accounting (``Container``), #342's typed fallbacks and opaque label, string
+prefixes, JSON Pointers, the mapping-key conversion, and the UTF-8 helpers
+(cut points, decoding with replacement). It is shared so that capture's
+sizes and ``render_json``'s output agree exactly, and so that every cut
+uses the same code point rules.
+
+The helpers take built-in values only and run no user code. Each caller
+keeps its own policy where it differs: ``json_key(live=True)`` is capture's
+(keys of a live value), ``live=False`` the renderer's (keys of a detached
+snapshot).
 """
 
 from __future__ import annotations

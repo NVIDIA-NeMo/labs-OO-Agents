@@ -1,31 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""``capture()``: a bounded snapshot of a finished Python value, without running user code.
+"""The public capture entry points: ``capture`` (with its registry) and ``capture_fields``.
 
-Based on the bounded trace JSON builder of PR #342 (Severin Klingler): exact
-built-in types are read natively, Pydantic v2 models and dataclasses through
-their declared fields in raw instance storage, and everything else is
-``Unavailable("opaque")``. No ``repr()``, ``str()``, truthiness, properties, descriptors,
-custom iteration, hashing or equality runs on an inspected value.
-
-One shared budget (``Limits``) bounds the whole capture:
-
-- ``max_chars``: the encoded size of the snapshot as canonical JSON (the
-  notation ``render_json`` emits), accounted exactly as in #342, so that
-  ``render_json(capture(v, limits), max_chars=limits.max_chars)`` never cuts
-  anything further;
-- ``max_nodes``: inspection work (values, container entries, MRO entries,
-  field and visibility metadata);
-- ``max_depth``: nesting;
-- ``max_items`` / ``max_string``: items per container and characters per
-  string, kept from the start and (``tail_share``) the end.
-
-``capture.register(T, shape)`` extends it with nearest-MRO dispatch: a
-shape (``array_like``, ``ndarray_like``, ``mapping_like``, ``object_like``,
-``text_like``) maps out the structure of a type through accessors, and capture
-builds the snapshot with the same builders as the built-in types, so the
-shared budget and the notation hold. Pydantic models and dataclasses are
-internal ``object_like`` shapes over their privileged field readers.
+The top of the capture layers (``_limits`` <- ``_raw`` <- ``_visibility``
+<- ``_shapes`` <- ``_walk`` <- ``_capture``). It checks the arguments, starts
+one ``_State`` per call and hands the value to the ``_walk`` builder. The
+builder is based on the bounded trace JSON builder of PR #342 (Severin
+Klingler).
 """
 
 from __future__ import annotations
@@ -62,26 +43,107 @@ __all__ = [
 
 
 class _CaptureFunction:
-    """``capture(value, limits)``, with ``capture.register(T, shape)`` to extend it."""
+    """``capture(value, limits=Limits()) -> Snapshot``: a bounded, detached snapshot of a value.
+
+    Arguments:
+
+    - ``value``: any Python object.
+    - ``limits``: the shared budget (``Limits``); the default is
+      ``Limits()``, #342's trace preview bounds.
+
+    Returns a ``Snapshot`` node holding no live objects. What becomes what:
+
+    - exact ``None``, ``bool``, ``int``, finite ``float``: a ``Scalar``;
+    - exact ``str``: a chars ``Text``; exact ``bytes``: a ``Scalar`` when
+      kept whole, else a bytes ``Text`` of the original bytes;
+    - exact ``list`` / ``tuple``: a ``Sequence``; exact ``dict``: a
+      ``Mapping``;
+    - a Pydantic v2 model or a dataclass: an ``Object`` of its visible
+      declared fields;
+    - an instance of a class registered with ``capture.register``: what its
+      shape describes;
+    - anything else, a non-finite ``float`` included: ``Unavailable("opaque")``.
+
+    Guarantees:
+
+    - No user code runs on values: no ``repr``, ``str``, truthiness,
+      properties, descriptors, ``__getattr__``, custom iteration, hashing or
+      equality of an inspected value, its class or its metaclass. Instances
+      are read from raw storage (``__dict__`` or ``__slots__``) through the
+      native descriptors. The only code that runs is class metadata,
+      evaluated the way Python does (``typing.get_type_hints(cls,
+      include_extras=True)``, once per dataclass with string annotations,
+      cached by class identity) and the accessors of registered shapes.
+    - Hidden fields are never read: agentdoc ``hidden`` /
+      ``spec(hidden=True)`` markers and ``spec()`` overrides, Pydantic
+      ``exclude=True`` / ``repr=False``, dataclass ``repr=False``,
+      ``_private``, ``ClassVar`` and ``InitVar`` fields.
+    - Fail closed: fields whose visibility cannot be read safely are left
+      out and the object gets reason ``"unreadable"``; an accessor that
+      raises becomes ``Unavailable("error")``. A value that cannot be read
+      becomes a node, not an exception.
+    - Bounded: the snapshot's canonical JSON is at most ``max_chars``
+      characters, and the work is at most ``max_nodes`` units and
+      ``max_depth`` levels (plus what registered accessors spend). A long
+      string or bytes value is sliced, never copied whole.
+    - Exact accounting: ``render_json(snapshot, max_chars=limits.max_chars)``
+      keeps everything the snapshot holds; on #342's domain it is #342's
+      text.
+    - UTF-8-safe cuts: a cut bytes value starts and ends on code point
+      boundaries.
+
+    Raises ``ValueError`` when ``limits`` is out of range (see ``Limits``).
+
+    ``capture.register(T, shape)`` and ``capture.unregister(T)`` extend it
+    for other types (see ``register``).
+
+    >>> from nooa.snapshot import Limits, capture, render_python
+    >>> capture("x" * 20, Limits(max_string=8, tail_share=0.5))
+    Text(head='xxxx', tail='xxxx', length=20, unit='chars', reason='max_length', full=None)
+    >>> render_python(capture({"a": [1, 2], "b": object()}))
+    "{'a': [1, 2], 'b': <opaque: object>}"
+    """
 
     def __call__(self, value: object, limits: Limits = DEFAULT_LIMITS) -> Snapshot:
-        """A bounded snapshot of ``value``; no user code runs on unregistered types."""
+        """A bounded snapshot of ``value`` under ``limits``; see ``capture``."""
         _validate_limits(limits)
         state = _State(limits)
         return _build(value, limits.max_chars, 0, "", state).node
 
     def register(self, cls: type[Any], shape: _Shape) -> None:
-        """Capture ``cls`` and its subclasses as ``shape`` describes them.
+        """Capture instances of ``cls`` and its subclasses as ``shape`` describes them.
 
-        ``shape`` is one of ``array_like``, ``ndarray_like``, ``mapping_like``,
-        ``object_like`` or ``text_like``; anything else raises ``TypeError``.
-        Registering needs the imported type, so supporting a library is opt-in
-        by whoever sets up the agent; the registry is process-wide. Classes
-        are matched by identity (``is``) along the value's raw MRO, so no user
-        code runs during lookup. The registration nearest in a value's MRO
-        wins (over the built-in Pydantic and dataclass views too); registering
-        ``cls`` again replaces it. Exact built-in types (``str``, ``list``, ...)
-        are always native.
+        Arguments:
+
+        - ``cls``: the class itself (so registering imports it; NOOA never
+          imports third-party libraries).
+        - ``shape``: what ``array_like``, ``ndarray_like``, ``mapping_like``,
+          ``object_like`` or ``text_like`` returned.
+
+        The registry is process-wide. Registering ``cls`` again replaces its
+        shape. At capture time the value's raw MRO is compared with the
+        registered classes by identity (``is``): the nearest registered
+        class wins, also over the Pydantic and dataclass readers. No class
+        is hashed or compared with ``==``, and no accessor runs during the
+        lookup. Exact built-in types (``str``, ``bytes``, ``int``,
+        ``float``, ``bool``, ``None``, ``list``, ``tuple``, ``dict``) are
+        always captured natively, whatever is registered.
+
+        Accessors are trusted code. They run only when capture keeps their
+        result, and an ``Exception`` they raise becomes
+        ``Unavailable("error")`` (see the shape constructors).
+
+        Raises ``TypeError`` when ``cls`` is not a class or ``shape`` is not
+        a shape.
+
+        >>> from nooa.snapshot import capture, object_like, render_python
+        >>> class Point:
+        ...     def __init__(self, x, y):
+        ...         self.x, self.y = x, y
+        >>> capture.register(Point, object_like({"x": lambda p: p.x, "y": lambda p: p.y}))
+        >>> render_python(capture(Point(1, 2)))
+        'Point(x=1, y=2)'
+        >>> capture.unregister(Point)
         """
         if not isinstance(cls, type):
             raise TypeError(f"capture.register needs a type, got {type(cls).__name__}")
@@ -95,7 +157,7 @@ class _CaptureFunction:
         _REGISTRY.append((cls, shape))
 
     def unregister(self, cls: type[Any]) -> None:
-        """Remove the registration for exactly ``cls`` (no-op when absent)."""
+        """Remove the registration of exactly ``cls`` (not of its bases); a no-op when there is none."""
         _REGISTRY[:] = [entry for entry in _REGISTRY if entry[0] is not cls]
 
 
@@ -123,12 +185,31 @@ def _field_placeholder(value: Any, state: _State) -> tuple[Any, Snapshot]:
 
 
 def capture_fields(*, limits: Limits = DEFAULT_LIMITS, **fields: object) -> Mapping:
-    """Capture a framework-owned wrapper so that every root field survives, with its type.
+    """Capture a framework-owned wrapper (``args=..., kwargs=...``) so that every field survives.
 
-    Each field first reserves a minimal placeholder of its own type (``[]``,
-    ``{}``, ``""``, ...); raises ``ValueError`` when ``limits`` cannot hold the
-    complete minimal wrapper (#342's ``trace_fields``). A field reached with
-    no node work left keeps its placeholder.
+    Arguments:
+
+    - ``limits``: the shared budget, as for ``capture`` (keyword-only).
+    - ``**fields``: the wrapper's fields, name -> value, in order.
+
+    Returns a ``Mapping`` (``type_name="dict"``, ``wrapper=True``) with one
+    entry per field, in order. Each field first reserves the minimal value
+    of its own type: ``""``, ``[]``, ``{}``, ``0``, ``0.0``, ``false`` or
+    ``null`` for the exact built-in types other than ``bytes``, ``{}`` for a
+    Pydantic model, ``null`` for anything else. Then the fields are captured in order, each
+    with the room the earlier ones left. A field reached with no
+    inspection work left keeps its minimal value (reason ``"max_nodes"``).
+    ``render_json`` keeps every field of the wrapper too. This is #342's
+    ``trace_fields``; the guarantees of ``capture`` hold for every field.
+
+    Raises ``ValueError`` when ``limits`` is out of range, or when it cannot
+    hold the wrapper with every field at its minimal value (``max_chars``),
+    or classify every field (``max_nodes``).
+
+    >>> from nooa.snapshot import Limits, capture_fields, render_json
+    >>> wrapper = capture_fields(args=["x" * 100], kwargs={}, limits=Limits(max_chars=40))
+    >>> render_json(wrapper, max_chars=40)
+    '{"args": ["xxxxxxxxxxxx"], "kwargs": {}}'
     """
     _validate_limits(limits)
     state = _State(limits)

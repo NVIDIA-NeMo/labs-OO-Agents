@@ -1,13 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""``TextStream``: output that arrives over time, as one bounded ``Text`` snapshot.
+"""Output that arrives over time: ``TextStream``, ``SpillTarget`` and ``merge``.
 
-A stream keeps its first ``head`` and last ``tail`` units (characters or
-bytes) in memory, counts everything, and can spill every byte, up to
-``SpillTarget.max_bytes``, to a file while it runs. ``snapshot()`` describes
-it at any time, ``since(mark)`` describes what arrived after a mark (progress)
-and ``merge`` joins two unread deltas. Byte streams keep the raw bytes, cut
-on UTF-8 code point boundaries, so every count is exact.
+The second producer of snapshots, next to ``capture``: it builds a ``Text``
+incrementally, so the whole output is never held in memory. It reads no
+live objects and does not import the capture layers; it shares only the
+nodes (``_model``) and the UTF-8 cut points (``_codec``).
 """
 
 from __future__ import annotations
@@ -32,11 +30,23 @@ DEFAULT_SPILL_BYTES = 64 * 1024 * 1024
 
 @dataclass(frozen=True)
 class SpillTarget:
-    """Where a stream writes its whole output while it runs.
+    """Where and how much a ``TextStream`` spills: the file that keeps its whole output.
 
-    ``path=None``: a new temporary file. Only the first ``max_bytes`` bytes are
-    written. ``always=False``: the file is deleted on ``close()`` when nothing
-    was cut from memory (the snapshot then holds everything).
+    Fields:
+
+    - ``path`` (default ``None``): the file to write; an existing file is
+      truncated. ``None``: a new temporary file (``nooa-output-*.txt`` in
+      the system temporary directory).
+    - ``max_bytes`` (default 64 MiB): only the first ``max_bytes`` bytes are
+      written; ``Spill.cut`` then says the file is cut. Non-negative.
+    - ``always`` (default ``False``): keep the file even when nothing was
+      cut. ``False``: ``close()`` deletes it when the final ``Text`` is
+      complete (the snapshot then holds everything).
+
+    The stream owns the file: it never raises for a file error. When the
+    file cannot be created, written or flushed, the stream logs a warning,
+    removes the partial file and keeps memory only (``Text.full`` is
+    ``None``).
     """
 
     path: str | None = None
@@ -45,18 +55,57 @@ class SpillTarget:
 
 
 class TextStream:
-    """Head, rolling tail, counter and optional spill file of one output stream.
+    """One output stream as a bounded ``Text``: head, rolling tail, exact count, optional spill file.
 
-    ``unit="bytes"``: ``write`` takes bytes (``str`` is encoded as UTF-8);
-    ``unit="chars"``: it takes ``str`` only and raises ``TypeError`` for
-    bytes (raw output belongs in a bytes stream, which keeps it as written).
-    Memory stays at ``head + tail`` units plus the chunk being written.
+    ``TextStream(*, unit, head, tail, spill=None)``, all keyword-only:
 
-    Threads: one writer. ``snapshot()`` and ``since()`` only read memory (and
-    flush the spill file), but they are not synchronised with ``write``:
-    call them from the writer's thread, or have the caller serialise them
-    with writes. There is no lock (PR 1).
+    - ``unit``: ``"chars"`` (``write`` takes ``str``) or ``"bytes"``
+      (``write`` takes ``bytes``, ``bytearray`` or ``str``, which is encoded
+      as UTF-8).
+    - ``head``: the units kept from the start.
+    - ``tail``: the units kept from the end (a rolling window).
+    - ``spill`` (default ``None``): a ``SpillTarget`` to also write the
+      whole output to a file while the stream runs; ``None``: memory only.
+
+    Methods: ``write(data)``, ``snapshot()``, ``since(mark)``, ``close()``.
+    A ``TextStream`` is also a context manager that closes on exit.
+
+    Guarantees:
+
+    - Bounded memory: at most ``head + tail`` units plus the chunk being
+      written; ``write`` is O(len(data)).
+    - Exact accounting: ``Text.length`` counts every unit written, and
+      ``Text.omitted`` every unit not kept.
+    - UTF-8-safe cuts: a bytes stream keeps the raw bytes, and a cut
+      ``Text`` of it starts and ends on code point boundaries. Bytes are
+      never decoded here; a chars stream keeps its ``str`` as written.
+    - The spill file holds the first ``SpillTarget.max_bytes`` bytes of the
+      output (``Text.full``); a file error never raises (see
+      ``SpillTarget``).
+
+    Threads: one writer. ``snapshot()`` and ``since()`` only read memory
+    (and flush the spill file) but are not synchronised with ``write``:
+    call them from the writer's thread, or serialise them with writes.
+    There is no lock.
+
+    Raises ``ValueError`` for an unknown ``unit``, a negative ``head`` or
+    ``tail``, or a negative ``spill.max_bytes``.
+
+    >>> from nooa.snapshot import TextStream, render_output
+    >>> stream = TextStream(unit="bytes", head=4, tail=4)
+    >>> stream.write(b"0123456789abcdef")
+    >>> print(render_output(stream.close()))
+    0123
+    [... 8 bytes omitted; full output not kept]
+    cdef
     """
+
+    unit: Literal["chars", "bytes"]
+    """``"chars"`` or ``"bytes"``, as given."""
+    head: int
+    """The units kept from the start, as given."""
+    tail: int
+    """The units kept from the end, as given."""
 
     def __init__(
         self,
@@ -147,7 +196,17 @@ class TextStream:
     # --- writing ----------------------------------------------------------
 
     def write(self, data: str | bytes | bytearray) -> None:
-        """Add ``data``: O(len(data)), memory bounded by ``head + tail``."""
+        """Append ``data`` to the stream: O(len(data)), memory bounded by ``head + tail``.
+
+        A chars stream takes ``str`` only and raises ``TypeError`` for
+        anything else (write raw output to a bytes stream, which keeps it as
+        written). A bytes stream takes ``bytes`` or ``bytearray``; a ``str``
+        is encoded as UTF-8 (surrogate escapes as their raw bytes, a lone
+        surrogate as ``\\udXXXX`` text). While a spill file is active,
+        ``data`` is also written to it, up to ``SpillTarget.max_bytes``
+        (a chars stream encodes it as a bytes stream would). Raises
+        ``ValueError`` after ``close()``.
+        """
         if self._closed is not None:
             raise ValueError("write to a closed TextStream")
         if self.unit == "bytes":
@@ -197,7 +256,11 @@ class TextStream:
         )
 
     def snapshot(self) -> Text:
-        """The whole stream so far (the final ``Text`` once closed)."""
+        """The whole stream so far, as a ``Text``; once closed, the final one.
+
+        Callable at any time while the stream runs. It first flushes the
+        spill file, so ``Text.full.kept`` bytes are on disk.
+        """
         if self._closed is not None:
             return self._closed
         self._flush()
@@ -213,10 +276,23 @@ class TextStream:
         return self._total - (len(last) - complete_prefix(last))
 
     def since(self, mark: int = 0) -> tuple[Text, int]:
-        """What arrived after ``mark`` (0: the start), and the mark to pass next time.
+        """What arrived after ``mark``, and the mark to pass next time: ``(Text, mark)``.
 
-        Bounded like the stream: what memory no longer holds is omitted. A
-        byte stream's mark stops before an incomplete UTF-8 sequence.
+        ``mark`` (default 0, the start) is a unit count returned by an
+        earlier ``since``; it is clamped to what was written. The ``Text``
+        has ``length`` = the units after ``mark`` and keeps what memory
+        still holds of them (in the head or the rolling tail); the rest is
+        omitted. A bytes stream's new mark stops before an incomplete UTF-8
+        sequence at the end, so the next delta starts with it. Join unread
+        deltas with ``merge``.
+
+        >>> from nooa.snapshot import TextStream
+        >>> stream = TextStream(unit="chars", head=3, tail=3)
+        >>> stream.write("hello")
+        >>> first, mark = stream.since()
+        >>> stream.write(" world")
+        >>> stream.since(mark)
+        (Text(head='', tail='rld', length=6, unit='chars', reason='max_length', full=None), 11)
         """
         if self._closed is not None:
             end = self._total
@@ -227,7 +303,12 @@ class TextStream:
         return self._text(mark, end), end
 
     def close(self) -> Text:
-        """The final ``Text``; closes the spill file (deleting it if nothing was cut)."""
+        """Finish the stream and return the final ``Text``; later calls return the same one.
+
+        Closes the spill file and deletes it when the ``Text`` is complete,
+        unless ``SpillTarget.always`` is set. After ``close()``, ``write``
+        raises ``ValueError``; ``snapshot()`` and ``since()`` still work.
+        """
         if self._closed is not None:
             return self._closed
         file, self._file = self._file, None
@@ -313,15 +394,29 @@ def _encode(text: str) -> bytes:
 
 
 def merge(a: Text, b: Text, head: int, tail: int) -> Text:
-    """``a`` then ``b`` as one ``Text`` of at most ``head`` + ``tail`` kept units.
+    """``a`` followed by ``b`` as one ``Text`` keeping at most ``head`` + ``tail`` units.
 
-    For unread progress deltas: ``length`` is ``a.length + b.length``, and
-    what either delta had already omitted stays omitted, so the head comes
-    only from what was kept before the first gap and the tail only from
-    what was kept after the last one. Each input keeps its own units (bytes
-    stay bytes), so the counts are exact. A bytes cut keeps whole code
-    points, as ``TextStream`` does, and never moves across the joint of two
-    inputs' parts.
+    For unread progress deltas (two results of ``TextStream.since``).
+
+    - ``a``, ``b``: two ``Text`` of the same unit.
+    - ``head``, ``tail``: the units the result may keep from its start and
+      its end.
+
+    The result's ``length`` is ``a.length + b.length``. What either input
+    already omitted stays omitted: the head comes only from what was kept
+    before the first gap, the tail only from what was kept after the last
+    one. Counts are exact in the inputs' unit (bytes stay bytes). A bytes
+    cut keeps whole code points and never moves across the joint of two
+    inputs' parts. ``reason``: ``None`` when everything fits, else the
+    first input's reason, or ``"max_length"``. ``full``: ``b.full`` when
+    both inputs spilled to the same path, else ``None``.
+
+    Raises ``ValueError`` when the units differ or ``head`` / ``tail`` is
+    negative.
+
+    >>> from nooa.snapshot import Text, merge
+    >>> merge(Text(head="hello", length=5, unit="chars"), Text(head=" world", length=6, unit="chars"), 3, 3)
+    Text(head='hel', tail='rld', length=11, unit='chars', reason='max_length', full=None)
     """
     if a.unit != b.unit:
         raise ValueError(f"cannot merge {a.unit} with {b.unit}")

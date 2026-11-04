@@ -1,23 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Renderers: one snapshot, the notation each consumer shows.
+"""The renderers: ``render_output``, ``render_python`` (with its hooks), ``render_json``, ``render_trace``.
 
-- ``render_output(snapshot)``: Shell-style output, ``HEAD\n[... N bytes omitted; ...]\nTAIL``.
-- ``render_python(snapshot)``: agentdoc's ``pformat`` / prefill notation.
-- ``render_json(snapshot, max_chars=...)``: plain, valid JSON within ``max_chars``
-  (#342's trace preview semantics: nothing is embedded in user data).
-- ``render_trace(snapshot, direction=..., max_chars=...)``: the ``render_json``
-  text and the trace span attributes that say whether and where it is
-  incomplete (the trace entry point).
-
-Only ``render_python`` has hooks, one per kind (``render_python.register(
-"numpy.ndarray")``): an ``Object`` whose ``kind`` has a hook renders through
-it, and the hook renders its children through the renderer ``r`` it is given.
-A missing or failing hook, or one nested more than 64 deep, means generic
-rendering; rendering never fails because of a hook. ``render_output`` and
-``render_json`` are generic. Only ``render_json`` bounds its output
-(``max_chars``); the text renderers format what ``capture`` kept
-(*Extension contract* in ``docs/snapshot-model.md``).
+Rendering is the last step: it reads detached nodes only, never a live
+value, and does not import the capture layers. It shares the JSON
+accounting with capture through ``_codec``, so ``render_json`` of a
+captured snapshot keeps exactly what capture kept.
 """
 
 from __future__ import annotations
@@ -139,15 +127,21 @@ _MAX_HOOK_NESTING = 64  # hooks running inside hooks: deeper nodes render generi
 
 
 class PythonRenderer:
-    """What a ``render_python`` hook renders children with: ``r.render(child)``.
+    """The renderer ``r`` a ``render_python`` hook receives: ``hook(node, r) -> str``.
 
-    Children rendered through ``r`` use the renderer's own notation and cut
-    markers (and their own hooks). ``r.generic(node)`` renders a node without
-    its hook. Hooks nest at most 64 deep: a node met while 64 hooks are running
-    renders generically, so a hook that renders its own node, or builds new
-    nodes of its kind, still ends. There is no output-length limit: the nodes
-    were bounded by ``capture``, and the string a hook returns is not checked
-    for length (*Extension contract* in ``docs/snapshot-model.md``).
+    ``render_python`` makes one per call; a hook never builds one. Methods:
+
+    - ``r.render(child)``: ``child`` in the renderer's notation, with its cut
+      markers, through the child's own hook when it has one. A hook renders
+      every child this way.
+    - ``r.generic(node)``: ``node`` without its own hook (its children still
+      use theirs); a hook calls it to extend the generic notation.
+
+    Hooks nest at most 64 deep: a node met while 64 hooks are running
+    renders generically. So a hook that renders its own node through ``r``,
+    or builds new nodes of its kind, still ends, well inside Python's
+    recursion limit. There is no length limit: the nodes were bounded by
+    ``capture``, and the string a hook returns is not checked for length.
     """
 
     def __init__(self, hooks: dict[str, TextHook]) -> None:
@@ -155,7 +149,12 @@ class PythonRenderer:
         self._depth = 0  # hooks running
 
     def render(self, node: Snapshot) -> str:
-        """``node`` in this renderer's notation, through its hook when one is registered."""
+        """``node`` in this renderer's notation, through its kind's hook when one is registered.
+
+        A hook that raises an ``Exception`` or returns a non-``str``, and any
+        node met while 64 hooks are running, renders as ``generic(node)``.
+        Raises ``TypeError`` when ``node`` is not a snapshot node.
+        """
         kind = node.kind if type(node) is Object else None
         hook = self._hooks.get(kind) if kind is not None else None
         if hook is not None and self._depth < _MAX_HOOK_NESTING:
@@ -171,7 +170,10 @@ class PythonRenderer:
         return self.generic(node)
 
     def generic(self, node: Snapshot) -> str:
-        """``node`` rendered generically (no hook for ``node`` itself; children use theirs)."""
+        """``node`` in the generic notation, without its own hook; its children use theirs.
+
+        Raises ``TypeError`` when ``node`` is not a snapshot node.
+        """
         if type(node) is Scalar:
             return repr(node.value)
         if type(node) is Text:
@@ -242,30 +244,65 @@ class _OutputNotation(PythonRenderer):
 
 
 class _RenderPython:
-    """``render_python(snapshot)``, with ``render_python.register(kind)`` for per-kind hooks."""
+    """``render_python(snapshot) -> str``: a snapshot in agentdoc's ``pformat`` / prefill notation.
+
+    Complete values are Python literals (a string with newlines in triple
+    quotes). Cut values use the slice-key markers:
+
+    - ``str(len=N, [:h]='...', [-t:]='...')`` and ``bytes(len=N, ...)``
+      with ``bytes`` literals of the kept bytes;
+    - ``list(len=N, [:h]=[...], [-t:]=[...])`` (and ``tuple``);
+    - ``dict(len=N, items={..., ..., ...})``;
+    - ``[list: N items]`` / ``{dict: N items}`` at ``max_depth``;
+    - ``Type(a=1, ...)`` for an incomplete ``Object``;
+    - ``<cycle>`` for a ``Ref``, ``<opaque: Type>`` for an uninspected
+      value, ``<unavailable: reason>`` for another ``Unavailable``.
+
+    String keys longer than 50 characters are cut the same way. The output
+    is not column-wrapped and has no length limit: it formats what
+    ``capture`` bounded.
+
+    Hooks (the one extension point for rendering): an ``Object`` whose
+    ``kind`` has a hook renders as ``hook(node, r)``, with ``r`` a
+    ``PythonRenderer``. Register with ``@render_python.register(kind)`` or
+    ``render_python.register(kind, hook)``; remove with
+    ``render_python.unregister(kind)``. The registry is process-wide.
+    Rendering never fails because of a hook: one that raises or returns a
+    non-``str``, or one nested more than 64 deep, falls back to the generic
+    notation. Raises ``TypeError`` when ``snapshot`` is not a snapshot node.
+
+    >>> from nooa.snapshot import Limits, Object, capture, render_python
+    >>> render_python(capture({"a": "x" * 100}, Limits(max_string=6, tail_share=0.5)))
+    "{'a': str(len=100, [:3]='xxx', [-3:]='xxx')}"
+    >>> @render_python.register("point")
+    ... def point(node: Object, r) -> str:
+    ...     return f"<{r.render(node.field('x'))}, {r.render(node.field('y'))}>"
+    >>> node = Object("P", (("x", capture(1)), ("y", capture(2))), kind="point")
+    >>> render_python(node)
+    '<1, 2>'
+    >>> render_python.unregister("point")
+    """
 
     def __init__(self) -> None:
         self._hooks: dict[str, TextHook] = {}
 
     def __call__(self, snapshot: Snapshot) -> str:
-        """``snapshot`` in agentdoc's ``pformat`` / CodeAct prefill notation, not column-wrapped.
-
-        Complete values are Python literals; cut ones use the slice-keys markers
-        ``str(len=N, [:h]='...', [-t:]='...')``, ``list(len=N, [:h]=[...], [-t:]=[...])``
-        and ``dict(len=N, items={..., ...})``; depth cuts ``[list: N items]``;
-        cycles ``<cycle>``; uninspected values ``<opaque: Type>``. An ``Object``
-        whose ``kind`` has a hook renders through it; a hook that raises or
-        returns a non-``str``, or one nested more than 64 deep, falls back to
-        the generic notation.
-        """
+        """``snapshot`` in agentdoc's ``pformat`` / prefill notation; see ``render_python``."""
         return PythonRenderer(self._hooks).render(snapshot)
 
     def register(self, kind: str, function: TextHook | None = None) -> Any:
         """Register ``hook(node: Object, r: PythonRenderer) -> str`` for objects of ``kind``.
 
-        Use as ``@render_python.register("numpy.ndarray")`` or
-        ``register(kind, hook)``; registering again replaces it. A hook that
-        raises or returns a non-``str`` falls back to the generic notation.
+        - ``kind``: a non-empty ``str``, matched against ``Object.kind``. The
+          library need not be imported to register a hook.
+        - ``function`` (default ``None``): the hook. ``None``: return a
+          decorator, ``@render_python.register("numpy.ndarray")``.
+
+        Returns the hook (or the decorator). Registering a kind again
+        replaces its hook. A hook renders children only through
+        ``r.render(child)``; one that raises an ``Exception`` or returns a
+        non-``str`` falls back to the generic notation. Raises ``TypeError``
+        when ``kind`` is not a non-empty ``str``.
         """
         if type(kind) is not str or not kind:
             raise TypeError("render_python.register needs a kind (a non-empty str)")
@@ -277,7 +314,7 @@ class _RenderPython:
         return add(function) if function is not None else add
 
     def unregister(self, kind: str) -> None:
-        """Remove the hook for ``kind`` (no-op when absent)."""
+        """Remove the hook for ``kind``; a no-op when there is none."""
         self._hooks.pop(kind, None)
 
 
@@ -285,17 +322,28 @@ render_python = _RenderPython()
 
 
 def render_output(snapshot: Snapshot) -> str:
-    """``snapshot`` as the model sees command output.
+    """``snapshot`` as the model sees command output: ``HEAD``, one notice line, ``TAIL``.
 
-    A ``Text`` is whole, or head and tail around one line that says how
-    much was left out and where the whole output is::
+    A complete ``Text`` is its content. A cut ``Text`` is its head, a line
+    that says how much was left out (in its unit) and where the whole output
+    is, and its tail, each on its own line when not empty::
 
         [... 1,234 bytes omitted; full output: /path]
         [... 1,234 bytes omitted; /path holds the first 65,536 of 99,999 bytes]
         [... 1,234 bytes omitted; full output not kept]
 
-    Other nodes use ``render_python``'s generic notation (no hooks), with
-    nested ``Text`` in the output notation.
+    Bytes are decoded as UTF-8 with replacement. Other nodes use
+    ``render_python``'s generic notation without hooks, with nested ``Text``
+    in the output notation. No length limit: it prints what the node kept.
+    Raises ``TypeError`` when ``snapshot`` is not a snapshot node.
+
+    >>> from nooa.snapshot import Spill, Text, render_output
+    >>> text = Text(head="ab", tail="yz", length=10, unit="chars", reason="max_length",
+    ...             full=Spill("/tmp/out.txt", 10, 10))
+    >>> print(render_output(text))
+    ab
+    [... 6 chars omitted; full output: /tmp/out.txt]
+    yz
     """
     return _OutputNotation({}).render(snapshot)
 
@@ -527,12 +575,31 @@ def _render(snapshot: Snapshot, max_chars: int) -> tuple[str, _Report]:
 
 
 def render_json(snapshot: Snapshot, *, max_chars: int) -> str:
-    """``snapshot`` as plain, valid JSON of at most ``max_chars`` characters.
+    """``snapshot`` as plain, valid JSON of at most ``max_chars`` characters (keyword-only).
 
-    Strings keep a prefix; containers their first items; uninspected values
-    become ``"<opaque: Type>"``; cycles ``[]`` / ``{}``. Nothing marks a cut
-    inside the data: ``render_trace`` reports where the preview is
-    incomplete. There are no hooks: every node renders generically.
+    The encoding is canonical: ASCII-only, ``", "`` and ``": "``
+    separators, keys in snapshot order. Strings keep a prefix (bytes are
+    decoded as UTF-8 with replacement); containers keep their first items
+    (a kept ``tail`` is not shown); uninspected values become
+    ``"<opaque: Type>"``; cycles ``[]`` / ``{}``; other ``Unavailable``
+    nodes, and anything that does not fit, the smallest value of their
+    type (``""``, ``0``, ``[]``, ``{}``, ...). Mapping keys convert as
+    ``json.dumps`` converts them, and a mapping stops at a key that would
+    collide. A ``capture_fields`` wrapper keeps every field. Nothing marks a
+    cut inside the data: ``render_trace`` reports where the text is
+    incomplete. No hooks.
+
+    Exact accounting: for ``snapshot = capture(v, limits)``,
+    ``render_json(snapshot, max_chars=limits.max_chars)`` cuts nothing
+    further, and on #342's domain it is #342's text. A smaller
+    ``max_chars`` cuts further and stays valid.
+
+    Raises ``ValueError`` when ``max_chars`` is less than 1, ``TypeError``
+    for a node that is not a snapshot node.
+
+    >>> from nooa.snapshot import capture, render_json
+    >>> render_json(capture({"a": "x" * 30, "b": [1, 2]}), max_chars=20)
+    '{"a": "xxxxxxxxxxx"}'
     """
     return _render(snapshot, max_chars)[0]
 
@@ -557,14 +624,36 @@ def _attributes(direction: str, report: _Report, snapshot: Snapshot) -> dict[str
 def render_trace(
     snapshot: Snapshot, *, direction: str, max_chars: int
 ) -> tuple[str, dict[str, Any]]:
-    """A trace span's preview of ``snapshot``: the JSON text and its span attributes.
+    """A trace span's preview of ``snapshot``: ``(json_text, attributes)``, from one JSON walk.
 
-    The text is ``render_json(snapshot, max_chars=max_chars)``; the attributes
-    come from the same JSON walk (``direction``: ``"input"`` or ``"output"``):
-    always ``nooa.{direction}.preview.version`` and ``.incomplete``; when
-    incomplete, ``.paths`` (RFC 6901 JSON Pointers, at most 32 and 2,048
-    characters, else the root ``""``) and ``.reasons`` (sorted, unique);
-    ``.full_output`` lists spill files, when any.
+    - ``snapshot``: the node to preview.
+    - ``direction`` (keyword-only): ``"input"`` or ``"output"``, the middle
+      of the attribute names.
+    - ``max_chars`` (keyword-only): the bound of the text, as for
+      ``render_json``.
+
+    ``json_text`` is ``render_json(snapshot, max_chars=max_chars)``. The
+    attributes say whether and where it is incomplete, including the cuts
+    rendering made (with ``prefix = f"nooa.{direction}.preview"``):
+
+    - ``{prefix}.version``: always, ``1``;
+    - ``{prefix}.incomplete``: always, a ``bool``;
+    - ``{prefix}.paths``: when incomplete, the JSON Pointers (RFC 6901) of
+      the incomplete nodes, a tuple of at most 32 paths and 2,048
+      characters, else ``("",)`` (the root);
+    - ``{prefix}.reasons``: when incomplete, the sorted, unique reasons;
+    - ``{prefix}.full_output``: when any ``Text`` in the snapshot spilled,
+      the spill file paths, depth first, whatever the text shows.
+
+    The version, incomplete and paths attributes are #342's. Raises as
+    ``render_json`` does.
+
+    >>> from nooa.snapshot import capture, render_trace
+    >>> text, attributes = render_trace(capture({"a": "x" * 30}), direction="output", max_chars=20)
+    >>> text
+    '{"a": "xxxxxxxxxxx"}'
+    >>> attributes["nooa.output.preview.paths"], attributes["nooa.output.preview.reasons"]
+    (('/a',), ('max_length',))
     """
     text, report = _render(snapshot, max_chars)
     return text, _attributes(direction, report, snapshot)

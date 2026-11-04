@@ -1,12 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""The capture builder: one bounded walk over a live value, sized as canonical JSON.
+"""The capture builder: one bounded walk over a live value, each node sized as canonical JSON.
 
-Dispatch (exact built-in types natively, then the nearest-MRO shape:
-``capture.register`` registrations, Pydantic models, dataclasses),
-containers, text cutting, objects and their fields, the registered shapes'
-builders and the fallbacks. Live classes and instances are read through
-``_raw``; shape accessors are the only extension code that runs.
+What lives here: dispatch (exact built-in types natively, then the shape of
+the nearest MRO entry: a ``capture.register`` registration, Pydantic's
+``BaseModel``, a dataclass), the container, text and object builders, the
+builders of the registered shapes and the typed fallbacks. Every node's
+size is its exact ``render_json`` size, so the walk stays within
+``Limits.max_chars``; every step charges ``Limits.max_nodes``.
+
+Live classes and instances are read through ``_raw``. Shape accessors are
+the only extension code that runs, and only here (see ``_raw``).
 """
 
 from __future__ import annotations
