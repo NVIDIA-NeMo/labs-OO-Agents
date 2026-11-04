@@ -260,8 +260,13 @@ async def test_unknown_sessions_and_methods(mode, servers):
         "message": "Resource not found",
         "data": {"uri": "nope"},
     }
-    frame = await server.call("authenticate", {"methodId": "x"})
+    frame = await server.call("frobnicate", {})
     assert frame.message["error"]["code"] == -32601
+    # authenticate is known (terminal auth); an unknown method id is invalid.
+    frame = await server.call("authenticate", {"methodId": "x"})
+    assert frame.message["error"]["code"] == -32602
+    frame = await server.call("authenticate", {"methodId": "nooa-connect"})
+    assert frame.message["result"] == {}
     assert await server.finish() == 0
 
 
