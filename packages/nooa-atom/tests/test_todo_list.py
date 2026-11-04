@@ -196,7 +196,10 @@ def test_lookup_errors_list_the_valid_ids_bounded():
         todos.get("missing")
     text = str(error.value)
     assert f"{items[0].id} (Item 0 " in text and "…)" in text
-    assert items[8].id not in text and text.endswith("+2 more (see todo_status)")
+    assert items[8].id not in text
+    assert text.endswith("+2 more (all of them: self.todo.list_todos())")
+    # todo_status shows only the first rows, so the hint names a call that lists every id.
+    assert [t.id for t in todos.list_todos()] == [t.id for t in items]
 
 
 def test_misuses_name_what_to_use_instead():

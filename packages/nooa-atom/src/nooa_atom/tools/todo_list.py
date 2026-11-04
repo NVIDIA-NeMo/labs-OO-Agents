@@ -336,7 +336,7 @@ class TodoList(Skill):
             return "the list is empty: add one with self.todo.add(title, description)"
         shown = ", ".join(f"{key} ({_short(item.title)})" for key, item in items[:_IDS_SHOWN])
         if len(items) > _IDS_SHOWN:
-            shown += f", +{len(items) - _IDS_SHOWN} more (see todo_status)"
+            shown += f", +{len(items) - _IDS_SHOWN} more (all of them: self.todo.list_todos())"
         return f"valid ids: {shown}"
 
     def _known(self, value: Any) -> bool:
