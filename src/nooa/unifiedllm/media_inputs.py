@@ -97,25 +97,27 @@ def guard_native_media(
     replayed as one unit and cannot be partly edited, so media cannot be removed
     from it the way ``filter_media_messages`` removes it from ordinary messages.
 
-    Two checks run in order:
+    ``enabled=None`` skips both checks: direct projection helpers that do not
+    apply media permissions keep their existing contract. Otherwise two checks
+    run in order:
 
-    1. If ``enabled`` is not None and ``native`` contains a media kind that is not
-       enabled, raise ``ReasoningReplayError``. The caller must replay a portable
-       version of the turn instead. ``enabled=None`` skips this check; direct
-       projection helpers use it when they do not apply media permissions.
+    1. If ``native`` contains a media kind that is not in ``enabled``, raise
+       ``ReasoningReplayError``. The caller must replay a portable version of the
+       turn instead.
     2. Raise ``ValueError`` if ``native`` contains media that ``interface`` cannot
        send (see ``nooa.media_policy``).
     """
-    if enabled is not None:
-        content = native.get("content")
-        kinds = ["audio"] if native.get("audio") is not None else []
-        if isinstance(content, (list, tuple)):
-            kinds.extend(attachment_kind(block) for block in content if isinstance(block, Mapping))
-        if any(kind is not None and kind not in enabled for kind in kinds):
-            raise ReasoningReplayError(
-                "Cannot remove disabled media from opaque assistant state; "
-                "supply a portable assistant turn instead."
-            )
+    if enabled is None:
+        return
+    content = native.get("content")
+    kinds = ["audio"] if native.get("audio") is not None else []
+    if isinstance(content, (list, tuple)):
+        kinds.extend(attachment_kind(block) for block in content if isinstance(block, Mapping))
+    if any(kind is not None and kind not in enabled for kind in kinds):
+        raise ReasoningReplayError(
+            "Cannot remove disabled media from opaque assistant state; "
+            "supply a portable assistant turn instead."
+        )
     from nooa.media_policy import reject_unsupported_media
 
     reject_unsupported_media([native], interface)

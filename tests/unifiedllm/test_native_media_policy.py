@@ -386,6 +386,20 @@ def test_compatible_opaque_native_media_guard_before_reconstruction(monkeypatch,
     assert turn.model_dump() == before and bodies == []
 
 
+@pytest.mark.parametrize("interface", ["anthropic", "responses"])
+def test_native_media_check_without_permissions_keeps_direct_contract(interface):
+    """``enabled=None`` (direct projection helpers) skips both checks, as on main."""
+    from nooa.unifiedllm.errors import ReasoningReplayError
+    from nooa.unifiedllm.media_inputs import guard_native_media
+
+    native = {"type": "message", "content": [{"type": "input_audio", "input_audio": {}}]}
+    guard_native_media(native, None, interface=interface)
+    with pytest.raises(ReasoningReplayError):
+        guard_native_media(native, (), interface=interface)
+    with pytest.raises(ValueError, match="Unsupported media input"):
+        guard_native_media(native, ("audio",), interface=interface)
+
+
 @pytest.mark.parametrize("kind", ["audio", "video"])
 def test_custom_chat_dispatch_with_anthropic_name_is_actual_wire_contract(monkeypatch, kind):
     bodies = mock_http(monkeypatch, "chat")
