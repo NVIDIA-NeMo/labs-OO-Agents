@@ -44,9 +44,9 @@ The lifecycle the agent follows (documented to it via `doc(self.skill_writing)`)
 ```python
 await self.skill_writing.create("release", "How to cut a release.", text=steps)  # text skill: SKILL.md, active at once
 await self.skill_writing.create("stats", "Statistical utilities.")      # 1. scaffold package (pyproject + __init__)
-await self.shell.write(self.skill_writing.path("stats", "stats.py"), source)   # 2. write code
+await self.shell.write_file(self.skill_writing.path("stats", "stats.py"), source)  # 2. write code
 await self.skill_writing.reload("stats")                                # 3. lint + hot-reload → self.stats exists
-await self.shell.edit(self.skill_writing.path("stats", "stats.py"), old, new)  # 4. edit
+await self.shell.replace(self.skill_writing.path("stats", "stats.py"), old, new)  # 4. edit
 await self.skill_writing.reload("stats")                                #    ...and reload again
 await self.skill_writing.run_tests("stats")                             # 5. pytest on the skill's tests/
 await self.skill_writing.list(); await self.skill_writing.repo_tree()   # discovery

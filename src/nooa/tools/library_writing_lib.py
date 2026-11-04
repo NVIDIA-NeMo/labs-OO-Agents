@@ -230,7 +230,7 @@ class SkillWriting(Skill):
                       If empty, returns the skill's root directory.
 
         Returns:
-            Absolute path as a string (suitable for self.shell.write/edit/view).
+            Absolute path as a string (for self.shell.write_file/replace/read).
         """
         p = self._dir(lib_name)
         if relative:
