@@ -47,6 +47,19 @@ def test_positional_result_reads_value_unless_it_is_a_field(monkeypatch):
     assert metrics.return_result_keyword_aliases == []  # pure: callers count
 
 
+def test_a_dataclass_value_field_is_not_the_positional_result():
+    import dataclasses
+
+    from nooa.strategies.codeact_errors import positional_result
+
+    @dataclasses.dataclass
+    class Result:
+        value: int
+
+    assert return_type_field_names(Result) == {"value"}
+    assert positional_result({"value": 3}, Result) is None
+
+
 def test_call_hint_names_each_model_with_its_required_fields():
     assert return_call_hint(Scored) == "Call it as return_result(Scored(value=...))."
     assert return_call_hint(Done | NeedInput) == (

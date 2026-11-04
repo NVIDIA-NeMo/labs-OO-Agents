@@ -6,6 +6,7 @@ Pure functions that format validation errors into actionable LLM feedback.
 Extracted from CodeActStrategy to keep the strategy class focused on control flow.
 """
 
+import dataclasses
 import inspect
 import json
 from typing import Any, Literal
@@ -31,12 +32,14 @@ def _return_type_members(return_type: Any) -> tuple[Any, ...]:
 
 
 def return_type_field_names(return_type: Any) -> set[str]:
-    """Field names of a model/TypedDict return type (all union members together)."""
+    """Field names of a model/dataclass/TypedDict return type (all union members together)."""
     names: set[str] = set()
     for member in _return_type_members(return_type):
         fields = getattr(member, "model_fields", None)
         if isinstance(fields, dict):
             names.update(fields)
+        elif isinstance(member, type) and dataclasses.is_dataclass(member):
+            names.update(f.name for f in dataclasses.fields(member))
         elif isinstance(member, type) and issubclass(member, dict):
             names.update(inspect.get_annotations(member))
     return names
