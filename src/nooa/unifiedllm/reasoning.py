@@ -9,6 +9,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, model_validator
 
 from nooa.unifiedllm.limits import REPLY_CAP_KEYS
+from nooa.unifiedllm.route_identity import endpoint_or_provider_changed
 
 _DECLARATIONS = {"reasoning_levels", "reasoning_default"}
 # These select the client/request itself, not a provider's effort behavior.
@@ -103,19 +104,6 @@ def _promote_reply_cap(params: dict[str, Any]) -> dict[str, Any]:
     return params
 
 
-def _endpoint_changed(defaults: Mapping[str, Any], overrides: Mapping[str, Any]) -> bool:
-    """Whether a call overrides the endpoint with a different URL.
-
-    ``api_base`` and ``base_url`` are two spellings of one endpoint, so passing the
-    configured URL under the other spelling is not a route change. A ``None``
-    or blank override is no override. URLs are normalized as for context windows (see
-    route_identity.endpoint_changed), so the three route checks agree.
-    """
-    from nooa.unifiedllm.route_identity import endpoint_changed
-
-    return endpoint_changed(defaults, overrides)
-
-
 def apply_reasoning_level(
     declaration: ReasoningConfig,
     model: str,
@@ -142,12 +130,9 @@ def apply_reasoning_level(
     if level is None:
         return _promote_reply_cap(params)
     patch = declaration.settings(level)
+    # api_base and base_url spell one endpoint; see route_identity.
     if (
-        _endpoint_changed(defaults, overrides)
-        or (
-            "custom_llm_provider" in overrides
-            and overrides["custom_llm_provider"] != defaults.get("custom_llm_provider")
-        )
+        endpoint_or_provider_changed(defaults, overrides)
         or overrides.get("model", model) != model
         or overrides.get("client") is not None
     ):

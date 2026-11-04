@@ -210,12 +210,41 @@ def test_known_raw_shapes_filter_first_then_reject(monkeypatch, style, block, en
     assert messages == before
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("style", ["anthropic", "responses"])
 @pytest.mark.parametrize("block", RAW_SHAPES)
-def test_responses_projection_rejects_explicit_unsupported_blocks(block):
-    before = deepcopy(block)
-    with pytest.raises(ValueError, match="Unsupported media input"):
-        ResponsesClient._transform_content_blocks([block])
-    assert block == before
+async def test_async_requests_reject_enabled_unsupported_blocks_before_http(
+    monkeypatch, style, block
+):
+    """The one post-projection check also rejects every raw shape on async calls."""
+    bodies = mock_http(monkeypatch, style)
+    messages = [{"role": "user", "content": [deepcopy(block)]}]
+    before = deepcopy(messages)
+    with make_client(style, media_inputs=ALL) as c:
+        with pytest.raises(ValueError, match="Unsupported media input"):
+            await c.acall(messages)
+    assert bodies == [] and messages == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("style", ["anthropic", "responses", "chat"])
+@pytest.mark.parametrize("is_async", [False, True])
+async def test_media_support_is_checked_once_per_request(monkeypatch, style, is_async):
+    import nooa.media_policy as media_policy
+
+    bodies = mock_http(monkeypatch, style)
+    calls = []
+    real = media_policy.reject_unsupported_media
+    monkeypatch.setattr(
+        media_policy,
+        "reject_unsupported_media",
+        lambda messages, interface: calls.append(interface) or real(messages, interface),
+    )
+    messages = [{"role": "user", "content": [{"type": "text", "text": "hello"}]}]
+    with make_client(style, media_inputs=ALL) as c:
+        await c.acall(messages) if is_async else c.call(messages)
+    assert len(bodies) == 1
+    assert len(calls) == 1
 
 
 @pytest.mark.parametrize("style", ["anthropic", "responses", "chat"])
@@ -384,6 +413,29 @@ def test_compatible_opaque_native_media_guard_before_reconstruction(monkeypatch,
         ):
             c.call([turn])
     assert turn.model_dump() == before and bodies == []
+
+
+def test_interface_resolution_lives_outside_media_policy_and_stays_importable():
+    import nooa.media_policy as media_policy
+    import nooa.request_interface as request_interface
+
+    for name in ("interface_for_provider", "resolved_input_interface", "entry_input_interface"):
+        assert getattr(media_policy, name) is getattr(request_interface, name)
+        assert getattr(request_interface, name).__module__ == "nooa.request_interface"
+
+
+@pytest.mark.parametrize("interface", ["anthropic", "responses"])
+def test_native_media_check_without_permissions_keeps_direct_contract(interface):
+    """``enabled=None`` (direct projection helpers) skips both checks, as on main."""
+    from nooa.unifiedllm.errors import ReasoningReplayError
+    from nooa.unifiedllm.media_inputs import check_replayed_native_media
+
+    native = {"type": "message", "content": [{"type": "input_audio", "input_audio": {}}]}
+    check_replayed_native_media(native, None, interface=interface)
+    with pytest.raises(ReasoningReplayError):
+        check_replayed_native_media(native, (), interface=interface)
+    with pytest.raises(ValueError, match="Unsupported media input"):
+        check_replayed_native_media(native, ("audio",), interface=interface)
 
 
 @pytest.mark.parametrize("kind", ["audio", "video"])

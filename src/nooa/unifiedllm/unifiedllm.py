@@ -6,7 +6,6 @@ import inspect
 import json
 import logging
 import math
-import os
 import re
 import warnings
 from abc import ABC, abstractmethod
@@ -1384,12 +1383,14 @@ class UnifiedLLM(ABC):
 
     def _prepare_media_messages(self, messages, call_config):
         enabled = self._request_media_inputs(call_config)
-        filtered = filter_media_messages(messages, enabled)
-        self._validate_implemented_media(filtered, call_config)
-        return filtered
+        # Media the interface cannot send is rejected after projection, by
+        # _validate_implemented_media: only the projected request also shows the
+        # native content of replayed assistant turns.
+        return filter_media_messages(messages, enabled)
 
     def _validate_implemented_media(self, messages, call_config):
-        from nooa.media_policy import reject_unsupported_media, resolved_input_interface
+        from nooa.media_policy import reject_unsupported_media
+        from nooa.request_interface import resolved_input_interface
 
         interface = resolved_input_interface(
             self._effective_model(call_config),
@@ -1630,6 +1631,7 @@ class UnifiedLLM(ABC):
         # import-time side effect.
         from nooa.unifiedllm.registry import (
             MODELS,
+            _lookup_api_key_env,
             _registry_lock,
             ensure_loaded,
         )
@@ -1664,9 +1666,12 @@ class UnifiedLLM(ABC):
         for key, cfg in models_snapshot.items():
             entry_client_type = cfg.get("client_type", "completion")
             if client_key is not None:
+                # Resolve the entry key as the registry does (validated name,
+                # NVIDIA synonyms, empty means unset), but without its warnings:
+                # this loop visits every entry. A malformed api_key_env gives None.
                 entry_key = cfg.get("api_key")
-                if entry_key is None and cfg.get("api_key_env"):
-                    entry_key = os.environ.get(cfg["api_key_env"])
+                if entry_key is None:
+                    entry_key, _ = _lookup_api_key_env(cfg)
                 if entry_key != client_key:
                     continue
             # Completion and Responses clients are never sent the registry-only
@@ -2150,9 +2155,9 @@ class CompletionClient(UnifiedLLM):
         same comparison as ``_request_media_inputs``); a call with no endpoint
         while one is configured goes to the provider default, a change.
         """
-        from nooa.unifiedllm.reasoning import _endpoint_changed
+        from nooa.unifiedllm.route_identity import endpoint_changed
 
-        return _endpoint_changed(self.config, call_config) or (
+        return endpoint_changed(self.config, call_config) or (
             any(self.config.get(key) for key in ("api_base", "base_url"))
             and not any(call_config.get(key) for key in ("api_base", "base_url"))
         )
@@ -2521,14 +2526,24 @@ class CompletionClient(UnifiedLLM):
     def _completion_http_client(
         self, call_config: dict[str, Any], *, is_async: bool, max_retries: int
     ) -> Any:
-        """Reuse the owned transport only while its constructor routing still applies."""
+        """Reuse the owned transport only while its constructor routing still applies.
+
+        The endpoint is compared with route_identity.endpoint_changed, like media
+        permissions, reasoning levels and context windows: the configured URL
+        under the other spelling, with a trailing slash or a different host case
+        is the same route and keeps the owned transport.
+        """
         if self.direct:
             return None
-        routing_fields = ("api_key", "custom_llm_provider")
+        from nooa.unifiedllm.route_identity import endpoint_changed
+
         if (
             self._effective_model(call_config) != self.model
-            or self._call_endpoint_changed(call_config)
-            or any(call_config.get(key) != self.config.get(key) for key in routing_fields)
+            or endpoint_changed(self.config, call_config)
+            or any(
+                call_config.get(key) != self.config.get(key)
+                for key in ("api_key", "custom_llm_provider")
+            )
         ):
             # LiteLLM uses a supplied OpenAI SDK client's bound URL/key, ignoring
             # the corresponding call parameters. Let it build the correct client
@@ -3239,9 +3254,6 @@ class ResponsesClient(UnifiedLLM):
     @staticmethod
     def _transform_content_blocks(blocks, text_kind="input_text"):
         """Project documented public slots, preserving request-owned metadata."""
-        from nooa.media_policy import reject_unsupported_media
-
-        reject_unsupported_media([{"content": blocks}], "responses")
         result = copy.deepcopy(blocks)
         for block in result:
             if block.get("type") == "text":
