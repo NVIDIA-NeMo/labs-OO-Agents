@@ -4,7 +4,9 @@
 
 from __future__ import annotations
 
+import gc
 import json
+import weakref
 from concurrent.futures import ThreadPoolExecutor
 from typing import Annotated, Any, ClassVar, Generic, Literal, TypeVar
 
@@ -16,6 +18,7 @@ from pydantic import (
     ConfigDict,
     Field,
     ValidationError,
+    create_model,
     field_validator,
     model_validator,
 )
@@ -23,6 +26,7 @@ from pydantic.version import VERSION as PYDANTIC_VERSION
 from typing_extensions import TypedDict
 
 from nooa.errors.storage import DeserializationError
+from nooa.storage import serialization
 from nooa.storage.markers import snapshotable
 from nooa.storage.serialization import deserialize, serialize
 
@@ -436,15 +440,96 @@ class _WrapValidatedAlias(BaseModel):
         return result
 
 
+class _DefaultWrapValidatedAlias(_WrapValidatedAlias):
+    """A dropped runtime flag must not silently replace a saved field with its default."""
+
+    value: int = Field(default=0, alias="apiValue")
+
+
+@pytest.mark.parametrize(
+    "value", [_WrapValidatedAlias(apiValue=7), _DefaultWrapValidatedAlias(apiValue=7)]
+)
 @pytest.mark.xfail(
     (2, 11) <= tuple(map(int, PYDANTIC_VERSION.split(".")[:2])) < (2, 14),
     reason="Pydantic 2.11–2.13 drops runtime alias flags in wrap validators: "
     "https://github.com/pydantic/pydantic/issues/13661",
     strict=True,
 )
-def test_model_wrap_validator_remains_in_place():
-    """Alias handling does not bypass wrappers in either schema layout."""
-    value = _WrapValidatedAlias(apiValue=7)
-    _WrapValidatedAlias.calls = []
+def test_model_wrap_validator_remains_in_place(value):
+    """Required and defaulted fields retain saved values without bypassing wrappers."""
+    type(value).calls = []
     assert _roundtrip(value) == value
-    assert _WrapValidatedAlias.calls == ["enter", "exit"]
+    assert type(value).calls == ["enter", "exit"]
+
+
+class _CacheRecord(BaseModel):
+    """A neutral model isolates caching from version-specific alias behavior."""
+
+    value: int = 0
+
+
+@pytest.fixture
+def canonical_cache():
+    """Keep cache lifetime tests isolated from other codec tests."""
+    serialization._canonical_validator.cache_clear()
+    yield serialization._canonical_validator
+    serialization._canonical_validator.cache_clear()
+
+
+def test_detached_validator_is_reused_for_unchanged_schema(canonical_cache):
+    """Repeated envelopes do not rebuild a model's detached validator."""
+    schema = _CacheRecord.__pydantic_core_schema__
+    first = canonical_cache(_CacheRecord, id(schema))
+    second = canonical_cache(_CacheRecord, id(schema))
+    assert first is second
+    assert first[0] is schema
+    assert first[1].validate_python({"value": 7}).value == 7
+    assert canonical_cache.cache_info().hits == 1
+
+
+def test_model_rebuild_invalidates_detached_validator(canonical_cache):
+    """A rebuilt class receives a new validator with its current defaults."""
+
+    class RebuiltRecord(BaseModel):
+        """A normal class supports rebuilding on the oldest supported Pydantic."""
+
+        value: int = 0
+
+    model = RebuiltRecord
+    original_schema = model.__pydantic_core_schema__
+    old = canonical_cache(model, id(original_schema))
+    model.model_fields["value"].default = 7
+    model.model_rebuild(force=True)
+    new_schema = model.__pydantic_core_schema__
+    new = canonical_cache(model, id(new_schema))
+    assert new_schema is not original_schema
+    assert new[0] is new_schema
+    assert new[1] is not old[1]
+    assert old[1].validate_python({}).value == 0
+    assert new[1].validate_python({}).value == 7
+
+
+def test_detached_validator_cache_is_bounded_and_releases_evicted_models(canonical_cache):
+    """Strong validator references do not retain unbounded dynamic model classes."""
+    model = create_model("TemporaryRecord", value=(int, 0))
+    reference = weakref.ref(model)
+    canonical_cache(model, id(model.__pydantic_core_schema__))
+    del model
+    gc.collect()
+    assert reference() is not None
+    for _ in range(129):
+        _CacheRecord.model_rebuild(force=True)
+        canonical_cache(_CacheRecord, id(_CacheRecord.__pydantic_core_schema__))
+    gc.collect()
+    assert canonical_cache.cache_info().currsize == 128
+    assert reference() is None
+
+
+def test_legacy_restoration_uses_cached_validator(monkeypatch, canonical_cache):
+    """The compatibility path actually reuses the cache during public restoration."""
+    monkeypatch.setattr(serialization, "_VALIDATE_BY_NAME", False)
+    value = _CacheRecord(value=7)
+    assert _roundtrip(value) == value
+    assert _roundtrip(value) == value
+    assert canonical_cache.cache_info().misses == 1
+    assert canonical_cache.cache_info().hits == 1

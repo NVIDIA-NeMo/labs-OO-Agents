@@ -25,6 +25,7 @@ import dataclasses
 import enum
 import importlib
 import inspect
+from functools import lru_cache
 from typing import Any
 
 from pydantic import BaseModel
@@ -299,35 +300,48 @@ def _validate_model_snapshot(cls: type[BaseModel], data: dict[str, Any]) -> Base
 
     # Pydantic <2.11 has no per-call alias flags. Use a detached validation
     # schema, including revalidated nested models, without changing live classes.
+    _, validator = _canonical_validator(cls, id(cls.__pydantic_core_schema__))
+    return validator.validate_python(data)
+
+
+@lru_cache(maxsize=128)
+def _canonical_validator(cls: type[BaseModel], _schema_id: int) -> tuple[Any, Any]:
+    """Cache a detached validator by class and source schema identity.
+
+    Retain the source schema so its identity cannot be reused while cached.
+    Bound the cache because validators strongly reference their model classes;
+    weak class keys alone would not release those classes.
+    """
     from pydantic_core import SchemaValidator
 
-    def by_name(schema: Any) -> Any:
-        """Copy validation lookups but leave defaults and user metadata opaque."""
-        if isinstance(schema, list):
-            return [by_name(item) for item in schema]
-        if isinstance(schema, tuple):
-            return tuple(by_name(item) for item in schema)
-        if not isinstance(schema, dict):
-            return schema
-        is_schema = isinstance(schema.get("type"), str)
-        detached = {
-            key: value
-            if is_schema and key in {"default", "metadata", "config", "function", "serialization"}
-            else by_name(value)
-            for key, value in schema.items()
-        }
-        if is_schema and detached["type"] in {"model-fields", "typed-dict"}:
-            detached["fields"] = {
-                name: {**field, "validation_alias": name}
-                for name, field in detached["fields"].items()
-            }
-        elif is_schema and detached["type"] == "dataclass-args":
-            detached["fields"] = [
-                {**field, "validation_alias": field["name"]} for field in detached["fields"]
-            ]
-        return detached
+    schema = cls.__pydantic_core_schema__
+    return schema, SchemaValidator(_by_name_schema(schema))
 
-    return SchemaValidator(by_name(cls.__pydantic_core_schema__)).validate_python(data)
+
+def _by_name_schema(schema: Any) -> Any:
+    """Copy validation lookups but leave defaults and user metadata opaque."""
+    if isinstance(schema, list):
+        return [_by_name_schema(item) for item in schema]
+    if isinstance(schema, tuple):
+        return tuple(_by_name_schema(item) for item in schema)
+    if not isinstance(schema, dict):
+        return schema
+    is_schema = isinstance(schema.get("type"), str)
+    detached = {
+        key: value
+        if is_schema and key in {"default", "metadata", "config", "function", "serialization"}
+        else _by_name_schema(value)
+        for key, value in schema.items()
+    }
+    if is_schema and detached["type"] in {"model-fields", "typed-dict"}:
+        detached["fields"] = {
+            name: {**field, "validation_alias": name} for name, field in detached["fields"].items()
+        }
+    elif is_schema and detached["type"] == "dataclass-args":
+        detached["fields"] = [
+            {**field, "validation_alias": field["name"]} for field in detached["fields"]
+        ]
+    return detached
 
 
 # ---------------------------------------------------------------------------
