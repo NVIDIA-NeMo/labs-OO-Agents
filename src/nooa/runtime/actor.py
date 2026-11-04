@@ -3219,19 +3219,17 @@ class ActorRuntime:
             # Strategy must be a GenerationStrategy instance
             if isinstance(strategy, GenerationStrategyABC):
                 # Use strategy's execute() method directly
-                from nooa.strategies.current_call import CurrentCall
+                from nooa.strategies.current_call import CurrentCall, merge_call_arguments
+
+                sig = inspect.signature(method)
+                merged_kwargs = merge_call_arguments(sig, args, kwargs)
 
                 # Expand {placeholders} in method docstring using call arguments
                 raw_docstring = getattr(method, "__doc__", None)
                 expanded_docstring = None
                 if raw_docstring:
-                    # Build context: map parameter names to argument values
-                    sig = inspect.signature(method)
-                    param_names = list(sig.parameters.keys())[1:]  # Skip 'self'
-                    arg_context = dict(zip(param_names, args, strict=False))
-                    arg_context.update(kwargs)
                     expanded_docstring = await self.expand_variables(
-                        raw_docstring, extra_context=arg_context, error_mode="silent"
+                        raw_docstring, extra_context=merged_kwargs, error_mode="silent"
                     )
 
                 # Use the shared builder so Annotated parameter specs reach

@@ -209,10 +209,11 @@ class FileBackedTruncatingStringIO(TruncatingStringIO):
 
     Behaves identically to :class:`TruncatingStringIO` for in-memory
     head/tail truncation, but additionally streams all written content to a
-    file on disk (UTF-8): a new temp file, or ``path`` if given. When
-    truncated, ``getvalue()`` includes the file path in the notice so the
-    user can inspect the full output. ``write_bytes`` writes raw bytes to the
-    file only (e.g. a process's output, kept byte-exact in a log).
+    file on disk (UTF-8; lone surrogates are written as ``\\udXXX`` escapes):
+    a new temp file, or ``path`` if given. When truncated, ``getvalue()``
+    includes the file path in the notice so the user can inspect the full
+    output. ``write_bytes`` writes raw bytes to the file only (e.g. a
+    process's output, kept byte-exact in a log).
 
     ``max_file_bytes`` caps the file: bytes past it are counted, not written,
     and :meth:`close` appends one ``[log truncated: N more bytes not
@@ -263,7 +264,7 @@ class FileBackedTruncatingStringIO(TruncatingStringIO):
 
     def write(self, s: str) -> int:
         """Write to both the file and the in-memory truncating buffer."""
-        self.write_bytes(s.encode("utf-8", errors="replace"))
+        self.write_bytes(s.encode("utf-8", errors="backslashreplace"))
         return super().write(s)
 
     def write_bytes(self, data: bytes) -> int:

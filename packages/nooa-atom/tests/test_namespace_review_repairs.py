@@ -370,12 +370,13 @@ async def test_current_call_parameters_keep_identity_and_are_not_provider_advert
 async def test_shared_autoimport_fix_preserves_explicit_non_atom_user_binding():
     llm = CellLLM(
         [
-            cell("print = 'explicit user binding'"),
-            cell("assert print == 'explicit user binding'\nreturn_result(7)"),
+            # Not `print`: main's CodeAct reserves advertised helpers (0e37c4c12).
+            cell("widget = 'explicit user binding'"),
+            cell("assert widget == 'explicit user binding'\nreturn_result(7)"),
         ]
     )
     agent = LegacyChild(llm=llm)
-    agent.tool = type("print", (), {"__module__": "dynamic_probe"})()
+    agent.tool = type("widget", (), {"__module__": "dynamic_probe"})()
     try:
         assert await agent.answer(None) == 7
         assert len(llm.calls) == 2

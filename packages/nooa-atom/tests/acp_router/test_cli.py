@@ -170,6 +170,48 @@ def test_explicit_role_arguments_win_over_argv(roles, monkeypatch):
     assert list(roles) == ["router"]
 
 
+def test_workers_run_under_sys_executable_with_the_rest_of_the_command_line(monkeypatch):
+    """A macOS framework Python reports the base Python.app as ``orig_argv[0]``.
+
+    That interpreter does not see the virtual environment, so workers must be
+    started with ``sys.executable`` and the rest of ``sys.orig_argv`` as is.
+    """
+    base = "/opt/homebrew/Frameworks/Python.framework/Versions/3.12/Resources/Python.app/Contents/MacOS/Python"
+    venv = "/Users/me/.cache/uv/archive-v0/abc/bin/python3"
+    monkeypatch.setattr(
+        sys, "orig_argv", [base, "-X", "utf8", "/env/bin/nooa", "atom", "--model", "m"]
+    )
+    monkeypatch.setattr(sys, "executable", venv)
+    assert cli.worker_command() == [venv, "-X", "utf8", "/env/bin/nooa", "atom", "--model", "m"]
+
+
+def test_the_router_and_http_server_spawn_workers_from_worker_command(monkeypatch):
+    """No role starts a worker from the raw ``sys.orig_argv``."""
+    from nooa_atom.acp import router, websocket
+
+    monkeypatch.setattr(sys, "orig_argv", ["/base/Python", "/env/bin/nooa", "atom"])
+    monkeypatch.setattr(sys, "executable", "/env/bin/python")
+    monkeypatch.setattr(cli, "_configure_logging", lambda name: None)
+    commands: list[list[str]] = []
+    monkeypatch.setattr(router, "process_spawn", lambda command: commands.append(command))
+
+    class FakeRouter:
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+        async def serve_stdio(self, **kwargs: Any) -> None:
+            pass
+
+    async def fake_serve_websocket(**kwargs: Any) -> None:
+        pass
+
+    monkeypatch.setattr(router, "Router", FakeRouter)
+    monkeypatch.setattr(websocket, "serve_websocket", fake_serve_websocket)
+    cli._run_router(sessions_dir=None, tee=None, acp_stdin=0, acp_stdout=1)
+    cli._run_http(cli.HttpOptions(host="127.0.0.1", port=0, token="t"), sessions_dir=None)
+    assert commands == [["/env/bin/python", "/env/bin/nooa", "atom"]] * 2
+
+
 def test_the_cli_module_imports_nothing_heavy_at_load_time():
     """Importing the command must not import nooa: every nooa command would pay for it.
 
