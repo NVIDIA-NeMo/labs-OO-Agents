@@ -273,6 +273,8 @@ class SkillWriting(Skill):
         if text is not None:
             if registry is None:  # LibraryManager loads only code skills
                 return f"Not created: this agent loads only code skills; '{lib_name}' needs code"
+            if (lib_dir / "pyproject.toml").exists():
+                return f"Not created: '{lib_name}' is a code skill; choose another name"
         lib_dir.mkdir(parents=True, exist_ok=True)
         first_line = description.strip().split("\n")[0]
 

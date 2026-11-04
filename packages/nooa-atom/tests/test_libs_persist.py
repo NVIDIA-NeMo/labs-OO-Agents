@@ -175,6 +175,17 @@ async def test_an_older_skill_with_another_entry_point_does_not_replace_a_newer_
         await agent.aclose()
 
 
+async def test_a_text_skill_does_not_reuse_a_code_skill_directory(tmp_path):
+    agent = _agent(tmp_path)
+    try:
+        await agent.skill_writing.create("stats", "Tiny statistics.")
+        result = await agent.skill_writing.create("stats", "Steps.", text="1. Tag.")
+        assert result.startswith("Not created")
+    finally:
+        await agent.aclose()
+    assert not (tmp_path / ".nooa" / "skills" / "stats" / "SKILL.md").exists()
+
+
 async def test_self_libs_is_gone(tmp_path):
     agent = _agent(tmp_path)
     try:
