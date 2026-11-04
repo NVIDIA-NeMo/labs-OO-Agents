@@ -56,7 +56,7 @@ class Spill:
 
 `Sequence`, `Mapping` and `Object` carry `length` (the original count), their kept children and `reason`. On every node `complete` is derived: `reason is None`. `Object` also carries an optional `kind`, a rendering key (see *Extending for third-party types*). `Unavailable(reason, type_name="", builtin=False)` stands for a value with no content kept: with reason `opaque`, a value of a type NOOA will not inspect (it renders as `<opaque: Type>`; `builtin`: an exact built-in type, a non-finite `float`, whose JSON fallback is #342's `0.0` / `0`), otherwise a read that failed or was refused. `Ref(id)` stands for a repeated or cyclic reference.
 
-Reason names (`Reason`; `REASONS = typing.get_args(Reason)`), each saying why a node is incomplete:
+Reason names (`Reason`), each saying why a node is incomplete:
 
 | Reason | Meaning |
 |---|---|
@@ -117,8 +117,7 @@ Rendering is the last step, and every consumer picks a renderer and limits:
 | `render_output(text)` | Shell results, cell stdout/stderr, job tails, core bash tool, progress | `HEAD\n[... 1,234,567 bytes omitted; full output: /path]\nTAIL` |
 | `render_python(snapshot)` | CodeAct prefill, `pformat`, `pprint`, `CommandResult` display | `str(len=10_000_000, [:4]='xxxx', [-4:]='xxxx')` (today's prefill notation) |
 | `render_json(snapshot)` | trace `input.value` / `output.value` | plain JSON, as in #342; nothing embedded in user data |
-| `preview_attributes(direction, snapshot)` | trace spans | `nooa.{dir}.preview.version/incomplete/paths` (#342), plus `.reasons` and `.full_output` |
-| `render_trace(snapshot, direction=…, max_chars=…)` | trace hooks | both of the above, `(text, attributes)`, from one JSON walk |
+| `render_trace(snapshot, direction=…, max_chars=…)` | trace hooks | `(render_json text, attributes)` from one JSON walk; the attributes are `nooa.{dir}.preview.version/incomplete/paths` (#342), plus `.reasons` and `.full_output` |
 | `render_card(text)` | ACP activity cards | the output notation, then the card's "output omitted" flag from `complete` |
 
 The output notation is one line, with three variants built from `Text` alone:
@@ -244,19 +243,19 @@ Public API, all importable from `nooa.snapshot`:
 
 | Name | What it is |
 |---|---|
-| `Scalar`, `Text`, `Sequence`, `Mapping`, `Object`, `Unavailable`, `Ref`, `Spill` | the frozen snapshot nodes; `Snapshot` is their union, `Reason` / `REASONS` the reason names, `Key` a mapping key |
-| `capture(value, limits=DEFAULT_LIMITS)`, `Limits`, `DEFAULT_LIMITS` | a snapshot of a finished value; `capture.register(T, shape)` / `capture.unregister(T)` extend it (process-wide, matched by class identity) |
+| `Scalar`, `Text`, `Sequence`, `Mapping`, `Object`, `Unavailable`, `Ref`, `Spill` | the frozen snapshot nodes; `Snapshot` is their union, `Reason` the reason names |
+| `capture(value, limits=Limits())`, `Limits` | a snapshot of a finished value; `capture.register(T, shape)` / `capture.unregister(T)` extend it (process-wide, matched by class identity) |
 | `array_like`, `ndarray_like`, `mapping_like`, `object_like`, `text_like` | the five shapes `capture.register` takes (see *Capture: shapes, registered by type*) |
 | `capture_fields(**fields, limits=...)` | #342's `trace_fields`: a framework wrapper whose every root field survives with its type |
-| `TextStream`, `SpillTarget`, `DEFAULT_SPILL_BYTES`, `merge` | output that arrives over time; `merge` joins unread deltas |
-| `render_output`, `render_python`, `render_json`, `preview_attributes` | the renderers; only `render_python` takes per-kind hooks (`.register(kind)`) |
-| `render_trace(snapshot, direction=…, max_chars=…)` | the trace entry point: `(render_json text, preview_attributes)` from one JSON walk |
+| `TextStream`, `SpillTarget`, `merge` | output that arrives over time; `merge` joins unread deltas |
+| `render_output`, `render_python`, `render_json` | the renderers; only `render_python` takes per-kind hooks (`.register(kind)`) |
+| `render_trace(snapshot, direction=…, max_chars=…)` | the trace entry point: `(render_json text, span attributes)` from one JSON walk |
 | `PythonRenderer` | the `r` a `render_python` hook gets: `r.render(child)`, `r.generic(node)` |
 
 Details that the sections above leave open:
 
 - **`Limits`** has `max_chars`, `max_nodes`, `max_depth` (#342's defaults: 50,000 / 2,000 / 16), `max_items` and `max_string` (`None`: only the shared budget) and `tail_share`, the part of a cut string or container kept from its end (0: a prefix, as in trace previews; 0.5: agentdoc's split). `max_items` caps the items of every container, the fields of an `Object` too: an object keeps its first `max_items` fields (not a head and tail) and is marked `max_items` when a later field was left out. `max_string` is an upper bound: a byte value keeps only whole code points within it, so a code point wider than what is left is omitted.
-- **`max_chars` counts canonical JSON**, exactly as #342 does. So `render_json(capture(v, limits), max_chars=limits.max_chars)` gives #342's text and incomplete paths (checked against the original builder on random shapes). `render_json` also walks the snapshot with the same accounting, so it stays valid and within any smaller `max_chars`, and `preview_attributes(..., max_chars=...)` reports the cuts that rendering made. For the trace path, `render_trace(snapshot, direction=…, max_chars=…)` returns the `render_json` text and the attributes from one JSON walk. Spill files (`.full_output`) are collected in their own small walk over the snapshot: every `Text.full` path, depth first, heads and tails, whatever the JSON shows, so they don't depend on `max_chars`.
+- **`max_chars` counts canonical JSON**, exactly as #342 does. So `render_json(capture(v, limits), max_chars=limits.max_chars)` gives #342's text and incomplete paths (checked against the original builder on random shapes). `render_json` also walks the snapshot with the same accounting, so it stays valid and within any smaller `max_chars`, and `render_trace(snapshot, direction=…, max_chars=…)` returns the `render_json` text and the span attributes from one JSON walk, including the cuts that rendering made. Spill files (`.full_output`) are collected in their own small walk over the snapshot: every `Text.full` path, depth first, heads and tails, whatever the JSON shows, so they don't depend on `max_chars`.
 - **Nodes beyond the design's fields:** `Text.omitted` (the units left out between head and tail), `Sequence.tail` / `Mapping.tail` (items kept from the end), `Sequence.type_name` / `Mapping.type_name`, `Unavailable.type_name` (picks #342's typed fallback), `Ref.kind`, and `Mapping.wrapper` (marks a `capture_fields` root). `Ref.id` is the JSON Pointer of the enclosing container that the cycle points back to. Repeated references that are not cycles are captured again each time, as in #342.
 - **Shape fields and reservation.** The accessor fields of a shape are built in order, and each leaves room (characters and node work) for the minimal value of every later field, as #342's `trace_fields` does for root fields; a later accessor field, whose value is not known before its accessor runs, counts as a 2-character value and 16 nodes, a structure field (`items`, `data`, …) as an empty container and one node. So in the ndarray example `dtype` and `shape` stay complete and `data` gets what is left: present, possibly cut, and incomplete with the reason that stopped it (`max_items`, `max_length` or `max_nodes`). A field is never held below its own minimal value (it gets `max(min(room, its minimum), room - reserved)` characters), and node work is held back only down to one node for the current field, so in a slot too small for all the minimums the later fields are cut. Each part is built in its slot's context: one level deeper than the object, under its field name, index or key (so `max_depth` holds for recursive registered types, and cycle `Ref` ids are field-name pointer paths). Fields that fit are kept whole.
 - **Reason `error`** is added to the list: a shape accessor that raised, or returned something its shape can't use (see *Errors* under the shapes).

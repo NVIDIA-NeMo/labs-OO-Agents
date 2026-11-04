@@ -17,12 +17,11 @@ node says whether it is complete and, if not, why. Two producers build it:
 
 Renderers turn it into what a consumer shows: ``render_output`` (command
 output), ``render_python`` (agentdoc's prefill notation, the one renderer with
-per-kind hooks), ``render_json``, ``preview_attributes`` and ``render_trace``
-(trace previews). See ``docs/snapshot-model.md``.
+per-kind hooks), ``render_json`` and ``render_trace`` (trace previews: the JSON
+text and its span attributes). See ``docs/snapshot-model.md``.
 """
 
 from nooa.snapshot._capture import (
-    DEFAULT_LIMITS,
     Limits,
     array_like,
     capture,
@@ -33,8 +32,6 @@ from nooa.snapshot._capture import (
     text_like,
 )
 from nooa.snapshot._model import (
-    REASONS,
-    Key,
     Mapping,
     Object,
     Reason,
@@ -48,19 +45,14 @@ from nooa.snapshot._model import (
 )
 from nooa.snapshot._render import (
     PythonRenderer,
-    preview_attributes,
     render_json,
     render_output,
     render_python,
     render_trace,
 )
-from nooa.snapshot._stream import DEFAULT_SPILL_BYTES, SpillTarget, TextStream, merge
+from nooa.snapshot._stream import SpillTarget, TextStream, merge
 
 __all__ = [
-    "DEFAULT_LIMITS",
-    "DEFAULT_SPILL_BYTES",
-    "REASONS",
-    "Key",
     "Limits",
     "Mapping",
     "Object",
@@ -82,7 +74,6 @@ __all__ = [
     "merge",
     "ndarray_like",
     "object_like",
-    "preview_attributes",
     "render_json",
     "render_output",
     "render_python",

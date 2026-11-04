@@ -9,13 +9,10 @@ snapshot into the notation a consumer shows; see ``docs/snapshot-model.md``.
 
 from __future__ import annotations
 
-import typing
 from dataclasses import dataclass
 from typing import Literal
 
 __all__ = [
-    "REASONS",
-    "Key",
     "Mapping",
     "Object",
     "Reason",
@@ -50,9 +47,6 @@ JSON form, or one that collides with an earlier key; ``error``: an accessor
 of a registered shape raised. Whether a spill file holds the whole content is
 not a reason: ``Text.full`` says it.
 """
-
-REASONS: tuple[str, ...] = typing.get_args(Reason)
-"""Every ``Reason``, in declaration order (derived, so the two cannot drift)."""
 
 Key = str | int | float | bool | None
 """A mapping key kept in a snapshot (exact built-in scalar types only)."""

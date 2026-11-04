@@ -13,7 +13,6 @@ import pytest
 
 import nooa.snapshot
 from nooa.snapshot import (
-    REASONS,
     Mapping,
     Object,
     Reason,
@@ -28,7 +27,7 @@ from tests.snapshot._random_trees import random_tree
 
 
 def test_reason_names() -> None:
-    assert REASONS == (
+    assert typing.get_args(Reason) == (
         "max_length",
         "max_items",
         "max_depth",
@@ -41,17 +40,13 @@ def test_reason_names() -> None:
     )
 
 
-def test_reasons_is_derived_from_the_reason_literal() -> None:
-    assert REASONS == typing.get_args(Reason)
-
-
 def test_removed_names_are_gone() -> None:
     # P3b: no consumer used them (principle 3). Spill state is read from
     # ``Text.full``; an uninspected value is ``Unavailable("opaque")``.
     assert not hasattr(nooa.snapshot, "Opaque")
     assert "Opaque" not in nooa.snapshot.__all__
     assert "replaced" not in {field.name for field in dataclasses.fields(Text)}
-    assert not {"file_limit", "not_kept"} & set(REASONS)
+    assert not {"file_limit", "not_kept"} & set(typing.get_args(Reason))
     assert [field.name for field in dataclasses.fields(Unavailable)] == [
         "reason",
         "type_name",

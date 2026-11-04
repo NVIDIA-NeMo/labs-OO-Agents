@@ -28,12 +28,12 @@ from nooa.snapshot import (
     capture,
     mapping_like,
     object_like,
-    preview_attributes,
     render_json,
     render_python,
     text_like,
 )
 from tests.snapshot import _annotation_aliases
+from tests.snapshot._trace import _attributes
 
 
 class Recorder:
@@ -149,7 +149,7 @@ def test_max_depth_cuts_nested_containers() -> None:
     snapshot = capture({"a": {"b": {"c": [1]}}}, Limits(max_depth=2))
 
     assert render_python(snapshot) == "{'a': {'b': {dict: 1 items}}}"
-    attributes = preview_attributes("output", snapshot)
+    attributes = _attributes("output", snapshot)
     assert attributes["nooa.output.preview.paths"] == ("/a/b",)
     assert attributes["nooa.output.preview.reasons"] == ("max_depth",)
 
@@ -580,7 +580,7 @@ def test_cycles_become_refs_to_the_ancestor() -> None:
     assert isinstance(inner_node, Mapping)
     assert inner_node.items[0][1] == Ref("", "mapping")
     assert render_python(snapshot) == "{'inner': {'back': <cycle>}}"
-    assert preview_attributes("output", snapshot)["nooa.output.preview.paths"] == ("/inner/back",)
+    assert _attributes("output", snapshot)["nooa.output.preview.paths"] == ("/inner/back",)
 
 
 def test_model_cycle_is_a_ref() -> None:
@@ -602,7 +602,7 @@ def test_repeated_references_are_expanded_each_time() -> None:
     snapshot = capture({"a": shared, "b": shared, "c": (shared,)})
 
     assert render_python(snapshot) == "{'a': [1, 2], 'b': [1, 2], 'c': ([1, 2],)}"
-    assert preview_attributes("output", snapshot)["nooa.output.preview.incomplete"] is False
+    assert _attributes("output", snapshot)["nooa.output.preview.incomplete"] is False
 
 
 # --- dataclasses ------------------------------------------------------------------------
@@ -729,7 +729,7 @@ def test_exception_in_an_accessor_is_unavailable(registry) -> None:
     snapshot = capture({"a": Animal("x")})
     assert isinstance(snapshot, Mapping)
     assert snapshot.items[0][1] == Unavailable("error", "Animal")
-    attributes = preview_attributes("output", snapshot)
+    attributes = _attributes("output", snapshot)
     assert attributes["nooa.output.preview.reasons"] == ("error",)
 
 

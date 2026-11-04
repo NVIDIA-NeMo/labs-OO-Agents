@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""render_json and preview_attributes: valid, bounded JSON previews and their span attributes."""
+"""render_json and render_trace's attributes: valid, bounded JSON previews and their span attributes."""
 
 from __future__ import annotations
 
@@ -21,9 +21,9 @@ from nooa.snapshot import (
     Unavailable,
     capture,
     capture_fields,
-    preview_attributes,
     render_json,
 )
+from tests.snapshot._trace import _attributes
 
 # --- render_json -----------------------------------------------------------------------
 
@@ -73,7 +73,7 @@ def test_render_json_is_valid_and_bounded_for_many_shapes() -> None:
             text = render_json(snapshot, max_chars=max_chars)
             json.loads(text)
             assert len(text) <= max_chars
-        attributes = preview_attributes("output", snapshot, max_chars=limits.max_chars)
+        attributes = _attributes("output", snapshot, max_chars=limits.max_chars)
         assert attributes["nooa.output.preview.version"] == 1
         assert attributes["nooa.output.preview.incomplete"] is (
             "nooa.output.preview.paths" in attributes
@@ -85,21 +85,19 @@ def test_render_json_at_capture_budget_cuts_nothing_further() -> None:
     limits = Limits(max_chars=200)
     snapshot = capture(value, limits)
 
-    assert preview_attributes("output", snapshot, max_chars=200) == preview_attributes(
-        "output", snapshot
-    )
+    assert _attributes("output", snapshot, max_chars=200) == _attributes("output", snapshot)
 
 
 def test_render_json_smaller_budget_reports_new_cuts() -> None:
     snapshot = capture({"a": "x" * 50, "b": "y" * 50})
 
     text = render_json(snapshot, max_chars=30)
-    attributes = preview_attributes("input", snapshot, max_chars=30)
+    attributes = _attributes("input", snapshot, max_chars=30)
 
     assert len(text) <= 30 and json.loads(text)
     assert attributes["nooa.input.preview.incomplete"] is True
     assert attributes["nooa.input.preview.reasons"] == ("max_length",)
-    assert preview_attributes("input", snapshot)["nooa.input.preview.incomplete"] is False
+    assert _attributes("input", snapshot)["nooa.input.preview.incomplete"] is False
 
 
 def test_render_json_non_string_keys_follow_json() -> None:
@@ -129,7 +127,7 @@ def test_render_json_colliding_keys_stop_the_mapping() -> None:
     snapshot = capture({1: "a", "1": "b"})
 
     assert json.loads(render_json(snapshot, max_chars=100)) == {"1": "a"}
-    assert preview_attributes("output", snapshot)["nooa.output.preview.paths"] == ("",)
+    assert _attributes("output", snapshot)["nooa.output.preview.paths"] == ("",)
 
 
 def test_render_json_bytes_and_cut_text_keep_a_prefix() -> None:
@@ -154,30 +152,30 @@ def test_capture_fields_keep_every_root_field() -> None:
     assert isinstance(parsed["returned_value"], dict)
 
 
-# --- preview_attributes ------------------------------------------------------------------
+# --- trace attributes --------------------------------------------------------------------
 
 
-def test_preview_attributes_complete() -> None:
-    assert preview_attributes("input", capture({"a": 1})) == {
+def test_trace_attributes_complete() -> None:
+    assert _attributes("input", capture({"a": 1})) == {
         "nooa.input.preview.version": 1,
         "nooa.input.preview.incomplete": False,
     }
 
 
-def test_preview_attributes_reasons_are_sorted_and_unique() -> None:
+def test_trace_attributes_reasons_are_sorted_and_unique() -> None:
     cycle: list[Any] = []
     cycle.append(cycle)
     snapshot = capture(
         {"c": cycle, "o": object(), "o2": object(), "s": "x" * 100}, Limits(max_string=5)
     )
 
-    attributes = preview_attributes("output", snapshot)
+    attributes = _attributes("output", snapshot)
 
     assert attributes["nooa.output.preview.reasons"] == ("cycle", "max_length", "opaque")
     assert attributes["nooa.output.preview.paths"] == ("/c/0", "/o", "/o2", "/s")
 
 
-def test_preview_attributes_full_output() -> None:
+def test_trace_attributes_full_output() -> None:
     spilled = Text(
         head=b"h",
         tail=b"t",
@@ -188,7 +186,7 @@ def test_preview_attributes_full_output() -> None:
     )
     snapshot = Mapping("dict", 2, (("stdout", spilled), ("again", spilled)))
 
-    attributes = preview_attributes("output", snapshot)
+    attributes = _attributes("output", snapshot)
 
     assert attributes["nooa.output.preview.full_output"] == ("/tmp/a",)
     assert attributes["nooa.output.preview.paths"] == ("/stdout", "/again")

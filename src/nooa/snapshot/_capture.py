@@ -74,7 +74,6 @@ from nooa.snapshot._model import (
 )
 
 __all__ = [
-    "DEFAULT_LIMITS",
     "Limits",
     "array_like",
     "capture",
@@ -127,10 +126,11 @@ class Limits:
     max_string: int | None = None
     tail_share: float = 0.0
 
-    def split(self, kept: int) -> tuple[int, int]:
-        """``kept`` units as (head, tail) under ``tail_share``."""
-        tail = int(kept * self.tail_share)
-        return kept - tail, tail
+
+def _split(limits: Limits, kept: int) -> tuple[int, int]:
+    """``kept`` units as (head, tail) under ``limits.tail_share``."""
+    tail = int(kept * limits.tail_share)
+    return kept - tail, tail
 
 
 DEFAULT_LIMITS = Limits()
@@ -342,7 +342,7 @@ def _cut_text(
         if chars:
             return _cut_chars(length, whole, whole, length, max_size, limits)
         return _cut_byte_parts(length, whole, whole, 0, length - 1, max_size, limits)
-    head_n, tail_n = limits.split(keep_cap)
+    head_n, tail_n = _split(limits, keep_cap)
     empty: Any = "" if chars else b""
     tail = read(length - tail_n, length) if tail_n else empty
     if chars:
@@ -363,7 +363,7 @@ def _cut_chars(
     """The cut ``Text`` of a string of ``length`` chars, keeping at most ``kept_cap`` of them.
 
     ``head_src`` / ``tail_src`` are the original's first / last chars that
-    ``limits.split(kept_cap)`` keeps (the whole string for both when
+    ``_split(limits, kept_cap)`` keeps (the whole string for both when
     ``kept_cap >= length``); every smaller cut is a part of them, so the
     original is never read again.
     """
@@ -371,7 +371,7 @@ def _cut_chars(
     def parts(kept: int) -> tuple[str, str]:
         if kept >= length:
             return head_src, ""
-        head_n, tail_n = limits.split(kept)
+        head_n, tail_n = _split(limits, kept)
         return head_src[:head_n], tail_src[len(tail_src) - tail_n :] if tail_n else ""
 
     head, tail = parts(_largest(lambda kept: _string_cost(*parts(kept)) <= max_size, kept_cap))
@@ -393,14 +393,14 @@ def _cut_byte_parts(
 ) -> _Built:
     """The cut bytes ``Text`` of ``length`` bytes, keeping at most ``kept_cap`` (< ``length``).
 
-    With ``(H, T) = limits.split(kept_cap)``: ``head_src`` holds the
+    With ``(H, T) = _split(limits, kept_cap)``: ``head_src`` holds the
     original's first ``H + 1`` bytes (one more, to see whether ``H`` is a code
     point boundary) and ``tail_src`` the bytes from ``tail_offset = length - T``;
     both may be the whole value (offset 0). Every smaller cut is a part of them.
     """
 
     def parts(kept: int) -> tuple[bytes, bytes]:
-        head_n, tail_n = limits.split(kept)
+        head_n, tail_n = _split(limits, kept)
         head_end = safe_end(head_src, head_n) if head_n else 0
         if tail_n:
             tail_start = safe_start(tail_src, length - tail_n - tail_offset) + tail_offset
@@ -510,7 +510,7 @@ def _plan(length: int, limits: Limits, has_tail: bool) -> tuple[int, int]:
     max_items = limits.max_items
     if max_items is None or length <= max_items:
         return length, 0
-    return limits.split(max_items) if has_tail else (max_items, 0)
+    return _split(limits, max_items) if has_tail else (max_items, 0)
 
 
 def _build_sequence(

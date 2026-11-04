@@ -23,7 +23,7 @@ from typing import IO, Literal
 from nooa.snapshot._codec import complete_prefix, safe_end, safe_start
 from nooa.snapshot._model import Spill, Text
 
-__all__ = ["DEFAULT_SPILL_BYTES", "SpillTarget", "TextStream", "merge"]
+__all__ = ["SpillTarget", "TextStream", "merge"]
 
 _log = logging.getLogger(__name__)
 

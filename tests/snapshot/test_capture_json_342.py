@@ -4,7 +4,7 @@
 
 Ported from ``tests/tracing/test_trace_json.py`` of PR #342 (Severin Klingler):
 ``trace_json(value)`` is now ``capture(value)`` then ``render_json`` and
-``preview_attributes``; ``trace_fields`` is ``capture_fields``.
+``render_trace``'s attributes; ``trace_fields`` is ``capture_fields``.
 """
 
 from __future__ import annotations
@@ -19,15 +19,16 @@ from pydantic.fields import FieldInfo
 
 from nooa import hidden, spec
 from nooa.snapshot import (
-    DEFAULT_LIMITS,
     Limits,
     capture,
     capture_fields,
-    preview_attributes,
     render_json,
     render_trace,
 )
 from nooa.snapshot._capture import _pydantic_fields, _State
+from tests.snapshot._trace import _attributes
+
+_DEFAULT = Limits()
 
 
 class TraceJSON(NamedTuple):
@@ -39,18 +40,18 @@ def _preview(snapshot: Any, limits: Limits) -> TraceJSON:
     # The trace path: text and attributes from one walk, equal to the two public calls.
     text, attributes = render_trace(snapshot, direction="output", max_chars=limits.max_chars)
     assert text == render_json(snapshot, max_chars=limits.max_chars)
-    assert attributes == preview_attributes("output", snapshot, max_chars=limits.max_chars)
+    assert attributes == _attributes("output", snapshot, max_chars=limits.max_chars)
     paths = attributes.get("nooa.output.preview.paths", ())
     assert attributes["nooa.output.preview.incomplete"] is bool(paths)
     return TraceJSON(text, paths)
 
 
-def trace_json(value: object, *, limits: Limits = DEFAULT_LIMITS) -> TraceJSON:
+def trace_json(value: object, *, limits: Limits = _DEFAULT) -> TraceJSON:
     """#342's ``trace_json`` expressed with the snapshot API."""
     return _preview(capture(value, limits), limits)
 
 
-def trace_fields(*, limits: Limits = DEFAULT_LIMITS, **fields: object) -> TraceJSON:
+def trace_fields(*, limits: Limits = _DEFAULT, **fields: object) -> TraceJSON:
     """#342's ``trace_fields`` expressed with the snapshot API."""
     return _preview(capture_fields(limits=limits, **fields), limits)
 
@@ -422,7 +423,7 @@ def test_span_metadata_reports_incomplete_paths_out_of_band() -> None:
     snapshot = capture("x" * 100, Limits(max_chars=10))
     text = render_json(snapshot, max_chars=10)
 
-    attributes = preview_attributes("output", snapshot, max_chars=10)
+    attributes = _attributes("output", snapshot, max_chars=10)
 
     assert json.loads(text) == "x" * 8
     assert attributes["nooa.output.preview.version"] == 1

@@ -6,9 +6,9 @@
 - ``render_python(snapshot)``: agentdoc's ``pformat`` / prefill notation.
 - ``render_json(snapshot, max_chars=...)``: plain, valid JSON within ``max_chars``
   (#342's trace preview semantics: nothing is embedded in user data).
-- ``preview_attributes(direction, snapshot)``: the trace span attributes that
-  say whether and where a JSON preview is incomplete.
-- ``render_trace(snapshot, direction=..., max_chars=...)``: both, for a trace span.
+- ``render_trace(snapshot, direction=..., max_chars=...)``: the ``render_json``
+  text and the trace span attributes that say whether and where it is
+  incomplete (the trace entry point).
 
 Only ``render_python`` has hooks, one per kind (``render_python.register(
 "numpy.ndarray")``): an ``Object`` whose ``kind`` has a hook renders through
@@ -22,7 +22,6 @@ rendering; rendering never fails because of a hook. ``render_output`` and
 
 from __future__ import annotations
 
-import sys
 from collections.abc import Callable
 from typing import Any, cast
 
@@ -49,7 +48,6 @@ from nooa.snapshot._model import (
 
 __all__ = [
     "PythonRenderer",
-    "preview_attributes",
     "render_json",
     "render_output",
     "render_python",
@@ -176,7 +174,7 @@ class PythonRenderer:
         if type(node) is Scalar:
             return repr(node.value)
         if type(node) is Text:
-            return self.text(node)
+            return self._text(node)
         if type(node) is Sequence:
             return self._sequence(node)
         if type(node) is Mapping:
@@ -191,7 +189,7 @@ class PythonRenderer:
             return f"<unavailable: {node.reason}>"
         raise TypeError(f"not a snapshot node: {type(node).__name__}")
 
-    def text(self, text: Text) -> str:
+    def _text(self, text: Text) -> str:
         """A ``Text`` node: a literal when complete, else the slice-keys marker."""
         return _python_text(text)
 
@@ -238,7 +236,7 @@ class PythonRenderer:
 class _OutputNotation(PythonRenderer):
     """``render_output``'s walk: ``Text`` in the output notation, no hooks."""
 
-    def text(self, text: Text) -> str:
+    def _text(self, text: Text) -> str:
         return _output_text(text)
 
 
@@ -572,7 +570,7 @@ def render_json(snapshot: Snapshot, *, max_chars: int) -> str:
 
     Strings keep a prefix; containers their first items; uninspected values
     become ``"<opaque: Type>"``; cycles ``[]`` / ``{}``. Nothing marks a cut
-    inside the data: ``preview_attributes`` reports where the preview is
+    inside the data: ``render_trace`` reports where the preview is
     incomplete. There are no hooks: every node renders generically.
     """
     return _render(snapshot, max_chars)[0]
@@ -595,29 +593,17 @@ def _attributes(direction: str, report: _Report, snapshot: Snapshot) -> dict[str
     return attributes
 
 
-def preview_attributes(
-    direction: str, snapshot: Snapshot, *, max_chars: int | None = None
-) -> dict[str, Any]:
-    """Span attributes for a JSON preview of ``snapshot`` (``direction``: input/output).
-
-    Always ``nooa.{direction}.preview.version`` and ``.incomplete``; when
-    incomplete, ``.paths`` (RFC 6901 JSON Pointers, at most 32 and 2,048
-    characters, else the root ``""``) and ``.reasons`` (sorted, unique);
-    ``.full_output`` lists spill files, when any. Pass the ``max_chars`` given
-    to ``render_json`` so that cuts made while rendering are reported too.
-    """
-    budget = sys.maxsize if max_chars is None else max_chars
-    return _attributes(direction, _render(snapshot, budget)[1], snapshot)
-
-
 def render_trace(
     snapshot: Snapshot, *, direction: str, max_chars: int
 ) -> tuple[str, dict[str, Any]]:
     """A trace span's preview of ``snapshot``: the JSON text and its span attributes.
 
-    Equal to ``(render_json(snapshot, max_chars=m), preview_attributes(direction,
-    snapshot, max_chars=m))``, from one JSON walk (``direction``: ``"input"`` or
-    ``"output"``).
+    The text is ``render_json(snapshot, max_chars=max_chars)``; the attributes
+    come from the same JSON walk (``direction``: ``"input"`` or ``"output"``):
+    always ``nooa.{direction}.preview.version`` and ``.incomplete``; when
+    incomplete, ``.paths`` (RFC 6901 JSON Pointers, at most 32 and 2,048
+    characters, else the root ``""``) and ``.reasons`` (sorted, unique);
+    ``.full_output`` lists spill files, when any.
     """
     text, report = _render(snapshot, max_chars)
     return text, _attributes(direction, report, snapshot)

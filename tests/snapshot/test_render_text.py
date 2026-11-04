@@ -23,11 +23,11 @@ from nooa.snapshot import (
     TextStream,
     Unavailable,
     capture,
-    preview_attributes,
     render_json,
     render_output,
     render_python,
 )
+from tests.snapshot._trace import _attributes
 
 # --- render_output -------------------------------------------------------------------
 
@@ -172,7 +172,7 @@ def test_uninspected_values_render_as_before(
     assert json.loads(render_json(snapshot, max_chars=100)) == json.loads(
         "[" + json.dumps(name) + ", 1]" if path else json.dumps(name)
     )
-    attributes = preview_attributes("output", snapshot)
+    attributes = _attributes("output", snapshot)
     assert attributes["nooa.output.preview.reasons"] == ("opaque",)
     assert attributes["nooa.output.preview.paths"] == (path,)
 

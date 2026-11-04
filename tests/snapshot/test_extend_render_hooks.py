@@ -21,7 +21,6 @@ from nooa.snapshot import (
     Spill,
     Text,
     capture,
-    preview_attributes,
     render_json,
     render_output,
     render_python,
@@ -185,7 +184,7 @@ def test_render_output_text_is_unchanged() -> None:
 _BUDGETS = (1, 2, 5, 17, 60, 300, 5_000, sys.maxsize)
 
 
-def test_render_trace_is_render_json_and_preview_attributes() -> None:
+def test_render_trace_is_render_json_and_its_attributes() -> None:
     spilled = Text(
         head="h",
         tail="",
@@ -198,7 +197,6 @@ def test_render_trace_is_render_json_and_preview_attributes() -> None:
 
     text, attributes = render_trace(node, direction="output", max_chars=60)
     assert text == render_json(node, max_chars=60)
-    assert attributes == preview_attributes("output", node, max_chars=60)
     assert "/0/s" in attributes["nooa.output.preview.paths"]
     assert attributes["nooa.output.preview.full_output"] == ("/tmp/full.txt",)
     assert render_trace(node, direction="input", max_chars=60)[1].keys() == {
@@ -214,7 +212,9 @@ def test_render_trace_on_random_trees() -> None:
         for max_chars in _BUDGETS:
             text, attributes = render_trace(tree, direction="output", max_chars=max_chars)
             assert text == render_json(tree, max_chars=max_chars)
-            assert attributes == preview_attributes("output", tree, max_chars=max_chars)
+            assert attributes["nooa.output.preview.incomplete"] is (
+                "nooa.output.preview.paths" in attributes
+            )
 
 
 def _every_spill(node: Snapshot) -> list[str]:
