@@ -30,14 +30,12 @@ internal ``object_like`` shapes over their privileged field readers.
 
 from __future__ import annotations
 
-import ast
-import builtins
 import dataclasses
 import itertools
 import math
-import sys
 import types
 import typing
+import weakref
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -46,7 +44,7 @@ from typing import Any, Literal, NamedTuple, cast
 from pydantic import BaseModel
 from pydantic.fields import FieldInfo
 
-from nooa.agentdoc._docs import SpecAnnotation, spec
+from nooa.agentdoc._docs import SpecAnnotation
 from nooa.agentdoc._visibility import hidden
 from nooa.snapshot._codec import (
     OPAQUE_PREFIX,
@@ -95,8 +93,6 @@ _TYPE_NAME = type.__dict__["__name__"]
 _BASE_MODEL_DICT = BaseModel.__dict__["__dict__"]
 _DATACLASS_FIELD_TYPE = cast(Any, dataclasses)._FIELD
 _ANNOTATED_ALIAS = type(typing.Annotated[int, "x"])
-_MODULE_DICT = cast(Any, types.ModuleType).__dict__["__dict__"]
-_MAX_ANNOTATION_CHARS = 2000
 """Longer string annotations are not parsed (the textual fail-closed rule applies)."""
 _BUILTIN_PAIRS: tuple[tuple[type[Any], str], ...] = (
     (str, "str"),
@@ -832,187 +828,6 @@ def _field_hidden(field_info: FieldInfo, state: _State) -> bool | None:
     return _metadata_hidden(metadata, state)
 
 
-def _module_namespace(name: Any, state: _State) -> dict[str, Any] | None:
-    """A loaded module's raw ``__dict__`` (no import, no attribute hooks; None: unknown)."""
-    if type(name) is not str:
-        return None
-    modules = _safe_dict(sys.modules, sys.modules, state)
-    module = dict.get(modules, name) if modules is not None else None
-    return None if module is None else _module_namespace_of(module, state)
-
-
-_UNRESOLVED = object()
-_NO_NAMESPACE: dict[str, Any] = {}
-"""Names resolve against builtins only: the declaring module is unknown."""
-
-
-def _resolve_name(expr: ast.expr, namespace: dict[str, Any], state: _State) -> Any:
-    """What a ``Name`` or dotted ``Attribute`` names in ``namespace`` (raw reads only)."""
-    if not state.take_node():
-        return _UNRESOLVED
-    if type(expr) is ast.Name:
-        found = dict.get(namespace, expr.id, _UNRESOLVED)
-        if found is _UNRESOLVED:
-            builtin_names = _safe_dict(_BUILTINS, _BUILTINS, state)
-            if builtin_names is not None:
-                found = dict.get(builtin_names, expr.id, _UNRESOLVED)
-        return found
-    if type(expr) is ast.Attribute:
-        base = _resolve_name(expr.value, namespace, state)
-        if base is _UNRESOLVED:
-            return _UNRESOLVED
-        inner = _module_namespace_of(base, state)
-        if inner is None:
-            return _UNRESOLVED  # only module attributes are read
-        return dict.get(inner, expr.attr, _UNRESOLVED)
-    return _UNRESOLVED
-
-
-def _module_namespace_of(value: Any, state: _State) -> dict[str, Any] | None:
-    """A module's raw ``__dict__``, checked by ``_safe_dict`` (None: not a module)."""
-    try:
-        namespace = _MODULE_DICT.__get__(value)
-    except Exception:
-        return None
-    return _safe_dict(namespace, namespace, state) if type(namespace) is dict else None
-
-
-_BUILTINS: dict[str, Any] = builtins.__dict__
-
-
-def _is_annotated(value: Any, state: _State) -> bool:
-    if value is typing.Annotated:
-        return True
-    extensions = _module_namespace("typing_extensions", state)
-    return extensions is not None and value is dict.get(extensions, "Annotated", _UNRESOLVED)
-
-
-def _marker_expr_hidden(expr: ast.expr, namespace: dict[str, Any], state: _State) -> bool | None:
-    """Whether one ``Annotated`` metadata expression hides the field (None: can't tell)."""
-    if type(expr) is ast.Constant:
-        return False
-    if type(expr) is ast.Name or type(expr) is ast.Attribute:
-        found = _resolve_name(expr, namespace, state)
-        if found is _UNRESOLVED:
-            return None
-        # ``hidden`` or a ``spec(...)`` marker object (``H = spec(hidden=True)``),
-        # read as resolved runtime metadata; foreign metadata is ignored.
-        return _metadata_hidden((found,), state)
-    if type(expr) is ast.Call:
-        function = _resolve_name(expr.func, namespace, state)
-        if function is _UNRESOLVED:
-            return None
-        if function is not spec and function is not SpecAnnotation:
-            return False  # foreign constraint metadata (pydantic Field, ...)
-        if expr.args:
-            return None
-        hidden_value: Any = None
-        for keyword in expr.keywords:
-            if not state.take_node():
-                return None
-            if keyword.arg is None:
-                return None  # ``**kwargs``: unreadable
-            if keyword.arg == "hidden":
-                if type(keyword.value) is not ast.Constant:
-                    return None
-                hidden_value = keyword.value.value
-        if hidden_value is None:
-            return False
-        if type(hidden_value) is not bool:
-            return None
-        return hidden_value
-    return None  # any other expression could evaluate to a marker
-
-
-def _parsed_annotation_hidden(
-    expr: ast.expr, namespace: dict[str, Any], state: _State
-) -> bool | None:
-    """Mirror of the runtime rule: only an outermost ``Annotated`` (flattened) hides."""
-    if not state.take_node():
-        return None
-    if type(expr) is ast.Name or type(expr) is ast.Attribute:
-        # An alias of a whole ``Annotated`` type (``Secret = Annotated[str, hidden]``)
-        # is inspected as the runtime annotation would be; any other name is visible.
-        found = _resolve_name(expr, namespace, state)
-        if found is _UNRESOLVED:
-            # A forward reference; without the declaring module, possibly such an alias.
-            return None if namespace is _NO_NAMESPACE else False
-        return _alias_hidden(found, state)
-    if type(expr) is not ast.Subscript:
-        return False
-    head = _resolve_name(expr.value, namespace, state)
-    annotated: bool | None = None if head is _UNRESOLVED else _is_annotated(head, state)
-    if annotated is False:
-        return False
-    elements = expr.slice.elts if type(expr.slice) is ast.Tuple else [expr.slice]
-    if len(elements) < 2:
-        return False
-    found = False
-    unknown = False
-    first = type(elements[0])
-    if first is ast.Subscript or first is ast.Name or first is ast.Attribute:
-        # ``Annotated`` flattens: the metadata of a nested one (or an alias of one) counts.
-        inner = _parsed_annotation_hidden(elements[0], namespace, state)
-        unknown = inner is None
-        found = inner is True
-    for element in elements[1:]:
-        marker = _marker_expr_hidden(element, namespace, state)
-        if marker is None:
-            unknown = True
-        elif marker:
-            found = True
-    if annotated:
-        return None if unknown else found
-    # An unresolved head (a local alias?) with marker-like metadata: can't tell.
-    return None if found or unknown else False
-
-
-def _textual_annotation_hidden(annotation: str) -> bool | None:
-    if "Annotated" in annotation and ("hidden" in annotation or "spec" in annotation):
-        return None
-    return False
-
-
-def _annotation_hidden(
-    annotation: Any, state: _State, namespace: dict[str, Any] | None = None
-) -> bool | None:
-    """Whether a dataclass field annotation carries ``hidden`` (None: fail closed).
-
-    String annotations (PEP 563) are never evaluated: they are parsed with
-    ``ast`` and their names (``Name`` or dotted module ``Attribute``) are looked
-    up in ``namespace``, the raw ``__dict__`` of the module that declared the
-    field, then in builtins. Resolved objects are compared by identity with
-    ``Annotated`` and the agentdoc ``hidden`` / ``spec`` markers; a resolved
-    ``spec(...)`` marker object or an alias of a whole ``Annotated`` type
-    (``Secret = Annotated[str, hidden]``) is read like the runtime annotation,
-    through raw attributes only. Inside an ``Annotated`` subscript, metadata
-    that can't be read safely (an unknown name, a ``spec(...)`` call without a
-    literal ``hidden``, a marker object with a non-``bool`` ``hidden``) fails
-    closed; unknown names elsewhere (``list[Foo]``, forward references) don't
-    matter. Without a namespace (the declaring module is unloaded, renamed or
-    unreadable) the string is still parsed, its names resolved against
-    builtins only: an unresolved head with name or call metadata (an alias
-    such as ``A[str, H]``) or an unresolved bare name (``Secret``) is unknown
-    and fails closed, while ``list[int]`` or ``dict[str, Foo]`` stay visible. For a string that is too long or doesn't
-    parse, one that mentions ``hidden`` or ``spec`` inside ``Annotated``
-    fails closed.
-    """
-    if type(annotation) is str:
-        if len(annotation) > _MAX_ANNOTATION_CHARS:
-            return _textual_annotation_hidden(annotation)
-        if namespace is None:
-            namespace = _NO_NAMESPACE
-        try:
-            tree = ast.parse(annotation, mode="eval")
-        except (SyntaxError, ValueError, RecursionError, MemoryError):
-            return _textual_annotation_hidden(annotation)
-        try:
-            return _parsed_annotation_hidden(tree.body, namespace, state)
-        except RecursionError:
-            return None
-    return _alias_hidden(annotation, state)
-
-
 def _alias_hidden(annotation: Any, state: _State) -> bool | None:
     """Whether a resolved annotation is an ``Annotated`` whose raw metadata hides (None: unreadable).
 
@@ -1028,29 +843,48 @@ def _alias_hidden(annotation: Any, state: _State) -> bool | None:
     return _metadata_hidden(metadata, state)
 
 
-def _declaring_module(
-    name: str, field: Any, mro: tuple[type[Any], ...], state: _State
-) -> dict[str, Any] | None:
-    """The raw namespace of the module whose dataclass declared ``field``.
+_UNREAD = object()
 
-    Inherited fields keep their ``Field`` object, so the declaring class is
-    the most basic class whose own ``__dataclass_fields__`` holds it.
+_HINTS: dict[int, tuple[weakref.ref[type[Any]], dict[str, tuple[Any, ...]] | None]] = {}
+"""Per dataclass, keyed by ``id`` and re-checked by identity: its resolved hint metadata."""
+
+
+def _resolved_metadata(cls: type[Any]) -> dict[str, tuple[Any, ...]] | None:
+    """The outermost ``Annotated`` metadata of each resolved type hint of ``cls`` (None: unreadable).
+
+    String annotations (PEP 563) are read the way Python reads them:
+    ``typing.get_type_hints(cls, include_extras=True)``, evaluated once per
+    class. The cache is keyed by ``id(cls)`` and re-checked with ``is``, so the
+    class is never hashed or compared; it keeps only a weak reference to the
+    class and the marker metadata, and ``weakref.finalize`` drops the entry
+    with the class. A hint that is not an exact ``Annotated`` alias has no
+    metadata (``()``). If evaluation raises, the class's hints are unreadable.
     """
-    for base in reversed(mro):
-        if not state.take_node():
-            return None
-        namespace = _raw_namespace(base, state)
-        if namespace is None:
-            continue
-        fields = dict.get(namespace, "__dataclass_fields__")
-        if type(fields) is not dict:
-            continue
-        # ``fields`` is class data too: check its keys before a lookup by name.
-        checked = _safe_dict(fields, fields, state)
-        if checked is not None and dict.get(checked, name) is field:
-            qualified = _raw_qualified_name(base, state)
-            return _module_namespace(qualified[0], state) if qualified is not None else None
-    return None
+    key = id(cls)
+    entry = _HINTS.get(key)
+    if entry is not None and entry[0]() is cls:
+        return entry[1]
+    metadata: dict[str, tuple[Any, ...]] | None = {}
+    try:
+        hints = typing.get_type_hints(cls, include_extras=True)
+        for name, hint in dict.items(hints):
+            if type(name) is not str:
+                continue
+            found: Any = ()
+            if type(hint) is _ANNOTATED_ALIAS:
+                found = object.__getattribute__(hint, "__metadata__")
+                if type(found) is not tuple:
+                    raise TypeError("unreadable Annotated metadata")
+            metadata[name] = found
+    except Exception:
+        metadata = None
+    try:
+        reference = weakref.ref(cls)
+        weakref.finalize(cls, _HINTS.pop, key, None)
+    except Exception:
+        return metadata  # not cacheable: evaluated again next time
+    _HINTS[key] = (reference, metadata)
+    return metadata
 
 
 class _Part:
@@ -1325,6 +1159,7 @@ def _dataclass_entries(
     stopped: list[Reason] = []
 
     def selected() -> typing.Iterator[tuple[str, Any] | None]:
+        resolved: Any = _UNREAD  # the class's resolved hints, read at the first string annotation
         for name, field in dict.items(fields):
             if not state.take_node():
                 stopped.append("max_nodes")
@@ -1346,10 +1181,13 @@ def _dataclass_entries(
                 return
             if represented is False or name.startswith("_"):
                 continue
-            namespace = (
-                _declaring_module(name, field, mro, state) if type(annotation) is str else None
-            )
-            annotation_hidden = _annotation_hidden(annotation, state, namespace)
+            if type(annotation) is str:
+                if resolved is _UNREAD:
+                    resolved = _resolved_metadata(carrier)
+                metadata = dict.get(resolved, name) if resolved is not None else None
+                annotation_hidden = None if metadata is None else _metadata_hidden(metadata, state)
+            else:
+                annotation_hidden = _alias_hidden(annotation, state)
             if annotation_hidden is None:
                 # This field can't be shown safely: omit it, the object is incomplete.
                 stopped.append("opaque")
@@ -2093,31 +1931,6 @@ def _field_reserves(pairs: list[tuple[Any, Any]]) -> tuple[list[tuple[int, int]]
         nodes += need_nodes
     reserves.reverse()
     return reserves, nodes
-
-
-_TYPE_MODULE = type.__dict__["__module__"]
-_TYPE_QUALNAME = type.__dict__["__qualname__"]
-
-
-def _raw_qualified_name(cls: type[Any], state: _State) -> tuple[str, str] | None:
-    """``(__module__, __qualname__)`` read through ``type``'s own descriptors.
-
-    The getters of ``type`` read the class's native storage, so neither a
-    metaclass ``__getattribute__`` nor a class-level attribute can intercept
-    them. Non-``str`` values (possible for ``__module__``) give ``None``. The
-    ``__module__`` getter looks the name up in the class namespace, so that
-    namespace is checked first (``_raw_namespace``: exact ``str`` keys only).
-    """
-    if _raw_namespace(cls, state) is None:
-        return None
-    try:
-        module = _TYPE_MODULE.__get__(cls, type(cls))
-        qualname = _TYPE_QUALNAME.__get__(cls, type(cls))
-    except Exception:
-        return None
-    if type(module) is not str or type(qualname) is not str:
-        return None
-    return module, qualname
 
 
 class _Registry:

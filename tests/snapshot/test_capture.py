@@ -352,6 +352,9 @@ def test_dataclass_string_annotation_with_hidden_is_resolved() -> None:
         "SpecInstance",
         "WholeAlias",
         "NestedWholeAlias",
+        "SpecUnreadable",  # ``spec(hidden=FLAG)``: evaluated, FLAG is True
+        "CalledMarker",  # ``make_secret()`` returns ``spec(hidden=True)`` (CodeRabbit)
+        "PartialMarker",  # ``functools.partial(spec, hidden=True)()``
     ],
 )
 def test_dataclass_string_annotation_aliases_are_hidden(name: str) -> None:
@@ -370,13 +373,98 @@ def test_dataclass_spec_hidden_false_literal_stays_visible() -> None:
     assert [name for name, _ in snapshot.fields] == ["shown", "ok"]
 
 
-@pytest.mark.parametrize("name", ["SpecUnreadable", "SpecInstanceUnreadable", "UnknownMarker"])
-def test_dataclass_unreadable_string_marker_fails_closed_per_field(name: str) -> None:
-    snapshot = capture(getattr(_annotation_aliases, name)())
+def test_dataclass_unreadable_resolved_marker_fails_closed_per_field() -> None:
+    snapshot = capture(_annotation_aliases.SpecInstanceUnreadable())  # ``hidden="yes"``
 
     assert isinstance(snapshot, Object)
     assert [field_name for field_name, _ in snapshot.fields] == ["ok"]
     assert not snapshot.complete and snapshot.reason == "opaque"
+
+
+@pytest.mark.parametrize("name", ["UnknownMarker", "TypeCheckingOnly", "Unresolvable"])
+def test_dataclass_hints_that_cannot_be_evaluated_fail_closed_for_the_class(name: str) -> None:
+    # ``get_type_hints`` raises (NameError): every string-annotated field is left out.
+    snapshot = capture(getattr(_annotation_aliases, name)())
+
+    assert "S-" not in render_json(snapshot, max_chars=2000)
+    assert isinstance(snapshot, Object)
+    assert snapshot.fields == ()
+    assert not snapshot.complete and snapshot.reason == "opaque"
+
+
+def test_dataclass_real_annotations_beside_unevaluable_strings_stay_readable() -> None:
+    Mixed = dataclasses.make_dataclass(  # noqa: N806
+        "Mixed",
+        [("shown", int, field(default=1)), ("token", Annotated[str, hidden], field(default="s"))],
+    )
+    Mixed.__annotations__["later"] = "NotDefinedAnywhere"  # makes get_type_hints raise
+    Mixed.__dataclass_fields__["later"] = later = field(default="x")
+    later.name, later.type, later._field_type = "later", "NotDefinedAnywhere", dataclasses._FIELD  # type: ignore[attr-defined]
+
+    snapshot = capture(Mixed())
+
+    assert isinstance(snapshot, Object)
+    assert [name for name, _ in snapshot.fields] == ["shown"]
+    assert not snapshot.complete and snapshot.reason == "opaque"
+
+
+def test_dataclass_foreign_constraint_metadata_stays_visible() -> None:
+    snapshot = capture(_annotation_aliases.Visible())
+
+    assert snapshot.field("constrained") == Scalar(3)  # ``Annotated[int, Field(gt=0), "doc"]``
+
+
+def test_dataclass_hints_are_evaluated_once_per_class(monkeypatch) -> None:
+    import typing
+
+    from nooa.snapshot import _capture
+
+    calls: list[object] = []
+    real = typing.get_type_hints
+
+    def counting(obj: Any, *args: Any, **kwargs: Any) -> Any:
+        calls.append(obj)
+        return real(obj, *args, **kwargs)
+
+    monkeypatch.setattr(typing, "get_type_hints", counting)
+
+    @dataclass
+    class Counted:
+        token: Annotated[str, hidden] = "s3cret"
+        name: str = "n"
+
+    for _ in range(3):
+        assert render_python(capture(Counted())) == "Counted(name='n')"
+
+    assert calls == [Counted]
+    calls.clear()
+    key = id(Counted)
+    assert key in _capture._HINTS
+    del Counted
+    import gc
+
+    gc.collect()
+    assert key not in _capture._HINTS  # dropped with the class (weakref.finalize)
+
+
+class _Unhashable(type):
+    def __hash__(cls) -> int:
+        raise RuntimeError("class hashed")
+
+    def __eq__(cls, other: object) -> bool:
+        raise RuntimeError("class compared")
+
+
+def test_dataclass_hint_cache_never_hashes_or_compares_the_class() -> None:
+    @dataclass
+    class Guarded(metaclass=_Unhashable):
+        token: Annotated[str, hidden] = "s3cret"
+        name: str = "n"
+
+    for _ in range(2):
+        snapshot = capture(Guarded())
+        assert isinstance(snapshot, Object) and snapshot.complete
+        assert [name for name, _ in snapshot.fields] == ["name"]
 
 
 def test_dataclass_string_annotations_without_markers_capture() -> None:
@@ -385,7 +473,6 @@ def test_dataclass_string_annotations_without_markers_capture() -> None:
     assert isinstance(snapshot, Object) and snapshot.complete
     assert json.loads(render_json(snapshot, max_chars=2000)) == {
         "xs": [1, 2],
-        "mapping": {},
         "forward": None,
         "constrained": 3,
         "nested": [4],
@@ -423,9 +510,11 @@ def _load_aliases_copy(name: str) -> Any:
 def _assert_alias_fields_fail_closed(value: Any) -> None:
     snapshot = capture(value)
 
+    # Without the declaring module, get_type_hints can't resolve ``Annotated``:
+    # every string-annotated field is left out.
     assert "S-" not in render_json(snapshot, max_chars=2000)
     assert isinstance(snapshot, Object)
-    assert [name for name, _ in snapshot.fields] == ["ok"]
+    assert snapshot.fields == ()
     assert not snapshot.complete and snapshot.reason == "opaque"
 
 
@@ -434,7 +523,7 @@ def test_dataclass_alias_marker_in_a_module_not_in_sys_modules_fails_closed() ->
     assert "_snapshot_unloaded_aliases" not in sys.modules
 
     _assert_alias_fields_fail_closed(module.AliasBoth())
-    _assert_alias_fields_fail_closed(module.WholeAlias())  # ``Secret`` can't be resolved
+    _assert_alias_fields_fail_closed(module.WholeAlias())
 
 
 def test_dataclass_alias_marker_with_a_reassigned_module_fails_closed() -> None:
@@ -444,17 +533,10 @@ def test_dataclass_alias_marker_with_a_reassigned_module_fails_closed() -> None:
     _assert_alias_fields_fail_closed(module.AliasBoth())
 
 
-def test_dataclass_plain_annotations_without_a_module_stay_visible() -> None:
+def test_dataclass_plain_annotations_without_a_module_fail_closed() -> None:
     module = _load_aliases_copy("_snapshot_unloaded_visible")
 
-    snapshot = capture(module.Visible(nested=[4]))
-
-    # ``Annotated`` itself can't be resolved without the module, so a field
-    # with call or name metadata (``Field(gt=0)``, ``SHOW``) is unknown and
-    # fails closed, as is a bare name that could alias one (``Documented``).
-    assert isinstance(snapshot, Object)
-    assert [name for name, _ in snapshot.fields] == ["xs", "mapping", "forward", "nested", "inner"]
-    assert not snapshot.complete and snapshot.reason == "opaque"
+    _assert_alias_fields_fail_closed(module.Visible(nested=[4]))
 
 
 # --- cycles and repeated references -----------------------------------------------------
@@ -838,7 +920,7 @@ def test_safe_dict_survives_a_namespace_changing_during_the_key_check() -> None:
     assert {f"k{index}" for index in range(8)} <= set(checked)
 
 
-def test_module_namespace_foreign_key_is_never_compared(monkeypatch) -> None:
+def test_module_namespace_hostile_key_fails_closed(monkeypatch) -> None:
     import types
 
     module = types.ModuleType("_snapshot_hostile_module")
@@ -862,10 +944,12 @@ def test_module_namespace_foreign_key_is_never_compared(monkeypatch) -> None:
 
     snapshot = capture(Secret())
 
-    assert _CollidingKey.calls == []
+    # Evaluating the annotations looks names up the way Python does; the
+    # module's key raises during the lookup, so the class's hints are unreadable.
+    assert _CollidingKey.calls != []
     assert isinstance(snapshot, Object)
-    assert snapshot.field("ok") == Scalar(1)
-    assert snapshot.field("token") is None  # can't be read safely: omitted
+    assert snapshot.fields == ()
+    assert not snapshot.complete and snapshot.reason == "opaque"
     assert "s3cret" not in render_json(snapshot, max_chars=1000)
 
 
