@@ -285,3 +285,29 @@ def test_other_spelling_of_the_same_endpoint_keeps_media_permissions(
     # A different URL is a replacement route and inherits nothing.
     other = client._prepare_call_config({override: "https://other.example/v1"})
     assert client._request_media_inputs(other) == ()
+
+
+@pytest.mark.parametrize("is_async", [False, True])
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"base_url": "https://gw.example/v1"},
+        {"api_base": "https://gw.example/v1/"},
+        {"api_base": "https://GW.example/v1"},
+    ],
+)
+def test_same_endpoint_override_keeps_owned_transport(is_async, override):
+    """The configured URL in another spelling or form must keep the owned HTTP client."""
+    client = CompletionClient("openai/opaque-model", api_key="k", api_base="https://gw.example/v1")
+    call_config = client._prepare_call_config(override)
+    sdk_client = client._completion_http_client(call_config, is_async=is_async, max_retries=0)
+    assert sdk_client is not None
+    owned_pool = client._http.httpx_async if is_async else client._http.httpx_sync
+    assert sdk_client._client is owned_pool
+
+
+@pytest.mark.parametrize("is_async", [False, True])
+def test_different_endpoint_override_drops_owned_transport(is_async):
+    client = CompletionClient("openai/opaque-model", api_key="k", api_base="https://gw.example/v1")
+    call_config = client._prepare_call_config({"api_base": "https://other.example/v1"})
+    assert client._completion_http_client(call_config, is_async=is_async, max_retries=0) is None

@@ -2114,10 +2114,22 @@ class CompletionClient(UnifiedLLM):
     def _completion_http_client(
         self, call_config: dict[str, Any], *, is_async: bool, max_retries: int
     ) -> Any:
-        """Reuse the owned transport only while its constructor routing still applies."""
-        routing_fields = ("api_base", "base_url", "api_key", "custom_llm_provider")
-        if self._effective_model(call_config) != self.model or any(
-            call_config.get(key) != self.config.get(key) for key in routing_fields
+        """Reuse the owned transport only while its constructor routing still applies.
+
+        The endpoint is compared with route_identity.endpoint_changed, like media
+        permissions, reasoning levels and context windows: the configured URL
+        under the other spelling, with a trailing slash or a different host case
+        is the same route and keeps the owned transport.
+        """
+        from nooa.unifiedllm.route_identity import endpoint_changed
+
+        if (
+            self._effective_model(call_config) != self.model
+            or endpoint_changed(self.config, call_config)
+            or any(
+                call_config.get(key) != self.config.get(key)
+                for key in ("api_key", "custom_llm_provider")
+            )
         ):
             # LiteLLM uses a supplied OpenAI SDK client's bound URL/key, ignoring
             # the corresponding call parameters. Let it build the correct client
