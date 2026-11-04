@@ -1348,9 +1348,10 @@ class UnifiedLLM(ABC):
 
     def _prepare_media_messages(self, messages, call_config):
         enabled = self._request_media_inputs(call_config)
-        filtered = filter_media_messages(messages, enabled)
-        self._validate_implemented_media(filtered, call_config)
-        return filtered
+        # Media the interface cannot send is rejected after projection, by
+        # _validate_implemented_media: only the projected request also shows the
+        # native content of replayed assistant turns.
+        return filter_media_messages(messages, enabled)
 
     def _validate_implemented_media(self, messages, call_config):
         from nooa.media_policy import reject_unsupported_media, resolved_input_interface
@@ -2786,9 +2787,6 @@ class ResponsesClient(UnifiedLLM):
     @staticmethod
     def _transform_content_blocks(blocks, text_kind="input_text"):
         """Project documented public slots, preserving request-owned metadata."""
-        from nooa.media_policy import reject_unsupported_media
-
-        reject_unsupported_media([{"content": blocks}], "responses")
         result = copy.deepcopy(blocks)
         for block in result:
             if block.get("type") == "text":
