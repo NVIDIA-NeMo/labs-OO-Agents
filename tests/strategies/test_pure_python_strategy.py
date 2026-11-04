@@ -20,7 +20,6 @@ def _resp(content: str) -> LLMResponse:
         content=content,
         tool_calls=[],
         finish_reason="stop",
-        assistant_message={"role": "assistant", "content": content},
     )
 
 
@@ -213,11 +212,7 @@ class TestPurePythonStrategyExecute:
 
         # Get LLM-generated events (exclude synthetic prefill events)
         history_events = agent_instance.event_manager.values()
-        assistant_events = [
-            e
-            for e in history_events
-            if e.event_type == "LLMOutput" and not (e.metadata or {}).get("prefill")
-        ]
+        assistant_events = [e for e in history_events if e.event_type == "LLMResponse"]
 
         # Should have 2 assistant events (one per LLM call)
         assert len(assistant_events) >= 2
@@ -330,21 +325,12 @@ return x + 1
 
         assert result == 6
 
-        # Check history - the assistant message should have CLEAN code (no fences)
+        # The canonical assistant event keeps the exact provider response.
         history_events = agent_instance.event_manager.values()
-        assistant_events = [
-            e
-            for e in history_events
-            if e.event_type == "LLMOutput" and not (e.metadata or {}).get("prefill")
-        ]
+        assistant_events = [e for e in history_events if e.event_type == "LLMResponse"]
 
         assert len(assistant_events) >= 1
-        stored_code = assistant_events[0].content
-
-        # Should NOT contain fence markers
-        assert "```" not in stored_code, f"History should not contain fences: {stored_code}"
-        # Should contain the actual code
-        assert "return x + 1" in stored_code
+        assert assistant_events[0].content == fenced_code
 
 
 class TestPurePythonMalformedOutputs:
@@ -549,8 +535,8 @@ return result
         assert fake_llm.call_count == 1
 
     @pytest.mark.asyncio
-    async def test_history_stores_clean_code_after_xml_stripping(self):
-        """History should store the clean code (without XML wrapper) for LLM learning."""
+    async def test_history_retains_provider_turn_after_xml_stripping(self):
+        """Execution strips XML without rewriting canonical history."""
         from nooa.strategies.pure_python import PurePythonStrategy
 
         class TestAgent(Agent, llm=_TEST_LLM):
@@ -571,22 +557,12 @@ return x + 1
 
         assert result == 6
 
-        # Check history - should have clean code without XML tags
+        # The canonical assistant event keeps the exact provider response.
         history_events = agent_instance.event_manager.values()
-        assistant_events = [
-            e
-            for e in history_events
-            if e.event_type == "LLMOutput" and not (e.metadata or {}).get("prefill")
-        ]
+        assistant_events = [e for e in history_events if e.event_type == "LLMResponse"]
 
         assert len(assistant_events) >= 1
-        stored_code = assistant_events[0].content
-
-        # Should NOT contain XML tags
-        assert "<tool_code>" not in stored_code
-        assert "</tool_code>" not in stored_code
-        # Should contain the actual code
-        assert "return x + 1" in stored_code
+        assert assistant_events[0].content == wrapped_response
 
 
 @pytest.fixture

@@ -15,6 +15,7 @@ from nooa.metaclass import AgentMeta
 if TYPE_CHECKING:
     from nooa.config.truncation_config import TruncationConfig
     from nooa.context_blocks import DynamicContext
+    from nooa.decisions import DecisionRequest, DecisionResponse, UnifiedDecisionModel
     from nooa.runtime.restrictions import RestrictionsConfig
     from nooa.strategies.current_call import CurrentCall
 
@@ -67,7 +68,7 @@ class RuntimeServices(Protocol):
         - System message: context blocks + strategy.strategy_prompt
         - Events: conversation events
 
-        Creates an LLMOutput event and adds it to event manager.
+        Creates an LLMResponse event and adds it to event manager.
 
         Args:
             tools: Optional list of tool definitions.
@@ -77,7 +78,7 @@ class RuntimeServices(Protocol):
         Returns:
             Tuple of (LLMResponse, event_id) where:
             - LLMResponse has content, reasoning, usage
-            - event_id can be used for event_manager.update() (e.g., strip reasoning)
+            - event_id identifies the append-only provider turn for inspection or linking
         """
         ...
 
@@ -92,6 +93,7 @@ class RuntimeServices(Protocol):
         tool_call_id: str | None = None,
         execution_count: int = 1,
         restrictions: "RestrictionsConfig | None" = None,
+        sandbox_executor: Any = None,
     ) -> Any:
         """Execute Python code with namespace + strategy builtins.
 
@@ -105,6 +107,7 @@ class RuntimeServices(Protocol):
             execution_count: Execution number for Jupyter-style "Cell In[N]" filename.
             restrictions: Code execution restrictions (blocked modules/calls).
                 None uses defaults from RestrictionsConfig().
+            sandbox_executor: Optional guarded worker used instead of in-process execution.
 
         Returns:
             ExecutionResult with stdout, error, defined_methods.
@@ -183,6 +186,36 @@ class RuntimeServices(Protocol):
         ...
 
 
+class DecisionRuntimeServices(RuntimeServices, Protocol):
+    """Additional runtime operation required only by decision strategies."""
+
+    @property
+    def decision_model(self) -> "UnifiedDecisionModel":
+        """Return the decision model resolved for the current call."""
+        ...
+
+    async def decision_state_inputs(
+        self,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]] | None]:
+        """Resolve explicitly selected context and events for decision state.
+
+        Returns:
+            A pair containing resolved context blocks and selected chronological
+            events. ``None`` for events means that no event query opted in.
+        """
+        ...
+
+    async def decide(
+        self, request: "DecisionRequest", *, include_raw_response: bool = False
+    ) -> "DecisionResponse":
+        """Evaluate one backend-neutral decision request and return its answers.
+
+        With ``include_raw_response``, the durable record also stores the
+        client's raw response body, when it has one.
+        """
+        ...
+
+
 class GenerationStrategy(ABC, metaclass=AgentMeta):
     """Abstract base class for generation strategies with automatic method wrapping.
 
@@ -203,6 +236,11 @@ class GenerationStrategy(ABC, metaclass=AgentMeta):
         def analyze(self, data: str) -> dict:
             '''Analyze data.'''
     """
+
+    @property
+    def uses_decision_model(self) -> bool:
+        """Return whether this strategy prefers the agent's decision model."""
+        return False
 
     @property
     def name(self) -> str:
@@ -326,14 +364,14 @@ class GenerationStrategy(ABC, metaclass=AgentMeta):
         )
 
         result = None
-        exception = None
+        exception: BaseException | None = None
         try:
             if inspect.iscoroutinefunction(callable_obj):
                 result = await callable_obj(*args, **kwargs)
             else:
                 result = callable_obj(*args, **kwargs)
             return result
-        except Exception as e:
+        except BaseException as e:
             exception = e
             raise
         finally:

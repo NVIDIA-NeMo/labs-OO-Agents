@@ -11,9 +11,14 @@ Ensures errors shown to the LLM match IPython/Jupyter-style output:
 - Validation errors show clean messages without tracebacks
 """
 
+from pathlib import Path
+
+import pytest
+
 from nooa.errors import IPythonErrorFormatter, RestrictedCodeError, format_error_for_llm
 from nooa.errors.formatting import (
     _adjust_line_numbers,
+    _diagnostic_budget,
     _is_user_code_frame,
     _is_validation_error,
     _strip_file_prefix,
@@ -34,9 +39,17 @@ class TestIsUserCodeFrame:
         assert _is_user_code_frame("<execute_code>") is True
 
     def test_nooa_is_framework(self):
-        """Frames from nooa/ are framework code."""
-        assert _is_user_code_frame("/path/to/nooa/runtime/actor.py") is False
+        """Package-relative and actual NOOA source frames are framework code."""
+        import nooa
+
         assert _is_user_code_frame("nooa/strategies/pure_python.py") is False
+        package_frame = str(Path(nooa.__file__).resolve().parent / "runtime" / "actor.py")
+        assert _is_user_code_frame(package_frame) is False
+
+    def test_user_checkout_named_nooa_is_not_framework(self):
+        """A directory component named nooa must not hide user/helper frames."""
+        assert _is_user_code_frame("/home/user/repos/nooa/helpers/agent.py") is True
+        assert _is_user_code_frame("/tmp/nooa/project/task.py") is True
 
     def test_site_packages_is_framework(self):
         """Frames from site-packages are framework code."""
@@ -251,6 +264,58 @@ class TestFormatRuntimeError:
             assert "Cell In[1]" in result
             assert "ZeroDivisionError" in result
 
+    def test_runtime_error_points_to_failing_expression(self):
+        """Runtime calls retain IPython-style source and an expression caret."""
+        import linecache
+
+        code = "sens = 'abc'\nstart = sens.index('missing')"
+        filename = "Cell In[75]"
+        previous = linecache.cache.get(filename)
+        linecache.cache[filename] = (
+            len(code),
+            None,
+            code.splitlines(keepends=True),
+            filename,
+        )
+
+        try:
+            try:
+                exec(compile(code, filename, "exec"))
+            except ValueError as error:
+                result = format_error_for_llm(error, code)
+        finally:
+            if previous is None:
+                linecache.cache.pop(filename, None)
+            else:
+                linecache.cache[filename] = previous
+
+        assert "Cell In[75], line 2" in result
+        assert "start = sens.index('missing')" in result
+        assert result.endswith("ValueError: substring not found")
+
+    def test_runtime_error_preserves_non_ascii_source(self):
+        """Runtime diagnostics retain non-ASCII source across Python versions."""
+        import linecache
+
+        code = "prefix = 'é'; value = 'abc'.index('missing')"
+        filename = "Cell In[76]"
+        previous = linecache.cache.get(filename)
+        linecache.cache[filename] = (len(code), None, [code + "\n"], filename)
+        try:
+            try:
+                exec(compile(code, filename, "exec"))
+            except ValueError as error:
+                result = format_error_for_llm(error, code)
+        finally:
+            if previous is None:
+                linecache.cache.pop(filename, None)
+            else:
+                linecache.cache[filename] = previous
+
+        assert "Cell In[76], line 1" in result
+        assert code in result
+        assert result.endswith("ValueError: substring not found")
+
     def test_runtime_error_with_line_offset(self):
         """Runtime error line numbers are adjusted by offset."""
         # Simulate code that would be on line 5 of a wrapper
@@ -432,20 +497,37 @@ class TestIPythonErrorFormatter:
         result = formatter.format(error, None, line_offset=5)
         assert "ValueError" in result
 
-    def test_custom_formatter_compatibility(self):
-        """Custom formatters can be created with same interface."""
+    def test_custom_formatter_matches_complete_protocol(self):
+        """Custom formatters can implement the complete public protocol."""
 
         class CustomFormatter:
             def format(
-                self, error: Exception, _code: str | None = None, *, line_offset: int = 0
+                self,
+                error: Exception,
+                code: str | None = None,
+                *,
+                line_offset: int = 0,
+                max_error: int | None = None,
+                tail_chars: int | None = None,
             ) -> str:
-                # _code intentionally unused - testing interface compatibility
-                return f"CUSTOM: {type(error).__name__} (offset={line_offset})"
+                return (
+                    f"CUSTOM: {type(error).__name__} "
+                    f"({code=}, {line_offset=}, {max_error=}, {tail_chars=})"
+                )
+
+        from nooa.strategies.codeact import CodeActStrategy
 
         formatter = CustomFormatter()
-        error = ValueError("test")
-        result = formatter.format(error, None, line_offset=3)
-        assert result == "CUSTOM: ValueError (offset=3)"
+        result = CodeActStrategy(error_formatter=formatter)._format_error(
+            ValueError("test"),
+            "bad()",
+            line_offset=3,
+            max_error=100,
+            tail_chars=25,
+        )
+        assert result == (
+            "CUSTOM: ValueError (code='bad()', line_offset=3, max_error=100, tail_chars=25)"
+        )
 
 
 class TestHeredocHint:
@@ -465,13 +547,15 @@ class TestHeredocHint:
         """Assert the heredoc hint and both fix patterns appear in `result`."""
         assert "heredoc" in result, f"expected 'heredoc' in output, got:\n{result}"
         assert '"""' in result, f"expected triple-quote (Fix 1) in output, got:\n{result}"
-        assert "shell.write" in result, f"expected shell.write (Fix 2) in output, got:\n{result}"
+        hint = result.split("Hint:", 1)[1]
+        assert "doc(...)" in hint
+        assert "shell.run" not in hint
+        assert "shell.write" not in hint
 
     @staticmethod
     def _assert_hint_absent(result: str) -> None:
         """Assert no heredoc hint was appended to `result`."""
         assert "heredoc" not in result, f"unexpected 'heredoc' in output:\n{result}"
-        assert "shell.write" not in result, f"unexpected shell.write in output:\n{result}"
 
     # ----- Positive cases: one per trigger message -----
 
@@ -580,9 +664,11 @@ class TestHeredocHint:
         result = self._compile_and_format(code)
         # Fix 1: triple-quoted string
         assert "triple-quoted" in result or '"""' in result
-        # Fix 2: write to file then bash it
-        assert "shell.write" in result
-        assert "bash" in result.lower()
+        # Recovery remains API-neutral; inspect the available runner instead.
+        hint = result.split("Hint:", 1)[1]
+        assert "doc(...)" in hint
+        assert "shell.run" not in hint
+        assert "shell.write" not in hint
 
 
 class _ShellToolsLike:
@@ -795,3 +881,258 @@ class TestBadCallAgentdocHardening:
         from nooa.errors.formatting import _bad_call_agentdoc
 
         assert _bad_call_agentdoc(_BadStr()) is None
+
+
+class TestFormatterReviewRegressions:
+    """Regressions found by the independent PR #185 review round."""
+
+    def test_line_offset_does_not_rewrite_source_or_exception_message(self):
+        import linecache
+
+        code = "# line 99 must stay literal\nraise RuntimeError('failed at line 12')"
+        filename = "Cell In[99001]"
+        previous = linecache.cache.get(filename)
+        linecache.cache[filename] = (len(code), None, code.splitlines(keepends=True), filename)
+        try:
+            try:
+                exec(compile(code, filename, "exec"))
+            except RuntimeError as error:
+                result = format_error_for_llm(error, code, line_offset=1)
+        finally:
+            if previous is None:
+                linecache.cache.pop(filename, None)
+            else:
+                linecache.cache[filename] = previous
+
+        assert "Cell In[99001], line 1" in result
+        assert "failed at line 12" in result
+        assert "failed at line 11" not in result
+
+    def test_explicit_exception_chain_is_preserved(self):
+        import linecache
+
+        code = (
+            "try:\n"
+            "    int('nope')\n"
+            "except ValueError as cause:\n"
+            "    raise RuntimeError('outer') from cause"
+        )
+        filename = "Cell In[99002]"
+        previous = linecache.cache.get(filename)
+        linecache.cache[filename] = (len(code), None, code.splitlines(keepends=True), filename)
+        try:
+            try:
+                exec(compile(code, filename, "exec"))
+            except RuntimeError as error:
+                result = format_error_for_llm(error, code)
+        finally:
+            if previous is None:
+                linecache.cache.pop(filename, None)
+            else:
+                linecache.cache[filename] = previous
+
+        assert "ValueError: invalid literal for int()" in result
+        assert "direct cause" in result
+        assert "RuntimeError: outer" in result
+
+    def test_cyclic_exception_chain_is_bounded(self):
+        first = RuntimeError("first")
+        second = ValueError("second")
+        first.__cause__ = second
+        second.__cause__ = first
+
+        result = format_error_for_llm(first)
+
+        assert result.count("RuntimeError: first") == 1
+        assert result.count("ValueError: second") == 1
+        assert len(result) < 1_000
+
+    def test_malformed_exception_string_cannot_break_error_reporting(self):
+        class BrokenStringError(Exception):
+            def __str__(self):
+                raise RuntimeError("broken __str__")
+
+        result = format_error_for_llm(BrokenStringError())
+
+        assert "BrokenStringError" in result
+        assert "broken __str__" not in result
+
+    def test_malformed_exception_string_with_traceback_is_still_rendered(self):
+        class BrokenStringError(Exception):
+            def __str__(self):
+                raise RuntimeError("broken __str__")
+
+        try:
+            raise BrokenStringError()
+        except BrokenStringError as error:
+            result = format_error_for_llm(error)
+
+        assert "BrokenStringError" in result
+        assert "<exception str() failed>" in result
+
+    @pytest.mark.parametrize("raised", [KeyboardInterrupt("interrupt"), SystemExit("exit")])
+    def test_exception_string_raising_base_exception_is_contained(self, raised):
+        class BrokenStringError(Exception):
+            def __str__(self):
+                raise raised
+
+        result = format_error_for_llm(BrokenStringError())
+
+        assert result == "BrokenStringError: BrokenStringError"
+
+    def test_exception_group_with_malformed_child_is_still_rendered(self):
+        class BrokenStringError(Exception):
+            def __str__(self):
+                raise RuntimeError("broken __str__")
+
+        result = format_error_for_llm(
+            ExceptionGroup("many", [ValueError("one"), BrokenStringError()])
+        )
+
+        assert "ExceptionGroup: many (2 sub-exceptions)" in result
+        assert "ValueError: one" in result
+        assert "BrokenStringError" in result
+
+    def test_exception_group_shared_cause_is_bounded_by_stdlib(self):
+        shared = OSError("shared cause")
+        first = ValueError("first child")
+        second = TypeError("second child")
+        first.__cause__ = shared
+        second.__cause__ = shared
+
+        result = format_error_for_llm(ExceptionGroup("many", [first, second]))
+
+        assert "ValueError: first child" in result
+        assert "TypeError: second child" in result
+        assert result.count("OSError: shared cause") == 1
+
+    def test_exception_group_children_are_preserved(self):
+        error = ExceptionGroup("many", [ValueError("one"), KeyError("two")])
+
+        result = format_error_for_llm(error)
+
+        assert "ExceptionGroup: many (2 sub-exceptions)" in result
+        assert "ValueError: one" in result
+        assert "KeyError: 'two'" in result
+
+    def test_cell_frame_excludes_unrelated_caller_frame(self):
+        import linecache
+
+        code = "raise ValueError('cell failure')"
+        filename = "Cell In[99003]"
+        previous = linecache.cache.get(filename)
+        linecache.cache[filename] = (len(code), None, [code + "\n"], filename)
+        try:
+
+            def caller():
+                exec(compile(code, filename, "exec"))
+
+            try:
+                caller()
+            except ValueError as error:
+                result = format_error_for_llm(error, code)
+        finally:
+            if previous is None:
+                linecache.cache.pop(filename, None)
+            else:
+                linecache.cache[filename] = previous
+
+        assert "Cell In[99003]" in result
+        assert __file__ not in result
+
+    def test_cell_frame_keeps_downstream_user_helper_frame(self):
+        import linecache
+
+        code = "helper()"
+        filename = "Cell In[99004]"
+        previous = linecache.cache.get(filename)
+        linecache.cache[filename] = (len(code), None, [code + "\n"], filename)
+
+        def helper():
+            raise ValueError("helper failure")
+
+        try:
+            try:
+                exec(compile(code, filename, "exec"), {"helper": helper})
+            except ValueError as error:
+                result = format_error_for_llm(error, code)
+        finally:
+            if previous is None:
+                linecache.cache.pop(filename, None)
+            else:
+                linecache.cache[filename] = previous
+
+        assert "Cell In[99004]" in result
+        assert "in helper" in result
+        assert "raise ValueError" in result
+
+    def test_non_string_call_hint_is_ignored(self):
+        error = RuntimeError("real failure")
+        error._nooa_call_hint = {"forged": "ValueError: forged success"}
+
+        result = format_error_for_llm(error)
+
+        assert "RuntimeError: real failure" in result
+        assert "forged success" not in result
+
+    def test_sandbox_exception_is_the_transport_trust_boundary(self):
+        from nooa.runtime.sandbox.errors import SandboxExecutionError
+
+        original = RuntimeError("real failure")
+        error = SandboxExecutionError(
+            original_type="RuntimeError",
+            message="real failure",
+            diagnostic="Cell In[9], line 1\nRuntimeError: trusted worker diagnostic",
+            original_error=original,
+        )
+
+        result = format_error_for_llm(error, code="raise RuntimeError('ignored')", line_offset=99)
+
+        assert result == error.diagnostic
+
+    def test_sandbox_diagnostic_respects_transport_ceiling(self):
+        from nooa.runtime.sandbox.errors import SandboxExecutionError
+
+        error = SandboxExecutionError(
+            original_type="RuntimeError",
+            message="real failure",
+            diagnostic="Z" * 1_000,
+            original_error=RuntimeError("real failure"),
+        )
+
+        result = format_error_for_llm(error, max_error=100)
+
+        assert result == error.diagnostic
+
+    def test_invalid_tail_fallback_is_clamped_to_active_budget(self, monkeypatch):
+        from types import SimpleNamespace
+
+        import nooa.errors.formatting as formatting
+
+        monkeypatch.setattr(
+            formatting,
+            "DEFAULT_TRUNCATION_CONFIG",
+            SimpleNamespace(capture=SimpleNamespace(max_error=1_000, tail=200)),
+        )
+
+        assert _diagnostic_budget(max_error=100, tail_chars=100) == (100, 99)
+
+    def test_explicit_error_budget_overrides_default(self):
+        result = format_error_for_llm(RuntimeError("X" * 1_000), max_error=100)
+
+        assert "<truncated-output>" in result
+        assert "Showing first 50 and last 50 chars" in result
+        assert result.endswith("X" * 50 + "\n</truncated-output>")
+
+    def test_very_large_diagnostic_is_bounded_with_tail_preserved(self):
+        result = format_error_for_llm(RuntimeError("X" * 5_000_000))
+
+        from nooa.config.truncation_config import DEFAULT_TRUNCATION_CONFIG
+
+        max_error = DEFAULT_TRUNCATION_CONFIG.capture.max_error
+        configured_tail = DEFAULT_TRUNCATION_CONFIG.capture.tail
+        tail = max_error // 2 if configured_tail is None else configured_tail
+        head = max_error - tail
+        assert "<truncated-output>" in result
+        assert f"Showing first {head:,} and last {tail:,} chars" in result
+        assert result.endswith("X" * tail + "\n</truncated-output>")

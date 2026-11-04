@@ -17,27 +17,32 @@ from __future__ import annotations
 
 import asyncio
 import os
-import pickle
 import threading
 import weakref
 from multiprocessing.connection import Connection
-from typing import Any
+from typing import Any, cast
 
+from nooa.errors.formatting import IPythonErrorFormatter
+from nooa.runtime.sandbox import wire
 from nooa.runtime.sandbox.cell_core import run_cell_source
-from nooa.runtime.sandbox.serialization import ResultDTO, result_to_dto
+from nooa.runtime.sandbox.serialization import ResultDTO, dto_to_wire, result_to_dto
 
 # Private state (the broker, and thus the parent pipe) for every proxy handed to
 # the cell is kept OUT of the object's ``__dict__``, in this module-private
 # weak-keyed registry. So ``self._broker`` is not a proxy attribute: it resolves
 # through ``__getattr__`` against the agent (which has no such attribute) and
-# fails, rather than handing the cell the live pipe — closing the direct
-# ``self._broker._conn.send(<pickle bomb>)`` escape. Legitimately-exposed private
+# fails, rather than handing the cell the live pipe. Legitimately-exposed private
 # agent attributes (``self._foo``) still broker normally, matching in-process.
-# NB: the parent<->worker channel still uses pickle, so a *fully adversarial*
-# in-process cell that reaches framework internals is out of scope here — that is
-# the OS-layer (separate uid/namespace) sandbox's job; this layer's contract is
-# OS-enforced action containment.
+# Hiding the pipe is hygiene, not the boundary: the parent treats everything this
+# process sends as hostile and decodes it as msgpack (``wire.py``), never pickle.
 _PROXY_STATE: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+_NO_PAYLOAD = object()
+_CODEC = wire.Codec()
+
+# Capture a dedicated formatter before untrusted cell code runs. In particular,
+# mutating the module-level default formatter cannot forge worker diagnostics.
+_WORKER_ERROR_FORMATTER = IPythonErrorFormatter().format
 
 
 class ParentToolError(RuntimeError):
@@ -57,23 +62,32 @@ class ChildBroker:
         self._send_lock = send_lock
         self._n = 0
 
-    def _rpc(self, message: dict[str, Any]) -> dict[str, Any]:
+    def _rpc(self, envelope: dict[str, Any], payload: Any = _NO_PAYLOAD) -> dict[str, Any]:
+        # The cell's value (call arguments or an assigned attribute) is encoded
+        # separately into ``payload`` so the parent can refuse it per call.
         # Hold the lock across the whole request/response so concurrent self.*
         # calls from threads inside a cell serialize on the single pipe (the id
         # counter and the send/recv pair must not interleave).
         with self._send_lock:
             self._n += 1
             call_id = self._n
-            message["tool_call_id"] = call_id
-            try:
-                self._conn.send(message)
-            except (pickle.PicklingError, TypeError) as exc:
-                from nooa.runtime.sandbox.errors import CellSerializationError
+            envelope["tool_call_id"] = call_id
+            if payload is not _NO_PAYLOAD:
+                try:
+                    envelope["payload"] = _CODEC.dumps(payload)
+                except Exception as exc:  # noqa: BLE001 - unsupported type, depth, user __str__...
+                    from nooa.runtime.sandbox.errors import CellSerializationError
 
-                raise CellSerializationError(
-                    f"Arguments to self.{'.'.join(message.get('path') or [])}(...) are not "
-                    f"picklable and cannot cross the sandbox boundary: {exc}"
-                ) from exc
+                    target = ".".join(envelope.get("path") or [])
+                    what = (
+                        f"The value assigned to self.{target}"
+                        if envelope.get("kind") == "setattr"
+                        else f"Arguments to self.{target}(...)"
+                    )
+                    raise CellSerializationError(
+                        f"{what} cannot cross the sandbox boundary: {exc}. {wire.HINT}"
+                    ) from exc
+            wire.send(self._conn, envelope)
             response = self._conn.recv()
         if (
             not isinstance(response, dict)
@@ -95,9 +109,7 @@ class ChildBroker:
         semantics on a proxy (see :meth:`_NestedProxy.__call__`) re-wrap the
         already-resolved ``result`` in an awaitable when ``was_async`` is True.
         """
-        resp = self._rpc(
-            {"type": "tool_call", "kind": "call", "path": path, "args": args, "kwargs": kwargs}
-        )
+        resp = self._rpc({"type": "tool_call", "kind": "call", "path": path}, (args, kwargs))
         return resp.get("result"), bool(resp.get("was_async"))
 
     def get_attr(self, path: list[str]) -> tuple[Any, bool]:
@@ -107,7 +119,7 @@ class ChildBroker:
 
     def set_attr(self, path: list[str], value: Any) -> None:
         """Assign ``value`` at ``path`` on the parent's live agent (``self.x = value``)."""
-        self._rpc({"type": "tool_call", "kind": "setattr", "path": path, "value": value})
+        self._rpc({"type": "tool_call", "kind": "setattr", "path": path}, value)
 
     def iterate(self, path: list[str]) -> list[Any]:
         """Return ``list(obj)`` for the live object at ``path`` (materialized on the parent)."""
@@ -127,13 +139,30 @@ def _raise_broker_error(response: dict[str, Any]) -> None:
         # normal signal path (cell_core catches it -> ExecutionResult.signal).
         from nooa.strategies.codeact import _ReturnResultSignal
 
-        raise _ReturnResultSignal(result=response.get("signal_result"))
+        signal_result = response.get("signal_result")
+        if response.get("signal_result_dropped", False):
+            raise CellSerializationError(
+                "A control-flow signal carried a value that could not cross the "
+                "sandbox boundary. Return a JSON/pickle-safe value instead."
+            )
+        raise _ReturnResultSignal(result=cast(Any, signal_result))
     if err_type == "CellSerializationError":
         raise CellSerializationError(message)
     exc_cls = getattr(_bi, err_type, ParentToolError)
     if not isinstance(exc_cls, type) or not issubclass(exc_cls, BaseException):
         exc_cls = ParentToolError
-    raise exc_cls(message)
+    try:
+        error = exc_cls(message)
+    except Exception:
+        # Some builtin exceptions (for example UnicodeDecodeError) require a
+        # structured constructor. Preserve the remote type name rather than
+        # replacing the actual failure with that constructor's TypeError.
+        error = ParentToolError(message)
+        error.original_type = err_type  # type: ignore[attr-defined]
+    call_hint = response.get("call_hint")
+    if isinstance(call_hint, str) and call_hint:
+        error._nooa_call_hint = call_hint  # type: ignore[attr-defined]
+    raise error
 
 
 def _is_async_callable(obj: Any) -> bool:
@@ -415,7 +444,7 @@ def worker_main(conn: Connection, init: dict[str, Any]) -> None:  # pragma: no c
         install_guards(init["spec"])
     except BaseException as exc:  # noqa: BLE001 - report and exit; parent fails closed
         try:
-            conn.send({"type": "fatal", "error": f"{type(exc).__name__}: {exc}"})
+            wire.send(conn, {"type": "fatal", "error": f"{type(exc).__name__}: {exc}"})
         except Exception:
             pass
         os._exit(3)
@@ -425,7 +454,7 @@ def worker_main(conn: Connection, init: dict[str, Any]) -> None:  # pragma: no c
     try:
         while True:
             try:
-                request = conn.recv()
+                request = conn.recv()  # parent -> worker: the parent is trusted
             except (EOFError, OSError):
                 return
             op = request.get("op")
@@ -433,21 +462,38 @@ def worker_main(conn: Connection, init: dict[str, Any]) -> None:  # pragma: no c
             if op == "shutdown":
                 return
             if op == "ping":
-                conn.send({"type": "response", "id": req_id, "ok": True})
+                wire.send(conn, {"type": "response", "id": req_id, "ok": True})
                 continue
             if op == "run":
-                dto = _run_one(loop, namespace, request)
-                conn.send({"type": "response", "id": req_id, "ok": True, "result": dto})
+                dto = _run_one(
+                    loop,
+                    namespace,
+                    request,
+                    max_error=init.get("max_error"),
+                    tail_chars=init.get("error_tail"),
+                )
+                wire.send(
+                    conn,
+                    {"type": "response", "id": req_id, "ok": True, "result": dto_to_wire(dto)},
+                )
                 continue
-            conn.send(
-                {"type": "response", "id": req_id, "ok": False, "error": f"unknown op {op!r}"}
+            wire.send(
+                conn,
+                {"type": "response", "id": req_id, "ok": False, "error": f"unknown op {op!r}"},
             )
     finally:
         loop.close()
 
 
 def _run_one(
-    loop: asyncio.AbstractEventLoop, namespace: dict[str, Any], request: dict[str, Any]
+    loop: asyncio.AbstractEventLoop,
+    namespace: dict[str, Any],
+    request: dict[str, Any],
+    _serialize: Any = result_to_dto,
+    _error_formatter: Any = _WORKER_ERROR_FORMATTER,
+    *,
+    max_error: int | None = None,
+    tail_chars: int | None = None,
 ) -> ResultDTO:
     result = loop.run_until_complete(
         run_cell_source(
@@ -456,4 +502,9 @@ def _run_one(
             execution_count=int(request.get("execution_count", 1)),
         )
     )
-    return result_to_dto(result)
+    return _serialize(
+        result,
+        error_formatter=_error_formatter,
+        max_error=max_error,
+        tail_chars=tail_chars,
+    )

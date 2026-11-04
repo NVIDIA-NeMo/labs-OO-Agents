@@ -412,6 +412,113 @@ def test_existing_release_must_be_matching_unpublished_draft(mr, monkeypatch):
         mr.validate_existing_release("v1.2.3", sha)
 
 
+def test_release_lookup_uses_draft_aware_gh_command(mr, monkeypatch):
+    metadata = {
+        "apiUrl": f"https://api.github.com/repos/{mr.GITHUB_REPO}/releases/7",
+        "isDraft": True,
+        "targetCommitish": "a" * 40,
+        "url": "https://draft",
+    }
+    commands = []
+
+    def fake_run(cmd, **_kwargs):
+        commands.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, json.dumps(metadata), "")
+
+    monkeypatch.setattr(mr, "run", fake_run)
+
+    assert mr.release_for_tag("v1.2.3") == {
+        "id": 7,
+        "draft": True,
+        "target_commitish": "a" * 40,
+        "html_url": "https://draft",
+    }
+    assert commands == [
+        [
+            "gh",
+            "release",
+            "view",
+            "v1.2.3",
+            "--repo",
+            mr.GITHUB_REPO,
+            "--json",
+            "apiUrl,isDraft,targetCommitish,url",
+        ]
+    ]
+
+
+def test_release_lookup_returns_none_when_cli_reports_not_found(mr, monkeypatch):
+    monkeypatch.setattr(
+        mr,
+        "run",
+        lambda cmd, **_kwargs: subprocess.CompletedProcess(cmd, 1, "", "release not found"),
+    )
+
+    assert mr.release_for_tag("v1.2.3") is None
+
+
+def test_release_lookup_fails_closed_on_api_error_or_invalid_metadata(mr, monkeypatch):
+    monkeypatch.setattr(
+        mr,
+        "run",
+        lambda cmd, **_kwargs: subprocess.CompletedProcess(cmd, 1, "", "HTTP 403"),
+    )
+    with pytest.raises(mr.ReleaseError, match="HTTP 403"):
+        mr.release_for_tag("v1.2.3")
+
+    monkeypatch.setattr(
+        mr,
+        "run",
+        lambda cmd, **_kwargs: subprocess.CompletedProcess(cmd, 0, "not-json", ""),
+    )
+    with pytest.raises(mr.ReleaseError, match="invalid release metadata"):
+        mr.release_for_tag("v1.2.3")
+
+
+def test_release_lookup_rejects_string_draft_state(mr, monkeypatch):
+    metadata = {
+        "apiUrl": f"https://api.github.com/repos/{mr.GITHUB_REPO}/releases/7",
+        "isDraft": "false",
+        "targetCommitish": "a" * 40,
+        "url": "https://release",
+    }
+    monkeypatch.setattr(
+        mr,
+        "run",
+        lambda cmd, **_kwargs: subprocess.CompletedProcess(cmd, 0, json.dumps(metadata), ""),
+    )
+
+    with pytest.raises(mr.ReleaseError, match="invalid release metadata"):
+        mr.release_for_tag("v1.2.3")
+
+
+@pytest.mark.parametrize(
+    "api_url",
+    [
+        "https://api.github.com/repos/NVIDIA-NeMo/labs-OO-Agents/releases/0",
+        "https://api.github.com/repos/NVIDIA-NeMo/labs-OO-Agents/releases/not-an-id",
+        "https://api.github.com/repos/other/repo/releases/7",
+        "https://example.com/repos/NVIDIA-NeMo/labs-OO-Agents/releases/7",
+        f"https://api.github.com/repos/NVIDIA-NeMo/labs-OO-Agents/releases/1{'0' * 5000}",
+    ],
+)
+def test_release_lookup_rejects_invalid_api_url(mr, monkeypatch, api_url):
+    metadata = {
+        "apiUrl": api_url,
+        "isDraft": True,
+        "targetCommitish": "a" * 40,
+        "url": "https://release",
+    }
+    monkeypatch.setattr(
+        mr,
+        "run",
+        lambda cmd, **_kwargs: subprocess.CompletedProcess(cmd, 0, json.dumps(metadata), ""),
+    )
+
+    with pytest.raises(mr.ReleaseError, match="invalid release metadata"):
+        mr.release_for_tag("v1.2.3")
+
+
 def test_strict_fast_checks_sync_all_public_ci_dependencies_first(mr, monkeypatch):
     commands = []
 
@@ -596,30 +703,29 @@ def test_public_report_sanitization(mr):
     assert "[REDACTED]" in safe and "[private-path]" in safe
 
 
-@pytest.mark.parametrize(
-    ("capability_gate_ran", "diff", "expected", "unexpected"),
-    [
-        (False, None, "NOT RUN — the capability gate was skipped", "PASS"),
-        (True, None, "PASS — all automated hard gates passed", "NOT RUN"),
-        (True, "stable floor", "FAIL — stable floor", "PASS"),
-    ],
-)
-def test_public_notes_report_the_actual_capability_gate_state(
-    mr, capability_gate_ran, diff, expected, unexpected
-):
+def test_public_notes_put_github_changes_before_capability_report(mr):
+    changes = "## What's Changed\n* Added a feature"
+    capability = (
+        "## 🧪 Capability Test Results\n\n"
+        "✅ Release OK — [full results](https://example.com/results)"
+    )
     notes = mr.build_public_notes(
-        tag="v1.2.3",
-        sha="a" * 40,
-        prev_tag="v1.2.2",
-        diff=mr.Diff(floor_breach=diff, markdown="capability report"),
-        change_notes="changes",
-        pipeline_url="https://gitlab.example/pipelines/1",
-        distributions=[],
-        capability_gate_ran=capability_gate_ran,
+        diff=mr.Diff(markdown=capability),
+        change_notes=changes,
     )
 
-    assert expected in notes
-    assert unexpected not in notes
+    assert notes == f"{changes}\n\n---\n\n{capability}\n"
+    assert "Unpublished NOOA release candidate" not in notes
+    assert "Reviewer checklist" not in notes
+
+
+def test_public_notes_have_a_fallback_when_github_returns_no_changes(mr):
+    notes = mr.build_public_notes(
+        diff=mr.Diff(markdown="capability report"),
+        change_notes="",
+    )
+
+    assert notes == "No generated change notes were returned.\n\n---\n\ncapability report\n"
 
 
 def _ci_args(mr, tmp_path):

@@ -38,6 +38,10 @@ def test_tracing_metadata_uses_package_version():
     assert metadata["nooa.version"] == nooa.__version__
 
 
+def test_legacy_instrumentor_name_is_a_compatibility_alias():
+    assert tracing.NemoOOAgentsInstrumentor is tracing.NOOAInstrumentor
+
+
 def test_instrumentor_registers_tracer_with_package_version():
     class RecordingTracerProvider:
         def __init__(self):
@@ -48,7 +52,7 @@ def test_instrumentor_registers_tracer_with_package_version():
             return object()
 
     tracer_provider = RecordingTracerProvider()
-    instrumentor = tracing.NemoOOAgentsInstrumentor()
+    instrumentor = tracing.NOOAInstrumentor()
 
     with patch("nooa.runtime.hooks.set_hooks"):
         instrumentor.instrument(tracer_provider=tracer_provider)

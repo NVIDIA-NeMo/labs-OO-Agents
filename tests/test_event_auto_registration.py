@@ -228,7 +228,7 @@ class TestExistingEventsStillWork:
             BeforeTurn,
             Error,
             Feedback,
-            LLMOutput,
+            LLMResponse,
             Message,
             PythonOutput,
             Reasoning,
@@ -241,7 +241,7 @@ class TestExistingEventsStillWork:
         assert Reasoning(content="x").event_type == "Reasoning"
         assert Error(content="x").event_type == "Error"
         assert Feedback(content="x").event_type == "Feedback"
-        assert LLMOutput(content="x").event_type == "LLMOutput"
+        assert LLMResponse(content="x").event_type == "LLMResponse"
         assert (
             PythonOutput(
                 tool_call_id="t", execution_status="complete", execution_count=1
@@ -272,7 +272,7 @@ class TestExistingEventsStillWork:
             BeforeTurn,
             Error,
             Feedback,
-            LLMOutput,
+            LLMResponse,
             Message,
             PythonOutput,
             Reasoning,
@@ -285,7 +285,7 @@ class TestExistingEventsStillWork:
         assert _EVENT_REGISTRY.get("Reasoning") is Reasoning
         assert _EVENT_REGISTRY.get("Error") is Error
         assert _EVENT_REGISTRY.get("Feedback") is Feedback
-        assert _EVENT_REGISTRY.get("LLMOutput") is LLMOutput
+        assert _EVENT_REGISTRY.get("LLMResponse") is LLMResponse
         assert _EVENT_REGISTRY.get("PythonOutput") is PythonOutput
         assert _EVENT_REGISTRY.get("Summary") is Summary
         assert _EVENT_REGISTRY.get("BeforeTurn") is BeforeTurn

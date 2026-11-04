@@ -1,17 +1,50 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-from nooa.unifiedllm.fake import FakeLLMClient
+from nooa.llm_types import (
+    AssistantPart,
+    AssistantReasoning,
+    AssistantText,
+    CacheBoundary,
+    LLMResponse,
+    LLMUsage,
+    ToolCall,
+    assistant_message,
+)
+from nooa.unifiedllm.admission import (
+    AdmissionCallCapError,
+    AdmissionControlConfig,
+    AdmissionController,
+    AdmissionError,
+    AdmissionPermit,
+    AdmissionTimeoutError,
+    AdmissionUnavailableError,
+    CooldownAdmissionPermit,
+)
+from nooa.unifiedllm.broker_admission import (
+    AdmissionBroker,
+    BrokerAdmissionConfig,
+    BrokerAdmissionController,
+    BrokerAdmissionSnapshot,
+)
+from nooa.unifiedllm.controlled import AdmissionControl
+from nooa.unifiedllm.errors import EmptyContentError, ReasoningReplayError
+from nooa.unifiedllm.fake import (
+    FakeLLMCall,
+    FakeLLMClient,
+    FakeLLMResponseExhaustedError,
+    FakeLLMToolSnapshot,
+)
 from nooa.unifiedllm.http_config import HttpConfig
 from nooa.unifiedllm.registry import (
     MODELS,
     ensure_loaded,
+    get_decision_model,
     get_llm_client,
     get_registry_config,
     reload_registry,
     resolve_api_key_from_config,
 )
 from nooa.unifiedllm.retry import (
-    EmptyContentError,
     RetryingWrapper,
     sync_retry,
     with_retry,
@@ -19,11 +52,9 @@ from nooa.unifiedllm.retry import (
 from nooa.unifiedllm.retry_config import RetryConfig
 from nooa.unifiedllm.unifiedllm import (
     CompletionClient,
-    LLMResponse,
     ReasoningCompletionClient,
     ResponsesClient,
     Tool,
-    ToolCall,
     UnifiedLLM,
     create_tool_from_callable,
     extract_and_parse_json,
@@ -37,6 +68,7 @@ __all__ = [
     "ResponsesClient",
     # Model registry
     "get_llm_client",
+    "get_decision_model",
     "get_registry_config",
     "reload_registry",
     "ensure_loaded",
@@ -48,6 +80,26 @@ __all__ = [
     "create_tool_from_callable",
     # Response types
     "LLMResponse",
+    "CacheBoundary",
+    "LLMUsage",
+    "AssistantPart",
+    "AssistantText",
+    "AssistantReasoning",
+    "ReasoningReplayError",
+    # Admission control
+    "AdmissionBroker",
+    "AdmissionCallCapError",
+    "AdmissionControl",
+    "AdmissionControlConfig",
+    "AdmissionController",
+    "AdmissionError",
+    "AdmissionPermit",
+    "AdmissionTimeoutError",
+    "AdmissionUnavailableError",
+    "BrokerAdmissionConfig",
+    "BrokerAdmissionController",
+    "BrokerAdmissionSnapshot",
+    "CooldownAdmissionPermit",
     # HTTP config
     "HttpConfig",
     # Retry utilities
@@ -57,7 +109,11 @@ __all__ = [
     "with_retry",
     "sync_retry",
     # Testing
+    "FakeLLMCall",
     "FakeLLMClient",
+    "FakeLLMResponseExhaustedError",
+    "FakeLLMToolSnapshot",
     # Utilities
     "extract_and_parse_json",
+    "assistant_message",
 ]

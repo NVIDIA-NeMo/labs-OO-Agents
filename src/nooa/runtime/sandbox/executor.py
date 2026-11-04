@@ -19,9 +19,13 @@ import os
 import signal
 import time
 from multiprocessing.connection import Connection
+from multiprocessing.process import BaseProcess
 from typing import Any
 
+from nooa._platform import require_posix
+from nooa.errors.formatting import _hard_bound_text
 from nooa.events import ExecutionResult
+from nooa.runtime.sandbox import wire
 from nooa.runtime.sandbox.config import ResolvedSpec, SandboxConfig, resolve_spec
 from nooa.runtime.sandbox.errors import (
     CellMemoryError,
@@ -31,10 +35,31 @@ from nooa.runtime.sandbox.errors import (
     WorkerDiedError,
 )
 from nooa.runtime.sandbox.guards import Capabilities, probe_capabilities
-from nooa.runtime.sandbox.serialization import ResultDTO, dto_to_result, is_picklable
+from nooa.runtime.sandbox.serialization import (
+    ResultDTO,
+    dto_from_wire,
+    dto_to_result,
+    effective_error_limit,
+    is_picklable,
+)
 from nooa.runtime.sandbox.worker import worker_main
 
 logger = logging.getLogger(__name__)
+
+
+# Broker responses cross a pickle pipe. Keep all parent-generated diagnostics
+# primitive and bounded before sending them to an untrusted worker. The other
+# direction is the security boundary: worker bytes are decoded as msgpack by
+# ``wire.Codec``, never unpickled.
+
+
+def _bounded_text(value: object, fallback: str, *, limit: int) -> str:
+    try:
+        text = str(value)
+    except BaseException:
+        text = fallback
+    return _hard_bound_text(text, limit)
+
 
 _CAPS_CACHE: Capabilities | None = None
 
@@ -72,13 +97,19 @@ class SandboxedExecutor:
         cell_timeout: float | None,
         framework_builtins: dict[str, Any] | None = None,
         restrictions: Any = None,
+        max_error: int | None = None,
+        error_tail: int | None = None,
     ):
+        require_posix("The CodeAct sandbox (a forked, rlimit-guarded worker)")
         self._agent = agent
         self._config = config
         self._cell_timeout = cell_timeout
         self._framework_builtins = framework_builtins or {}
         self._restrictions = restrictions
+        self._max_error = effective_error_limit(max_error)
+        self._error_tail = error_tail
         self._spec: ResolvedSpec = resolve_spec(config)
+        self._codec = wire.Codec(wire.agent_types(agent))
 
         caps = _capabilities()
         missing = check_enforceable(config, caps)
@@ -101,7 +132,7 @@ class SandboxedExecutor:
             )
 
         self._ctx = mp.get_context(config.start_method)
-        self._proc: mp.process.BaseProcess | None = None
+        self._proc: BaseProcess | None = None
         self._conn: Connection | None = None
         self._lock = asyncio.Lock()
         self._req_id = 0
@@ -145,6 +176,8 @@ class SandboxedExecutor:
             "framework_builtins": self._framework_builtins,
             "restrictions": self._restrictions,
             "spec": self._spec,
+            "max_error": self._max_error,
+            "error_tail": self._error_tail,
         }
         proc = self._ctx.Process(
             target=worker_main, args=(child_conn, init), daemon=True, name="nooa-sandbox-worker"
@@ -218,7 +251,12 @@ class SandboxedExecutor:
 
     # --- running a cell ----------------------------------------------------
     async def run_cell(self, code: str, *, execution_count: int = 1) -> ExecutionResult:
-        """Execute one cell in the worker and return an ``ExecutionResult``."""
+        """Execute one cell in the worker and return an ``ExecutionResult``.
+
+        Output is buffered in the worker and transferred with the final result.
+        If the process is hard-killed (timeout, resource limit, or crash), output
+        written by that cell before death cannot be recovered.
+        """
         if self._closed:
             raise WorkerDiedError("sandbox executor is closed")
         async with self._lock:
@@ -256,8 +294,13 @@ class SandboxedExecutor:
                 err = self._classify_worker_death(exc)
                 await self._restart_worker()
                 return self._synth_error(err)
-            dto: ResultDTO = response["result"]
-            return dto_to_result(dto, signal_factory=self._signal_factory)
+            try:
+                dto: ResultDTO = dto_from_wire(response.get("result"))
+            except CellSerializationError as exc:
+                # Only a tampered worker produces a malformed result: retire it.
+                await self._restart_worker()
+                return self._synth_error(WorkerDiedError(f"{exc}.{self._RESET_NOTE}"))
+            return dto_to_result(dto, signal_factory=self._signal_factory, codec=self._codec)
 
     def _recv_until_result(
         self, req_id: int, deadline: float | None, loop: asyncio.AbstractEventLoop
@@ -288,9 +331,18 @@ class SandboxedExecutor:
                     raise WorkerDiedError("sandbox worker exited unexpectedly")
                 continue
             try:
-                msg = conn.recv()
+                raw = conn.recv_bytes()
             except (EOFError, OSError) as exc:
                 raise WorkerDiedError("sandbox worker pipe closed") from exc
+            # Never ``conn.recv()`` here: that would unpickle worker bytes.
+            try:
+                msg = self._codec.loads(raw)
+                if not isinstance(msg, dict):
+                    raise CellSerializationError("not a message dict")
+            except CellSerializationError as exc:
+                raise WorkerDiedError(
+                    f"sandbox worker sent a malformed message ({exc}).{self._RESET_NOTE}"
+                ) from exc
             mtype = msg.get("type")
             if mtype == "tool_call":
                 # Pause the cell clock while the parent services the brokered
@@ -307,19 +359,30 @@ class SandboxedExecutor:
                 return msg
 
     def _service_tool_call(self, msg: dict[str, Any], loop: asyncio.AbstractEventLoop) -> None:
-        future = asyncio.run_coroutine_threadsafe(self._dispatch_tool_call(msg), loop)
-        # Brokered ``self.*`` work runs parent-side while the worker idles — it
-        # gets its OWN bound (broker_timeout_s), not the cell deadline: killing
-        # the worker because the parent was slow (e.g. memory consolidation LLM
-        # calls) wiped REPL state and swallowed queued submits in the ARC fleet.
-        broker_timeout = self._config.broker_timeout_s or None
         try:
-            response = future.result(timeout=broker_timeout)
-        except futures.TimeoutError:
-            future.cancel()
-            raise CellTimeoutError(
-                f"brokered self.* call exceeded broker_timeout_s={broker_timeout}s"
-            ) from None
+            call = self._decode_tool_call(msg)
+        except CellSerializationError as exc:
+            # Refused value or malformed request: answer this call with a normal
+            # tool error so the cell sees it and the worker (and namespace) survives.
+            response: dict[str, Any] = {
+                "ok": False,
+                "error_type": "CellSerializationError",
+                "error": _bounded_text(exc, "CellSerializationError", limit=self._max_error),
+            }
+        else:
+            future = asyncio.run_coroutine_threadsafe(self._dispatch_tool_call(call), loop)
+            # Brokered ``self.*`` work runs parent-side while the worker idles — it
+            # gets its OWN bound (broker_timeout_s), not the cell deadline: killing
+            # the worker because the parent was slow (e.g. memory consolidation LLM
+            # calls) wiped REPL state and swallowed queued submits in the ARC fleet.
+            broker_timeout = self._config.broker_timeout_s or None
+            try:
+                response = future.result(timeout=broker_timeout)
+            except futures.TimeoutError:
+                future.cancel()
+                raise CellTimeoutError(
+                    f"brokered self.* call exceeded broker_timeout_s={broker_timeout}s"
+                ) from None
         response["type"] = "tool_result"
         response["tool_call_id"] = msg.get("tool_call_id")
         conn = self._conn
@@ -330,6 +393,43 @@ class SandboxedExecutor:
                 # Worker died mid-brokered-call; surface as a worker death so
                 # run_cell restarts it instead of aborting the whole generation.
                 raise WorkerDiedError("sandbox worker pipe closed during tool call") from exc
+
+    def _decode_tool_call(self, msg: dict[str, Any]) -> dict[str, Any]:
+        """Check the broker request shape and decode its cell-supplied payload.
+
+        Raises ``CellSerializationError`` for a refused value (a type the agent
+        did not declare) or a malformed request.
+        """
+        kind, path = msg.get("kind"), msg.get("path") or []
+        if kind not in ("call", "attr", "setattr", "iter"):
+            raise CellSerializationError(f"malformed sandbox broker request: kind {kind!r}")
+        if not isinstance(path, list) or not all(isinstance(p, str) for p in path):
+            raise CellSerializationError("malformed sandbox broker request: bad path")
+        call: dict[str, Any] = {"kind": kind, "path": path}
+        if kind not in ("call", "setattr"):
+            return call
+        what = f"self.{'.'.join(path)}" + ("" if kind == "setattr" else "(...)")
+        payload = msg.get("payload")
+        if not isinstance(payload, bytes):
+            raise CellSerializationError(f"malformed sandbox broker request for {what}")
+        try:
+            value = self._codec.loads(payload)
+        except CellSerializationError as exc:
+            raise CellSerializationError(
+                f"Value passed to {what} cannot cross the sandbox boundary: {exc}. {wire.HINT}"
+            ) from exc
+        if kind == "setattr":
+            call["value"] = value
+        elif (
+            isinstance(value, tuple)
+            and len(value) == 2
+            and isinstance(value[0], tuple)
+            and isinstance(value[1], dict)
+        ):
+            call["args"], call["kwargs"] = value
+        else:
+            raise CellSerializationError(f"malformed sandbox broker request for {what}")
+        return call
 
     def _walk_path(self, path: list[str]) -> Any:
         """Resolve a dotted attribute path (``["memory", "remember"]``) on the agent."""
@@ -345,6 +445,7 @@ class SandboxedExecutor:
         path = msg.get("path") or []
         display = ".".join(path)
         kind = msg.get("kind")
+        target: Any = None
         try:
             if kind == "setattr":
                 # self.<path> = value on the parent's live agent.
@@ -394,16 +495,36 @@ class SandboxedExecutor:
             # ARC submit_actions -> return_result). Marshal it back to the cell so
             # it re-raises there and flows through the normal signal path.
             payload = getattr(sig, "result", None)
+            payload_is_picklable = is_picklable(payload)
             return {
                 "ok": False,
                 "error_type": "ExecutionSignal",
-                "error": str(sig),
-                "signal_result": payload if is_picklable(payload) else None,
+                "error": _bounded_text(sig, "ExecutionSignal", limit=self._max_error),
+                "signal_result": payload if payload_is_picklable else None,
+                "signal_result_dropped": not payload_is_picklable,
             }
         except CellSerializationError as exc:
-            return {"ok": False, "error_type": "CellSerializationError", "error": str(exc)}
+            return {
+                "ok": False,
+                "error_type": "CellSerializationError",
+                "error": _bounded_text(exc, "CellSerializationError", limit=self._max_error),
+            }
         except Exception as exc:  # noqa: BLE001 - surface tool errors to the cell
-            return {"ok": False, "error_type": type(exc).__name__, "error": str(exc)}
+            # The parent still has the resolved target and can safely derive its
+            # agentdoc. The child cannot: it only has a proxy and a traceback-local
+            # surrogate exception. Transport a bounded string hint, never the
+            # callable or traceback itself.
+            from nooa.errors.formatting import _bad_call_agentdoc
+
+            call_hint = _bad_call_agentdoc(exc, target=target)
+            response = {
+                "ok": False,
+                "error_type": _bounded_text(type(exc).__name__, "Exception", limit=self._max_error),
+                "error": _bounded_text(exc, type(exc).__name__, limit=self._max_error),
+            }
+            if call_hint:
+                response["call_hint"] = _bounded_text(call_hint, "", limit=self._max_error)
+            return response
 
     # --- error synthesis ---------------------------------------------------
     def _classify_worker_death(self, exc: WorkerDiedError) -> Exception:

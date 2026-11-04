@@ -55,6 +55,15 @@ class SnapshotVars(MutableMapping):
         return self._data[key]
 
     def __setitem__(self, key: str, value: Any) -> None:
+        if not isinstance(key, str):
+            logger.warning(
+                "SnapshotVars: key %r (%s) is not a string and will NOT be persisted "
+                "(it won't survive /exit + resume): snapshots are JSON, which requires "
+                "string keys",
+                key,
+                type(key).__name__,
+            )
+            return
         try:
             serialize(value)
         except (SerializationError, TypeError, ValueError, RecursionError) as exc:

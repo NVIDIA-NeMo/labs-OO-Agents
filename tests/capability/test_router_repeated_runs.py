@@ -35,12 +35,12 @@ REMAINING HYPOTHESES:
 import asyncio
 import json
 import linecache
-from dataclasses import dataclass
 from typing import TypedDict
 
 import pytest
 
 from nooa import Agent
+from nooa.unifiedllm import LLMResponse, ToolCall
 
 
 class SimpleResult(TypedDict):
@@ -63,20 +63,6 @@ class SimpleAgent(Agent):
         ...
 
 
-@dataclass
-class FakeToolCall:
-    id: str
-    name: str
-    arguments: str
-
-
-@dataclass
-class FakeLLMResponse:
-    finish_reason: str
-    tool_calls: list[FakeToolCall]
-    content: str | None = None
-
-
 class FakeLLM:
     """Fake LLM that returns deterministic code."""
 
@@ -95,10 +81,10 @@ class FakeLLM:
         else:
             code = """return_result(computed=True, value=x + y)"""
 
-        return FakeLLMResponse(
+        return LLMResponse(
             finish_reason="tool_calls",
             tool_calls=[
-                FakeToolCall(
+                ToolCall(
                     id=f"call_{self.call_count}",
                     name="execute_python",
                     arguments=json.dumps({"code": code}),
@@ -354,10 +340,10 @@ result = await validator.validate(values)
 return_result(agents_called=["Validator"], results={"Validator": result})
 """
 
-            return FakeLLMResponse(
+            return LLMResponse(
                 finish_reason="tool_calls",
                 tool_calls=[
-                    FakeToolCall(
+                    ToolCall(
                         id=f"call_{self.call_count}",
                         name="execute_python",
                         arguments=json.dumps({"code": code}),

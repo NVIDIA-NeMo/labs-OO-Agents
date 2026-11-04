@@ -25,13 +25,15 @@ import pytest
 
 from nooa.context_blocks import ResultStatus, ToolCallEvent, ToolResult
 from nooa.context_blocks.events import AssistantEvent, UserEvent
-from nooa.context_blocks.models import Role
+from nooa.context_blocks.formatter import XMLBlockFormatter
+from nooa.context_blocks.models import ResolvedBlock, Role
 from nooa.events import (
     AfterTurn,
     BeforeTurn,
+    DecisionRecord,
     Error,
     Feedback,
-    LLMOutput,
+    LLMResponse,
     Message,
     PythonOutput,
     Reasoning,
@@ -40,6 +42,7 @@ from nooa.events import (
 )
 from nooa.runtime.event_backend import InMemoryBackend
 from nooa.storage.sqlite import SQLiteEventBackend
+from nooa.unifiedllm import AssistantReasoning, AssistantText, ToolCall
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -117,8 +120,8 @@ _ALL_EVENTS = [
     ),
     (
         "9",
-        LLMOutput(content="result = compute()"),
-        LLMOutput,
+        LLMResponse(content="result = compute()"),
+        LLMResponse,
         Role.ASSISTANT,
     ),
     (
@@ -164,6 +167,24 @@ _ALL_EVENTS = [
         ),
         AfterTurn,
         Role.RUNTIME_EVENT,
+    ),
+    (
+        "14",
+        DecisionRecord(
+            decision_call_id="decision-call-1",
+            method_name="urgent",
+            generation_id="gen-002",
+            state={"inputs": {"message": "Production is down"}},
+            questions={"result": {"type": "noul", "instructions": "Is this urgent?"}},
+            answers={"result": {"probability_true": 0.9}},
+            requested_model="decision-model",
+            resolved_model="decision-model-v1",
+            response_id="response-1",
+            usage={"input_tokens": 10, "output_tokens": 2},
+            success=True,
+        ),
+        DecisionRecord,
+        Role.METADATA,
     ),
 ]
 
@@ -226,6 +247,108 @@ def test_event_roundtrip_via_all_events(backend, tag, event, expected_type, expe
         f"all_events() returned {type(retrieved).__name__}, expected {expected_type.__name__}. "
         f"event_type={event.event_type!r}"
     )
+
+
+@pytest.mark.parametrize(
+    "event",
+    [
+        LLMResponse(
+            parts=(
+                AssistantReasoning(
+                    text="Check the inputs before running the tool.",
+                    native={"opaque": {"provider": "state"}},
+                ),
+                AssistantText(text="done"),
+                ToolCall(
+                    id="call-state",
+                    name="execute_python",
+                    arguments='{"code":"print(1)"}',
+                ),
+            ),
+            finish_reason="tool_calls",
+            usage={
+                "input_tokens": 100,
+                "output_tokens": 20,
+                "cached_input_tokens": 75,
+            },
+            model_name="provider/model",
+            generation_id="generation-1",
+        ),
+        ToolCallEvent(
+            tool_call_id="tc-state",
+            name="execute_python",
+            arguments={"code": "print(1)"},
+            llm_response_id="assistant-turn-id",
+        ),
+    ],
+    ids=["llm-output", "tool-call"],
+)
+def test_assistant_turn_ir_survives_backend_roundtrip(backend, event):
+    """Canonical turns and execution links survive session persistence."""
+    backend.store("state", event)
+
+    restored = backend.get("state")
+
+    assert restored is not None
+    if isinstance(event, LLMResponse):
+        assert restored.tool_calls == event.tool_calls
+        assert restored.finish_reason == event.finish_reason
+        assert restored.reasoning == event.reasoning
+        assert restored.parts == event.parts
+        assert restored.usage == event.usage
+        assert restored.model_name == event.model_name
+        assert restored.generation_id == event.generation_id
+    else:
+        assert restored.llm_response_id == event.llm_response_id
+
+
+def test_linked_assistant_turn_renders_after_backend_roundtrip(backend):
+    """A persisted canonical turn and its execution retain their relationship."""
+    turn = LLMResponse(
+        content="I will run it.",
+        tool_calls=(
+            ToolCall(
+                id="call-roundtrip",
+                name="execute_python",
+                arguments='{"code":"print(1)"}',
+            ),
+        ),
+        finish_reason="tool_calls",
+    )
+    execution = ToolCallEvent(
+        tool_call_id="call-roundtrip",
+        name="execute_python",
+        arguments={"code": "print(1)"},
+        llm_response_id=turn.id,
+        result=ToolResult(tool_call_id="call-roundtrip", content="status: complete"),
+    )
+    backend.store("turn", turn)
+    backend.store("execution", execution)
+
+    restored_turn, restored_execution = backend.all_events()
+    messages = XMLBlockFormatter().format(
+        [
+            ResolvedBlock(
+                key="turn",
+                content=restored_turn.content,
+                role=Role.ASSISTANT,
+                event=restored_turn,
+            ),
+            ResolvedBlock(
+                key="execution",
+                content="",
+                role=Role.ASSISTANT,
+                event=restored_execution,
+            ),
+        ]
+    )
+
+    assistant = next(message for message in messages if message.role == Role.ASSISTANT)
+    assert assistant.content == "I will run it."
+    assert [call.id for call in assistant.tool_calls] == ["call-roundtrip"]
+    result = next(message for message in messages if message.role == Role.TOOL)
+    assert result.tool_call_id == "call-roundtrip"
+    assert result.content == "status: complete"
 
 
 def test_tool_call_event_result_preserved_after_update(backend):
@@ -370,3 +493,129 @@ def test_python_output_none_value_is_preserved(backend):
     retrieved = backend.get("noneval")
     assert retrieved is not None
     assert retrieved.value is None
+
+
+@pytest.mark.parametrize(
+    "value",
+    [None, "text", 3, 2.5, True, [1, "a", None], (1, 2), {"a": [1, {"b": False}]}],
+)
+def test_json_safe_skips_the_probe_for_plain_json_values(monkeypatch, value):
+    """Plain JSON values are returned as they are, without a trial ``to_json`` dump."""
+    import nooa.events as events
+
+    def fail(*_args, **_kwargs):
+        raise AssertionError("to_json should not be called for a plain JSON value")
+
+    monkeypatch.setattr(events, "to_json", fail)
+    assert events._json_safe(value) is value
+
+
+def test_plain_json_walk_refuses_a_large_container_before_queueing_it():
+    """A container larger than the remaining budget is refused without queueing its children."""
+    import tracemalloc
+
+    import nooa.events as events
+
+    big = list(range(events._PLAIN_JSON_MAX_ITEMS * 100))
+    wide = dict.fromkeys(map(str, range(events._PLAIN_JSON_MAX_ITEMS * 10)), 0)
+    tracemalloc.start()
+    try:
+        assert events._is_plain_json(big) is False
+        assert events._is_plain_json({"k": big}) is False
+        assert events._is_plain_json(wide) is False
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 1_000_000  # queueing a million children would take tens of megabytes
+
+
+@pytest.mark.parametrize("value", [["a\udcff"], {"a\udcff": 1}, "a\udcff"])
+def test_python_output_with_a_lone_surrogate_string_still_serializes(backend, value):
+    """A string with a lone surrogate is not plain JSON, so it takes the fallback.
+
+    ``os.listdir`` on a non-UTF-8 filename returns such strings; pydantic-core
+    refuses to encode them, which used to wedge the event store.
+    """
+    event = PythonOutput(
+        tool_call_id="",
+        execution_status="complete",
+        execution_count=1,
+        value=value,
+    )
+    assert "udcff" in event.model_dump_json()
+    backend.store("surrogate", event)
+    assert backend.get("surrogate") is not None
+
+
+def test_json_safe_still_probes_other_values(monkeypatch):
+    """Anything else is still probed: native types pass, unencodable ones fall back."""
+    import asyncio
+    import datetime
+
+    import nooa.events as events
+
+    calls: list[object] = []
+    real = events.to_json
+
+    def counting(value, *args, **kwargs):
+        calls.append(value)
+        return real(value, *args, **kwargs)
+
+    monkeypatch.setattr(events, "to_json", counting)
+    stamp = datetime.datetime(2020, 1, 2)
+    assert events._json_safe(stamp) is stamp
+    assert "CancelledError" in events._json_safe([1, asyncio.CancelledError()])
+    assert len(calls) == 2
+
+
+def test_python_output_rich_diagnostic_roundtrip_preserves_every_channel(backend):
+    """Source-aware failures must survive the backend used by resumed sessions."""
+    diagnostic = (
+        "Cell In[75], line 5, in <module>\n"
+        "    start = sens.index('missing')\n"
+        "            ^^^^^^^^^^^^^^^^^^^^^\n"
+        "ValueError: substring not found"
+    )
+    event = PythonOutput(
+        tool_call_id="tc-diagnostic",
+        execution_status="error",
+        execution_count=75,
+        stdout="partial result\n",
+        stderr="warning before failure\n",
+        error=diagnostic,
+    )
+
+    backend.store("diagnostic", event)
+    retrieved = backend.get("diagnostic")
+
+    assert isinstance(retrieved, PythonOutput)
+    assert retrieved.tool_call_id == "tc-diagnostic"
+    assert retrieved.execution_count == 75
+    assert retrieved.execution_status == ResultStatus.ERROR
+    assert retrieved.stdout == "partial result\n"
+    assert retrieved.stderr == "warning before failure\n"
+    assert retrieved.error == diagnostic
+    assert "start = sens.index('missing')" in retrieved.error
+    assert "^^^^^^^^^^^^^^^^^^^^^" in retrieved.error
+
+
+def test_decision_record_raw_response_round_trips(backend):
+    raw = {"model": "loaded-model", "answers": {}, "metadata": {"calibration": "none"}}
+    backend.store(
+        "decision-raw",
+        DecisionRecord(
+            decision_call_id="decision-call-2",
+            method_name="urgent",
+            generation_id="gen-003",
+            state="Production is down",
+            questions={},
+            requested_model="decision-model",
+            raw_response=raw,
+            success=True,
+        ),
+    )
+
+    retrieved = backend.get("decision-raw")
+
+    assert isinstance(retrieved, DecisionRecord)
+    assert retrieved.model_dump(mode="json")["raw_response"] == raw
