@@ -886,17 +886,33 @@ class ActorRuntime:
             get_harness_metrics().media_image_limit_collapsed(limit, collapsed)
         return collapsed
 
-    async def _with_image_recovery(
-        self, call: Callable[[], Awaitable[Any]], rebuild: Callable[[], Awaitable[None]]
+    async def _call_with_recovery(
+        self,
+        call: Callable[[], Awaitable[Any]],
+        rebuild: Callable[[], Awaitable[None]],
+        recover_context_window: Callable[[BaseException], bool],
     ) -> Any:
-        """``await call()``; on a provider image limit, collapse old images, rebuild, call again."""
-        try:
-            return await call()
-        except Exception as exc:
-            if not self._recover_image_limit(exc):
-                raise
-            await rebuild()
-            return await call()
+        """``await call()``, recovering once each from an image limit and a context-window error.
+
+        Image limit: collapse old images. Context window:
+        ``recover_context_window(exc)`` archives events and lowers the reply
+        budget (False: re-raise). Then the messages are rebuilt and the call
+        made again, so each retry is covered by the other recovery.
+        """
+        image_done = context_done = False
+        while True:
+            try:
+                return await call()
+            except Exception as exc:
+                if not image_done and self._recover_image_limit(exc):
+                    image_done = True
+                elif not context_done and _is_context_window_error(exc):
+                    context_done = True
+                    if not recover_context_window(exc):
+                        raise
+                else:
+                    raise
+                await rebuild()
 
     def _recover_image_limit(self, exc: BaseException) -> bool:
         """A provider's per-request image limit: remember it, collapse old images; True to retry."""
@@ -1382,38 +1398,30 @@ class ActorRuntime:
                 async def _run_middleware() -> LLMCallContext:
                     return await em.run_middleware("llm_call", ctx, _core_llm)
 
+                def _recover_middleware_window(_cw_exc: BaseException) -> bool:
+                    # Always archive first — even if we can't reduce max_tokens,
+                    # shedding events lets the retry (or caller's next attempt) succeed.
+                    _ctx_window = _context_window_for_error(ctx.client, _cw_exc, ctx.params)
+                    self._archive_on_context_error(_ctx_window, exc=_cw_exc)
+                    _reduced = _compute_reduced_max_tokens(
+                        _cw_exc,
+                        _ctx_window,
+                        context_limits_for(ctx.client, ctx.params).reserved_output_tokens,
+                    )
+                    if _reduced is None:
+                        return False
+                    logger.warning(
+                        "context-window recovery (middleware): reducing max_tokens %s -> %d",
+                        ctx.params.get("max_tokens"),
+                        _reduced,
+                    )
+                    ctx.params = reduced_reply_params(ctx.client, ctx.params, _reduced)
+                    return True
+
                 try:
-                    try:
-                        ctx = await self._with_image_recovery(
-                            _run_middleware, _rebuild_middleware_messages
-                        )
-                    except Exception as _cw_exc:
-                        if not _is_context_window_error(_cw_exc):
-                            raise
-                        # Always archive first — even if we can't reduce max_tokens,
-                        # shedding events lets the retry (or caller's next attempt) succeed.
-                        _ctx_window = _context_window_for_error(ctx.client, _cw_exc, ctx.params)
-                        self._archive_on_context_error(
-                            _ctx_window,
-                            exc=_cw_exc,
-                        )
-                        _reduced = _compute_reduced_max_tokens(
-                            _cw_exc,
-                            _ctx_window,
-                            context_limits_for(ctx.client, ctx.params).reserved_output_tokens,
-                        )
-                        if _reduced is None:
-                            raise
-                        logger.warning(
-                            "context-window recovery (middleware): reducing max_tokens %s -> %d",
-                            ctx.params.get("max_tokens"),
-                            _reduced,
-                        )
-                        # Re-build messages after archival so the retry sees the
-                        # reduced event store.
-                        ctx.params = reduced_reply_params(ctx.client, ctx.params, _reduced)
-                        await _rebuild_middleware_messages()
-                        ctx = await em.run_middleware("llm_call", ctx, _core_llm)
+                    ctx = await self._call_with_recovery(
+                        _run_middleware, _rebuild_middleware_messages, _recover_middleware_window
+                    )
                 except Exception as _exc:
                     _emit_llm_end(success=False, exception_type=type(_exc).__name__)
                     raise
@@ -1453,14 +1461,14 @@ class ActorRuntime:
                 _kwargs.setdefault("prompt_cache_key", f"{self.agent._agent_id}-{_strategy_tag}")
                 _emit_llm_start()
 
-                async def _rebuild_messages(request_params: dict[str, Any] = kwargs) -> None:
+                async def _rebuild_messages() -> None:
                     nonlocal messages, _dynamic_context
                     messages = await self._build_messages(
                         self._current_method,
                         call_args=self._current_call.args if self._current_call else (),
                         call_kwargs=self._current_call.kwargs if self._current_call else {},
                         tools=tools,
-                        request_params=request_params,
+                        request_params=_kwargs,
                     )
                     _dynamic_context = _snapshot_llm_request(
                         self.event_manager, messages, current_generation_id or ""
@@ -1471,49 +1479,38 @@ class ActorRuntime:
                         messages, tools=tools, output_model=output_model, **_kwargs
                     )
 
+                def _recover_window(_cw_exc: BaseException) -> bool:
+                    nonlocal _kwargs
+                    # Always archive first — even if we can't reduce max_tokens,
+                    # shedding events lets the retry (or caller's next attempt) succeed.
+                    _ctx_window = _context_window_for_error(llm_client, _cw_exc, _kwargs)
+                    self._archive_on_context_error(_ctx_window, exc=_cw_exc)
+                    _reduced = _compute_reduced_max_tokens(
+                        _cw_exc,
+                        _ctx_window,
+                        context_limits_for(llm_client, _kwargs).reserved_output_tokens,
+                    )
+                    if _reduced is None:
+                        # Archival already ran: the caller (e.g. CodeAct) retries
+                        # with fresh messages.
+                        return False
+                    logger.warning(
+                        "context-window recovery: reducing max_tokens %s -> %d "
+                        "(prompt=%s, ctx_window=%s)",
+                        kwargs.get("max_tokens"),
+                        _reduced,
+                        _parse_prompt_tokens(_cw_exc),
+                        _ctx_window,
+                    )
+                    # _kwargs keeps the per-(agent, strategy) cache key, so the
+                    # retry lands on the same shard as the original attempt.
+                    _kwargs = reduced_reply_params(llm_client, _kwargs, _reduced)
+                    return True
+
                 try:
-                    try:
-                        response = await self._with_image_recovery(_call_llm, _rebuild_messages)
-                    except Exception as _cw_exc:
-                        if not _is_context_window_error(_cw_exc):
-                            raise
-                        # Always archive first — even if we can't reduce max_tokens,
-                        # shedding events lets the retry (or caller's next attempt) succeed.
-                        _ctx_window = _context_window_for_error(llm_client, _cw_exc, _kwargs)
-                        self._archive_on_context_error(
-                            _ctx_window,
-                            exc=_cw_exc,
-                        )
-                        _reduced = _compute_reduced_max_tokens(
-                            _cw_exc,
-                            _ctx_window,
-                            context_limits_for(llm_client, _kwargs).reserved_output_tokens,
-                        )
-                        if _reduced is None:
-                            # Can't compute a reduced max_tokens, but archival already ran.
-                            # Re-raise so the caller (e.g. CodeAct) retries with fresh messages.
-                            raise
-                        logger.warning(
-                            "context-window recovery: reducing max_tokens %s -> %d "
-                            "(prompt=%s, ctx_window=%s)",
-                            kwargs.get("max_tokens"),
-                            _reduced,
-                            _parse_prompt_tokens(_cw_exc),
-                            _ctx_window,
-                        )
-                        # Re-build messages after archival so the retry sees the
-                        # reduced event store. Retrying with the same messages would
-                        # fail again when input tokens exceed the context window.
-                        _recovery_kw = reduced_reply_params(llm_client, _kwargs, _reduced)
-                        await _rebuild_messages(_recovery_kw)
-                        # Reuse _kwargs (already has the per-(agent, strategy) key set)
-                        # so recovery lands on the same shard as the original attempt.
-                        response = await llm_client.acall(
-                            messages,
-                            tools=tools,
-                            output_model=output_model,
-                            **_recovery_kw,
-                        )
+                    response = await self._call_with_recovery(
+                        _call_llm, _rebuild_messages, _recover_window
+                    )
                 except Exception as _exc:
                     _emit_llm_end(success=False, exception_type=type(_exc).__name__)
                     raise

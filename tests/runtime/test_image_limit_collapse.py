@@ -175,3 +175,37 @@ async def test_a_collapsed_cell_keeps_its_printed_output_and_tool_pairing():
         if isinstance(message, Mapping) and message.get("role") == "tool"
     }
     assert calls == results == {"c1", "c2"}
+
+
+async def test_the_context_window_retry_is_covered_by_image_recovery():
+    from litellm.exceptions import ContextWindowExceededError
+
+    from nooa.runtime.actor import ActorRuntime
+
+    class Runtime:
+        def _recover_image_limit(self, exc):
+            return isinstance(exc, _TooManyImages)
+
+    window = ContextWindowExceededError("context length exceeded", "m", "openai")
+    errors = [window, _TooManyImages("Too many images: 2 (max 1)")]
+    seen = []
+
+    async def call():
+        if errors:
+            raise errors.pop(0)
+        return "ok"
+
+    async def rebuild():
+        seen.append("rebuild")
+
+    run = ActorRuntime._call_with_recovery
+    assert await run(Runtime(), call, rebuild, lambda exc: seen.append(exc) or True) == "ok"
+    assert seen == [window, "rebuild", "rebuild"]
+    # Each recovery runs once: a second context-window error is raised.
+    errors[:] = [window, window]
+    with pytest.raises(ContextWindowExceededError):
+        await run(Runtime(), call, rebuild, lambda exc: True)
+    # A context window that cannot be recovered is raised as is.
+    errors[:] = [window]
+    with pytest.raises(ContextWindowExceededError):
+        await run(Runtime(), call, rebuild, lambda exc: False)
