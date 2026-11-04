@@ -59,6 +59,13 @@ async def test_fresh_history_and_python_media_owned(client_type, asynchronous, e
     with client_type("openai/test", media_inputs=enabled, cache_breakpoint=None) as client:
         with patch(f"litellm.{method}", new_callable=AsyncMock if asynchronous else None) as wire:
             wire.return_value = response(responses)
+            if responses and {"audio", "video"}.intersection(enabled or []):
+                with pytest.raises(ValueError, match="Unsupported media input for Responses"):
+                    await client.acall(messages) if asynchronous else client.call(messages)
+                wire.assert_not_called()
+                assert messages == before
+                assert [(obj.data_url, repr(obj)) for obj in objects] == object_state
+                return
             if asynchronous:
                 await client.acall(messages)
             else:
@@ -299,6 +306,14 @@ def test_top_level_assistant_audio_cannot_bypass_text_only(client_type, enabled)
     with client_type("openai/test", media_inputs=enabled, cache_breakpoint=None) as client:
         with patch("litellm.responses" if responses else "litellm.completion") as wire:
             wire.return_value = response(responses)
+            if responses and enabled:
+                with pytest.raises(
+                    ValueError, match="Unsupported media input for Responses: audio"
+                ):
+                    client.call([original])
+                wire.assert_not_called()
+                assert original == before
+                return
             client.call([original])
             sent = wire.call_args.kwargs["input" if responses else "messages"][0]
             assert ("audio" in sent) == bool(enabled)

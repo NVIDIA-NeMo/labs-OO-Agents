@@ -11,9 +11,10 @@ from typing import Any
 
 from nooa._immutable_json import json_containers
 from nooa.llm_types import AssistantPart, AssistantReasoning, AssistantText, LLMResponse, ToolCall
+from nooa.request_interface import interface_for_provider
 from nooa.unifiedllm.cache_policy import wrap_anthropic_text
 
-from .media_inputs import guard_native_media
+from .media_inputs import check_replayed_native_media
 from .replay_state import (
     ReasoningReplayError,
     _field,
@@ -214,7 +215,12 @@ def project_chat_turn(
     for part in turn.parts:
         native = json_containers(part.native) if compatible and part.native else {}
         if isinstance(part, AssistantText) and native:
-            guard_native_media(native, media_inputs)
+            # This projection serves CompletionClient only, which sends either
+            # native Anthropic Messages or OpenAI-compatible Chat. ResponsesClient
+            # turns are projected in response_parts.py with interface="responses".
+            check_replayed_native_media(
+                native, media_inputs, interface=interface_for_provider(provider)
+            )
         if isinstance(part, ToolCall):
             call_id = part.id
             if signature := native.pop("inline_thought_signature", None):

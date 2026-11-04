@@ -253,7 +253,8 @@ class _ClientHttp:
             _, provider, dynamic_api_key, dynamic_api_base = litellm.get_llm_provider(
                 model,
                 api_key=config.get("api_key"),
-                api_base=config.get("api_base"),
+                api_base=config.get("api_base") or config.get("base_url"),
+                custom_llm_provider=config.get("custom_llm_provider"),
             )
         except Exception as e:  # noqa: BLE001
             # Unknown/ambiguous model — don't risk handing an incompatible client
@@ -276,7 +277,7 @@ class _ClientHttp:
 
         # OpenAI SDK path: client= must be an AsyncOpenAI / OpenAI wrapping httpx.
         api_key = config.get("api_key") or dynamic_api_key
-        api_base = config.get("api_base") or dynamic_api_base
+        api_base = config.get("api_base") or config.get("base_url") or dynamic_api_base
         # CompletionClient's RetryConfig owns retries; calls set their own value.
         common: dict[str, Any] = {"timeout": self._timeout, "max_retries": 0}
         if api_key:
@@ -1289,22 +1290,79 @@ class UnifiedLLM(ABC):
         return self._reasoning_config.default
 
     def _prepare_call_config(self, overrides: dict[str, Any]) -> dict[str, Any]:
-        return apply_reasoning_level(
+        """Merge the client configuration with per-call ``overrides`` for one request.
+
+        ``api_base`` and ``base_url`` are two spellings of the same endpoint:
+
+        - An endpoint override of ``None``, ``""`` or only whitespace counts as no
+          override. Clearing the
+          configured endpoint would send the request, with its credentials, to
+          the provider's default endpoint instead of the configured gateway.
+        - A non-None override of one spelling also replaces the other spelling if
+          the client configuration sets it. Leaving the old value would give
+          LiteLLM two different endpoints, and Responses requests copy
+          ``base_url`` over ``api_base``. Both spellings are kept (rather than
+          dropping one) because LiteLLM's async provider detection reads
+          ``base_url``, and because an override equal to the configured URL must
+          leave the route, and therefore the media permissions, unchanged.
+        """
+        from nooa.unifiedllm.route_identity import no_endpoint_override
+
+        overrides = {
+            key: value
+            for key, value in overrides.items()
+            if not (key in ("api_base", "base_url") and no_endpoint_override(value))
+        }
+        params = apply_reasoning_level(
             self._reasoning_config, self.model, self.config, overrides, self.reasoning_level
         )
+        for alias, other in (("api_base", "base_url"), ("base_url", "api_base")):
+            if alias in overrides and other not in overrides and other in params:
+                params[other] = overrides[alias]
+        return params
 
     def _request_media_inputs(self, call_config: dict[str, Any]) -> tuple[MediaInput, ...]:
-        """A replacement route never inherits permissions from this connection."""
-        if self._effective_model(call_config) != self.model or any(
-            call_config.get(key) != self.config.get(key)
-            for key in ("api_base", "base_url", "custom_llm_provider", "client")
+        """A replacement route never inherits permissions from this connection.
+
+        ``api_base`` and ``base_url`` are compared as one endpoint, so the
+        configured URL under the other spelling keeps the permissions. URLs are
+        normalized by route_identity.endpoint_changed, like context windows.
+        """
+        from nooa.unifiedllm.route_identity import endpoint_changed
+
+        if (
+            self._effective_model(call_config) != self.model
+            or endpoint_changed(self.config, call_config)
+            # A request with no endpoint goes to the provider default.
+            or (
+                any(self.config.get(key) for key in ("api_base", "base_url"))
+                and not any(call_config.get(key) for key in ("api_base", "base_url"))
+            )
+            or any(
+                call_config.get(key) != self.config.get(key)
+                for key in ("custom_llm_provider", "client")
+            )
         ):
             return ()
         return validate_media_inputs(self.media_inputs)
 
     def _prepare_media_messages(self, messages, call_config):
         enabled = self._request_media_inputs(call_config)
+        # Media the interface cannot send is rejected after projection, by
+        # _validate_implemented_media: only the projected request also shows the
+        # native content of replayed assistant turns.
         return filter_media_messages(messages, enabled)
+
+    def _validate_implemented_media(self, messages, call_config):
+        from nooa.media_policy import reject_unsupported_media
+        from nooa.request_interface import resolved_input_interface
+
+        interface = resolved_input_interface(
+            self._effective_model(call_config),
+            call_config,
+            client_type="responses" if isinstance(self, ResponsesClient) else "completion",
+        )
+        reject_unsupported_media(messages, interface)
 
     def get_context_limits(
         self, overrides: dict[str, Any] | None = None, *, fallback_reserve: int = 0
@@ -1313,8 +1371,8 @@ class UnifiedLLM(ABC):
 
         Includes selected reasoning levels, per-call caps and extra_body. Does
         not infer a reply cap from model metadata. ``fallback_reserve`` is only
-        a planning allowance when no cap is configured. For a per-call model
-        switch, never reuse the original model's window; pass an explicit
+        a planning allowance when no cap is configured. For a per-call route
+        switch, never reuse the original endpoint's window; pass an explicit
         context_window or use a separately configured client for that model.
         """
         params = self._prepare_call_config(overrides or {})
@@ -1325,9 +1383,19 @@ class UnifiedLLM(ABC):
         cap = caps[0] if caps else None
         if cap is not None and (type(cap) is not int or cap <= 0):
             raise ValueError("Reply token limit must be a positive integer")
-        same_model = self._effective_model(params) == self.model
+        from nooa.unifiedllm.route_identity import same_context_route
+
+        client_type = "responses" if isinstance(self, ResponsesClient) else "completion"
+        same_route = same_context_route(
+            self.model,
+            self.config,
+            client_type,
+            self._effective_model(params),
+            params,
+            client_type,
+        )
         window = (overrides or {}).get("context_window")
-        if window is None and same_model:
+        if window is None and same_route:
             window = self.context_window
         if not isinstance(window, int) or window <= 0:
             window = None
@@ -1468,7 +1536,7 @@ class UnifiedLLM(ABC):
         Resolution order:
         1. Explicit ``context_window`` config passed to the client constructor
         2. Registry config (if created via get_llm_client())
-        3. Registry lookup by model name or model_name field
+        3. Unambiguous registry lookup by compatible route (direct clients only)
         4. litellm model info (for known models)
         5. None (unknown model)
 
@@ -1480,12 +1548,22 @@ class UnifiedLLM(ABC):
         if cw is not None:
             return cw
 
-        # Then check registry config (set by get_llm_client()).
+        from nooa.unifiedllm.route_identity import same_context_route
+
+        client_type = "responses" if isinstance(self, ResponsesClient) else "completion"
+        # Clients built by the registry carry their entry's settings. Use only
+        # that entry; if it declares no context_window, do not borrow one from
+        # another alias that happens to use the same model.
         if self._registry_config is not None:
-            cw = self._registry_config.get("context_window")
-            if cw is not None:
-                return cw
-            # Registry entry exists but lacks context_window — fall through
+            route = getattr(self, "_registry_context_route", None)
+            if route is None or same_context_route(
+                self.model, self.config, client_type, route[0], route[1], route[2]
+            ):
+                cw = self._registry_config.get("context_window")
+                if cw is not None:
+                    return cw
+            info = self.get_model_info()
+            return info.get("max_input_tokens") if info else None
 
         # Try registry lookup by model string. The property is reachable
         # from any UnifiedLLM instance — including ones constructed
@@ -1494,6 +1572,7 @@ class UnifiedLLM(ABC):
         # import-time side effect.
         from nooa.unifiedllm.registry import (
             MODELS,
+            _lookup_api_key_env,
             _registry_lock,
             ensure_loaded,
         )
@@ -1507,18 +1586,57 @@ class UnifiedLLM(ABC):
         with _registry_lock:
             models_snapshot = dict(MODELS)
 
-        # Direct key match
-        if model_str in models_snapshot:
-            cw = models_snapshot[model_str].get("context_window")
-            if cw is not None:
-                return cw
-
-        # Reverse lookup: check if any registry entry's model_name matches
-        for _key, cfg in models_snapshot.items():
-            if cfg.get("model_name") == model_str:
+        # A directly built client has no entry of its own. Use a registry
+        # context_window only if every alias with the same route declares the
+        # same positive value. If they disagree, or one of them declares none,
+        # the result would depend on YAML order, so fall back instead.
+        #
+        # A direct client never has ``api_key_env``, so credentials are compared
+        # here rather than in same_context_route: a client without an api_key
+        # matches regardless of credentials; a client with one matches only an
+        # entry whose resolved key (api_key, else the value of api_key_env) is
+        # equal. Keys are compared in memory only and never logged.
+        client_key = self.config.get("api_key")
+        own_route = {
+            name: value
+            for name, value in self.config.items()
+            if name not in ("api_key", "api_key_env")
+        }
+        windows = set()
+        undeclared = False
+        for key, cfg in models_snapshot.items():
+            entry_client_type = cfg.get("client_type", "completion")
+            if client_key is not None:
+                # Resolve the entry key as the registry does (validated name,
+                # NVIDIA synonyms, empty means unset), but without its warnings:
+                # this loop visits every entry. A malformed api_key_env gives None.
+                entry_key = cfg.get("api_key")
+                if entry_key is None:
+                    entry_key, _ = _lookup_api_key_env(cfg)
+                if entry_key != client_key:
+                    continue
+            # Completion and Responses clients are never sent the registry-only
+            # ``endpoint`` key (the decision-route spelling), so leave it out of
+            # the comparison, as client_from_config does. Decision entries keep it.
+            skipped = ("api_key", "api_key_env") + (
+                () if entry_client_type == "decision" else ("endpoint",)
+            )
+            route = {name: value for name, value in cfg.items() if name not in skipped}
+            if same_context_route(
+                model_str,
+                own_route,
+                client_type,
+                cfg.get("model_name", key),
+                route,
+                entry_client_type,
+            ):
                 cw = cfg.get("context_window")
-                if cw is not None:
-                    return cw
+                if type(cw) is int and cw > 0:
+                    windows.add(cw)
+                else:
+                    undeclared = True
+        if len(windows) == 1 and not undeclared:
+            return windows.pop()
 
         # Fallback to litellm
         info = self.get_model_info()
@@ -1995,10 +2113,22 @@ class CompletionClient(UnifiedLLM):
     def _completion_http_client(
         self, call_config: dict[str, Any], *, is_async: bool, max_retries: int
     ) -> Any:
-        """Reuse the owned transport only while its constructor routing still applies."""
-        routing_fields = ("api_base", "base_url", "api_key", "custom_llm_provider")
-        if self._effective_model(call_config) != self.model or any(
-            call_config.get(key) != self.config.get(key) for key in routing_fields
+        """Reuse the owned transport only while its constructor routing still applies.
+
+        The endpoint is compared with route_identity.endpoint_changed, like media
+        permissions, reasoning levels and context windows: the configured URL
+        under the other spelling, with a trailing slash or a different host case
+        is the same route and keeps the owned transport.
+        """
+        from nooa.unifiedllm.route_identity import endpoint_changed
+
+        if (
+            self._effective_model(call_config) != self.model
+            or endpoint_changed(self.config, call_config)
+            or any(
+                call_config.get(key) != self.config.get(key)
+                for key in ("api_key", "custom_llm_provider")
+            )
         ):
             # LiteLLM uses a supplied OpenAI SDK client's bound URL/key, ignoring
             # the corresponding call parameters. Let it build the correct client
@@ -2037,6 +2167,8 @@ class CompletionClient(UnifiedLLM):
             anthropic_cache_marking=cache_mapping == "anthropic",
             media_inputs=self._request_media_inputs(call_config),
         )
+
+        self._validate_implemented_media(prepared_messages, call_config)
 
         # Choose the stable-prefix breakpoint on projected provider messages.
         prepared_messages, _, _ = self._prepare_cache_boundary(
@@ -2151,6 +2283,8 @@ class CompletionClient(UnifiedLLM):
             anthropic_cache_marking=cache_mapping == "anthropic",
             media_inputs=self._request_media_inputs(call_config),
         )
+
+        self._validate_implemented_media(prepared_messages, call_config)
 
         # Choose the stable-prefix breakpoint on projected provider messages.
         prepared_messages, _, _ = self._prepare_cache_boundary(
@@ -2458,6 +2592,8 @@ class ResponsesClient(UnifiedLLM):
             media_inputs=self._request_media_inputs(call_config),
         )
 
+        self._validate_implemented_media(input_messages, call_config)
+
         api_params = {
             "model": self.model,
             "truncation": "disabled",
@@ -2544,6 +2680,8 @@ class ResponsesClient(UnifiedLLM):
             native_encrypted_reasoning,
             media_inputs=self._request_media_inputs(call_config),
         )
+
+        self._validate_implemented_media(input_messages, call_config)
 
         api_params = {
             "model": self.model,
