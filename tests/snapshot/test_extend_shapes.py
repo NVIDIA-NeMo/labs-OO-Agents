@@ -470,12 +470,12 @@ def test_starved_structure_parts_say_max_nodes(registered) -> None:
     assert reasons <= {None, "max_nodes"}
 
 
-# --- Pydantic models and dataclasses are internal object_like shapes ---------------------
+# --- Pydantic models and dataclasses are internal field-reader shapes ---------------------
 
 
 def test_pydantic_and_dataclasses_are_internal_object_shapes() -> None:
-    for shape in (_capture._PYDANTIC_SHAPE, _capture._DATACLASS_SHAPE):
-        assert type(shape) is _capture._ObjectLike and shape.reader is not None
+    for shape in (_capture._PYDANTIC, _capture._DATACLASS):
+        assert type(shape) is _capture._FieldReader
 
     class Model(BaseModel):
         a: int = 1

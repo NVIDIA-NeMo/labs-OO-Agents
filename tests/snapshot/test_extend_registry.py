@@ -61,7 +61,7 @@ def test_register_needs_a_shape() -> None:
         None,
         "array_like",
         {"length": len},
-        _capture._PYDANTIC_SHAPE,  # internal shapes are not public
+        _capture._PYDANTIC,  # internal shapes are not public
     ]
     for not_a_shape in not_shapes:
         with pytest.raises(TypeError):

@@ -295,24 +295,6 @@ def _safe_mro(value: Any, state: _State) -> tuple[type[Any], ...] | None:
     return tuple(checked)
 
 
-def _index_of(mro: tuple[type[Any], ...], target: type[Any]) -> int | None:
-    for index, base in enumerate(mro):
-        if base is target:
-            return index
-    return None
-
-
-def _dataclass_index(mro: tuple[type[Any], ...], state: _State) -> int | None:
-    """Index of the nearest class whose own namespace holds dataclass fields."""
-    for index, base in enumerate(mro):
-        if base is object:
-            continue
-        namespace = _raw_namespace(base, state)
-        if namespace is not None and type(dict.get(namespace, "__dataclass_fields__")) is dict:
-            return index
-    return None
-
-
 # --- scalars and strings -----------------------------------------------------
 
 
@@ -974,7 +956,7 @@ _Entries = tuple[typing.Iterator[tuple[str, Any] | None] | None, list[Reason]]
 
 
 def _pydantic_entries(
-    value: BaseModel, mro: tuple[type[Any], ...], index: int, state: _State
+    value: BaseModel, mro: tuple[type[Any], ...], carrier: type[Any], state: _State
 ) -> _Entries:
     """The privileged field reader of a Pydantic v2 model: declared fields, raw stored values."""
     try:
@@ -1069,10 +1051,9 @@ def _slot_value(name: str, mro: tuple[type[Any], ...], value: Any, state: _State
 
 
 def _dataclass_entries(
-    value: Any, mro: tuple[type[Any], ...], index: int, state: _State
+    value: Any, mro: tuple[type[Any], ...], carrier: type[Any], state: _State
 ) -> _Entries:
-    """The privileged field reader of a dataclass: declared fields of ``mro[index]``, raw values."""
-    carrier = mro[index]
+    """The privileged field reader of a dataclass: declared fields of ``carrier``, raw values."""
     raw = _instance_storage(value, mro, state)
     storage = _copy_storage(raw, state) if raw is not _STOP else None
     namespace = _raw_namespace(carrier, state)
@@ -1223,11 +1204,8 @@ class _NdarrayLike:
 
 @dataclass(frozen=True)
 class _ObjectLike:
-    """Ordered named accessors, or (internal) a privileged field ``reader`` (Pydantic, dataclasses)."""
-
     fields: tuple[tuple[str, Callable[[Any], Any]], ...]
     kind: str | None
-    reader: Callable[[Any, tuple[type[Any], ...], int, _State], _Entries] | None = None
 
 
 @dataclass(frozen=True)
@@ -1356,8 +1334,19 @@ def text_like(
     return _TextLike(_accessor(length, "length"), _accessor(slice, "slice"), unit, _kind(kind))
 
 
-_PYDANTIC_SHAPE = _ObjectLike((), None, _pydantic_entries)
-_DATACLASS_SHAPE = _ObjectLike((), None, _dataclass_entries)
+@dataclass(frozen=True)
+class _FieldReader:
+    """The internal shape of Pydantic models and dataclasses: a privileged field reader.
+
+    ``read(value, mro, carrier, state)`` yields the fields of the class
+    ``carrier`` (the MRO entry that matched). Never registered by users.
+    """
+
+    read: Callable[[Any, tuple[type[Any], ...], type[Any], _State], _Entries]
+
+
+_PYDANTIC = _FieldReader(_pydantic_entries)
+_DATACLASS = _FieldReader(_dataclass_entries)
 
 
 class _ShapeError(Exception):
@@ -1475,10 +1464,10 @@ def _structure_part(
 
 
 def _build_object(
-    shape: _ObjectLike | _ArrayLike | _MappingLike | _NdarrayLike,
+    shape: _ObjectLike | _ArrayLike | _MappingLike | _NdarrayLike | _FieldReader,
     value: Any,
     mro: tuple[type[Any], ...],
-    index: int,
+    carrier: type[Any],
     max_size: int,
     depth: int,
     path: str,
@@ -1486,23 +1475,23 @@ def _build_object(
 ) -> _Built:
     """An ``Object`` of a shape: a field reader's fields, or accessor fields and structure parts.
 
-    Pydantic models and dataclasses are ``_ObjectLike`` shapes whose ``reader``
-    is their privileged field reader; registered shapes add their accessor
+    Pydantic models and dataclasses are ``_FieldReader`` shapes: their
+    privileged reader yields the fields. Registered shapes add their accessor
     fields (built only when kept, each leaving room for the later ones) and
     their structure (``items``, ``shape`` / ``labels`` / ``data``), never cut
     by ``max_items``.
     """
     type_name = _bounded_type_name(value, _MAX_TYPE_NAME)
     module = _module_name(type(value), state)
-    kind = shape.kind
+    kind = None if isinstance(shape, _FieldReader) else shape.kind
     if depth >= state.max_depth:
         return _Built(Object(type_name, (), False, "max_depth", module, kind), 2)
     ref = _enter(value, path, "object", state)
     if ref is not None:
         return _Built(ref, 2)
     try:
-        if type(shape) is _ObjectLike and shape.reader is not None:
-            selected, stopped = shape.reader(value, mro, index, state)
+        if isinstance(shape, _FieldReader):  # one of this module's shapes: no user hook
+            selected, stopped = shape.read(value, mro, carrier, state)
             if selected is None:
                 return _closed(type_name, module)
             built = _object_fields(type_name, module, selected, max_size, depth, path, state)
@@ -1798,21 +1787,26 @@ def _text_parts(shape: _TextLike, value: Any, max_size: int, limits: Limits) -> 
 
 
 def _build_shape(
-    shape: _Shape,
+    shape: _Shape | _FieldReader,
     value: Any,
     mro: tuple[type[Any], ...],
-    index: int,
+    carrier: type[Any],
     max_size: int,
     depth: int,
     path: str,
     state: _State,
 ) -> _Built:
-    """Build ``value`` (whose MRO matched at ``index``) as ``shape`` describes it."""
+    """Build ``value`` (whose MRO entry ``carrier`` matched) as ``shape`` describes it."""
     shape_type = type(shape)
     if shape_type is _TextLike:
         return _build_text(cast(_TextLike, shape), value, max_size, state)
-    if shape_type is _ObjectLike or shape_type is _NdarrayLike or cast(Any, shape).fields:
-        return _build_object(cast(Any, shape), value, mro, index, max_size, depth, path, state)
+    if (
+        shape_type is _FieldReader
+        or shape_type is _ObjectLike
+        or shape_type is _NdarrayLike
+        or cast(Any, shape).fields
+    ):
+        return _build_object(cast(Any, shape), value, mro, carrier, max_size, depth, path, state)
     collection = cast(_ArrayLike | _MappingLike, shape)
     type_name = _bounded_type_name(value, _MAX_TYPE_NAME)
     node_type = Sequence if shape_type is _ArrayLike else Mapping
@@ -1851,29 +1845,32 @@ def _field_reserves(pairs: list[tuple[Any, Any]]) -> tuple[list[tuple[int, int]]
     return reserves, nodes
 
 
-class _Registry:
-    """The process-wide ``capture.register(T, shape)`` registrations, matched by class identity.
+_REGISTRY: list[tuple[type[Any], _Shape]] = []
+"""The process-wide ``capture.register(T, shape)`` registrations, matched by class identity.
 
-    A list of ``(cls, shape)`` pairs scanned with ``is``: a class is never
-    hashed or compared with ``==``, so a metaclass ``__hash__``/``__eq__``
-    cannot run during dispatch.
+Scanned with ``is``: a class is never hashed or compared with ``==``, so a
+metaclass ``__hash__`` / ``__eq__`` cannot run during dispatch.
+"""
+
+
+def _find_shape(
+    mro: tuple[type[Any], ...], state: _State
+) -> tuple[type[Any], _Shape | _FieldReader] | None:
+    """The shape of the nearest MRO entry that has one (identity comparisons only).
+
+    At one entry a registration comes first, then Pydantic's ``BaseModel``,
+    then a class whose own namespace declares dataclass fields.
     """
-
-    def __init__(self) -> None:
-        self.entries: list[tuple[type[Any], _Shape]] = []
-
-    def find(self, mro: tuple[type[Any], ...]) -> tuple[int, _Shape] | None:
-        """The registration nearest in ``mro`` (identity comparisons only)."""
-        if not self.entries:
-            return None
-        for index, base in enumerate(mro):
-            for registered, shape in self.entries:
-                if registered is base:
-                    return index, shape
-        return None
-
-
-_REGISTRY = _Registry()
+    for base in mro:
+        for registered, shape in _REGISTRY:
+            if registered is base:
+                return base, shape
+        if base is BaseModel:
+            return base, _PYDANTIC
+        namespace = _raw_namespace(base, state) if base is not object else None
+        if namespace is not None and type(dict.get(namespace, "__dataclass_fields__")) is dict:
+            return base, _DATACLASS
+    return None
 
 
 # --- the walk --------------------------------------------------------------------
@@ -1942,32 +1939,13 @@ def _build(
         return _build_dict(value, max_size, depth, path, state)
 
     mro = _safe_mro(value, state)
-    if mro is None:
+    found = None if mro is None else _find_shape(mro, state)
+    if mro is None or found is None:
         return _opaque(value, max_size, state)
-    found = _REGISTRY.find(mro)
-    model_index = _index_of(mro, BaseModel)
-    dataclass_index = _dataclass_index(mro, state)
-    candidates = [
-        (found[0], 0) if found is not None else None,
-        (model_index, 1) if model_index is not None else None,
-        (dataclass_index, 2) if dataclass_index is not None else None,
-    ]
-    present = [candidate for candidate in candidates if candidate is not None]
-    if not present:
-        return _opaque(value, max_size, state)
-    _index, kind = min(present)
     if max_size < 2:
         return committed_fallback or _fallback(value, "max_length", max_size)
-    if kind == 0:
-        assert found is not None
-        return _build_shape(found[1], value, mro, found[0], max_size, depth, path, state)
-    if kind == 1:
-        assert model_index is not None
-        return _build_object(_PYDANTIC_SHAPE, value, mro, model_index, max_size, depth, path, state)
-    assert dataclass_index is not None
-    return _build_object(
-        _DATACLASS_SHAPE, value, mro, dataclass_index, max_size, depth, path, state
-    )
+    carrier, shape = found
+    return _build_shape(shape, value, mro, carrier, max_size, depth, path, state)
 
 
 class _CaptureFunction:
@@ -1995,21 +1973,17 @@ class _CaptureFunction:
         if not isinstance(cls, type):
             raise TypeError(f"capture.register needs a type, got {type(cls).__name__}")
         shape_type = type(shape)
-        if not any(shape_type is known for known in _SHAPE_TYPES) or (
-            shape_type is _ObjectLike and cast(_ObjectLike, shape).reader is not None
-        ):
+        if not any(shape_type is known for known in _SHAPE_TYPES):
             raise TypeError(
                 "capture.register needs a shape (array_like, ndarray_like, mapping_like,"
                 f" object_like or text_like), got {_bounded_type_name(shape, _MAX_TYPE_NAME)}"
             )
-        entries = _REGISTRY.entries
-        entries[:] = [entry for entry in entries if entry[0] is not cls]
-        entries.append((cls, shape))
+        _REGISTRY[:] = [entry for entry in _REGISTRY if entry[0] is not cls]
+        _REGISTRY.append((cls, shape))
 
     def unregister(self, cls: type[Any]) -> None:
         """Remove the registration for exactly ``cls`` (no-op when absent)."""
-        entries = _REGISTRY.entries
-        entries[:] = [entry for entry in entries if entry[0] is not cls]
+        _REGISTRY[:] = [entry for entry in _REGISTRY if entry[0] is not cls]
 
 
 capture = _CaptureFunction()
@@ -2036,7 +2010,7 @@ def _field_placeholder(value: Any, state: _State) -> tuple[Any, Snapshot]:
     if value_type is float:
         return 0.0, Unavailable("max_length", "float")
     mro = _safe_mro(value, state)
-    if mro is not None and _index_of(mro, BaseModel) is not None:
+    if mro is not None and any(base is BaseModel for base in mro):
         name = _bounded_type_name(value, _MAX_TYPE_NAME)
         return {}, Object(name, (), False, "max_length", _module_name(type(value), state))
     return None, Unavailable("max_length", "NoneType")
