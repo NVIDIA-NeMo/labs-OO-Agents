@@ -18,12 +18,15 @@ from acp import PROTOCOL_VERSION, InitializeResponse
 from acp.core import DEFAULT_STDIO_BUFFER_LIMIT_BYTES
 from acp.schema import (
     AgentCapabilities,
+    ClientCapabilities,
     Implementation,
     McpCapabilities,
     SessionCapabilities,
     SessionCloseCapabilities,
     SessionListCapabilities,
 )
+
+from nooa_atom.acp.terminal_auth import connect_auth_method, supports_terminal_auth
 
 INJECT_CAPABILITY = {"dev.nooa/inject": {"queue": {}, "steer": {}, "revoke": {}}}
 """``agentCapabilities._meta`` for ``_nooa/session/inject`` and ``revoke_inject``.
@@ -112,9 +115,15 @@ def steer_capability(dialects: tuple[PoolDialect, ...]) -> dict[str, bool]:
 
 
 def initialize_response(
-    protocol_version: int, client_info: Implementation | None = None
+    protocol_version: int,
+    client_info: Implementation | None = None,
+    client_capabilities: ClientCapabilities | None = None,
 ) -> InitializeResponse:
-    """The static answer to ``initialize``: what this agent supports.
+    """The answer to ``initialize``: what this agent supports.
+
+    A client that runs ``terminal`` auth methods (``auth.terminal``) is
+    offered one: ``nooa connect`` in a terminal (``terminal_auth``). Other
+    clients get no auth methods.
 
     ``session/delete`` and ``logout`` are not advertised: the 0.12 library
     does not route them, so a client calling them would get "method not
@@ -140,7 +149,7 @@ def initialize_response(
             ),
             field_meta={**INJECT_CAPABILITY, **steer_capability(pool_dialects(client_info))},
         ),
-        auth_methods=[],
+        auth_methods=[connect_auth_method()] if supports_terminal_auth(client_capabilities) else [],
         agent_info=Implementation(
             name="nooa-atom",
             title="NVIDIA Labs Object Oriented Agents (NOOA)",

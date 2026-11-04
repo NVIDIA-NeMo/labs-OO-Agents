@@ -436,7 +436,9 @@ def command(
             raise click.UsageError("--catalogue-file requires a plan/check --stage")
         from ._connect_wizard import run_wizard
 
-        run_wizard(
+        # The saved alias, or None: `nooa atom --connect` invokes this command
+        # and uses it for its exit status; the `nooa connect` CLI ignores it.
+        return run_wizard(
             model=model,
             edit_model=edit_model,
             provider=provider,
