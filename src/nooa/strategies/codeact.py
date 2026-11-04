@@ -1474,7 +1474,7 @@ Standard Python builtins and agent instance (`self`) are available."""
         Only for strategies whose sole tool is the Python cell: one ``result``
         argument (the tool's shape) or one ``value`` (the builtin's parameter,
         read as in a cell). Anything else (no argument, several fields) still
-        gets the unknown-tool feedback.
+        gets the unknown-tool feedback. Pure: the caller counts the alias.
         """
         if list(args) == ["result"]:
             return args
@@ -1875,6 +1875,13 @@ Standard Python builtins and agent instance (`self`) are available."""
             )
         )
 
+        # A provider return_result call without such a tool: the builtin's arguments.
+        alias = (
+            self._return_result_alias(args, return_type)
+            if tool_call.name == "return_result" and not self._supports_return_result()
+            else None
+        )
+
         # Handle based on tool name
         if tool_call.name == self._python_tool_name():
             # Execute Python code
@@ -1899,16 +1906,17 @@ Standard Python builtins and agent instance (`self`) are available."""
                 return _ToolCallsResult(completed=True, final_value=result[1])
 
         elif tool_call.name == "return_result" and (
-            self._supports_return_result()
-            or self._return_result_alias(args, return_type) is not None
+            self._supports_return_result() or alias is not None
         ):
             # Return the final result
             alias_note: str | None = None
             alias_intro = ""
-            if not self._supports_return_result():
+            if alias is not None:
                 # Some models call the cell builtin as a provider tool: take its
                 # value as return_result(value) inside a cell would, and say so.
-                args = self._return_result_alias(args, return_type) or {}
+                if "value" in args and "result" in alias:
+                    get_harness_metrics().return_result_keyword_alias("value")
+                args = alias
                 alias_note = return_alias_note(self._python_tool_name(), args.get("result"))
                 alias_intro = return_alias_invalid_intro(
                     self._python_tool_name(), args.get("result")
@@ -3755,7 +3763,10 @@ Standard Python builtins and agent instance (`self`) are available."""
                 raise _ReturnResultSignal(result={"result": list(args)[0]})
             # return_result(value=x) is return_result(x) unless value is a field;
             # other keyword arguments (result= included) pass as-is.
-            raise _ReturnResultSignal(result=positional_result(kwargs, call.return_type) or kwargs)
+            positional = positional_result(kwargs, call.return_type)
+            if positional is not None:
+                get_harness_metrics().return_result_keyword_alias("value")
+            raise _ReturnResultSignal(result=positional or kwargs)
 
         # Start with module context (imports, type definitions)
         agent_module = inspect.getmodule(type(runtime.agent))

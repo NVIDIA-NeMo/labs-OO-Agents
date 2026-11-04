@@ -46,8 +46,8 @@ def positional_result(kwargs: dict[str, Any], return_type: Any) -> dict[str, Any
     """``{"result": x}`` for ``return_result(value=x)``, the builtin's parameter name.
 
     Only when the return type has no ``value`` field (then ``value=`` is that
-    field); counted in harness metrics. Shared by the in-cell builtin and a
-    provider ``return_result`` call.
+    field). Pure: callers count the alias. Shared by the in-cell builtin
+    and a provider ``return_result`` call.
     """
     if (
         list(kwargs) == ["value"]
@@ -55,9 +55,6 @@ def positional_result(kwargs: dict[str, Any], return_type: Any) -> dict[str, Any
         and return_type is not type(None)
         and "value" not in return_type_field_names(return_type)
     ):
-        from nooa.runtime.harness_metrics import get_harness_metrics
-
-        get_harness_metrics().return_result_keyword_alias("value")
         return {"result": kwargs["value"]}
     return None
 

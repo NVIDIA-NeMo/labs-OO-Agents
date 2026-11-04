@@ -44,7 +44,7 @@ def test_positional_result_reads_value_unless_it_is_a_field(monkeypatch):
     assert positional_result({"result": 3}, int) is None  # already the canonical shape
     assert positional_result({"value": 3, "note": "x"}, Scored) is None
     assert positional_result({"value": 3}, None) is None
-    assert metrics.return_result_keyword_aliases == ["value"]
+    assert metrics.return_result_keyword_aliases == []  # pure: callers count
 
 
 def test_call_hint_names_each_model_with_its_required_fields():

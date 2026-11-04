@@ -148,6 +148,21 @@ async def test_an_invalid_provider_return_result_names_the_fields_doc(registry, 
     assert "taken as" not in seen and "Invalid result:" not in seen
 
 
+async def test_one_aliased_provider_call_counts_once(registry, options, models, span_attributes):
+    import json
+
+    from nooa.unifiedllm import LLMResponse, ToolCall
+
+    value = {"kind": "done", "explanation": "aliased"}
+    call = ToolCall(id="alias", name="return_result", arguments=json.dumps({"value": value}))
+    models.scripts[None] = [LLMResponse(parts=(call,), finish_reason="tool_calls")]
+    root = await registry.create(options)
+    assert await asyncio.wait_for(root.prompt("hi"), TIMEOUT) == Done(explanation="aliased")
+    attrs = _merged(span_attributes)
+    assert attrs["harness.return_result_keyword_alias.count"] == 1
+    assert attrs["harness.return_result_keyword_alias.keywords"] == ["value"]
+
+
 async def test_invalid_values_stay_bounded(registry, options, models):
     from nooa_atom.session.session import TurnFailedError
 
