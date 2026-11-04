@@ -1347,11 +1347,14 @@ class _BlockingCallVisitor(ast.NodeVisitor):
         self.generic_visit(node)
 
     def _visit_nested_scope(self, node: ast.AST) -> Any:
+        # Calls in the nested body see its own bindings; the cell's come back on exit.
+        saved_tracked = dict(self.tracked_locals)
         self.scope_depth += 1
         try:
             self.generic_visit(node)
         finally:
             self.scope_depth -= 1
+            self.tracked_locals = saved_tracked
 
     visit_FunctionDef = visit_AsyncFunctionDef = visit_Lambda = visit_ClassDef = _visit_nested_scope
     visit_ListComp = visit_SetComp = visit_DictComp = visit_GeneratorExp = _visit_nested_scope
@@ -1359,8 +1362,9 @@ class _BlockingCallVisitor(ast.NodeVisitor):
     def visit_Name(self, node: ast.Name) -> Any:
         """Record every name the cell binds (assignment, for/with/walrus targets, ...)."""
         # A store inside a nested body binds a local there, not the cell's name.
-        if isinstance(node.ctx, ast.Store) and not self.scope_depth:
-            self.cell_bound.add(node.id)
+        if isinstance(node.ctx, ast.Store):
+            if not self.scope_depth:
+                self.cell_bound.add(node.id)
             self.tracked_locals.pop(node.id, None)
 
     def visit_Assign(self, node: ast.Assign) -> Any:
@@ -1389,11 +1393,7 @@ class _BlockingCallVisitor(ast.NodeVisitor):
             matched = match_blocked_module(ref[0], self.blocked_calls) if ref else None
             if ref and matched:
                 for name in names:
-                    if self.scope_depth:
-                        # Track the nested local without replacing the cell's binding.
-                        self.tracked_locals.setdefault(name, (matched, ref[1]))
-                    else:
-                        self.tracked_locals[name] = (matched, ref[1])
+                    self.tracked_locals[name] = (matched, ref[1])
         else:
             ref = self._resolve_ref(value)
             if ref and self._blocked_call(ref[0], ref[1]):

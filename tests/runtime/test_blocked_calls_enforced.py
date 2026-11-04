@@ -264,6 +264,31 @@ def test_validator_ignores_nested_scope_bindings(code, exec_globals):
     assert issues and issues[0].code == "E310", code
 
 
+THREAD_THEN = "import threading\nt = threading.Thread(target=print)\n"
+
+
+@pytest.mark.parametrize(
+    "code,lines",
+    [
+        (THREAD_THEN + "def helper():\n    t = threading.Event()\n    t.wait()\n", [5]),
+        (THREAD_THEN + "f = lambda: [t.wait() for t in [threading.Event()]]\n", []),
+        (THREAD_THEN + "def helper():\n    t = threading.Event()\nt.wait()\n", []),
+        (THREAD_THEN + "def helper():\n    t = threading.Event()\nt.join()\n", [5]),
+        (THREAD_THEN + "def helper():\n    t = ' '\n    t.join(['a'])\nt.join()\n", [6]),
+    ],
+    ids=[
+        "nested Event refused",
+        "comprehension target",
+        "outer Thread.wait allowed",
+        "outer Thread.join refused",
+        "nested rebind clears inside only",
+    ],
+)
+def test_validator_tracks_nested_rebinding_inside_body_only(code, lines):
+    """A nested body's own binding decides its calls; the cell's binding is back after it."""
+    assert [issue.line for issue in _validate(code, None)] == lines
+
+
 @pytest.mark.parametrize("name", list(ALLOWED))
 def test_validator_allows_alternatives(name):
     assert _validate(ALLOWED[name]) == []
