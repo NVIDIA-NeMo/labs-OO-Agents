@@ -78,10 +78,16 @@ def serialize(value: Any) -> tuple[Any, set[str]]:
         The allowlist must be passed to ``deserialize()`` for security.
 
     Raises:
-        SerializationError: If the value contains an unsupported type.
+        SerializationError: If the value contains an unsupported type or exceeds
+            the supported recursion depth, including recursive object graphs.
     """
     allowlist: set[str] = set()
-    blob = _serialize(value, allowlist)
+    try:
+        blob = _serialize(value, allowlist)
+    except RecursionError as exc:
+        raise SerializationError(
+            "Snapshot value contains a cycle or exceeds the supported nesting depth"
+        ) from exc
     return blob, allowlist
 
 
