@@ -157,7 +157,8 @@ class SkillManager(Skill):
             if entry.kind == "mcp":
                 call = f"MCP tool: {call_form(_call_attr(entry.name, entry.key), tool)}"
             else:
-                call = f"method: self.{attr_name(entry.name)}.{tool}"
+                # The registry attaches a code skill as its leaf, whatever name it is shown under.
+                call = f"method: self.{attr_name(_leaf(entry.key))}.{tool}"
             lines.append(f"{entry.name} has {tool} ({call})")
         if len(tools) > shown:
             lines.append(f"... {len(tools) - shown} more tools; narrow the query")

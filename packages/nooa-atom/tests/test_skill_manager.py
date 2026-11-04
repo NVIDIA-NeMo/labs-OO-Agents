@@ -478,3 +478,26 @@ async def test_search_matches_a_connected_mcp_servers_tools(agent):
     approve(agent, "probe")
     await agent.skills.activate(["probe"])
     assert "probe has probe (MCP tool: await self.probe.probe(...))" in agent.skills.search("probe")
+
+
+async def test_search_calls_a_duplicate_leaf_code_skill_on_its_registered_attribute(
+    monkeypatch, tmp_path
+):
+    points = [
+        _EntryPoint("tools.greeter", Greeter, "Greeting helpers"),
+        _EntryPoint("other.greeter", Greeter, "Other greeting helpers"),
+    ]
+    monkeypatch.setattr("nooa.skill_registry.entry_points", lambda *, group: points)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    made = AtomAgentBase(llm=FakeLLMClient(), cwd=tmp_path)
+    try:
+        # The second greeter is shown under its key, but the registry attaches it as its leaf.
+        names = [entry.name for entry in made.skills.entries() if entry.key.endswith("greeter")]
+        assert names == ["greeter", "tools.greeter"]
+        activated = await made.skills.activate(["tools.greeter"])
+        assert activated == "tools.greeter: active; use self.greeter"
+        found = made.skills.search("greet").splitlines()
+        assert "tools.greeter has greet (method: self.greeter.greet)" in found
+        assert made.greeter is made.skills.registry["tools.greeter"]
+    finally:
+        await made.aclose()
