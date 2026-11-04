@@ -311,6 +311,15 @@ def _largest(fits: Callable[[int], bool], high: int) -> int:
     return low
 
 
+def _at(_data: Any, index: int) -> int:
+    """Any index of a ``str`` is a cut point (``safe_end`` / ``safe_start`` for bytes)."""
+    return index
+
+
+def _same(text: str) -> str:
+    return text
+
+
 def _cut_text(
     length: int,
     read: Callable[[int, int], Any],
@@ -325,98 +334,53 @@ def _cut_text(
     (its checked ``slice``). ``read`` runs at most twice, only for what may be
     kept: the whole text when it is short enough, else the tail and the head
     (one byte longer for bytes, to see whether the head ends on a code point
-    boundary). ``whole_scalar``: complete bytes are a ``Scalar`` (exact ``bytes``).
+    boundary). Every smaller cut is a part of what was read, so the text is
+    never read again. ``whole_scalar``: complete bytes are a ``Scalar``.
     """
     chars = unit == "chars"
     if max_size < 2:
         return _Built(Unavailable("max_length", "str" if chars else "bytes"), 1)
     raw_limit = max_size - 2  # a byte decodes to at most one character
-    keep_cap = raw_limit if limits.max_string is None else min(raw_limit, limits.max_string)
-    if length <= keep_cap:  # small enough to be kept whole: one read
+    cap = raw_limit if limits.max_string is None else min(raw_limit, limits.max_string)
+    if length <= cap:  # small enough to be kept whole: one read
         whole = read(0, length)
         encoded_size = len(dumps(whole if chars else decode(whole)))
         if encoded_size <= max_size:
             if whole_scalar:
                 return _Built(Scalar(whole), encoded_size)
             return _Built(Text(head=whole, length=length, unit=unit), encoded_size)
-        if chars:
-            return _cut_chars(length, whole, whole, length, max_size, limits)
-        return _cut_byte_parts(length, whole, whole, 0, length - 1, max_size, limits)
-    head_n, tail_n = _split(limits, keep_cap)
-    empty: Any = "" if chars else b""
-    tail = read(length - tail_n, length) if tail_n else empty
-    if chars:
-        head = read(0, head_n) if head_n else empty
-        return _cut_chars(length, head, tail, keep_cap, max_size, limits)
-    if not head_n:
-        head = empty
-    elif head_n + 1 < length:
-        head = read(0, head_n + 1)
-    else:  # no tail, and the head is one byte short of the whole: read that byte apart
-        head = read(0, head_n) + read(head_n, length)
-    return _cut_byte_parts(length, head, tail, length - tail_n, keep_cap, max_size, limits)
+        head_src = tail_src = whole
+        tail_offset, cap = 0, length - 1
+    else:
+        head_n, tail_n = _split(limits, cap)
+        tail_offset = length - tail_n
+        empty: Any = "" if chars else b""
+        tail_src = read(tail_offset, length) if tail_n else empty
+        stop = head_n if chars else head_n + 1
+        if not head_n:
+            head_src = empty
+        elif stop < length:
+            head_src = read(0, stop)
+        else:  # no tail, and the head is one byte short of the whole: read that byte apart
+            head_src = read(0, head_n) + read(head_n, length)
+    end, start, show = (_at, _at, _same) if chars else (safe_end, safe_start, decode)
 
-
-def _cut_chars(
-    length: int, head_src: str, tail_src: str, kept_cap: int, max_size: int, limits: Limits
-) -> _Built:
-    """The cut ``Text`` of a string of ``length`` chars, keeping at most ``kept_cap`` of them.
-
-    ``head_src`` / ``tail_src`` are the original's first / last chars that
-    ``_split(limits, kept_cap)`` keeps (the whole string for both when
-    ``kept_cap >= length``); every smaller cut is a part of them, so the
-    original is never read again.
-    """
-
-    def parts(kept: int) -> tuple[str, str]:
-        if kept >= length:
-            return head_src, ""
+    def parts(kept: int) -> tuple[Any, Any]:
         head_n, tail_n = _split(limits, kept)
-        return head_src[:head_n], tail_src[len(tail_src) - tail_n :] if tail_n else ""
-
-    head, tail = parts(_largest(lambda kept: _string_cost(*parts(kept)) <= max_size, kept_cap))
-    kept = len(head) + len(tail)
-    if kept >= length:
-        return _Built(Text(head=head, length=length, unit="chars"), len(dumps(head)))
-    node = Text(head=head, tail=tail, length=length, unit="chars", reason="max_length")
-    return _Built(node, _string_cost(head, tail))
-
-
-def _cut_byte_parts(
-    length: int,
-    head_src: bytes,
-    tail_src: bytes,
-    tail_offset: int,
-    kept_cap: int,
-    max_size: int,
-    limits: Limits,
-) -> _Built:
-    """The cut bytes ``Text`` of ``length`` bytes, keeping at most ``kept_cap`` (< ``length``).
-
-    With ``(H, T) = _split(limits, kept_cap)``: ``head_src`` holds the
-    original's first ``H + 1`` bytes (one more, to see whether ``H`` is a code
-    point boundary) and ``tail_src`` the bytes from ``tail_offset = length - T``;
-    both may be the whole value (offset 0). Every smaller cut is a part of them.
-    """
-
-    def parts(kept: int) -> tuple[bytes, bytes]:
-        head_n, tail_n = _split(limits, kept)
-        head_end = safe_end(head_src, head_n) if head_n else 0
-        if tail_n:
-            tail_start = safe_start(tail_src, length - tail_n - tail_offset) + tail_offset
-        else:
-            tail_start = length
-        tail_start = max(tail_start, head_end)
+        head_end = end(head_src, head_n)
+        tail_start = start(tail_src, length - tail_n - tail_offset) + tail_offset
+        tail_start = max(tail_start, head_end) if tail_n else length
         return head_src[:head_end], tail_src[tail_start - tail_offset :]
 
     def cost(kept: int) -> int:
         head, tail = parts(kept)
-        return _string_cost(decode(head), decode(tail))
+        return _string_cost(show(head), show(tail))
 
-    # parts(0) is empty (cost 2 <= max_size), so the largest fitting cut always fits.
-    head, tail = parts(_largest(lambda kept: cost(kept) <= max_size, kept_cap))
-    node = Text(head=head, tail=tail, length=length, unit="bytes", reason="max_length")
-    return _Built(node, _string_cost(decode(head), decode(tail)))
+    # Nothing is kept at 0 (cost 2 <= max_size), so the largest fitting cut always fits.
+    kept = _largest(lambda kept: cost(kept) <= max_size, cap)
+    head, tail = parts(kept)
+    node = Text(head=head, tail=tail, length=length, unit=unit, reason="max_length")
+    return _Built(node, cost(kept))
 
 
 def _build_integer(value: int, max_size: int) -> _Built:
