@@ -284,3 +284,31 @@ async def test_a_wrapped_text_result_is_still_returned_as_its_text():
             content=[TextContent(type="text", text=text)], structuredContent={"result": wrapped}
         )
         assert await _make_tool(_OneResultClient(result))._call_tool("notes", {}) == text
+
+
+@pytest.mark.asyncio
+async def test_an_ordinary_result_object_is_not_unwrapped_as_text():
+    """Only a tool that declares FastMCP's wrapper schema has its ``{"result": ...}`` unwrapped."""
+    from mcp.types import ListToolsResult, Tool
+
+    from nooa.mcp.tool import _create_tool_instance
+
+    wrapper = {"type": "object", "properties": {"result": {"type": "string"}}}
+    ordinary = {
+        "type": "object",
+        "properties": {"result": {"type": "string"}, "detail": {"type": "string"}},
+    }
+    result = CallToolResult(
+        content=[TextContent(type="text", text="ok")], structuredContent={"result": "ok"}
+    )
+    tools = ListToolsResult(
+        tools=[
+            Tool(name="wrapped", inputSchema={"type": "object"}, outputSchema=wrapper),
+            Tool(name="ordinary", inputSchema={"type": "object"}, outputSchema=ordinary),
+            Tool(name="undeclared", inputSchema={"type": "object"}),
+        ]
+    )
+    tool = _create_tool_instance("srv", _OneResultClient(result), tools)
+    assert await tool.wrapped() == "ok"
+    assert await tool.ordinary() == {"result": "ok"}
+    assert await tool.undeclared() == {"result": "ok"}

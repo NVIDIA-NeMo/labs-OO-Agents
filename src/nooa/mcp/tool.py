@@ -508,6 +508,7 @@ def _make_dynamic_class(
     """
     methods: dict[str, Any] = {}
     tool_names: list[str] = []
+    output_schemas: dict[str, dict[str, Any] | None] = {}
 
     for spec in tool_specs:
         tool_name = spec.name
@@ -529,6 +530,7 @@ def _make_dynamic_class(
         )
 
         methods[method_name] = method
+        output_schemas[tool_name] = spec.output_schema
 
     # Class name from server name, e.g. "language-server" -> "LanguageServerTool"
     class_name = (
@@ -546,7 +548,7 @@ def _make_dynamic_class(
         "result (dict) if the server sends one, else the text. MCPToolError is raised "
         "when the server marks the call failed."
     )
-    reserved = {"__doc__", "_tool_method_names"}
+    reserved = {"__doc__", "_tool_method_names", "_tool_output_schemas"}
     collisions = reserved.intersection(methods)
     if collisions:
         names = ", ".join(sorted(collisions))
@@ -562,7 +564,14 @@ def _make_dynamic_class(
         # enumerate them without name-heuristic guessing against base-class
         # members. This is the factory's own knowledge — it does not couple
         # MCPManager to any Skill/registry.
-        {**methods, "__doc__": class_doc, "_tool_method_names": frozenset(methods)},
+        # ``_tool_output_schemas`` tells ``_invoke`` which tools declared
+        # FastMCP's ``{"result": ...}`` wrapper schema.
+        {
+            **methods,
+            "__doc__": class_doc,
+            "_tool_method_names": frozenset(methods),
+            "_tool_output_schemas": output_schemas,
+        },
     )
 
     return dynamic_class
@@ -679,6 +688,19 @@ class MCPTool:
                 + (f": {details}" if details else "")
             ) from exc
 
+    def _may_wrap_text(self, tool_name: str) -> bool:
+        """Whether ``{"result": ...}`` from this tool may be FastMCP's wrapper of its text.
+
+        FastMCP declares a wrapper output schema (only a ``result`` property)
+        when it wraps, so a tool with another or no declared schema returns
+        an ordinary object. A hand-written subclass declares none: unknown.
+        """
+        schemas = getattr(self, "_tool_output_schemas", None)
+        if schemas is None:
+            return True
+        schema = schemas.get(tool_name)
+        return isinstance(schema, dict) and _wrapper_schema(schema)
+
     async def _invoke(self, tool_name: str, clean_args: dict[str, Any]) -> Any:
         """Single tool-call attempt against the current client/session."""
         async with self._client.connect_to_server() as session:
@@ -696,7 +718,9 @@ class MCPTool:
                 details = json.dumps(structured, default=str)
             raise MCPToolError(self._server_name, tool_name, details)
 
-        if isinstance(structured, dict) and not _wraps_text(structured, result):
+        if isinstance(structured, dict) and not (
+            self._may_wrap_text(tool_name) and _wraps_text(structured, result)
+        ):
             # The tool's typed result; its text content is a serialized copy.
             if structured.get("error"):  # failure in the result, not isError
                 from nooa.runtime.harness_metrics import get_harness_metrics
