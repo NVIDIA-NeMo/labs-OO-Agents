@@ -1580,9 +1580,13 @@ def _load_error(session_id: str, exc: BaseException) -> BaseException:
 
 
 def _available_commands_update(commands: list[CommandInfo]) -> Any:
-    """The session's commands, and the ones this adapter runs itself (``/recover`` and ``/verbosity``)."""
+    """The session's commands, and the ones this adapter runs itself (``/recover``, ``/connect``, ``/verbosity``)."""
     available: list[AvailableCommand] = []
     names = {command.name for command in commands}
+    connect = CommandInfo(
+        name="connect",
+        description="Set up a model provider (runs nooa connect in a terminal).",
+    )
     verbosity = CommandInfo(
         name="verbosity",
         description="Set how much agent activity is shown: silent, concise, or verbose.",
@@ -1591,7 +1595,7 @@ def _available_commands_update(commands: list[CommandInfo]) -> Any:
     # The ACP-local command wins over a skill command with the same name.
     for command in [
         *(c for c in commands if c.name != verbosity.name),
-        *(c for c in (RECOVER,) if c.name not in names),
+        *(c for c in (RECOVER, connect) if c.name not in names),
         verbosity,
     ]:
         input_spec = (
