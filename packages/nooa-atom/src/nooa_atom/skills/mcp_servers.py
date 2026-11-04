@@ -217,16 +217,14 @@ class MCPServers:
         if not self._watch_settings:
             return []
 
-        from nooa.layered_config import load_layered_yaml
         from nooa_atom.workspace.settings import (
-            SETTINGS_ENV_VAR,
-            SETTINGS_FILENAME,
             SETTINGS_SECTION,
             copy_coding_settings,
+            load_settings_layers,
         )
 
         copy_coding_settings(self.project_dir)
-        data = load_layered_yaml(SETTINGS_FILENAME, SETTINGS_ENV_VAR, project_dir=self.project_dir)
+        data = load_settings_layers(self.project_dir)
         legacy = data.get("tui", {})
         tui = dict(legacy) if isinstance(legacy, dict) else {}
         atom = data.get(SETTINGS_SECTION, {})

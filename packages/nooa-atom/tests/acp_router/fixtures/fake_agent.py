@@ -3,7 +3,7 @@
 """``nooa-atom`` in any role, with sessions on a scripted fake model.
 
 Run it as the server command (``python fake_agent.py [nooa-atom options]``).
-The router starts its workers from ``sys.orig_argv``, so workers run this
+The router starts its workers from ``cli.worker_command()``, so workers run this
 file too and get the same fake model. Options starting with ``--fixture-``
 are this file's own and are not passed to ``nooa-atom``:
 

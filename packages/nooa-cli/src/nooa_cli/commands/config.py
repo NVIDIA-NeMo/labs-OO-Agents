@@ -12,7 +12,9 @@ Subcommands:
                you can edit it locally.
 
 All three files share the same directories and precedence (user →
-project → env-var override); see :mod:`nooa.layered_config`.
+project → env-var override); ``llm_config.yaml`` and ``settings.yaml``
+also have a lowest bundled-defaults layer (the ``nooa.bundled_configs``
+and ``nooa.bundled_settings`` entry points); see :mod:`nooa.layered_config`.
 
 The config chain (last wins):
 
@@ -176,7 +178,15 @@ def show_cmd():
 
     # ── Settings & secrets (same dirs, same precedence) ───────────────
     click.echo("")
-    _show_layered_file("Settings", "settings.yaml", "NEMO_OO_SETTINGS", _summarize_settings)
+    from nooa.layered_config import bundled_settings_paths
+
+    _show_layered_file(
+        "Settings",
+        "settings.yaml",
+        "NEMO_OO_SETTINGS",
+        _summarize_settings,
+        bundled=bundled_settings_paths(),
+    )
     click.echo("")
     _show_layered_file("Secrets", "secrets.yaml", "NEMO_OO_SECRETS", _summarize_secrets)
 
@@ -216,8 +226,10 @@ def _summarize_secrets(path: Path) -> str:
     return "env: " + ", ".join(names) + "  (values redacted)"
 
 
-def _show_layered_file(label: str, filename: str, env_var: str, summarize) -> None:
-    """Print the user → project → env-var layers for *filename*.
+def _show_layered_file(
+    label: str, filename: str, env_var: str, summarize, bundled: list[Path] | None = None
+) -> None:
+    """Print the (bundled →) user → project → env-var layers for *filename*.
 
     *summarize* is called per existing file to produce a one-line,
     value-safe description. The highest-priority occurrence of a resolved
@@ -226,7 +238,7 @@ def _show_layered_file(label: str, filename: str, env_var: str, summarize) -> No
     from nooa.layered_config import layered_paths
     from nooa.paths import get_project_dir, get_user_dir
 
-    resolved_set = set(layered_paths(filename, env_var))
+    resolved_set = set(layered_paths(filename, env_var, prepend=bundled or ()))
 
     def _summary(path: Path) -> str:
         try:
@@ -236,6 +248,15 @@ def _show_layered_file(label: str, filename: str, env_var: str, summarize) -> No
         return f"present — {summarize(path)}{note}"
 
     click.echo(f"{label} ({filename}):")
+
+    if bundled is not None:
+        click.echo("  Bundled defaults (entry points):")
+        if not bundled:
+            click.echo("    none installed")
+        for path in bundled:
+            click.echo(
+                f"    {path}: {_summary(path)}" if path.exists() else f"    {path}  (missing)"
+            )
 
     user_path = get_user_dir(filename)
     project_path = get_project_dir(filename)
