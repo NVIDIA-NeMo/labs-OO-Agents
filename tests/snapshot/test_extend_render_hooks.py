@@ -181,7 +181,7 @@ _BUDGETS = (1, 2, 5, 17, 60, 300, 5_000, sys.maxsize)
 
 
 def test_render_trace_is_render_json_and_preview_attributes() -> None:
-    spilled = Text("h", "", 9, "chars", False, "max_length", Spill("/tmp/full.txt", 9, 9), 0, 8)
+    spilled = Text("h", "", 9, "chars", False, "max_length", Spill("/tmp/full.txt", 9, 9), 8)
     node = Sequence("list", 2, (_thing(s="x" * 1_000), spilled), True, None)
 
     text, attributes = render_trace(node, direction="output", max_chars=60)
@@ -239,7 +239,9 @@ def test_spill_paths_do_not_depend_on_the_budget() -> None:
 
 def test_render_trace_equals_the_former_preview() -> None:
     # Digests of the former ``_render._preview`` (text and attributes) and of its spill
-    # files on 1,000 random trees, computed before it was replaced (P3a).
+    # files on 1,000 random trees, computed before it was replaced (P3a). P3b updated
+    # the preview digest once: a cut ``Text`` whose spill file is cut now has reason
+    # ``max_length`` (``file_limit`` was removed), which changes ``.reasons`` only.
     import hashlib
     import json
 
@@ -255,7 +257,7 @@ def test_render_trace_equals_the_former_preview() -> None:
             previews.update(json.dumps([text, items]).encode())
         spills.update(json.dumps(_every_spill(tree)).encode())
     assert previews.hexdigest() == (
-        "ac996553ead3a16a21557a0e16a2ae8177a7c004a03658885a11f36ccb6324e2"
+        "87876bc0374a01c62587a7a5b1f9b73f7e5d495236eaaab54d42660efcaef29b"
     )
     assert spills.hexdigest() == (
         "491b778daee0693ee827461c465dc95713144be2353602d5fa2c660135ab0468"

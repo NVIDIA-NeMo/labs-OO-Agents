@@ -3,7 +3,7 @@
 """One snapshot model for values, output streams and spilled files.
 
 A snapshot is a small, detached tree (``Scalar``, ``Text``, ``Sequence``,
-``Mapping``, ``Object``, ``Opaque``, ``Unavailable``, ``Ref``) in which every
+``Mapping``, ``Object``, ``Unavailable``, ``Ref``) in which every
 node says whether it is complete and, if not, why. Two producers build it:
 
 - ``capture(value, limits)`` for finished Python values (no user code runs on
@@ -37,7 +37,6 @@ from nooa.snapshot._model import (
     Key,
     Mapping,
     Object,
-    Opaque,
     Reason,
     Ref,
     Scalar,
@@ -65,7 +64,6 @@ __all__ = [
     "Limits",
     "Mapping",
     "Object",
-    "Opaque",
     "PythonRenderer",
     "Reason",
     "Ref",

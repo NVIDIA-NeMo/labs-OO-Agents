@@ -5,7 +5,7 @@
 Based on the bounded trace JSON builder of PR #342 (Severin Klingler): exact
 built-in types are read natively, Pydantic v2 models and dataclasses through
 their declared fields in raw instance storage, and everything else is
-``Opaque``. No ``repr()``, ``str()``, truthiness, properties, descriptors,
+``Unavailable("opaque")``. No ``repr()``, ``str()``, truthiness, properties, descriptors,
 custom iteration, hashing or equality runs on an inspected value.
 
 One shared budget (``Limits``) bounds the whole capture:
@@ -49,14 +49,13 @@ from nooa.agentdoc._visibility import hidden
 from nooa.snapshot._codec import (
     OPAQUE_PREFIX,
     OPAQUE_SUFFIX,
-    decode_counted,
+    decode,
     dumps,
     fallback_candidates,
     fallback_json,
     json_key,
     opaque_json,
     pointer_child,
-    replaced_in,
     safe_end,
     safe_start,
 )
@@ -64,7 +63,6 @@ from nooa.snapshot._model import (
     Key,
     Mapping,
     Object,
-    Opaque,
     Reason,
     Ref,
     Scalar,
@@ -383,8 +381,7 @@ def _cut_bytes(value: bytes, max_size: int, max_keep: int | None, limits: Limits
     raw_limit = max_size - 2  # a byte decodes to at most one character
     keep_cap = raw_limit if max_keep is None else min(raw_limit, max_keep)
     if length <= keep_cap:
-        decoded, _replaced = decode_counted(value)
-        encoded_size = len(dumps(decoded))
+        encoded_size = len(dumps(decode(value)))
         if encoded_size <= max_size:
             return _Built(Scalar(value), encoded_size)
     return _cut_byte_parts(length, value, value, 0, min(length - 1, keep_cap), max_size, limits)
@@ -420,7 +417,7 @@ def _cut_byte_parts(
 
     def cost(kept: int) -> int:
         head, tail = parts(kept)
-        return _string_cost(decode_counted(head)[0], decode_counted(tail)[0])
+        return _string_cost(decode(head), decode(tail))
 
     low = kept_cap
     if cost(kept_cap) > max_size:
@@ -435,16 +432,9 @@ def _cut_byte_parts(
     if cost(low) > max_size:  # a whole code point did not fit
         head, tail = b"", b""
     node = Text(
-        head,
-        tail,
-        length,
-        "bytes",
-        False,
-        "max_length",
-        replaced=replaced_in(head, tail),
-        omitted=length - len(head) - len(tail),
+        head, tail, length, "bytes", False, "max_length", omitted=length - len(head) - len(tail)
     )
-    return _Built(node, _string_cost(decode_counted(head)[0], decode_counted(tail)[0]))
+    return _Built(node, _string_cost(decode(head), decode(tail)))
 
 
 def _build_integer(value: int, max_size: int) -> _Built:
@@ -465,13 +455,13 @@ def _build_integer(value: int, max_size: int) -> _Built:
 
 
 def _opaque(value: Any, max_size: int, state: _State) -> _Built:
-    """An ``Opaque`` node for an unsupported value, sized as its bounded label."""
+    """An ``Unavailable("opaque")`` node for an unsupported value, sized as its bounded label."""
     cls = type(value)
     name_budget = max(0, max_size - len(OPAQUE_PREFIX) - len(OPAQUE_SUFFIX) - 2)
     name = _bounded_type_name(value, name_budget)
     module = _module_name(cls, state)
     _label, size = opaque_json(name, _builtin_name(value), max_size)
-    return _Built(Opaque(module, name), size)
+    return _Built(Unavailable("opaque", name, module), size)
 
 
 # --- containers ---------------------------------------------------------------
@@ -678,7 +668,7 @@ def _mapping_from(
             return False
         key_text = json_key(key, live=True)
         if key_text is None:
-            box.stop("opaque")
+            box.stop("key")
             return False
         overhead = _key_overhead(key_text, box)
         if overhead is None:
@@ -947,7 +937,7 @@ def _pydantic_fields(mro: tuple[type[Any], ...], state: _State) -> dict[str, Fie
 
 def _closed(type_name: str, module: str) -> _Built:
     """A model whose fields cannot be read safely: no field at all (fail closed)."""
-    return _Built(Object(type_name, (), False, "opaque", module), 2)
+    return _Built(Object(type_name, (), False, "unreadable", module), 2)
 
 
 def _copy_storage(obj_dict: Any, state: _State) -> dict[str, Any] | None:
@@ -1187,7 +1177,7 @@ def _dataclass_entries(
                 annotation_hidden = _alias_hidden(annotation, state)
             if annotation_hidden is None:
                 # This field can't be shown safely: omit it, the object is incomplete.
-                stopped.append("opaque")
+                stopped.append("unreadable")
                 continue
             if overrides.get(name, annotation_hidden):
                 continue
@@ -1851,12 +1841,9 @@ def _text_parts(shape: _TextLike, value: Any, max_size: int, limits: Limits) -> 
             if encoded_size <= max_size:
                 return _Built(Text(whole, "", length, "chars", True, None), encoded_size)
             return _cut_chars(length, whole, whole, length, max_size, limits)
-        decoded, replaced = decode_counted(whole)
-        encoded_size = len(dumps(decoded))
+        encoded_size = len(dumps(decode(whole)))
         if encoded_size <= max_size:
-            return _Built(
-                Text(whole, b"", length, "bytes", True, None, None, replaced), encoded_size
-            )
+            return _Built(Text(whole, b"", length, "bytes", True, None), encoded_size)
         return _cut_byte_parts(length, whole, whole, 0, length - 1, max_size, limits)
     head_n, tail_n = limits.split(keep_cap)
     empty: Any = "" if chars else b""
@@ -2004,7 +1991,8 @@ def _build(
         if not math.isfinite(value):
             name_budget = max(0, max_size - len(OPAQUE_PREFIX) - len(OPAQUE_SUFFIX) - 2)
             name = "float"[:name_budget]
-            return _Built(Opaque("builtins", name), opaque_json(name, "float", max_size)[1])
+            size = opaque_json(name, "float", max_size)[1]
+            return _Built(Unavailable("opaque", name, "builtins"), size)
         encoded = dumps(value)
         if len(encoded) <= max_size:
             return _Built(Scalar(value), len(encoded))

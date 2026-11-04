@@ -9,7 +9,6 @@ import random
 from nooa.snapshot import (
     Mapping,
     Object,
-    Opaque,
     Ref,
     Scalar,
     Sequence,
@@ -40,8 +39,7 @@ def random_text(rng: random.Random) -> Text:
     if rng.random() < 0.5:
         total = length
         full = Spill(rng.choice(SPILLS), rng.choice((total, total // 2)), total)
-    reason = "file_limit" if full is not None and full.kept < full.total else "max_length"
-    return Text(head_kept, tail_kept, length, unit, False, reason, full, 0, omitted)
+    return Text(head_kept, tail_kept, length, unit, False, "max_length", full, omitted)
 
 
 def random_tree(rng: random.Random, depth: int = 0) -> Snapshot:
@@ -54,7 +52,8 @@ def random_tree(rng: random.Random, depth: int = 0) -> Snapshot:
         if choice <= 2:
             return random_text(rng)
         if choice == 3:
-            return Opaque(rng.choice(("builtins", "pkg")), rng.choice(("int", "Thing")))
+            module = rng.choice(("builtins", "pkg"))
+            return Unavailable("opaque", rng.choice(("int", "Thing")), module)
         if choice == 4:
             return Unavailable(rng.choice(("error", "max_nodes")), rng.choice(("", "list", "int")))
         if choice == 5:

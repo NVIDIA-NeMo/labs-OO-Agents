@@ -202,7 +202,7 @@ def test_mapping_like_with_fields_and_errors(registered) -> None:
     # A key that is not an exact built-in scalar stops the mapping, as for a dict.
     registered(Table, mapping_like(lambda v: 2, lambda v: [("a", 1), (object(), 2)]))
     stopped = capture(Table())
-    assert isinstance(stopped, Mapping) and stopped.reason == "opaque" and len(stopped.items) == 1
+    assert isinstance(stopped, Mapping) and stopped.reason == "key" and len(stopped.items) == 1
 
 
 # --- object_like -----------------------------------------------------------------------

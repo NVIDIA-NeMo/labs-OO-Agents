@@ -9,6 +9,7 @@ snapshot into the notation a consumer shows; see ``docs/snapshot-model.md``.
 
 from __future__ import annotations
 
+import typing
 from dataclasses import dataclass
 from typing import Literal
 
@@ -17,7 +18,6 @@ __all__ = [
     "Key",
     "Mapping",
     "Object",
-    "Opaque",
     "Reason",
     "Ref",
     "Scalar",
@@ -35,23 +35,24 @@ Reason = Literal[
     "max_nodes",
     "cycle",
     "opaque",
-    "file_limit",
-    "not_kept",
+    "unreadable",
+    "key",
     "error",
 ]
-"""Why a node is incomplete. ``error``: an accessor of a registered shape raised."""
+"""Why a node is incomplete.
 
-REASONS: tuple[str, ...] = (
-    "max_length",
-    "max_items",
-    "max_depth",
-    "max_nodes",
-    "cycle",
-    "opaque",
-    "file_limit",
-    "not_kept",
-    "error",
-)
+``max_length`` / ``max_items`` / ``max_depth`` / ``max_nodes``: a limit cut it;
+``cycle``: a reference to an enclosing container; ``opaque``: a value of a
+type NOOA does not inspect; ``unreadable``: an object's fields, or a field's
+metadata (``spec`` hidden marker, annotation), could not be read safely, so
+they were left out (fail closed); ``key``: a mapping stopped at a key with no
+JSON form, or one that collides with an earlier key; ``error``: an accessor
+of a registered shape raised. Whether a spill file holds the whole content is
+not a reason: ``Text.full`` says it.
+"""
+
+REASONS: tuple[str, ...] = typing.get_args(Reason)
+"""Every ``Reason``, in declaration order (derived, so the two cannot drift)."""
 
 Key = str | int | float | bool | None
 """A mapping key kept in a snapshot (exact built-in scalar types only)."""
@@ -99,9 +100,13 @@ class Text:
     ``len(head)`` and ``len(tail)`` are its kept units and, for a ``Text``
     that ``capture``, ``TextStream`` or ``merge`` produce,
     ``length == len(head) + len(tail) + omitted``. Renderers decode bytes only
-    when they print. ``replaced`` counts replacement characters that decoding
-    introduces (decoding the kept bytes, or bytes written to a chars
-    ``TextStream``).
+    when they print.
+
+    ``full``: where the whole content was written, if anywhere; ``None`` when
+    nothing was spilled (no spill asked for, or the file could not be
+    written). ``full.cut``: the file itself holds only the first ``full.kept``
+    bytes. ``reason`` says why the kept parts are cut, never whether the
+    file is whole.
     """
 
     head: str | bytes
@@ -111,7 +116,6 @@ class Text:
     complete: bool
     reason: Reason | None
     full: Spill | None = None
-    replaced: int = 0
     omitted: int = 0
 
 
@@ -172,27 +176,18 @@ class Object:
 
 
 @dataclass(frozen=True)
-class Opaque:
-    """A value of a type that NOOA does not inspect."""
-
-    module: str
-    type_name: str
-
-    @property
-    def complete(self) -> bool:
-        return False
-
-    @property
-    def reason(self) -> Reason:
-        return "opaque"
-
-
-@dataclass(frozen=True)
 class Unavailable:
-    """A read that failed or was refused (``type_name``: the value's type, if known)."""
+    """A value with no content kept, and why (``type_name``: its type, if known).
+
+    ``reason="opaque"``: a value of a type NOOA does not inspect (``module``:
+    its type's module, ``""`` when unknown); it renders as
+    ``<opaque: type_name>``. Any other reason: a read that failed or was
+    refused, or a limit that left no room (``module`` is ``None``).
+    """
 
     reason: Reason
     type_name: str = ""
+    module: str | None = None
 
     @property
     def complete(self) -> bool:
@@ -219,5 +214,5 @@ class Ref:
         return "cycle"
 
 
-Snapshot = Scalar | Text | Sequence | Mapping | Object | Opaque | Unavailable | Ref
+Snapshot = Scalar | Text | Sequence | Mapping | Object | Unavailable | Ref
 """One node of a snapshot tree."""

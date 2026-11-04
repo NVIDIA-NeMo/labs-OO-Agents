@@ -19,7 +19,6 @@ from nooa.snapshot import (
     Limits,
     Mapping,
     Object,
-    Opaque,
     Ref,
     Scalar,
     Sequence,
@@ -90,6 +89,11 @@ def _clear_recorder() -> None:
 
 
 # --- shared budget --------------------------------------------------------------
+
+
+def _opaque(node: object) -> bool:
+    """Whether ``node`` is the node of an uninspected value."""
+    return isinstance(node, Unavailable) and node.reason == "opaque"
 
 
 def test_complete_values_are_plain_nodes() -> None:
@@ -189,12 +193,11 @@ def test_bytes_are_cut_on_code_points() -> None:
     assert render_python(snapshot) == "bytes(len=200, [:4]=b'\\xc3\\xa9\\xc3\\xa9')"
 
 
-def test_invalid_bytes_count_replacements() -> None:
+def test_invalid_bytes_are_kept_raw() -> None:
     snapshot = capture(b"ok\xff\xfe" + b"x" * 100, Limits(max_string=6))
 
     assert isinstance(snapshot, Text)
     assert snapshot.head == b"ok\xff\xfexx"  # the original bytes
-    assert snapshot.replaced == 2
 
 
 def test_invalid_limits_are_rejected() -> None:
@@ -217,7 +220,7 @@ def test_unknown_types_run_no_user_code() -> None:
     snapshot = capture({"x": value, "y": [value]})
 
     assert isinstance(snapshot, Mapping)
-    assert snapshot.items[0][1] == Opaque(__name__, "Recorder")
+    assert snapshot.items[0][1] == Unavailable("opaque", "Recorder", __name__)
     assert Recorder.calls == []
     assert render_python(snapshot) == "{'x': <opaque: Recorder>, 'y': [<opaque: Recorder>]}"
     assert json.loads(render_json(snapshot, max_chars=1000)) == {
@@ -238,7 +241,7 @@ def test_container_and_scalar_subclasses_are_opaque() -> None:
         pass
 
     for value in (MyStr("x"), MyDict(a=1), MyInt(3)):
-        assert isinstance(capture(value), Opaque)
+        assert _opaque(capture(value))
 
 
 def test_dataclass_properties_and_hooks_are_not_called() -> None:
@@ -378,7 +381,7 @@ def test_dataclass_unreadable_resolved_marker_fails_closed_per_field() -> None:
 
     assert isinstance(snapshot, Object)
     assert [field_name for field_name, _ in snapshot.fields] == ["ok"]
-    assert not snapshot.complete and snapshot.reason == "opaque"
+    assert not snapshot.complete and snapshot.reason == "unreadable"
 
 
 @pytest.mark.parametrize("name", ["UnknownMarker", "TypeCheckingOnly", "Unresolvable"])
@@ -389,7 +392,7 @@ def test_dataclass_hints_that_cannot_be_evaluated_fail_closed_for_the_class(name
     assert "S-" not in render_json(snapshot, max_chars=2000)
     assert isinstance(snapshot, Object)
     assert snapshot.fields == ()
-    assert not snapshot.complete and snapshot.reason == "opaque"
+    assert not snapshot.complete and snapshot.reason == "unreadable"
 
 
 def test_dataclass_real_annotations_beside_unevaluable_strings_stay_readable() -> None:
@@ -405,7 +408,7 @@ def test_dataclass_real_annotations_beside_unevaluable_strings_stay_readable() -
 
     assert isinstance(snapshot, Object)
     assert [name for name, _ in snapshot.fields] == ["shown"]
-    assert not snapshot.complete and snapshot.reason == "opaque"
+    assert not snapshot.complete and snapshot.reason == "unreadable"
 
 
 def test_dataclass_foreign_constraint_metadata_stays_visible() -> None:
@@ -515,7 +518,7 @@ def _assert_alias_fields_fail_closed(value: Any) -> None:
     assert "S-" not in render_json(snapshot, max_chars=2000)
     assert isinstance(snapshot, Object)
     assert snapshot.fields == ()
-    assert not snapshot.complete and snapshot.reason == "opaque"
+    assert not snapshot.complete and snapshot.reason == "unreadable"
 
 
 def test_dataclass_alias_marker_in_a_module_not_in_sys_modules_fails_closed() -> None:
@@ -611,7 +614,7 @@ def test_dataclass_class_object_is_opaque() -> None:
     class Thing:
         a: int = 1
 
-    assert isinstance(capture(Thing), Opaque)  # the class, not an instance
+    assert _opaque(capture(Thing))  # the class, not an instance
 
 
 def test_dataclass_fields_obey_the_budget() -> None:
@@ -852,7 +855,7 @@ def test_unknown_field_type_metaclass_eq_never_runs() -> None:
 
     assert calls == []
     assert isinstance(snapshot, Object)
-    assert isinstance(snapshot.field("value"), Opaque)
+    assert _opaque(snapshot.field("value"))
 
 
 class _CollidingKey:
@@ -885,7 +888,7 @@ def test_class_namespace_foreign_key_is_never_compared() -> None:
     snapshot = capture(unknown())
 
     assert _CollidingKey.calls == []
-    assert isinstance(snapshot, Opaque)  # an unreadable namespace fails closed
+    assert _opaque(snapshot)  # an unreadable namespace fails closed
 
 
 def test_safe_dict_survives_a_namespace_changing_during_the_key_check() -> None:
@@ -949,7 +952,7 @@ def test_module_namespace_hostile_key_fails_closed(monkeypatch) -> None:
     assert _CollidingKey.calls != []
     assert isinstance(snapshot, Object)
     assert snapshot.fields == ()
-    assert not snapshot.complete and snapshot.reason == "opaque"
+    assert not snapshot.complete and snapshot.reason == "unreadable"
     assert "s3cret" not in render_json(snapshot, max_chars=1000)
 
 

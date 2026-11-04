@@ -27,7 +27,7 @@ from collections.abc import Callable
 from typing import Any, cast
 
 from nooa.snapshot._codec import (
-    decode_counted,
+    decode,
     dumps,
     fallback_candidates,
     fallback_json,
@@ -39,7 +39,6 @@ from nooa.snapshot._codec import (
 from nooa.snapshot._model import (
     Mapping,
     Object,
-    Opaque,
     Ref,
     Scalar,
     Sequence,
@@ -68,7 +67,7 @@ _MAX_KEY_CHARS = 50
 
 def _shown(part: str | bytes) -> str:
     """A kept part as text to print: bytes decode as UTF-8, with replacement."""
-    return part.decode("utf-8", errors="replace") if isinstance(part, bytes) else part
+    return decode(part) if isinstance(part, bytes) else part
 
 
 def _output_text(text: Text) -> str:
@@ -80,7 +79,7 @@ def _output_text(text: Text) -> str:
     full = text.full
     if full is None:
         line = omitted + "full output not kept]"
-    elif full.kept < full.total:
+    elif full.cut:
         line = omitted + f"{full.path} holds the first {full.kept:,} of {full.total:,} bytes]"
     else:
         line = omitted + f"full output: {full.path}]"
@@ -188,11 +187,11 @@ class PythonRenderer:
             return self._mapping(node)
         if type(node) is Object:
             return self._object(node)
-        if type(node) is Opaque:
-            return f"<opaque: {node.type_name}>"
         if type(node) is Ref:
             return "<cycle>"
         if type(node) is Unavailable:
+            if node.reason == "opaque":
+                return f"<opaque: {node.type_name}>"
             return f"<unavailable: {node.reason}>"
         raise TypeError(f"not a snapshot node: {type(node).__name__}")
 
@@ -377,7 +376,9 @@ def _placeholder(node: Snapshot) -> Any:
         return fallback_candidates(type(value).__name__)[0]
     if node_type is Unavailable:
         assert isinstance(node, Unavailable)
-        return fallback_candidates(node.type_name)[0] if node.type_name else None
+        if node.reason == "opaque" or not node.type_name:
+            return None
+        return fallback_candidates(node.type_name)[0]
     return None
 
 
@@ -413,7 +414,7 @@ def _json_entries(
         separator = 2 if output else 0
         remaining = max_size - size - separator
         if key_text is None or key_text in output:
-            stop = "opaque"
+            stop = "key"
         elif len(key_text) + 2 > remaining:
             stop = "max_length"
         else:
@@ -437,7 +438,7 @@ def _json(node: Snapshot, max_size: int, path: str, report: _Report) -> tuple[An
         chars = node_type is Text and node.unit == "chars"  # type: ignore[union-attr]
         if type(head) is not (str if chars else bytes):
             raise TypeError("a Text node's head is a str (chars) or bytes (bytes)")
-        text = cast(str, head) if chars else decode_counted(cast(bytes, head))[0]  # bytes: decoded
+        text = cast(str, head) if chars else decode(cast(bytes, head))  # bytes: decoded
         value, size = fit_string(text, max_size)
         if type(value) is not str or len(value) < len(text):
             report.incomplete(path, "max_length")
@@ -492,14 +493,12 @@ def _json(node: Snapshot, max_size: int, path: str, report: _Report) -> tuple[An
         assert isinstance(node, Ref)
         report.incomplete(path, "cycle")
         return ([], 2) if node.kind == "sequence" else ({}, 2)
-    if node_type is Opaque:
-        assert isinstance(node, Opaque)
-        report.incomplete(path, "opaque")
-        fallback_type = node.type_name if node.module == "builtins" else ""
-        return opaque_json(node.type_name, fallback_type, max_size)
     if node_type is Unavailable:
         assert isinstance(node, Unavailable)
         report.incomplete(path, node.reason)
+        if node.reason == "opaque":
+            fallback_type = node.type_name if node.module == "builtins" else ""
+            return opaque_json(node.type_name, fallback_type, max_size)
         return fallback_json(node.type_name, max_size)
     raise TypeError(f"not a snapshot node: {node_type.__name__}")
 

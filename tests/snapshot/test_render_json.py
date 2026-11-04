@@ -15,10 +15,10 @@ from pydantic import BaseModel
 from nooa.snapshot import (
     Limits,
     Mapping,
-    Opaque,
     Scalar,
     Spill,
     Text,
+    Unavailable,
     capture,
     capture_fields,
     preview_attributes,
@@ -42,7 +42,7 @@ def _shapes(rng: random.Random, depth: int = 0) -> Any:
     if choice == 2:
         return rng.choice([b"", b"\xff" * 10, "é".encode() * 50])
     if choice == 3:
-        return rng.choice([_Model(), object(), Opaque])
+        return rng.choice([_Model(), object(), Unavailable])
     if choice == 4:
         return "😀" * rng.randrange(5)
     if choice in (5, 6):
@@ -118,7 +118,7 @@ def test_key_policies_capture_refuses_what_rendering_converts() -> None:
     # Capture reads live keys: a huge int or a non-finite float key stops the mapping.
     for key in (huge, math.inf, math.nan):
         snapshot = capture({"a": 1, key: 2})
-        assert isinstance(snapshot, Mapping) and snapshot.reason == "opaque"
+        assert isinstance(snapshot, Mapping) and snapshot.reason == "key"
         assert snapshot.items == (("a", Scalar(1)),)
     # Rendering reads detached keys: they convert as they are.
     detached = Mapping("dict", 2, ((huge, Scalar(1)), (1.5, Scalar(2))), True, None)

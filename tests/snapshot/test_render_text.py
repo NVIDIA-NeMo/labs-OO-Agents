@@ -15,7 +15,6 @@ from nooa.agentdoc import pformat
 from nooa.snapshot import (
     Limits,
     Object,
-    Opaque,
     Ref,
     Scalar,
     Sequence,
@@ -24,6 +23,7 @@ from nooa.snapshot import (
     TextStream,
     Unavailable,
     capture,
+    preview_attributes,
     render_json,
     render_output,
     render_python,
@@ -50,7 +50,7 @@ def test_render_output_full_output() -> None:
 
 
 def test_render_output_file_limit() -> None:
-    text = _cut(full=Spill("/tmp/out", 65_536, 1_234_575), reason="file_limit")
+    text = _cut(full=Spill("/tmp/out", 65_536, 1_234_575))
 
     assert render_output(text) == (
         "HEAD\n[... 1,234,567 bytes omitted; /tmp/out holds the first 65,536 of 1,234,575 bytes]"
@@ -123,8 +123,40 @@ def test_render_python_models_match_agentdoc() -> None:
     assert render_python(capture(Model())) == pformat(Model()) == "Model(a=1, b='x')"
 
 
+class Widget:
+    """A type NOOA does not inspect."""
+
+
+@pytest.mark.parametrize(
+    ("value", "python", "json_by_budget", "path"),
+    [
+        (Widget(), "<opaque: Widget>", ["0", '""', '"<"', '"<op"', '"<opaque: >"'], ""),
+        (float("inf"), "<opaque: float>", ["0", '""', '"<"', '"<op"', '"<opaque: >"'], ""),
+        (Widget, "<opaque: type>", ["0", '""', '"<"', '"<op"', '"<opaque: >"'], ""),
+        ([object(), 1], "[<opaque: object>, 1]", ["0", "[]", "[0]", '["<"]', '["<opaque:"]'], "/0"),
+    ],
+)
+def test_uninspected_values_render_as_before(
+    value: Any, python: str, json_by_budget: list[str], path: str
+) -> None:
+    # ``Opaque`` became ``Unavailable("opaque", type_name, module)`` (P3b); every
+    # notation is unchanged (outputs recorded from the former ``Opaque`` node).
+    snapshot = capture(value)
+    name = python.removeprefix("[").split(",")[0]
+
+    assert render_python(snapshot) == render_output(snapshot) == python
+    budgets = (1, 2, 3, 5, 12)
+    assert [render_json(snapshot, max_chars=m) for m in budgets] == json_by_budget
+    assert json.loads(render_json(snapshot, max_chars=100)) == json.loads(
+        "[" + json.dumps(name) + ", 1]" if path else json.dumps(name)
+    )
+    attributes = preview_attributes("output", snapshot)
+    assert attributes["nooa.output.preview.reasons"] == ("opaque",)
+    assert attributes["nooa.output.preview.paths"] == (path,)
+
+
 def test_render_python_notation_for_other_nodes() -> None:
-    assert render_python(Opaque("m", "Widget")) == "<opaque: Widget>"
+    assert render_python(Unavailable("opaque", "Widget", "m")) == "<opaque: Widget>"
     assert render_python(Ref("", "sequence")) == "<cycle>"
     assert render_python(Unavailable("error", "Widget")) == "<unavailable: error>"
     assert render_python(Object("M", (("a", Scalar(1)),), False, "max_nodes")) == "M(a=1, ...)"
@@ -160,7 +192,7 @@ def test_render_python_of_a_bytes_stream_with_a_surrogate_escape() -> None:
 
 
 def test_complete_bytes_text_renders_as_a_bytes_literal() -> None:
-    text = Text(b"a\xffb", b"", 3, "bytes", True, None, replaced=1)
+    text = Text(b"a\xffb", b"", 3, "bytes", True, None)
 
     assert render_python(text) == "b'a\\xffb'"
     assert render_output(text) == "a\ufffdb"

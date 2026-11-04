@@ -4,7 +4,7 @@
 
 Canonical JSON encoding and size accounting (#342's fallbacks, the opaque
 label, string prefixes, pointers, mapping keys) and UTF-8 helpers (cut
-points, decoding with replacement counting). ``_capture``, ``_render`` and
+points, decoding with replacement). ``_capture``, ``_render`` and
 ``_stream`` use them; each keeps its own safety policy: capture reads live
 values and never runs user code, rendering only reads detached nodes. These
 helpers take built-in values only and run no user code themselves.
@@ -24,8 +24,6 @@ _JSON_KWARGS: dict[str, Any] = {
 }
 OPAQUE_PREFIX = "<opaque: "
 OPAQUE_SUFFIX = ">"
-REPLACEMENT = "\ufffd"
-REPLACEMENT_BYTES = REPLACEMENT.encode("utf-8")
 
 
 # --- canonical JSON -----------------------------------------------------------------
@@ -182,13 +180,6 @@ def complete_prefix(data: bytes | bytearray) -> int:
     return index if size - index < need else size
 
 
-def replaced_in(*parts: bytes) -> int:
-    """Replacements that decoding each of ``parts`` on its own introduces."""
-    return sum(decode_counted(part)[1] for part in parts)
-
-
-def decode_counted(data: bytes | bytearray) -> tuple[str, int]:
-    """``data`` decoded as UTF-8 with replacement, and the replacements introduced."""
-    text = bytes(data).decode("utf-8", errors="replace")
-    introduced = text.count(REPLACEMENT) - bytes(data).count(REPLACEMENT_BYTES)
-    return text, max(0, introduced)
+def decode(data: bytes | bytearray) -> str:
+    """``data`` decoded as UTF-8 with replacement (how every renderer shows bytes)."""
+    return bytes(data).decode("utf-8", errors="replace")
