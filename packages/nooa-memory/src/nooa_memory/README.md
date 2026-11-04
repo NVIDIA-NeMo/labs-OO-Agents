@@ -35,6 +35,11 @@ accreted over time**, modeled on how the brain uses memory.
 When `enabled=False` (or not installed), the agent is byte-for-byte unchanged — the
 *additive guarantee* (regression-tested).
 
+A disabled installation does not construct an embedder or open its database.
+Explicitly accessing the manager's store or calling its operations initializes
+the resources on demand; agent-facing memory tools remain disabled. Uninstalling
+an unused disabled manager does not create resources either.
+
 ---
 
 ## Quick start
