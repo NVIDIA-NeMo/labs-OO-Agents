@@ -2,6 +2,14 @@
 
 This page describes `nooa.snapshot`: one model for describing a large value or a large output stream, with what was kept, how much was left out and where the rest is. It builds on Severin Klingler's bounded trace JSON builder (PR #342). The machinery is in place; consumers move to it in later steps (see [Plan](#plan)).
 
+## Principles
+
+Three rules decide every design question in this package. When code and these rules disagree, the code is wrong.
+
+1. **Never run code on values; read class metadata the way Python does.** Capture never calls a value's `repr`, `str`, properties, descriptors or iteration: values are captured over and over, and their code can be slow, have side effects or reveal hidden fields. Class declarations are different: annotations and field declarations are code the class's author wrote, which Python already runs when the class is defined. Capture reads them once per class with `typing.get_type_hints(cls, include_extras=True)`, cached by class identity, the same way `agentdoc` does. If they can't be read, the affected fields fail closed: they are left out and the object is marked incomplete.
+2. **Store what you cut in its own units.** A cut string keeps characters; cut bytes keep bytes. Nothing is decoded until it is rendered, so counts stay exact and no unit is reconstructed later.
+3. **One extension point per job, and nothing without a user.** Shapes are the only way to describe a type to capture, and `render_python` hooks the only way to change how a node prints. A field, reason or hook that no consumer reads is not added.
+
 ## Why
 
 NOOA cuts large output in about seven places today, each with its own limits and its own notation:
