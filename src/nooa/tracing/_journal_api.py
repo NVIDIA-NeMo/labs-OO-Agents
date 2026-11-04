@@ -238,6 +238,8 @@ def _llm_span_id(
     ctx = current.get_span_context()
     kind = (getattr(current, "attributes", None) or {}).get(SpanAttributes.OPENINFERENCE_SPAN_KIND)
     if ctx.is_valid and kind == OpenInferenceSpanKindValues.LLM.value:
+        if failed:
+            current.set_status(Status(StatusCode.ERROR, "no response"))
         return format(ctx.span_id, "016x")
 
     attributes: dict[str, Any] = {
