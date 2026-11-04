@@ -129,19 +129,18 @@ def _shown_value(value: Any, limit: int) -> str:
     return shown[: limit - 1] + "…" if len(shown) > limit else shown
 
 
-def return_alias_note(python_tool: str, value: Any, limit: int = 200) -> str:
-    """The note on an accepted provider ``return_result`` call taken as the builtin."""
-    return (
-        f"return_result isn't a tool. It's a function you call inside {python_tool}; "
-        f"this call ran as return_result({_shown_value(value, limit)})"
-    )
+def return_alias_note(python_tool: str, value: Any, *, valid: bool, limit: int = 200) -> str:
+    """The note on a provider ``return_result`` call run as the builtin.
 
-
-def return_alias_invalid_intro(python_tool: str, value: Any, limit: int = 200) -> str:
-    """The first line for an invalid provider ``return_result`` call taken as the builtin."""
+    ``valid``: the value was accepted (a note after "Result accepted.") or
+    not (the first line, before the validation errors).
+    """
+    lead = f"return_result isn't a tool. It's a function you call inside {python_tool}"
+    shown = _shown_value(value, limit)
+    if valid:
+        return f"{lead}; this call ran as return_result({shown})"
     return (
-        f"return_result isn't a tool. It's a function you call inside {python_tool}. "
-        f"I ran your call as {python_tool} code return_result({_shown_value(value, limit)}), "
+        f"{lead}. I ran your call as {python_tool} code return_result({shown}), "
         "and that value isn't a valid result:"
     )
 

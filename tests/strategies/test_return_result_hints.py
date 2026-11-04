@@ -97,21 +97,21 @@ def test_doc_hint_names_every_member_only_when_all_are_bound():
 def test_alias_note_names_the_value_taken_and_is_bounded():
     from nooa.strategies.codeact_errors import return_alias_note
 
-    assert return_alias_note("python_cell", 42) == (
+    assert return_alias_note("python_cell", 42, valid=True) == (
         "return_result isn't a tool. It's a function you call inside python_cell; "
         "this call ran as return_result(42)"
     )
-    long = return_alias_note("python_cell", "x" * 1000)
+    long = return_alias_note("python_cell", "x" * 1000, valid=True)
     assert len(long) < 320 and long.endswith("…)")
 
 
 def test_alias_invalid_intro_says_how_the_call_ran_and_is_bounded():
-    from nooa.strategies.codeact_errors import return_alias_invalid_intro
+    from nooa.strategies.codeact_errors import return_alias_note
 
-    assert return_alias_invalid_intro("python_cell", "hello") == (
+    assert return_alias_note("python_cell", "hello", valid=False) == (
         "return_result isn't a tool. It's a function you call inside python_cell. "
         "I ran your call as python_cell code return_result('hello'), and that value isn't "
         "a valid result:"
     )
-    assert "taken as" not in return_alias_invalid_intro("python_cell", "hello")
-    assert len(return_alias_invalid_intro("python_cell", "x" * 1000)) < 400
+    assert "taken as" not in return_alias_note("python_cell", "hello", valid=False)
+    assert len(return_alias_note("python_cell", "x" * 1000, valid=False)) < 400

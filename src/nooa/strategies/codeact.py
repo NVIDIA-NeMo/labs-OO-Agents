@@ -72,7 +72,6 @@ from nooa.strategies.codeact_errors import (
     ReturnForm,
     format_validation_error,
     positional_result,
-    return_alias_invalid_intro,
     return_alias_note,
     return_call_hint,
     return_doc_hint,
@@ -1482,6 +1481,9 @@ Standard Python builtins and agent instance (`self`) are available."""
             return positional_result(args, return_type) or args
         return None
 
+    def _alias_note(self, args: dict[str, Any], *, valid: bool) -> str:
+        return return_alias_note(self._python_tool_name(), args.get("result"), valid=valid)
+
     def _unknown_tool_feedback(
         self, tool_name: str, args: dict[str, Any], runtime: RuntimeServices
     ) -> str:
@@ -1909,18 +1911,12 @@ Standard Python builtins and agent instance (`self`) are available."""
             self._supports_return_result() or alias is not None
         ):
             # Return the final result
-            alias_note: str | None = None
-            alias_intro = ""
             if alias is not None:
                 # Some models call the cell builtin as a provider tool: take its
                 # value as return_result(value) inside a cell would, and say so.
                 if "value" in args and "result" in alias:
                     get_harness_metrics().return_result_keyword_alias("value")
                 args = alias
-                alias_note = return_alias_note(self._python_tool_name(), args.get("result"))
-                alias_intro = return_alias_invalid_intro(
-                    self._python_tool_name(), args.get("result")
-                )
                 get_harness_metrics().return_result_tool_alias()
             try:
                 validated, error_msg = self._handle_return_result(
@@ -1929,7 +1925,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                     return_type,
                     session,
                     call,
-                    form="alias" if alias_note else "tool",
+                    form="tool" if alias is None else "alias",
                 )
             except GenerationError:
                 # _handle_return_result raises GenerationError when validation
@@ -1955,18 +1951,19 @@ Standard Python builtins and agent instance (`self`) are available."""
                     arguments=corrected_args,
                     result=ToolResult(
                         tool_call_id=tool_call.id,
-                        content="Result accepted." + (f" {alias_note}." if alias_note else ""),
+                        content="Result accepted."
+                        if alias is None
+                        else f"Result accepted. {self._alias_note(args, valid=True)}.",
                         result_status=ResultStatus.COMPLETE,
                     ),
                 )
                 logger.info("[CODEACT] Task completed successfully via return_result")
                 return _ToolCallsResult(completed=True, final_value=validated)
             # Validation error - update with error result
-            if alias_note:
-                # No return_result tool exists: point only at the cell form.
-                content = f"{alias_intro}\n{error_msg}"
-            else:
+            if alias is None:
                 content = f"Invalid result: {error_msg}"
+            else:  # no return_result tool exists: the hint points only at the cell form
+                content = f"{self._alias_note(args, valid=False)}\n{error_msg}"
             runtime.event_manager.update(
                 tool_call_event_id,
                 result=ToolResult(
@@ -2589,14 +2586,9 @@ Standard Python builtins and agent instance (`self`) are available."""
 
             # Offered back to the model as a cell error it can retry on.
             metrics.return_result_invalid(type(e).__name__)
-            if form == "alias":
-                error_msg = f"{error_msg}\nThe turn goes on (attempt {attempts} of {budget})."
-            else:
-                error_msg = (
-                    f"{error_msg}\nThe turn goes on: fix the value and call return_result "
-                    f"again (attempt {attempts} of {budget})."
-                )
-            return (None, error_msg)
+            # The alias form's hint already says how to finish (in the cell).
+            fix = "" if form == "alias" else ": fix the value and call return_result again"
+            return (None, f"{error_msg}\nThe turn goes on{fix} (attempt {attempts} of {budget}).")
 
         except BaseException as error:
             exception = error
