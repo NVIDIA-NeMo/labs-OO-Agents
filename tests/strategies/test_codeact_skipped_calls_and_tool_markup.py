@@ -177,6 +177,18 @@ async def test_all_calls_that_succeed_get_no_skip_results(strategy_type, tool, m
             '{"name": "python_cell", "arguments": {"code": "1"}}',
             '{"name": "python_cell", "arguments":',
         ),
+        (
+            '{"arguments": {"code": "print({1})"}, "name": "python_cell"}',
+            '{"arguments": {"code": "print({1})"}, "name": "',
+        ),
+        (
+            '{"parameters": {"code": "say(\\"hi\\")"}, "name": "python_cell"}',
+            '{"parameters": {"code": "say(\\"hi\\")"}, "name": "',
+        ),
+        (
+            '{"arguments": "{\\"code\\": \\"1\\"}", "name": "python_cell"}',
+            '{"arguments": "{\\"code\\": \\"1\\"}", "name": "',
+        ),
     ],
 )
 def test_tool_call_markup_is_detected(text, marker):
@@ -185,7 +197,16 @@ def test_tool_call_markup_is_detected(text, marker):
 
 @pytest.mark.parametrize(
     "text",
-    [None, "", "I am done.", "Call `return_result(value)` next.", '{"name": "x"}', "a <b> c"],
+    [
+        None,
+        "",
+        "I am done.",
+        "Call `return_result(value)` next.",
+        '{"name": "x"}',
+        '{"arguments": {"code": "1"}}',
+        '{"arguments": {"code": "1"}, "label": "x"}',
+        "a <b> c",
+    ],
 )
 def test_plain_text_has_no_tool_call_markup(text):
     assert text_only_tool_call_markup(text) is None

@@ -170,10 +170,15 @@ def retry_text_only_response(context: TextOnlyResponseContext) -> TextOnlyRespon
 # Tool-call syntax a model wrote as text (often inside <think>), which the
 # provider did not parse into a real tool call: Hermes/Qwen-style
 # <tool_call>/<function=...>/<parameter=...>, GLM's <arg_key>/<arg_value>,
-# Anthropic-style <invoke>, and a JSON {"name": ..., "arguments": ...} object.
+# Anthropic-style <invoke>, and a JSON {"name": ..., "arguments": ...} object
+# with its two members in either order (the arguments may be a flat object
+# or a string; nested objects inside them are not followed).
+_JSON_STRING = r'"(?:[^"\\]|\\.)*"'
+_JSON_FLAT_OBJECT = rf'\{{(?:{_JSON_STRING}|[^{{}}"])*\}}'
 _TOOL_CALL_MARKUP = re.compile(
     r"</?tool_call>|<function=|<parameter=|</?arg_(?:key|value)>|<invoke\b"
-    r'|\{\s*"name"\s*:\s*"[^"]*"\s*,\s*"(?:arguments|parameters)"\s*:'
+    rf'|\{{\s*"name"\s*:\s*{_JSON_STRING}\s*,\s*"(?:arguments|parameters)"\s*:'
+    rf'|\{{\s*"(?:arguments|parameters)"\s*:\s*(?:{_JSON_FLAT_OBJECT}|{_JSON_STRING})\s*,\s*"name"\s*:\s*"'
 )
 
 TEXT_ONLY_TOOL_MARKUP_NOTE = (
