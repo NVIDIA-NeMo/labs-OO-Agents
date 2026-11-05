@@ -2,9 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Owner/lifetime leases on the existing ContextVarStream capture plumbing.
 
-Experimental callers opt in. Descendant writes use the originating OPEN scope;
-late writes are dropped, never redirected to a later cell or a closed file.
-Managed jobs install their own
+Used by the opt-in execution namespace (see
+:mod:`nooa.runtime.execution_namespace`), which Atom always uses. Descendant
+writes use the originating OPEN scope; late writes are dropped, never
+redirected to a later cell or a closed file. Managed jobs install their own
 scope and publish its bounded output through the job's existing delivery.
 """
 

@@ -1019,6 +1019,13 @@ Standard Python builtins and agent instance (`self`) are available."""
 
         Raises:
             GenerationError: If generation fails after max retries/iterations.
+
+        Execution namespace hook: if the agent defines
+        ``_execution_namespace_for(call)``, it is called once per call. A
+        returned :class:`~nooa.runtime.execution_namespace.ExecutionNamespace`
+        runs this call's cells in that namespace (in-process backend only);
+        ``None``, or no hook, keeps the default cell execution. Atom defines
+        the hook and always returns a namespace.
         """
         # Guarantee the sandbox worker is torn down on EVERY exit — including the
         # GenerationError paths inside the loop — not just the success returns.
