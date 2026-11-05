@@ -52,15 +52,19 @@ import tempfile
 import weakref
 from dataclasses import dataclass
 from pathlib import Path
-from typing import IO, Annotated, Any
+from typing import IO, Annotated, Any, Literal
 
 from nooa import hidden
 from nooa.agentdoc import spec
+from nooa.runtime.harness_metrics import get_harness_metrics
 from nooa.tools import BashSession
-from nooa_atom.agent.work_manager import _progress_sink, describe, job_dir
+from nooa_atom.agent.work_manager import _progress_sink, current_name, describe, job_dir
 from nooa_atom.agent.work_progress import _ShellProgress
 
 __all__ = ["CommandResult", "Shell", "ShellOwner", "default_cwd", "shell_owner"]
+
+# How bash ended during a command: its own exit (``exit N``, errexit) or a signal.
+_Ended = Literal["exit", "signal"] | None
 
 default_cwd: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "nooa_work_shell_cwd", default=None
@@ -68,8 +72,8 @@ default_cwd: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 """Where a ``Shell()`` without ``cwd`` starts (an agent sets its workspace); else the process's."""
 
 # A stream's summary: whole when at most this many bytes, else head and tail.
-_SUMMARY_BYTES = 10_000
-_HEAD_BYTES = 2_000
+_SUMMARY_BYTES = 1_048_576  # a stream's text is whole in the result up to 1 MiB
+_HEAD_BYTES = _SUMMARY_BYTES // 4
 _TAIL_BYTES = _SUMMARY_BYTES - _HEAD_BYTES
 # Bytes of each stream kept on disk per command, by default.
 _MAX_OUTPUT_BYTES = 64 * 1024 * 1024
@@ -77,7 +81,7 @@ _CHUNK_BYTES = 64 * 1024
 # Seconds a cancelled persistent command gets to end after SIGTERM, then SIGKILL.
 _INTERRUPT_GRACE = 2.0
 # Seconds a command may run by default (``Shell.run``'s ``timeout``).
-_DEFAULT_TIMEOUT = 1800.0
+_DEFAULT_TIMEOUT = 600.0
 # Seconds past a command's deadline before the bash session's own timeout fires.
 _BACKSTOP_SECONDS = 60.0
 # Skips each command once an interrupt set __nooa_stop, except the epilogue's first.
@@ -112,7 +116,7 @@ _CLOSED_DURING = "the shell was closed while this command ran; the command was s
 class CommandResult:
     """One command's outcome: exit code, output, and bash's directory after it.
 
-    ``stdout``/``stderr``: whole up to 10 kB, else head+tail around a marker;
+    ``stdout``/``stderr``: whole up to 1 MiB, else head+tail around a marker;
     ``*_path`` then names the capture (up to ``max_output``, default 64 MiB),
     kept while the job is listed (direct ``run``: until its Shell/session closes).
     """
@@ -163,11 +167,18 @@ class _Capture:
         """The stream's text, or its head and tail around a marker; and the path if cut."""
         self.file.flush()
         self.file.seek(0)
-        if self.total <= _SUMMARY_BYTES:
+        if self.total <= _SUMMARY_BYTES and self.total <= self.written:
             return self.file.read(self.total).decode("utf-8", errors="replace"), None
-        head = self.file.read(_HEAD_BYTES).decode("utf-8", errors="replace")
-        tail = bytes(self.tail[-_TAIL_BYTES:]).decode("utf-8", errors="replace")
-        omitted = self.total - _HEAD_BYTES - len(self.tail[-_TAIL_BYTES:])
+        # The file holds the first ``written`` bytes (maybe fewer than a head, under a
+        # small max_output) and memory the last ones; the marker counts what neither kept.
+        head_bytes = self.file.read(_HEAD_BYTES)
+        kept_tail = min(len(self.tail), self.total - len(head_bytes))
+        tail_bytes = bytes(self.tail[len(self.tail) - kept_tail :])
+        omitted = self.total - len(head_bytes) - kept_tail
+        if omitted == 0:  # head and tail meet: the text is whole even though the file is cut
+            return (head_bytes + tail_bytes).decode("utf-8", errors="replace"), None
+        head = head_bytes.decode("utf-8", errors="replace")
+        tail = tail_bytes.decode("utf-8", errors="replace")
         if self.total > self.written:
             where = (
                 f"over the {self.limit:,}-byte output limit: {self.path} holds only the "
@@ -272,6 +283,42 @@ def _closed_error(message: str) -> BaseException:
     return asyncio.CancelledError() if _cancelling() else RuntimeError(message)
 
 
+def _timeout_note(timeout: float) -> str:
+    """How to go on after a command ran into its deadline."""
+    return (
+        f"[timed out after {timeout:g} s: pass a larger timeout= for a longer command, or "
+        "run it in the background: self.jobs.launch(sh.run(cmd, timeout=...), name=...)]"
+    )
+
+
+# Seconds a command may wait for its turn before its result says what it waited for.
+_QUEUE_NOTE_SECONDS = 5.0
+_BLOCKER_CHARS = 80
+
+
+def _blocker(command: str | None, job: str | None) -> str:
+    """The command running in a Shell, as a note names it: `cmd` (job name)."""
+    flat = " ".join((command or "a command").split())
+    if len(flat) > _BLOCKER_CHARS:
+        flat = flat[: _BLOCKER_CHARS - 1] + "…"
+    return f"`{flat}`" + (f" (job {job})" if job else "")
+
+
+def _queued_note(blocker: str, waited: float) -> str:
+    """What a command queued behind a running one waited for, and how to avoid it."""
+    head = f"waited {waited:.0f} s for its turn behind {blocker} in this Shell"
+    return f"[{head}; a Shell runs one command at a time: use another Shell() for other commands]"
+
+
+def _busy_message(blocker: str) -> str:
+    """Why a command awaited in a cell was refused behind a launched job's command."""
+    return (
+        f"this Shell is busy running {blocker}, which was launched in the background: "
+        "a Shell runs one command at a time. Use another Shell() for this command "
+        "(e.g. sh2 = Shell()), or wait for the job."
+    )
+
+
 def _check_timeout(value: Any) -> float:
     """``value`` as a command deadline: a non-bool int or float, finite and positive."""
     if isinstance(value, bool) or not isinstance(value, int | float):
@@ -342,9 +389,11 @@ class Shell:
         print(r.returncode, r.stdout)
 
     Reuse ``sh``: FIFO commands preserve cwd, variables, options and traps.
-    A new Shell starts fresh in the workspace; bash starts on first use.
+    A new Shell starts a fresh ``bash`` in the workspace directory on first use.
+    A Shell runs one command at a time: use another Shell for a second concurrent command.
 
-    Timeout returns 124 with ``timed_out=True``. Timeout/cancel skips remaining
+    ``timeout`` defaults to 600 s. Timeout returns 124 with ``timed_out=True``
+    and a note in stderr on how to go on. Timeout/cancel skips remaining
     commands, usually retaining state. Unstoppable builtins or a USR1 trap may
     force a restart. ``set -e`` or ``exit N`` can end bash; the next command starts
     fresh. Other options persist; results report lost state.
@@ -389,6 +438,8 @@ class Shell:
         # Shell state as last confirmed by bash itself (never guessed from config).
         self._confirmed_cwd: str | None = None
         self._busy: str | None = None  # the command running now
+        self._busy_job: str | None = None  # the job it runs in (None: a direct run)
+        self._queued = 0  # commands waiting for their turn behind it
         self._lost = False  # restarted since the last command: state was lost
         # The user's shell options (of "euxvp", p: pipefail) and whether a user
         # USR1 trap is set, as bash last reported them (see ``_wrap``).
@@ -412,7 +463,8 @@ class Shell:
             return "not started" if self._confirmed_cwd is None else "closed"
         lost = " · restarted, variables lost" if self._lost else ""
         if self._busy is not None:
-            return f"running $ {self._busy} · was in {self._confirmed_cwd}{lost}"
+            queued = f" · {self._queued} queued behind it" if self._queued else ""
+            return f"running $ {self._busy} · was in {self._confirmed_cwd}{lost}{queued}"
         return f"idle · in {self._confirmed_cwd}{lost}"
 
     def _directory(self) -> str:
@@ -426,24 +478,53 @@ class Shell:
         """Run one command in this object's bash (started on first use); state carries over.
 
         ``stdin``: its input (else none); ``timeout``: deadline, seconds from its start.
+        Awaited in a cell while this Shell runs a background job: fails at once; use another Shell().
         """
         timeout = _check_timeout(timeout)
         describe(f"$ {command}")
         await self._closed()
         generation = self._generation
-        async with self._lock:
+        note = ""
+        if self._lock.locked() and self._busy is not None:
+            blocker = _blocker(self._busy, self._busy_job)
+            if self._busy_job is not None and current_name() is None:
+                # Awaited in a cell behind a background job (often a never-ending tail):
+                # waiting would block the turn, so say so at once instead.
+                get_harness_metrics().shell_busy()
+                raise RuntimeError(_busy_message(blocker))
+            get_harness_metrics().shell_queued()  # FIFO: wait behind it
+            describe(f"$ {command} · queued behind {blocker}")
+            loop = asyncio.get_running_loop()
+            queued_at = loop.time()
+            self._queued += 1
+            try:
+                await self._lock.acquire()
+            finally:
+                self._queued -= 1
+            waited = loop.time() - queued_at
+            if waited >= _QUEUE_NOTE_SECONDS:
+                note = _queued_note(blocker, waited)
+        else:
+            await self._lock.acquire()
+        try:
             if self._generation != generation:
                 raise RuntimeError(_CLOSED_BEFORE)
-            if self._session is None:
-                await self._start(generation)
-            self._busy = command
+            # Busy from first use on: a cell's run behind a job starting bash fails too.
+            self._busy, self._busy_job = command, current_name()
             try:
-                return await self._send_locked(command, stdin, timeout, generation)
+                if self._session is None:
+                    await self._start(generation)
+                result = await self._send_locked(command, stdin, timeout, generation)
             finally:
-                self._busy = None
+                self._busy = self._busy_job = None
                 session = self._session
                 if session is not None:
                     self._confirmed_cwd = str(session.cwd)  # bash reports it after each command
+        finally:
+            self._lock.release()
+        if note:
+            result.stderr = f"{result.stderr}\n{note}" if result.stderr else note
+        return result
 
     async def send(self, command: str) -> CommandResult:
         """A launched Shell's request (``job.send(command)``): ``run`` with its default timeout."""
@@ -463,7 +544,7 @@ class Shell:
             self._starting = False
         self._session, self._note = session, ""
         self._bash = (pid, _start_time(pid))
-        self._confirmed_cwd, self._busy, self._lost = str(session.cwd), None, False
+        self._confirmed_cwd, self._lost = str(session.cwd), False
         self._reset_tracked()
 
     async def _start_session(self, session: BashSession, generation: int, closed: str) -> int:
@@ -647,6 +728,9 @@ class Shell:
             statusfile = directory / f"{stem}.status"
             fifos.append(statusfile)  # removed with the FIFOs
             wrapped = self._wrap(command, pidfile, statusfile, source, fifos[0], fifos[1])
+            # A dead bash restarts in its kept cwd (BashSession resets on the next
+            # command): if that directory is gone, start where this Shell started.
+            cwd_note = "" if self._bash and self._bash_alive() else self._fallback_cwd(session)
             # Earlier background jobs of this bash: an interrupt never signals them.
             before = _descendants(self._bash[0]) if self._bash and self._bash_alive() else {}
             # Our own deadline (the session's is a backstop): a timeout stops the
@@ -689,15 +773,19 @@ class Shell:
             self._check_open(generation)
             await self._settle([pump for pump, _, _ in pumps])
             self._read_status(statusfile)
-            ended = False
+            ended: _Ended = None
             if code == -1:  # no status from bash: did it exit (`exit 7`, errexit)?
-                status = await self._exit_status(session)
-                if status is not None:
-                    ended, code = True, status
+                exit_status = await self._exit_status(session)
+                if exit_status is not None:
+                    code, ended = exit_status
             if restart_notes is None:
                 notes = self._check_bash(pidfile, code, timed_out, ended)
             else:  # restarted at the deadline: this result says so
                 notes = restart_notes
+            if cwd_note:
+                notes.insert(0, cwd_note)
+            if timed_out:
+                notes.append(_timeout_note(timeout))
             result = _result(code, timed_out, out, err, str(session.cwd))
             if kept is None:
                 self._retain(result, out, err)
@@ -787,8 +875,9 @@ class Shell:
         self._options, self._user_usr1 = "", False
 
     @staticmethod
-    async def _exit_status(session: BashSession) -> int | None:
-        """The status bash exited with (``exit 7``, or errexit); None if it has not exited."""
+    async def _exit_status(session: BashSession) -> tuple[int, _Ended] | None:
+        """How bash ended: its status and ``exit`` (its own ``exit N`` or errexit) or
+        ``signal`` (killed from outside); None if it has not exited."""
         proc = getattr(session, "_process", None)
         if proc is None:
             return None
@@ -797,7 +886,7 @@ class Shell:
         returncode = proc.returncode
         if returncode is None:
             return None
-        return 128 - returncode if returncode < 0 else returncode
+        return (128 - returncode, "signal") if returncode < 0 else (returncode, "exit")
 
     async def _settle(self, pumps: list[asyncio.Task[None]]) -> None:
         """Wait briefly for the output still in the pipes."""
@@ -806,8 +895,12 @@ class Shell:
                 asyncio.shield(asyncio.gather(*pumps, return_exceptions=True)), _DRAIN_SECONDS
             )
 
-    def _check_bash(self, pidfile: Path, code: int, timed_out: bool, ended: bool) -> list[str]:
-        """Notice a bash that was replaced before, or died during, this command."""
+    def _check_bash(self, pidfile: Path, code: int, timed_out: bool, ended: _Ended) -> list[str]:
+        """Notice a bash that was replaced before, or died during, this command.
+
+        ``ended``: how bash ended during it (``exit``: the command's own
+        ``exit N`` or errexit), else None.
+        """
         notes = []
         if self._note:
             notes.append(self._note)
@@ -830,12 +923,40 @@ class Shell:
             self._lost = True
             self._bash = None
             self._reset_tracked()
+            if ended == "exit":
+                get_harness_metrics().shell_exit_hint(code)
+                notes.append(
+                    f"[this command ended the Shell's bash (exit {code}); the next command "
+                    "starts a fresh bash (cwd kept; environment, variables, options and traps "
+                    "reset). Use a subshell `( ... )` or a return code instead of exit.]"
+                )
+                return notes
             status = f" (exit {code})" if ended else ""
             notes.append(
                 f"[bash ended during this command{status}; the next command starts a new "
                 "shell: cwd kept, environment, shell variables, options and traps lost]"
             )
         return notes
+
+    def _fallback_cwd(self, session: BashSession) -> str:
+        """Before bash (re)starts: move a kept cwd that no longer exists; the note, or "".
+
+        The fallback is this Shell's starting directory, else the workspace,
+        else the process's cwd (the first that exists); counted in harness metrics.
+        """
+        kept = str(session.cwd)
+        if os.path.isdir(kept):
+            return ""
+        candidates = (self._directory(), default_cwd.get(), os.getcwd())
+        fallback = next((c for c in candidates if c and os.path.isdir(c)), None)
+        if fallback is None:
+            return ""
+        session.cwd = fallback  # where BashSession starts bash next
+        self._confirmed_cwd = str(session.cwd)
+        get_harness_metrics().shell_cwd_fallback(f"{kept} -> {session.cwd}")
+        return (
+            f"[the shell's kept cwd {kept} no longer exists: the new bash started in {session.cwd}]"
+        )
 
     def _check_open(self, generation: int) -> None:
         if self._generation != generation:
@@ -875,6 +996,7 @@ class Shell:
         await session.close()
         if self._generation != generation:  # closed while that close ran
             return None
+        cwd_note = self._fallback_cwd(session)
         pid = await self._start_session(session, generation, _CLOSED_DURING)  # keeps the cwd
         self._bash, self._lost = (pid, _start_time(pid)), True
         self._reset_tracked()
@@ -882,6 +1004,8 @@ class Shell:
             "[the shell restarted: an interrupted command did not stop; "
             "cwd kept, environment and shell variables lost]"
         )
+        if cwd_note:
+            self._note += "\n" + cwd_note
         return True
 
     def _running_bash(self) -> int | None:

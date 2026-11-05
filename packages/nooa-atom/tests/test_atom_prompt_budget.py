@@ -146,22 +146,95 @@ RESULT = (
 # Totals raised on the rebase onto dev/atom 060f59e66 (2026-10-29), whose own
 # prompt additions came along: totals 21,045 / 21,240 / 21,408 / 21,543; system
 # limits unchanged. Limits: measured totals plus about 2%, rounded up to the next 100.
+# Raised for the exact-output rule (2026-10-30, friction PR part 3, user-approved:
+# prompt budget is not a constraint): the class doc and the interactive role say an
+# exact value or format is the whole message. Measured system / total: handle
+# 20,202 / 21,227, handle_batch 20,321 / 21,346, handle_work 20,489 / 21,514,
+# handle_orchestrate 20,624 / 21,649.
+# Limits: measured values plus about 2%, rounded up to the next 100.
+# Raised for the filesystem-scan warning (2026-10-30, friction PR part 3,
+# user-approved): the class doc says a scan of the whole filesystem can run until
+# the timeout. Measured system / total: handle 20,298 / 21,323, handle_batch
+# 20,417 / 21,442, handle_work 20,585 / 21,610, handle_orchestrate 20,720 / 21,745.
+# Limits: measured values plus about 2%, rounded up to the next 100.
+# Raised for self.jobs.after/every/tail (2026-10-30, friction PR: producer features
+# into self.jobs, user-approved): the WorkManager doc and the work examples show the
+# timer, ticks and file tail with the "a delay counts from now" clause. Measured
+# system / total: handle 21,553 / 22,578, handle_batch 21,672 / 22,697, handle_work
+# 21,840 / 22,865, handle_orchestrate 21,975 / 23,000.
+# Limits: measured values plus about 2%, rounded up to the next 100.
+# Lowered when self.jobs.tail was dropped (2026-10-30, user decision: a Shell
+# running ``tail -F`` with a Throttle covers it): the docs show that idiom in one
+# line instead. Measured system / total: handle 21,247 / 22,272, handle_batch
+# 21,366 / 22,391, handle_work 21,534 / 22,559, handle_orchestrate 21,669 / 22,694.
+# Limits: measured values plus about 2%, rounded up to the next 100.
+# Raised for the PR512 small fixes (2026-10-30, friction PR, user-approved): the
+# libs attribute says where libraries are saved, the Subagent doc says awaiting a
+# request blocks until the child ends its turn (together about 220 characters),
+# and the class doc adds the quote-style and script-on-stdin advice next to the
+# triple-quote rule (about 210). Measured system / total: handle 21,676 / 22,701,
+# handle_batch 21,795 / 22,820, handle_work 21,963 / 22,988, handle_orchestrate
+# 22,098 / 23,123. Limits: measured values plus about 2%, rounded up to the next 100.
+# Re-measured for the PR512 live-names line (2026-10-30, friction PR, user decision):
+# python_cell_lifetime opens with "All your live Python names are listed in the
+# python_cell_state block; anything not listed there does not exist in this
+# session." (199 characters, every row). Measured system / total: handle 21,875 /
+# 22,900, handle_batch 21,994 / 23,019, handle_work 22,162 / 23,187,
+# handle_orchestrate 22,297 / 23,322. Within the limits, so they stay. The line was
+# reworded (CodeRabbit: the block is bounded, so "anything not listed does not
+# exist" was wrong) to the python_cell_state() wording below; still within the limits.
+# Totals raised for the #517 prompt-review decisions (2026-11-03, user-approved):
+# the <skills> block is back as self.skills.status() (active skills, connected MCP
+# servers, a count of the rest), the timers show their fn, and python_cell_lifetime
+# drops the late-output bullet. Measured system / total: handle 21,921 / 23,251,
+# handle_batch 22,040 / 23,370, handle_work 22,208 / 23,538, handle_orchestrate
+# 22,343 / 23,673. System limits still hold; totals: measured plus about 2%,
+# rounded up to the next 100.
+# The handle system limit raised for the interactive role as a bulleted block
+# (2026-11-03, #517 user decision): handle system / total 22,092 / 23,422 ->
+# 22,286 / 23,616. System limit set to the bench ceiling (measured plus 2% would
+# pass it); total still within its limit.
+# The handle_orchestrate system limit and the bench ceiling raised for the
+# self.skill_writing rename (2026-11-04, #517 user decision): the attribute line says
+# skills are code or instructions saved in .nooa/skills, and the SkillManager doc
+# says new skills are made with self.skill_writing. Measured system / total before
+# -> after: handle 22,366 / 23,696 -> 22,375 / 23,708, handle_batch 22,291 / 23,621
+# -> 22,300 / 23,633, handle_work 22,459 / 23,789 -> 22,468 / 23,801,
+# handle_orchestrate 22,594 / 23,924 -> 22,603 / 23,936. Only handle_orchestrate
+# passed its system limit (22,600), so it and the bench ceiling go to 22,700.
 LIMITS = {
-    (ATOM, "handle"): (20_100, 21_500),
-    (ATOM, "handle_batch"): (20_300, 21_700),
-    (ATOM, "handle_work"): (20_500, 21_900),
-    (ATOM, "handle_orchestrate"): (20_600, 22_000),
+    (ATOM, "handle"): (22_600, 23_800),
+    (ATOM, "handle_batch"): (22_300, 23_900),
+    (ATOM, "handle_work"): (22_500, 24_100),
+    (ATOM, "handle_orchestrate"): (22_700, 24_200),
 }
 # The bench guard's system-prompt ceiling; every agent stays under it.
-# Raised from 20,000 for the Done(message=...) guidance (2026-10-29, see above).
-BENCH_SYSTEM_LIMIT = 20_700
+# Raised from 20,000 for the Done(message=...) guidance (2026-10-29, see above),
+# then from 21,200 to 22,600 for self.jobs.after/every/tail (2026-10-30), and
+# lowered to 22,300 when self.jobs.tail was dropped (2026-10-30), then raised to
+# 22,600 for the PR512 small fixes (2026-10-30, see above; handle_orchestrate 22,098),
+# then to 22,700 for the self.skill_writing rename (2026-11-04, see above).
+BENCH_SYSTEM_LIMIT = 22_700
+# The one line every agent (root and child) gets in python_cell_lifetime.
+LIVE_NAMES_LINE = (
+    "The python_cell_state block lists up to 20 of your live Python names and "
+    'says how many more exist ("omitted: N"); python_cell_state() returns all of '
+    "them with their types. Check both before recreating a name."
+)
 
 # Separate CHAR/JSON-size guards, not token counts or a full provider-wire payload.
 # Effective restriction guidance grows default tool descriptions 2,069 -> 2,839;
 # canonical function-tool JSON 2,259 -> 3,032 (+773); schema JSON stays 79.
-TOOL_DESCRIPTION_CHAR_LIMIT = 2_900
+# Raised to 3,150 for the task-vs-thinking-environment line (2026-10-31, user request;
+# descriptions 2,894 -> 3,136).
+# Raised to 3,250 for the #517 Shell snippet (2026-11-03, user decision): the first
+# sentence shows both forms, wait (sh.run) and background (self.jobs.launch);
+# descriptions 3,136 -> 3,198.
+TOOL_DESCRIPTION_CHAR_LIMIT = 3_250
 TOOL_SCHEMA_JSON_CHAR_LIMIT = 100
-TOOL_PAYLOAD_JSON_CHAR_LIMIT = 3_100
+# Raised to 3,350 with the description limit (2026-10-31; JSON 3,087 -> 3,331).
+# Raised to 3,450 with it (2026-11-03; JSON 3,331 -> 3,395).
+TOOL_PAYLOAD_JSON_CHAR_LIMIT = 3_450
 
 
 @pytest.fixture(autouse=True)
@@ -267,7 +340,9 @@ async def test_first_call_prompt_stays_within_budget(spec, method, tmp_path, ses
     assert "<experimental_namespace>" not in rendered
     assert "<python_cell_lifetime>" in rendered
     assert "job.output / JobEvent.output" in rendered
-    assert "Cell variables survive Done, Waiting and NeedInput" in rendered
+    assert "Names you define in cells (values, functions, classes) survive Done" in rendered
+    assert "- Agent methods other than handle start each call with fresh names." in rendered
+    assert LIVE_NAMES_LINE in rendered
     assert "cell locals last one method call" not in rendered
     assert sizes["system"] <= system_limit
     assert sizes["messages"] <= total_limit
@@ -307,6 +382,18 @@ async def test_prompts_reply_to_a_child_question_with_send(spec, method, tmp_pat
 
 
 @pytest.mark.parametrize(("spec", "method"), list(LIMITS))
+async def test_prompts_warn_that_a_whole_filesystem_scan_can_hit_the_timeout(
+    spec, method, tmp_path, sessions_dir
+):
+    messages, _, _ = await _first_call(spec, method, tmp_path, sessions_dir)
+    rendered = " ".join("\n".join(str(m.get("content", "")) for m in messages).split())
+    assert (
+        "Search inside the repository, never ``/``: a scan of the whole filesystem "
+        "(``find /``, ``grep -r /``, ``du /``) can run until the timeout. Prefer ``rg``"
+    ) in rendered
+
+
+@pytest.mark.parametrize(("spec", "method"), list(LIMITS))
 async def test_prompts_make_done_message_the_reply(spec, method, tmp_path, sessions_dir):
     """Done(message=...) is the documented reply; the role says who receives it."""
     messages, _, _ = await _first_call(spec, method, tmp_path, sessions_dir)
@@ -314,9 +401,12 @@ async def test_prompts_make_done_message_the_reply(spec, method, tmp_path, sessi
     assert 'Done(message="your reply", explanation="short status")' in rendered
     assert "Waiting(explanation=..., on=[names], message=...)" in rendered
     assert (
-        "``message`` and ``question`` are shown as your reply; ``explanation`` is a short "
-        "status line, not the reply; use ``self.message()`` for notes while you work."
+        "``message`` and ``question`` are shown as your reply. "
+        "``explanation`` is a short status line, not the reply; use ``self.message()`` for "
+        "notes while you work."
     ) in rendered
+    # The exact-output rule is said once, in the interactive role.
+    assert rendered.count("exact value or format") == (1 if method == "handle" else 0)
     assert (
         "Replies and notes go to the user, or to your parent if you are a subagent; unattended, "
         "only your result is read."
@@ -329,7 +419,8 @@ async def test_prompts_make_done_message_the_reply(spec, method, tmp_path, sessi
     else:
         assert "parent" not in role
     if method == "handle":
-        assert "You are working with a person, the user. Reply with Done(message=...)" in role
+        assert "You are working with a person, the user. - After a user message," in role
+        assert "Send brief progress notes" not in role
 
 
 class _InstalledSkill:
@@ -376,10 +467,24 @@ async def test_installed_skills_are_counted_not_listed(monkeypatch, tmp_path, se
     finally:
         await registry.close_all()
     rendered = "\n".join(str(m.get("content", "")) for m in llm.calls[0].messages)
-    # The Atom agent shows no dynamic <skills> inventory: SkillManager's docs
-    # are in the static python_cell_tools block, and status() is on demand.
-    assert "<skills" not in rendered
+    # The skills block (#517 P04) is the manager's state, not the inventory:
+    # installed skills are a count with the search call, never named.
+    block = rendered.split('<skills expr="self.skills.status()">\n', 1)[1].split("</skills>")[0]
+    assert block.startswith("Active: ") and "more (code" in block
+    assert "self.skills.search('query')" in block
     assert "class SkillManager" in rendered and "def status(self) -> str:" in rendered
     for skill in extra:
         assert skill.description not in rendered
         assert skill.name.split(".")[-1] not in rendered
+
+
+def test_the_quoting_advice_keeps_triple_quotes_only():
+    from nooa_atom.agent.agent import AtomAgent
+
+    text = " ".join(AtomAgent.__doc__.split())
+    # The triple-quote rule stays (it cut SWE quoting errors 35 -> 9).
+    assert "Write shell commands as triple-quoted strings (``sh.run('''...''')``)" in text
+    # Quote choice and script-on-stdin are an error hint on an unterminated string
+    # (nooa.errors.formatting), not always-on advice.
+    assert "neither contains nor ends with" not in text
+    assert "stdin=script" not in text

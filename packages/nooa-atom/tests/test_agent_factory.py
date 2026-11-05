@@ -81,7 +81,7 @@ async def test_the_registry_builds_a_workspace_atom_agent_by_default(workspace, 
         assert type(agent) is AtomAgent
         assert agent.cwd == workspace.resolve()
         assert agent.llm is llm
-        assert agent.libs._path == workspace / ".nooa" / "libs"
+        assert agent.skill_writing._path == workspace / ".nooa" / "skills"
         # configure_session_skills ran: the MCP servers and workspace settings.
         assert "nooa.workspace_settings" in agent.skills.activated()
         assert agent.skills.mcp.project_dir == workspace.resolve() / ".nooa"
@@ -168,7 +168,7 @@ async def test_a_kwargs_forwarding_subclass_gets_the_real_workspace(workspace):
     try:
         assert type(agent).__name__ == "ForwardingAgent"
         assert agent.cwd == workspace.resolve()
-        assert agent.libs._path == workspace / ".nooa" / "libs"
+        assert agent.skill_writing._path == workspace / ".nooa" / "skills"
     finally:
         await _close(agent)
 

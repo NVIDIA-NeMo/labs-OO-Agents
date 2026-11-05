@@ -22,6 +22,7 @@ import contextvars
 import inspect
 import json
 import logging
+import re
 import types
 import typing
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
@@ -68,7 +69,14 @@ from nooa.runtime.hooks import call_after_hook, call_before_hook
 from nooa.runtime.sandbox.errors import SandboxExecutionError
 from nooa.strategies._completion_guard import completion_binding_errors
 from nooa.strategies.base import RuntimeServices, build_sampling_kwargs
-from nooa.strategies.codeact_errors import format_validation_error
+from nooa.strategies.codeact_errors import (
+    ReturnForm,
+    format_validation_error,
+    positional_result,
+    return_alias_note,
+    return_call_hint,
+    return_doc_hint,
+)
 from nooa.strategies.composite import CompositeStrategy
 from nooa.strategies.generated_code import (
     ExecutionNamespaceBuilder,
@@ -203,21 +211,81 @@ def retry_text_only_response(context: TextOnlyResponseContext) -> TextOnlyRespon
     return TextOnlyResponseAction.retry(_text_only_correction(context))
 
 
+# Tool-call syntax a model wrote as text (often inside <think>), which the
+# provider did not parse into a real tool call: Hermes/Qwen-style
+# <tool_call>/<function=...>/<parameter=...>, GLM's <arg_key>/<arg_value>,
+# Anthropic-style <invoke>, and a JSON {"name": ..., "arguments": ...} object.
+_TOOL_CALL_MARKUP = re.compile(
+    r"</?tool_call>|<function=|<parameter=|</?arg_(?:key|value)>|<invoke\b"
+    r'|\{\s*"name"\s*:\s*"[^"]*"\s*,\s*"(?:arguments|parameters)"\s*:'
+)
+
+TEXT_ONLY_TOOL_MARKUP_NOTE = (
+    "Your reply contained a tool call written as text (inside <think>, or as "
+    "XML/markup), so it was not run. Tool calls only run when sent as real tool "
+    "calls, after your reasoning."
+)
+
+
+def text_only_tool_call_markup(text: str | None) -> str | None:
+    """Return the first tool-call markup written as text in *text*, else ``None``.
+
+    Used when a reply has no real tool call: the model may have written one
+    as text (for example inside ``<think>``) that the provider did not parse.
+    Detection only; the recovered call is never executed.
+    """
+    if not text:
+        return None
+    match = _TOOL_CALL_MARKUP.search(text)
+    return match.group(0) if match else None
+
+
+def text_only_tool_markup_note(context: TextOnlyResponseContext) -> str:
+    """The note that leads a text-only correction ("" if no tool-call markup).
+
+    Looks at the reply's content and reasoning; records
+    ``harness.text_only_tool_markup.count`` when markup is found.
+    """
+    reasoning = getattr(context.response, "reasoning", None)
+    for text in (context.content, reasoning if isinstance(reasoning, str) else None):
+        if text_only_tool_call_markup(text) is not None:
+            get_harness_metrics().text_only_tool_markup()
+            return TEXT_ONLY_TOOL_MARKUP_NOTE + " "
+    return ""
+
+
 def _text_only_correction(
     context: TextOnlyResponseContext,
     validation_error: str | None = None,
+    *,
+    python_tool: str | None = None,
 ) -> Error:
+    """The correction for a plain-text reply.
+
+    ``python_tool``: the only tool is that Python cell (``return_result`` is a
+    function inside it), as in CodeActV2; else the two-tool form.
+    """
+    method = context.call.method_name
+    if python_tool is None:
+        how = (
+            f"To finish `{method}`, call `return_result(value)`. "
+            "To do more work, call `execute_python(code)`. "
+            "Re-issue your response now as one of those tool calls."
+        )
+    else:
+        how = (
+            f"To finish `{method}`, call `{python_tool}` with `return_result(value)` inside "
+            f"the cell. To continue working, call `{python_tool}` with the next computation."
+        )
     validation_feedback = (
         f"\n\nThe attempted result was invalid:\n{validation_error}" if validation_error else ""
     )
     return Error(
         content=(
+            f"{text_only_tool_markup_note(context)}"
             "Your last reply was plain text with no tool call. It was preserved, "
             "but a bare message cannot end the turn or run code. "
-            f"To finish `{context.call.method_name}`, call `return_result(value)`. "
-            "To do more work, call `execute_python(code)`. "
-            "Re-issue your response now as one of those tool calls."
-            f"{validation_feedback}"
+            f"{how}{validation_feedback}"
         )
     )
 
@@ -308,6 +376,7 @@ class CodeActSession:
     event_manager: Any  # EventManager reference for Out[n] access
     iteration: int = 0
     error_count: int = 0
+    result_error_count: int = 0  # invalid return_result values (max_result_retries or max_retries)
     consecutive_api_errors: int = 0
     consecutive_text_only: int = 0
     length_recoveries: int = 0  # Cut-off (finish_reason=length) replies nudged so far
@@ -1398,6 +1467,29 @@ Standard Python builtins and agent instance (`self`) are available."""
             "agent's APIs."
         )
 
+    @staticmethod
+    def _return_result_alias(args: dict[str, Any], return_type: Any) -> dict[str, Any] | None:
+        """The arguments a provider ``return_result`` call gives the builtin, if it has one value.
+
+        Only for strategies whose sole tool is the Python cell: one ``result``
+        argument (the tool's shape) or one ``value`` (the builtin's parameter,
+        read as in a cell). Anything else (no argument, several fields) still
+        gets the unknown-tool feedback. Pure: the caller counts the alias.
+        """
+        if list(args) == ["result"]:
+            return args
+        if list(args) == ["value"]:
+            return positional_result(args, return_type) or args
+        return None
+
+    def _alias_note(self, args: dict[str, Any], *, valid: bool) -> str:
+        if "result" in args:
+            return return_alias_note(self._python_tool_name(), args["result"], valid=valid)
+        # ``value`` is the return type's own field: the call ran as return_result(value=x).
+        return return_alias_note(
+            self._python_tool_name(), args.get("value"), valid=valid, keyword="value"
+        )
+
     def _unknown_tool_feedback(
         self, tool_name: str, args: dict[str, Any], runtime: RuntimeServices
     ) -> str:
@@ -1506,35 +1598,104 @@ Standard Python builtins and agent instance (`self`) are available."""
 
         # Process each tool call in order, stopping at the first error.
         # If one cell fails, subsequent cells likely depend on its output
-        # and would cascade into confusing errors.
-        for tool_call in tool_calls:
-            guard = session.loop_guard
-            if guard is None:
-                result = await self._process_one_tool_call(
+        # and would cascade into confusing errors. The calls after it still
+        # get a "Not executed" result (see _skip_remaining_tool_calls).
+        for index, tool_call in enumerate(tool_calls):
+            try:
+                result = await self._process_guarded_tool_call(
                     tool_call, runtime, builtins, session, call, return_type, llm_response_id
                 )
-                if result is not None:
-                    return result
-                continue
+            except GenerationError:
+                # An exhausted return_result ends the generation from inside
+                # this call (which records its own error result); the calls
+                # after it still need theirs, or replay drops the whole turn.
+                self._skip_remaining_tool_calls(
+                    _ToolCallsResult(), tool_calls, index, runtime, llm_response_id
+                )
+                raise
+            if result is not None:  # failed or finished: the calls after it do not run
+                return self._skip_remaining_tool_calls(
+                    result, tool_calls, index, runtime, llm_response_id
+                )
 
-            action, parsed_args = self._loop_guard_action(tool_call)
-            blocked = self._loop_guard_before(
-                guard, action, parsed_args, tool_call, runtime, llm_response_id
+        # All tool calls processed without completion or error-break
+        return _ToolCallsResult()
+
+    async def _process_guarded_tool_call(
+        self,
+        tool_call: Any,
+        runtime: RuntimeServices,
+        builtins: dict[str, Any],
+        session: CodeActSession,
+        call: "CurrentCall",
+        return_type: Any,
+        llm_response_id: str | None,
+    ) -> _ToolCallsResult | None:
+        """Run one tool call, through the session's loop guard when it has one."""
+        guard = session.loop_guard
+        if guard is None:
+            return await self._process_one_tool_call(
+                tool_call, runtime, builtins, session, call, return_type, llm_response_id
             )
-            if blocked is not None:
-                return blocked
+        action, parsed_args = self._loop_guard_action(tool_call)
+        result = self._loop_guard_before(
+            guard, action, parsed_args, tool_call, runtime, llm_response_id
+        )
+        if result is None:
             first_new = len(runtime.event_manager.keys())
             result = await self._process_one_tool_call(
                 tool_call, runtime, builtins, session, call, return_type, llm_response_id
             )
-            if result is not None and result.completed:
-                return result
-            self._loop_guard_after(guard, action, parsed_args, tool_call, runtime, first_new)
-            if result is not None:
-                return result
+            if result is None or not result.completed:
+                self._loop_guard_after(guard, action, parsed_args, tool_call, runtime, first_new)
+        return result
 
-        # All tool calls processed without completion or error-break
-        return _ToolCallsResult()
+    @staticmethod
+    def _skip_remaining_tool_calls(
+        result: _ToolCallsResult,
+        tool_calls: list[Any],
+        index: int,
+        runtime: RuntimeServices,
+        llm_response_id: str | None,
+    ) -> _ToolCallsResult:
+        """Give each call after ``tool_calls[index]`` a "Not executed" result.
+
+        The turn stops at the first failed or finishing call. Without a result
+        for every call of a response, the message builder omits that whole
+        assistant tool-call turn from replay, and the model is never told the
+        later calls did not run. Returns ``result`` unchanged.
+        """
+        remaining = tool_calls[index + 1 :]
+        if not remaining:
+            return result
+        if result.completed:
+            content = "Not executed: an earlier call in this response already finished the turn."
+        else:
+            content = (
+                f"Not executed: an earlier call in this response "
+                f"({tool_calls[index].name} call {index + 1}) failed, so nothing after it ran."
+            )
+        for skipped in remaining:
+            try:
+                args: Any = json.loads(skipped.arguments)
+            except (TypeError, ValueError):
+                args = {}
+            runtime.event_manager.add(
+                ToolCallEvent(
+                    tool_call_id=skipped.id,
+                    name=skipped.name,
+                    arguments=args if isinstance(args, dict) else {},
+                    llm_response_id=llm_response_id,
+                    result=ToolResult(
+                        tool_call_id=skipped.id,
+                        content=content,
+                        result_status=ResultStatus.ERROR,
+                    ),
+                )
+            )
+        get_harness_metrics().tool_call_skipped(len(remaining))
+        logger.debug("[CODEACT] Skipped %d tool call(s) after call %d", len(remaining), index + 1)
+        return result
 
     def _loop_guard_action(self, tool_call: Any) -> tuple[str, Any]:
         """Fingerprint a tool call from its raw arguments, valid JSON or not."""
@@ -1744,6 +1905,13 @@ Standard Python builtins and agent instance (`self`) are available."""
             )
         )
 
+        # A provider return_result call without such a tool: the builtin's arguments.
+        alias = (
+            self._return_result_alias(args, return_type)
+            if tool_call.name == "return_result" and not self._supports_return_result()
+            else None
+        )
+
         # Handle based on tool name
         if tool_call.name == self._python_tool_name():
             # Execute Python code
@@ -1767,11 +1935,25 @@ Standard Python builtins and agent instance (`self`) are available."""
                 # Task completed via inline return_result()
                 return _ToolCallsResult(completed=True, final_value=result[1])
 
-        elif tool_call.name == "return_result" and self._supports_return_result():
+        elif tool_call.name == "return_result" and (
+            self._supports_return_result() or alias is not None
+        ):
             # Return the final result
+            if alias is not None:
+                # Some models call the cell builtin as a provider tool: take its
+                # value as return_result(value) inside a cell would, and say so.
+                if "value" in args and "result" in alias:
+                    get_harness_metrics().return_result_keyword_alias("value")
+                args = alias
+                get_harness_metrics().return_result_tool_alias()
             try:
                 validated, error_msg = self._handle_return_result(
-                    runtime, args, return_type, session, call
+                    runtime,
+                    args,
+                    return_type,
+                    session,
+                    call,
+                    form="tool" if alias is None else "alias",
                 )
             except GenerationError:
                 # _handle_return_result raises GenerationError when validation
@@ -1797,21 +1979,24 @@ Standard Python builtins and agent instance (`self`) are available."""
                     arguments=corrected_args,
                     result=ToolResult(
                         tool_call_id=tool_call.id,
-                        content="Result accepted.",
+                        content="Result accepted."
+                        if alias is None
+                        else f"Result accepted. {self._alias_note(args, valid=True)}.",
                         result_status=ResultStatus.COMPLETE,
                     ),
                 )
                 logger.info("[CODEACT] Task completed successfully via return_result")
                 return _ToolCallsResult(completed=True, final_value=validated)
             # Validation error - update with error result
+            if alias is None:
+                content = f"Invalid result: {error_msg}"
+            else:  # no return_result tool exists: the hint points only at the cell form
+                content = f"{self._alias_note(args, valid=False)}\n{error_msg}"
             runtime.event_manager.update(
                 tool_call_event_id,
                 result=ToolResult(
                     tool_call_id=tool_call.id,
-                    content=f"Invalid result: {error_msg}\n"
-                    f"Please call return_result again with valid arguments. "
-                    f"Tip: if you computed the result in {self._python_tool_name()}(), you can call "
-                    f"return_result(variable) from within the code instead.",
+                    content=content,
                     result_status=ResultStatus.ERROR,
                 ),
             )
@@ -2244,8 +2429,14 @@ Standard Python builtins and agent instance (`self`) are available."""
         return_type: Any,
         session: CodeActSession,
         call: Any,
+        *,
+        form: ReturnForm = "cell",
     ) -> tuple[Any, str | None]:
         """Validate return_result arguments and return the result.
+
+        ``form``: how the call was made (``return_call_hint``): ``cell``, a
+        direct ``return_result`` ``tool`` call (JSON arguments), or an ``alias``
+        provider call taken as the cell builtin (there is no such tool).
 
         Pure validation - does NOT update ToolCallEvent.result. Caller is responsible
         for updating the ToolCallEvent with the result when return_result is called
@@ -2394,22 +2585,38 @@ Standard Python builtins and agent instance (`self`) are available."""
             json.JSONDecodeError,
         ) as e:
             exception = e
-            get_harness_metrics().validation_error(type(e).__name__, str(e)[:500])
-            session.record_error()
+            metrics = get_harness_metrics()
+            metrics.validation_error(type(e).__name__, str(e)[:500])
             # Pass actual value for better "Got: {...}" error messages
             actual_value = normalized_args.get("result") if normalized_args else None
             error_msg = format_validation_error(
                 e, return_type, actual_value, runtime.truncation_config
             )
+            if not isinstance(e, InvariantError):
+                call_hint = return_call_hint(return_type, form, self._python_tool_name())
+                doc_hint = return_doc_hint(return_type, session.session_locals)
+                if call_hint and doc_hint:
+                    call_hint = f"{call_hint}\n{doc_hint}"
+                if call_hint:
+                    error_msg = f"{error_msg}\n{call_hint}"
             logger.debug(f"[CODEACT] return_result validation failed: {e}")
 
-            if session.is_exhausted():
+            # Invalid results have their own budget; they are retryable cell
+            # errors, so they do not count toward the session's error_count.
+            session.result_error_count += 1
+            attempts = session.result_error_count
+            budget = self.config.max_result_retries or session.max_retries
+            if attempts >= budget:
                 raise GenerationError(
-                    f"return_result validation failed after {session.max_retries} attempts.\n"
+                    f"return_result validation failed after {attempts} attempts.\n"
                     f"Last error:\n{error_msg}"
                 ) from e
 
-            return (None, error_msg)
+            # Offered back to the model as a cell error it can retry on.
+            metrics.return_result_invalid(type(e).__name__)
+            # The alias form's hint already says how to finish (in the cell).
+            fix = "" if form == "alias" else ": fix the value and call return_result again"
+            return (None, f"{error_msg}\nThe turn goes on{fix} (attempt {attempts} of {budget}).")
 
         except BaseException as error:
             exception = error
@@ -3590,9 +3797,12 @@ Standard Python builtins and agent instance (`self`) are available."""
                     raise _ReturnResultSignal(result=result)
                 # Single positional argument - treat as the 'result' field
                 raise _ReturnResultSignal(result={"result": list(args)[0]})
-            else:
-                # Keyword arguments - pass as-is
-                raise _ReturnResultSignal(result=kwargs)
+            # return_result(value=x) is return_result(x) unless value is a field;
+            # other keyword arguments (result= included) pass as-is.
+            positional = positional_result(kwargs, call.return_type)
+            if positional is not None:
+                get_harness_metrics().return_result_keyword_alias("value")
+            raise _ReturnResultSignal(result=positional or kwargs)
 
         # Start with module context (imports, type definitions)
         agent_module = inspect.getmodule(type(runtime.agent))

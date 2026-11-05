@@ -39,7 +39,7 @@ def _old_session(workspace, agent_name="CodingAgent", working_directory=None):
             llm=FakeLLMClient([]),
             storage=handle.storage,
             cwd=workspace,
-            libs_dir=workspace / ".nooa" / "libs",
+            libs_dir=workspace / ".nooa" / "skills",
         )
         agent.todo.add(_TODO)
         handle.storage.save_snapshot(agent)

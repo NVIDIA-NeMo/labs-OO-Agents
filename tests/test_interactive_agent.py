@@ -76,10 +76,15 @@ def test_vars_property_documents_supported_attribute_usage(agent):
     assert "Store serializable values" in text
 
 
-def test_vars_proxy_item_assignment_names_the_attribute_form(agent):
-    with pytest.raises(TypeError, match=r"write self\.v\.cursor = \.\.\. instead"):
-        agent.v["cursor"] = 3
+def test_vars_proxy_item_access_is_the_attribute_store(agent):
+    agent.v["cursor"] = 3
+    assert agent.v.cursor == 3 and agent.v["cursor"] == 3 and agent.vars["cursor"] == 3
+    del agent.v["cursor"]
     assert "cursor" not in agent.vars
+    with pytest.raises(KeyError):
+        _ = agent.v["cursor"]
+    with pytest.raises(TypeError, match="var names are str"):
+        agent.v[1] = 3
 
 
 def test_message_records_event_and_renders(agent):
@@ -130,6 +135,13 @@ def test_need_input_reason_is_optional():
     assert NeedInput(question="Which branch?").reason is None
     asked = NeedInput(question="Which branch?", reason="Pushing to the wrong one is hard to undo.")
     assert asked.reason == "Pushing to the wrong one is hard to undo."
+
+
+def test_need_input_accepts_an_explanation_like_done_and_waiting():
+    asked = NeedInput(question="Which branch?", explanation="blocked on the branch")
+    assert asked.explanation == "blocked on the branch"
+    assert NeedInput(question="Which branch?", explanation=" ").explanation is None
+    assert NeedInput(question="Which branch?").explanation is None
 
 
 @pytest.mark.parametrize(

@@ -16,7 +16,7 @@ import time
 import tokenize
 import types
 import warnings
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import datetime
@@ -33,7 +33,7 @@ from nooa.context_blocks import (
 from nooa.context_blocks.scoped import _scoped_blocks_var, _scoped_events_var
 
 if TYPE_CHECKING:
-    from nooa.config.truncation_config import TruncationConfig
+    from nooa.config.truncation_config import CaptureConfig, TruncationConfig
     from nooa.context_blocks.models import ContextWindowStats
     from nooa.decisions import (
         DecisionRequest,
@@ -54,6 +54,7 @@ from nooa.events import (
     SystemPrompt,
 )
 from nooa.llm_types import LLMUsage
+from nooa.runtime.cell_deadline import run_with_deadline
 from nooa.runtime.context_vars import (
     _current_event_format_var,
     _in_exec_middleware,
@@ -129,6 +130,7 @@ def _make_llm_metrics_bridge(hm: "HarnessMetrics") -> Callable[[str, Any], None]
         "reasoning_as_structured_output": lambda _: hm.record_reasoning_as_structured_output(),
         "token_usage": _handle_token_usage,
         "llm_queue": lambda detail: hm.record_llm_queue(detail),
+        "media_rejected_retry": lambda kind: hm.media_rejected_retry(kind),
     }
 
     def bridge(event: str, detail: Any = None) -> None:
@@ -215,6 +217,16 @@ _ARCHIVE_TARGET_UTILIZATION = 0.60
 # Cold-start chars→tokens ratio (~4 chars per token) used before any provider
 # response has calibrated _tokens_per_char from real usage.
 _DEFAULT_TOKENS_PER_CHAR = 0.25
+
+
+def _image_block_count(event: Any) -> int:
+    """The image content blocks (``image_url``) an event sends to the model."""
+    images = getattr(event, "images", None)
+    if not isinstance(images, list):
+        return 0
+    return sum(
+        1 for block in images if isinstance(block, dict) and block.get("type") == "image_url"
+    )
 
 
 def _collapse_oldest(
@@ -554,13 +566,10 @@ def _rewrite_never_awaited_warnings(text: str, agent: Any = None) -> str:
     return _NEVER_AWAITED_RE.sub(hint, text)
 
 
-def _make_capture_buffer(
-    limit: int, tail_chars: int | None, file_backed: bool
-) -> TruncatingStringIO:
-    """Create a stdout/stderr capture buffer, optionally file-backed."""
-    if file_backed:
-        return FileBackedTruncatingStringIO(limit=limit, tail_chars=tail_chars)
-    return TruncatingStringIO(limit=limit, tail_chars=tail_chars)
+def _make_capture_buffer(limit: int, capture: "CaptureConfig") -> TruncatingStringIO:
+    """Create a stdout/stderr capture buffer, file-backed if ``capture`` says so."""
+    kind = FileBackedTruncatingStringIO if capture.file_backed else TruncatingStringIO
+    return kind(limit=limit, tail_chars=capture.tail, unrecoverable_hint=capture.unrecoverable_hint)
 
 
 def _extract_captured_locals(exec_globals: dict[str, Any]) -> dict[str, Any]:
@@ -658,6 +667,8 @@ class ActorRuntime:
         """
         # Agent instance
         self.agent: Any = agent
+        # A provider's per-request image limit, once a request was refused for it.
+        self._request_image_limit: int | None = None
 
         # Lock for generation serialization (only one LLM generation session at a time)
         self._generation_lock = asyncio.Lock()
@@ -818,6 +829,119 @@ class ActorRuntime:
             if isinstance(hm, HarnessMetrics):
                 hm.context_limits_events_collapsed += n_to_archive
                 hm.context_limits_tokens_archived += int(n_to_archive * avg_event_tok)
+
+    def _collapse_images_over_limit(self, limit: int) -> int:
+        """Keep the newest ``limit`` images in the active events; collapse older image events.
+
+        Each image-bearing event (a ``Task`` or ``PythonOutput`` with image
+        blocks) older than the newest ``limit`` images is collapsed on its
+        own. Only its images go: the summary carries the event's text (the
+        cell's printed output, the task prompt) followed by a short note in
+        place of the images, and the original stays readable at
+        ``self.events["<tag>"]``. Returns the number collapsed.
+        """
+        from nooa.agentdoc import pformat
+
+        em = self.event_manager
+        # Only the events this request renders (the query _phase_events applies):
+        # an excluded event neither uses the budget nor gets collapsed.
+        query = (
+            em.get_event_query()
+            or _scoped_events_var.get()
+            or _decorator_events_var.get()
+            or getattr(self.agent, "event_query", None)
+        )
+        included = (
+            {id(e) for e in query.apply(em.values(), current_call_id=self._agent_call_id)}
+            if query
+            else None
+        )
+        bearing: list[tuple[str, int]] = []
+        events: dict[str, Any] = {}
+        for tag in em.keys():
+            try:
+                event = em[tag]
+            except Exception:  # noqa: BLE001
+                continue
+            if included is not None and id(event) not in included:
+                continue
+            count = _image_block_count(event)
+            if count:
+                bearing.append((tag, count))
+                events[tag] = event
+        kept = 0
+        to_collapse: list[str] = []
+        for tag, count in reversed(bearing):
+            if kept + count <= limit:
+                kept += count
+            else:
+                to_collapse.append(tag)
+                kept = limit  # an older, smaller event must not slip in after a skipped one
+        collapsed = 0
+        for tag in reversed(to_collapse):
+            try:
+                text = pformat(events[tag])  # images are repr=False: the event's text only
+            except Exception:  # noqa: BLE001
+                text = ""
+            summary_text = (text + "\n" if text else "") + (
+                f"[image collapsed (request image limit {limit}); "
+                f'original: self.events["{tag}"]; show it again: '
+                f'show(Image.from_url(self.events["{tag}"].images[0]["image_url"]["url"]))]'
+            )
+            try:
+                em.collapse(tag, tag, summary_text=summary_text)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("image-limit collapse failed for %s: %s", tag, exc)
+                continue
+            collapsed += 1
+        if collapsed:
+            get_harness_metrics().media_image_limit_collapsed(limit, collapsed)
+        return collapsed
+
+    async def _call_with_recovery(
+        self,
+        call: Callable[[], Awaitable[Any]],
+        rebuild: Callable[[], Awaitable[None]],
+        recover_context_window: Callable[[BaseException], bool],
+    ) -> Any:
+        """``await call()``, recovering once each from an image limit and a context-window error.
+
+        Image limit: collapse old images. Context window:
+        ``recover_context_window(exc)`` archives events and lowers the reply
+        budget (False: re-raise). Then the messages are rebuilt and the call
+        made again, so each retry is covered by the other recovery.
+        """
+        image_done = context_done = False
+        while True:
+            try:
+                return await call()
+            except Exception as exc:
+                if not image_done and self._recover_image_limit(exc):
+                    image_done = True
+                elif not context_done and _is_context_window_error(exc):
+                    context_done = True
+                    if not recover_context_window(exc):
+                        raise
+                else:
+                    raise
+                await rebuild()
+
+    def _recover_image_limit(self, exc: BaseException) -> bool:
+        """A provider's per-request image limit: remember it, collapse old images; True to retry."""
+        from nooa.unifiedllm.media_inputs import image_limit
+
+        limit = image_limit(exc)
+        if limit is None:
+            return False
+        self._request_image_limit = limit  # the session's later requests stay under it
+        if self._collapse_images_over_limit(limit) == 0:
+            return False  # nothing left to collapse: the same request would fail again
+        logger.warning(
+            "Provider image limit %d: collapsed older image events and retrying: %s",
+            limit,
+            str(exc)[:300],
+        )
+        return True
 
     @property
     def _agent_call_stack(self) -> tuple[str | None, ...]:
@@ -1137,6 +1261,9 @@ class ActorRuntime:
 
         from nooa.unifiedllm.limits import context_limits_for, reduced_reply_params
 
+        # A provider image limit learned earlier in this session: stay under it.
+        if self._request_image_limit is not None:
+            self._collapse_images_over_limit(self._request_image_limit)
         # Build messages from context + events (timers inside _build_messages).
         # No proactive clamping — recovery is error-driven. If the API rejects
         # with ContextWindowExceededError, the except handler archives events,
@@ -1265,46 +1392,48 @@ class ActorRuntime:
                     return ctx
 
                 _emit_llm_start()
+
+                async def _rebuild_middleware_messages() -> None:
+                    nonlocal _dynamic_context
+                    ctx.messages = await self._build_messages(
+                        self._current_method,
+                        call_args=self._current_call.args if self._current_call else (),
+                        call_kwargs=self._current_call.kwargs if self._current_call else {},
+                        tools=ctx.params.get("tools"),
+                        request_params=ctx.params,
+                        llm_client=ctx.client,
+                    )
+                    _dynamic_context = _snapshot_llm_request(
+                        self.event_manager, ctx.messages, current_generation_id or ""
+                    )
+
+                async def _run_middleware() -> LLMCallContext:
+                    return await em.run_middleware("llm_call", ctx, _core_llm)
+
+                def _recover_middleware_window(_cw_exc: BaseException) -> bool:
+                    # Always archive first — even if we can't reduce max_tokens,
+                    # shedding events lets the retry (or caller's next attempt) succeed.
+                    _ctx_window = _context_window_for_error(ctx.client, _cw_exc, ctx.params)
+                    self._archive_on_context_error(_ctx_window, exc=_cw_exc)
+                    _reduced = _compute_reduced_max_tokens(
+                        _cw_exc,
+                        _ctx_window,
+                        context_limits_for(ctx.client, ctx.params).reserved_output_tokens,
+                    )
+                    if _reduced is None:
+                        return False
+                    logger.warning(
+                        "context-window recovery (middleware): reducing max_tokens %s -> %d",
+                        ctx.params.get("max_tokens"),
+                        _reduced,
+                    )
+                    ctx.params = reduced_reply_params(ctx.client, ctx.params, _reduced)
+                    return True
+
                 try:
-                    try:
-                        ctx = await em.run_middleware("llm_call", ctx, _core_llm)
-                    except Exception as _cw_exc:
-                        if not _is_context_window_error(_cw_exc):
-                            raise
-                        # Always archive first — even if we can't reduce max_tokens,
-                        # shedding events lets the retry (or caller's next attempt) succeed.
-                        _ctx_window = _context_window_for_error(ctx.client, _cw_exc, ctx.params)
-                        self._archive_on_context_error(
-                            _ctx_window,
-                            exc=_cw_exc,
-                        )
-                        _reduced = _compute_reduced_max_tokens(
-                            _cw_exc,
-                            _ctx_window,
-                            context_limits_for(ctx.client, ctx.params).reserved_output_tokens,
-                        )
-                        if _reduced is None:
-                            raise
-                        logger.warning(
-                            "context-window recovery (middleware): reducing max_tokens %s -> %d",
-                            ctx.params.get("max_tokens"),
-                            _reduced,
-                        )
-                        # Re-build messages after archival so the retry sees the
-                        # reduced event store.
-                        ctx.params = reduced_reply_params(ctx.client, ctx.params, _reduced)
-                        ctx.messages = await self._build_messages(
-                            self._current_method,
-                            call_args=self._current_call.args if self._current_call else (),
-                            call_kwargs=self._current_call.kwargs if self._current_call else {},
-                            tools=ctx.params.get("tools"),
-                            request_params=ctx.params,
-                            llm_client=ctx.client,
-                        )
-                        _dynamic_context = _snapshot_llm_request(
-                            self.event_manager, ctx.messages, current_generation_id or ""
-                        )
-                        ctx = await em.run_middleware("llm_call", ctx, _core_llm)
+                    ctx = await self._call_with_recovery(
+                        _run_middleware, _rebuild_middleware_messages, _recover_middleware_window
+                    )
                 except Exception as _exc:
                     _emit_llm_end(success=False, exception_type=type(_exc).__name__)
                     raise
@@ -1343,63 +1472,57 @@ class ActorRuntime:
                 )
                 _kwargs.setdefault("prompt_cache_key", f"{self.agent._agent_id}-{_strategy_tag}")
                 _emit_llm_start()
+
+                async def _rebuild_messages() -> None:
+                    nonlocal messages, _dynamic_context
+                    messages = await self._build_messages(
+                        self._current_method,
+                        call_args=self._current_call.args if self._current_call else (),
+                        call_kwargs=self._current_call.kwargs if self._current_call else {},
+                        tools=tools,
+                        request_params=_kwargs,
+                    )
+                    _dynamic_context = _snapshot_llm_request(
+                        self.event_manager, messages, current_generation_id or ""
+                    )
+
+                async def _call_llm() -> Any:
+                    return await llm_client.acall(
+                        messages, tools=tools, output_model=output_model, **_kwargs
+                    )
+
+                def _recover_window(_cw_exc: BaseException) -> bool:
+                    nonlocal _kwargs
+                    # Always archive first — even if we can't reduce max_tokens,
+                    # shedding events lets the retry (or caller's next attempt) succeed.
+                    _ctx_window = _context_window_for_error(llm_client, _cw_exc, _kwargs)
+                    self._archive_on_context_error(_ctx_window, exc=_cw_exc)
+                    _reduced = _compute_reduced_max_tokens(
+                        _cw_exc,
+                        _ctx_window,
+                        context_limits_for(llm_client, _kwargs).reserved_output_tokens,
+                    )
+                    if _reduced is None:
+                        # Archival already ran: the caller (e.g. CodeAct) retries
+                        # with fresh messages.
+                        return False
+                    logger.warning(
+                        "context-window recovery: reducing max_tokens %s -> %d "
+                        "(prompt=%s, ctx_window=%s)",
+                        kwargs.get("max_tokens"),
+                        _reduced,
+                        _parse_prompt_tokens(_cw_exc),
+                        _ctx_window,
+                    )
+                    # _kwargs keeps the per-(agent, strategy) cache key, so the
+                    # retry lands on the same shard as the original attempt.
+                    _kwargs = reduced_reply_params(llm_client, _kwargs, _reduced)
+                    return True
+
                 try:
-                    try:
-                        response = await llm_client.acall(
-                            messages,
-                            tools=tools,
-                            output_model=output_model,
-                            **_kwargs,
-                        )
-                    except Exception as _cw_exc:
-                        if not _is_context_window_error(_cw_exc):
-                            raise
-                        # Always archive first — even if we can't reduce max_tokens,
-                        # shedding events lets the retry (or caller's next attempt) succeed.
-                        _ctx_window = _context_window_for_error(llm_client, _cw_exc, _kwargs)
-                        self._archive_on_context_error(
-                            _ctx_window,
-                            exc=_cw_exc,
-                        )
-                        _reduced = _compute_reduced_max_tokens(
-                            _cw_exc,
-                            _ctx_window,
-                            context_limits_for(llm_client, _kwargs).reserved_output_tokens,
-                        )
-                        if _reduced is None:
-                            # Can't compute a reduced max_tokens, but archival already ran.
-                            # Re-raise so the caller (e.g. CodeAct) retries with fresh messages.
-                            raise
-                        logger.warning(
-                            "context-window recovery: reducing max_tokens %s -> %d "
-                            "(prompt=%s, ctx_window=%s)",
-                            kwargs.get("max_tokens"),
-                            _reduced,
-                            _parse_prompt_tokens(_cw_exc),
-                            _ctx_window,
-                        )
-                        # Re-build messages after archival so the retry sees the
-                        # reduced event store. Retrying with the same messages would
-                        # fail again when input tokens exceed the context window.
-                        _recovery_kw = reduced_reply_params(llm_client, _kwargs, _reduced)
-                        messages = await self._build_messages(
-                            self._current_method,
-                            call_args=self._current_call.args if self._current_call else (),
-                            call_kwargs=self._current_call.kwargs if self._current_call else {},
-                            tools=tools,
-                            request_params=_recovery_kw,
-                        )
-                        _dynamic_context = _snapshot_llm_request(
-                            self.event_manager, messages, current_generation_id or ""
-                        )
-                        # Reuse _kwargs (already has the per-(agent, strategy) key set)
-                        # so recovery lands on the same shard as the original attempt.
-                        response = await llm_client.acall(
-                            messages,
-                            tools=tools,
-                            output_model=output_model,
-                            **_recovery_kw,
-                        )
+                    response = await self._call_with_recovery(
+                        _call_llm, _rebuild_messages, _recover_window
+                    )
                 except Exception as _exc:
                     _emit_llm_end(success=False, exception_type=type(_exc).__name__)
                     raise
@@ -1768,16 +1891,9 @@ class ActorRuntime:
                 stdout_buffer, stderr_buffer = capture_scope.stdout, capture_scope.stderr
                 media_buffer = capture_scope.media
             else:
-                stdout_buffer = _make_capture_buffer(
-                    limit=truncation_config.capture.max_stdout,
-                    tail_chars=truncation_config.capture.tail,
-                    file_backed=truncation_config.capture.file_backed,
-                )
-                stderr_buffer = _make_capture_buffer(
-                    limit=truncation_config.capture.max_stderr,
-                    tail_chars=truncation_config.capture.tail,
-                    file_backed=truncation_config.capture.file_backed,
-                )
+                capture = truncation_config.capture
+                stdout_buffer = _make_capture_buffer(capture.max_stdout, capture)
+                stderr_buffer = _make_capture_buffer(capture.max_stderr, capture)
                 stdout_token = _stdout_buffer_var.set(stdout_buffer)
                 stderr_token = _stderr_buffer_var.set(stderr_buffer)
                 # Block stdin reads for this async task (prevents hangs from input(), etc.)
@@ -1878,7 +1994,7 @@ class ActorRuntime:
                     if timeout is None:
                         result_value = await run_owned_cell()
                     else:
-                        result_value = await asyncio.wait_for(run_owned_cell(), timeout=timeout)
+                        result_value = await run_with_deadline(run_owned_cell(), timeout)
                     if has_explicit_return or (implicit_return_added and result_value is not None):
                         returned_value = result_value
                 elif wrap_in_function:
@@ -1942,13 +2058,7 @@ class ActorRuntime:
                     coro = exec_globals["__repl_wrapper__"]()
                     with agent_async_safety_context():
                         if timeout is not None:
-                            try:
-                                result_value = await asyncio.wait_for(coro, timeout=timeout)
-                            except TimeoutError:
-                                raise TimeoutError(
-                                    f"Code execution timed out after {timeout} seconds. "
-                                    "Check for infinite loops or blocking operations."
-                                ) from None
+                            result_value = await run_with_deadline(coro, timeout)
                         else:
                             result_value = await coro
 
@@ -2048,13 +2158,7 @@ class ActorRuntime:
                             coro = exec_globals["__wrapper__"]()
                             with agent_async_safety_context():
                                 if timeout is not None:
-                                    try:
-                                        await asyncio.wait_for(coro, timeout=timeout)
-                                    except TimeoutError:
-                                        raise TimeoutError(
-                                            f"Code execution timed out after {timeout} seconds. "
-                                            "Check for infinite loops or blocking operations."
-                                        ) from None
+                                    await run_with_deadline(coro, timeout)
                                 else:
                                     await coro
                         else:

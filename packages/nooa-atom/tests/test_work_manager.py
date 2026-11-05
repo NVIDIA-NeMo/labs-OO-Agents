@@ -884,3 +884,167 @@ async def test_work_that_swallows_cancel_ends_done_without_notice(setup):
     await job.cancel()
     assert job.status == "done" and await job == "finished anyway"
     assert channel.snapshot() == []  # cancelled by its owner: no event
+
+
+# ---- built-in work: after / every -------------------------------------------------
+
+
+async def _event(channel, timeout: float = 5.0):
+    return await asyncio.wait_for(channel.get(), timeout)
+
+
+async def test_after_delivers_done_after_the_delay(setup):
+    manager, channel = setup
+    loop = asyncio.get_running_loop()
+    start = loop.time()
+    job = manager.after(0.2, name="reading")
+    assert job.name == "reading" and job.status == "running"
+    assert "timer: 0.2 s" in job.summary
+    event = await _event(channel)
+    elapsed = loop.time() - start
+    assert (event.name, event.kind, event.value) == ("reading", "done", None)
+    assert 0.18 <= elapsed < 2.0
+    assert job.status == "done"
+
+
+async def test_after_can_be_awaited_and_cancelled(setup):
+    manager, channel = setup
+    assert await manager.after(0) is None
+    job = manager.after(30, name="later")
+    await job.cancel()
+    assert job.status == "cancelled"
+    await settle()
+    assert channel.qsize() == 0  # the owner cancelled it: no event
+
+
+async def test_timers_follow_the_launch_name_rules(setup):
+    manager, _ = setup
+    with pytest.raises(ValueError, match="not valid"):
+        manager.after(1, name="bad name")
+    manager.after(30, name="t")
+    with pytest.raises(ValueError, match="is running"):
+        manager.every(1, name="t")
+    for bad in (-1, float("nan"), float("inf")):
+        with pytest.raises(ValueError):
+            manager.after(bad)
+    with pytest.raises(ValueError):
+        manager.every(0)
+    with pytest.raises(TypeError):
+        manager.after("120")
+    with pytest.raises(TypeError):
+        manager.every(True)
+
+
+async def test_every_ticks_until_cancelled(setup):
+    manager, channel = setup
+    job = manager.every(0.05, name="poll")
+    first = await _event(channel)
+    second = await _event(channel)
+    assert (first.kind, first.value, second.value) == ("item", 1, 2)
+    await job.cancel()
+    await settle()
+    assert job.status == "cancelled" and channel.qsize() == 0
+
+
+async def test_unread_ticks_merge_into_one(setup):
+    manager, channel = setup
+    job = manager.every(0.02, name="poll")
+    await asyncio.sleep(0.3)  # about 15 ticks, nobody reading
+    assert channel.qsize() == 1
+    event = await _event(channel)
+    assert event.value >= 5 and event.dropped == event.value - 1
+    await job.cancel()
+
+
+async def test_every_late_wake_up_yields_the_latest_due_tick(monkeypatch):
+    # The first sleep wakes 0.35 s in although only 0.1 s was asked for:
+    # three ticks are due by then, so the timer says 3, not 1.
+    clock = [100.0]
+
+    async def late_sleep(seconds):
+        clock[0] += 0.35 if clock[0] == 100.0 else seconds
+
+    monkeypatch.setattr(work_manager.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(work_manager.asyncio, "sleep", late_sleep)
+    ticks = work_manager._every(0.1)
+    assert [await anext(ticks), await anext(ticks)] == [3, 4]
+    await ticks.aclose()
+
+
+async def test_after_returns_what_fn_returns_sync_or_async(setup):
+    manager, channel = setup
+    assert await manager.after(0, lambda: "Check the training loss.") == "Check the training loss."
+
+    async def status():
+        await asyncio.sleep(0)
+        return {"ci": "green"}
+
+    job = manager.after(0.01, status, name="ci")
+    event = await _event(channel)
+    assert (event.name, event.kind, event.value) == ("ci", "done", {"ci": "green"})
+    assert job.result == {"ci": "green"}
+
+
+async def test_after_fails_with_what_fn_raises(setup):
+    manager, channel = setup
+
+    def broken():
+        raise RuntimeError("no such run")
+
+    job = manager.after(0, broken, name="check")
+    event = await _event(channel)
+    assert (event.kind, event.value) == ("failed", "RuntimeError: no such run")
+    assert job.status == "failed"
+    with pytest.raises(RuntimeError, match="no such run"):
+        await job
+
+
+async def test_every_delivers_fn_results_and_exceptions_and_goes_on(setup):
+    manager, channel = setup
+    calls = []
+
+    async def check():
+        calls.append(1)
+        if len(calls) == 2:
+            raise ValueError("flaky")
+        return len(calls)
+
+    job = manager.every(0.05, check, name="status")
+    values = [(await _event(channel)).value for _ in range(3)]
+    await job.cancel()
+    assert values[0] == 1 and values[2] == 3
+    assert isinstance(values[1], ValueError) and str(values[1]) == "flaky"
+    assert job.status == "cancelled"
+
+
+async def test_every_with_a_sync_fn_keeps_only_the_newest_unread_item(setup):
+    manager, channel = setup
+    calls = []
+    job = manager.every(0.02, lambda: calls.append(1) or f"call {len(calls)}", name="poll")
+    await asyncio.sleep(0.3)  # many ticks, nobody reading
+    assert channel.qsize() == 1
+    event = await _event(channel)
+    await job.cancel()
+    assert event.value == f"call {event.dropped + 1}" and event.dropped >= 4
+
+
+async def test_timers_refuse_a_fn_that_is_not_callable(setup):
+    manager, channel = setup
+    with pytest.raises(TypeError, match=r"self\.jobs\.after\(seconds, fn\) takes a function"):
+        manager.after(5, "Check the training loss.")
+    with pytest.raises(TypeError, match=r"self\.jobs\.every\(seconds, fn\) takes a function"):
+        manager.every(5, 42)
+    await settle()
+    assert manager.running() == [] and channel.qsize() == 0
+
+
+async def test_every_can_be_read_with_async_for(setup):
+    manager, _ = setup
+    job = manager.every(0.01)
+    seen = []
+    async for tick in job:
+        seen.append(tick)
+        if len(seen) == 3:
+            break
+    assert seen == [1, 2, 3]
+    await job.cancel()

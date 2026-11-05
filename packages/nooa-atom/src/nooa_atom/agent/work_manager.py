@@ -398,6 +398,7 @@ class Job:
         self._reader_ref: weakref.ref[_Reader] | None = None  # weak: a dropped reader detaches
         self._unread: deque[JobEvent] = deque()  # its item events possibly still in the outbox
         self._dropped = 0  # carried into the next event
+        self._coalesce = False  # every(): an unread item is replaced by the next
         self.dropped = 0
         self._scratch: tuple[Path, int, int] | None = None
         # Resources.
@@ -784,6 +785,10 @@ class Job:
         if self._silent:
             return  # cancelled by its owner: nothing more is delivered
         outbox = self._manager._outbox
+        if self._coalesce and self._unread and outbox.remove(self._unread[-1]):
+            replaced = self._unread.pop()
+            self._dropped += 1 + replaced.dropped
+            self.dropped += 1
         while len(self._unread) >= self._manager.max_items:
             oldest = self._unread.popleft()
             if outbox.remove(oldest):
@@ -863,6 +868,11 @@ class Job:
                     # The outcome was handed to this await, which will not see it.
                     self._handoff.discard(future)
                     self._requeue()
+                told = self._manager._on_wait_cancelled
+                if told is not None and _current.get() is None and self._status == "running":
+                    # Only this await ends: the job runs on and delivers its event.
+                    with contextlib.suppress(Exception):
+                        told(self)
                 raise
             self._handoff.discard(future)
             self._consumed = True
@@ -950,6 +960,76 @@ def _remove_owned(owned: tuple[Path, int, int] | None) -> None:
     shutil.rmtree(path, ignore_errors=True)  # does not follow symlinks inside
 
 
+# ---- built-in work: timers ------------------------------------------------------
+
+
+def _seconds(value: Any, *, zero_ok: bool) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(f"seconds must be a number, got {value!r}")
+    if not math.isfinite(value) or value < 0 or (value == 0 and not zero_ok):
+        need = "zero or more" if zero_ok else "more than zero"
+        raise ValueError(f"seconds must be finite and {need}, got {value!r}")
+    return float(value)
+
+
+def _clock(seconds_from_now: float) -> str:
+    return time.strftime("%H:%M:%S", time.localtime(time.time() + seconds_from_now))
+
+
+def _check_fn(fn: Any, method: str) -> None:
+    if fn is not None and not callable(fn):
+        call = f"self.jobs.{method}"
+        raise TypeError(
+            f"{call}(seconds, fn) takes a function (or nothing) after seconds, got "
+            f'{type(fn).__name__}; e.g. {call}(600, lambda: "text")'
+        )
+
+
+async def _call(fn: Any) -> Any:
+    value = fn()
+    if inspect.isawaitable(value):
+        value = await value
+    return value
+
+
+async def _after(seconds: float, fn: Any = None) -> Any:
+    await asyncio.sleep(seconds)
+    if fn is None:
+        return None
+    return await _call(fn)
+
+
+async def _every(seconds: float, fn: Any = None):
+    async for tick in _ticks(seconds):
+        if fn is None:
+            yield tick
+            continue
+        try:
+            value = await _call(fn)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # delivered as this tick's item; the timer goes on
+            value = exc
+        yield value
+
+
+async def _ticks(seconds: float):
+    start = time.monotonic()
+    tick = 0
+    while True:
+        tick += 1
+        # Fixed schedule: no drift; a late wake-up skips the ticks it missed.
+        due = start + tick * seconds
+        now = time.monotonic()
+        if due < now:
+            tick = int((now - start) // seconds) + 1
+            due = start + tick * seconds
+        await asyncio.sleep(due - now)
+        # The wake-up itself may be late: yield the latest tick that is due.
+        tick = max(tick, int((time.monotonic() - start) // seconds))
+        yield tick
+
+
 class WorkManager:
     """``job = self.jobs.launch(work, name="tests")`` starts work without waiting.
 
@@ -959,6 +1039,7 @@ class WorkManager:
     else a JobEvent in the next turn's ``notification["jobs"]``. Jobs outlive
     turns: return ``Waiting(on=[name])`` while they run; cancel unneeded work.
     Names: letters, digits, ``_`` or ``-``; requests are ``<name>#1``, ``<name>#2``...
+    Built in, as launch(): ``after(s, fn)`` calls fn once after s seconds; ``every(s, fn)`` calls it every s seconds (fn optional).
     """
 
     __nosnapshot__ = True
@@ -978,6 +1059,7 @@ class WorkManager:
         on_change: Callable[[], None] | None = None,
         capture_factory: Callable[[], Any] | None = None,
         launch_info: Callable[[Any, str], dict[str, str]] | None = None,
+        on_wait_cancelled: Callable[[Job], None] | None = None,
     ) -> None:
         """A manager whose undelivered events go to ``outbox``.
 
@@ -992,7 +1074,8 @@ class WorkManager:
         after a job starts or finishes (to keep ``records()`` saved with a
         snapshot). ``launch_info(work, kind)`` returns a few short strings
         about new work (where it was launched, what it is), kept with the
-        job and in its record.
+        job and in its record. ``on_wait_cancelled(job)`` is told of a running
+        job whose await outside any job was cancelled (the job runs on).
         """
         for label, value in (
             ("keep", keep),
@@ -1015,6 +1098,7 @@ class WorkManager:
         self._on_change = on_change
         self._capture_factory = capture_factory
         self._launch_info = launch_info
+        self._on_wait_cancelled = on_wait_cancelled
 
     @_public_signature
     def launch(
@@ -1026,9 +1110,22 @@ class WorkManager:
         **unexpected: Any,
     ) -> Job:
         """Start ``work`` (awaitable, async iterable or resource) and return its Job."""
+        if unexpected:
+            if inspect.iscoroutine(work):
+                work.close()
+            raise TypeError(_unexpected_launch_keywords(unexpected))
+        return self._launch(work, name=name, progress=progress)
+
+    def _launch(
+        self,
+        work: Any,
+        *,
+        name: str | None,
+        progress: Throttle | None = None,
+        summary: str = "",
+        coalesce: bool = False,
+    ) -> Job:
         try:
-            if unexpected:
-                raise TypeError(_unexpected_launch_keywords(unexpected))
             check_policy(progress)
             if self._closed:
                 raise RuntimeError("the work manager is closed")
@@ -1058,7 +1155,21 @@ class WorkManager:
             if inspect.iscoroutine(work):
                 work.close()
             raise
-        return self._start(name, work, kind, progress)
+        return self._start(name, work, kind, progress, summary=summary, coalesce=coalesce)
+
+    def after(self, seconds: float, fn: Any = None, *, name: str | None = None) -> Job:
+        """Timer: after ``seconds``, calls ``fn()`` (awaited if async); its return value is the job's done value (None without fn). A reminder for yourself: ``self.jobs.after(600, lambda: "Check the training loss; stop the run if it stopped improving.")``"""
+        seconds = _seconds(seconds, zero_ok=True)
+        _check_fn(fn, "after")
+        summary = f"timer: {seconds:g} s, due {_clock(seconds)}"
+        return self._launch(_after(seconds, fn), name=name, summary=summary)
+
+    def every(self, seconds: float, fn: Any = None, *, name: str | None = None) -> Job:
+        """Calls ``fn()`` every ``seconds`` (awaited if async) and delivers each return value as an item; an exception is delivered as that tick's item and the timer goes on; at most one unread item (the newest). Without fn, items are 1, 2, 3... Example: ``self.jobs.every(30, self.check_status, name="status")``"""
+        seconds = _seconds(seconds, zero_ok=False)
+        _check_fn(fn, "every")
+        summary = f"every {seconds:g} s"
+        return self._launch(_every(seconds, fn), name=name, summary=summary, coalesce=True)
 
     def get(self, name: str) -> Job | None:
         """The newest job with this name (a running one, else the latest finished)."""
@@ -1108,12 +1219,21 @@ class WorkManager:
     # ---- internals ----------------------------------------------------------
 
     def _start(
-        self, name: str | None, work: Any, kind: str, progress: Throttle | None = None
+        self,
+        name: str | None,
+        work: Any,
+        kind: str,
+        progress: Throttle | None = None,
+        *,
+        summary: str = "",
+        coalesce: bool = False,
     ) -> Job:
         self._next_id += 1
         job_id = self._next_id
         job = Job(self, name or f"job#{job_id}", job_id, work, kind)
         job._progress_policy = progress
+        job._summary = summary
+        job._coalesce = coalesce
         if self._launch_info is not None:
             try:
                 info = self._launch_info(work, kind)

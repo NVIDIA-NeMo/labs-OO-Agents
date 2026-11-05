@@ -95,6 +95,21 @@ def test_each_turn_method_selects_a_policy_and_its_instructions():
             assert old not in text
 
 
+def test_the_interactive_role_is_a_bulleted_block():
+    assert ROLE_INSTRUCTIONS["interactive"] == (
+        "You are working with a person, the user.\n"
+        "- After a user message, answer the user directly.\n"
+        "- As you work, keep the user up to date with self.message(): what you found, what you "
+        "decided and what comes next, in a sentence or two. Send one note for a group of "
+        "related steps, not one per command.\n"
+        "- Reply with Done(message=...): complete Markdown with outcome, evidence, risks (when "
+        "asked for an exact value or format, exactly that, with nothing added). Background "
+        "jobs may keep running.\n"
+        "- Ask with NeedInput(question=...) only when the person must answer."
+    )
+    assert "Send brief progress notes" not in ROLE_INSTRUCTIONS["interactive"]
+
+
 async def test_the_role_block_is_the_same_prefix_on_every_turn(options):
     models = AtomModels()
     models.scripts[None] = [reply("one", "first"), reply("two", "second")]

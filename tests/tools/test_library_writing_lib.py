@@ -290,6 +290,15 @@ async def test_create_writes_pyproject_and_init(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_create_text_skill_without_a_registry_is_refused(tmp_path: Path):
+    """Without a skill registry nothing loads a SKILL.md, so none is written."""
+    libs = SkillWriting(_make_agent(), path=tmp_path)
+    result = await libs.create("notes", DESCRIPTION, text="Steps.")
+    assert result.startswith("Not created")
+    assert not (tmp_path / "notes").exists()
+
+
+@pytest.mark.asyncio
 async def test_create_does_not_write_source_file(tmp_path: Path):
     """create() only scaffolds the package — no code files are written."""
     libs = SkillWriting(_make_agent(), path=tmp_path)
@@ -400,11 +409,14 @@ async def test_reload_reports_registry_failure(tmp_path: Path):
     """A reload that the registry rejects must NOT be reported as loaded."""
 
     class _FailingSkills:
-        def discover_libs(self, path):
+        def discover_libs(self, path, *, agent_written=False):
             pass
 
         def activate(self, patterns):
             pass
+
+        def loaded(self):
+            return []
 
         async def reload(self, name: str) -> str:
             return f"Reload failed for {name}: boom"
@@ -427,11 +439,14 @@ async def test_reload_reports_success(tmp_path: Path):
     """A reload the registry accepts is reported as loaded."""
 
     class _OkSkills:
-        def discover_libs(self, path):
+        def discover_libs(self, path, *, agent_written=False):
             pass
 
         def activate(self, patterns):
             pass
+
+        def loaded(self):
+            return []
 
         async def reload(self, name: str) -> str:
             return f"Reloaded {name} (self.rl_ok)"

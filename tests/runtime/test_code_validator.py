@@ -2900,7 +2900,36 @@ class TestCapabilityAwareFixHints:
     @pytest.mark.parametrize("module", ["socket", "urllib.request"])
     def test_network_import_points_to_shell_run_when_available(self, module):
         message = self._error(f"import {module}", self._WithShell())
-        assert "Fix: for network access, run the command with `await self.shell.run" in message
+        assert "Fix: use `httpx.AsyncClient`" in message
+        assert "or curl: run the command with `await self.shell.run" in message
+
+    @pytest.mark.parametrize("module", ["ftplib", "smtplib"])
+    @pytest.mark.parametrize("agent", ["with_shell", None])
+    def test_non_http_network_import_is_not_pointed_at_httpx(self, module, agent):
+        message = self._error(f"import {module}", self._WithShell() if agent else None)
+        assert "httpx" not in message
+        if agent:
+            assert "Fix: curl: run the command with `await self.shell.run" in message
+        else:
+            assert "Fix:" not in message
+
+    @pytest.mark.parametrize("agent", ["with_shell", None])
+    def test_network_hint_omits_httpx_when_it_is_restricted(self, agent):
+        from nooa.runtime.restrictions import DEFAULT_BLOCKED_MODULES, RESTRICTED_MODULES
+
+        context = ValidationContext(
+            agent=self._WithShell() if agent else None,
+            blocked_modules=DEFAULT_BLOCKED_MODULES,
+            restricted_imports=RESTRICTED_MODULES,
+        )
+        with pytest.raises(ValidationError) as exc_info:
+            UnifiedCodeValidator().validate("import socket", context)
+        message = str(exc_info.value)
+        assert "httpx" not in message
+        if agent:
+            assert "Fix: curl: run the command with `await self.shell.run" in message
+        else:
+            assert "Fix:" not in message
 
     @pytest.mark.parametrize("agent", [None, _WithoutShell()])
     @pytest.mark.parametrize("code", ["import subprocess", "import socket"])
@@ -2908,7 +2937,10 @@ class TestCapabilityAwareFixHints:
         message = self._error(code, agent)
         assert "is blocked" in message
         assert "self.shell" not in message
-        assert "Fix:" not in message
+        if code == "import socket":  # an async client needs no shell
+            assert "Fix: use `httpx.AsyncClient`" in message and "curl" not in message
+        else:
+            assert "Fix:" not in message
 
     def test_sync_shell_run_is_not_advertised_as_awaitable(self):
         class SyncShell:
@@ -2948,7 +2980,10 @@ class TestCapabilityAwareFixHints:
             spec(agent, "shell", hidden=True)
         message = self._error(code, agent)
         assert "self.shell" not in message and "self.jobs" not in message
-        assert "Fix:" not in message
+        if code.startswith(("import socket", "import urllib")):  # an async client needs no shell
+            assert "Fix: use `httpx.AsyncClient`" in message and "curl" not in message
+        else:
+            assert "Fix:" not in message
 
     def test_instance_visibility_override_preserves_public_async_shell_hints(self):
         from nooa.agentdoc import spec
@@ -3116,6 +3151,33 @@ class TestCapabilityAwareFixHints:
 
     def test_time_sleep_points_to_asyncio_sleep(self):
         assert "Fix: `await asyncio.sleep(seconds)`" in self._error("time.sleep(1)")
+
+    @pytest.mark.parametrize(
+        "code",
+        ["time.sleep(1)", "import threading", "async def f():\n    return 1\nasyncio.run(f())"],
+    )
+    def test_a_stripped_asyncio_is_not_suggested(self, code):
+        import asyncio
+        import time
+
+        from nooa.runtime.restrictions import DEFAULT_BLOCKED_MODULES, RestrictionsConfig
+
+        def fix(blocked: frozenset[str], restricted: frozenset[str]) -> str:
+            # As the actor does: the same lists reach the context and the validator.
+            context = ValidationContext(
+                blocked_modules=blocked,
+                restricted_imports=restricted,
+                exec_globals={"asyncio": asyncio, "time": time},
+            )
+            config = RestrictionsConfig(blocked_modules=blocked, restricted_imports=restricted)
+            with pytest.raises(ValidationError) as exc_info:
+                UnifiedCodeValidator(restrictions=config).validate(code, context)
+            message = str(exc_info.value)
+            return message.split("Fix:", 1)[1] if "Fix:" in message else ""
+
+        base = DEFAULT_BLOCKED_MODULES | {"threading"}
+        assert fix(base | {"asyncio"}, frozenset()) == ""  # stripped from the namespace
+        assert "asyncio" in fix(base, frozenset({"asyncio"}))  # only restricted: still bound
 
     def test_hints_do_not_change_what_is_allowed(self):
         from nooa.runtime.restrictions import DEFAULT_BLOCKED_MODULES

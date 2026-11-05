@@ -26,6 +26,16 @@ from nooa_atom.agent.work_shell import Shell
 from nooa.runtime.channels import QueueManager
 
 
+@pytest.fixture(autouse=True)
+def small_shell_view(monkeypatch):
+    """Cut Shell texts at 10,000 characters here (1 MiB by default), so 20 kB is long."""
+    from nooa_atom.agent import work_shell
+
+    monkeypatch.setattr(work_shell, "_SUMMARY_BYTES", 10_000)
+    monkeypatch.setattr(work_shell, "_HEAD_BYTES", 2_500)
+    monkeypatch.setattr(work_shell, "_TAIL_BYTES", 7_500)
+
+
 class Clock:
     class Timer:
         def __init__(self, due, callback):
@@ -336,7 +346,8 @@ async def past_old_preview_deadline(gate):
 
 def assert_full_capture(result, *, out=NOISY_OUT + "TAIL", err=NOISY_ERR):
     assert result.returncode == 0 and not result.timed_out
-    assert "bytes omitted" in result.stdout and "bytes omitted" in result.stderr
+    read = "bytes omitted; full output: "
+    assert read in result.stdout and read in result.stderr
     assert Path(result.stdout_path).read_text() == out
     assert Path(result.stderr_path).read_text() == err
 

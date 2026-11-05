@@ -6,6 +6,14 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- MCP (behaviour change): a tool call whose result carries `structuredContent`
+  (most FastMCP tools with a typed return) now returns that structured value
+  as a `dict`, not the text of its first content block. FastMCP's
+  `{"result": <text>}` wrapper still comes back as the text, and an `isError`
+  result raises `MCPToolError` with the server's message. Callers that parsed
+  the old text (`json.loads(await self.srv.tool(...))`) or treated the result
+  as a `str` must use the dict directly; `json.dumps(result)` gives the old
+  JSON text.
 - `nooa-atom`: AtomAgent drops the core `<events_api>` guidance block (added on
   main for agents that expose `self.events`). `self.events` stays exposed, and
   Atom's `context_usage` block already names `self.events.collapse(...)` and

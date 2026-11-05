@@ -146,11 +146,253 @@ async def test_integer_collapse_succeeds_without_warning():
 
 
 @pytest.mark.asyncio
+async def test_a_real_return_result_tool_error_gets_the_tool_form_and_no_old_tip():
+    """With a return_result tool, the hint is the tool form (M5); the old Tip is gone."""
+    from nooa.interactive import Done, NeedInput
+    from nooa.strategies.codeact import CodeActStrategy
+
+    llm = FakeLLMClient(
+        scripted_responses=[
+            LLMResponse(
+                parts=(ToolCall(id="bad", name="return_result", arguments='{"result": "x"}'),),
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(
+                parts=(
+                    ToolCall(
+                        id="ok",
+                        name="return_result",
+                        arguments=json.dumps({"result": {"explanation": "done"}}),
+                    ),
+                ),
+                finish_reason="tool_calls",
+            ),
+        ]
+    )
+
+    class TestAgent(Agent, llm=llm):
+        @strategy(CodeActStrategy(config=CodeActConfig(prefill=None)))
+        async def answer(self) -> Done | NeedInput:
+            """Return the answer."""
+            ...
+
+    agent = TestAgent()
+    try:
+        assert await agent.answer() == Done(explanation="done")
+        [bad] = [
+            event.result.content
+            for event in agent.runtime.event_manager.all_events()
+            if isinstance(event, ToolCallEvent) and event.tool_call_id == "bad" and event.result
+        ]
+    finally:
+        await agent.aclose()
+    assert bad.startswith("Invalid result: ")
+    assert (
+        "In execute_python code, call it as one of: return_result(Done(explanation=...)), "
+        "return_result(NeedInput(question=...)). As a direct return_result tool call, pass "
+        'JSON arguments: {"result": {"explanation": ...}} or {"result": {"question": ...}}.'
+    ) in bad
+    assert bad.endswith(
+        "The turn goes on: fix the value and call return_result again (attempt 1 of 3)."
+    )
+    assert "Tip:" not in bad and "Please call return_result again" not in bad
+
+
+@pytest.mark.asyncio
+async def test_invalid_results_have_their_own_budget_and_say_the_attempt():
+    """One budget (H3): invalid results count on their own, not toward max_retries' errors."""
+
+    def cell(code: str, call_id: str) -> LLMResponse:
+        return LLMResponse(
+            parts=(ToolCall(id=call_id, name="python_cell", arguments=json.dumps({"code": code})),),
+            finish_reason="tool_calls",
+        )
+
+    llm = FakeLLMClient(
+        scripted_responses=[
+            cell("return_result('not a number')", "r1"),
+            cell("1 / 0", "e1"),
+            cell("return_result('still not')", "r2"),
+            cell("1 / 0", "e2"),
+            cell("return_result(42)", "ok"),
+        ]
+    )
+
+    class TestAgent(Agent, llm=llm):
+        @strategy(CodeActV2(config=CodeActConfig(prefill=None, max_retries=3)))
+        async def answer(self) -> int:
+            """Return the answer."""
+            ...
+
+    agent = TestAgent()
+    try:
+        # Before: 2 invalid results + 2 cell errors = 4 errors >= max_retries 3.
+        assert await agent.answer() == 42
+        rendered = str(llm.last_messages)
+    finally:
+        await agent.aclose()
+    attempt = "The turn goes on: fix the value and call return_result again (attempt {} of 3)."
+    assert attempt.format(1) in rendered and attempt.format(2) in rendered
+
+
+@pytest.mark.asyncio
+async def test_provider_return_result_value_is_the_field_when_the_type_has_one():
+    """As in a cell, value= is the return type's field when it has one (one rule, H2)."""
+    from pydantic import BaseModel
+
+    class Scored(BaseModel):
+        value: int
+
+    llm = FakeLLMClient(
+        scripted_responses=[
+            LLMResponse(
+                parts=(ToolCall(id="a", name="return_result", arguments='{"value": 7}'),),
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(
+                parts=(ToolCall(id="b", name="return_result", arguments='{"value": 8}'),),
+                finish_reason="tool_calls",
+            ),
+        ]
+    )
+
+    class TestAgent(Agent, llm=llm):
+        @strategy(CodeActV2(config=CodeActConfig(prefill=None)))
+        async def answer(self) -> Scored:
+            """Return the answer."""
+            ...
+
+    agent = TestAgent()
+    try:
+        assert await agent.answer() == Scored(value=7)  # the first call, not a retry
+    finally:
+        await agent.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("key", ["value", "result"])
+async def test_provider_return_result_with_one_value_finishes_like_the_builtin(key, monkeypatch):
+    """Nemotron/GLM call return_result as a provider tool: take its value, validated."""
+    from nooa.runtime.harness_metrics import HarnessMetrics
+
+    flushed: list[dict] = []
+    real_flush = HarnessMetrics.flush_to_span
+
+    def flush(self):
+        flushed.append(self.to_span_attributes())
+        real_flush(self)
+
+    monkeypatch.setattr(HarnessMetrics, "flush_to_span", flush)
+    llm = FakeLLMClient(
+        scripted_responses=[
+            LLMResponse(
+                parts=(ToolCall(id="bad", name="return_result", arguments=json.dumps({key: "x"})),),
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(
+                parts=(ToolCall(id="ok", name="return_result", arguments=json.dumps({key: 42})),),
+                finish_reason="tool_calls",
+            ),
+        ]
+    )
+
+    class TestAgent(Agent, llm=llm):
+        @strategy(CodeActV2(config=CodeActConfig(prefill=None)))
+        async def answer(self) -> int:
+            """Return the answer."""
+            ...
+
+    agent = TestAgent()
+    try:
+        assert await agent.answer() == 42
+        rendered = str(llm.last_messages)
+        # The same validation and retry as the builtin, in the alias wording.
+        assert "and that value isn't a valid result:" in rendered
+        assert "Invalid result" not in rendered
+        assert "Unknown tool" not in rendered
+        assert [tool.name for tool in llm.last_tools] == ["python_cell"]
+    finally:
+        await agent.aclose()
+    assert sum(a.get("harness.return_result_tool_alias.count", 0) for a in flushed) == 2
+
+
+@pytest.mark.asyncio
+async def test_aliased_return_result_says_how_it_was_taken_and_shows_the_cell_form():
+    """The alias says it was taken as return_result(x); an invalid value gets the cell form."""
+    from nooa.interactive import Done, NeedInput
+
+    llm = FakeLLMClient(
+        scripted_responses=[
+            LLMResponse(
+                parts=(
+                    ToolCall(
+                        id="bad",
+                        name="return_result",
+                        arguments=json.dumps({"value": "NeedInput(question='which?')"}),
+                    ),
+                ),
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(
+                parts=(
+                    ToolCall(
+                        id="ok",
+                        name="return_result",
+                        arguments=json.dumps({"result": {"explanation": "done"}}),
+                    ),
+                ),
+                finish_reason="tool_calls",
+            ),
+        ]
+    )
+
+    class TestAgent(Agent, llm=llm):
+        @strategy(CodeActV2(config=CodeActConfig(prefill=None)))
+        async def answer(self) -> Done | NeedInput:
+            """Return the answer."""
+            ...
+
+    agent = TestAgent()
+    try:
+        result = await agent.answer()
+        assert isinstance(result, Done) and result.explanation == "done"
+        results = {
+            event.tool_call_id: event.result.content
+            for event in agent.runtime.event_manager.all_events()
+            if isinstance(event, ToolCallEvent) and event.result is not None
+        }
+    finally:
+        await agent.aclose()
+    bad = results["bad"]
+    assert bad.splitlines()[0] == (
+        "return_result isn't a tool. It's a function you call inside python_cell. I ran your "
+        "call as python_cell code return_result(\"NeedInput(question='which?')\"), and that "
+        "value isn't a valid result:"
+    )
+    # The validation errors follow; the cell form comes last and no JSON arguments.
+    assert bad.splitlines()[1].startswith("return_result() failed")
+    assert bad.splitlines()[-2:] == [
+        "To finish, call python_cell with one of: "
+        "return_result(Done(explanation=...)), return_result(NeedInput(question=...)).",
+        # One budget for every agent (H3): max_retries (3) when max_result_retries is unset.
+        "The turn goes on (attempt 1 of 3).",
+    ]
+    # Done and NeedInput are not bound in this cell namespace: no doc() line.
+    assert "Fields: print(doc(" not in bad
+    assert "JSON" not in bad and '{"result"' not in bad
+    assert "Please call return_result again" not in bad
+    assert results["ok"] == (
+        "Result accepted. return_result isn't a tool. It's a function you call inside "
+        "python_cell; this call ran as return_result({'explanation': 'done'})."
+    )
+
+
+@pytest.mark.asyncio
 async def test_provider_return_result_gets_single_tool_recovery_guidance():
     llm = FakeLLMClient(
         scripted_responses=[
             LLMResponse(
-                parts=(ToolCall(id="bad", name="return_result", arguments='{"result": 42}'),),
+                parts=(ToolCall(id="bad", name="return_result", arguments='{"a": 4, "b": 2}'),),
                 finish_reason="tool_calls",
             ),
             _response("return_result(42)", "fixed"),
@@ -951,3 +1193,51 @@ async def test_never_awaited_coroutine_warning_becomes_a_one_line_hint():
         assert "was never awaited" not in output
     finally:
         await agent.aclose()
+
+
+@pytest.mark.asyncio
+async def test_aliased_return_result_shows_a_value_field_it_was_given():
+    """A return type with its own ``value`` field: the note shows return_result(value=x)."""
+    from pydantic import BaseModel
+
+    class Answer(BaseModel):
+        value: int
+
+    llm = FakeLLMClient(
+        scripted_responses=[
+            LLMResponse(
+                parts=(ToolCall(id="bad", name="return_result", arguments='{"value": "many"}'),),
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(
+                parts=(ToolCall(id="ok", name="return_result", arguments='{"value": 5}'),),
+                finish_reason="tool_calls",
+            ),
+        ]
+    )
+
+    class TestAgent(Agent, llm=llm):
+        @strategy(CodeActV2(config=CodeActConfig(prefill=None)))
+        async def answer(self) -> Answer:
+            """Return the answer."""
+            ...
+
+    agent = TestAgent()
+    try:
+        assert (await agent.answer()).value == 5
+        results = {
+            event.tool_call_id: event.result.content
+            for event in agent.runtime.event_manager.all_events()
+            if isinstance(event, ToolCallEvent) and event.result is not None
+        }
+    finally:
+        await agent.aclose()
+    assert results["bad"].splitlines()[0] == (
+        "return_result isn't a tool. It's a function you call inside python_cell. I ran your "
+        "call as python_cell code return_result(value='many'), and that value isn't a valid "
+        "result:"
+    )
+    assert results["ok"] == (
+        "Result accepted. return_result isn't a tool. It's a function you call inside "
+        "python_cell; this call ran as return_result(value=5)."
+    )

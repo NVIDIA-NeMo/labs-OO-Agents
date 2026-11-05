@@ -37,7 +37,9 @@ from nooa.unifiedllm.cache_policy import (
 from nooa.unifiedllm.media_inputs import (
     MediaInput,
     attachment_kind,
+    explicitly_rejected,
     filter_media_messages,
+    media_occurrences,
     validate_media_inputs,
 )
 
@@ -1248,6 +1250,7 @@ def _update_token_calibration(
 class UnifiedLLM(ABC):
     _registry_config: dict[str, Any] | None
     cache_breakpoint: Literal["auto", "openai", "anthropic"] | None
+    retry_config: RetryConfig | None = None  # endpoint retries; also bounds media recovery
 
     def __init__(
         self,
@@ -1269,6 +1272,9 @@ class UnifiedLLM(ABC):
             self._reasoning_config.settings(reasoning_level)
         self.reasoning_level = reasoning_level
         self.media_inputs = validate_media_inputs(media_inputs)
+        # Attachment occurrences the current connection rejected; reset when
+        # a request goes to another model or endpoint.
+        self._media_exclusions: tuple[tuple[Any, ...] | None, set[Any]] = (None, set())
         self.model = model
         self.config = config
         self._registry_config = None
@@ -1304,7 +1310,79 @@ class UnifiedLLM(ABC):
 
     def _prepare_media_messages(self, messages, call_config):
         enabled = self._request_media_inputs(call_config)
-        return filter_media_messages(messages, enabled)
+        return filter_media_messages(messages, enabled, self._rejected_media(call_config))
+
+    def _rejected_media(self, call_config: dict[str, Any]) -> set[Any]:
+        """Rejected attachment occurrences of this request's connection only."""
+        client = call_config.get("client")
+        connection = (
+            self._effective_model(call_config),
+            *(call_config.get(key) for key in ("api_base", "base_url", "custom_llm_provider")),
+            None if client is None else id(client),
+        )
+        exclusions = self._media_exclusions
+        if exclusions[0] != connection:
+            # Another model or endpoint may read what this one could not.
+            exclusions = (connection, set())
+            self._media_exclusions = exclusions
+        return exclusions[1]
+
+    def _exclude_rejected_media(
+        self, messages, kwargs: dict[str, Any], exc: Exception, staged: list[tuple[set, Any]]
+    ) -> bool:
+        """Exclude sent attachments the provider explicitly rejected, for a retry.
+
+        The first exclusion of a request takes the newest sent attachment: the
+        only one when the request carries one, and usually the one just added.
+        A provider rarely says which one it could not read, so if the retry is
+        rejected too, the next one excludes every remaining attachment of that
+        kind at once. Each exclusion is appended to ``staged``; the caller
+        drops them all again unless the request finally succeeds, so a request
+        that still fails never leaves good attachments replaced by a note.
+
+        True means the request changed and may be retried; a generic error, or
+        one with nothing left to exclude, returns False.
+        """
+        try:
+            call_config = self._prepare_call_config(kwargs)
+        except Exception:
+            return False  # The request itself is invalid; re-raise the original error.
+        rejected = self._rejected_media(call_config)
+        sent = media_occurrences(messages, self._request_media_inputs(call_config))
+        candidates = [
+            (kind, key)
+            for kind, key in reversed(sent)
+            if key not in rejected and explicitly_rejected(exc, kind)
+        ]
+        if not candidates:
+            return False
+        if staged:  # the newest was not it: the provider did not say which one
+            kind = candidates[0][0]
+            chosen = [(k, key) for k, key in candidates if k == kind]
+        else:
+            chosen = candidates[:1]
+        for kind, key in chosen:
+            rejected.add(key)
+            staged.append((rejected, key))
+            _record_llm_metric("media_rejected_retry", kind)
+        logger.warning(
+            "Provider rejected an attached %s; retrying with a note in place of %d: %s",
+            chosen[0][0],
+            len(chosen),
+            str(exc)[:300],
+        )
+        return True
+
+    def _media_recovery_attempts(self) -> int:
+        # Shares the endpoint retry budget: max_retries=0 (e.g. a connect
+        # probe, which must see the provider's own answer) disables it.
+        return max(0, self.retry_config.max_retries) if self.retry_config else 0
+
+    @staticmethod
+    def _unstage_media(staged: list[tuple[set, Any]]) -> None:
+        """The request still failed: its exclusions were not the fix, so undo them."""
+        for rejected, key in staged:
+            rejected.discard(key)
 
     def get_context_limits(
         self, overrides: dict[str, Any] | None = None, *, fallback_reserve: int = 0
@@ -1524,7 +1602,6 @@ class UnifiedLLM(ABC):
         info = self.get_model_info()
         return info.get("max_input_tokens") if info else None
 
-    @abstractmethod
     def call(
         self,
         messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
@@ -1541,15 +1618,27 @@ class UnifiedLLM(ABC):
         5. Returns everything in standardized LLMResponse
 
         Pass prior LLMResponse objects directly in messages to retain compatible state.
+        An attachment the provider explicitly rejects is retried as a note
+        (``_exclude_rejected_media``); each request is one ``_call_once``.
 
         Raises:
         - ValidationError: if output_model validation fails
         - json.JSONDecodeError: if JSON parsing fails
         - Other exceptions for API errors
         """
-        pass
+        staged: list[tuple[set, Any]] = []
+        try:
+            for _ in range(self._media_recovery_attempts()):
+                try:
+                    return self._call_once(messages, tools, output_model, **kwargs)
+                except Exception as exc:
+                    if not self._exclude_rejected_media(messages, kwargs, exc, staged):
+                        raise
+            return self._call_once(messages, tools, output_model, **kwargs)
+        except BaseException:
+            self._unstage_media(staged)
+            raise
 
-    @abstractmethod
     async def acall(
         self,
         messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
@@ -1558,7 +1647,38 @@ class UnifiedLLM(ABC):
         **kwargs,
     ) -> LLMResponse:
         """Async version of call"""
-        pass
+        staged: list[tuple[set, Any]] = []
+        try:
+            for _ in range(self._media_recovery_attempts()):
+                try:
+                    return await self._acall_once(messages, tools, output_model, **kwargs)
+                except Exception as exc:
+                    if not self._exclude_rejected_media(messages, kwargs, exc, staged):
+                        raise
+            return await self._acall_once(messages, tools, output_model, **kwargs)
+        except BaseException:
+            self._unstage_media(staged)
+            raise
+
+    @abstractmethod
+    def _call_once(
+        self,
+        messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
+        tools: list[Tool] | None = None,
+        output_model: type[BaseModel] | None = None,
+        **kwargs,
+    ) -> LLMResponse:
+        """One request; ``call`` adds media recovery around it."""
+
+    @abstractmethod
+    async def _acall_once(
+        self,
+        messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
+        tools: list[Tool] | None = None,
+        output_model: type[BaseModel] | None = None,
+        **kwargs,
+    ) -> LLMResponse:
+        """Async ``_call_once``."""
 
 
 def _collect_sync(raw: Any) -> "litellm.ModelResponse":
@@ -2008,7 +2128,7 @@ class CompletionClient(UnifiedLLM):
         client = self._http.async_client if is_async else self._http.sync_client
         return _with_sdk_retries(client, max_retries)
 
-    def call(
+    def _call_once(
         self,
         messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
         tools: list[Tool] | None = None,
@@ -2122,7 +2242,7 @@ class CompletionClient(UnifiedLLM):
             )
         return self._response_from_chat(raw_response, state_scope, tools, output_model)
 
-    async def acall(
+    async def _acall_once(
         self,
         messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
         tools: list[Tool] | None = None,
@@ -2429,7 +2549,7 @@ class ResponsesClient(UnifiedLLM):
             "strict": use_strict,
         }
 
-    def call(
+    def _call_once(
         self,
         messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
         tools: list[Tool] | None = None,
@@ -2516,7 +2636,7 @@ class ResponsesClient(UnifiedLLM):
             raw_response, state_scope, usage, output_model, native_encrypted_reasoning
         )
 
-    async def acall(
+    async def _acall_once(
         self,
         messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
         tools: list[Tool] | None = None,

@@ -124,6 +124,8 @@ class HarnessMetrics(BaseModel):
     text_only_loop_aborts_count: int = 0
     loop_guard_nudges_count: int = 0
     loop_guard_stops_count: int = 0
+    tool_call_skipped_count: int = 0
+    text_only_tool_markup_count: int = 0
     empty_response_count: int = 0
     gpt4o_double_quote_fix_count: int = 0
     gpt4o_double_quote_fix_previews: list[str] = Field(default_factory=list)
@@ -138,6 +140,17 @@ class HarnessMetrics(BaseModel):
     # ── Return Value Handling ──
     explicit_return_auto_completed: int = 0
     implicit_return_transformed: int = 0
+    # return_result(value=x) read as return_result(x) (in a cell or as a provider tool call)
+    return_result_keyword_aliases: list[str] = Field(default_factory=list)
+    # Invalid return_result values sent back as a retryable cell error; the error type
+    return_result_invalid_retries: list[str] = Field(default_factory=list)
+    # A Shell command queued behind another still running in the same Shell
+    shell_queued_behind_running: int = 0
+    # A Shell command awaited in a cell refused: the Shell runs a launched job's command
+    shell_busy_rejected: int = 0
+    # A one-shot child awaited in a cell handed to self.jobs at the cell deadline (not closed)
+    child_detached_at_deadline: int = 0
+    return_result_tool_aliases: int = 0  # provider return_result calls taken as the cell builtin
 
     # ── Error Recovery ──
     validation_errors: list[ErrorRecord] = Field(default_factory=list)
@@ -168,6 +181,12 @@ class HarnessMetrics(BaseModel):
     llm_queue_max_depth: int = 0
     llm_queue_wait: TimingStat = Field(default_factory=TimingStat)
 
+    # ── Media Recovery (from unifiedllm via callback) ──
+    # A provider rejected an attachment; retried with a note in its place (kind)
+    media_rejected_retries: list[str] = Field(default_factory=list)
+    media_image_limit_collapses: list[int] = Field(default_factory=list)  # limit M per recovery
+    media_image_limit_events_collapsed: int = 0
+
     # ── Code Execution ──
     exec_python_total: int = 0
     exec_python_success: int = 0
@@ -177,11 +196,21 @@ class HarnessMetrics(BaseModel):
     shell_variant: str = ""  # which self.shell implementation is active (bake-off tag)
     shell_failures: list[ErrorRecord] = Field(default_factory=list)
     shell_deaths: list[ErrorRecord] = Field(default_factory=list)
+    shell_cwd_fallbacks: list[str] = Field(default_factory=list)
+    shell_exit_hints: list[int] = Field(default_factory=list)
     repo_failures: list[ErrorRecord] = Field(default_factory=list)
     tool_avoidance: list[str] = Field(default_factory=list)
+    mcp_result_errors: list[str] = Field(default_factory=list)
+    # Waiting on the person (user_messages) rejected; the role whose turn did it
+    waiting_on_person_rejections: list[str] = Field(default_factory=list)
+    # LLM-facing queue reads that timed out mid-cell (channel name)
+    queue_read_timeouts: list[str] = Field(default_factory=list)
 
     # ── Code Validation ──
     missing_awaits_detected: list[str] = Field(default_factory=list)
+    name_error_hints: list[str] = Field(default_factory=list)
+    mcp_tool_name_hints: list[str] = Field(default_factory=list)
+    module_not_found_hints: list[str] = Field(default_factory=list)
     infinite_loops_detected: int = 0
     return_types_redefined: list[str] = Field(default_factory=list)
 
@@ -212,9 +241,10 @@ class HarnessMetrics(BaseModel):
         if len(lst) < _MAX_LIST_ITEMS:
             lst.append(_truncate(value, limit))
 
-    def _append_error(self, lst: list[ErrorRecord], rec: ErrorRecord) -> None:
+    def _append_item(self, lst: list[Any], item: Any) -> None:
+        """Append ``item`` unless ``lst`` is full (no truncation: records, ints)."""
         if len(lst) < _MAX_LIST_ITEMS:
-            lst.append(rec)
+            lst.append(item)
 
     # ── Convenience record methods ──────────────────────────────────
     # Method names follow a consistent pattern: match the field name
@@ -257,6 +287,14 @@ class HarnessMetrics(BaseModel):
     def loop_guard_stop(self) -> None:
         self.loop_guard_stops_count += 1
 
+    def tool_call_skipped(self, count: int = 1) -> None:
+        """Record calls of a response not run because an earlier one failed or finished."""
+        self.tool_call_skipped_count += count
+
+    def text_only_tool_markup(self) -> None:
+        """Record a text-only reply that contained a tool call written as text."""
+        self.text_only_tool_markup_count += 1
+
     def empty_response(self) -> None:
         self.empty_response_count += 1
 
@@ -290,9 +328,37 @@ class HarnessMetrics(BaseModel):
     def implicit_return(self) -> None:
         self.implicit_return_transformed += 1
 
+    def return_result_keyword_alias(self, keyword: str) -> None:
+        """return_result(value=x) was read as return_result(x)."""
+        self._append(self.return_result_keyword_aliases, keyword)
+
+    def return_result_invalid(self, error_type: str) -> None:
+        """An invalid return_result value went back to the model as a retryable error."""
+        self._append(self.return_result_invalid_retries, error_type)
+
+    def waiting_on_person_rejected(self, role: str) -> None:
+        """Waiting(on=["user_messages"]) was rejected with what to do instead."""
+        self._append(self.waiting_on_person_rejections, role)
+
+    def queue_read_timeout(self, channel: str) -> None:
+        """A cell's ``await self.<channel>.get()`` timed out with nothing queued."""
+        self._append(self.queue_read_timeouts, channel)
+
+    def shell_queued(self) -> None:
+        """A Shell command was queued behind another still running in the same Shell."""
+        self.shell_queued_behind_running += 1
+
+    def shell_busy(self) -> None:
+        """A Shell command awaited in a cell was refused behind a launched job's command."""
+        self.shell_busy_rejected += 1
+
+    def child_detached(self) -> None:
+        """A child awaited in a cell outlived the cell deadline as a job instead of being closed."""
+        self.child_detached_at_deadline += 1
+
     # Error Recovery
     def validation_error(self, error_type: str, message: str) -> None:
-        self._append_error(
+        self._append_item(
             self.validation_errors,
             ErrorRecord(error_type=_truncate(error_type), message=_truncate(message)),
         )
@@ -361,6 +427,16 @@ class HarnessMetrics(BaseModel):
         if isinstance(wait_s, int | float) and not isinstance(wait_s, bool):
             self.llm_queue_wait.record(float(wait_s))
 
+    # Media recovery (dispatched from unifiedllm callback)
+    def media_image_limit_collapsed(self, limit: int, events: int) -> None:
+        """The request's images exceeded the provider limit ``limit``; ``events`` were collapsed."""
+        self._append_item(self.media_image_limit_collapses, int(limit))
+        self.media_image_limit_events_collapsed += int(events)
+
+    def media_rejected_retry(self, kind: Any) -> None:
+        """The provider rejected an attachment; the request was retried without it."""
+        self._append(self.media_rejected_retries, str(kind or "unknown"))
+
     # Code Execution
     def exec_python(self, *, success: bool) -> None:
         self.exec_python_total += 1
@@ -370,7 +446,7 @@ class HarnessMetrics(BaseModel):
     def exec_error(
         self, error_type: str, message: str, turn: int = 0, code_preview: str = ""
     ) -> None:
-        self._append_error(
+        self._append_item(
             self.exec_errors,
             ErrorRecord(
                 error_type=_truncate(error_type),
@@ -387,7 +463,7 @@ class HarnessMetrics(BaseModel):
 
     def shell_failure(self, tool_method: str, message: str, code_preview: str = "") -> None:
         """Record a shell tool failure (non-zero exit, timeout, file not found, etc.)."""
-        self._append_error(
+        self._append_item(
             self.shell_failures,
             ErrorRecord(
                 error_type=_truncate(tool_method),
@@ -396,9 +472,20 @@ class HarnessMetrics(BaseModel):
             ),
         )
 
+    def shell_exit_hint(self, code: int) -> None:
+        """A command ended its Shell's bash itself (``exit N``, errexit); the result said so."""
+        self._append_item(self.shell_exit_hints, int(code))
+
+    def shell_cwd_fallback(self, detail: str) -> None:
+        """A restarted Shell's kept cwd was gone; bash started in its starting directory.
+
+        ``detail`` is ``<gone> -> <fallback>``.
+        """
+        self._append(self.shell_cwd_fallbacks, detail)
+
     def shell_death(self, context: str, diagnostics: str) -> None:
         """Record a bash process death event with diagnostics."""
-        self._append_error(
+        self._append_item(
             self.shell_deaths,
             ErrorRecord(
                 error_type=_truncate(context),
@@ -408,7 +495,7 @@ class HarnessMetrics(BaseModel):
 
     def repo_failure(self, tool_method: str, message: str, code_preview: str = "") -> None:
         """Record a repo tool failure (file not found, no results, timeout, etc.)."""
-        self._append_error(
+        self._append_item(
             self.repo_failures,
             ErrorRecord(
                 error_type=_truncate(tool_method),
@@ -428,6 +515,32 @@ class HarnessMetrics(BaseModel):
     # Code Validation
     def missing_await(self, method_name: str) -> None:
         self._append(self.missing_awaits_detected, method_name)
+
+    def name_error_hint(self, name: str) -> None:
+        """A cell's NameError got the pointer to the python_cell_state block."""
+        self._append(self.name_error_hints, name)
+
+    def mcp_tool_name_hint(self, call: str) -> None:
+        """A cell called an MCP tool bare or as ``self.<tool>``; the error named its server.
+
+        ``call`` is ``<server>.<tool>``.
+        """
+        self._append(self.mcp_tool_name_hints, call)
+
+    def return_result_tool_alias(self) -> None:
+        """A provider-tool ``return_result(value=...)`` call was taken as the cell builtin."""
+        self.return_result_tool_aliases += 1
+
+    def mcp_result_error(self, call: str) -> None:
+        """An MCP tool returned a structured result with an ``error`` field (not isError).
+
+        ``call`` is ``<server>.<tool>``; the tool docs say to check for this.
+        """
+        self._append(self.mcp_result_errors, call)
+
+    def module_not_found_hint(self, module: str) -> None:
+        """A cell's ModuleNotFoundError got the pointer to the task's python3 behind a Shell."""
+        self._append(self.module_not_found_hints, module)
 
     def infinite_loop(self) -> None:
         self.infinite_loops_detected += 1
@@ -646,6 +759,18 @@ _SPAN_SCHEMA: tuple[SchemaEntry, ...] = (
         lambda m: m.loop_guard_stops_count,
     ),
     SchemaEntry(
+        "harness.tool_call_skipped.count",
+        "Tool calls not run after an earlier call failed or finished",
+        "Response Format Fixups",
+        lambda m: m.tool_call_skipped_count,
+    ),
+    SchemaEntry(
+        "harness.text_only_tool_markup.count",
+        "Text-only replies with a tool call written as text",
+        "Response Format Fixups",
+        lambda m: m.text_only_tool_markup_count,
+    ),
+    SchemaEntry(
         "harness.empty_response.count",
         "Empty responses",
         "Response Format Fixups",
@@ -735,6 +860,76 @@ _SPAN_SCHEMA: tuple[SchemaEntry, ...] = (
         "Implicit return transformed",
         "Return Value Handling",
         lambda m: m.implicit_return_transformed,
+    ),
+    SchemaEntry(
+        "harness.return_result_keyword_alias.count",
+        "return_result(value=x) read as return_result(x)",
+        "Return Value Handling",
+        lambda m: len(m.return_result_keyword_aliases),
+    ),
+    SchemaEntry(
+        "harness.return_result_keyword_alias.keywords",
+        "return_result alias keywords",
+        "Return Value Handling",
+        lambda m: m.return_result_keyword_aliases,
+        True,
+    ),
+    SchemaEntry(
+        "harness.return_result_invalid.count",
+        "Invalid return_result values offered a retry",
+        "Return Value Handling",
+        lambda m: len(m.return_result_invalid_retries),
+    ),
+    SchemaEntry(
+        "harness.return_result_invalid.types",
+        "Invalid return_result error types",
+        "Return Value Handling",
+        lambda m: m.return_result_invalid_retries,
+        True,
+    ),
+    SchemaEntry(
+        "harness.shell_queued_behind_running.count",
+        "Shell commands queued behind a running one",
+        "Tool Usage",
+        lambda m: m.shell_queued_behind_running,
+    ),
+    SchemaEntry(
+        "harness.shell_busy_rejected.count",
+        "Shell commands refused behind a background job",
+        "Tool Usage",
+        lambda m: m.shell_busy_rejected,
+    ),
+    SchemaEntry(
+        "harness.child_detached_at_deadline.count",
+        "Children awaited in a cell kept running as jobs at the cell deadline",
+        "Tool Usage",
+        lambda m: m.child_detached_at_deadline,
+    ),
+    SchemaEntry(
+        "harness.waiting_on_person_rejected.count",
+        "Waiting on user_messages rejected",
+        "Tool Usage",
+        lambda m: len(m.waiting_on_person_rejections),
+    ),
+    SchemaEntry(
+        "harness.waiting_on_person_rejected.roles",
+        "Roles that waited on the person",
+        "Tool Usage",
+        lambda m: m.waiting_on_person_rejections,
+        True,
+    ),
+    SchemaEntry(
+        "harness.queue_read_timeout.count",
+        "Queue reads timed out mid-cell",
+        "Tool Usage",
+        lambda m: len(m.queue_read_timeouts),
+    ),
+    SchemaEntry(
+        "harness.queue_read_timeout.channels",
+        "Timed-out queue channels",
+        "Tool Usage",
+        lambda m: m.queue_read_timeouts,
+        True,
     ),
     # Error Recovery
     SchemaEntry(
@@ -894,6 +1089,39 @@ _SPAN_SCHEMA: tuple[SchemaEntry, ...] = (
         "LLM Admission",
         lambda m: m.llm_queue_wait,
     ),
+    # Media Recovery
+    SchemaEntry(
+        "harness.media_image_limit_collapsed.count",
+        "Image-limit recoveries (oldest images collapsed)",
+        "Media Recovery",
+        lambda m: len(m.media_image_limit_collapses),
+    ),
+    SchemaEntry(
+        "harness.media_image_limit_collapsed.limits",
+        "Provider image limits hit",
+        "Media Recovery",
+        lambda m: m.media_image_limit_collapses,
+        True,
+    ),
+    SchemaEntry(
+        "harness.media_image_limit_collapsed.events",
+        "Image events collapsed for the image limit",
+        "Media Recovery",
+        lambda m: m.media_image_limit_events_collapsed,
+    ),
+    SchemaEntry(
+        "harness.media_rejected_retry.count",
+        "Rejected attachments retried without them",
+        "Media Recovery",
+        lambda m: len(m.media_rejected_retries),
+    ),
+    SchemaEntry(
+        "harness.media_rejected_retry.kinds",
+        "Rejected attachment kinds",
+        "Media Recovery",
+        lambda m: m.media_rejected_retries,
+        True,
+    ),
     # Code Execution
     SchemaEntry(
         "harness.exec_python.total",
@@ -965,6 +1193,32 @@ _SPAN_SCHEMA: tuple[SchemaEntry, ...] = (
         True,
     ),
     SchemaEntry(
+        "harness.shell_exit_hint.count",
+        "Commands that ended their Shell's bash (exit/errexit)",
+        "Tool Usage",
+        lambda m: len(m.shell_exit_hints),
+    ),
+    SchemaEntry(
+        "harness.shell_exit_hint.codes",
+        "Exit statuses of commands that ended their Shell's bash",
+        "Tool Usage",
+        lambda m: m.shell_exit_hints,
+        True,
+    ),
+    SchemaEntry(
+        "harness.shell_cwd_fallback.count",
+        "Restarted Shells whose kept cwd was gone",
+        "Tool Usage",
+        lambda m: len(m.shell_cwd_fallbacks),
+    ),
+    SchemaEntry(
+        "harness.shell_cwd_fallback.details",
+        "Gone cwd -> fallback directory",
+        "Tool Usage",
+        lambda m: m.shell_cwd_fallbacks,
+        True,
+    ),
+    SchemaEntry(
         "harness.repo_failure.count",
         "Repo failures",
         "Tool Usage",
@@ -1009,6 +1263,64 @@ _SPAN_SCHEMA: tuple[SchemaEntry, ...] = (
         "Missing await details",
         "Code Validation",
         lambda m: m.missing_awaits_detected,
+        True,
+    ),
+    SchemaEntry(
+        "harness.name_error_hint.count",
+        "NameErrors pointed at python_cell_state",
+        "Code Validation",
+        lambda m: len(m.name_error_hints),
+    ),
+    SchemaEntry(
+        "harness.name_error_hint.names",
+        "Undefined names in hinted NameErrors",
+        "Code Validation",
+        lambda m: m.name_error_hints,
+        True,
+    ),
+    SchemaEntry(
+        "harness.mcp_tool_name_hint.count",
+        "MCP tools called bare or as self.<tool>, pointed at their server",
+        "Code Validation",
+        lambda m: len(m.mcp_tool_name_hints),
+    ),
+    SchemaEntry(
+        "harness.mcp_tool_name_hint.calls",
+        "Hinted MCP tools as <server>.<tool>",
+        "Code Validation",
+        lambda m: m.mcp_tool_name_hints,
+        True,
+    ),
+    SchemaEntry(
+        "harness.mcp_result_error.count",
+        "MCP results reporting failure in an 'error' field",
+        "Tool Usage",
+        lambda m: len(m.mcp_result_errors),
+    ),
+    SchemaEntry(
+        "harness.mcp_result_error.calls",
+        "MCP tools whose result had an 'error' field, as <server>.<tool>",
+        "Tool Usage",
+        lambda m: m.mcp_result_errors,
+        True,
+    ),
+    SchemaEntry(
+        "harness.return_result_tool_alias.count",
+        "Provider return_result calls taken as the cell builtin",
+        "Return Value Handling",
+        lambda m: m.return_result_tool_aliases,
+    ),
+    SchemaEntry(
+        "harness.module_not_found_hint.count",
+        "Cell ModuleNotFoundErrors pointed at the task's python3",
+        "Code Validation",
+        lambda m: len(m.module_not_found_hints),
+    ),
+    SchemaEntry(
+        "harness.module_not_found_hint.modules",
+        "Missing modules in hinted ModuleNotFoundErrors",
+        "Code Validation",
+        lambda m: m.module_not_found_hints,
         True,
     ),
     SchemaEntry(

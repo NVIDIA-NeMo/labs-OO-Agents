@@ -308,8 +308,13 @@ Cancelling a final-result wait does not cancel the job; owner cancellation does
 stop the command. Timeout returns a `CommandResult` with return code 124 and
 `timed_out=True`.
 
-Final `stdout` and `stderr` summaries are whole up to 10 kB per stream, otherwise
-head and tail around a truncation marker. Whenever a summary is cut,
+A cell's printed stdout over 50,000 characters (stderr over 2,000) is cut in
+memory around a `<truncated-output>` marker, with no file; the marker says to
+write large output to a file and read it with `self.files.read(path)`.
+
+Final `stdout` and `stderr` summaries are whole up to 1 MiB per stream, otherwise
+head (256 KiB) and tail (768 KiB) around a `[... N bytes omitted; full output: <path>]`
+marker. Whenever a summary is cut,
 `stdout_path` and `stderr_path` name capture files, for managed jobs and direct
 `await sh.run(...)` calls alike; short output keeps no file. Each file holds at
 most the Shell's `max_output` bytes per stream (64 MiB by default); the marker
@@ -335,8 +340,8 @@ strategy and does not gain Atom's namespace behavior.
 
 The owned namespaces are in-process only. Helpers see subsequent global rebindings;
 definitions/defaults/decorators execute once, and intentional library caches retain
-their normal semantics. Each root/child session owns separate state. Other generated
-methods have separate call-local owners. Reserved runtime
+their normal semantics. Each root/child session owns separate state. Agent methods
+other than `handle` start each call with a fresh namespace. Reserved runtime
 names and call inputs cannot be overwritten; background/nested/stale completion
 capabilities cannot complete a different foreground call.
 
@@ -415,7 +420,7 @@ count on demand. Agents that expose the optional `<skills>` block show that same
 
 ```text
 <skills>
-Active: libwriting, methodwriting, repo, shell, todo, workspace_settings, github (mcp)
+Active: methodwriting, repo, shell, skill_writing, todo, workspace_settings, github (mcp)
 38 more (code, text, MCP): self.skills.search('query') (sync); print(self.skills.doc('name')) for full instructions/APIs (unconnected MCP: connection status); await self.skills.activate(['name']) (async)
 </skills>
 ```

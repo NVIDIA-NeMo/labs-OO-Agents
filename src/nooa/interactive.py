@@ -39,6 +39,7 @@ from nooa.context_blocks import Metadata
 from nooa.context_blocks.roles import Role
 from nooa.runtime.turn_loop import ResultKind
 from nooa.storage.markers import nosnapshot
+from nooa.storage.persistent_vars import PersistentVars
 from nooa.storage.snapshot_vars import SnapshotVars
 
 with hidden:
@@ -146,6 +147,8 @@ class NeedInput(BaseModel):
     ``self.message()``. The answer arrives as a plain ``str``; put any
     suggested answers in the question text. ``reason`` optionally says in
     one sentence why progress is not possible or not desirable without it.
+    ``explanation`` is an optional short status line, as on ``Done`` and
+    ``Waiting``; it is not shown as the question.
     """
 
     model_config = {"extra": "forbid"}
@@ -155,8 +158,10 @@ class NeedInput(BaseModel):
     reason: str | None = Field(
         default=None, description="Why progress is not possible or not desirable without it"
     )
+    explanation: str | None = Field(default=None, description="Short status line; not the question")
 
     _check_question = field_validator("question")(_non_blank)
+    _check_explanation = field_validator("explanation")(_blank_to_none)
 
 
 class Waiting(BaseModel):
@@ -221,6 +226,18 @@ class TaskResult(BaseModel):
             "Leave empty when the task only asks for actions."
         ),
     )
+
+    def __getattr__(self, name: str) -> Any:
+        try:
+            return super().__getattr__(name)  # type: ignore[misc]  # pydantic's private attrs
+        except AttributeError:
+            if name.startswith("_"):
+                raise
+            fields = ", ".join(type(self).model_fields)
+            raise AttributeError(
+                f"TaskResult has no attribute {name!r}; its fields are {fields}. "
+                "A finished task has no status: read solution_description and evidence."
+            ) from None
 
 
 ONE_SHOT_QUESTION: Annotated[str, hidden] = (
@@ -384,12 +401,12 @@ def install_summarizer(config: SummarizationConfig, agent: Agent) -> None:
     summarizer._automatic_context_budget_percent = config.threshold_fraction
 
 
-class AgentVars:
-    """Attribute-access proxy for an agent's persistent ``vars`` dict.
+class AgentVars(PersistentVars):
+    """An agent's persistent ``vars`` dict, also usable as attributes.
 
-    Mirrors ``TodoVars``: write ``self.v.spec = "..."`` instead of
-    ``self.vars["spec"] = "..."``. Reads and writes go straight
-    through to ``self.vars`` so snapshot serialization is unaffected.
+    ``self.v.spec = "..."`` and ``self.v["spec"] = "..."`` write the same
+    entry. Reads and writes go straight through to ``self.vars`` so
+    snapshot serialization is unaffected.
 
     Use for variables that need to survive across turns and across
     sessions but aren't tied to a specific todo. (For per-todo state,
@@ -399,36 +416,10 @@ class AgentVars:
     snapshot-serialized (a live client, socket, callable, ...) logs a
     warning and is **not stored** — it won't survive ``/exit`` + resume.
     Store serializable data (dict/str/number/Pydantic model) instead.
+    Helper names (``keys``, ``items``, ``get``, ``set``, ``clear``) and
+    ``_``-prefixed names are read with ``get(name)`` and written with
+    ``set(name, value)``.
     """
-
-    def __init__(self, agent: Any):
-        object.__setattr__(self, "_agent", agent)
-
-    def __getattr__(self, key: str) -> Any:
-        try:
-            return self._agent.vars[key]
-        except KeyError:
-            raise AttributeError(f"No var {key!r} on agent") from None
-
-    def __setattr__(self, key: str, value: Any) -> None:
-        self._agent.vars[key] = value
-
-    def __setitem__(self, key: str, value: Any) -> None:
-        raise TypeError(
-            f"self.v does not support item assignment; write self.v.{key} = ... instead."
-        )
-
-    def __delattr__(self, key: str) -> None:
-        try:
-            del self._agent.vars[key]
-        except KeyError:
-            raise AttributeError(f"No var {key!r} on agent") from None
-
-    def __contains__(self, key: str) -> bool:
-        return key in self._agent.vars
-
-    def __repr__(self) -> str:
-        return repr(self._agent.vars)
 
 
 # The ``queues`` context block. Its expression is shown to the model, so it
@@ -478,7 +469,8 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
     # proxy for dot-attribute reads/writes (``self.v.spec = "..."``).
     vars: SnapshotVars
 
-    def __init__(self, llm=None, **kwargs):
+    def __init__(self, llm=None, *, producers: bool = True, **kwargs):  # noqa: F811 (not the module)
+        """``producers=False``: no ``self.producers`` (a subclass with its own timers)."""
         super().__init__(llm=llm or _DEFAULT_LLM, **kwargs)
         self._render_message = None
         self.vars = SnapshotVars()
@@ -487,7 +479,8 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
         self.user_messages = self._user_messages_in.reader
         self.event_manager.on_close(self.queue_manager.shutdown)
         self.turns = TurnLoop(self)
-        self.producers = ProducersSkill()
+        if producers:
+            self.producers = ProducersSkill()
         # Surface pending-queue counts (and a short preview of each item)
         # to the LLM every turn — the agent reads queue depth straight
         # from the ``queues`` context block. Composed via
@@ -541,7 +534,7 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
 
     @property
     def v(self) -> AgentVars:
-        """Durable facts: write ``self.v.key = value``, read ``self.v.key``, delete ``del self.v.key``. Store serializable values.
+        """Durable facts: write ``self.v.key = value``, read ``self.v.key``, delete ``del self.v.key`` (or ``self.v["key"]``). Store serializable values.
 
         Use for state that should survive across turns and sessions
         but isn't tied to a specific todo. Snapshot-backed via

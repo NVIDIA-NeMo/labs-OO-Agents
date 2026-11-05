@@ -180,8 +180,38 @@ def test_unknown_or_inexact_titles_keep_the_missing_item_error(method):
     for query in ("fix the parser", "Fix", "parser", " Fix the parser", "Fix  the parser", "", " "):
         with pytest.raises(ValueError) as error:
             getattr(todos, method)(query)
-        assert str(error.value) == f"no item {query!r}; ids are shown in todo_status"
+        assert (
+            str(error.value)
+            == f"no item {query!r}; valid ids: {todos.to_dict()['todos'][0]['id']} (Fix the parser)"
+        )
         assert todos.to_dict() == before
+
+
+def test_lookup_errors_list_the_valid_ids_bounded():
+    todos = TodoList()
+    with pytest.raises(ValueError, match="no item 'x'; the list is empty: add one with"):
+        todos.get("x")
+    items = [todos.add(f"Item {n} " + "x" * 40) for n in range(10)]
+    with pytest.raises(ValueError) as error:
+        todos.get("missing")
+    text = str(error.value)
+    assert f"{items[0].id} (Item 0 " in text and "…)" in text
+    assert items[8].id not in text
+    assert text.endswith("+2 more (all of them: self.todo.list_todos())")
+    # todo_status shows only the first rows, so the hint names a call that lists every id.
+    assert [t.id for t in todos.list_todos()] == [t.id for t in items]
+
+
+def test_misuses_name_what_to_use_instead():
+    todos = TodoList()
+    with pytest.raises(TypeError, match=r"add\(\) takes add\(title, description=''\), got 3"):
+        todos.add("Fix the parser", "the brief", "more")
+    assert todos.to_dict()["todos"] == []
+    todos.add("Fix the parser")
+    with pytest.raises(
+        TypeError, match=r"self.todo is not subscriptable; use self.todo.get\('1'\)"
+    ):
+        todos["1"]
 
 
 @pytest.mark.parametrize("todo_type", [Todo, CoreTodo])

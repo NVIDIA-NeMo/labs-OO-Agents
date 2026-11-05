@@ -23,6 +23,17 @@ from nooa.storage.snapshot_vars import SnapshotVars
 
 UNIFIED = "nooa_atom.agent:AtomAgent"
 TIMEOUT = 60
+# The python_cell tool description reaches every role (root, child, benchmark/gym).
+ENVIRONMENT_LINE = (
+    "python_cell runs in Atom's own Python (your thinking environment). The task's code, "
+    "packages and tests live in the task environment: run them through a Shell (e.g. "
+    "sh.run(\"python3 script.py\")); don't install task packages into Atom's Python."
+)
+LIVE_NAMES_LINE = (
+    "The python_cell_state block lists up to 20 of your live Python names and "
+    'says how many more exist ("omitted: N"); python_cell_state() returns all of '
+    "them with their types. Check both before recreating a name."
+)
 
 WORK_RESULT = (
     "return_result(Done(explanation='{e}', result=TaskResult(solution_description='s', "
@@ -104,12 +115,21 @@ async def test_one_shot_subagent_returns_its_task_result_and_notes_are_job_items
         assert "Return API documentation as str; display with print(doc(obj))" in rendered
         assert "Print (return None): max_length=items/container" in rendered
         assert "def read(self, name: str)" not in rendered
+        # Root and child: the same pointer, to the block the cell names are in.
+        assert LIVE_NAMES_LINE in rendered
+        assert "<python_cell_state>\nRetained Python names:" in rendered
         [tool] = call.tools
         assert tool.name == "python_cell"
         assert tool.description.count("Blocked imports:") == 1
         assert tool.description.count("Blocked calls by module") == 1
         assert "`subprocess`" in tool.description and "literal dunder names" in tool.description
-        assert "Run commands with `await sh.run(cmd)` on a `Shell()`" in tool.description
+        assert (
+            "Run commands with `sh = Shell()`: `r = await sh.run(cmd)` waits for the result; "
+            '`self.jobs.launch(sh.run(cmd), name="build")` runs it in the background. Child '
+            "agents also go on `self.jobs`, documented in the python_cell_tools block."
+        ) in tool.description
+        assert "timeout=600" not in tool.description
+        assert ENVIRONMENT_LINE in tool.description
         assert "self.shell" not in tool.description and "self.delegate" not in tool.description
         assert "Blocked imports:" not in rendered  # guidance is tool-local, not another block
 
@@ -319,7 +339,7 @@ async def test_a_shell_timeout_delivers_a_result_and_wakes_the_waiting_turn(
     models.scripts[None] = [
         cell(
             "import inspect\n"
-            "assert inspect.signature(Shell.run).parameters['timeout'].default == 1800.0\n"
+            "assert inspect.signature(Shell.run).parameters['timeout'].default == 600.0\n"
             "self.jobs.launch(Shell().run('sleep 30; echo never', timeout=0.5), name='slow')\n"
             "return_result(Waiting(explanation='slow command running', on=['slow']))"
         ),
@@ -329,6 +349,7 @@ async def test_a_shell_timeout_delivers_a_result_and_wakes_the_waiting_turn(
             "r = event.value\n"
             "assert isinstance(r, CommandResult), r\n"
             "assert (r.returncode, r.timed_out, r.stdout) == (124, True, ''), r\n"
+            "assert 'pass a larger timeout=' in r.stderr, r\n"
             "return_result(Done(explanation='timed out as expected'))"
         ),
     ]
@@ -466,7 +487,10 @@ async def test_first_call_offers_one_work_vocabulary(
     await asyncio.wait_for(root.prompt("hello"), TIMEOUT)
     call = models.llms[None].calls[0]
     tools = "\n".join(str(getattr(tool, "description", tool)) for tool in call.tools or ())
-    assert "Run commands with `await sh.run(cmd)` on a `Shell()`" in tools
+    assert (
+        "Run commands with `sh = Shell()`: `r = await sh.run(cmd)` waits for the result;" in tools
+    )
+    assert ENVIRONMENT_LINE in tools
     messages = "\n".join(str(m.get("content", "")) for m in call.messages)
     rendered = messages + "\n" + tools  # what the model reads: the messages and the tool
     prefix = str(call.messages[0].get("content", ""))
@@ -500,14 +524,42 @@ async def test_first_call_offers_one_work_vocabulary(
         "progress=Throttle(seconds=5)",
         "<python_cell_state>\nRetained Python names: none; omitted: 0\n</python_cell_state>",
         "<python_cell_lifetime>",
-        "Other generated methods are call-local.",
+        LIVE_NAMES_LINE,
+        "- Agent methods other than handle start each call with fresh names.",
+        "- A restart loses these names. Store serializable state on self.v for "
+        "persistence across restarts.",
+        "- A job's stdout/stderr/media are in job.output / JobEvent.output, never in a later cell.",
         "registered queue producers",
-        'r = await sh.run("cd src && make", timeout=600)',
+        'r = await sh.run("cd src && make")  # wait for it',
         "Import anything else you need",
     ):
         assert wanted in rendered, wanted
+    # One Shell snippet, both forms (#517): wait for the result, or launch it.
+    flat = " ".join(prefix.split())
+    assert (
+        "Run a command with ``sh = Shell()``: ``r = await sh.run(cmd)`` waits for the result; "
+        '``self.jobs.launch(sh.run(cmd), name="build")`` runs it in the background while you '
+        "do other things (builds, servers; subagents too, see the python_cell_tools block)."
+    ) in flat
+    assert "sh.run(cmd, timeout=600)" not in rendered and "timeout=600)  # wait" not in rendered
+    # Task Python goes on stdin (#517 A), right after the triple-quote rule.
+    assert (
+        "the same way, not as heredocs. Run Python in the task environment by passing the "
+        'code on stdin: ``sh.run("python3 -", stdin=code)``, not inside ``python3 -c "..."``.'
+    ) in flat
+    # The skills block is back (#517 P04), now the manager's own state: active
+    # skills, connected MCP servers with the call form, and a count of the rest
+    # pointing at self.skills.search. The old registry inventory never returns,
+    # and the catalog is never listed in it.
+    assert '<skills expr="self.skills.status()">\nActive: ' in rendered
+    skills_block = rendered.split('<skills expr="self.skills.status()">', 1)[1].split("</skills>")[
+        0
+    ]
+    assert "self.skills.search('query')" in skills_block
+    assert len(skills_block.strip().splitlines()) <= 3, skills_block
     for legacy in (
-        "<skills",
+        "Nothing expires on its own",  # the restart bullet now points at self.v instead
+        "output that arrives after it ended is dropped",  # dropped: job.output says it
         "## Python cell state",
         "handle_batch",
         "handle_work",
@@ -754,6 +806,11 @@ async def test_reserved_names_and_snapshots(tmp_path):
         for name in ("jobs", "user_messages", "user", "delegates"):
             with pytest.raises(ValueError, match="names a channel"):
                 agent.jobs.launch(asyncio.sleep(1), name=name)
+            with pytest.raises(ValueError, match="names a channel"):
+                agent.jobs.after(60, name=name)
+            with pytest.raises(ValueError, match="names a channel"):
+                agent.jobs.every(30, name=name)
+        assert not agent.jobs.running()
         job = agent.jobs.launch(asyncio.sleep(30), name="nap")
         agent.v.job = job
         agent.v.shell = Shell()
@@ -1192,15 +1249,15 @@ def test_command_output_is_shown_cut_but_kept_whole():
 async def test_skills_are_documented_statically_and_activation_still_works(tmp_path):
     agent = await _agent(tmp_path)
     try:
-        assert "skills" not in agent.context
+        # The skills block shows self.skills.status(), rendered each call (#517 P04).
+        assert "skills" in agent.context
         tools = str(agent.context["python_cell_tools"])
         assert "class SkillManager" in tools and "def activate(" in tools
         assert "shell" not in agent.skills.status().splitlines()[0]
         print(await agent.skills.activate(["shell"]))
         assert "shell" in agent.skills.status().splitlines()[0]
-        assert "skills" not in agent.context  # activation does not bring the block back
         agent.after_restore()
-        assert "skills" not in agent.context
+        assert "skills" in agent.context
     finally:
         await agent.aclose()
 
@@ -1223,3 +1280,78 @@ async def test_the_cell_state_block_is_one_line(tmp_path):
         await strategy.python_cell_state_context(SimpleNamespace(current_call=empty))
         == "Cell locals: none"
     )
+
+
+async def test_a_name_error_points_at_python_cell_state_and_is_counted(
+    registry, options, models, monkeypatch
+):
+    """A child's ``sh`` is not its parent's: the error says where live names are."""
+    from nooa.runtime.harness_metrics import HarnessMetrics
+
+    flushed: list[dict] = []
+    real_flush = HarnessMetrics.flush_to_span
+
+    def flush(self):
+        flushed.append(self.to_span_attributes())
+        real_flush(self)
+
+    monkeypatch.setattr(HarnessMetrics, "flush_to_span", flush)
+    models.scripts[None] = [
+        cell("r = await sh.run('true')"),
+        cell("print(results)"),
+        cell("return_result(Done(explanation='ok'))"),
+    ]
+    root = await registry.create(options)
+    await asyncio.wait_for(root.prompt("go"), TIMEOUT)
+
+    def seen(call):
+        messages = models.llms[None].calls[call].messages
+        return "\n".join(str(m.get("content", "")) for m in messages)
+
+    after_sh = seen(1)
+    assert "name 'sh' is not defined" in after_sh
+    assert (
+        "Live names are listed in the python_cell_state block; python_cell_state() lists up to "
+        "20 (both may omit some). Check both and your context before recreating a name. "
+        "Create it first, e.g. `sh = Shell()`."
+    ) in after_sh
+    after_results = seen(2)
+    assert "name 'results' is not defined" in after_results
+    assert after_results.count("Create it first") == after_sh.count("Create it first")
+    [attrs] = [a for a in flushed if "harness.name_error_hint.count" in a]
+    assert attrs["harness.name_error_hint.count"] == 2
+    assert attrs["harness.name_error_hint.names"] == ["sh", "results"]
+
+
+async def test_a_module_not_found_error_points_at_the_task_python_and_is_counted(
+    registry, options, models, monkeypatch
+):
+    """A cell's import runs in Atom's Python; the task's python3 may have the package."""
+    from nooa.runtime.harness_metrics import HarnessMetrics
+
+    flushed: list[dict] = []
+    real_flush = HarnessMetrics.flush_to_span
+
+    def flush(self):
+        flushed.append(self.to_span_attributes())
+        real_flush(self)
+
+    monkeypatch.setattr(HarnessMetrics, "flush_to_span", flush)
+    models.scripts[None] = [
+        cell("import no_such_task_pkg_xyz.sub"),
+        cell("return_result(Done(explanation='ok'))"),
+    ]
+    root = await registry.create(options)
+    await asyncio.wait_for(root.prompt("go"), TIMEOUT)
+    seen = "\n".join(str(m.get("content", "")) for m in models.llms[None].calls[1].messages)
+    assert "No module named 'no_such_task_pkg_xyz'" in seen
+    assert (
+        "python_cell runs in Atom's own Python, not the task's; the task's python3 may have "
+        "no_such_task_pkg_xyz: check with "
+        'await sh.run("python3 -", stdin="import no_such_task_pkg_xyz")'
+    ) in seen
+    assert "python3 -c 'import" not in seen
+    assert "Live names are listed" not in seen
+    [attrs] = [a for a in flushed if "harness.module_not_found_hint.count" in a]
+    assert attrs["harness.module_not_found_hint.count"] == 1
+    assert attrs["harness.module_not_found_hint.modules"] == ["no_such_task_pkg_xyz"]

@@ -761,6 +761,16 @@ class TestHeredocHint:
         assert '"""' in result, f"expected triple-quote (Fix 1) in output, got:\n{result}"
         hint = result.split("Hint:", 1)[1]
         assert "doc(...)" in hint
+        flat = " ".join(hint.split())
+        # Standard input first, runner-neutral; the triple-quoted command is the fallback.
+        assert flat.startswith(
+            "this looks like a shell heredoc (`<<...`) embedded in a Python string. "
+            'Pass the content on standard input instead, e.g. run("cat > notes.txt", '
+            'stdin=content) or run("python3 -", stdin=code); check print(doc(...)) of your '
+            "command runner for its stdin parameter. Otherwise put the complete command in "
+            "a triple-quoted string:"
+        ), hint
+        assert "single- or multiple-line" not in flat and "documented API" not in flat
         assert "shell.run" not in hint
         assert "shell.write" not in hint
 
@@ -778,6 +788,20 @@ class TestHeredocHint:
         assert "SyntaxError" in result
         assert "unterminated string literal" in result
         self._assert_hint_present(result)
+
+    def test_heredoc_hint_wins_over_the_quote_hint(self):
+        """Both hints apply to this input; only the first (heredoc) is shown."""
+        from nooa.errors.formatting import _maybe_quote_hint
+
+        code = 'x = "cat <<EOF\nhello\nEOF\n'
+        try:
+            compile(code, "Cell In[1]", "exec")
+        except SyntaxError as error:
+            quote_hint = _maybe_quote_hint(error)
+        assert quote_hint
+        result = self._compile_and_format(code)
+        self._assert_hint_present(result)
+        assert quote_hint not in result
 
     def test_hint_on_invalid_syntax_forgot_comma(self):
         """Heredoc + implicit string concat shape → 'Perhaps you forgot a comma?'."""
@@ -881,6 +905,52 @@ class TestHeredocHint:
         assert "doc(...)" in hint
         assert "shell.run" not in hint
         assert "shell.write" not in hint
+
+
+class TestQuoteHint:
+    """An unterminated string literal gets a one-line quote-style / stdin hint."""
+
+    HINT = (
+        "Hint: pick a quote style the text neither contains nor ends with, or pass the "
+        "text on standard input or in a file instead of a string literal."
+    )
+
+    @staticmethod
+    def _format(code: str) -> str:
+        try:
+            compile(code, "Cell In[1]", "exec")
+        except SyntaxError as e:
+            return format_error_for_llm(e, code)
+        raise AssertionError(f"expected SyntaxError compiling: {code!r}")
+
+    @pytest.mark.parametrize(
+        "code",
+        [
+            'x = "abc',
+            'r = await sh.run("""echo "hi"""")',
+            'script = """print("done")\n',
+        ],
+    )
+    def test_hint_on_unterminated_string_literal(self, code):
+        result = self._format(code)
+        assert "unterminated" in result and "string literal" in result
+        assert result.count(self.HINT) == 1
+
+    def test_hint_on_a_validator_wrapped_unterminated_string(self):
+        from nooa.runtime.code_validator import UnifiedCodeValidator, ValidationContext
+
+        code = "r = await sh.run('''cat x\n"
+        with pytest.raises(RestrictedCodeError) as exc_info:
+            UnifiedCodeValidator().validate(code, ValidationContext(execution_count=2))
+        result = format_error_for_llm(exc_info.value, code)
+        assert "unterminated triple-quoted string literal" in result
+        assert result.count(self.HINT) == 1
+
+    @pytest.mark.parametrize("code", ["x = (1", "def f(:\n    pass", "x = 1 +", 'x = "a" "b" c'])
+    def test_no_hint_for_other_syntax_errors(self, code):
+        result = self._format(code)
+        assert "SyntaxError" in result
+        assert "quote style" not in result and "stdin" not in result
 
 
 class _ShellToolsLike:

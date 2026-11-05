@@ -31,24 +31,26 @@ from nooa.interactive import Done, NeedInput, Waiting
 from nooa.strategies import CodeActV2, PredictStrategy  # noqa: F401
 from nooa_atom.agent.work_manager import Job, JobEvent, Throttle, WorkManager
 from nooa_atom.agent.work_shell import CommandResult, Shell
-from nooa_atom.agent.work_subagent import Question, Subagent
+from nooa_atom.agent.work_subagent import Question, Subagent, note_running_job
 from nooa_atom.session.items import TaskResult  # noqa: F401
-from nooa_atom.skills.manager import SkillManager
+from nooa_atom.skills.manager import SkillManager, call_form
 from nooa_atom.tools.repo_tools import RepoTools
 from nooa_atom.tools.todo_list import Todo, TodoList  # noqa: F401
 
 with hidden:
     import inspect
+    import re
     import sys
     import time
     import types
 
     from nooa import no_trace
     from nooa.config import CodeActConfig, PredictConfig, TruncationConfig
-    from nooa.config.truncation_config import FormatConfig
+    from nooa.config.truncation_config import CaptureConfig, FormatConfig
     from nooa.interactive import InteractiveAgent, require_task_result
     from nooa.runtime.capture_scope import CaptureScope
     from nooa.runtime.channels import ChannelReader
+    from nooa.runtime.harness_metrics import get_harness_metrics
     from nooa.runtime.pprint import pprint as runtime_pprint
     from nooa.storage.markers import nosnapshot
     from nooa.strategies.codeact import current_cell_tag
@@ -61,7 +63,6 @@ with hidden:
     from nooa_atom.agent.done_reflection import DoneReflectionPlan, reflect_accepted_done
     from nooa_atom.agent.reflection_gate import _ReflectionGate
     from nooa_atom.agent.roles import TurnPolicy
-    from nooa_atom.agent.work_manager import _public_signature
 
 __all__ = ["AtomAgent", "Files"]
 
@@ -99,24 +100,15 @@ class _AgentJobs(WorkManager):
         super().__init__(agent._jobs_in, **kwargs)
         self._agent = agent
 
-    @_public_signature
-    def launch(
-        self,
-        work: Any,
-        *,
-        name: str | None = None,
-        progress: Throttle | None = None,
-        **unexpected: Any,
-    ) -> Job:
-        if (
-            not unexpected
-            and name is not None
-            and (name in PERSON_NAMES or name in self._agent.queue_manager.channels())
+    def _launch(self, work: Any, *, name: str | None, **options: Any) -> Job:
+        # launch(), after() and every() all start here, so one check covers them.
+        if name is not None and (
+            name in PERSON_NAMES or name in self._agent.queue_manager.channels()
         ):
             if inspect.iscoroutine(work):
                 work.close()
             raise ValueError(f"{name!r} names a channel or the person; pick another job name")
-        return super().launch(work, name=name, progress=progress, **unexpected)
+        return super()._launch(work, name=name, **options)
 
 
 # CodeActV2's python_cell description names the legacy delegation method.
@@ -124,9 +116,102 @@ _LEGACY_TOOL_HINT: Annotated[str, hidden] = (
     "If `self` exposes delegation, inspect its documentation with `print(doc(self.delegate))`."
 )
 _TOOL_HINT: Annotated[str, hidden] = (
-    "Run commands with `await sh.run(cmd)` on a `Shell()`; background work and child "
-    "agents go on `self.jobs`, documented in the python_cell_tools block."
+    "Run commands with `sh = Shell()`: `r = await sh.run(cmd)` waits for the result; "
+    '`self.jobs.launch(sh.run(cmd), name="build")` runs it in the background. Child agents '
+    "also go on `self.jobs`, documented in the python_cell_tools block. python_cell runs in Atom's own Python (your thinking "
+    "environment). The task's code, packages and tests live in the task environment: run them "
+    'through a Shell (e.g. sh.run("python3 script.py")); don\'t install task packages into '
+    "Atom's Python."
 )
+
+# What a cell error names, read from the exception or, on the sandbox path
+# (which reports the error as text), from the formatted text.
+_ERROR_TEXT = {
+    NameError: re.compile(r"^NameError: name '(?P<name>\w+)' is not defined", re.MULTILINE),
+    ModuleNotFoundError: re.compile(
+        r"^ModuleNotFoundError: No module named '(?P<name>[\w.]+)'", re.MULTILINE
+    ),
+    AttributeError: re.compile(
+        r"^AttributeError: '(?P<type>\w+)' object has no attribute '(?P<name>\w+)'",
+        re.MULTILINE,
+    ),
+}
+
+
+def _error_name(
+    error: BaseException, formatted: str, kind: type[BaseException], owner: Any = None
+) -> str | None:
+    """The name a ``kind`` error is about, else None.
+
+    For ``AttributeError`` only an attribute of ``owner`` counts (by identity,
+    or by type name in the text).
+    """
+    if type(error) is kind:
+        if kind is AttributeError and getattr(error, "obj", None) is not owner:
+            return None
+        name = getattr(error, "name", None)
+        if isinstance(name, str) and name:
+            return name
+    match = _ERROR_TEXT[kind].search(formatted)
+    if match is None:
+        return None
+    if kind is AttributeError and match.group("type") != type(owner).__name__:
+        return None
+    return match.group("name")
+
+
+def _mcp_tool_hint(agent: Any, error: BaseException, formatted: str) -> str | None:
+    """Name the MCP server of a tool called as a bare name or as ``self.<tool>``; counted."""
+    skills = getattr(agent, "skills", None)
+    if not isinstance(skills, SkillManager):
+        return None
+    name = _error_name(error, formatted, NameError) or _error_name(
+        error, formatted, AttributeError, agent
+    )
+    server = skills.mcp_tool_server(name) if name else None
+    if server is None:
+        return None
+    get_harness_metrics().mcp_tool_name_hint(f"{server}.{name}")
+    return f"`{name}` is a tool of MCP server {server}: {call_form(server, name)}"
+
+
+def _name_error_hint(agent: Any, error: BaseException, formatted: str) -> str | None:
+    """Point a cell's ``name 'x' is not defined`` at the python_cell_state block; counted."""
+    name = _error_name(error, formatted, NameError)
+    if name is None:
+        return None
+    hint = (
+        "Live names are listed in the python_cell_state block; python_cell_state() lists up to "
+        "20 (both may omit some). Check both and your context before recreating a name."
+    )
+    if name == "sh":
+        hint += " Create it first, e.g. `sh = Shell()`."
+    get_harness_metrics().name_error_hint(name)
+    return hint
+
+
+def _module_not_found_hint(agent: Any, error: BaseException, formatted: str) -> str | None:
+    """Point a cell's ``No module named 'x'`` at the task's python3; counted.
+
+    A cell runs in Atom's Python, which usually lacks the task's packages.
+    """
+    name = _error_name(error, formatted, ModuleNotFoundError)
+    if name is None:
+        return None
+    module = name.split(".", 1)[0]
+    get_harness_metrics().module_not_found_hint(name)
+    return (
+        "python_cell runs in Atom's own Python, not the task's; the task's python3 may have "
+        f'{module}: check with await sh.run("python3 -", stdin="import {module}")'
+    )
+
+
+# After the core cut notice of a cell print kept only in memory (capture config).
+_CUT_PRINT_HINT = "Write large output to a file and read it with self.files.read(path)."
+
+
+# The hints a failed cell can get; the first that applies is the only one added.
+_CELL_ERROR_HINTS = (_mcp_tool_hint, _name_error_hint, _module_not_found_hint)
 
 
 @hidden
@@ -223,6 +308,18 @@ class AtomCodeAct(CodeActV2):
             line += "; imports: " + listing(imports, more)
         return line
 
+    def _format_execution_error(self, runtime: Any, result: Any, code: str, **kwargs: Any) -> str:
+        """Add the first hint of ``_CELL_ERROR_HINTS`` that applies to a failed cell."""
+        formatted = super()._format_execution_error(runtime, result, code, **kwargs)
+        if result.error is None:
+            return formatted
+        agent = getattr(runtime, "agent", None)
+        for hint_for in _CELL_ERROR_HINTS:
+            hint = hint_for(agent, result.error, formatted)
+            if hint:
+                return f"{formatted}\n\n{hint}"
+        return formatted
+
     def _build_execute_python_tool(self) -> Any:
         tool = super()._build_execute_python_tool()
         tool.description = tool.description.replace(_LEGACY_TOOL_HINT, _TOOL_HINT)
@@ -281,10 +378,17 @@ def _check_waiting(agent: Any, result: Any, *, fix: str) -> None:
     if not unmet:
         return
     reasons = []
+    policy = getattr(agent, "_turn_policy", "interactive")
+    if policy == "child" and any(name in PERSON_NAMES for name in unmet):
+        fix = _CHILD_ASKS  # a child asks through NeedInput, never by waiting
     for name in unmet:
         job = agent.jobs.get(name) if isinstance(name, str) else None
         if name in PERSON_NAMES:
-            reasons.append(f"Waiting on {name!r}, but the person is not a job.")
+            get_harness_metrics().waiting_on_person_rejected(policy)
+            if policy == "child":
+                reasons.append(f"Waiting on {name!r}, but your parent is not a job.")
+            else:
+                reasons.append(f"Waiting on {name!r}, but the person is not a job.")
         elif job is not None and job.status == "running":
             reasons.append(
                 f"{name!r} is an idle resource: nothing arrives until you send it work "
@@ -334,6 +438,11 @@ def require_settled_work(agent: Any, result: Any, call: Any) -> None:
         )
 
 
+_CHILD_ASKS: Annotated[str, hidden] = (
+    "If you need input, return NeedInput(question=...): your parent answers with send "
+    "(a one-shot task cannot ask: decide and say so in the report). If you are done, "
+    "return Done(explanation=..., result=TaskResult(...))."
+)
 _NO_ONE_TO_ASK: Annotated[str, hidden] = (
     "Nobody can answer questions in an unattended task: decide, state your assumptions in the "
     "TaskResult report, and return Done (or Waiting while launched work runs)."
@@ -464,9 +573,11 @@ def _tools_doc(text: str) -> str:
 _WORK_EXAMPLES: Annotated[str, hidden] = """\
 # Work: self.jobs is for background work.
 sh = Shell()  # make one; bash starts on first use
-r = await sh.run("cd src && make", timeout=600)  # wait for it
+r = await sh.run("cd src && make")  # wait for it
 job = self.jobs.launch(sh.run("make"), name="build", progress=Throttle(seconds=5))  # background
 job.set_progress(None)  # quiet again
+self.jobs.after(600, lambda: "Check the training loss.")  # done value: the reminder
+self.jobs.every(60, self.check_status, name="poll")  # items: each return value
 self.jobs.launch(sh.run("pytest -q"), name="tests")
 job = self.jobs.launch(Shell(), name="sh")
 r = await job.send("make")
@@ -482,13 +593,19 @@ _CONTEXT: Annotated[dict[str, Any], hidden] = {
     "self": Context(expr="doc(type(self), concise=True)", prefix=True),
 }
 _NOTIFICATION: Annotated[Any, hidden] = spec(max_string=50_000, max_length=100, max_depth=10)
+# An invalid return_result value is a cell error the model retries on; the
+# turn fails only after this many in one turn (other errors keep max_retries).
+_MAX_RESULT_RETRIES: Annotated[int, hidden] = 10
 _REMOVED: Annotated[str, hidden] = (
     "{} is not part of this agent: run a child with Subagent "
     '(await Subagent().run(todo), or self.jobs.launch(Subagent(), name="..."))'
 )
 
 
-class AtomAgent(AtomAgentBase):
+class AtomAgent(
+    AtomAgentBase,
+    truncation=TruncationConfig(capture=CaptureConfig(unrecoverable_hint=_CUT_PRINT_HINT)),
+):
     """You are a careful agent working in one local repository.
 
     Read the repository instructions and the code you touch before editing.
@@ -504,15 +621,19 @@ class AtomAgent(AtomAgentBase):
     item you work on, append findings and checks to its ``comments``, complete
     it), and ``self.v`` keeps
     durable facts across restarts (handle locals last this live session). Run a
-    command with ``r = await sh.run(cmd, timeout=600)`` on a ``Shell()``;
-    ``self.jobs`` is only for work that runs while you do other things (builds,
-    servers, subagents; see the python_cell_tools block). Search inside the
-    repository, never ``/``. Prefer ``rg`` to search for text and ``rg --files``
-    to list files: it's much faster than ``grep`` or ``find``. If ``rg`` isn't
-    installed, use another tool.
+    command with ``sh = Shell()``: ``r = await sh.run(cmd)`` waits for the
+    result; ``self.jobs.launch(sh.run(cmd), name="build")`` runs it in the
+    background while you do other things (builds, servers; subagents too, see
+    the python_cell_tools block). Search inside the
+    repository, never ``/``: a scan of the whole filesystem (``find /``,
+    ``grep -r /``, ``du /``) can run until the timeout. Prefer ``rg`` to search
+    for text and ``rg --files`` to list files: it's much faster than ``grep`` or
+    ``find``. If ``rg`` isn't installed, use another tool.
     Write shell commands as triple-quoted strings (``sh.run('''...''')``) so
     quotes need no escaping, and pass file contents to ``self.files`` the same
-    way, not as heredocs.
+    way, not as heredocs. Run Python in the task environment by passing the
+    code on stdin: ``sh.run("python3 -", stdin=code)``, not inside
+    ``python3 -c "..."``.
 
     A subagent sees only its brief: a Todo whose description carries the
     requirements, constraints and acceptance checks. Verify what it reports;
@@ -526,8 +647,8 @@ class AtomAgent(AtomAgentBase):
     ``NeedInput(question=...)`` only when someone can answer, or
     ``Waiting(explanation=..., on=[names], message=...)`` for live work: jobs or
     registered queue producers. ``message`` and ``question`` are shown as your
-    reply; ``explanation`` is a short status line, not the reply; use
-    ``self.message()`` for notes while you work. Replies and notes go to the
+    reply. ``explanation`` is a short status line,
+    not the reply; use ``self.message()`` for notes while you work. Replies and notes go to the
     user, or to your parent if you are a subagent; unattended, only your result
     is read. The ``role`` block says who reads your result and how to end.
     """
@@ -554,6 +675,8 @@ class AtomAgent(AtomAgentBase):
     _session_namespace_was_live: Annotated[bool, hidden]
     # The session runs every turn with this method, whatever its turn_method.
     turn_entry: ClassVar[str] = "handle"
+    # The fix hint of a blocked subprocess/os.system/network import or call.
+    _shell_run_hint: ClassVar[str] = "use a Shell: `sh = Shell()` then `r = await sh.run(cmd)`"
 
     def __init__(
         self,
@@ -584,11 +707,20 @@ class AtomAgent(AtomAgentBase):
         self._reflection_candidate = None
         self._namespace_restart_notified = False
         self._session_namespace_was_live = False
-        super().__init__(*args, **kwargs)
+        # Core's ``self.producers`` (QueueManager.spawn helpers) is not Atom's:
+        # its timers are ``self.jobs.after/every``; tails are ``tail -F`` in a Shell.
+        super().__init__(*args, producers=False, **kwargs)
         self._reflection_gate = reflection_gate
         if policy not in ("interactive", "unattended", "orchestrator", "child"):
             raise ValueError(f"unknown policy {policy!r}")
         self._turn_policy = policy
+        if policy == "child":
+            # A parent's answer to NeedInput comes as a new turn; only notes
+            # (``Subagent.message()``) arrive mid-turn.
+            self.user_messages.timeout_hint = (
+                "An answer from your parent comes only after this turn ends (as a new turn); "
+                "a note it sends with message() can still arrive now. " + _CHILD_ASKS
+            )
         text = instructions.strip() if isinstance(instructions, str) else ""
         self._role_instructions = text or None
         # The legacy JobsApi never started anything; drop it and its cancel hint.
@@ -599,6 +731,7 @@ class AtomAgent(AtomAgentBase):
             on_change=self._record_work,
             launch_info=self._launch_info,
             capture_factory=lambda: CaptureScope(self.runtime.truncation_config),
+            on_wait_cancelled=note_running_job,
         )
         self._shells = work_shell.ShellOwner()
         self.files = Files(self.shell)
@@ -612,7 +745,7 @@ class AtomAgent(AtomAgentBase):
     @hidden
     @no_trace
     def _execution_namespace_for(self, call: Any) -> Any:
-        """Handle shares this live session's owner; other methods are call-local."""
+        """Handle shares this live session's namespace; other agent methods start each call fresh."""
         from nooa.runtime.execution_namespace import RUNTIME_NAMES, ExecutionNamespace
 
         if call.method_name == "handle":
@@ -674,14 +807,22 @@ class AtomAgent(AtomAgentBase):
         )
         self.context.pop("experimental_namespace", None)  # replace an earlier snapshot's block
         self.context["python_cell_lifetime"] = Context(
-            "Cell variables survive Done, Waiting and NeedInput in this live session. "
-            "Other generated methods are call-local. "
-            "Restart loses these names, not self.v. No automatic expiry. "
-            "del removes names, NOT jobs/resources: close/cancel work explicitly. "
-            "Globals are shared with jobs, not transactional. "
-            "Job stdout/stderr/media: job.output / JobEvent.output, never a later cell. "
-            "Descendant output belongs to its originating open scope; late output is dropped. "
-            "Inventory: bounded names/types only.",
+            "\n".join(
+                (
+                    "- The python_cell_state block lists up to 20 of your live Python names and "
+                    'says how many more exist ("omitted: N"); python_cell_state() returns all of '
+                    "them with their types. Check both before recreating a name.",
+                    "- Names you define in cells (values, functions, classes) survive Done, "
+                    "Waiting and NeedInput in this live session: define a helper once and reuse "
+                    "it in later turns.",
+                    "- Agent methods other than handle start each call with fresh names.",
+                    "- A restart loses these names. Store serializable state on self.v for "
+                    "persistence across restarts.",
+                    "- del removes a name, not a job or resource: close or cancel work explicitly.",
+                    "- A job's stdout/stderr/media are in job.output / JobEvent.output, never in "
+                    "a later cell.",
+                )
+            ),
             prefix=True,
         )
         self.context["todo_status"] = Context(expr="self.todo.status()")
@@ -689,10 +830,11 @@ class AtomAgent(AtomAgentBase):
         # Same fallback as AtomAgentBase: the first prompt has no stats yet but
         # still needs the events guidance that replaces the events_api block.
         self.context["context_usage"] = Context(expr="self._context_usage()")
-        # Skills are documented in python_cell_tools (SkillManager); the
-        # registry's dynamic inventory block is not shown. self.skills.status()
-        # gives it on demand.
-        self.context.pop("skills", None)
+        # Skills are documented in python_cell_tools (SkillManager). The skills
+        # block is the manager's state, re-rendered every call like <status>:
+        # active skills, connected MCP servers with the call form, and a count
+        # of the rest (self.skills.search); never the catalog.
+        self.context["skills"] = Context(expr="self.skills.status()")
         if self._role_instructions:
             self.context["role"] = Context(self._role_instructions, prefix=True)
         else:
@@ -777,7 +919,7 @@ class AtomAgent(AtomAgentBase):
         status = self.queue_manager.status(more_work=running, idle=idle, read_hints=hints)
         if running or idle:
             status += "\nCancel: await self.jobs.get('<name>').cancel()"
-        return status
+        return status  # connected MCP servers are in the skills block
 
     # ---- legacy surface, hidden ------------------------------------------------
 
@@ -925,7 +1067,13 @@ class AtomAgent(AtomAgentBase):
 
     @hidden
     @strategy(
-        AtomCodeAct(config=CodeActConfig(cell_timeout=1800.0, postconditions=[require_role])),
+        AtomCodeAct(
+            config=CodeActConfig(
+                cell_timeout=1800.0,
+                max_result_retries=_MAX_RESULT_RETRIES,
+                postconditions=[require_role],
+            )
+        ),
         context=_CONTEXT,
     )
     async def handle(
@@ -949,9 +1097,15 @@ class AtomAgent(AtomAgentBase):
         raise TypeError(_ONE_TURN_METHOD)
 
 
+# "producers" is also core's nemo.producers entry-point skill, which doc() would list.
 for _name in ("shell", "delegates", "producers", "system_messages", "cwd"):
     spec(AtomAgent, _name, hidden=True)
 spec(AtomAgent, "jobs", description="Run and track work: see WorkManager")
+spec(
+    AtomAgent,
+    "skill_writing",
+    description="Save skills (code or instructions) in .nooa/skills; later sessions get each one",
+)
 # Host-facing members of the work types stay out of the model's docs.
 for _cls, _members in (
     (WorkManager, ("keep", "max_items", "max_requests")),

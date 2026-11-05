@@ -77,16 +77,31 @@ _HEREDOC_RE = re.compile(r"<<-?\s*['\"]?\w+['\"]?")
 
 # Appended to SyntaxErrors that look like heredoc-in-quoted-string failures.
 _HEREDOC_HINT = '''\
-Hint: this looks like a shell heredoc (`<<...`) embedded in a single- or
-multiple-line Python string. Put the complete command in a triple-quoted
-string, then pass that value using the callable's documented API:
+Hint: this looks like a shell heredoc (`<<...`) embedded in a Python string.
+Pass the content on standard input instead, e.g. run("cat > notes.txt",
+stdin=content) or run("python3 -", stdin=code); check print(doc(...)) of your
+command runner for its stdin parameter. Otherwise put the complete command in
+a triple-quoted string:
 
     command = """cat <<'EOF'
 content
-EOF"""
+EOF"""'''
 
-Use `print(doc(...))` to inspect the available command runner and how it accepts
-commands or standard input.'''
+
+# Appended to a SyntaxError for an unterminated string literal (single- or
+# triple-quoted): the text usually contains or ends with the closing quote.
+_UNTERMINATED_STRING_RE = re.compile(r"^unterminated (?:triple-quoted )?string literal")
+_QUOTE_HINT = (
+    "Hint: pick a quote style the text neither contains nor ends with, or pass the "
+    "text on standard input or in a file instead of a string literal."
+)
+
+
+def _maybe_quote_hint(error: SyntaxError) -> str | None:
+    """Return the quote-style hint for an unterminated string literal, else None."""
+    if _UNTERMINATED_STRING_RE.match(error.msg or ""):
+        return _QUOTE_HINT
+    return None
 
 
 # Call-shape TypeError messages — a method/function called with the wrong
@@ -850,7 +865,8 @@ class IPythonErrorFormatter:
         # Adjust line numbers for wrapper offset
         formatted = _adjust_line_numbers(formatted, line_offset)
 
-        hint = _maybe_heredoc_hint(error)
+        # The first hint that applies, as in Atom's cell-error hints.
+        hint = _maybe_heredoc_hint(error) or _maybe_quote_hint(error)
         if hint:
             formatted = f"{formatted}\n\n{hint}"
 

@@ -103,7 +103,7 @@ class Todo(BaseModel):
 
     @property
     def v(self) -> PersistentVars:
-        """Durable task-specific work state backed by ``self.vars``.
+        """Durable task-specific work state backed by ``self.vars``; ``t.v["k"]`` is ``t.v.k``.
 
         Store plans, findings, artifacts, checkpoints, and verification metadata
         here. Use the agent's ``self.v`` for durable cross-task identity and

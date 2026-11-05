@@ -67,6 +67,7 @@ class TruncatingStringIO(io.StringIO):
         tail_chars: int | None = None,
         *,
         full_output_path: str | None = None,
+        unrecoverable_hint: str | None = None,
     ):
         """Initialize truncating buffer.
 
@@ -77,9 +78,12 @@ class TruncatingStringIO(io.StringIO):
                         ``limit``: keep only the end (tail-only notice).
             full_output_path: Where the caller keeps the full output, named
                         in the truncation notice (None: not recoverable).
+            unrecoverable_hint: A sentence after the notice's "not recoverable"
+                        line (e.g. how to keep large output next time).
         """
         super().__init__()
         self._full_output_path = full_output_path
+        self._unrecoverable_hint = unrecoverable_hint
         self._limit = limit
         self._tail_limit = tail_chars if tail_chars is not None else limit // 2
         self._head_limit = limit - self._tail_limit
@@ -155,6 +159,11 @@ class TruncatingStringIO(io.StringIO):
         """Where the full output is, if anywhere (named in the notices)."""
         return self._full_output_path
 
+    def _not_recoverable(self, dropped: int) -> str:
+        """The notice line for a cut with no full copy, plus the configured hint."""
+        hint = f" {self._unrecoverable_hint}" if self._unrecoverable_hint else ""
+        return f"The {dropped:,} chars in the middle are not recoverable.{hint}\n"
+
     def _format_tail_notice(self, tail: str, dropped: int) -> str:
         """Tail-only buffers: one short line, then the end of the output."""
         path = self._output_path()
@@ -172,7 +181,7 @@ class TruncatingStringIO(io.StringIO):
         if path:
             where = f"The full untruncated output ({total:,} chars) is in: {path}\n"
         else:
-            where = f"The {dropped:,} chars in the middle are not recoverable.\n"
+            where = self._not_recoverable(dropped)
         return (
             f"<truncated-output>\n"
             f"Output too large ({total:,} chars). "
@@ -229,8 +238,9 @@ class FileBackedTruncatingStringIO(TruncatingStringIO):
         suffix: str = ".txt",
         path: str | Path | None = None,
         max_file_bytes: int | None = None,
+        unrecoverable_hint: str | None = None,
     ):
-        super().__init__(limit=limit, tail_chars=tail_chars)
+        super().__init__(limit=limit, tail_chars=tail_chars, unrecoverable_hint=unrecoverable_hint)
         self._file_failed = False
         self._file_path: str | None = None
         self._file: io.BufferedWriter | None = None
@@ -292,7 +302,7 @@ class FileBackedTruncatingStringIO(TruncatingStringIO):
                 f"Read that file to see the {dropped:,} chars not shown here.\n"
             )
         else:
-            file_notice = f"The {dropped:,} chars in the middle are not recoverable.\n"
+            file_notice = self._not_recoverable(dropped)
 
         return (
             f"<truncated-output>\n"
