@@ -6,6 +6,13 @@ Provides ``serialize()`` and ``deserialize()`` — an 8-step isinstance dispatch
 that handles JSON primitives, enums, collections, nosnapshot values, Pydantic
 models, dataclasses, and ``@snapshotable``-decorated classes.
 
+Pydantic fields use canonical Python names for both storage and restoration,
+independently of external input aliases. Explicit restoration hooks own their format.
+Models that override ``model_validate`` retain their own input-alias behavior,
+even if the override only delegates to ``super()``. With ``extra="allow"``, old
+keys matching renamed fields only through ``AliasChoices`` become extras rather
+than migrating; use ``__restore_snapshot__`` for such migrations.
+
 Envelope format for non-primitive types::
 
     {"__type__": "pydantic"|"dataclass"|"dict_class",
@@ -256,7 +263,7 @@ def _deserialize_envelope(blob: dict[str, Any], allowlist: set[str]) -> Any:
             data = {k: v for k, v in data.items() if k in cls.model_fields}
         # Restore retained nested envelopes before Pydantic validates them.
         deserialized_data = {k: _deserialize(v, allowlist) for k, v in data.items()}
-        return cls.model_validate(deserialized_data)
+        return _validate_model_snapshot(cls, deserialized_data)
 
     if envelope_type == _DATACLASS:
         # Lenient: filter to accepted kwargs, let defaults fill gaps
@@ -278,6 +285,17 @@ def _deserialize_envelope(blob: dict[str, Any], allowlist: set[str]) -> Any:
         return obj
 
     raise DeserializationError(f"Unknown envelope type: {envelope_type!r}")
+
+
+def _validate_model_snapshot(cls: type[BaseModel], data: dict[str, Any]) -> BaseModel:
+    """Validate canonical snapshot field names without changing external input aliases."""
+    if getattr(cls.model_validate, "__func__", None) is not getattr(
+        BaseModel.model_validate, "__func__", None
+    ):
+        # An application-supplied validation entry point retains its existing
+        # input contract, just like an explicit __restore_snapshot__ hook.
+        return cls.model_validate(data)
+    return cls.model_validate(data, by_name=True, by_alias=False)
 
 
 # ---------------------------------------------------------------------------
