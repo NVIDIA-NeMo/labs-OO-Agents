@@ -16,7 +16,8 @@ Producers:
   ``mapping_like``, ``object_like`` or ``text_like``.
   ``capture_fields(**fields)`` captures a framework wrapper.
 - ``TextStream``: output that arrives over time, with an optional
-  ``SpillTarget`` file; ``merge`` joins two unread deltas.
+  ``SpillTarget`` file; ``SpillDir`` bounds the files of many streams;
+  ``merge`` joins two unread deltas.
 
 Renderers: ``render_output`` (command output), ``render_python``
 (agentdoc's prefill notation; its hooks receive a ``PythonRenderer``),
@@ -59,7 +60,7 @@ from nooa.snapshot._render import (
     render_python,
     render_trace,
 )
-from nooa.snapshot._stream import SpillTarget, TextStream, merge
+from nooa.snapshot._stream import SpillDir, SpillTarget, TextStream, merge
 
 __all__ = [
     "Limits",
@@ -72,6 +73,7 @@ __all__ = [
     "Sequence",
     "Snapshot",
     "Spill",
+    "SpillDir",
     "SpillTarget",
     "Text",
     "TextStream",

@@ -42,6 +42,7 @@ Everything is importable from `nooa.snapshot`; see each docstring for arguments,
 | `array_like`, `ndarray_like`, `mapping_like`, `object_like`, `text_like` | the five shapes `capture.register` takes |
 | `capture_fields` | a framework wrapper whose every root field survives (#342's `trace_fields`) |
 | `TextStream`, `SpillTarget` | output that arrives over time, and its optional spill file |
+| `SpillDir` | a folder of spill files for many streams, within a file count and a byte total |
 | `merge` | join two unread progress deltas |
 | `render_output` | command output: `HEAD`, `[... N bytes omitted; full output: PATH]`, `TAIL` |
 | `render_python`, `PythonRenderer` | agentdoc's prefill notation, its per-kind hooks, and the `r` a hook gets |
@@ -59,6 +60,7 @@ Everything is importable from `nooa.snapshot`; see each docstring for arguments,
 - **No user code on values.** Capture never calls a value's `repr`, `str`, properties, descriptors, iteration, hashing or equality. It reads class metadata once per class with `typing.get_type_hints(cls, include_extras=True)`. `src/nooa/snapshot/_raw.py` is the module to audit.
 - **Fail closed.** Hidden fields are never read. A field whose visibility can't be read is left out, and the object gets reason `unreadable`.
 - **Bounded size, time and memory.** `Limits` bounds a capture: `max_chars` (canonical JSON), `max_nodes` (work), `max_depth`, `max_items`, `max_string`. A `TextStream` holds at most `head + tail` units; its spill file at most `SpillTarget.max_bytes` bytes.
+- **Shared spill budget.** A `SpillDir` holds at most `max_files` files and `max_bytes` bytes at once (an open stream counts its target's `max_bytes`, a closed file its size), evicting the oldest closed files for room, and deletes what it created on `close()`; a `Text.full` in it may name a file deleted since.
 - **Exact accounting.** `Text.length == len(head) + len(tail) + omitted`, in the text's own unit. `render_json(capture(v, limits), max_chars=limits.max_chars)` cuts nothing further.
 - **UTF-8-safe cuts.** Bytes stay bytes until rendered, and every bytes cut lands on a code point boundary.
 - **#342 parity.** On #342's domain, `render_json` and `render_trace` give #342's text, incomplete paths and attribute names.
