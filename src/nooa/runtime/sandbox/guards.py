@@ -384,7 +384,15 @@ def apply_env_allowlist(allowed: tuple[str, ...]) -> None:
     keep = {key: value for key, value in os.environ.items() if key in allowed}
     os.environ.clear()
     if platform.system() == "Linux":
-        _libc().clearenv()  # also drops variables set from C that os.environ never saw
+        libc = _libc()
+        # An allowed variable set from C (setenv) is in libc's environment but
+        # not in os.environ, so os.environ.clear() left it; read it before
+        # clearenv() drops it.
+        libc.getenv.restype = ctypes.c_char_p
+        for key in allowed:
+            if key not in keep and (raw := libc.getenv(os.fsencode(key))) is not None:
+                keep[key] = os.fsdecode(raw)
+        libc.clearenv()  # also drops variables set from C that os.environ never saw
         start, end = _env_block_bounds()
         if end > start:
             ctypes.memset(start, 0, end - start)

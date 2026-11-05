@@ -224,6 +224,23 @@ def test_env_closed_with_allowlist():
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="/proc/self/environ is Linux-only")
+def test_env_allowlist_keeps_allowed_variable_set_from_c():
+    # A C library's setenv() reaches libc's environment but not os.environ.
+    run_in_controlled_env("""
+        import ctypes
+        libc = ctypes.CDLL(None)
+        libc.getenv.restype = ctypes.c_char_p
+        libc.setenv(b"FROM_C", b"kept", 1)
+        libc.setenv(b"FROM_C_DENIED", b"dropped", 1)
+        assert "FROM_C" not in os.environ
+        guards.apply_env_allowlist(("PATH", "FROM_C"))
+        assert os.environ.get("FROM_C") == "kept", sorted(os.environ)
+        assert libc.getenv(b"FROM_C") == b"kept"
+        assert libc.getenv(b"FROM_C_DENIED") is None
+    """)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="/proc/self/environ is Linux-only")
 def test_env_allowlist_fails_closed_when_block_not_zeroed():
     # No usable env_start/env_end (e.g. a /proc that reports zeros): refuse to run.
     # The controlled block is non-empty, so there is something left to detect.
