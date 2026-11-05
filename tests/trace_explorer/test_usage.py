@@ -248,6 +248,48 @@ def test_csv_round_trip_and_spreadsheet_text_safety(tmp_path, model):
     assert row["model"] == ("'" + model if dangerous else model)
 
 
+def test_csv_uses_lf_record_terminators(tmp_path):
+    """Return LF records so callers can apply text-mode newline conversion once."""
+    report = load_usage_report(_trace(tmp_path, [_span()]))
+    output = report.to_csv()
+    assert "\r" not in output
+    assert output.count("\n") == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+@pytest.mark.parametrize("until,record_types", [(0, ["summary"]), (1, ["call", "summary"])])
+async def test_cli_csv_survives_stdout_newline_translation(
+    tmp_path, monkeypatch, newline, until, record_types
+):
+    """POSIX and Windows-style stdout write one record per line, including empty reports."""
+    path = _trace(tmp_path, [_span()])
+    raw = io.BytesIO()
+    with io.TextIOWrapper(raw, encoding="utf-8", newline=newline) as output:
+        with monkeypatch.context() as patch:
+            patch.setattr(sys, "stdout", output)
+            patch.setattr(
+                sys,
+                "argv",
+                [
+                    "trace-explorer",
+                    str(path),
+                    "--usage",
+                    "--usage-format",
+                    "csv",
+                    "--until-seconds",
+                    str(until),
+                ],
+            )
+            await _async_main()
+            output.flush()
+            captured = raw.getvalue()
+    assert b"\r\r\n" not in captured
+    rows = list(csv.reader(io.StringIO(captured.decode("utf-8"), newline="")))
+    assert len(rows) == 1 + len(record_types)
+    assert [row[0] for row in rows[1:]] == record_types
+
+
 @pytest.mark.parametrize(
     "record",
     [

@@ -102,7 +102,7 @@ class UsageReport:
             "start_time_unix_nano",
             "recorded_duration_seconds",
         ]
-        writer = csv.DictWriter(output, fieldnames=columns)
+        writer = csv.DictWriter(output, fieldnames=columns, lineterminator="\n")
         writer.writeheader()
         for point in self.timeline:
             row = asdict(point)
