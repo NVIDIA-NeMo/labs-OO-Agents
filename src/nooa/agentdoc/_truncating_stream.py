@@ -8,8 +8,7 @@ Two flavors:
 
 - :class:`TruncatingStringIO` — pure in-memory head/tail buffer (default).
 - :class:`FileBackedTruncatingStringIO` — same truncation, but also streams
-  all output to a file (a temp file unless ``path=`` is given, optionally
-  capped by ``max_file_bytes=``) and includes the file path in the truncation
+  all output to a temp file and includes the file path in the truncation
   notice, so the full untruncated output remains retrievable.
 
 With ``tail_chars == limit`` (no head) the buffer keeps only the end of the
@@ -31,7 +30,6 @@ import logging
 import os
 import tempfile
 from collections.abc import AsyncIterator, Callable
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -66,7 +64,6 @@ class TruncatingStringIO(io.StringIO):
         limit: int = DEFAULT_LIMIT,
         tail_chars: int | None = None,
         *,
-        full_output_path: str | None = None,
         unrecoverable_hint: str | None = None,
     ):
         """Initialize truncating buffer.
@@ -76,13 +73,10 @@ class TruncatingStringIO(io.StringIO):
             tail_chars: Characters reserved for the tail window.
                         None = half of limit (50/50 split). Equal to
                         ``limit``: keep only the end (tail-only notice).
-            full_output_path: Where the caller keeps the full output, named
-                        in the truncation notice (None: not recoverable).
             unrecoverable_hint: A sentence after the notice's "not recoverable"
                         line (e.g. how to keep large output next time).
         """
         super().__init__()
-        self._full_output_path = full_output_path
         self._unrecoverable_hint = unrecoverable_hint
         self._limit = limit
         self._tail_limit = tail_chars if tail_chars is not None else limit // 2
@@ -156,8 +150,12 @@ class TruncatingStringIO(io.StringIO):
         return self._format_truncation_notice(head, tail, total, head_chars, tail_chars, dropped)
 
     def _output_path(self) -> str | None:
-        """Where the full output is, if anywhere (named in the notices)."""
-        return self._full_output_path
+        """Where the full output is, if anywhere (named in the notices).
+
+        None here: an in-memory buffer keeps no full copy. File-backed
+        subclasses return their file.
+        """
+        return None
 
     def _not_recoverable(self, dropped: int) -> str:
         """The notice line for a cut with no full copy, plus the configured hint."""
@@ -210,14 +208,8 @@ class FileBackedTruncatingStringIO(TruncatingStringIO):
     Behaves identically to :class:`TruncatingStringIO` for in-memory
     head/tail truncation, but additionally streams all written content to a
     file on disk (UTF-8; lone surrogates are written as ``\\udXXX`` escapes):
-    a new temp file, or ``path`` if given. When truncated, ``getvalue()``
-    includes the file path in the notice so the user can inspect the full
-    output. ``write_bytes`` writes raw bytes to the file only (e.g. a
-    process's output, kept byte-exact in a log).
-
-    ``max_file_bytes`` caps the file: bytes past it are counted, not written,
-    and :meth:`close` appends one ``[log truncated: N more bytes not
-    written]`` line.
+    a new temp file. When truncated, ``getvalue()`` includes the file path
+    in the notice so the user can inspect the full output.
 
     File I/O errors are handled gracefully — if the file cannot be
     created or written to, the stream falls back to pure in-memory behavior
@@ -236,25 +228,16 @@ class FileBackedTruncatingStringIO(TruncatingStringIO):
         dir: str | None = None,
         prefix: str = "nemo_output_",
         suffix: str = ".txt",
-        path: str | Path | None = None,
-        max_file_bytes: int | None = None,
         unrecoverable_hint: str | None = None,
     ):
         super().__init__(limit=limit, tail_chars=tail_chars, unrecoverable_hint=unrecoverable_hint)
         self._file_failed = False
         self._file_path: str | None = None
         self._file: io.BufferedWriter | None = None
-        self._max_file_bytes = max_file_bytes
-        self._file_bytes = 0
-        self._file_dropped = 0
         try:
-            if path is not None:
-                self._file = open(path, "wb")  # noqa: SIM115 - closed in close()
-                self._file_path = str(path)
-            else:
-                fd, temp_path = tempfile.mkstemp(dir=dir, prefix=prefix, suffix=suffix)
-                self._file = os.fdopen(fd, "wb")
-                self._file_path = temp_path
+            fd, temp_path = tempfile.mkstemp(dir=dir, prefix=prefix, suffix=suffix)
+            self._file = os.fdopen(fd, "wb")
+            self._file_path = temp_path
         except OSError:
             _log.warning(
                 "Failed to create file for output capture; falling back to in-memory",
@@ -264,26 +247,14 @@ class FileBackedTruncatingStringIO(TruncatingStringIO):
 
     def write(self, s: str) -> int:
         """Write to both the file and the in-memory truncating buffer."""
-        self.write_bytes(s.encode("utf-8", errors="backslashreplace"))
-        return super().write(s)
-
-    def write_bytes(self, data: bytes) -> int:
-        """Write raw bytes to the file only (up to ``max_file_bytes``); return len(data)."""
-        if self._file is None or self._file_failed or self._file.closed:
-            return len(data)
-        room = len(data)
-        if self._max_file_bytes is not None:
-            room = max(0, min(room, self._max_file_bytes - self._file_bytes))
-        self._file_dropped += len(data) - room
-        if room:
+        if self._file is not None and not self._file_failed and not self._file.closed:
             try:
-                self._file.write(data[:room] if room < len(data) else data)
+                self._file.write(s.encode("utf-8", errors="backslashreplace"))
                 self._file.flush()
-                self._file_bytes += room
             except OSError:
                 _log.warning("Failed to write to file; disabling file backing", exc_info=True)
                 self._file_failed = True
-        return len(data)
+        return super().write(s)
 
     def _output_path(self) -> str | None:
         if self._file_path and not self._file_failed:
@@ -328,11 +299,6 @@ class FileBackedTruncatingStringIO(TruncatingStringIO):
         """Path to the file, or None if file creation failed."""
         return self._file_path
 
-    @property
-    def file_bytes_dropped(self) -> int:
-        """Bytes not written because of ``max_file_bytes``."""
-        return self._file_dropped
-
     def close(self) -> None:
         """Close the file handle (file remains on disk).
 
@@ -342,10 +308,6 @@ class FileBackedTruncatingStringIO(TruncatingStringIO):
         """
         if self._file is not None and not self._file.closed:
             try:
-                if self._file_dropped and not self._file_failed:
-                    self._file.write(
-                        f"\n[log truncated: {self._file_dropped:,} more bytes not written]\n".encode()
-                    )
                 self._file.close()
             except OSError:
                 pass
