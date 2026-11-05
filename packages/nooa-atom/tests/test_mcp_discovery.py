@@ -8,13 +8,13 @@ from pathlib import Path
 import pytest
 from atom_test_agents import AtomModels, cell
 from nooa_atom.agent.base import AtomAgentBase
+from nooa_atom.agent.metrics import AtomHarnessMetrics
 from nooa_atom.session.options import SessionOptions
 from nooa_atom.session.registry import SessionRegistry
 from nooa_atom.session.store import SessionStore
 from nooa_atom.skills.mcp_servers import MCPServers
 
 from nooa.interactive import Done
-from nooa.runtime.harness_metrics import HarnessMetrics
 from nooa.unifiedllm import FakeLLMClient
 
 PROBE = Path(__file__).parent / "acp_adapter" / "fixtures" / "mcp_probe.py"
@@ -117,8 +117,8 @@ async def registry(tmp_path, monkeypatch, tmp_path_factory):
 async def test_root_and_child_name_the_server_in_the_first_request_and_hint_its_tools(
     registry, tmp_path, monkeypatch
 ):
-    metrics = HarnessMetrics()  # the turn's own metrics session would hide them
-    monkeypatch.setattr("nooa_atom.agent.agent.get_harness_metrics", lambda: metrics)
+    metrics = AtomHarnessMetrics()  # the turn's own metrics session would hide them
+    monkeypatch.setattr("nooa_atom.agent.agent.atom_metrics", lambda: metrics)
     models = registry.models
     models.scripts[None] = [
         cell("await lookup_order(order_id=1)"),

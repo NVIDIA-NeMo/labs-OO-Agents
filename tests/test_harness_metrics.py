@@ -257,26 +257,10 @@ class TestRecording:
         m.missing_await("analyze")
         assert m.missing_awaits_detected == ["analyze"]
 
-    def test_mcp_tool_name_hint(self):
-        m = HarnessMetrics()
-        m.mcp_tool_name_hint("hcb_resources.lookup_order")
-        assert m.mcp_tool_name_hints == ["hcb_resources.lookup_order"]
-        attrs = {entry.key: entry.value_fn(m) for entry in get_span_schema()}
-        assert attrs["harness.mcp_tool_name_hint.count"] == 1
-        assert attrs["harness.mcp_tool_name_hint.calls"] == ["hcb_resources.lookup_order"]
-
     def test_return_result_tool_alias(self):
         m = HarnessMetrics()
         m.return_result_tool_alias()
         assert m.to_span_attributes()["harness.return_result_tool_alias.count"] == 1
-
-    def test_module_not_found_hint(self):
-        m = HarnessMetrics()
-        m.module_not_found_hint("cv2")
-        assert m.module_not_found_hints == ["cv2"]
-        attrs = m.to_span_attributes()
-        assert attrs["harness.module_not_found_hint.count"] == 1
-        assert attrs["harness.module_not_found_hint.modules"] == ["cv2"]
 
     def test_infinite_loop(self):
         m = HarnessMetrics()
@@ -1095,6 +1079,19 @@ from nooa.runtime.harness_metrics import (  # noqa: E402
     register_harness_metrics_extension,
 )
 
+# The counters only Atom records live in nooa_atom.agent.metrics, not here.
+_ATOM_ONLY_FIELDS = (
+    "shell_queued_behind_running",
+    "shell_busy_rejected",
+    "child_detached_at_deadline",
+    "waiting_on_person_rejections",
+    "shell_exit_hints",
+    "shell_cwd_fallbacks",
+    "name_error_hints",
+    "mcp_tool_name_hints",
+    "module_not_found_hints",
+)
+
 
 class _ToyMetrics(HarnessMetricsExtension):
     """A package's counters, as a test extension."""
@@ -1119,6 +1116,13 @@ def _registry(monkeypatch):
 
 
 class TestExtensions:
+    def test_core_metrics_do_not_carry_atom_counters(self):
+        core_keys = {entry.key for entry in _SPAN_SCHEMA}
+        for name in _ATOM_ONLY_FIELDS:
+            assert name not in HarnessMetrics.model_fields
+        for key in ("harness.shell_busy_rejected.count", "harness.name_error_hint.count"):
+            assert key not in core_keys
+
     def test_extension_records_into_span_attributes(self):
         m = HarnessMetrics()
         assert m.to_span_attributes() == {}
