@@ -211,12 +211,18 @@ If no anchor can be derived (e.g. empty turn) **nothing is injected** — it nev
 memories are *not* reinforced (only memories the agent deliberately `recall()`s get their
 recency/strength bumped), so the ACT-R signal stays meaningful.
 
+`context_char_budget` is a hard cap on whole records. A block that fits is injected
+as is. One that does not is packed in rank order, with the `always` open-todo section
+claiming budget first: heads are capped at 160 characters, and a record that still
+does not fit loses its references, then the rest of its head, and is left out only if
+its bare `[type#id]` marker does not fit. A marker is never cut, and an explicit `recall()`
+still returns the full text. A budget too small for a section header and one marker
+injects nothing.
+
 Injection IDs, per-memory injection counters, and `MemoryInjected.n_memories`
-describe records retained after the character budget is applied. A partially
-rendered record counts once its complete `[type#id]` marker is visible (including
-the status in a todo marker); a cut inside that marker does not count. Omitted
-records are not logged as injected. This rule applies to both recalled memories
-and the additional open-todo section, without changing passive ACT-R behavior.
+describe exactly the records whose marker reached the context. Omitted records are
+not logged as injected. This rule applies to both recalled memories and the additional
+open-todo section, without changing passive ACT-R behavior.
 
 **How to configure** (`SpontaneousConfig`):
 

@@ -67,15 +67,18 @@ def test_wholly_truncated_memory_is_not_logged(setup):
     assert manager.store.get(second.id).injected_count == 0
 
 
-@pytest.mark.parametrize("cut", [0, 10, 35, 50, 51, 52, 80, 250, 270, 1000])
-def test_partial_record_requires_complete_identity_marker(setup, cut):
+@pytest.mark.parametrize(
+    ("cut", "n_kept"),
+    # 52 is the header, its newline and the first marker; below that nothing fits.
+    [(0, 0), (10, 0), (35, 0), (50, 0), (51, 0), (52, 1), (80, 1), (250, 2), (270, 2), (1000, 2)],
+)
+def test_record_is_kept_only_with_its_complete_identity_marker(setup, cut, n_kept):
     _, manager, first, second = setup
-    full = _expected_text(manager, [first, second])
-    prefix = full[:cut].rstrip() if len(full) > cut else full
-    expected = [m.id for m in (first, second) if f"[info#{m.id}]" in prefix]
+    expected = [m.id for m in (first, second)][:n_kept]
     _budget(manager, cut)
     text = manager._format_recall(["deployment"])
-    assert text == (prefix + " …" if len(full) > cut else full)
+    assert len(text) <= cut
+    assert text.count("[info#") == n_kept
     assert manager._last_injected_ids == expected
     for memory in (first, second):
         assert manager.store.get(memory.id).injected_count == int(memory.id in expected)
@@ -94,7 +97,7 @@ def test_all_fit_preserves_output_and_passive_actr_state(setup):
         assert (saved.strength, saved.access_count, saved.last_accessed_at) == before[memory.id]
 
 
-@pytest.mark.parametrize("cut", [40, 80, 1000])
+@pytest.mark.parametrize("cut", [60, 80, 1000])
 def test_event_counts_and_ids_agree_with_retained_memories(setup, cut):
     agent, manager, first, second = setup
     _budget(manager, cut)
@@ -110,6 +113,22 @@ def test_event_counts_and_ids_agree_with_retained_memories(setup, cut):
     assert event.n_memories == len(expected)
     assert event.chars == len(text)
     assert manager.stats.injected_chars == len(text)
+
+
+def test_budget_below_one_marker_injects_nothing(setup):
+    agent, manager, first, second = setup
+    key = manager.config.spontaneous.context_block_key
+    agent.context_manager.set_dynamic(key, value="stale block")
+    _budget(manager, 40)
+    events = []
+    agent.event_manager.on("MemoryInjected", events.append)
+    agent.event_manager.add(Task(prompt="deployment"))
+    manager._on_before_turn(None)
+    assert key not in agent.context_manager
+    assert events == []
+    assert manager._last_injected_ids == []
+    assert manager.store.get(first.id).injected_count == 0
+    assert manager.store.get(second.id).injected_count == 0
 
 
 def test_logging_disabled_still_reports_only_retained_ids(setup):
@@ -135,7 +154,7 @@ def test_empty_query_clears_prior_injection_metadata(setup):
     assert manager._last_injected_ids == []
 
 
-def test_reference_truncation_does_not_log_later_record(setup):
+def test_reference_that_does_not_fit_is_dropped_whole(setup):
     agent, manager, first, second = setup
     agent.vars = {"live": "reference " + "R" * 200}
     first.content = "short"
@@ -145,13 +164,29 @@ def test_reference_truncation_does_not_log_later_record(setup):
     cut = full.index("reference") + len("reference")
     _budget(manager, cut)
     text = manager._format_recall(["deployment"])
-    assert "reference" in text and second.id not in text
-    assert manager._last_injected_ids == [first.id]
-    assert manager.store.get(second.id).injected_count == 0
+    assert "reference" not in text
+    assert f"[info#{first.id}] short" in text and second.content in text
+    assert manager._last_injected_ids == [first.id, second.id]
+    assert manager.store.get(second.id).injected_count == 1
 
 
-@pytest.mark.parametrize("cut", [80, 1000])
-def test_always_visible_todos_use_same_accounting_rule(setup, monkeypatch, cut):
+def test_reference_that_fits_survives_packing(setup):
+    agent, manager, first, second = setup
+    agent.vars = {"live": "reference value"}
+    first.references = [MemoryRef(kind="var", key="live")]
+    manager.store.save(first)
+    full = _expected_text(manager, [first, second])
+    _budget(manager, len(full) - 1)  # over budget only because of the long head
+    text = manager._format_recall(["deployment"])
+    assert "reference value" in text and second.content in text
+    assert manager._last_injected_ids == [first.id, second.id]
+
+
+@pytest.mark.parametrize(
+    ("cut", "keeps_first"),
+    [(80, False), (1000, True)],  # at 80 the todo claims the room the record would need
+)
+def test_always_visible_todos_use_same_accounting_rule(setup, monkeypatch, cut, keeps_first):
     _, manager, first, second = setup
     second.type = MemoryType.TODO
     second.status = "open"
@@ -161,9 +196,10 @@ def test_always_visible_todos_use_same_accounting_rule(setup, monkeypatch, cut):
     )
     _budget(manager, cut, inject_open_todos="always")
     text = manager._format_recall(["deployment"])
-    expected = [first.id] + ([second.id] if f"[todo:open#{second.id}]" in text else [])
-    assert manager._last_injected_ids == expected
-    assert manager.store.get(second.id).injected_count == int(second.id in expected)
+    assert f"[todo:open#{second.id}]" in text
+    assert manager._last_injected_ids == ([first.id] if keeps_first else []) + [second.id]
+    assert manager.store.get(first.id).injected_count == int(keeps_first)
+    assert manager.store.get(second.id).injected_count == 1
 
 
 def test_bracket_inside_memory_id_does_not_end_identity_marker(setup, monkeypatch):

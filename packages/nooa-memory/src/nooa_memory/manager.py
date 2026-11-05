@@ -57,6 +57,11 @@ logger = logging.getLogger(__name__)
 # Dedicated logger for memory-usage monitoring/debug (raise to DEBUG to trace ops).
 mem_logger = logging.getLogger("nooa_memory")
 
+# Longest title/content an injected line keeps once the block is over budget.
+_HEAD_MAX_CHARS = 160
+_RECALLED_HEADER = "## Recalled memories (associative)"
+_TODOS_HEADER = "## Open todos"
+
 # Salience/importance defaults per auto-written event type.
 _EVENT_SALIENCE: dict[str, tuple[float, float]] = {
     # event_type: (salience, importance)
@@ -638,9 +643,18 @@ class MemoryManager:
         tag = f"{m.type.value}:{m.status}" if m.type is MemoryType.TODO else m.type.value
         return f"- [{tag}#{m.id[:8]}]"
 
-    def _memory_lines(self, m: Memory) -> list[str]:
+    def _head_line(self, m: Memory, limit: int | None = None) -> str:
+        """Render the marker and head, shortening the head to ``limit`` chars."""
+        marker = self._identity_marker(m)
         head = (m.title or m.content).replace("\n", " ").strip()
-        lines = [f"{self._identity_marker(m)} {head}"]
+        if limit is None or len(head) <= limit:
+            return f"{marker} {head}"
+        if limit < 2:
+            return marker
+        return f"{marker} {head[: limit - 1].rstrip()}…"
+
+    def _memory_lines(self, m: Memory) -> list[str]:
+        lines = [self._head_line(m)]
         # References resolve fresh against live state (pass-by-reference).
         for ref in m.references[:4]:
             resolved = resolve(self.agent, self.store, ref)
@@ -659,10 +673,11 @@ class MemoryManager:
         return todos[:k]
 
     def _format_recall(self, queries: list[str]) -> str:
-        """Render recall, then account only for memories identifiable in the result.
+        """Render recall within the budget and account for the memories it kept.
 
-        A partial record counts as injected once its complete ``[type#id]``
-        marker survives the budget. A cut inside that marker does not count.
+        A block that fits is rendered whole. One that does not is packed record
+        by record (see ``_pack_section``), so a ``[type#id]`` marker is never cut
+        and only memories whose marker is in the result count as injected.
         """
         self._last_injected_ids = []
         if not queries:
@@ -676,40 +691,30 @@ class MemoryManager:
                     continue  # todos are reachable via explicit recall/search only
                 seen.setdefault(m.id, m)
         shown = list(seen.values())[:k]
-        lines: list[str] = []
-        record_lines: list[tuple[Memory, int]] = []
-        if shown:
-            lines.append("## Recalled memories (associative)")
-            for m in shown:
-                record_lines.append((m, len(lines)))
-                lines.extend(self._memory_lines(m))
         extra: list[Memory] = []
         if sp.inject_open_todos == "always":
             listed = {m.id for m in shown}
             extra = [t for t in self._open_todos(sp.open_todos_k) if t.id not in listed]
-            if extra:
-                lines.append("## Open todos")
-                for t in extra:
-                    record_lines.append((t, len(lines)))
-                    lines.extend(self._memory_lines(t))
-        if not lines:
-            return ""
+        recalled = [(m, self._memory_lines(m)) for m in shown]
+        todos = [(t, self._memory_lines(t)) for t in extra]
+        lines: list[str] = []
+        if recalled:
+            lines += [_RECALLED_HEADER, *(ln for _, block in recalled for ln in block)]
+        if todos:
+            lines += [_TODOS_HEADER, *(ln for _, block in todos for ln in block)]
         text = "\n".join(lines)
-        visible_end = len(text)
-        if len(text) > sp.context_char_budget:
-            prefix = text[: sp.context_char_budget].rstrip()
-            visible_end = len(prefix)
-            text = prefix + " …"
-        offsets: list[int] = []
-        position = 0
-        for line in lines:
-            offsets.append(position)
-            position += len(line) + 1  # newline between rendered lines
-        injected = [
-            memory
-            for memory, line_index in record_lines
-            if offsets[line_index] + len(self._identity_marker(memory)) <= visible_end
-        ]
+        injected = [m for m, _ in recalled + todos]
+        budget = sp.context_char_budget
+        if len(text) > budget:
+            # The "always" section claims budget first so prospective memory
+            # survives long associative hits; it still renders last.
+            todo_text, kept_todos = self._pack_section(_TODOS_HEADER, todos, budget)
+            recalled_budget = budget - len(todo_text) - 1 if todo_text else budget
+            recalled_text, kept = self._pack_section(_RECALLED_HEADER, recalled, recalled_budget)
+            text = "\n".join(part for part in (recalled_text, todo_text) if part)
+            injected = kept + kept_todos
+        if not text:
+            return ""
         self._last_injected_ids = [m.id for m in injected]
         if self.config.observability.log_injections:
             # Logged WITHOUT touching: injection stays invisible to ACT-R.
@@ -717,6 +722,31 @@ class MemoryManager:
                 m.log_access(self._access("injected"), cap=self.config.observability.access_log_cap)
                 self.store.save(m)
         return text
+
+    def _pack_section(
+        self, header: str, blocks: list[tuple[Memory, list[str]]], budget: int
+    ) -> tuple[str, list[Memory]]:
+        """Fit a section's records, in order, within ``budget`` chars.
+
+        Each record shrinks only as far as it must: capped head plus references,
+        then the head alone cut to the room left, then its bare marker, and is
+        otherwise left out. The full text stays reachable through ``recall``.
+        """
+        entries: list[str] = []
+        kept: list[Memory] = []
+        used = len(header)
+        for m, block in blocks:
+            room = budget - used - 1  # the newline before this record
+            entry = "\n".join([self._head_line(m, _HEAD_MAX_CHARS), *block[1:]])
+            if len(entry) > room:
+                head_room = room - len(self._identity_marker(m)) - 1
+                entry = self._head_line(m, min(_HEAD_MAX_CHARS, head_room))
+            if len(entry) > room:
+                continue
+            entries.append(entry)
+            kept.append(m)
+            used += len(entry) + 1
+        return "\n".join([header, *entries]) if entries else "", kept
 
     def _on_task(self, event: object) -> None:
         self._primed = False

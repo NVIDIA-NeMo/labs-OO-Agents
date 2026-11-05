@@ -6,6 +6,12 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- `nooa-memory`: an over-budget injected memory block is now packed record by
+  record instead of being cut at `context_char_budget`. One long memory no
+  longer crowds out the rest, `inject_open_todos="always"` survives a full
+  block, a `[type#id]` marker is never cut, and the block no longer exceeds the
+  budget. A block that fits is unchanged. A budget too small for a section
+  header and one marker now injects nothing rather than a fragment.
 - Registry entries' `base_url`, `timeout` and `custom_llm_provider` settings
   are now passed to the clients built from them. They were ignored before, so
   configs that set them may now send requests to a different endpoint or
