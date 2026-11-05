@@ -460,3 +460,29 @@ async def test_authenticate_rejects_an_unknown_method(make_adapter):
     adapter = await make_adapter(ScriptedModels({None: []}), capabilities=TERMINAL)
     with pytest.raises(RequestError):
         await adapter.authenticate("other")
+
+
+async def test_a_session_that_ran_connect_can_be_loaded_after_the_restart(
+    atom_adapter, workspace, client
+):
+    # Pool runs the terminal Connect, starts a new agent process, closes the
+    # old one, then loads the same session by id. The old process must not
+    # discard it as an empty session when it closes.
+    adapter = await atom_adapter([], capabilities=TERMINAL)
+    session_id = (await adapter.new_session(str(workspace))).session_id
+    with pytest.raises(RequestError) as failed:
+        await _connect_prompt(adapter, session_id)
+    assert failed.value.code == -32000
+    restarted = await atom_adapter([], capabilities=TERMINAL)
+    await adapter.close()
+    await restarted.load_session(str(workspace), session_id)
+    assert restarted.session(session_id).id == session_id
+
+
+async def test_an_untouched_session_is_still_discarded_at_close(atom_adapter, workspace):
+    adapter = await atom_adapter([], capabilities=TERMINAL)
+    session_id = (await adapter.new_session(str(workspace))).session_id
+    await adapter.close()
+    restarted = await atom_adapter([], capabilities=TERMINAL)
+    with pytest.raises(RequestError):
+        await restarted.load_session(str(workspace), session_id)

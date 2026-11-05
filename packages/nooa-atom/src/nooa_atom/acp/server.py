@@ -300,6 +300,10 @@ class AtomACPAgent:
         # Client requests (forms, permissions) a prompt is waiting on, by
         # session: session/cancel stops them.
         self._asks: dict[str, set[asyncio.Future[Any]]] = {}
+        # Sessions that asked the client to run the terminal Connect. The
+        # client restarts the agent and loads them again by id, so close()
+        # keeps them even when they have no turns yet.
+        self._connecting: set[str] = set()
         self._ask_epochs: dict[str, int] = {}
         # The question each session's prompt is asking, so two prompts that
         # returned with the same turn ask it once.
@@ -729,7 +733,9 @@ class AtomACPAgent:
             (registry, session.id)
             for registry in self._registries.values()
             for session in registry.sessions.values()
-            if session.parent_id is None and session.info.turn_count == 0
+            if session.parent_id is None
+            and session.info.turn_count == 0
+            and session.id not in self._connecting
         ]
         await _close_in_order(
             *(registry.close_all for registry in self._registries.values()),
@@ -771,6 +777,7 @@ class AtomACPAgent:
                 if handled is not None:
                     return handled
             if self._terminal_auth() and not self._has_model(session):
+                self._connecting.add(session.id)
                 raise RequestError.auth_required(
                     {"reason": "No model is configured; connect one with `nooa connect`."}
                 )
@@ -949,6 +956,7 @@ class AtomACPAgent:
         """
         result = consume_connect_result()
         if result is None:
+            self._connecting.add(session.id)
             raise RequestError.auth_required(
                 {"reason": "/connect runs `nooa connect` in a terminal."}
             )
