@@ -177,6 +177,31 @@ async def test_all_calls_that_succeed_get_no_skip_results(strategy_type, tool, m
             '{"name": "python_cell", "arguments": {"code": "1"}}',
             '{"name": "python_cell", "arguments":',
         ),
+        (
+            '{"arguments": {"code": "print({1})"}, "name": "python_cell"}',
+            '{"arguments": {"code": "print({1})"}, "name": "python_cell"}',
+        ),
+        (
+            '{"id": "call_1", "arguments": {"code": "say(\\"hi\\")"}, "name": "python_cell"}',
+            '{"id": "call_1", "arguments": {"code": "say(\\"hi\\")"}, "name": "python_cell"}',
+        ),
+        (
+            '{"parameters": {"value": {"explanation": "ok", "items": [1, {"a": 2}]}}, "name": "return_result"}',
+            '{"parameters": {"value": {"explanation": "ok", "items": [1, {"a": 2}]}}, "name": "return_result"}',
+        ),
+        (
+            '{"arguments": "{\\"code\\": \\"1\\"}", "name": "python_cell"}',
+            '{"arguments": "{\\"code\\": \\"1\\"}", "name": "python_cell"}',
+        ),
+        (
+            'I will run {"x": 1} then {"tool_calls": [{"arguments": {"code": "1"}, "name": "python_cell"}]} now.',
+            '{"tool_calls": [{"arguments": {"code": "1"}, "name": "python_cell"}]}',
+        ),
+        (
+            '<think>cut off {"arguments": {"code": "1"}, "name": "python_cell"}, so '
+            '{"name": "python_cell", "arguments": {"code": "1"',
+            '{"name": "python_cell", "arguments":',
+        ),
     ],
 )
 def test_tool_call_markup_is_detected(text, marker):
@@ -185,7 +210,19 @@ def test_tool_call_markup_is_detected(text, marker):
 
 @pytest.mark.parametrize(
     "text",
-    [None, "", "I am done.", "Call `return_result(value)` next.", '{"name": "x"}', "a <b> c"],
+    [
+        None,
+        "",
+        "I am done.",
+        "Call `return_result(value)` next.",
+        '{"name": "x"}',
+        '{"arguments": {"code": "1"}}',
+        '{"arguments": {"code": "1"}, "label": "x"}',
+        '{"name": 3, "arguments": {}}',
+        '{"items": [{"name": "x"}, {"arguments": {}}]}',
+        "f({'name': 'x', 'arguments': {}})",
+        "a <b> c",
+    ],
 )
 def test_plain_text_has_no_tool_call_markup(text):
     assert text_only_tool_call_markup(text) is None
