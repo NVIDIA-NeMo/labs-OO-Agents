@@ -214,16 +214,50 @@ def retry_text_only_response(context: TextOnlyResponseContext) -> TextOnlyRespon
 # Tool-call syntax a model wrote as text (often inside <think>), which the
 # provider did not parse into a real tool call: Hermes/Qwen-style
 # <tool_call>/<function=...>/<parameter=...>, GLM's <arg_key>/<arg_value>,
-# Anthropic-style <invoke>, and a JSON {"name": ..., "arguments": ...} object
-# with its two members in either order (the arguments may be a flat object
-# or a string; nested objects inside them are not followed).
-_JSON_STRING = r'"(?:[^"\\]|\\.)*"'
-_JSON_FLAT_OBJECT = rf'\{{(?:{_JSON_STRING}|[^{{}}"])*\}}'
+# Anthropic-style <invoke>, and the prefix of a JSON {"name": ..., "arguments": ...}
+# object (matched even when the object was cut off). Complete JSON objects with
+# the two members in any order, or with other members, are found by parsing
+# (see _json_tool_call).
 _TOOL_CALL_MARKUP = re.compile(
     r"</?tool_call>|<function=|<parameter=|</?arg_(?:key|value)>|<invoke\b"
-    rf'|\{{\s*"name"\s*:\s*{_JSON_STRING}\s*,\s*"(?:arguments|parameters)"\s*:'
-    rf'|\{{\s*"(?:arguments|parameters)"\s*:\s*(?:{_JSON_FLAT_OBJECT}|{_JSON_STRING})\s*,\s*"name"\s*:\s*"'
+    r'|\{\s*"name"\s*:\s*"(?:[^"\\]|\\.)*"\s*,\s*"(?:arguments|parameters)"\s*:'
 )
+_JSON_DECODER = json.JSONDecoder()
+_TOOL_CALL_ARGUMENT_KEYS = ("arguments", "parameters")
+
+
+def _holds_tool_call(value: Any) -> bool:
+    """Whether *value* is, or contains, an object with "name" and "arguments"/"parameters"."""
+    if isinstance(value, dict):
+        if isinstance(value.get("name"), str) and any(
+            key in value for key in _TOOL_CALL_ARGUMENT_KEYS
+        ):
+            return True
+        return any(_holds_tool_call(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_holds_tool_call(item) for item in value)
+    return False
+
+
+def _json_tool_call(text: str) -> str | None:
+    """Return the source of the first JSON object in *text* that holds a tool call, else ``None``.
+
+    Every ``{`` is tried as the start of a JSON value; one that parses is
+    searched in memory (so a call nested in a wrapper object or list counts)
+    and then skipped over, so a long JSON document is parsed once.
+    """
+    start = text.find("{")
+    while start != -1:
+        try:
+            value, end = _JSON_DECODER.raw_decode(text, start)
+        except ValueError:
+            start = text.find("{", start + 1)
+            continue
+        if _holds_tool_call(value):
+            return text[start:end]
+        start = text.find("{", end)
+    return None
+
 
 TEXT_ONLY_TOOL_MARKUP_NOTE = (
     "Your reply contained a tool call written as text (inside <think>, or as "
@@ -242,7 +276,9 @@ def text_only_tool_call_markup(text: str | None) -> str | None:
     if not text:
         return None
     match = _TOOL_CALL_MARKUP.search(text)
-    return match.group(0) if match else None
+    if match:
+        return match.group(0)
+    return _json_tool_call(text)
 
 
 def text_only_tool_markup_note(context: TextOnlyResponseContext) -> str:
