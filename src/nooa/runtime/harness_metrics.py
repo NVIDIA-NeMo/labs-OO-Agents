@@ -28,7 +28,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any, ClassVar, NamedTuple
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +93,54 @@ class SchemaEntry(NamedTuple):
     category: str
     value_fn: Callable[[HarnessMetrics], Any]
     is_detail: bool = False
+
+
+# ── Extensions (counters a package adds) ────────────────────────────
+
+
+class HarnessMetricsExtension(BaseModel):
+    """Counters a package adds to :class:`HarnessMetrics`, with their span attributes.
+
+    Subclass it with the fields and recorder methods, set ``span_schema`` (its
+    entries' ``value_fn`` receives the extension instance, not the
+    HarnessMetrics), and register the class with
+    :func:`register_harness_metrics_extension`. Record with
+    ``get_harness_metrics().extension(MyMetrics).my_counter()``: a session
+    creates the extension on first use, so agents that never record one carry
+    none of its fields, and outside a session the call is a no-op.
+    """
+
+    span_schema: ClassVar[tuple[SchemaEntry, ...]] = ()
+
+    def _append(self, lst: list[str], value: str, limit: int = _MAX_STRING_CHARS) -> None:
+        """Append ``value`` truncated to ``limit`` unless ``lst`` is full."""
+        if len(lst) < _MAX_LIST_ITEMS:
+            lst.append(_truncate(value, limit))
+
+    def _append_item(self, lst: list[Any], item: Any) -> None:
+        """Append ``item`` unless ``lst`` is full (no truncation: records, ints)."""
+        if len(lst) < _MAX_LIST_ITEMS:
+            lst.append(item)
+
+
+# Registered extension classes, in registration order (drives get_span_schema()).
+_EXTENSIONS: list[type[HarnessMetricsExtension]] = []
+
+
+def register_harness_metrics_extension[E: HarnessMetricsExtension](cls: type[E]) -> type[E]:
+    """Register an extension so :func:`get_span_schema` lists its attributes.
+
+    Usable as a class decorator; registering the same class again is a no-op.
+    Raises ``ValueError`` if one of its span keys is already in the schema.
+    """
+    if cls in _EXTENSIONS:
+        return cls
+    taken = {entry.key for entry in get_span_schema()}
+    clashes = sorted(entry.key for entry in cls.span_schema if entry.key in taken)
+    if clashes:
+        raise ValueError(f"{cls.__name__} span keys already in the schema: {clashes}")
+    _EXTENSIONS.append(cls)
+    return cls
 
 
 # ── HarnessMetrics ──────────────────────────────────────────────────
@@ -234,6 +282,18 @@ class HarnessMetrics(BaseModel):
     time_code_execution: TimingStat = Field(default_factory=TimingStat)
     time_tracing_overhead: TimingStat = Field(default_factory=TimingStat)
     turn_count: int = 0
+
+    # Package extensions (HarnessMetricsExtension), created on first use
+    _extensions: dict[type[HarnessMetricsExtension], HarnessMetricsExtension] = PrivateAttr(
+        default_factory=dict
+    )
+
+    def extension[E: HarnessMetricsExtension](self, cls: type[E]) -> E:
+        """This session's instance of extension ``cls``, created on first use."""
+        ext = self._extensions.get(cls)
+        if ext is None:
+            ext = self._extensions[cls] = cls()
+        return ext  # type: ignore[return-value]
 
     # ── Helpers ──────────────────────────────────────────────────────
 
@@ -590,6 +650,11 @@ class HarnessMetrics(BaseModel):
             value = entry.value_fn(self)
             if value:
                 attrs[entry.key] = value
+        for ext in self._extensions.values():
+            for entry in type(ext).span_schema:
+                value = entry.value_fn(ext)
+                if value:
+                    attrs[entry.key] = value
         return attrs
 
     def flush_to_span(self) -> None:
@@ -1390,8 +1455,21 @@ def get_span_schema() -> tuple[SchemaEntry, ...]:
     """Public accessor for the span attribute schema.
 
     Used by trace_explorer to drive display without importing internals.
+    Includes the entries of registered extensions (see
+    :func:`register_harness_metrics_extension`), whose ``value_fn`` takes a
+    HarnessMetrics like the core entries.
     """
-    return _SPAN_SCHEMA
+    return _SPAN_SCHEMA + tuple(
+        SchemaEntry(
+            entry.key,
+            entry.label,
+            entry.category,
+            lambda m, c=cls, f=entry.value_fn: f(m.extension(c)),
+            entry.is_detail,
+        )
+        for cls in _EXTENSIONS
+        for entry in cls.span_schema
+    )
 
 
 # ── Null object (no-op outside generation sessions) ─────────────────
@@ -1421,10 +1499,17 @@ class _NullMetrics:
     def __getattr__(self, name: str) -> Any:
         if name == "timer":
             return _noop_timer
+        if name == "extension":
+            return _null_extension
         return _noop
 
 
 _NULL_METRICS = _NullMetrics()
+
+
+def _null_extension(_cls: Any) -> _NullMetrics:
+    """``extension(cls)`` outside a session: a no-op recorder too."""
+    return _NULL_METRICS
 
 
 # ── ContextVar lifecycle ────────────────────────────────────────────
