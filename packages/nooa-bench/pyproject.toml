@@ -13,6 +13,7 @@ requires-python = ">=3.12,<3.14"
 dependencies = [
     "nooa",
     "nooa-cli",
+    "nooa-atom",
     "click>=8.1",
 ]
 
@@ -23,10 +24,12 @@ Issues = "https://github.com/NVIDIA-NeMo/labs-OO-Agents/issues"
 
 [project.scripts]
 nemo-harbor = "nooa_bench.runner:main"
+nooa-bench = "nooa_bench.cli:main"
 
 [tool.uv.sources]
 nooa = { workspace = true }
 nooa-cli = { workspace = true }
+nooa-atom = { workspace = true }
 
 [build-system]
 requires = ["hatchling>=1.26.0", "uv-dynamic-versioning>=0.14.0"]

@@ -823,7 +823,7 @@ async def test_adapter_skips_forwarded_acp_transport_mcp_server(tmp_path):
     client = _RegistrationAwareClient()
     adapter = CodingACPAdapter(_completed_llm)
     adapter.on_connect(client)  # type: ignore[arg-type]
-    server = AcpMcpServer(name="proxied", id="server-1", type="acp")
+    server = AcpMcpServer(name="proxied", server_id="server-1", type="acp")
 
     with (
         patch(
@@ -1345,7 +1345,7 @@ async def test_prompt_on_a_closing_session_is_a_clean_protocol_error(tmp_path):
 
 
 async def test_sessions_on_different_workspaces_get_separate_library_dirs(tmp_path):
-    """One ACP process serves many workspaces, so libs cannot be process-global.
+    """One ACP process serves many workspaces, so agent-written skills cannot be process-global.
 
     SkillWriting puts the directory on sys.path and activates local.*, so a
     shared one exposes code the agent wrote for one repo to a session working
@@ -1364,8 +1364,8 @@ async def test_sessions_on_different_workspaces_get_separate_library_dirs(tmp_pa
 
     first_agent = await _session(adapter, first.session_id)
     second_agent = await _session(adapter, second.session_id)
-    assert first_agent.agent.libs._path == first_root / ".nooa" / "libs"
-    assert second_agent.agent.libs._path == second_root / ".nooa" / "libs"
+    assert first_agent.agent.skill_writing._path == first_root / ".nooa" / "skills"
+    assert second_agent.agent.skill_writing._path == second_root / ".nooa" / "skills"
     await adapter.close()
 
 
@@ -1572,3 +1572,106 @@ async def test_bootstrap_updates_do_not_interleave_into_a_replay(tmp_path):
     # The replayed turns must be contiguous — nothing wedged between them.
     assert replayed == list(range(replayed[0], replayed[0] + len(replayed))), kinds
     await adapter.close()
+
+
+def _remembering_llm() -> FakeLLMClient:
+    return FakeLLMClient.with_tool_call(
+        "execute_python",
+        {
+            "code": (
+                "self.v.remembered = 'kept across a reload'\n"
+                "self.message('noted')\n"
+                "return_result(Done(explanation='noted'))"
+            )
+        },
+    )
+
+
+async def _session_that_remembered(tmp_path) -> tuple[CodingACPAdapter, str]:
+    """A session whose one finished turn set ``self.v.remembered``; adapter still open."""
+    adapter = CodingACPAdapter(_remembering_llm)
+    adapter.on_connect(_RecordingClient())  # type: ignore[arg-type]
+    created = await adapter.new_session(str(tmp_path))
+    await adapter.prompt(created.session_id, [text_block("remember this")])
+    return adapter, created.session_id
+
+
+async def _reload(tmp_path, session_id: str, client=None) -> tuple[CodingACPAdapter, object]:
+    adapter = CodingACPAdapter(_completed_llm)
+    adapter.on_connect(client or _RecordingClient())  # type: ignore[arg-type]
+    await adapter.load_session(str(tmp_path), session_id)
+    return adapter, await _session(adapter, session_id)
+
+
+def _count_saves(session) -> list[str]:
+    saved: list[str] = []
+    session.handle.storage.save_snapshot_json = saved.append
+    return saved
+
+
+async def test_load_session_restores_the_agent_state_from_the_last_turn(tmp_path):
+    first, session_id = await _session_that_remembered(tmp_path)
+    await first.close()
+
+    second, session = await _reload(tmp_path, session_id)
+    assert session.agent.v.remembered == "kept across a reload"
+    await second.close()
+
+
+async def test_an_unchanged_state_is_not_saved_again(tmp_path):
+    adapter, session_id = await _session_that_remembered(tmp_path)
+    session = await _session(adapter, session_id)
+    saved = _count_saves(session)
+    session.checkpoint()
+    assert saved == []
+    await adapter.close()
+
+
+async def test_a_reloaded_session_does_not_save_its_unchanged_state_again(tmp_path):
+    first, session_id = await _session_that_remembered(tmp_path)
+    await first.close()
+
+    second, session = await _reload(tmp_path, session_id)
+    saved = _count_saves(session)
+    session.checkpoint()
+    assert saved == []
+    await second.close()
+
+
+async def test_a_cancelled_turn_does_not_save_its_state(tmp_path):
+    adapter, session_id = await _session_that_remembered(tmp_path)
+    session = await _session(adapter, session_id)
+    saved = _count_saves(session)
+
+    session.cancel_complete.clear()
+    async with session.saving_state():
+        session.agent.v.half_done = True
+        session.cancel_complete.set()  # what cancel() does
+    with pytest.raises(asyncio.CancelledError):
+        async with session.saving_state():
+            session.cancel_complete.clear()
+            session.agent.v.half_done = 2
+            raise asyncio.CancelledError
+    assert saved == []
+
+    session.cancel_complete.clear()
+    async with session.saving_state():
+        pass  # a turn that finishes saves what changed
+    assert len(saved) == 1
+    await adapter.close()
+
+
+async def test_load_session_with_an_unreadable_snapshot_starts_a_fresh_agent(tmp_path, caplog):
+    first, session_id = await _session_that_remembered(tmp_path)
+    (await _session(first, session_id)).handle.storage.save_snapshot_json('{"version": 999}')
+    await first.close()
+
+    client = _RecordingClient()
+    with caplog.at_level("WARNING", logger="nooa_acp.server"):
+        second, session = await _reload(tmp_path, session_id, client)
+    assert "could not restore its saved state" in caplog.text
+    assert "remembered" not in session.agent.v
+    replayed = [u.content.text for u in client.updates if isinstance(u, UserMessageChunk)]
+    assert replayed == ["remember this\n"]
+    await second.prompt(session_id, [text_block("still usable")])
+    await second.close()

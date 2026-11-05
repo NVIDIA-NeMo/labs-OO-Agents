@@ -75,13 +75,19 @@ class TestFileBackedBasicBehavior:
         finally:
             buf.cleanup()
 
-    def test_unicode_round_trip(self, buf):
+    def test_unicode_round_trip(self, monkeypatch):
         """Unicode characters survive the write-read round trip in both memory and file."""
-        text = "Hello 世界! 🚀 café"
-        buf.write(text)
-        assert buf.getvalue() == text
-        with open(buf.file_path) as f:
-            assert f.read() == text
+        # Exercise a non-UTF-8 default even on UTF-8 CI hosts.
+        monkeypatch.setattr("io.text_encoding", lambda encoding, stacklevel=2: encoding or "cp1252")
+        buf = FileBackedTruncatingStringIO(limit=100)
+        try:
+            text = "Hello 世界! 🚀 café"
+            buf.write(text)
+            assert buf.getvalue() == text
+            with open(buf.file_path, encoding="utf-8") as f:
+                assert f.read() == text
+        finally:
+            buf.cleanup()
 
 
 class TestFileBackedFileOutput:
@@ -135,6 +141,17 @@ class TestFileBackedFileOutput:
             assert basename.endswith(".log")
         finally:
             buf.cleanup()
+
+    def test_lone_surrogate_escaped_in_file(self, buf):
+        """Lone surrogates are escaped in the file; the full output stays recoverable."""
+        text = "before\ud800after"
+        assert buf.write(text) == len(text)
+        assert buf.getvalue() == text
+        assert buf.write("x" * 200) == 200
+        value = buf.getvalue()
+        assert "full untruncated output" in value
+        with open(buf.file_path, encoding="utf-8") as f:
+            assert f.read() == "before\\ud800after" + "x" * 200
 
     def test_large_output(self):
         """File correctness verified with 50k chars of output."""
@@ -282,3 +299,38 @@ class TestFileBackedExport:
         from nooa.agentdoc import FileBackedTruncatingStringIO as FB
 
         assert FB is FileBackedTruncatingStringIO
+
+
+class TestExplicitPathAndCap:
+    def test_writes_to_the_given_path(self, tmp_path):
+        target = tmp_path / "out.log"
+        buf = FileBackedTruncatingStringIO(limit=4, tail_chars=4, path=target)
+        buf.write("abcdefgh")
+        buf.close()
+        assert buf.file_path == str(target)
+        assert target.read_text() == "abcdefgh"
+        assert buf.getvalue() == f"[... 4 chars omitted; full output: {target}]\nefgh"
+
+    def test_max_file_bytes_caps_the_file_and_says_so_at_close(self, tmp_path):
+        target = tmp_path / "out.log"
+        buf = FileBackedTruncatingStringIO(limit=0, tail_chars=0, path=target, max_file_bytes=5)
+        buf.write_bytes(b"abc")
+        buf.write_bytes(b"defgh")
+        assert buf.file_bytes_dropped == 3
+        buf.close()
+        buf.close()  # idempotent
+        assert target.read_bytes() == b"abcde\n[log truncated: 3 more bytes not written]\n"
+
+    def test_write_bytes_goes_to_the_file_only(self, tmp_path):
+        target = tmp_path / "out.log"
+        buf = FileBackedTruncatingStringIO(limit=10, path=target)
+        buf.write_bytes(b"\xffraw")
+        buf.write("text")
+        buf.close()
+        assert target.read_bytes() == b"\xffrawtext"
+        assert buf.getvalue() == "text"
+
+    def test_unwritable_path_falls_back_to_memory(self, tmp_path):
+        buf = FileBackedTruncatingStringIO(limit=4, tail_chars=4, path=tmp_path / "no" / "x")
+        buf.write("abcdefgh")
+        assert buf.getvalue() == "[... 4 chars omitted]\nefgh"

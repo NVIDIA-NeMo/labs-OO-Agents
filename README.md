@@ -80,8 +80,6 @@ cd my-agent-project
 uv add nooa
 ```
 
-Or with pip: `pip install nooa`.
-
 > **Windows:** use [WSL 2](https://learn.microsoft.com/windows/wsl/install). Native Windows is not supported: `import nooa` and the `nooa` command stop with an error that points to WSL 2. Setting `NOOA_SKIP_PLATFORM_CHECK=1` skips that check. The pure-Python core (agents, PredictStrategy, in-process CodeAct, in-memory storage) and `nooa connect` are tested on native Windows. Other features may work but are unsupported; those that need POSIX (shell tools, the CodeAct sandbox, file-backed SQLite storage, `monitor()`) stop with a `PosixOnlyFeatureError`.
 
 <details>
@@ -108,11 +106,9 @@ uv add "nooa[cli,memory]"       # several at once
 | `nooa-memory` | `nooa[memory]` | long-term memory subsystem (`MemoryManager`) |
 | `nooa-bench` | `nooa[bench]` | `BenchAgent` and the Harbor benchmark runner |
 
-`eval_pipeline` is not published to PyPI — install it from the repo:
-
-```bash
-uv add "eval_pipeline @ git+https://github.com/NVIDIA-NeMo/labs-OO-Agents.git@main#subdirectory=util/eval_pipeline"
-```
+For `eval_pipeline`, follow the [Contributing](#contributing) instructions to clone
+the repo and run `uv sync --group dev`. This installs it editable with the other
+workspace packages.
 
 </details>
 
@@ -150,10 +146,13 @@ uv run nooa connect
 ```
 
 Choose your provider or endpoint, API key, exact model, and an alias such as
-`my-model`. Connect checks the configured route and saves the alias in NOOA's
-user configuration. **The checks send real requests and can cost money**; the
-wizard asks before running them and before saving. Keep keys in environment
-variables or NOOA's secrets file, not in model configuration or committed code.
+`my-model`. Connect helps your agents run smoothly: it suggests and saves a
+reply/output token limit, records the context window when known (you can supply
+it), and lists your chosen media formats. It also tests the configured route,
+tools, reasoning, and caching. The checks send real requests and may incur
+provider charges. The wizard asks before checks and saving. Keep keys in
+environment variables or NOOA's secrets file, not in model configuration or
+committed code.
 
 Use the saved alias in Python:
 
@@ -164,15 +163,11 @@ llm = get_llm_client("my-model")
 ```
 
 See [Connect setup](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/docs/model-connect.md)
-for providers, editing, and diagnostic stages. For setup **without inference
-calls**, use [offline model configuration](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/docs/model-configuration.md).
-`--no-probe` alone may still fetch discovery/catalogue metadata; the offline
-guide explains how to avoid that too. Agent-driven stages do not ask for
-spending approval; authorize them before use.
+for providers, model settings, editing, and diagnostic stages.
 
 You can also construct clients directly using
 [LiteLLM-supported model names](https://docs.litellm.ai/), with your endpoint
-and credentials. See [manual configuration](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/docs/model-configuration.md).
+and credentials. See [Model configuration](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/docs/model-configuration.md).
 
 ### 2. Your first agent
 
@@ -205,8 +200,8 @@ asyncio.run(main())
 ```
 
 Save the model-selection and agent snippets together as `first_agent.py`, then
-run `uv run python first_agent.py` in your project with approved inference
-allowance. After your final call, `await llm.aclose()` releases client resources.
+run `uv run python first_agent.py` in your project. After your final call,
+`await llm.aclose()` releases client resources.
 
 The [checked-in first example](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/examples/quickstart/01_first_generation_method.py)
 is a separate source-checkout example: it chooses its own client from environment

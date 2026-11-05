@@ -1,9 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""SkillWriting — scaffold, lint, and manage persistent skill libraries."""
+"""SkillWriting — write the skills later sessions get: code packages or SKILL.md text."""
 
 import ast
 import inspect
+import json
 import re
 import sys
 import textwrap
@@ -55,16 +56,26 @@ class LintReport:
 # ---------------------------------------------------------------------------
 
 
-class SkillWriting(Skill):
-    """Scaffold, lint, and manage persistent skill libraries.
+def older_skill_dirs(skills_dir: Path) -> list[Path]:
+    """The older directories whose skills still load beside ``skills_dir``.
 
-    Libraries are standard Python packages stored at a project-local path.
-    Use ``self.shell`` for all file I/O (write, edit, view, grep); this
-    skill handles scaffolding, linting, hot-reload, and testing.
+    Skills were saved in ``.nooa/libs`` before ``.nooa/skills``: for a save
+    directory named ``skills``, its sibling ``libs`` (user data on disk).
+    """
+    skills_dir = Path(skills_dir)
+    return [skills_dir.with_name("libs")] if skills_dir.name == "skills" else []
+
+
+class SkillWriting(Skill):
+    """Write skills that later sessions get: code skills or text instructions.
+
+    A code skill is a Python package; a text skill is a SKILL.md with
+    instructions. Use ``self.shell`` for file I/O (write, edit, view, grep);
+    this skill handles scaffolding, linting, hot-reload, and testing.
 
     ## Skill contract
 
-    Every library's ``__init__.py`` should export a ``Skill`` subclass::
+    Every code skill's ``__init__.py`` should export a ``Skill`` subclass::
 
         '''Grep-style search across multiple repos.'''
         from nooa.skill import Skill
@@ -77,7 +88,7 @@ class SkillWriting(Skill):
             def search(self, pattern: str) -> list[str]:
                 ...
 
-    The SkillRegistry auto-attaches the Skill as ``self.<lib_name>``.
+    The SkillRegistry auto-attaches the Skill as ``self.<name>``.
     Without a Skill subclass, the module is wrapped via ``Skill(module)``.
 
     ## Slash commands
@@ -120,94 +131,167 @@ class SkillWriting(Skill):
 
     ## Lifecycle
 
-        # 1. Scaffold the package
-        await self.libs.create("stats", "Statistical utilities.")
+        # A text skill: instructions, saved and active at once
+        await self.skill_writing.create("release", "How to cut a release.", text=steps)
+
+        # A code skill: 1. scaffold the package
+        await self.skill_writing.create("stats", "Statistical utilities.")
 
         # 2. Write code using self.shell
-        await self.shell.write_file(self.libs.path("stats", "stats.py"), source)
+        await self.shell.write_file(self.skill_writing.path("stats", "stats.py"), source)
 
         # 3. Lint + reload
-        await self.libs.reload("stats")
+        await self.skill_writing.reload("stats")
         # -> lints, hot-reloads; self.stats is now available
 
         # 4. Edit using self.shell (replace(path, old, new); old must be unique)
-        await self.shell.replace(self.libs.path("stats", "stats.py"), old, new)
-        await self.libs.reload("stats")
+        await self.shell.replace(self.skill_writing.path("stats", "stats.py"), old, new)
+        await self.skill_writing.reload("stats")
 
         # 5. Test
-        await self.libs.run_tests("stats")
+        await self.skill_writing.run_tests("stats")
+
+    ## Where skills are saved, and later sessions
+
+    Each skill is a directory ``self.skill_writing.path(name)`` kept on disk
+    across sessions: ``<workspace>/.nooa/skills`` for an Atom agent, else
+    ``.nooa/skills`` under the project root (or ``$NEMO_OO_PROJECT_DIR/skills``).
+    Skills in an older ``.nooa/libs`` directory still load; a name in
+    ``.nooa/skills`` wins. A later session loads each one at start as
+    ``self.<name>`` (``local.<name>`` in ``self.skills.search``), with nothing
+    to import or activate, unless the agent already has that attribute (such
+    as ``shell``): that one keeps its attribute and is not loaded.
+    ``await self.skill_writing.list()`` names them all.
 
     ## Discovery
 
-        await self.libs.list()       # all library names
-        await self.libs.repo_tree()  # directory tree
+        await self.skill_writing.list()       # all skill names
+        await self.skill_writing.repo_tree()  # directory tree
 
     ## Rules
     - Always provide a meaningful description when calling create()
-    - Library code is plain Python — no agent `self`, no `...` bodies, no async
+    - Code skills are plain Python — no agent `self`, no `...` bodies, no async
     - Always run run_tests() after creating or editing before claiming done
-    - Use a library for logic worth naming and reusing; use inline code for one-offs
-    - Always write a ``Skill`` subclass in ``__init__.py``
+    - Write a skill for logic or advice worth reusing; use inline code for one-offs
+    - Always write a ``Skill`` subclass in a code skill's ``__init__.py``
     - Slash command return values are prompts — tell the agent what happened
       and what it can do next, don't just dump raw output
     """
 
     requires = ("nemo.shell",)
 
-    def __init__(self, agent: Any, path: Path) -> None:
+    def __init__(self, agent: Any, path: Path, *, also_load: Sequence[Path] = ()) -> None:
+        """Save new skills in ``path``; also load the skills in ``also_load`` (older dirs)."""
         self._agent = agent
-        self._path = path
+        self._path = Path(path)
         self._path.mkdir(parents=True, exist_ok=True)
-        libs_str = str(self._path)
-        if libs_str not in sys.path:
-            sys.path.insert(0, libs_str)
-        # Discover and register libs via SkillRegistry if available
-        if hasattr(agent, "skills"):
-            agent.skills.discover_libs(self._path)
-            agent.skills.activate(["local.*"])
+        self._also_load = [Path(p) for p in also_load if Path(p) != self._path]
+        # The save directory first: a skill there wins over one of the same
+        # name in an older directory (the first one registered is kept).
+        roots = [self._path, *(p for p in self._also_load if p.is_dir())]
+        for root in reversed(roots):
+            if str(root) not in sys.path:
+                sys.path.insert(0, str(root))
+        # Discover and register skills via the SkillRegistry if the agent has
+        # one (an Atom agent's SkillManager wraps it as ``registry``).
+        registry = self._registry()
+        if registry is not None:
+            for root in roots:
+                registry.discover_libs(root, agent_written=True)
+            registry.activate(["local.*"])
         else:
-            LibraryManager.install(self._agent, libs_dir=self._path)
+            for root in roots:
+                LibraryManager.install(self._agent, libs_dir=root)
         super().__init__()
 
+    def _registry(self) -> Any:
+        """The agent's SkillRegistry, or None."""
+        skills = getattr(self._agent, "skills", None)
+        if skills is None:
+            return None
+        return getattr(skills, "registry", skills)
+
+    def _dir(self, lib_name: str) -> Path:
+        """The directory of a skill: the save directory's, else an older one's that exists."""
+        primary = self._path / lib_name
+        if primary.is_dir():
+            return primary
+        for root in self._also_load:
+            if (root / lib_name).is_dir():
+                return root / lib_name
+        return primary
+
     def path(self, lib_name: str, relative: str = "") -> str:
-        """Return the absolute path for a file within a library.
+        """Return the absolute path for a file within a skill.
 
         Args:
-            lib_name: Library name.
-            relative: Relative path within the library (e.g. "stats.py").
-                      If empty, returns the library root directory.
+            lib_name: Skill name.
+            relative: Relative path within the skill (e.g. "stats.py").
+                      If empty, returns the skill's root directory.
 
         Returns:
-            Absolute path as a string (suitable for self.shell.write/edit/view).
+            Absolute path as a string (for self.shell.write_file/replace/read).
         """
-        p = self._path / lib_name
+        p = self._dir(lib_name)
         if relative:
             p = p / relative
         return str(p)
 
     async def list(self) -> list[str]:
-        """Return sorted names of all libraries (directories with a pyproject.toml)."""
-        return sorted(
-            p.parent.name for p in self._path.glob("*/pyproject.toml") if p.parent.is_dir()
-        )
+        """Return sorted names of all saved skills (code: pyproject.toml; text: SKILL.md)."""
+        names: set[str] = set()
+        for root in (self._path, *self._also_load):
+            if not root.is_dir():
+                continue
+            for p in root.iterdir():
+                if p.is_dir() and any(
+                    (p / f).is_file() for f in ("pyproject.toml", "SKILL.md", "skill.md")
+                ):
+                    names.add(p.name)
+        return sorted(names)
 
-    async def create(self, lib_name: str, description: str) -> str:
-        """Scaffold a new library: writes pyproject.toml + __init__.py.
+    async def create(self, lib_name: str, description: str, *, text: str | None = None) -> str:
+        """Create a skill that later sessions get, in .nooa/skills/<lib_name>.
 
-        Nothing is loaded yet. Write code with self.shell.write_file() then
-        call self.libs.reload() to lint and activate.
+        With ``text``: a text skill, SKILL.md (front matter name and
+        description, then ``text``), saved and active at once as
+        ``self.<lib_name>``. Without: a code skill scaffold (pyproject.toml +
+        ``__init__.py`` with a Skill subclass); nothing is loaded yet. Write
+        code with self.shell.write_file() then call self.skill_writing.reload()
+        to lint and activate.
 
         Args:
-            lib_name: Module name for the library (e.g. "stats").
-            description: Human-readable description stored as the module docstring.
+            lib_name: Skill name, a module name for a code skill (e.g. "stats").
+            description: One-line description; the code skill's module docstring.
+            text: The text skill's instructions (Markdown).
 
         Returns:
-            Confirmation string with the library path.
+            Confirmation string with the skill path.
         """
         lib_dir = self._path / lib_name
+        registry = self._registry()
+        if text is not None:
+            if registry is None:  # LibraryManager loads only code skills
+                return f"Not created: this agent loads only code skills; '{lib_name}' needs code"
+            if (lib_dir / "pyproject.toml").exists():
+                return f"Not created: '{lib_name}' is a code skill; choose another name"
         lib_dir.mkdir(parents=True, exist_ok=True)
-
         first_line = description.strip().split("\n")[0]
+
+        if text is not None:
+            # JSON strings are valid YAML scalars: quotes and colons stay safe.
+            skill_md = (
+                f"---\nname: {json.dumps(lib_name)}\n"
+                f"description: {json.dumps(first_line)}\n---\n\n{text.strip()}\n"
+            )
+            (lib_dir / "SKILL.md").write_text(skill_md, encoding="utf-8")
+            if f"local.{lib_name}" in registry.loaded():
+                await registry.reload(f"local.{lib_name}")
+            else:
+                registry.discover_libs(self._path, agent_written=True)
+            registry.activate([f"local.{lib_name}"])
+            return f"Created text skill '{lib_name}' at {lib_dir / 'SKILL.md'}"
+
         pyproject = textwrap.dedent(f"""\
             [project]
             name = "{lib_name}"
@@ -227,23 +311,23 @@ class SkillWriting(Skill):
         )
         (lib_dir / "__init__.py").write_text(init_content)
 
-        return f"Created library '{lib_name}' at {lib_dir}"
+        return f"Created skill '{lib_name}' at {lib_dir}"
 
     async def reload(self, lib_name: str) -> str:
-        """Lint and hot-reload a library.
+        """Lint and hot-reload a skill (a text skill: re-read its SKILL.md).
 
-        Parses all .py files in the library for syntax/security errors,
-        then reloads the library into the SkillRegistry if clean.
+        Parses all .py files in the skill for syntax/security errors,
+        then reloads the skill into the SkillRegistry if clean.
 
         Args:
-            lib_name: Library name to reload.
+            lib_name: Skill name to reload.
 
         Returns:
             LintReport string describing the result.
         """
-        lib_dir = self._path / lib_name
+        lib_dir = self._dir(lib_name)
         if not lib_dir.is_dir():
-            return f"Library '{lib_name}' not found at {lib_dir}"
+            return f"Skill '{lib_name}' not found at {lib_dir}"
 
         # Lint all .py files (except __init__.py)
         all_errors: list[str] = []
@@ -274,23 +358,34 @@ class SkillWriting(Skill):
 
         Returns the registry's status string (starts with "Reloaded" on success).
         """
-        if hasattr(self._agent, "skills"):
+        registry = self._registry()
+        if registry is not None:
+            lib_dir = self._dir(lib_name)
+            if (
+                f"local.{lib_name}" not in registry.loaded()
+                and not (lib_dir / "pyproject.toml").exists()
+            ):
+                # A text skill (SKILL.md only): register it from its directory.
+                registry.discover_libs(lib_dir.parent, agent_written=True)
+                registry.activate([f"local.{lib_name}"])
+                if f"local.{lib_name}" in registry.loaded():
+                    return f"Reloaded local.{lib_name}"
             try:
-                return await self._agent.skills.reload(f"local.{lib_name}")
+                return await registry.reload(f"local.{lib_name}")
             except KeyError:
                 # First lint+reload of a brand-new library: it isn't registered
                 # yet, so skills.reload() raises. Fall through to the manager,
                 # which imports and attaches it from disk.
                 pass
-        mgr = LibraryManager(self._agent, self._path)
+        mgr = LibraryManager(self._agent, self._dir(lib_name).parent)
         mgr._reload(lib_name)
         return f"Reloaded local.{lib_name}"
 
     async def repo_tree(self, directory: str = ".") -> str:
-        """Show the directory tree of the libraries root (or a subdirectory).
+        """Show the directory tree of the skills root (or a subdirectory).
 
         Args:
-            directory: Subdirectory to show (relative to libs root, default ".").
+            directory: Subdirectory to show (relative to the skills root, default ".").
 
         Returns:
             Tree output as a string.
@@ -306,10 +401,10 @@ class SkillWriting(Skill):
         return "\n".join(lines)
 
     async def run_tests(self, lib_name: str) -> str:
-        """Run pytest on the library's tests/ directory.
+        """Run pytest on a code skill's tests/ directory.
 
         Args:
-            lib_name: Library name.
+            lib_name: Skill name.
 
         Returns:
             Pytest output as a string.
@@ -318,9 +413,10 @@ class SkillWriting(Skill):
         import sys as _sys
 
         shell = self._agent.shell
-        tests_dir = self._path / lib_name / "tests"
+        lib_dir = self._dir(lib_name)
+        tests_dir = lib_dir / "tests"
         result = await shell.run(
-            f"PYTHONPATH={shlex.quote(str(self._path))}${{PYTHONPATH:+:$PYTHONPATH}} "
+            f"PYTHONPATH={shlex.quote(str(lib_dir.parent))}${{PYTHONPATH:+:$PYTHONPATH}} "
             f"{shlex.quote(_sys.executable)} -m pytest {shlex.quote(str(tests_dir))} -v",
             timeout=60,
         )

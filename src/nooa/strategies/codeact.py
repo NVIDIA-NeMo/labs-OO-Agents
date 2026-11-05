@@ -18,6 +18,7 @@ Reference: "Executable Code Actions Elicit Better LLM Agents" (Wang et al.)
 
 import ast
 import asyncio
+import contextvars
 import inspect
 import json
 import logging
@@ -31,6 +32,7 @@ from typing import (
     TYPE_CHECKING,
     Annotated,
     Any,
+    ClassVar,
     Literal,
     get_args,
     get_origin,
@@ -45,7 +47,12 @@ from nooa.context_blocks import DynamicContext, EventBase, ResultStatus, ToolCal
 from nooa.context_blocks.events import CODEACT_INLINE_RETURN
 from nooa.context_blocks.exceptions import BlockSyntaxError
 from nooa.decorators import strategy
-from nooa.errors import GenerationError, LoopDetectedError
+from nooa.errors import (
+    GenerationError,
+    IterationLimitExceeded,
+    LoopDetectedError,
+    RetryLimitExceeded,
+)
 from nooa.events import (
     AfterTurn,
     BeforeTurn,
@@ -60,8 +67,16 @@ from nooa.events import (
 from nooa.runtime.harness_metrics import get_harness_metrics
 from nooa.runtime.hooks import call_after_hook, call_before_hook
 from nooa.runtime.sandbox.errors import SandboxExecutionError
+from nooa.strategies._completion_guard import completion_binding_errors
 from nooa.strategies.base import RuntimeServices, build_sampling_kwargs
-from nooa.strategies.codeact_errors import format_validation_error
+from nooa.strategies.codeact_errors import (
+    ReturnForm,
+    format_validation_error,
+    positional_result,
+    return_alias_note,
+    return_call_hint,
+    return_doc_hint,
+)
 from nooa.strategies.composite import CompositeStrategy
 from nooa.strategies.generated_code import (
     ExecutionNamespaceBuilder,
@@ -87,11 +102,40 @@ logger = logging.getLogger(__name__)
 
 _EXECUTE_PYTHON_RECEIPT = "status: accepted"
 
+# The cell running now: (agent, tag of its ToolCallEvent). Set around the
+# execution of each python cell so work launched from it can name it later.
+_current_cell: contextvars.ContextVar[tuple[Any, str] | None] = contextvars.ContextVar(
+    "nooa_current_cell", default=None
+)
+
+
+def current_cell_tag(agent: Any | None = None) -> str | None:
+    """The event tag of the python cell running now (None outside a cell).
+
+    With ``agent``, only a cell of that agent counts: a nested agent's cell
+    is not the caller's.
+    """
+    cell = _current_cell.get()
+    if cell is None or (agent is not None and cell[0] is not agent):
+        return None
+    return cell[1]
+
+
 OUTPUT_TOKENS_EXHAUSTED_MESSAGE = (
     "The model used all available output tokens before completing a tool call. "
     "Increase `max_tokens` (16384 or more is often needed for reasoning models)."
 )
 """The ``GenerationError`` message when a response stops at its output-token limit."""
+
+MAX_LENGTH_RECOVERIES = 2
+"""Cut-off replies per call that get a recovery nudge before the call fails."""
+
+OUTPUT_LIMIT_NUDGE = (
+    "Your last reply was cut off at the output-token limit before it finished, so "
+    "nothing ran. Reply again more briefly: keep reasoning short and call the "
+    "tool with the next step now."
+)
+"""Feedback after a reply stopped at its output-token limit (finish_reason=length)."""
 
 MAX_ITERATIONS_MESSAGE = (
     "Generation failed after {iterations} iterations (max_iterations={max_iterations}). "
@@ -218,7 +262,26 @@ def text_only_tool_markup_note(context: TextOnlyResponseContext) -> str:
 def _text_only_correction(
     context: TextOnlyResponseContext,
     validation_error: str | None = None,
+    *,
+    python_tool: str | None = None,
 ) -> Error:
+    """The correction for a plain-text reply.
+
+    ``python_tool``: the only tool is that Python cell (``return_result`` is a
+    function inside it), as in CodeActV2; else the two-tool form.
+    """
+    method = context.call.method_name
+    if python_tool is None:
+        how = (
+            f"To finish `{method}`, call `return_result(value)`. "
+            "To do more work, call `execute_python(code)`. "
+            "Re-issue your response now as one of those tool calls."
+        )
+    else:
+        how = (
+            f"To finish `{method}`, call `{python_tool}` with `return_result(value)` inside "
+            f"the cell. To continue working, call `{python_tool}` with the next computation."
+        )
     validation_feedback = (
         f"\n\nThe attempted result was invalid:\n{validation_error}" if validation_error else ""
     )
@@ -227,10 +290,7 @@ def _text_only_correction(
             f"{text_only_tool_markup_note(context)}"
             "Your last reply was plain text with no tool call. It was preserved, "
             "but a bare message cannot end the turn or run code. "
-            f"To finish `{context.call.method_name}`, call `return_result(value)`. "
-            "To do more work, call `execute_python(code)`. "
-            "Re-issue your response now as one of those tool calls."
-            f"{validation_feedback}"
+            f"{how}{validation_feedback}"
         )
     )
 
@@ -321,11 +381,14 @@ class CodeActSession:
     event_manager: Any  # EventManager reference for Out[n] access
     iteration: int = 0
     error_count: int = 0
+    result_error_count: int = 0  # invalid return_result values (max_result_retries or max_retries)
     consecutive_api_errors: int = 0
     consecutive_text_only: int = 0
+    length_recoveries: int = 0  # Cut-off (finish_reason=length) replies nudged so far
     session_locals: dict[str, Any] = field(default_factory=dict)
     out_accessor: Any = field(default=None)  # OutAccessor instance, created lazily
     sandbox_executor: Any = field(default=None)  # SandboxedExecutor when backend="sandbox"
+    execution_namespace: Any = field(default=None)  # explicit experimental owner
     execution_count: int = 0
     loop_guard: LoopGuard | None = None
 
@@ -378,11 +441,11 @@ class CodeActSession:
 
     def build_failure_error(self) -> GenerationError:
         if self.error_count >= self.max_retries:
-            return GenerationError(
+            return RetryLimitExceeded(
                 f"Generation failed after {self.error_count} errors (max_retries={self.max_retries}). "
                 f"Unable to generate valid code for `{self.target_method_name}`."
             )
-        return GenerationError(
+        return IterationLimitExceeded(
             MAX_ITERATIONS_MESSAGE.format(
                 iterations=self.iteration,
                 max_iterations=self.max_iterations,
@@ -709,7 +772,7 @@ Standard Python builtins and agent instance (`self`) are available."""
             "",
             f"These names are already in scope inside `{self._python_tool_name()}()` (state "
             "persists across cells) — call them, don't re-import or re-define. "
-            "Use `doc(name)` to inspect any type or function in detail.",
+            "Use `print(doc(name))` to inspect any type or function in detail.",
             "",
             "```python",
             "\n".join(code) if code else "# (no module-level symbols)",
@@ -748,22 +811,52 @@ Standard Python builtins and agent instance (`self`) are available."""
         except Exception:
             return ", ".join(name for name, _ in ordered)
 
+    # show() is in every cell's namespace, for both CodeAct strategies.
+    SHOW_NOTE_LINES: ClassVar[tuple[str, ...]] = (
+        "show(obj) attaches a nooa.media.Image/Audio/Video/File so you can see or hear it;",
+        "here `Image` is nooa.media.Image (e.g. Image.from_file(path)), not PIL.Image.",
+    )
+
     def _always_available_text(self) -> str:
         names = ", ".join(f"`{name}`" for name in self._always_available_builtins())
-        return f"Always available without import: {names}, plus stdlib `asyncio` and `typing`."
+        return (
+            f"Always available without import: {names}, plus stdlib `asyncio` and `typing`. "
+            "`print(doc(x))` explains any object, function or skill: its signature, docs and methods (`doc()` returns text, so print it). "
+            + " ".join(self.SHOW_NOTE_LINES)
+        )
 
     def _always_available_builtins(self) -> tuple[str, ...]:
         return ("self", "print()", "pprint()", "doc()", "return_result()")
 
-    @staticmethod
-    def _restrictions_text() -> str:
-        """Shared model-facing restrictions for the two Python-tool strategies."""
-        return (
-            "- `eval`, `exec`, `compile`, `__import__`, `input`, `breakpoint`\n"
-            "- `globals`, `locals`, `vars`, `asyncio.run`, `loop.run_until_complete`\n"
-            "- Attaching callables to the agent: `self.foo = fn`, "
-            "`setattr(self, 'foo', fn)`, `type(self).foo = fn`"
+    def _restrictions_text(self) -> str:
+        """Shared fixed guardrails and this strategy's effective configured restrictions."""
+        restrictions = self.config.restrictions
+        lines = [
+            "- `eval`, `exec`, `compile`, `__import__`, `input`, `breakpoint`, "
+            "`globals`, `locals`, `vars`",
+        ]
+        imports = sorted(restrictions.blocked_modules | restrictions.restricted_imports)
+        if imports:
+            lines.append("- Blocked imports: " + ", ".join(f"`{name}`" for name in imports))
+        calls = [
+            f"{module}: {', '.join(sorted(names))}"
+            for module, names in sorted(restrictions.blocked_calls.items())
+            if names
+        ]
+        if calls:
+            lines.append("- Blocked calls by module (functions/methods): " + "; ".join(calls))
+        lines.extend(
+            [
+                "- Guarded internals (e.g. `.__dict__`, `.__class__`), and "
+                "`getattr`/`setattr`/`delattr` with literal dunder names. "
+                "Inspect with `print(doc(obj))`, `type(obj)`, and documented fields instead.",
+                "- Do not attach helper functions/methods to public agent attributes or mutate "
+                "shared classes; keep helpers cell-local.",
+                "Use documented async APIs or command/I/O tools; await directly. "
+                "Scheduling blocking work as a task does not offload it.",
+            ]
         )
+        return "\n".join(lines)
 
     def _python_tool_name(self) -> str:
         """Return the model-facing name of the Python cell tool."""
@@ -796,7 +889,7 @@ Standard Python builtins and agent instance (`self`) are available."""
         """
         ## Strategy
 
-        Jupyter-like Python session. Parameters pre-loaded as locals; state persists across cells. Use `await` directly, `print`/`pprint` to debug, `doc(obj)` to inspect types. You MUST call a tool each turn — **plain-text responses do NOT end the session**. To finish, call `return_result(value)`. Repeated text-only responses will abort the run with an error.
+        Jupyter-like Python session. Parameters pre-loaded as locals; state persists across cells. Use `await` directly, `print`/`pprint` to debug, `print(doc(obj))` to inspect types. You MUST call a tool each turn — **plain-text responses do NOT end the session**. To finish, call `return_result(value)`. Repeated text-only responses will abort the run with an error.
 
         **Your two tools:**
         - `execute_python(code)` — run a code cell
@@ -843,7 +936,7 @@ Standard Python builtins and agent instance (`self`) are available."""
 
         ### Subagents
 
-        If `self` exposes a delegation method, use it for bounded work that benefits from an independent context; inspect its documentation with `doc(...)`. For other iterative sub-tasks that need code execution, use `@strategy(CodeActStrategy())`. A delegated task must be strictly simpler than the current call to avoid infinite recursion.
+        If `self` exposes a delegation method, use it for bounded work that benefits from an independent context; inspect its documentation with `print(doc(...))`. For other iterative sub-tasks that need code execution, use `@strategy(CodeActStrategy())`. A delegated task must be strictly simpler than the current call to avoid infinite recursion.
 
         ## Restrictions (will throw)
 
@@ -875,7 +968,7 @@ Standard Python builtins and agent instance (`self`) are available."""
     @staticmethod
     def _sync_session_locals(call: "CurrentCall", session: "CodeActSession") -> None:
         """Write back session_locals to caller's dict, filtering session internals."""
-        if call.session_locals is None:
+        if call.session_locals is None or session.execution_namespace is not None:
             return
         filtered = {
             k: v
@@ -935,8 +1028,16 @@ Standard Python builtins and agent instance (`self`) are available."""
         # Guarantee the sandbox worker is torn down on EVERY exit — including the
         # GenerationError paths inside the loop — not just the success returns.
         session_holder: dict[str, Any] = {}
+        selector = getattr(runtime.agent, "_execution_namespace_for", None)
+        namespace = selector(call) if selector is not None else None
+        call.execution_namespace = namespace
         try:
-            return await self._run_generation(runtime, call, session_holder)
+            if namespace is None:
+                return await self._run_generation(runtime, call, session_holder)
+            if self.config.execution_backend != "inprocess":
+                raise ValueError("Experimental namespaces support only inprocess execution")
+            with namespace.enter({}):
+                return await self._run_generation(runtime, call, session_holder)
         finally:
             session = session_holder.get("session")
             if session is not None:
@@ -970,6 +1071,12 @@ Standard Python builtins and agent instance (`self`) are available."""
         # Publish to the caller so execute()'s finally can tear down the worker.
         session_holder["session"] = session
 
+        session.execution_namespace = call.execution_namespace
+        if session.execution_namespace is not None:
+            if call.session_locals is not None:
+                raise ValueError("Owned namespaces cannot be combined with legacy session_locals")
+            session.session_locals = session.execution_namespace.globals
+
         # Seed session_locals from caller-provided dict (persistent stack)
         if call.session_locals is not None:
             session.session_locals.update(call.session_locals)
@@ -981,6 +1088,9 @@ Standard Python builtins and agent instance (`self`) are available."""
         _init_hm = get_harness_metrics()
         with _init_hm.timer("time_session_init"):
             builtins = self._build_builtins(runtime, call)
+            if session.execution_namespace is not None:
+                builtins["Out"] = session.out_accessor
+                session.execution_namespace.update_framework(self._framework_bindings(runtime))
 
             # Sandbox backend: create the per-session guarded executor. Fails
             # closed here (before any cell) if a requested guardrail can't be
@@ -1120,6 +1230,16 @@ Standard Python builtins and agent instance (`self`) are available."""
                             content=f"Truncated response: {_response_debug_details(response)}"
                         )
                     )
+                    # A cut-off reply ran nothing. Give the model a bounded number
+                    # of chances to answer briefly before failing the call.
+                    if (
+                        session.length_recoveries < MAX_LENGTH_RECOVERIES
+                        and not session.is_exhausted()
+                    ):
+                        session.length_recoveries += 1
+                        session.record_iteration()
+                        runtime.event_manager.add(Error(content=OUTPUT_LIMIT_NUDGE))
+                        continue
                     turn_state.is_final = True
                     raise GenerationError(OUTPUT_TOKENS_EXHAUSTED_MESSAGE)
 
@@ -1352,6 +1472,29 @@ Standard Python builtins and agent instance (`self`) are available."""
             "agent's APIs."
         )
 
+    @staticmethod
+    def _return_result_alias(args: dict[str, Any], return_type: Any) -> dict[str, Any] | None:
+        """The arguments a provider ``return_result`` call gives the builtin, if it has one value.
+
+        Only for strategies whose sole tool is the Python cell: one ``result``
+        argument (the tool's shape) or one ``value`` (the builtin's parameter,
+        read as in a cell). Anything else (no argument, several fields) still
+        gets the unknown-tool feedback. Pure: the caller counts the alias.
+        """
+        if list(args) == ["result"]:
+            return args
+        if list(args) == ["value"]:
+            return positional_result(args, return_type) or args
+        return None
+
+    def _alias_note(self, args: dict[str, Any], *, valid: bool) -> str:
+        if "result" in args:
+            return return_alias_note(self._python_tool_name(), args["result"], valid=valid)
+        # ``value`` is the return type's own field: the call ran as return_result(value=x).
+        return return_alias_note(
+            self._python_tool_name(), args.get("value"), valid=valid, keyword="value"
+        )
+
     def _unknown_tool_feedback(
         self, tool_name: str, args: dict[str, Any], runtime: RuntimeServices
     ) -> str:
@@ -1463,41 +1606,54 @@ Standard Python builtins and agent instance (`self`) are available."""
         # and would cascade into confusing errors. The calls after it still
         # get a "Not executed" result (see _skip_remaining_tool_calls).
         for index, tool_call in enumerate(tool_calls):
-            guard = session.loop_guard
-            if guard is None:
-                result = await self._process_one_tool_call(
+            try:
+                result = await self._process_guarded_tool_call(
                     tool_call, runtime, builtins, session, call, return_type, llm_response_id
                 )
-                if result is not None:
-                    return self._skip_remaining_tool_calls(
-                        result, tool_calls, index, runtime, llm_response_id
-                    )
-                continue
-
-            action, parsed_args = self._loop_guard_action(tool_call)
-            blocked = self._loop_guard_before(
-                guard, action, parsed_args, tool_call, runtime, llm_response_id
-            )
-            if blocked is not None:
-                return self._skip_remaining_tool_calls(
-                    blocked, tool_calls, index, runtime, llm_response_id
+            except GenerationError:
+                # An exhausted return_result ends the generation from inside
+                # this call (which records its own error result); the calls
+                # after it still need theirs, or replay drops the whole turn.
+                self._skip_remaining_tool_calls(
+                    _ToolCallsResult(), tool_calls, index, runtime, llm_response_id
                 )
-            first_new = len(runtime.event_manager.keys())
-            result = await self._process_one_tool_call(
-                tool_call, runtime, builtins, session, call, return_type, llm_response_id
-            )
-            if result is not None and result.completed:
-                return self._skip_remaining_tool_calls(
-                    result, tool_calls, index, runtime, llm_response_id
-                )
-            self._loop_guard_after(guard, action, parsed_args, tool_call, runtime, first_new)
-            if result is not None:
+                raise
+            if result is not None:  # failed or finished: the calls after it do not run
                 return self._skip_remaining_tool_calls(
                     result, tool_calls, index, runtime, llm_response_id
                 )
 
         # All tool calls processed without completion or error-break
         return _ToolCallsResult()
+
+    async def _process_guarded_tool_call(
+        self,
+        tool_call: Any,
+        runtime: RuntimeServices,
+        builtins: dict[str, Any],
+        session: CodeActSession,
+        call: "CurrentCall",
+        return_type: Any,
+        llm_response_id: str | None,
+    ) -> _ToolCallsResult | None:
+        """Run one tool call, through the session's loop guard when it has one."""
+        guard = session.loop_guard
+        if guard is None:
+            return await self._process_one_tool_call(
+                tool_call, runtime, builtins, session, call, return_type, llm_response_id
+            )
+        action, parsed_args = self._loop_guard_action(tool_call)
+        result = self._loop_guard_before(
+            guard, action, parsed_args, tool_call, runtime, llm_response_id
+        )
+        if result is None:
+            first_new = len(runtime.event_manager.keys())
+            result = await self._process_one_tool_call(
+                tool_call, runtime, builtins, session, call, return_type, llm_response_id
+            )
+            if result is None or not result.completed:
+                self._loop_guard_after(guard, action, parsed_args, tool_call, runtime, first_new)
+        return result
 
     @staticmethod
     def _skip_remaining_tool_calls(
@@ -1754,6 +1910,13 @@ Standard Python builtins and agent instance (`self`) are available."""
             )
         )
 
+        # A provider return_result call without such a tool: the builtin's arguments.
+        alias = (
+            self._return_result_alias(args, return_type)
+            if tool_call.name == "return_result" and not self._supports_return_result()
+            else None
+        )
+
         # Handle based on tool name
         if tool_call.name == self._python_tool_name():
             # Execute Python code
@@ -1777,11 +1940,25 @@ Standard Python builtins and agent instance (`self`) are available."""
                 # Task completed via inline return_result()
                 return _ToolCallsResult(completed=True, final_value=result[1])
 
-        elif tool_call.name == "return_result" and self._supports_return_result():
+        elif tool_call.name == "return_result" and (
+            self._supports_return_result() or alias is not None
+        ):
             # Return the final result
+            if alias is not None:
+                # Some models call the cell builtin as a provider tool: take its
+                # value as return_result(value) inside a cell would, and say so.
+                if "value" in args and "result" in alias:
+                    get_harness_metrics().return_result_keyword_alias("value")
+                args = alias
+                get_harness_metrics().return_result_tool_alias()
             try:
                 validated, error_msg = self._handle_return_result(
-                    runtime, args, return_type, session, call
+                    runtime,
+                    args,
+                    return_type,
+                    session,
+                    call,
+                    form="tool" if alias is None else "alias",
                 )
             except GenerationError:
                 # _handle_return_result raises GenerationError when validation
@@ -1807,21 +1984,24 @@ Standard Python builtins and agent instance (`self`) are available."""
                     arguments=corrected_args,
                     result=ToolResult(
                         tool_call_id=tool_call.id,
-                        content="Result accepted.",
+                        content="Result accepted."
+                        if alias is None
+                        else f"Result accepted. {self._alias_note(args, valid=True)}.",
                         result_status=ResultStatus.COMPLETE,
                     ),
                 )
                 logger.info("[CODEACT] Task completed successfully via return_result")
                 return _ToolCallsResult(completed=True, final_value=validated)
             # Validation error - update with error result
+            if alias is None:
+                content = f"Invalid result: {error_msg}"
+            else:  # no return_result tool exists: the hint points only at the cell form
+                content = f"{self._alias_note(args, valid=False)}\n{error_msg}"
             runtime.event_manager.update(
                 tool_call_event_id,
                 result=ToolResult(
                     tool_call_id=tool_call.id,
-                    content=f"Invalid result: {error_msg}\n"
-                    f"Please call return_result again with valid arguments. "
-                    f"Tip: if you computed the result in {self._python_tool_name()}(), you can call "
-                    f"return_result(variable) from within the code instead.",
+                    content=content,
                     result_status=ResultStatus.ERROR,
                 ),
             )
@@ -2001,9 +2181,13 @@ Standard Python builtins and agent instance (`self`) are available."""
         # Execute the code (pass tool_call.id for trace correlation)
         # Nested agent calls may add their events to the event manager during this execution
         with get_harness_metrics().timer("time_code_execution"):
-            result = await self._execute_code(
-                runtime, code, builtins, session, method_name, tool_call_id=tool_call.id
-            )
+            token = _current_cell.set((runtime.agent, tool_call_event_id))
+            try:
+                result = await self._execute_code(
+                    runtime, code, builtins, session, method_name, tool_call_id=tool_call.id
+                )
+            finally:
+                _current_cell.reset(token)
 
         # Determine final status
         final_status = ResultStatus.ERROR if result.error else ResultStatus.COMPLETE
@@ -2040,7 +2224,7 @@ Standard Python builtins and agent instance (`self`) are available."""
         # shadows the return type, this ensures they're always fresh for the next cell.
         # Handles complex types like Optional[Answer], list[Answer] by extracting
         # all protected names and re-injecting from the execution builtins.
-        if return_type is not None:
+        if return_type is not None and session.execution_namespace is None:
             from nooa.runtime.code_validator import _collect_type_names
 
             protected_names = _collect_type_names(return_type, builtins)
@@ -2250,8 +2434,14 @@ Standard Python builtins and agent instance (`self`) are available."""
         return_type: Any,
         session: CodeActSession,
         call: Any,
+        *,
+        form: ReturnForm = "cell",
     ) -> tuple[Any, str | None]:
         """Validate return_result arguments and return the result.
+
+        ``form``: how the call was made (``return_call_hint``): ``cell``, a
+        direct ``return_result`` ``tool`` call (JSON arguments), or an ``alias``
+        provider call taken as the cell builtin (there is no such tool).
 
         Pure validation - does NOT update ToolCallEvent.result. Caller is responsible
         for updating the ToolCallEvent with the result when return_result is called
@@ -2400,22 +2590,38 @@ Standard Python builtins and agent instance (`self`) are available."""
             json.JSONDecodeError,
         ) as e:
             exception = e
-            get_harness_metrics().validation_error(type(e).__name__, str(e)[:500])
-            session.record_error()
+            metrics = get_harness_metrics()
+            metrics.validation_error(type(e).__name__, str(e)[:500])
             # Pass actual value for better "Got: {...}" error messages
             actual_value = normalized_args.get("result") if normalized_args else None
             error_msg = format_validation_error(
                 e, return_type, actual_value, runtime.truncation_config
             )
+            if not isinstance(e, InvariantError):
+                call_hint = return_call_hint(return_type, form, self._python_tool_name())
+                doc_hint = return_doc_hint(return_type, session.session_locals)
+                if call_hint and doc_hint:
+                    call_hint = f"{call_hint}\n{doc_hint}"
+                if call_hint:
+                    error_msg = f"{error_msg}\n{call_hint}"
             logger.debug(f"[CODEACT] return_result validation failed: {e}")
 
-            if session.is_exhausted():
+            # Invalid results have their own budget; they are retryable cell
+            # errors, so they do not count toward the session's error_count.
+            session.result_error_count += 1
+            attempts = session.result_error_count
+            budget = self.config.max_result_retries or session.max_retries
+            if attempts >= budget:
                 raise GenerationError(
-                    f"return_result validation failed after {session.max_retries} attempts.\n"
+                    f"return_result validation failed after {attempts} attempts.\n"
                     f"Last error:\n{error_msg}"
                 ) from e
 
-            return (None, error_msg)
+            # Offered back to the model as a cell error it can retry on.
+            metrics.return_result_invalid(type(e).__name__)
+            # The alias form's hint already says how to finish (in the cell).
+            fix = "" if form == "alias" else ": fix the value and call return_result again"
+            return (None, f"{error_msg}\nThe turn goes on{fix} (attempt {attempts} of {budget}).")
 
         except BaseException as error:
             exception = error
@@ -3152,15 +3358,19 @@ Standard Python builtins and agent instance (`self`) are available."""
 
         # Execute the code. A cancel here is recorded exactly like a cancel in a
         # model-written cell, with the prefill tag on the recorded output.
-        result = await self._execute_code(
-            runtime,
-            code,
-            builtins,
-            session,
-            method_name,
-            tool_call_id=prefill_id,
-            output_metadata={"prefill": True, "prefill_type": prefill_type},
-        )
+        token = _current_cell.set((runtime.agent, prefill_event_id))
+        try:
+            result = await self._execute_code(
+                runtime,
+                code,
+                builtins,
+                session,
+                method_name,
+                tool_call_id=prefill_id,
+                output_metadata={"prefill": True, "prefill_type": prefill_type},
+            )
+        finally:
+            _current_cell.reset(token)
 
         # Merge captured locals into session (persists for next steps and LLM turns)
         if result.captured_locals:
@@ -3234,7 +3444,23 @@ Standard Python builtins and agent instance (`self`) are available."""
 
         # Validate REPL policy (no classes, await async methods)
         validator = GeneratedCodeValidator()
-        validation_errors = validator.validate(code, runtime.agent)
+        try:
+            validation_errors = completion_binding_errors(
+                code,
+                reserved=frozenset(
+                    name.removesuffix("()") for name in self._always_available_builtins()
+                ),
+                filename=f"Cell In[{session.execution_count}]",
+            )
+        except SyntaxError as error:
+            return ExecutionResult(stdout="", error=error, defined_methods={})
+        try:
+            validation_errors.extend(validator.validate(code, runtime.agent))
+        except RecursionError:
+            validation_errors.append(
+                "Cell nests too deeply for REPL-policy validation; "
+                "split the deeply nested code into smaller statements, then retry."
+            )
         if validation_errors:
             error_msg = "Code validation failed:\n" + "\n".join(
                 f"• {err}" for err in validation_errors
@@ -3248,7 +3474,15 @@ Standard Python builtins and agent instance (`self`) are available."""
         # execute_code (rather than the executor directly) keeps the execute_python
         # middleware, before/after_code_execution hooks and events firing.
         run_kwargs: dict[str, Any]
-        if session.sandbox_executor is not None:
+        if session.execution_namespace is not None:
+            # One compiler executes definitions once. No predefinition, copying,
+            # captured-local merge or helper-global repair on this engine.
+            run_kwargs = {
+                "builtins": builtins,
+                "execution_namespace": session.execution_namespace,
+                "framework_bindings": self._framework_bindings(runtime),
+            }
+        elif session.sandbox_executor is not None:
             # Validation of restrictions and the cell guard still runs on the parent.
             run_kwargs = {"sandbox_executor": session.sandbox_executor}
         else:
@@ -3458,6 +3692,25 @@ Standard Python builtins and agent instance (`self`) are available."""
 
         return context
 
+    def _framework_bindings(self, runtime: RuntimeServices) -> dict[str, Any]:
+        """Identify only the existing dynamic class auto-import path's additions.
+
+        Module exports are initial seeds, not a live dictionary to refresh.
+        Recompute dynamic availability for each owned cell, including classes
+        activated/deactivated since this generation's initial builtins were built.
+        """
+        module = inspect.getmodule(type(runtime.agent))
+        if module is None:
+            return {}
+        from nooa.agentdoc.visibility import filter_mro_module_globals
+
+        # Include inherited module exports as static too, even for an owned
+        # nested method using ordinary CodeActV2 rather than AtomCodeAct.
+        static_names = set(filter_mro_module_globals(type(runtime.agent)))
+        static_names.update(self._extract_module_context(module, agent=None))
+        context = self._extract_module_context(module, agent=runtime.agent)
+        return {name: value for name, value in context.items() if name not in static_names}
+
     @staticmethod
     def _import_dynamic_classes(
         agent: Any, agent_module: types.ModuleType, context: dict[str, Any]
@@ -3475,13 +3728,28 @@ Standard Python builtins and agent instance (`self`) are available."""
         Package-agnostic: works for any class, not just known packages.
         """
         try:
+            from nooa.runtime.execution_namespace import RUNTIME_NAMES, framework_name_allowed
+
             seen = set(context.keys())
+            call = getattr(getattr(agent, "runtime", None), "current_call", None)
+            reserved = RUNTIME_NAMES | frozenset(getattr(call, "kwargs", {}))
+            if call is None:
+                # Out-of-call discovery (e.g. an Atom context preview) uses the
+                # agent's declared turn entry when one exists. No method runs.
+                entry = getattr(agent, "turn_entry", None)
+                method = getattr(type(agent), entry, None) if isinstance(entry, str) else None
+                if method is not None:
+                    reserved |= frozenset(inspect.signature(method).parameters)
 
             for attr_value in _iter_agent_attrs(agent):
                 cls = type(attr_value)
                 name = cls.__name__
 
-                if name in seen or cls.__module__ == "builtins":
+                if (
+                    name in seen
+                    or cls.__module__ == "builtins"
+                    or not framework_name_allowed(name, reserved)
+                ):
                     continue
 
                 context[name] = cls
@@ -3534,9 +3802,12 @@ Standard Python builtins and agent instance (`self`) are available."""
                     raise _ReturnResultSignal(result=result)
                 # Single positional argument - treat as the 'result' field
                 raise _ReturnResultSignal(result={"result": list(args)[0]})
-            else:
-                # Keyword arguments - pass as-is
-                raise _ReturnResultSignal(result=kwargs)
+            # return_result(value=x) is return_result(x) unless value is a field;
+            # other keyword arguments (result= included) pass as-is.
+            positional = positional_result(kwargs, call.return_type)
+            if positional is not None:
+                get_harness_metrics().return_result_keyword_alias("value")
+            raise _ReturnResultSignal(result=positional or kwargs)
 
         # Start with module context (imports, type definitions)
         agent_module = inspect.getmodule(type(runtime.agent))

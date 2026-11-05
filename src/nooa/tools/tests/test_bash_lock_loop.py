@@ -99,8 +99,9 @@ class TestLockLoopMismatch:
         await bash_session.run("echo start")
         original_lock = bash_session._lock
 
-        # Simulate a loop change by setting _started_on_loop to a different object
-        bash_session._started_on_loop = object()
+        # Simulate a loop change: the locks belong to another loop (#447 keys the
+        # recreation on the locks' own loop, not the loop bash started on).
+        bash_session._lock_loop = object()
         bash_session._ensure_lock_on_current_loop()
         assert bash_session._lock is not original_lock
 

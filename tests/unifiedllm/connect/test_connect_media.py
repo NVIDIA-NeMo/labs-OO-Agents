@@ -329,7 +329,7 @@ async def test_abort_before_media_send_closes_iterator_without_more_requests(mon
     ],
 )
 def test_unrelated_provider_errors_with_media_nouns_are_inconclusive(kind, message, param):
-    from nooa.unifiedllm.connect._media import explicitly_rejected
+    from nooa.unifiedllm.media_inputs import explicitly_rejected
 
     class Error(Exception):
         status_code = 400

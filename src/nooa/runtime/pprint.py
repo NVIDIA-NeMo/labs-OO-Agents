@@ -25,7 +25,7 @@ def pprint(
     max_depth: int | None = None,
     expand_all: bool = False,
 ) -> None:
-    """Pretty print with optional truncation (Rich-compatible API).
+    """Print (return None): max_length=items/container, max_string=string chars, max_depth=nesting; None=unlimited.
 
     Formats data structures with intelligent truncation for large containers
     and strings. API matches rich.pretty.pprint() for LLM familiarity.

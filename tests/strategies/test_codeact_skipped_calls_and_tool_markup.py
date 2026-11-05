@@ -260,3 +260,32 @@ def test_text_only_reminder_texts():
         "XML/markup), so it was not run. Tool calls only run when sent as real tool "
         "calls, after your reasoning."
     )
+
+
+def test_both_text_only_corrections_come_from_one_function():
+    """CodeActV2 reuses the core correction (L6); its text is unchanged."""
+    from types import SimpleNamespace
+
+    from nooa.strategies.codeact import _text_only_correction
+    from nooa.strategies.codeact_v2 import CodeActV2
+
+    context = SimpleNamespace(
+        content="plain words",
+        response=SimpleNamespace(reasoning=None),
+        call=SimpleNamespace(method_name="answer"),
+    )
+    v2 = CodeActV2()._retry_text_only_response(context)
+    expected = (
+        "Your last reply was plain text with no tool call. It was preserved, but a bare message "
+        "cannot end the turn or run code. To finish `answer`, call `python_cell` with "
+        "`return_result(value)` inside the cell. To continue working, call `python_cell` with "
+        "the next computation."
+    )
+    assert _text_only_correction(context, python_tool="python_cell").content == expected
+    assert v2.kind == "retry" and [event.content for event in v2.events] == [expected]
+    assert _text_only_correction(context).content == (
+        "Your last reply was plain text with no tool call. It was preserved, but a bare message "
+        "cannot end the turn or run code. To finish `answer`, call `return_result(value)`. To do "
+        "more work, call `execute_python(code)`. Re-issue your response now as one of those "
+        "tool calls."
+    )

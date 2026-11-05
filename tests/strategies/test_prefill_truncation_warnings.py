@@ -66,6 +66,33 @@ def test_structured_fields_report_omissions():
     assert reasons == {"max_string", "max_length"}
 
 
+def test_skipped_empty_fields_are_not_omissions():
+    """A field hidden by hide_empty after the length limit omits nothing."""
+    from typing import Annotated
+
+    from nooa.agentdoc import spec
+
+    @dataclass
+    class Data:
+        first: int = 1
+        empty: Annotated[str | None, spec(hide_empty=True)] = None
+
+    with observe_truncation() as reasons:
+        text = pformat(Data(), max_length=1)
+    assert reasons == set()
+    assert "..." not in text
+
+    @dataclass
+    class Fuller:
+        first: int = 1
+        empty: Annotated[str | None, spec(hide_empty=True)] = None
+        second: int = 2
+
+    with observe_truncation() as reasons:
+        pformat(Fuller(), max_length=1)
+    assert reasons == {"max_length"}
+
+
 def test_dictionary_key_warning_explains_fixed_limit():
     """Dictionary key previews aren't controlled by prefill_format.max_string."""
     call = CurrentCall(id="test", method_name="analyze", decorator="strategy")

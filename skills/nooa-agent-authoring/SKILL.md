@@ -43,14 +43,14 @@ Use `Annotated[type, "description"]` on parameters and return types to give the 
 
 ## LLM clients and cascading
 
-Start model onboarding with `uv add "nooa[cli]"` and `uv run nooa connect`,
-with the user's permission for billable checks, or use the configuration skill
-for offline setup. On Windows, run nooa inside WSL 2; native Windows stops at
-`import nooa` unless `NOOA_SKIP_PLATFORM_CHECK=1` is set. Use an already configured registry alias with
-`get_llm_client("my-model")`.
-For endpoint setup, credentials, registry edits, reply budgets, reasoning-level
-configuration, caching or Connect diagnostics, use
+Use existing registry aliases with `get_llm_client("my-model")`. Before model
+onboarding, checks or configuration writes, follow
+[nooa-connect](../nooa-connect/SKILL.md), the canonical permission-first headless
+guide. Authoring an agent does not itself authorize configuring/testing models.
+For saved settings, precedence, reasoning levels and caching semantics, use
 [nooa-model-configuration](../nooa-model-configuration/SKILL.md).
+On Windows, run nooa inside WSL 2; native Windows stops at `import nooa`
+unless `NOOA_SKIP_PLATFORM_CHECK=1` is set.
 For images, audio, video, PDFs, and CodeAct `show()`, use
 [nooa-media](../nooa-media/SKILL.md). Configure each model's `media_inputs`
 with the formats your provider accepts.
