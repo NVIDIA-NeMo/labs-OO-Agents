@@ -131,14 +131,16 @@ def register_harness_metrics_extension[E: HarnessMetricsExtension](cls: type[E])
     """Register an extension so :func:`get_span_schema` lists its attributes.
 
     Usable as a class decorator; registering the same class again is a no-op.
-    Raises ``ValueError`` if one of its span keys is already in the schema.
+    Raises ``ValueError`` if one of its span keys is already in the schema or
+    appears twice in its own ``span_schema``.
     """
     if cls in _EXTENSIONS:
         return cls
+    keys = [entry.key for entry in cls.span_schema]
     taken = {entry.key for entry in get_span_schema()}
-    clashes = sorted(entry.key for entry in cls.span_schema if entry.key in taken)
+    clashes = sorted({key for key in keys if key in taken or keys.count(key) > 1})
     if clashes:
-        raise ValueError(f"{cls.__name__} span keys already in the schema: {clashes}")
+        raise ValueError(f"{cls.__name__} span keys already in the schema or repeated: {clashes}")
     _EXTENSIONS.append(cls)
     return cls
 
@@ -1308,6 +1310,8 @@ def get_span_schema() -> tuple[SchemaEntry, ...]:
     :func:`register_harness_metrics_extension`), whose ``value_fn`` takes a
     HarnessMetrics like the core entries.
     """
+    if not _EXTENSIONS:
+        return _SPAN_SCHEMA
     return _SPAN_SCHEMA + tuple(
         SchemaEntry(
             entry.key,

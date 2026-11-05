@@ -4304,6 +4304,16 @@ class TraceExplorer:
                 lines.extend(cat_lines)
                 lines.append("")
 
+        # Attributes of an extension this process has not imported (e.g. Atom's
+        # counters read by a fresh trace-explorer): shown by key, not dropped.
+        known = {entry.key for entry in schema}
+        unknown = [(k, v) for k, v in metrics.items() if k not in known and v]
+        if unknown:
+            lines.append("  Other")
+            for key, value in sorted(unknown):
+                lines.append(f"  {key.removeprefix('harness.') + ':':<35} {value}")
+            lines.append("")
+
         prefill = data.get("prefill_type", "")
         if prefill:
             lines.append(f"  Prefill: {prefill}")

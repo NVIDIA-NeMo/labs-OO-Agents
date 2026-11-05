@@ -468,7 +468,10 @@ class TestSchema:
             assert entry.category
             assert callable(entry.value_fn)
 
-    def test_get_span_schema_returns_same_object(self):
+    def test_get_span_schema_returns_same_object(self, monkeypatch):
+        from nooa.runtime import harness_metrics
+
+        monkeypatch.setattr(harness_metrics, "_EXTENSIONS", [])  # no package registered one
         assert get_span_schema() is _SPAN_SCHEMA
 
     def test_every_to_span_attributes_key_is_in_schema(self):
@@ -1164,6 +1167,17 @@ class TestExtensions:
 
         with pytest.raises(ValueError, match="harness.turn_count"):
             register_harness_metrics_extension(Clash)
+
+    def test_keys_repeated_within_one_extension_are_refused(self, _registry):
+        class Twice(HarnessMetricsExtension):
+            span_schema = (
+                SchemaEntry("harness.twice.count", "A", "Toy", lambda m: 1),
+                SchemaEntry("harness.twice.count", "B", "Toy", lambda m: 2),
+            )
+
+        with pytest.raises(ValueError, match="harness.twice.count"):
+            register_harness_metrics_extension(Twice)
+        assert Twice not in _hm_module._EXTENSIONS
 
     def test_outside_a_session_extension_is_a_no_op(self):
         get_harness_metrics().extension(_ToyMetrics).poke("a")  # no error
