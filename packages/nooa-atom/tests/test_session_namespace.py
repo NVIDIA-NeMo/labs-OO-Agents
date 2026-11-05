@@ -166,6 +166,25 @@ hostile = Hostile()
         await agent.aclose()
 
 
+async def test_inventory_lists_the_newest_bindings_first(tmp_path):
+    """Names from the latest cell lead, so old loop temporaries don't hide them."""
+    llm = CellLLM(
+        [
+            cell("\n".join(f"aaa_{i}=1" for i in range(30)) + "\nreturn_result(Done(explanation='a'))"),
+            cell("zzz_report = 'x'\naaa_3 = 2\nreturn_result(Done(explanation='b'))"),
+        ]
+    )
+    agent = AtomAgent(cwd=tmp_path, llm=llm)
+    try:
+        await agent.handle({"user_messages": ["one"]})
+        await agent.handle({"user_messages": ["two"]})
+        names = list(agent._handle_namespace.inventory()["names"])
+        assert names[:2] == ["aaa_3", "zzz_report"]  # newest cell first, then by name
+        assert names[2:5] == ["aaa_0", "aaa_1", "aaa_10"]
+    finally:
+        await agent.aclose()
+
+
 async def test_del_does_not_close_resource_and_session_close_owns_shell(tmp_path):
     registry, root, _ = await make_root(
         tmp_path,

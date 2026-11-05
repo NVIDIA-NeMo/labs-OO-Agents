@@ -425,6 +425,8 @@ class ExecutionNamespace:
         self._foreground: CallBindings | None = None
         self._initialized = False
         self.user_names: set[str] = set()
+        # The cell number that last bound each name: inventory lists newest first.
+        self._bound_in: dict[str, int] = {}
         self.dependency_names: set[str] = set()
         self.epoch = 0
 
@@ -545,8 +547,12 @@ class ExecutionNamespace:
             call.cell_task = None
 
     def inventory(self) -> dict[str, Any]:
-        """Bounded names/types only; no repr, deep walks or object callbacks."""
-        names = sorted(name for name in self.user_names if name in self.globals)
+        """Bounded names/types only, newest binding first; no repr, deep walks or callbacks."""
+        bound_in = self._bound_in
+        names = sorted(
+            (name for name in self.user_names if name in self.globals),
+            key=lambda name: (-bound_in.get(name, 0), name),
+        )
         visible: dict[str, str] = {}
         budget = 1800  # leaves room for dict punctuation and omitted count (<2 KB)
         for index, name in enumerate(names[:20]):
@@ -656,6 +662,7 @@ class ExecutionNamespace:
         self.user_names.update(compiled.bindings)
         self.dependency_names.update(compiled.dependencies)
         self.epoch += 1
+        self._bound_in.update(dict.fromkeys(compiled.bindings, self.epoch))
         exec(compiled.code, self.globals)
         function = self.globals.pop(compiled.wrapper_name)
         return function()
