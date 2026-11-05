@@ -128,6 +128,8 @@ class Codec:
         if isinstance(obj, Media):
             cls_name = type(obj).__name__
             if cls_name not in _MEDIA_CLASSES:
+                # Subclasses not in the allow list (e.g. Screenshot(Image)) arrive
+                # on the other side as their base class.
                 if isinstance(obj, Image):
                     cls_name = "Image"
                 elif isinstance(obj, Audio):
