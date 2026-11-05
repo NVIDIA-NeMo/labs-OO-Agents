@@ -81,10 +81,14 @@ def image_limit(exc: BaseException) -> int | None:
 
 
 def explicitly_rejected(exc, kind):
-    """Only a media-specific provider rejection, not a generic HTTP 400.
+    """Return True if ``exc`` is the provider refusing this kind of media.
 
-    A per-request image limit (``image_limit``) is not a rejection of one
-    image: the runtime collapses the oldest images instead.
+    Requires HTTP 400/415/422 and an error message that is specifically about
+    the media (or the content part used to send it), for example "image input
+    is not supported" or "Unsupported content part type: 'file'". A generic
+    400, or an error about another parameter (model, max_tokens, ...), does
+    not count. A per-request image limit (``image_limit``) is not a rejection
+    of one image: the runtime collapses the oldest images instead.
     """
     status = getattr(exc, "_connect_http_status", getattr(exc, "status_code", None))
     if status not in {400, 415, 422}:
@@ -117,6 +121,24 @@ def explicitly_rejected(exc, kind):
     # "media" names whichever attachment the request carries (one gateway
     # says "Media could not be processed ... Failed to load image").
     noun = rf"(?:{names}|media)(?: (?:input|content|format|type|data|url|attachment|processing|file)s?)?"
+    # Text-only models: the whole request is refused because it has media.
+    if re.search(r"\bnot a multimodal model\b|\bdoes(?: not|n't) support multimodal", text):
+        return True
+    # "Unsupported content part type: 'file'" names the wire part for this format.
+    part = re.search(
+        r"unsupported (?:chat )?(?:content(?: part)?|media) type:?\s*[\\'\"]*([a-z_]+)", text
+    )
+    parts = {
+        "image": {"image_url", "input_image"},
+        "audio": {"input_audio", "audio_url"},
+        "video": {"video_url"},
+        "pdf": {"file", "input_file", "document"},
+    }.get(kind, set())
+    if part and part.group(1) in parts:
+        return True
+    # A strict server whose message schema has no variant for this media part.
+    if "did not match any variant of untagged enum" in text and "messagecontent" in text:
+        return True
     return bool(
         re.search(
             rf"\b{noun}\b (?:is |are |was |were )?(?:not supported|unsupported|not allowed|rejected|invalid"
@@ -172,12 +194,19 @@ def media_occurrences(messages, enabled: tuple[MediaInput, ...]):
 
 
 def filter_media_messages(messages, enabled: tuple[MediaInput, ...], excluded=frozenset()):
-    """Filter public attachment slots on a new request view, keeping turn objects.
+    """Return a copy of ``messages`` with media that is not ``enabled`` replaced.
 
+    Each disabled attachment is replaced by a short text notice (see
+    ``removed_media_notice``) so the model knows something was removed. Three
+    places are checked: a message that is itself an attachment item (Responses
+    input allows these at the top level), an assistant ``audio`` field, and the
+    blocks of a ``content`` list (``output`` for ``function_call_output`` items).
     ``excluded`` holds keys from ``media_occurrences`` that the current
-    connection rejected; each becomes a short text note.
-    Does not visit tool arguments, reasoning, vendor extensions or arbitrary
-    nested dictionaries. Projection still owns native LLMResponse containers.
+    connection rejected; each such block becomes a ``rejected_media_notice``.
+    Tool arguments, reasoning and vendor extensions are not inspected.
+    ``LLMResponse`` and ``CacheBoundary`` objects are passed through unchanged;
+    their native content is checked later by ``check_replayed_native_media``. The input
+    list and its messages are not modified.
     """
     rejected = {
         (index, position)
@@ -190,6 +219,12 @@ def filter_media_messages(messages, enabled: tuple[MediaInput, ...], excluded=fr
             result.append(message)
             continue
         item = dict(message)
+        kind = attachment_kind(item)
+        if kind is not None and kind not in enabled:
+            # The whole message is an attachment item, so there is no content
+            # list to filter: replace the item with a user notice.
+            result.append({"role": "user", "content": removed_media_notice(kind)})
+            continue
         slot = "output" if item.get("type") == "function_call_output" else "content"
         if isinstance(item.get(slot), tuple):
             # A tuple of blocks is sent like a list, so it must be filtered like one.
@@ -230,10 +265,27 @@ def filter_media_messages(messages, enabled: tuple[MediaInput, ...], excluded=fr
     return result
 
 
-def guard_native_media(native: Mapping[str, Any], enabled: tuple[MediaInput, ...] | None) -> None:
-    """Adapter-owned compatible envelopes are indivisible; never recurse."""
+def check_replayed_native_media(
+    native: Mapping[str, Any], enabled: tuple[MediaInput, ...] | None, *, interface: str = "chat"
+) -> None:
+    """Check the native content of a replayed assistant turn before it is sent.
+
+    ``native`` is the provider's own message for an earlier assistant turn. It is
+    replayed as one unit and cannot be partly edited, so media cannot be removed
+    from it the way ``filter_media_messages`` removes it from ordinary messages.
+
+    ``enabled=None`` skips both checks: direct projection helpers that do not
+    apply media permissions keep their existing contract. Otherwise two checks
+    run in order:
+
+    1. If ``native`` contains a media kind that is not in ``enabled``, raise
+       ``ReasoningReplayError``. The caller must replay a portable version of the
+       turn instead.
+    2. Raise ``ValueError`` if ``native`` contains media that ``interface`` cannot
+       send (see ``nooa.media_policy``).
+    """
     if enabled is None:
-        return  # Direct projection helpers retain their existing contract.
+        return
     content = native.get("content")
     kinds = ["audio"] if native.get("audio") is not None else []
     if isinstance(content, (list, tuple)):
@@ -243,3 +295,6 @@ def guard_native_media(native: Mapping[str, Any], enabled: tuple[MediaInput, ...
             "Cannot remove disabled media from opaque assistant state; "
             "supply a portable assistant turn instead."
         )
+    from nooa.media_policy import reject_unsupported_media
+
+    reject_unsupported_media([native], interface)

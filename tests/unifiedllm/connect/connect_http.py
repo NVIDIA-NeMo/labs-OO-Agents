@@ -8,6 +8,9 @@ import httpx
 
 
 def mock_http(monkeypatch, handle):
+    # LiteLLM otherwise fetches Anthropic beta-header metadata synchronously,
+    # outside the async model transport. Use its bundled metadata in HTTP tests.
+    monkeypatch.setenv("LITELLM_LOCAL_ANTHROPIC_BETA_HEADERS", "True")
     original = httpx.AsyncClient.__init__
     original_send = httpx.AsyncClient.send
 
