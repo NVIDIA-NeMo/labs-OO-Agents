@@ -1241,3 +1241,29 @@ async def test_aliased_return_result_shows_a_value_field_it_was_given():
         "Result accepted. return_result isn't a tool. It's a function you call inside "
         "python_cell; this call ran as return_result(value=5)."
     )
+
+
+@pytest.mark.asyncio
+async def test_max_result_retries_zero_fails_on_the_first_invalid_result():
+    """0 is a budget, not "unset": the first invalid return_result ends the run."""
+    from nooa.errors import GenerationError
+
+    llm = FakeLLMClient(
+        scripted_responses=[
+            _response('return_result("not a number")', "bad"),
+            _response("return_result(42)", "ok"),
+        ]
+    )
+
+    class TestAgent(Agent, llm=llm):
+        @strategy(CodeActV2(config=CodeActConfig(prefill=None, max_result_retries=0)))
+        async def answer(self) -> int:
+            """Return the answer."""
+            ...
+
+    agent = TestAgent()
+    try:
+        with pytest.raises(GenerationError, match="after 1 attempts"):
+            await agent.answer()
+    finally:
+        await agent.aclose()

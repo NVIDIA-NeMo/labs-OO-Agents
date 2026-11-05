@@ -2653,7 +2653,9 @@ Standard Python builtins and agent instance (`self`) are available."""
             # errors, so they do not count toward the session's error_count.
             session.result_error_count += 1
             attempts = session.result_error_count
-            budget = self.config.max_result_retries or session.max_retries
+            budget = self.config.max_result_retries
+            if budget is None:
+                budget = session.max_retries
             if attempts >= budget:
                 raise GenerationError(
                     f"return_result validation failed after {attempts} attempts.\n"

@@ -120,6 +120,7 @@ class Done(BaseModel):
     turn, ``handle_work``, requires one; other turns may leave it unset).
     """
 
+    model_config = {"extra": "forbid"}
     _turn_kind: ClassVar[ResultKind] = "done"
     explanation: str = Field(description="Status line saying what was finished; not the reply")
     message: str | None = Field(default=None, description="The reply to show the user")
@@ -173,6 +174,7 @@ class Waiting(BaseModel):
     next turn when one of them delivers.
     """
 
+    model_config = {"extra": "forbid"}
     _turn_kind: ClassVar[ResultKind] = "waiting"
     explanation: str = Field(description="Why the turn is waiting")
     message: str | None = Field(default=None, description="Line to show the user while waiting")
