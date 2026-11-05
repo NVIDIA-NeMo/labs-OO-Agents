@@ -136,6 +136,10 @@ class BashSession:
         self._last_successful_command: float | None = None
         self._last_command: str = ""
         self._start_count: int = 0
+        # True while a command's sentinel is outstanding. Still True when the next call starts
+        # means the call that sent it was cancelled mid-command (e.g. by a python_cell timeout):
+        # that command still holds bash's foreground, so the next call starts a fresh session.
+        self._command_in_flight = False
         from nooa.tools.shell_lifecycle import _current_scope
 
         if scope := _current_scope.get():
@@ -466,6 +470,9 @@ class BashSession:
         elif self._started_on_loop is not asyncio.get_running_loop():
             await self._reset_for_loop_change()
 
+        if self._command_in_flight:
+            await self._recover_abandoned_command()
+
         self._last_command = command
         sentinel = f"__CTRL_{secrets.token_hex(8)}__"
 
@@ -526,6 +533,9 @@ class BashSession:
         elif self._started_on_loop is not asyncio.get_running_loop():
             await self._reset_for_loop_change()
 
+        if self._command_in_flight:
+            await self._recover_abandoned_command()
+
         self._last_command = command
         sentinel = f"__CTRL_{secrets.token_hex(8)}__"
         script = self._build_script(command, sentinel)
@@ -581,7 +591,16 @@ class BashSession:
         stdout_task = asyncio.create_task(_read_stream(proc.stdout, "stdout", stdout_queue))
         stderr_task = asyncio.create_task(_read_stream(proc.stderr, "stderr", stderr_queue))
 
-        ctrl_lines, timed_out = await self._read_control_until(sentinel, timeout)
+        self._command_in_flight = True
+        try:
+            ctrl_lines, timed_out = await self._read_control_until(sentinel, timeout)
+        except BaseException:
+            # Cancelled mid-command: these readers would otherwise keep consuming the pipes,
+            # and every later command would see empty output.
+            stdout_task.cancel()
+            stderr_task.cancel()
+            raise
+        self._command_in_flight = False
 
         # Sentinel received — cancel readers and drain remaining.
         stdout_task.cancel()
@@ -694,7 +713,16 @@ class BashSession:
         stdout_task = asyncio.create_task(accumulate(proc.stdout, stdout_buf))
         stderr_task = asyncio.create_task(accumulate(proc.stderr, stderr_buf))
 
-        ctrl_lines, timed_out = await self._read_control_until(sentinel, timeout)
+        self._command_in_flight = True
+        try:
+            ctrl_lines, timed_out = await self._read_control_until(sentinel, timeout)
+        except BaseException:
+            # Cancelled mid-command (e.g. a python_cell timeout): these readers would otherwise
+            # keep consuming the pipes, and every later command would see empty output.
+            stdout_task.cancel()
+            stderr_task.cancel()
+            raise
+        self._command_in_flight = False
 
         # Cancel accumulators FIRST to avoid concurrent StreamReader access.
         # StreamReader does not support multiple concurrent readers.
@@ -863,6 +891,20 @@ class BashSession:
             return True
         return False
 
+    async def _recover_abandoned_command(self) -> None:
+        """Start a fresh session (cwd kept) after a call was cancelled while its command ran.
+
+        That command still holds bash's foreground, so a new script would wait behind it, and
+        its sentinel would arrive first. With keep_background_on_close the abandoned command's
+        processes keep running, with their output drained; otherwise close() ends them.
+        """
+        logger.warning(
+            "BashSession: a call was cancelled while its command ran (%r); "
+            "starting a fresh session",
+            self._last_command[:200],
+        )
+        await self.reset()
+
     async def _reset_for_loop_change(self) -> None:
         """Reset after detecting that the event loop changed (gl-212)."""
         logger.warning("BashSession: event loop changed — resetting (env/aliases lost)")
@@ -901,6 +943,8 @@ class BashSession:
 
     async def close(self) -> None:
         """Terminate the bash session cleanly."""
+        # Whatever ran, this session's sentinel is no longer awaited.
+        self._command_in_flight = False
         if self._control_transport is not None:
             try:
                 self._control_transport.close()
