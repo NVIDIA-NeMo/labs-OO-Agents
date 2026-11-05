@@ -173,15 +173,10 @@ class TestTailOnly:
             buf.write("abcdefghij")
         assert buf.getvalue() == "[... 20 chars omitted]\nabcdefghij"
 
-    def test_notice_names_the_full_output_path(self):
-        buf = TruncatingStringIO(limit=4, tail_chars=4, full_output_path="/tmp/x.log")
+    def test_tail_only_cut_says_nothing_about_a_file(self):
+        buf = TruncatingStringIO(limit=4, tail_chars=4)
         buf.write("x" * 52_004)
-        assert buf.getvalue() == "[... 52,000 chars omitted; full output: /tmp/x.log]\nxxxx"
-
-    def test_head_and_tail_notice_with_a_path(self):
-        buf = TruncatingStringIO(limit=10, full_output_path="/tmp/x.log")
-        buf.write("a" * 30)
-        assert "The full untruncated output (30 chars) is in: /tmp/x.log" in buf.getvalue()
+        assert buf.getvalue() == "[... 52,000 chars omitted]\nxxxx"
 
 
 class TestLineSplitter:

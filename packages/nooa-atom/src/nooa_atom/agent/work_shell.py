@@ -56,8 +56,8 @@ from typing import IO, Annotated, Any, Literal
 
 from nooa import hidden
 from nooa.agentdoc import spec
-from nooa.runtime.harness_metrics import get_harness_metrics
 from nooa.tools import BashSession
+from nooa_atom.agent.metrics import atom_metrics
 from nooa_atom.agent.work_manager import _progress_sink, current_name, describe, job_dir
 from nooa_atom.agent.work_progress import _ShellProgress
 
@@ -490,9 +490,9 @@ class Shell:
             if self._busy_job is not None and current_name() is None:
                 # Awaited in a cell behind a background job (often a never-ending tail):
                 # waiting would block the turn, so say so at once instead.
-                get_harness_metrics().shell_busy()
+                atom_metrics().shell_busy()
                 raise RuntimeError(_busy_message(blocker))
-            get_harness_metrics().shell_queued()  # FIFO: wait behind it
+            atom_metrics().shell_queued()  # FIFO: wait behind it
             describe(f"$ {command} · queued behind {blocker}")
             loop = asyncio.get_running_loop()
             queued_at = loop.time()
@@ -924,7 +924,7 @@ class Shell:
             self._bash = None
             self._reset_tracked()
             if ended == "exit":
-                get_harness_metrics().shell_exit_hint(code)
+                atom_metrics().shell_exit_hint(code)
                 notes.append(
                     f"[this command ended the Shell's bash (exit {code}); the next command "
                     "starts a fresh bash (cwd kept; environment, variables, options and traps "
@@ -953,7 +953,7 @@ class Shell:
             return ""
         session.cwd = fallback  # where BashSession starts bash next
         self._confirmed_cwd = str(session.cwd)
-        get_harness_metrics().shell_cwd_fallback(f"{kept} -> {session.cwd}")
+        atom_metrics().shell_cwd_fallback(f"{kept} -> {session.cwd}")
         return (
             f"[the shell's kept cwd {kept} no longer exists: the new bash started in {session.cwd}]"
         )

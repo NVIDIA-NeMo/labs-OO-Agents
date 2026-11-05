@@ -33,8 +33,8 @@ from typing import Any
 
 from nooa import hidden
 from nooa.runtime.cell_deadline import deadline_cancel
-from nooa.runtime.harness_metrics import get_harness_metrics
 from nooa.tools import Todo as _AnyTodo
+from nooa_atom.agent.metrics import atom_metrics
 from nooa_atom.agent.work_manager import current_name, describe, emitter
 from nooa_atom.session.items import ChildFailed, ChildQuestion, ChildResult, TaskResult
 from nooa_atom.session.names import is_valid_name
@@ -387,7 +387,7 @@ def _detach(
     task = job._task
     if task is not None:  # cancelled before it ran, its body never closes the child
         task.add_done_callback(lambda _: _close_unstarted(port, route, future, ref, name))
-    get_harness_metrics().child_detached()
+    atom_metrics().child_detached()
     deadline.note(still_running_note(job.name))
     return True
 
@@ -430,7 +430,7 @@ def note_running_job(job: Any) -> None:
         return
     owner = job._owner
     if job._kind == "request" and isinstance(owner._work, Subagent):
-        get_harness_metrics().child_detached()
+        atom_metrics().child_detached()
     deadline.note(still_running_note(job.name))
 
 

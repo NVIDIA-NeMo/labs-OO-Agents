@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 
 import pytest
+from nooa_atom.agent.metrics import AtomHarnessMetrics
 from nooa_atom.agent.work_manager import WorkManager
 from nooa_atom.agent.work_shell import CommandResult, Shell
 
@@ -636,7 +637,7 @@ async def test_a_commands_own_exit_says_how_to_keep_the_shell(tmp_path):
             r = await sh.run("set -e; false")  # errexit: the same note
             assert "this command ended the Shell's bash (exit 1)" in r.stderr
             assert (await sh.run("(exit 4)")).stderr == ""  # a subshell keeps bash
-    assert metrics.shell_exit_hints == [5, 1]
+    assert metrics.extension(AtomHarnessMetrics).shell_exit_hints == [5, 1]
     assert metrics.to_span_attributes()["harness.shell_exit_hint.count"] == 2
 
 
@@ -675,7 +676,9 @@ async def test_a_restarted_shell_whose_kept_cwd_is_gone_starts_where_it_started(
             # A live bash in a removed directory is left as it is (no restart).
             await sh.run(f"mkdir {gone} && cd {gone} && rmdir {gone}")
             assert "no longer exists" not in (await sh.run("true")).stderr
-    assert metrics.shell_cwd_fallbacks == [f"{gone.resolve()} -> {tmp_path.resolve()}"]
+    assert metrics.extension(AtomHarnessMetrics).shell_cwd_fallbacks == [
+        f"{gone.resolve()} -> {tmp_path.resolve()}"
+    ]
     attrs = metrics.to_span_attributes()
     assert attrs["harness.shell_cwd_fallback.count"] == 1
 

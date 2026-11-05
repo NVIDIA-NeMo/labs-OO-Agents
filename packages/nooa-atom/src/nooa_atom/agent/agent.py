@@ -50,7 +50,6 @@ with hidden:
     from nooa.interactive import InteractiveAgent, require_task_result
     from nooa.runtime.capture_scope import CaptureScope
     from nooa.runtime.channels import ChannelReader
-    from nooa.runtime.harness_metrics import get_harness_metrics
     from nooa.runtime.pprint import pprint as runtime_pprint
     from nooa.storage.markers import nosnapshot
     from nooa.strategies.codeact import current_cell_tag
@@ -61,6 +60,7 @@ with hidden:
     from nooa_atom.agent.base import AtomAgentBase, session_title_request  # noqa: F401
     from nooa_atom.agent.conditions import PERSON_NAMES, require_result
     from nooa_atom.agent.done_reflection import DoneReflectionPlan, reflect_accepted_done
+    from nooa_atom.agent.metrics import atom_metrics
     from nooa_atom.agent.reflection_gate import _ReflectionGate
     from nooa_atom.agent.roles import TurnPolicy
 
@@ -171,7 +171,7 @@ def _mcp_tool_hint(agent: Any, error: BaseException, formatted: str) -> str | No
     server = skills.mcp_tool_server(name) if name else None
     if server is None:
         return None
-    get_harness_metrics().mcp_tool_name_hint(f"{server}.{name}")
+    atom_metrics().mcp_tool_name_hint(f"{server}.{name}")
     return f"`{name}` is a tool of MCP server {server}: {call_form(server, name)}"
 
 
@@ -186,7 +186,7 @@ def _name_error_hint(agent: Any, error: BaseException, formatted: str) -> str | 
     )
     if name == "sh":
         hint += " Create it first, e.g. `sh = Shell()`."
-    get_harness_metrics().name_error_hint(name)
+    atom_metrics().name_error_hint(name)
     return hint
 
 
@@ -199,7 +199,7 @@ def _module_not_found_hint(agent: Any, error: BaseException, formatted: str) -> 
     if name is None:
         return None
     module = name.split(".", 1)[0]
-    get_harness_metrics().module_not_found_hint(name)
+    atom_metrics().module_not_found_hint(name)
     return (
         "python_cell runs in Atom's own Python, not the task's; the task's python3 may have "
         f'{module}: check with await sh.run("python3 -", stdin="import {module}")'
@@ -384,7 +384,7 @@ def _check_waiting(agent: Any, result: Any, *, fix: str) -> None:
     for name in unmet:
         job = agent.jobs.get(name) if isinstance(name, str) else None
         if name in PERSON_NAMES:
-            get_harness_metrics().waiting_on_person_rejected(policy)
+            atom_metrics().waiting_on_person_rejected(policy)
             if policy == "child":
                 reasons.append(f"Waiting on {name!r}, but your parent is not a job.")
             else:

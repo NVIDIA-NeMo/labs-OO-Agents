@@ -28,7 +28,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any, ClassVar, NamedTuple
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +95,56 @@ class SchemaEntry(NamedTuple):
     is_detail: bool = False
 
 
+# ── Extensions (counters a package adds) ────────────────────────────
+
+
+class HarnessMetricsExtension(BaseModel):
+    """Counters a package adds to :class:`HarnessMetrics`, with their span attributes.
+
+    Subclass it with the fields and recorder methods, set ``span_schema`` (its
+    entries' ``value_fn`` receives the extension instance, not the
+    HarnessMetrics), and register the class with
+    :func:`register_harness_metrics_extension`. Record with
+    ``get_harness_metrics().extension(MyMetrics).my_counter()``: a session
+    creates the extension on first use, so agents that never record one carry
+    none of its fields, and outside a session the call is a no-op.
+    """
+
+    span_schema: ClassVar[tuple[SchemaEntry, ...]] = ()
+
+    def _append(self, lst: list[str], value: str, limit: int = _MAX_STRING_CHARS) -> None:
+        """Append ``value`` truncated to ``limit`` unless ``lst`` is full."""
+        if len(lst) < _MAX_LIST_ITEMS:
+            lst.append(_truncate(value, limit))
+
+    def _append_item(self, lst: list[Any], item: Any) -> None:
+        """Append ``item`` unless ``lst`` is full (no truncation: records, ints)."""
+        if len(lst) < _MAX_LIST_ITEMS:
+            lst.append(item)
+
+
+# Registered extension classes, in registration order (drives get_span_schema()).
+_EXTENSIONS: list[type[HarnessMetricsExtension]] = []
+
+
+def register_harness_metrics_extension[E: HarnessMetricsExtension](cls: type[E]) -> type[E]:
+    """Register an extension so :func:`get_span_schema` lists its attributes.
+
+    Usable as a class decorator; registering the same class again is a no-op.
+    Raises ``ValueError`` if one of its span keys is already in the schema or
+    appears twice in its own ``span_schema``.
+    """
+    if cls in _EXTENSIONS:
+        return cls
+    keys = [entry.key for entry in cls.span_schema]
+    taken = {entry.key for entry in get_span_schema()}
+    clashes = sorted({key for key in keys if key in taken or keys.count(key) > 1})
+    if clashes:
+        raise ValueError(f"{cls.__name__} span keys already in the schema or repeated: {clashes}")
+    _EXTENSIONS.append(cls)
+    return cls
+
+
 # ── HarnessMetrics ──────────────────────────────────────────────────
 
 
@@ -144,12 +194,6 @@ class HarnessMetrics(BaseModel):
     return_result_keyword_aliases: list[str] = Field(default_factory=list)
     # Invalid return_result values sent back as a retryable cell error; the error type
     return_result_invalid_retries: list[str] = Field(default_factory=list)
-    # A Shell command queued behind another still running in the same Shell
-    shell_queued_behind_running: int = 0
-    # A Shell command awaited in a cell refused: the Shell runs a launched job's command
-    shell_busy_rejected: int = 0
-    # A one-shot child awaited in a cell handed to self.jobs at the cell deadline (not closed)
-    child_detached_at_deadline: int = 0
     return_result_tool_aliases: int = 0  # provider return_result calls taken as the cell builtin
 
     # ── Error Recovery ──
@@ -196,21 +240,14 @@ class HarnessMetrics(BaseModel):
     shell_variant: str = ""  # which self.shell implementation is active (bake-off tag)
     shell_failures: list[ErrorRecord] = Field(default_factory=list)
     shell_deaths: list[ErrorRecord] = Field(default_factory=list)
-    shell_cwd_fallbacks: list[str] = Field(default_factory=list)
-    shell_exit_hints: list[int] = Field(default_factory=list)
     repo_failures: list[ErrorRecord] = Field(default_factory=list)
     tool_avoidance: list[str] = Field(default_factory=list)
     mcp_result_errors: list[str] = Field(default_factory=list)
-    # Waiting on the person (user_messages) rejected; the role whose turn did it
-    waiting_on_person_rejections: list[str] = Field(default_factory=list)
     # LLM-facing queue reads that timed out mid-cell (channel name)
     queue_read_timeouts: list[str] = Field(default_factory=list)
 
     # ── Code Validation ──
     missing_awaits_detected: list[str] = Field(default_factory=list)
-    name_error_hints: list[str] = Field(default_factory=list)
-    mcp_tool_name_hints: list[str] = Field(default_factory=list)
-    module_not_found_hints: list[str] = Field(default_factory=list)
     infinite_loops_detected: int = 0
     return_types_redefined: list[str] = Field(default_factory=list)
 
@@ -234,6 +271,18 @@ class HarnessMetrics(BaseModel):
     time_code_execution: TimingStat = Field(default_factory=TimingStat)
     time_tracing_overhead: TimingStat = Field(default_factory=TimingStat)
     turn_count: int = 0
+
+    # Package extensions (HarnessMetricsExtension), created on first use
+    _extensions: dict[type[HarnessMetricsExtension], HarnessMetricsExtension] = PrivateAttr(
+        default_factory=dict
+    )
+
+    def extension[E: HarnessMetricsExtension](self, cls: type[E]) -> E:
+        """This session's instance of extension ``cls``, created on first use."""
+        ext = self._extensions.get(cls)
+        if ext is None:
+            ext = self._extensions[cls] = cls()
+        return ext  # type: ignore[return-value]
 
     # ── Helpers ──────────────────────────────────────────────────────
 
@@ -336,25 +385,9 @@ class HarnessMetrics(BaseModel):
         """An invalid return_result value went back to the model as a retryable error."""
         self._append(self.return_result_invalid_retries, error_type)
 
-    def waiting_on_person_rejected(self, role: str) -> None:
-        """Waiting(on=["user_messages"]) was rejected with what to do instead."""
-        self._append(self.waiting_on_person_rejections, role)
-
     def queue_read_timeout(self, channel: str) -> None:
         """A cell's ``await self.<channel>.get()`` timed out with nothing queued."""
         self._append(self.queue_read_timeouts, channel)
-
-    def shell_queued(self) -> None:
-        """A Shell command was queued behind another still running in the same Shell."""
-        self.shell_queued_behind_running += 1
-
-    def shell_busy(self) -> None:
-        """A Shell command awaited in a cell was refused behind a launched job's command."""
-        self.shell_busy_rejected += 1
-
-    def child_detached(self) -> None:
-        """A child awaited in a cell outlived the cell deadline as a job instead of being closed."""
-        self.child_detached_at_deadline += 1
 
     # Error Recovery
     def validation_error(self, error_type: str, message: str) -> None:
@@ -472,17 +505,6 @@ class HarnessMetrics(BaseModel):
             ),
         )
 
-    def shell_exit_hint(self, code: int) -> None:
-        """A command ended its Shell's bash itself (``exit N``, errexit); the result said so."""
-        self._append_item(self.shell_exit_hints, int(code))
-
-    def shell_cwd_fallback(self, detail: str) -> None:
-        """A restarted Shell's kept cwd was gone; bash started in its starting directory.
-
-        ``detail`` is ``<gone> -> <fallback>``.
-        """
-        self._append(self.shell_cwd_fallbacks, detail)
-
     def shell_death(self, context: str, diagnostics: str) -> None:
         """Record a bash process death event with diagnostics."""
         self._append_item(
@@ -516,17 +538,6 @@ class HarnessMetrics(BaseModel):
     def missing_await(self, method_name: str) -> None:
         self._append(self.missing_awaits_detected, method_name)
 
-    def name_error_hint(self, name: str) -> None:
-        """A cell's NameError got the pointer to the python_cell_state block."""
-        self._append(self.name_error_hints, name)
-
-    def mcp_tool_name_hint(self, call: str) -> None:
-        """A cell called an MCP tool bare or as ``self.<tool>``; the error named its server.
-
-        ``call`` is ``<server>.<tool>``.
-        """
-        self._append(self.mcp_tool_name_hints, call)
-
     def return_result_tool_alias(self) -> None:
         """A provider-tool ``return_result(value=...)`` call was taken as the cell builtin."""
         self.return_result_tool_aliases += 1
@@ -537,10 +548,6 @@ class HarnessMetrics(BaseModel):
         ``call`` is ``<server>.<tool>``; the tool docs say to check for this.
         """
         self._append(self.mcp_result_errors, call)
-
-    def module_not_found_hint(self, module: str) -> None:
-        """A cell's ModuleNotFoundError got the pointer to the task's python3 behind a Shell."""
-        self._append(self.module_not_found_hints, module)
 
     def infinite_loop(self) -> None:
         self.infinite_loops_detected += 1
@@ -590,6 +597,11 @@ class HarnessMetrics(BaseModel):
             value = entry.value_fn(self)
             if value:
                 attrs[entry.key] = value
+        for ext in self._extensions.values():
+            for entry in type(ext).span_schema:
+                value = entry.value_fn(ext)
+                if value:
+                    attrs[entry.key] = value
         return attrs
 
     def flush_to_span(self) -> None:
@@ -888,37 +900,6 @@ _SPAN_SCHEMA: tuple[SchemaEntry, ...] = (
         True,
     ),
     SchemaEntry(
-        "harness.shell_queued_behind_running.count",
-        "Shell commands queued behind a running one",
-        "Tool Usage",
-        lambda m: m.shell_queued_behind_running,
-    ),
-    SchemaEntry(
-        "harness.shell_busy_rejected.count",
-        "Shell commands refused behind a background job",
-        "Tool Usage",
-        lambda m: m.shell_busy_rejected,
-    ),
-    SchemaEntry(
-        "harness.child_detached_at_deadline.count",
-        "Children awaited in a cell kept running as jobs at the cell deadline",
-        "Tool Usage",
-        lambda m: m.child_detached_at_deadline,
-    ),
-    SchemaEntry(
-        "harness.waiting_on_person_rejected.count",
-        "Waiting on user_messages rejected",
-        "Tool Usage",
-        lambda m: len(m.waiting_on_person_rejections),
-    ),
-    SchemaEntry(
-        "harness.waiting_on_person_rejected.roles",
-        "Roles that waited on the person",
-        "Tool Usage",
-        lambda m: m.waiting_on_person_rejections,
-        True,
-    ),
-    SchemaEntry(
         "harness.queue_read_timeout.count",
         "Queue reads timed out mid-cell",
         "Tool Usage",
@@ -1193,32 +1174,6 @@ _SPAN_SCHEMA: tuple[SchemaEntry, ...] = (
         True,
     ),
     SchemaEntry(
-        "harness.shell_exit_hint.count",
-        "Commands that ended their Shell's bash (exit/errexit)",
-        "Tool Usage",
-        lambda m: len(m.shell_exit_hints),
-    ),
-    SchemaEntry(
-        "harness.shell_exit_hint.codes",
-        "Exit statuses of commands that ended their Shell's bash",
-        "Tool Usage",
-        lambda m: m.shell_exit_hints,
-        True,
-    ),
-    SchemaEntry(
-        "harness.shell_cwd_fallback.count",
-        "Restarted Shells whose kept cwd was gone",
-        "Tool Usage",
-        lambda m: len(m.shell_cwd_fallbacks),
-    ),
-    SchemaEntry(
-        "harness.shell_cwd_fallback.details",
-        "Gone cwd -> fallback directory",
-        "Tool Usage",
-        lambda m: m.shell_cwd_fallbacks,
-        True,
-    ),
-    SchemaEntry(
         "harness.repo_failure.count",
         "Repo failures",
         "Tool Usage",
@@ -1266,32 +1221,6 @@ _SPAN_SCHEMA: tuple[SchemaEntry, ...] = (
         True,
     ),
     SchemaEntry(
-        "harness.name_error_hint.count",
-        "NameErrors pointed at python_cell_state",
-        "Code Validation",
-        lambda m: len(m.name_error_hints),
-    ),
-    SchemaEntry(
-        "harness.name_error_hint.names",
-        "Undefined names in hinted NameErrors",
-        "Code Validation",
-        lambda m: m.name_error_hints,
-        True,
-    ),
-    SchemaEntry(
-        "harness.mcp_tool_name_hint.count",
-        "MCP tools called bare or as self.<tool>, pointed at their server",
-        "Code Validation",
-        lambda m: len(m.mcp_tool_name_hints),
-    ),
-    SchemaEntry(
-        "harness.mcp_tool_name_hint.calls",
-        "Hinted MCP tools as <server>.<tool>",
-        "Code Validation",
-        lambda m: m.mcp_tool_name_hints,
-        True,
-    ),
-    SchemaEntry(
         "harness.mcp_result_error.count",
         "MCP results reporting failure in an 'error' field",
         "Tool Usage",
@@ -1309,19 +1238,6 @@ _SPAN_SCHEMA: tuple[SchemaEntry, ...] = (
         "Provider return_result calls taken as the cell builtin",
         "Return Value Handling",
         lambda m: m.return_result_tool_aliases,
-    ),
-    SchemaEntry(
-        "harness.module_not_found_hint.count",
-        "Cell ModuleNotFoundErrors pointed at the task's python3",
-        "Code Validation",
-        lambda m: len(m.module_not_found_hints),
-    ),
-    SchemaEntry(
-        "harness.module_not_found_hint.modules",
-        "Missing modules in hinted ModuleNotFoundErrors",
-        "Code Validation",
-        lambda m: m.module_not_found_hints,
-        True,
     ),
     SchemaEntry(
         "harness.infinite_loops_detected",
@@ -1390,8 +1306,23 @@ def get_span_schema() -> tuple[SchemaEntry, ...]:
     """Public accessor for the span attribute schema.
 
     Used by trace_explorer to drive display without importing internals.
+    Includes the entries of registered extensions (see
+    :func:`register_harness_metrics_extension`), whose ``value_fn`` takes a
+    HarnessMetrics like the core entries.
     """
-    return _SPAN_SCHEMA
+    if not _EXTENSIONS:
+        return _SPAN_SCHEMA
+    return _SPAN_SCHEMA + tuple(
+        SchemaEntry(
+            entry.key,
+            entry.label,
+            entry.category,
+            lambda m, c=cls, f=entry.value_fn: f(m.extension(c)),
+            entry.is_detail,
+        )
+        for cls in _EXTENSIONS
+        for entry in cls.span_schema
+    )
 
 
 # ── Null object (no-op outside generation sessions) ─────────────────
@@ -1421,10 +1352,17 @@ class _NullMetrics:
     def __getattr__(self, name: str) -> Any:
         if name == "timer":
             return _noop_timer
+        if name == "extension":
+            return _null_extension
         return _noop
 
 
 _NULL_METRICS = _NullMetrics()
+
+
+def _null_extension(_cls: Any) -> _NullMetrics:
+    """``extension(cls)`` outside a session: a no-op recorder too."""
+    return _NULL_METRICS
 
 
 # ── ContextVar lifecycle ────────────────────────────────────────────
