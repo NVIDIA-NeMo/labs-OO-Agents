@@ -210,6 +210,23 @@ def _module_not_found_hint(agent: Any, error: BaseException, formatted: str) -> 
 _CUT_PRINT_HINT = "Write large output to a file and read it with self.files.read(path)."
 
 
+def _inactive_skill_classes(agent: Any) -> list[type]:
+    """Classes of code skills that are loaded but not active (not listed in the stub)."""
+    skills = getattr(agent, "skills", None)
+    if not isinstance(skills, SkillManager):
+        return []
+    active = set(skills.activated())
+    classes: list[type] = []
+    for key in skills.loaded():
+        if key in active:
+            continue
+        try:
+            classes.append(type(skills.registry[key]))
+        except Exception:  # a skill that cannot be looked up is simply not listed
+            continue
+    return classes
+
+
 # The hints a failed cell can get; the first that applies is the only one added.
 _CELL_ERROR_HINTS = (_mcp_tool_hint, _name_error_hint, _module_not_found_hint)
 
@@ -261,10 +278,15 @@ class AtomCodeAct(CodeActV2):
             )
         # The stub lists only names worth using; private or hidden helper types
         # (``_AgentJobs`` behind ``self.jobs``) stay bound in cells, unlisted.
+        # Inactive skills stay bound (activating one needs no new names) but
+        # unlisted: the stub shows what is in use, self.skills the rest.
+        inactive = _inactive_skill_classes(runtime.agent)
         context = {
             name: value
             for name, value in context.items()
-            if not name.startswith("_") and getattr(value, "_agentdoc_hidden", False) is not True
+            if not name.startswith("_")
+            and getattr(value, "_agentdoc_hidden", False) is not True
+            and not any(value is cls for cls in inactive)
         }
         return self._render_execution_context_stub(
             context, {agent_module.__name__, __name__}, self.config.restrictions.blocked_modules
