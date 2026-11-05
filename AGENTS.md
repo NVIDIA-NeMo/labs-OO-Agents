@@ -220,6 +220,21 @@ Two limits worth knowing:
   indistinguishable from the outside — so leave trace-sensitive generator
   methods undecorated.
 
+### Bounded values and output
+
+Never write a new way to truncate, preview or cap a value or output. Use
+`nooa.snapshot` (see `docs/snapshot-model.md`): `capture` + `render_python` /
+`render_json` / `render_trace` for values, `TextStream` + `render_output` for
+output streams. Each public name's docstring documents it (`print(doc(...))`).
+
+If your code limits size for another reason (rejecting an oversized request,
+paginating a query, a protocol limit), mark the line with the reason:
+
+    raw = f.read(MAX_BODY + 1)  # snapshot: allow reject oversized uploads; nothing is shown
+
+The reason is required. Existing truncation code is being moved onto
+`nooa.snapshot` in follow-up pull requests; don't add more of it.
+
 ### Quality & Testing
 
 - **Evidence before assertions.** Run tests/verification before claiming work is done. Enforce in the orchestrator.
