@@ -22,3 +22,10 @@ def test_an_unknown_field_is_an_error(make):
 def test_known_fields_still_work():
     assert Done(explanation="done", message="hi").message == "hi"
     assert Waiting(explanation="tests", on=["tests"], message="soon").on == ["tests"]
+
+
+def test_the_json_kind_tag_is_accepted_only_for_its_own_type():
+    assert Done.model_validate({"kind": "done", "explanation": "ok"}) == Done(explanation="ok")
+    assert NeedInput.model_validate({"kind": "need_input", "question": "q"}).question == "q"
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        Done.model_validate({"kind": "waiting", "explanation": "ok"})
