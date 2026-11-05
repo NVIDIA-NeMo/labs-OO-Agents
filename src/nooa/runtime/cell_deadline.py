@@ -58,8 +58,9 @@ def deadline_cancel() -> CellDeadline | None:
 def timeout_message(timeout: float, notes: list[str] | None = None) -> str:
     """The cell's timeout error text, with the deadline's notes after it."""
     text = (
-        f"Code execution timed out after {timeout} seconds. "
-        "Check for infinite loops or blocking operations."
+        f"Code execution timed out after {timeout} seconds; the cell was stopped and "
+        "whatever it awaited was cancelled. Check for infinite loops or blocking operations, "
+        "and run long work in the background instead of awaiting it in one cell."
     )
     return " ".join([text, *(notes or [])])
 

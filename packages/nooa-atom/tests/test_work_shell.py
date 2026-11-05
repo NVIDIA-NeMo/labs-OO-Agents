@@ -1327,3 +1327,17 @@ async def test_a_long_wait_behind_a_direct_run_is_noted_on_the_result(tmp_path, 
         assert (first.stdout, second.stdout, second.timed_out) == ("first\n", "second\n", False)
         assert "waited" in second.stderr and "`sleep 0.6; echo first`" in second.stderr
         assert "(job" not in second.stderr
+
+
+async def test_the_cell_deadline_names_the_shell_command_it_stopped(tmp_path):
+    """A cell deadline (not the command's timeout=) says which command it stopped."""
+    from nooa.runtime.cell_deadline import run_with_deadline
+
+    async with Shell(tmp_path) as sh:
+        with pytest.raises(TimeoutError) as caught:
+            await run_with_deadline(sh.run("sleep 30", timeout=60), 0.5)
+        message = str(caught.value)
+        assert "It stopped the Shell command 'sleep 30'; the Shell is still usable." in message
+        assert "self.jobs.launch(sh.run(cmd), name=...)" in message
+        r = await sh.run("echo alive", timeout=10)
+        assert (r.returncode, r.stdout) == (0, "alive\n")
