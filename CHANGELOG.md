@@ -15,7 +15,10 @@ to follow semantic versioning.
   an earlier cell. Previously only modules bound before the cell (in practice
   `asyncio`) were checked, so `time.sleep`, `os.system`,
   `threading.Event().wait()` and the others ran, and a wait could hang the
-  event loop. The check is static: a call reached only through a value it
+  event loop. A name the cell rebinds (`sleep = asyncio.sleep`, `t = asyncio`,
+  `ev, x = threading.Event(), 1`, `ev2 = ev`) is checked as its new value from
+  that statement on, and names bound inside a `def` or comprehension stay local
+  to it. The check is static: a call reached only through a value it
   cannot name (a function argument, a container item, `getattr`, a method
   bound to another name) is still not caught.
 

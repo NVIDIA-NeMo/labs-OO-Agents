@@ -289,6 +289,124 @@ def test_validator_tracks_nested_rebinding_inside_body_only(code, lines):
     assert [issue.line for issue in _validate(code, None)] == lines
 
 
+class _NoName:
+    """A callable from a listed module without ``__name__`` (like a partial or a callable object)."""
+
+    def __call__(self, *args):
+        return None
+
+
+def _no_name(module: str) -> _NoName:
+    obj = _NoName()
+    obj.__module__ = module  # instance attribute: the object, not its class, claims the module
+    return obj
+
+
+@pytest.mark.parametrize(
+    "code,exec_globals",
+    [
+        ("sleep = asyncio.sleep\nawait sleep(0)", {"asyncio": asyncio, "sleep": time.sleep}),
+        ("import time as t\nt = asyncio\nawait t.sleep(0)", None),
+        (
+            "def h():\n    from time import sleep\nsleep = asyncio.sleep\nawait sleep(0)",
+            {"asyncio": asyncio, "sleep": time.sleep},
+        ),
+        ("def h():\n    from time import sleep\nawait asyncio.sleep(0)", None),
+        (
+            "ev = threading.Event()\nevs = [ev.wait() for ev in [asyncio.Event()]]",
+            {"asyncio": asyncio, "threading": threading},
+        ),
+        ("def f(ev):\n    return ev.wait()", {"ev": threading.Event()}),
+        ("def sleep(x):\n    return x\nsleep(0)", {"sleep": time.sleep}),
+        ("import time\nfor time in [asyncio]:\n    await time.sleep(0)", None),
+    ],
+    ids=[
+        "rebound alias",
+        "rebound module",
+        "import inside def",
+        "import inside def only",
+        "comprehension generator before element",
+        "function argument",
+        "def rebinds name",
+        "for target rebinds module",
+    ],
+)
+def test_validator_honours_cell_rebindings_everywhere(code, exec_globals):
+    """Every resolution path sees the cell's own, scope-local bindings before exec_globals."""
+    assert _validate(code, exec_globals) == []
+
+
+@pytest.mark.parametrize(
+    "code,exec_globals",
+    [
+        ("sleep(0)", {"sleep": _no_name("time")}),
+        ("run(['true'])", {"run": _no_name("subprocess")}),
+        ("import threading\nev, x = threading.Event(), 1\nev.wait(0)", None),
+        ("import threading\n[ev, (x, lock)] = [1, (2, threading.Lock())]\nlock.acquire()", None),
+        ("import threading\nev = threading.Event()\nev2 = ev\nev2.wait(0)", None),
+        ("ev2 = ev\nev2.wait(0)", {"ev": threading.Event()}),
+        ("ev2 = ev3 = ev\nev3.wait(0)", {"ev": threading.Event()}),
+        ("sleep = asyncio.sleep\nsleep = time.sleep\nsleep(0)", {"asyncio": asyncio, "time": time}),
+        ("lock = lock.acquire()", {"lock": threading.Lock()}),
+        ("ev.wait(0)\nev = asyncio.Event()", {"asyncio": asyncio, "ev": threading.Event()}),
+        ("def f():\n    ev.wait(0)\nimport threading\nev = threading.Event()\nf()", None),
+        ("import threading\n(ev := threading.Event()).wait(0)", None),
+    ],
+    ids=[
+        "no __name__ blocked call",
+        "no __name__ blocked module",
+        "tuple target",
+        "nested list target",
+        "instance alias same cell",
+        "instance alias earlier cell",
+        "chained alias",
+        "later rebinding wins after it runs",
+        "value before target",
+        "call before rebinding",
+        "function body sees final cell bindings",
+        "walrus",
+    ],
+)
+def test_validator_refuses_through_aliases_and_targets(code, exec_globals):
+    issues = _validate(code, exec_globals)
+    assert issues and issues[0].code == "E310", code
+
+
+@pytest.mark.parametrize(
+    "code,exec_globals,rendered",
+    [
+        (
+            "import threading\nlock = threading.Lock()\nlock.acquire()",
+            None,
+            "threading.Lock.acquire()",
+        ),
+        ("lock.acquire()", {"lock": threading.Lock()}, "threading.Lock.acquire()"),
+        ("import threading\nthreading.Lock().acquire()", None, "threading.Lock.acquire()"),
+        (
+            "import threading\nt = threading.Thread(target=print)\nt.join()",
+            None,
+            "threading.Thread.join()",
+        ),
+        ("t.join()", {"t": threading.Thread(target=print)}, "threading.Thread.join()"),
+        ("loop = asyncio.new_event_loop()\nloop.run_forever()", None, "asyncio.run_forever()"),
+        ("asyncio.get_event_loop().run_forever()", None, "asyncio.run_forever()"),
+    ],
+    ids=[
+        "Lock same cell",
+        "Lock earlier cell",
+        "Lock constructor",
+        "Thread same cell",
+        "Thread earlier cell",
+        "loop same cell",
+        "loop chained",
+    ],
+)
+def test_validator_renders_the_same_entry_on_every_path(code, exec_globals, rendered):
+    """Hints key on the rendered name, so every path names the listed entry the same way."""
+    issues = _validate(code, exec_globals)
+    assert len(issues) == 1 and issues[0].message.startswith(rendered + " blocks"), issues
+
+
 @pytest.mark.parametrize("name", list(ALLOWED))
 def test_validator_allows_alternatives(name):
     assert _validate(ALLOWED[name]) == []
