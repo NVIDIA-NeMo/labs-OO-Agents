@@ -473,6 +473,50 @@ def test_dataclass_hints_are_evaluated_once_per_class(monkeypatch) -> None:
     assert key not in _visibility._HINTS  # dropped with the class (weakref.finalize)
 
 
+def test_dataclass_hints_that_fail_are_retried_by_the_next_capture(monkeypatch) -> None:
+    import types
+    import typing
+
+    from nooa.snapshot import _visibility
+
+    calls: list[object] = []
+    real = typing.get_type_hints
+
+    def counting(obj: Any, *args: Any, **kwargs: Any) -> Any:
+        calls.append(obj)
+        return real(obj, *args, **kwargs)
+
+    monkeypatch.setattr(typing, "get_type_hints", counting)
+    module = types.ModuleType("snapshot_forward_reference")
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    exec(  # a forward reference to a name the module defines later
+        "from __future__ import annotations\n"
+        "from dataclasses import dataclass\n"
+        "from typing import Annotated\n"
+        "from nooa import hidden\n"
+        "@dataclass\n"
+        "class Later:\n"
+        "    token: Annotated[Missing, hidden] = 's3cret'\n"
+        "    name: str = 'n'\n",
+        module.__dict__,
+    )
+    later = module.Later
+
+    first = capture([later(), later(), later()])
+    assert calls == [later]  # the failure is evaluated once per capture, not once per instance
+    assert id(later) not in _visibility._HINTS  # and not cached for the process
+    assert all(item.reason == "unreadable" for item in first.items)
+    assert "s3cret" not in render_python(first)
+
+    module.Missing = str
+    calls.clear()
+    assert render_python(capture(later())) == "Later(name='n')"  # the next capture tries again
+    assert calls == [later]
+    calls.clear()
+    assert render_python(capture(later())) == "Later(name='n')"
+    assert calls == []  # and the success is cached
+
+
 class _Unhashable(type):
     def __hash__(cls) -> int:
         raise RuntimeError("class hashed")

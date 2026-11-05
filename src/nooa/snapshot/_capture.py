@@ -72,8 +72,9 @@ class _CaptureFunction:
       are read from raw storage (``__dict__`` or ``__slots__``) through the
       native descriptors. The only code that runs is class metadata,
       evaluated the way Python does (``typing.get_type_hints(cls,
-      include_extras=True)``, once per dataclass with string annotations,
-      cached by class identity) and the accessors of registered shapes.
+      include_extras=True)`` for a dataclass with string annotations; a
+      success is cached by class identity, a failure is retried by the next
+      ``capture``) and the accessors of registered shapes.
     - Hidden fields are never read: agentdoc ``hidden`` /
       ``spec(hidden=True)`` markers and ``spec()`` overrides, Pydantic
       ``exclude=True`` / ``repr=False``, dataclass ``repr=False``,

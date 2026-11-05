@@ -24,9 +24,10 @@ these ways:
   Pydantic ``FieldInfo``, a ``dataclasses.Field``, an ``Annotated`` alias
   and agentdoc's ``SpecAnnotation``;
 - class metadata, the way Python reads it: ``_visibility`` calls
-  ``typing.get_type_hints(cls, include_extras=True)`` once per dataclass
-  that has string annotations (cached by class identity; any exception
-  fails closed). This evaluates annotation code the class's author wrote;
+  ``typing.get_type_hints(cls, include_extras=True)`` for a dataclass
+  that has string annotations (a success is cached by class identity; an
+  exception fails closed for that capture and is retried by the next one).
+  This evaluates annotation code the class's author wrote;
 - registered shapes, in ``_walk`` only: their accessors (trusted extension
   code), and what is done with their results: iterating ``items(v)``,
   indexing ``labels(v)[i]``, and copying a ``slice`` result (``bytes()`` of

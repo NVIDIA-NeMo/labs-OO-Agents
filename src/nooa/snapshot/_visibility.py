@@ -8,8 +8,9 @@ What lives here:
   markers and the ``_agentdoc_fields_docs`` overrides of a class or an
   instance;
 - the annotation metadata of a dataclass with string annotations:
-  ``typing.get_type_hints(cls, include_extras=True)``, once per class,
-  cached by class identity in ``_HINTS``, failing closed on any error;
+  ``typing.get_type_hints(cls, include_extras=True)``; a success is cached
+  by class identity in ``_HINTS``, a failure fails closed for the current
+  capture only and is retried by the next one;
 - ``_pydantic_entries`` and ``_dataclass_entries``, the readers that yield
   the visible declared fields of a Pydantic v2 model or a dataclass from
   raw instance storage.
@@ -160,26 +161,33 @@ def _annotation_hidden(
     return _metadata_hidden(metadata, state)
 
 
-_HINTS: dict[int, tuple[weakref.ref[type[Any]], dict[str, tuple[Any, ...]] | None]] = {}
+_HINTS: dict[int, tuple[weakref.ref[type[Any]], dict[str, tuple[Any, ...]]]] = {}
 """Per dataclass, keyed by ``id`` and re-checked by identity: its resolved hint metadata."""
 
 
-def _resolved_metadata(cls: type[Any]) -> dict[str, tuple[Any, ...]] | None:
+def _resolved_metadata(cls: type[Any], state: _State) -> dict[str, tuple[Any, ...]] | None:
     """The outermost ``Annotated`` metadata of each resolved type hint of ``cls`` (None: unreadable).
 
     String annotations (PEP 563) are read the way Python reads them:
-    ``typing.get_type_hints(cls, include_extras=True)``, evaluated once per
-    class. The cache is keyed by ``id(cls)`` and re-checked with ``is``, so the
-    class is never hashed or compared; it keeps only a weak reference to the
-    class and the marker metadata, and ``weakref.finalize`` drops the entry
-    with the class. A hint that is not an exact ``Annotated`` alias has no
-    metadata (``()``). If evaluation raises, the class's hints are unreadable.
+    ``typing.get_type_hints(cls, include_extras=True)``. A successful result
+    is cached for the process, keyed by ``id(cls)`` and re-checked with
+    ``is``, so the class is never hashed or compared; the cache keeps only a
+    weak reference to the class and the marker metadata, and
+    ``weakref.finalize`` drops the entry with the class. A hint that is not an
+    exact ``Annotated`` alias has no metadata (``()``).
+
+    If evaluation raises (for example, a forward reference to a name not
+    defined yet), the class's hints are unreadable for the rest of this
+    capture (recorded on ``state``, so the failure is evaluated once per
+    capture, not once per instance), and the next capture tries again.
     """
     key = id(cls)
     entry = _HINTS.get(key)
     if entry is not None and entry[0]() is cls:
         return entry[1]
-    metadata: dict[str, tuple[Any, ...]] | None = {}
+    if state.unreadable_hints.get(key) is cls:
+        return None
+    metadata: dict[str, tuple[Any, ...]] = {}
     try:
         hints = typing.get_type_hints(cls, include_extras=True)
         for name, hint in dict.items(hints):
@@ -192,7 +200,8 @@ def _resolved_metadata(cls: type[Any]) -> dict[str, tuple[Any, ...]] | None:
                     raise TypeError("unreadable Annotated metadata")
             metadata[name] = found
     except Exception:
-        metadata = None
+        state.unreadable_hints[key] = cls  # retried by the next capture
+        return None
     try:
         reference = weakref.ref(cls)
         weakref.finalize(cls, _HINTS.pop, key, None)
@@ -288,7 +297,7 @@ def _dataclass_entries(
         raise _FailClosed
     overrides = _visibility_overrides(storage, mro, state)
     # The class's resolved hints, read once, at the first string annotation.
-    hints = functools.cache(functools.partial(_resolved_metadata, carrier))
+    hints = functools.cache(functools.partial(_resolved_metadata, carrier, state))
     for name, field in dict.items(fields):
         if not state.take_node():
             yield _Omitted("max_nodes")
