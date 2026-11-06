@@ -193,3 +193,45 @@ async def test_self_libs_is_gone(tmp_path):
             agent.libs  # noqa: B018
     finally:
         await agent.aclose()
+
+
+async def test_a_text_skill_named_like_an_agent_attribute_is_refused(tmp_path):
+    agent = _agent(tmp_path)
+    try:
+        shell = agent.shell
+        result = await agent.skill_writing.create("shell", "Shell tips.", text="Use rg.")
+        assert result.startswith("Not created")
+        assert "self.shell is already an attribute" in result
+        assert "choose another name" in result
+        # reload() does not import the directory and replace self.shell either.
+        skill_dir = tmp_path / ".nooa" / "skills" / "shell"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text("---\nname: shell\ndescription: x\n---\nHi.\n")
+        reloaded = await agent.skill_writing.reload("shell")
+        assert "OK — written and loaded" not in reloaded
+        assert "choose another name" in reloaded
+        assert agent.shell is shell
+        assert "local.shell" not in agent.skills.registry.loaded()
+    finally:
+        await agent.aclose()
+
+
+async def test_a_text_skill_with_a_free_name_is_created_and_loaded(tmp_path):
+    agent = _agent(tmp_path)
+    try:
+        result = await agent.skill_writing.create("release_notes", "Notes.", text="1. Tag.")
+        assert result.startswith("Created text skill 'release_notes'")
+        assert "local.release_notes" in agent.skills.registry.loaded()
+    finally:
+        await agent.aclose()
+
+
+async def test_a_skill_name_with_a_path_is_refused(tmp_path):
+    agent = _agent(tmp_path)
+    try:
+        with pytest.raises(ValueError, match="choose another name"):
+            await agent.skill_writing.create("../../escaped", "x", text="Hi.")
+    finally:
+        await agent.aclose()
+    assert not (tmp_path / "escaped").exists()
+    assert not (tmp_path.parent / "escaped").exists()

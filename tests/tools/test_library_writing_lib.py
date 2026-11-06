@@ -460,3 +460,78 @@ async def test_reload_reports_success(tmp_path: Path):
     result = await libs.reload("rl_ok")
 
     assert "OK — written and loaded" in result
+
+
+# ---------------------------------------------------------------------------
+# Skill names (m7) and attribute collisions (M3)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "bad", ["../../escaped", "a/b", "..", "a\\b", "", "1abc", "with space", "class"]
+)
+@pytest.mark.asyncio
+async def test_a_skill_name_that_is_not_identifier_like_is_refused_everywhere(
+    tmp_path: Path, bad: str
+):
+    libs = SkillWriting(_make_agent(), path=tmp_path / "skills")
+    for attempt in (
+        libs.create(bad, DESCRIPTION),
+        libs.create(bad, DESCRIPTION, text="Steps."),
+        libs.reload(bad),
+        libs.run_tests(bad),
+    ):
+        with pytest.raises(ValueError, match="choose another name"):
+            await attempt
+    with pytest.raises(ValueError, match="Invalid skill name"):
+        libs.path(bad)
+    # Nothing was written outside (or inside) the skills directory.
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["skills"]
+    assert list((tmp_path / "skills").iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_a_text_skill_name_may_contain_a_hyphen_but_a_code_skill_name_may_not(
+    tmp_path: Path,
+):
+    libs = SkillWriting(_make_agent(), path=tmp_path)
+    assert libs.path("release-notes").endswith("release-notes")
+    with pytest.raises(ValueError, match="Python identifier"):
+        await libs.create("release-notes", DESCRIPTION)
+
+
+@pytest.mark.asyncio
+async def test_a_code_skill_named_like_an_agent_attribute_is_refused(tmp_path: Path):
+    agent = _make_agent()
+    shell = agent.shell
+    libs = SkillWriting(agent, path=tmp_path)
+    result = await libs.create("shell", DESCRIPTION)
+    assert result.startswith("Not created")
+    assert "self.shell is already an attribute" in result
+    assert "choose another name" in result
+    assert not (tmp_path / "shell").exists()
+    assert agent.shell is shell
+
+
+@pytest.mark.asyncio
+async def test_reload_never_replaces_a_non_skill_attribute(tmp_path: Path):
+    """A skill directory written by hand under an attribute's name is not attached."""
+    agent = _make_agent()
+    shell = agent.shell
+    libs = SkillWriting(agent, path=tmp_path)
+    _make_lib_dir(tmp_path, "shell", SIMPLE_SOURCE)
+    result = await libs.reload("shell")
+    assert "not loaded" in result.lower()
+    assert "choose another name" in result
+    assert agent.shell is shell
+
+
+@pytest.mark.asyncio
+async def test_reload_of_a_text_only_directory_does_not_import_it_as_a_module(tmp_path: Path):
+    agent = _make_agent()
+    libs = SkillWriting(agent, path=tmp_path)
+    (tmp_path / "notes").mkdir()
+    (tmp_path / "notes" / "SKILL.md").write_text("---\nname: notes\n---\nHi.\n")
+    result = await libs.reload("notes")
+    assert "not loaded" in result.lower()
+    assert "notes" not in vars(agent)

@@ -5,6 +5,7 @@
 import ast
 import inspect
 import json
+import keyword
 import re
 import sys
 import textwrap
@@ -211,8 +212,43 @@ class SkillWriting(Skill):
             return None
         return getattr(skills, "registry", skills)
 
+    @staticmethod
+    def _check_name(lib_name: str, *, code: bool = False) -> None:
+        """Refuse a skill name that is not identifier-like: it becomes a directory name.
+
+        A text skill may contain ``-`` (its attribute uses ``_``); a code skill
+        is imported, so it needs a plain identifier. Path separators, ``..``
+        and other characters would escape or confuse the skills directory.
+        """
+        name = lib_name if isinstance(lib_name, str) else ""
+        candidate = name if code else name.replace("-", "_")
+        if not candidate.isidentifier() or keyword.iskeyword(candidate):
+            kind = "a Python identifier" if code else "a Python identifier (or with '-')"
+            raise ValueError(
+                f"Invalid skill name {lib_name!r}: use {kind}, such as 'stats' or "
+                "'release_notes', with no path separators or '..'; choose another name"
+            )
+
+    def _attr_conflict(self, lib_name: str) -> str | None:
+        """What already holds the attribute ``lib_name`` would be loaded as, else None."""
+        registry = self._registry()
+        attr = lib_name.replace("-", "_")
+        taken = getattr(registry, "_attr_taken", None) if registry is not None else None
+        if taken is not None:
+            if taken(f"local.{lib_name}"):
+                return f"self.{attr} is already an attribute of the agent"
+            return None
+        try:
+            existing = getattr(self._agent, attr)
+        except AttributeError:
+            return None
+        if isinstance(existing, Skill):
+            return None  # a skill (this one, reloaded); replacing it is a reload
+        return f"self.{attr} is already an attribute of the agent ({type(existing).__name__})"
+
     def _dir(self, lib_name: str) -> Path:
         """The directory of a skill: the save directory's, else an older one's that exists."""
+        self._check_name(lib_name)
         primary = self._path / lib_name
         if primary.is_dir():
             return primary
@@ -268,6 +304,7 @@ class SkillWriting(Skill):
         Returns:
             Confirmation string with the skill path.
         """
+        self._check_name(lib_name, code=text is None)
         lib_dir = self._path / lib_name
         registry = self._registry()
         if text is not None:
@@ -275,6 +312,10 @@ class SkillWriting(Skill):
                 return f"Not created: this agent loads only code skills; '{lib_name}' needs code"
             if (lib_dir / "pyproject.toml").exists():
                 return f"Not created: '{lib_name}' is a code skill; choose another name"
+        conflict = self._attr_conflict(lib_name)
+        if conflict is not None:
+            # Loading it would replace that attribute (or be skipped silently).
+            return f"Not created: {conflict}; choose another name for the skill"
         lib_dir.mkdir(parents=True, exist_ok=True)
         first_line = description.strip().split("\n")[0]
 
@@ -290,6 +331,11 @@ class SkillWriting(Skill):
             else:
                 registry.discover_libs(self._path, agent_written=True)
             registry.activate([f"local.{lib_name}"])
+            if f"local.{lib_name}" not in registry.loaded():
+                return (
+                    f"Saved text skill '{lib_name}' at {lib_dir / 'SKILL.md'}, but it is not "
+                    "loaded; choose another name"
+                )
             return f"Created text skill '{lib_name}' at {lib_dir / 'SKILL.md'}"
 
         pyproject = textwrap.dedent(f"""\
@@ -359,17 +405,18 @@ class SkillWriting(Skill):
         Returns the registry's status string (starts with "Reloaded" on success).
         """
         registry = self._registry()
+        lib_dir = self._dir(lib_name)
+        is_code = (lib_dir / "pyproject.toml").exists()
         if registry is not None:
-            lib_dir = self._dir(lib_name)
-            if (
-                f"local.{lib_name}" not in registry.loaded()
-                and not (lib_dir / "pyproject.toml").exists()
-            ):
+            if f"local.{lib_name}" not in registry.loaded() and not is_code:
                 # A text skill (SKILL.md only): register it from its directory.
                 registry.discover_libs(lib_dir.parent, agent_written=True)
                 registry.activate([f"local.{lib_name}"])
                 if f"local.{lib_name}" in registry.loaded():
                     return f"Reloaded local.{lib_name}"
+                conflict = self._attr_conflict(lib_name)
+                reason = f"{conflict}; choose another name" if conflict else "it did not load"
+                return f"Not loaded: text skill '{lib_name}': {reason}"
             try:
                 return await registry.reload(f"local.{lib_name}")
             except KeyError:
@@ -377,7 +424,14 @@ class SkillWriting(Skill):
                 # yet, so skills.reload() raises. Fall through to the manager,
                 # which imports and attaches it from disk.
                 pass
-        mgr = LibraryManager(self._agent, self._dir(lib_name).parent)
+        # The manager imports a code package and sets it as an attribute; it
+        # must never replace an attribute that is not a skill (self.shell, ...).
+        if not is_code:
+            return f"Not loaded: '{lib_name}' has no pyproject.toml, so it is not a code skill"
+        conflict = self._attr_conflict(lib_name)
+        if conflict is not None:
+            return f"Not loaded: {conflict}; choose another name for the skill"
+        mgr = LibraryManager(self._agent, lib_dir.parent)
         mgr._reload(lib_name)
         return f"Reloaded local.{lib_name}"
 
@@ -472,6 +526,7 @@ class SkillWriting(Skill):
 
     def _get_declared_deps(self, lib_name: str) -> set[str]:
         """Parse declared dependencies from the library's pyproject.toml."""
+        self._check_name(lib_name)
         pyproject_path = self._path / lib_name / "pyproject.toml"
         if not pyproject_path.exists():
             return set()

@@ -6,6 +6,18 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- `SkillWriting` (`self.skill_writing`): `create()` refuses a skill whose name
+  is already an attribute of the agent (`self.shell`, another skill) with
+  "Not created: self.shell is already an attribute of the agent; choose
+  another name for the skill". Before, a text skill was reported created but
+  never loaded, and `reload()` then imported its SKILL.md-only directory as a
+  module and replaced the real attribute. `reload()` no longer imports a
+  directory without a pyproject.toml, never replaces an attribute that is not
+  a skill, and reports a text skill that did not load. Skill names are
+  validated wherever they become a path (`create`, `path`, `reload`,
+  `run_tests`): a Python identifier (a text skill may also use `-`), so
+  `"../x"`, `"a/b"` or `".."` raise `ValueError` instead of writing outside
+  `.nooa/skills`.
 - Owned execution namespace (Atom): a cell helper run in a thread that does
   not inherit the cell's context (`loop.run_in_executor`, `threading.Thread`)
   can use `print`, `pprint`, `show` and `self` again; they resolve to the
