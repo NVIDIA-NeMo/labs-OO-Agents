@@ -270,10 +270,12 @@ jobs:
         uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.12"
+      # nooa-atom too: nooa-bench depends on it and it is not on PyPI, so
+      # without its wheel `uv pip install dist/*.whl` cannot resolve nooa-bench.
       - name: Build wheels
         run: |
           rm -rf dist
-          for pkg in nooa nooa-cli nooa-acp nooa-memory nooa-bench; do
+          for pkg in nooa nooa-cli nooa-acp nooa-memory nooa-bench nooa-atom; do
             uv build --no-sources --package "$pkg" --out-dir dist
           done
       - name: Install wheels into a clean environment
