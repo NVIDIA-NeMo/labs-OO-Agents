@@ -69,7 +69,16 @@ import inspect
 import logging
 import types
 from dataclasses import dataclass, field
-from typing import Annotated, Any, ForwardRef, Literal, Protocol, get_args, get_origin
+from typing import (
+    Annotated,
+    Any,
+    ForwardRef,
+    Literal,
+    NamedTuple,
+    Protocol,
+    get_args,
+    get_origin,
+)
 
 from nooa.errors import RestrictedCodeError as ValidationError
 from nooa.runtime.restrictions import (
@@ -1247,8 +1256,39 @@ class BlockingCallValidator:
         return visitor.issues
 
 
+# Runtime instance types whose class name differs from the listed constructor.
+_RUNTIME_CLASS_ALIASES: dict[tuple[str, str], tuple[str, str]] = {
+    ("_thread", "lock"): ("threading", "Lock"),
+}
+# C modules whose functions the listed module re-exports (os.system.__module__ == "posix").
+_RUNTIME_MODULE_ALIASES: dict[str, str] = {"posix": "os", "nt": "os"}
+
+
+class _Binding(NamedTuple):
+    """What a name or expression refers to, as far as the blocked-call check can tell."""
+
+    kind: Literal["module", "ref", "instance"]
+    module: str  # module name; for "instance", the module of its class
+    name: str = ""  # "ref": attribute of ``module`` (function/class); "instance": class name
+
+
+class _Scope(NamedTuple):
+    kind: Literal["cell", "function", "class", "comprehension"]
+    # Names bound so far in this scope; None = bound to something the check does not track.
+    names: dict[str, _Binding | None]
+
+
 class _BlockingCallVisitor(ast.NodeVisitor):
-    """AST visitor that detects blocking calls using runtime-resolved names."""
+    """AST visitor that detects blocking calls using runtime-resolved names.
+
+    Every check asks one scope-aware resolver (``_lookup``/``_resolve``): a name
+    means what the innermost scope bound it to so far in this cell (imports,
+    assignments, loop/with/except targets, args, defs), else the earlier cells'
+    object in ``exec_globals``. Statements are visited in execution order and an
+    assignment's value before its targets, so a rebinding wins only after it runs.
+    Function bodies are checked where they are defined and again against the
+    cell's final bindings, because they may run after the rest of the cell.
+    """
 
     def __init__(
         self,
@@ -1259,124 +1299,340 @@ class _BlockingCallVisitor(ast.NodeVisitor):
         self.blocked_modules = restrictions.blocked_modules
         self.blocked_calls = restrictions.blocked_calls
         self.issues: list[ValidationIssue] = []
-        # Track local variables assigned from constructors on blocked-call modules.
-        # Maps var_name -> (module_name, class_name)
-        self.tracked_locals: dict[str, tuple[str, str]] = {}
+        self._issue_keys: set[tuple[int, int, str]] = set()
+        self.scopes: list[_Scope] = [_Scope("cell", {})]
+        # Cell-level defs/lambdas whose bodies get a second check at the end of the cell.
+        self._deferred: list[ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda] = []
 
-    def _resolve_module_from_call(self, node: ast.Call) -> str | None:
-        """Resolve the module of a chained call like asyncio.get_event_loop().
+    # -- resolver ---------------------------------------------------------------
 
-        For `asyncio.get_event_loop().run_until_complete(...)`, the inner call
-        `asyncio.get_event_loop()` has its function's value as the `asyncio` Name.
-        We resolve that to the asyncio module.
-        """
-        if isinstance(node.func, ast.Attribute):
-            return self._resolve_module(node.func.value)
-        return None
+    def _bind(self, name: str, binding: _Binding | None) -> None:
+        self.scopes[-1].names[name] = binding
 
-    def _resolve_module(self, node: ast.expr) -> str | None:
-        """Resolve an AST expression to its module name via exec_globals.
+    def _lookup(self, name: str) -> _Binding | None:
+        """The binding a name has here: this cell's own scopes first, then exec_globals."""
+        innermost = self.scopes[-1]
+        for scope in reversed(self.scopes):
+            # A class body's names are not visible inside its methods.
+            if scope.kind == "class" and scope is not innermost:
+                continue
+            if name in scope.names:
+                return scope.names[name]
+        return self._from_globals(name)
 
-        For non-module objects, falls back to obj.__module__. Same caveat as
-        is_from_blocked_module(): safe with curated block lists but could
-        over-match if a broadly-used module like "io" were added.
-        """
+    def _from_globals(self, name: str) -> _Binding | None:
+        """The binding of an object an earlier cell left in exec_globals."""
+        obj = self.exec_globals.get(name)
+        if obj is None:
+            return None
+        if isinstance(obj, types.ModuleType):
+            return _Binding("module", obj.__name__)
+        if isinstance(obj, type) or callable(obj):
+            module_name = getattr(obj, "__module__", None)
+            if not isinstance(module_name, str):
+                return None
+            # A callable without __name__ (a partial, a callable object) keeps its variable name.
+            obj_name = getattr(obj, "__name__", None)
+            if not isinstance(obj_name, str):
+                obj_name = name
+            return _Binding("ref", _RUNTIME_MODULE_ALIASES.get(module_name, module_name), obj_name)
+        cls = type(obj)
+        key = (cls.__module__, cls.__name__)
+        return _Binding("instance", *_RUNTIME_CLASS_ALIASES.get(key, key))
+
+    def _resolve(self, node: ast.expr) -> _Binding | None:
+        """Resolve ``os``, ``os.path.join``, ``Event``, ``threading.Event()``, ``ev``, ..."""
         if isinstance(node, ast.Name):
-            obj = self.exec_globals.get(node.id)
-            if isinstance(obj, types.ModuleType):
-                return obj.__name__
-            return getattr(obj, "__module__", None)
+            return self._lookup(node.id)
         if isinstance(node, ast.Attribute):
-            # For chained attributes like os.path.join, resolve the leftmost name
-            return self._resolve_module(node.value)
+            base = self._resolve(node.value)
+            if base is not None and base.kind == "module":
+                return _Binding("ref", base.module, node.attr)
+            if base is not None and base.kind == "ref":
+                # os.path.join: a submodule (or class) attribute
+                return _Binding("ref", f"{base.module}.{base.name}", node.attr)
+            return None
+        if isinstance(node, ast.NamedExpr):
+            return self._resolve(node.value)
+        if isinstance(node, ast.Call):
+            # threading.Event(): what a module's class or function returns
+            func = self._resolve(node.func)
+            if func is not None and func.kind == "ref":
+                return _Binding("instance", func.module, func.name)
         return None
 
-    def _add_issue(self, node: ast.AST, module_name: str, call_name: str) -> None:
-        self.issues.append(
-            ValidationIssue(
-                line=getattr(node, "lineno", 0),
-                col=getattr(node, "col_offset", 0),
-                message=(
-                    f"{module_name}.{call_name}() blocks the event loop and is not "
-                    f"allowed in agent code. Use 'await' with an async alternative "
-                    f"or an appropriate agent tool."
-                ),
-                code="E310",
-                severity="error",
+    def _module_name(self, node: ast.expr) -> str | None:
+        """The module a method's receiver belongs to (``os``, ``os.path``, an instance's)."""
+        if isinstance(node, ast.Name):
+            binding = self._lookup(node.id)
+        elif isinstance(node, ast.Attribute):
+            binding = self._resolve(node)
+            if binding is None:
+                # e.g. obj.attr.method(): fall back to the leftmost object's module
+                return self._module_name(node.value)
+        else:
+            return None
+        if binding is None:
+            return None
+        if binding.kind == "ref":
+            return f"{binding.module}.{binding.name}"
+        return binding.module
+
+    def _evaluate(self, value: ast.expr) -> Any:
+        """Bindings of an assigned value, element-wise for a tuple/list display."""
+        if isinstance(value, (ast.Tuple, ast.List)) and not any(
+            isinstance(elt, ast.Starred) for elt in value.elts
+        ):
+            return [self._evaluate(elt) for elt in value.elts]
+        return self._resolve(value)
+
+    def _bind_target(self, target: ast.expr, value: Any) -> None:
+        """Bind ``ev``, ``ev, x`` (paired with a same-length display) ...; others stay untracked."""
+        if isinstance(target, ast.Name):
+            self._bind(target.id, None if isinstance(value, list) else value)
+        elif (
+            isinstance(target, (ast.Tuple, ast.List))
+            and isinstance(value, list)
+            and len(value) == len(target.elts)
+            and not any(isinstance(elt, ast.Starred) for elt in target.elts)
+        ):
+            for elt, elt_value in zip(target.elts, value, strict=True):
+                self._bind_target(elt, elt_value)
+        # Anything else was already bound as untracked by visit_Name.
+
+    # -- bindings, in execution order ---------------------------------------------
+
+    def visit_Module(self, node: ast.Module) -> Any:
+        self.generic_visit(node)
+        # A function defined in the cell may run after the rest of it.
+        deferred, self._deferred = self._deferred, []
+        for function in deferred:
+            self._visit_function_body(function)
+        self.issues.sort(key=lambda issue: (issue.line, issue.col))
+
+    def visit_Name(self, node: ast.Name) -> Any:
+        # Assignment/for/with/del targets: the name no longer means its earlier object.
+        if isinstance(node.ctx, (ast.Store, ast.Del)):
+            self._bind(node.id, None)
+
+    def visit_Import(self, node: ast.Import) -> Any:
+        for alias in node.names:
+            if alias.asname:
+                self._bind(alias.asname, _Binding("module", alias.name))
+            else:
+                top = alias.name.split(".")[0]
+                self._bind(top, _Binding("module", top))
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> Any:
+        for alias in node.names:
+            if alias.name == "*":
+                continue
+            ref = (
+                _Binding("ref", node.module, alias.name) if node.module and not node.level else None
             )
-        )
+            self._bind(alias.asname or alias.name, ref)
 
     def visit_Assign(self, node: ast.Assign) -> Any:
-        """Track local variables assigned from constructors on blocked-call modules."""
-        # Track: t = threading.Thread(...) -> tracked_locals["t"] = ("threading", "Thread")
-        if isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Attribute):
-            module_name = self._resolve_module(node.value.func.value)
-            if module_name:
-                matched = match_blocked_module(module_name, self.blocked_calls)
-                if matched:
-                    class_name = node.value.func.attr
-                    for target in node.targets:
-                        if isinstance(target, ast.Name):
-                            self.tracked_locals[target.id] = (matched, class_name)
+        """Track ``t = threading.Thread()``, ``s = os.system``, ``t = asyncio``, ``ev2 = ev``."""
+        # The value runs before the targets are bound: ``lock = lock.acquire()``.
+        self.visit(node.value)
+        value = self._evaluate(node.value)
+        for target in node.targets:
+            self.visit(target)
+            self._bind_target(target, value)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> Any:
+        """Track ``ev: threading.Event = threading.Event()`` like a plain assignment."""
+        self.visit(node.annotation)
+        value = None
+        if node.value is not None:
+            self.visit(node.value)
+            value = self._evaluate(node.value)
+        self.visit(node.target)
+        if node.value is not None:
+            self._bind_target(node.target, value)
+
+    def visit_AugAssign(self, node: ast.AugAssign) -> Any:
+        self.visit(node.value)
+        self.visit(node.target)
+
+    def visit_NamedExpr(self, node: ast.NamedExpr) -> Any:
+        self.visit(node.value)
+        # A walrus in a comprehension binds in the enclosing scope.
+        scope = next(s for s in reversed(self.scopes) if s.kind != "comprehension")
+        scope.names[node.target.id] = self._resolve(node.value)
+
+    def visit_For(self, node: ast.For | ast.AsyncFor) -> Any:
+        # The iterable runs before the target is bound.
+        self.visit(node.iter)
+        self.visit(node.target)
+        for stmt in node.body + node.orelse:
+            self.visit(stmt)
+
+    visit_AsyncFor = visit_For
+
+    def visit_ExceptHandler(self, node: ast.ExceptHandler) -> Any:
+        if node.type is not None:
+            self.visit(node.type)
+        if node.name:
+            self._bind(node.name, None)
+        for stmt in node.body:
+            self.visit(stmt)
+
+    def visit_MatchAs(self, node: ast.MatchAs) -> Any:
         self.generic_visit(node)
+        if node.name:
+            self._bind(node.name, None)
+
+    def visit_MatchStar(self, node: ast.MatchStar) -> Any:
+        if node.name:
+            self._bind(node.name, None)
+
+    # -- nested scopes -------------------------------------------------------------
+
+    def _visit_in_scope(
+        self,
+        kind: Literal["function", "class", "comprehension"],
+        nodes: list[ast.AST],
+        params: tuple[str, ...] = (),
+    ) -> None:
+        self.scopes.append(_Scope(kind, dict.fromkeys(params)))
+        try:
+            for child in nodes:
+                self.visit(child)
+        finally:
+            self.scopes.pop()
+
+    def _visit_function_body(
+        self, node: ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda
+    ) -> None:
+        args = node.args
+        params = [a.arg for a in args.posonlyargs + args.args + args.kwonlyargs]
+        params += [a.arg for a in (args.vararg, args.kwarg) if a is not None]
+        body = node.body if isinstance(node.body, list) else [node.body]
+        self._visit_in_scope("function", body, tuple(params))
+
+    def _visit_signature(self, args: ast.arguments) -> None:
+        # Defaults and annotations run in the enclosing scope when the def runs.
+        for default in args.defaults + [d for d in args.kw_defaults if d is not None]:
+            self.visit(default)
+        for arg in args.posonlyargs + args.args + args.kwonlyargs + [args.vararg, args.kwarg]:
+            if arg is not None and arg.annotation is not None:
+                self.visit(arg.annotation)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> Any:
+        for decorator in node.decorator_list:
+            self.visit(decorator)
+        self._visit_signature(node.args)
+        if node.returns is not None:
+            self.visit(node.returns)
+        at_cell_level = len(self.scopes) == 1
+        self._bind(node.name, None)
+        self._visit_function_body(node)
+        if at_cell_level:
+            self._deferred.append(node)
+
+    visit_AsyncFunctionDef = visit_FunctionDef
+
+    def visit_Lambda(self, node: ast.Lambda) -> Any:
+        self._visit_signature(node.args)
+        self._visit_function_body(node)
+        if len(self.scopes) == 1:
+            self._deferred.append(node)
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> Any:
+        for child in node.decorator_list + node.bases + [kw.value for kw in node.keywords]:
+            self.visit(child)
+        self._visit_in_scope("class", node.body)
+        self._bind(node.name, None)
+
+    def _visit_comprehension(
+        self, node: ast.ListComp | ast.SetComp | ast.DictComp | ast.GeneratorExp
+    ) -> Any:
+        # Generators run before the element; the first iterable in the enclosing scope.
+        self.visit(node.generators[0].iter)
+        parts: list[ast.AST] = []
+        for index, generator in enumerate(node.generators):
+            if index:
+                parts.append(generator.iter)
+            parts.append(generator.target)
+            parts.extend(generator.ifs)
+        if isinstance(node, ast.DictComp):
+            parts += [node.key, node.value]
+        else:
+            parts.append(node.elt)
+        self._visit_in_scope("comprehension", parts)
+
+    visit_ListComp = visit_SetComp = visit_DictComp = visit_GeneratorExp = _visit_comprehension
+
+    # -- checks --------------------------------------------------------------------
+
+    def _add_issue(self, node: ast.AST, module_name: str, call_name: str) -> None:
+        line, col = getattr(node, "lineno", 0), getattr(node, "col_offset", 0)
+        message = (
+            f"{module_name}.{call_name}() blocks the event loop and is not "
+            f"allowed in agent code. Use 'await' with an async alternative "
+            f"or an appropriate agent tool."
+        )
+        # Function bodies are checked twice (see visit_Module): report once.
+        if (line, col, message) in self._issue_keys:
+            return
+        self._issue_keys.add((line, col, message))
+        self.issues.append(
+            ValidationIssue(line=line, col=col, message=message, code="E310", severity="error")
+        )
+
+    def _blocked_call(self, module_name: str, call_name: str) -> str | None:
+        """Return the blocked-calls key when ``module_name``'s ``call_name`` is listed."""
+        matched = match_blocked_module(module_name, self.blocked_calls)
+        if matched and call_name in self.blocked_calls[matched]:
+            return matched
+        return None
 
     def visit_Call(self, node: ast.Call) -> Any:
         """Check each call against blocked modules and blocked calls."""
-        if isinstance(node.func, ast.Attribute):
-            # e.g., subprocess.run(), time.sleep(), t.join()
-            module_name = self._resolve_module(node.func.value)
-            call_name = node.func.attr
+        self._check_call(node)
+        self.generic_visit(node)
 
+    def _check_call(self, node: ast.Call) -> None:
+        if isinstance(node.func, ast.Attribute):
+            # e.g., subprocess.run(), time.sleep(), os.path.join()
+            receiver = node.func.value
+            call_name = node.func.attr
+            module_name = self._module_name(receiver)
             if module_name:
-                # Check fully blocked modules
                 matched = match_blocked_module(module_name, self.blocked_modules)
                 if matched:
-                    self._add_issue(node, matched, call_name)
-                    return self.generic_visit(node)
-
-                # Check partially blocked calls
-                matched = match_blocked_module(module_name, self.blocked_calls)
+                    return self._add_issue(node, matched, call_name)
+                matched = self._blocked_call(module_name, call_name)
                 if matched:
-                    if call_name in self.blocked_calls[matched]:
-                        self._add_issue(node, matched, call_name)
-                        return self.generic_visit(node)
+                    return self._add_issue(node, matched, call_name)
 
-            # Check local variable tracking (for Thread.join, Lock.acquire etc.)
-            if isinstance(node.func.value, ast.Name):
-                var_name = node.func.value.id
-                if var_name in self.tracked_locals:
-                    tracked_module, class_name = self.tracked_locals[var_name]
-                    if tracked_module in self.blocked_calls:
-                        blocked = self.blocked_calls[tracked_module]
-                        dotted = f"{class_name}.{call_name}"
-                        if dotted in blocked or call_name in blocked:
-                            self._add_issue(node, tracked_module, call_name)
-
-            # Check chained calls: e.g. asyncio.get_event_loop().run_until_complete()
-            if isinstance(node.func.value, ast.Call):
-                chained_module = self._resolve_module_from_call(node.func.value)
-                if chained_module:
-                    matched = match_blocked_module(chained_module, self.blocked_calls)
-                    if matched and call_name in self.blocked_calls[matched]:
-                        self._add_issue(node, matched, call_name)
+            # Methods on an instance of a listed class: threading.Event().wait(), an
+            # Event/Lock/Thread/Queue bound in this or an earlier cell, and calls on
+            # what a listed module returns (asyncio.new_event_loop().run_forever()).
+            instance = (
+                self._resolve(receiver)
+                if isinstance(receiver, (ast.Name, ast.Call, ast.NamedExpr))
+                else None
+            )
+            if instance is not None and instance.kind == "instance":
+                for entry in (f"{instance.name}.{call_name}", call_name):
+                    matched = self._blocked_call(instance.module, entry)
+                    if matched:
+                        return self._add_issue(node, matched, entry)
 
         elif isinstance(node.func, ast.Name):
-            # e.g., run(['ls']) where run = subprocess.run
-            obj = self.exec_globals.get(node.func.id)
-            if obj is not None:
-                obj_module = getattr(obj, "__module__", None)
-                if obj_module:
-                    matched_blocked = match_blocked_module(obj_module, self.blocked_modules)
-                    if matched_blocked:
-                        self._add_issue(node, matched_blocked, node.func.id)
-                    else:
-                        matched_calls = match_blocked_module(obj_module, self.blocked_calls)
-                        if matched_calls:
-                            fn_name = getattr(obj, "__name__", node.func.id)
-                            if fn_name in self.blocked_calls[matched_calls]:
-                                self._add_issue(node, matched_calls, fn_name)
-
-        self.generic_visit(node)
+            # e.g., run(['ls']) where run = subprocess.run, or `from os import system`
+            ref = self._lookup(node.func.id)
+            if ref is not None and ref.kind == "ref":
+                matched = match_blocked_module(ref.module, self.blocked_modules)
+                if matched:
+                    return self._add_issue(node, matched, node.func.id)
+                matched = self._blocked_call(ref.module, ref.name)
+                if matched:
+                    return self._add_issue(node, matched, ref.name)
+        return None
 
 
 # =============================================================================

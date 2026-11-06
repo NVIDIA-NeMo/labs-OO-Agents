@@ -19,6 +19,22 @@ to follow semantic versioning.
   write time, and a stored var that later becomes unserializable (e.g. a list
   that now contains itself) is skipped at checkpoint with a warning instead of
   dropping every var.
+- CodeAct cells now refuse every call in `DEFAULT_BLOCKED_CALLS` before the
+  cell runs, also when the module is imported in the same cell
+  (`import os; os.system(...)`, `from time import sleep`, `import time as t`),
+  for listed methods on instances (`threading.Event().wait()`,
+  `ev = Event(); ev.wait()`, `lock.acquire()`, `t.join()`, a multiprocessing
+  `Queue.get`/`put`, `Process.join`), and for such objects or functions bound in
+  an earlier cell. Previously only modules bound before the cell (in practice
+  `asyncio`) were checked, so `time.sleep`, `os.system`,
+  `threading.Event().wait()` and the others ran, and a wait could hang the
+  event loop. A name the cell rebinds (`sleep = asyncio.sleep`, `t = asyncio`,
+  `ev, x = threading.Event(), 1`, `ev2 = ev`) is checked as its new value from
+  that statement on, and names bound inside a `def` or comprehension stay local
+  to it. The check is static: a call reached only through a value it
+  cannot name (a function argument, a container item, `getattr`, a method
+  bound to another name) is still not caught.
+
 - Registry entries' `base_url`, `timeout` and `custom_llm_provider` settings
   are now passed to the clients built from them. They were ignored before, so
   configs that set them may now send requests to a different endpoint or
