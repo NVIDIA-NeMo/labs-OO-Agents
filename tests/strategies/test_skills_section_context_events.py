@@ -133,9 +133,9 @@ async def _render_execution_context(agent: Agent) -> str:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("method_name", ["go", "go_v2", "predict", "pure_python"])
+@pytest.mark.parametrize("method_name", ["go", "go_v2", "pure_python"])
 async def test_events_guidance_tracks_instance_visibility(method_name):
-    """Visibility toggles the entire guidance block across all strategies."""
+    """Visibility toggles the entire guidance block across code-running strategies."""
     agent = _EventsOnlyAgent()
     method = getattr(agent, method_name)
     prompt = (await build_prompt_data(method)).system_prompt or ""
@@ -155,6 +155,18 @@ async def test_events_guidance_tracks_instance_visibility(method_name):
     prompt = (await build_prompt_data(method)).system_prompt or ""
     assert "<events_api" in prompt
     assert "You MUST call doc(self.events) before using it" in prompt
+
+
+@pytest.mark.asyncio
+async def test_predict_gets_no_events_guidance():
+    """A Predict call has no REPL, so it gets no guidance to run doc(self.events)."""
+    agent = _EventsOnlyAgent()
+    prompt = (await build_prompt_data(agent.predict)).system_prompt or ""
+    assert "<events_api" not in prompt
+    assert "print(doc(self.events))" not in prompt
+    # The same agent's code-running methods still get it.
+    prompt = (await build_prompt_data(agent.go)).system_prompt or ""
+    assert "<events_api" in prompt
 
 
 @pytest.mark.asyncio

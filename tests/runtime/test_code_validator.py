@@ -1344,6 +1344,23 @@ exec('2')
         assert isinstance(error, SyntaxError)
         assert error.filename == "Cell In[7]"
 
+    def test_syntax_error_is_distinct_from_policy_rejection(
+        self,
+        validator: UnifiedCodeValidator,
+        default_context: ValidationContext,
+    ):
+        """Parser rejections use CodeSyntaxError (still a RestrictedCodeError)."""
+        from nooa.errors import CodeSyntaxError
+
+        with pytest.raises(CodeSyntaxError) as exc_info:
+            validator.validate("def incomplete(", default_context)
+        assert isinstance(exc_info.value, ValidationError)
+        assert exc_info.value.line_number == 1
+
+        with pytest.raises(ValidationError) as policy_info:
+            validator.validate("import subprocess", default_context)
+        assert not isinstance(policy_info.value, CodeSyntaxError)
+
     def test_validators_run_in_order(
         self, validator: UnifiedCodeValidator, default_context: ValidationContext
     ):
@@ -2805,3 +2822,368 @@ class TestReturnTypeShadowValidator:
             assert 'getattr(current_call, "return_type"' in src, (
                 "actor.py no longer reads return_type from the current call"
             )
+
+
+# =============================================================================
+# Capability-aware fix hints (wording only)
+# =============================================================================
+@pytest.mark.parametrize(
+    "code",
+    [
+        "setattr(obj, 'data', 1)",
+        "getattr(obj, 'data')",
+        "delattr(obj, 'data')",
+        "obj._private",
+        "getattr(obj, '_private')",
+        "obj.__version__",
+        "import json\nprint(doc(obj))\ntype(obj)",
+        "await asyncio.sleep(0)",
+    ],
+)
+def test_documented_inspection_and_async_alternatives_remain_allowed(code):
+    import asyncio
+
+    UnifiedCodeValidator().validate(code, ValidationContext(exec_globals={"asyncio": asyncio}))
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "obj.__dict__",
+        "obj.__class__",
+        "getattr(obj, '__version__')",
+        "setattr(obj, '__version__', '1')",
+        "delattr(obj, '__version__')",
+    ],
+)
+def test_documented_internal_and_literal_dunder_guards_still_reject(code):
+    with pytest.raises(ValidationError):
+        UnifiedCodeValidator().validate(code, ValidationContext())
+
+
+class TestCapabilityAwareFixHints:
+    """Restriction errors point to alternatives the agent actually has."""
+
+    class _Shell:
+        async def run(self, command: str) -> str:
+            return command
+
+    class _WithShell:
+        def __init__(self):
+            self.shell = TestCapabilityAwareFixHints._Shell()
+
+    class _WithoutShell:
+        pass
+
+    def _error(self, code: str, agent=None) -> str:
+        import asyncio
+        import os
+        import time
+
+        from nooa.runtime.restrictions import DEFAULT_BLOCKED_MODULES
+
+        context = ValidationContext(
+            agent=agent,
+            blocked_modules=DEFAULT_BLOCKED_MODULES,
+            exec_globals={"asyncio": asyncio, "os": os, "time": time},
+        )
+        with pytest.raises(ValidationError) as exc_info:
+            UnifiedCodeValidator().validate(code, context)
+        return str(exc_info.value)
+
+    @pytest.mark.parametrize("code", ["import subprocess", "from subprocess import run"])
+    def test_subprocess_import_points_to_shell_run_when_available(self, code):
+        message = self._error(code, self._WithShell())
+        assert "is blocked" in message
+        assert 'Fix: run the command with `await self.shell.run("...")`' in message
+
+    @pytest.mark.parametrize("module", ["socket", "urllib.request"])
+    def test_network_import_points_to_shell_run_when_available(self, module):
+        message = self._error(f"import {module}", self._WithShell())
+        assert "Fix: use `httpx.AsyncClient`" in message
+        assert "or curl: run the command with `await self.shell.run" in message
+
+    @pytest.mark.parametrize("module", ["ftplib", "smtplib"])
+    @pytest.mark.parametrize("agent", ["with_shell", None])
+    def test_non_http_network_import_is_not_pointed_at_httpx(self, module, agent):
+        message = self._error(f"import {module}", self._WithShell() if agent else None)
+        assert "httpx" not in message
+        if agent:
+            assert "Fix: curl: run the command with `await self.shell.run" in message
+        else:
+            assert "Fix:" not in message
+
+    @pytest.mark.parametrize("agent", ["with_shell", None])
+    def test_network_hint_omits_httpx_when_it_is_restricted(self, agent):
+        from nooa.runtime.restrictions import DEFAULT_BLOCKED_MODULES, RESTRICTED_MODULES
+
+        context = ValidationContext(
+            agent=self._WithShell() if agent else None,
+            blocked_modules=DEFAULT_BLOCKED_MODULES,
+            restricted_imports=RESTRICTED_MODULES,
+        )
+        with pytest.raises(ValidationError) as exc_info:
+            UnifiedCodeValidator().validate("import socket", context)
+        message = str(exc_info.value)
+        assert "httpx" not in message
+        if agent:
+            assert "Fix: curl: run the command with `await self.shell.run" in message
+        else:
+            assert "Fix:" not in message
+
+    @pytest.mark.parametrize("agent", [None, _WithoutShell()])
+    @pytest.mark.parametrize("code", ["import subprocess", "import socket"])
+    def test_no_shell_hint_without_shell_capability(self, code, agent):
+        message = self._error(code, agent)
+        assert "is blocked" in message
+        assert "self.shell" not in message
+        if code == "import socket":  # an async client needs no shell
+            assert "Fix: use `httpx.AsyncClient`" in message and "curl" not in message
+        else:
+            assert "Fix:" not in message
+
+    def test_sync_shell_run_is_not_advertised_as_awaitable(self):
+        class SyncShell:
+            def run(self, command):
+                return command
+
+        agent = self._WithoutShell()
+        agent.shell = SyncShell()
+        assert "self.shell" not in self._error("import subprocess", agent)
+
+    @pytest.mark.parametrize("visibility", ["annotation", "class", "instance"])
+    @pytest.mark.parametrize(
+        "code",
+        [
+            "import subprocess",
+            "import socket",
+            "import urllib.request",
+            "os.system('x')",
+            "os.popen('x')",
+        ],
+    )
+    def test_hidden_shell_is_not_recommended(self, visibility, code):
+        from typing import Annotated
+
+        from nooa.agentdoc import hidden, spec
+
+        class Public(self._WithShell):
+            pass
+
+        class Hidden(self._WithShell):
+            shell: Annotated[object, hidden]
+
+        agent = Hidden() if visibility == "annotation" else Public()
+        if visibility == "class":
+            spec(Public, "shell", hidden=True)
+        elif visibility == "instance":
+            spec(agent, "shell", hidden=True)
+        message = self._error(code, agent)
+        assert "self.shell" not in message and "self.jobs" not in message
+        if code.startswith(("import socket", "import urllib")):  # an async client needs no shell
+            assert "Fix: use `httpx.AsyncClient`" in message and "curl" not in message
+        else:
+            assert "Fix:" not in message
+
+    def test_instance_visibility_override_preserves_public_async_shell_hints(self):
+        from nooa.agentdoc import spec
+
+        class Hidden(self._WithShell):
+            pass
+
+        spec(Hidden, "shell", hidden=True)
+        public = Hidden()
+        spec(public, "shell", hidden=False)
+        for code in ("import subprocess", "import socket", "os.system('x')", "os.popen('x')"):
+            assert "await self.shell.run" in self._error(code, public)
+            assert "self.shell" not in self._error(code, Hidden())
+
+    def _shell_descriptor_class(self, kind, inherited=False, *, raises=False):
+        from functools import cached_property
+
+        from nooa.agentdoc import hidden
+
+        descriptor = property if kind == "property" else cached_property
+        shell_type = self._Shell
+
+        class Holder:
+            def __init__(self):
+                self.reads = 0
+
+            @descriptor
+            @hidden
+            def shell(self) -> shell_type:
+                self.reads += 1
+                if raises:
+                    raise AssertionError("hidden getter must not run")
+                return shell_type()
+
+        class Child(Holder):
+            pass
+
+        return Child if inherited else Holder
+
+    @pytest.mark.parametrize("kind", ["property", "cached_property"])
+    @pytest.mark.parametrize("inherited", [False, True])
+    @pytest.mark.parametrize(
+        ("class_hidden", "instance_hidden", "exposed"),
+        [
+            (None, None, False),
+            (True, None, False),
+            (False, None, True),
+            (None, True, False),
+            (None, False, True),
+            (True, False, True),
+            (False, True, False),
+        ],
+    )
+    def test_shell_descriptor_visibility_precedence(
+        self, kind, inherited, class_hidden, instance_hidden, exposed
+    ):
+        from nooa.agentdoc import doc, spec
+        from nooa.runtime.code_validator import _has_shell
+
+        cls = self._shell_descriptor_class(kind, inherited)
+        if class_hidden is not None:
+            spec(cls, "shell", hidden=class_hidden)
+        agent = cls()
+        if instance_hidden is not None:
+            spec(agent, "shell", hidden=instance_hidden)
+        assert _has_shell(agent) is exposed
+        assert agent.reads == int(exposed)  # one lookup only after explicit opt-in
+        # Class docs agree for defaults/class overrides. Instance overrides above
+        # test metadata precedence, not rediscovery of properties omitted by doc().
+        if instance_hidden is None:
+            assert ("shell:" in doc(cls)) is exposed
+        for code in (
+            "import subprocess",
+            "import socket",
+            "import urllib.request",
+            "os.system('x')",
+            "os.popen('x')",
+        ):
+            assert ("await self.shell.run" in self._error(code, agent)) is exposed
+        if not exposed:
+            assert agent.reads == 0
+
+    @pytest.mark.parametrize("kind", ["property", "cached_property"])
+    @pytest.mark.parametrize("exposed", [False, True])
+    def test_shell_descriptor_most_derived_class_spec_wins(self, kind, exposed):
+        from nooa.agentdoc import doc, spec
+        from nooa.runtime.code_validator import _has_shell
+
+        base = self._shell_descriptor_class(kind)
+
+        class Child(base):
+            pass
+
+        spec(base, "shell", hidden=exposed)
+        spec(Child, "shell", hidden=not exposed)
+        agent = Child()
+        assert ("shell:" in doc(Child)) is exposed
+        assert _has_shell(agent) is exposed
+        assert agent.reads == int(exposed)
+
+    @pytest.mark.parametrize("kind", ["property", "cached_property"])
+    def test_shell_descriptor_inherits_explicit_class_opt_in(self, kind):
+        from nooa.agentdoc import spec
+        from nooa.runtime.code_validator import _has_shell
+
+        base = self._shell_descriptor_class(kind)
+        spec(base, "shell", hidden=False)
+
+        class Child(base):
+            pass
+
+        # Check inherited metadata precedence independently of doc() discovery.
+        agent = Child()
+        assert _has_shell(agent) and agent.reads == 1
+
+    @pytest.mark.parametrize("kind", ["property", "cached_property"])
+    @pytest.mark.parametrize("inherited", [False, True])
+    def test_hidden_shell_descriptor_getter_is_never_evaluated(self, kind, inherited):
+        from nooa.agentdoc import doc
+        from nooa.runtime.code_validator import _has_shell
+
+        agent = self._shell_descriptor_class(kind, inherited, raises=True)()
+        assert "shell:" not in doc(agent)
+        assert not _has_shell(agent)
+        for code in (
+            "import subprocess",
+            "import socket",
+            "import urllib.request",
+            "os.system('x')",
+            "os.popen('x')",
+        ):
+            assert "self.shell" not in self._error(code, agent)
+        assert agent.reads == 0
+
+    @pytest.mark.parametrize("inherited", [False, True])
+    def test_cached_shell_descriptor_visibility_survives_caching(self, inherited):
+        from nooa.agentdoc import doc, spec
+        from nooa.runtime.code_validator import _has_shell
+
+        agent = self._shell_descriptor_class("cached_property", inherited)()
+        assert not _has_shell(agent) and agent.reads == 0
+        # Explicit test setup populates the cache; hint inspection must not do this itself.
+        cached = agent.shell
+        assert agent.reads == 1
+        assert not _has_shell(agent)
+        assert "shell:" not in doc(type(agent))
+        spec(agent, "shell", hidden=False)
+        assert _has_shell(agent) and agent.shell is cached
+        spec(agent, "shell", hidden=True)
+        assert not _has_shell(agent) and agent.reads == 1
+
+    def test_dunder_import_points_to_normal_import(self):
+        message = self._error('json = __import__("json")')
+        assert "__import__() is forbidden" in message
+        assert "Fix: use a normal import statement, e.g. `import json`" in message
+
+    @pytest.mark.parametrize("call", ['exec("x = 1")', 'eval("1 + 1")'])
+    def test_exec_eval_point_to_direct_code(self, call):
+        assert "Fix: write the code directly in the cell" in self._error(call)
+
+    def test_asyncio_run_points_to_direct_await(self):
+        message = self._error("async def f():\n    return 1\nasyncio.run(f())")
+        assert "asyncio.run() blocks the event loop" in message
+        assert "Fix: cells already run inside an event loop: `await coro` directly" in message
+
+    def test_time_sleep_points_to_asyncio_sleep(self):
+        assert "Fix: `await asyncio.sleep(seconds)`" in self._error("time.sleep(1)")
+
+    @pytest.mark.parametrize(
+        "code",
+        ["time.sleep(1)", "import threading", "async def f():\n    return 1\nasyncio.run(f())"],
+    )
+    def test_a_stripped_asyncio_is_not_suggested(self, code):
+        import asyncio
+        import time
+
+        from nooa.runtime.restrictions import DEFAULT_BLOCKED_MODULES, RestrictionsConfig
+
+        def fix(blocked: frozenset[str], restricted: frozenset[str]) -> str:
+            # As the actor does: the same lists reach the context and the validator.
+            context = ValidationContext(
+                blocked_modules=blocked,
+                restricted_imports=restricted,
+                exec_globals={"asyncio": asyncio, "time": time},
+            )
+            config = RestrictionsConfig(blocked_modules=blocked, restricted_imports=restricted)
+            with pytest.raises(ValidationError) as exc_info:
+                UnifiedCodeValidator(restrictions=config).validate(code, context)
+            message = str(exc_info.value)
+            return message.split("Fix:", 1)[1] if "Fix:" in message else ""
+
+        base = DEFAULT_BLOCKED_MODULES | {"threading"}
+        assert fix(base | {"asyncio"}, frozenset()) == ""  # stripped from the namespace
+        assert "asyncio" in fix(base, frozenset({"asyncio"}))  # only restricted: still bound
+
+    def test_hints_do_not_change_what_is_allowed(self):
+        from nooa.runtime.restrictions import DEFAULT_BLOCKED_MODULES
+
+        for agent in (None, self._WithShell()):
+            context = ValidationContext(agent=agent, blocked_modules=DEFAULT_BLOCKED_MODULES)
+            UnifiedCodeValidator().validate("import json\nx = json.dumps({})", context)
+            with pytest.raises(ValidationError):
+                UnifiedCodeValidator().validate("import subprocess", context)

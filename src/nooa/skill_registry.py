@@ -256,7 +256,7 @@ class SkillRegistry(Skill):
         """
         return self._discovered.get(name)
 
-    def discover_libs(self, libs_path: "Path") -> None:
+    def discover_libs(self, libs_path: "Path", *, agent_written: bool = False) -> None:
         """Scan a libs directory and register each skill package.
 
         Each subdirectory containing a pyproject.toml is imported and
@@ -267,8 +267,14 @@ class SkillRegistry(Skill):
         (``[project.entry-points."nooa.skills"]``). If no
         entry_point is declared, falls back to ``local.<lib_name>``.
 
+        ``agent_written`` is for the skills an agent wrote (SkillWriting): a
+        subdirectory with a SKILL.md and no pyproject.toml also registers, as
+        the TextSkill ``local.<dir_name>``, and a skill whose attribute the
+        agent already has from elsewhere (such as ``shell``) is skipped.
+
         Args:
             libs_path: Directory containing library packages.
+            agent_written: Agent-written skills (see above).
         """
         from pathlib import Path
 
@@ -280,11 +286,21 @@ class SkillRegistry(Skill):
             for entry in sorted(libs_path.iterdir())
             if entry.is_dir() and (entry / "pyproject.toml").exists()
         ]
+        if agent_written:
+            for entry in sorted(libs_path.iterdir()):
+                if (
+                    entry.is_dir()
+                    and not (entry / "pyproject.toml").exists()
+                    and ((entry / "SKILL.md").exists() or (entry / "skill.md").exists())
+                ):
+                    self._register_local_text_skill(entry)
         for lib_dir in libraries:
             lib_name = lib_dir.name
             reg_name, target = self._read_skill_entry(lib_dir, lib_name)
             if reg_name in self._loaded:
                 continue
+            if agent_written and self._attr_taken(reg_name):
+                continue  # the attribute it registers as is another skill's
             try:
                 skill = self._import_lib(lib_dir, lib_name, target)
                 if skill is not None:
@@ -417,6 +433,27 @@ class SkillRegistry(Skill):
                 self._sources[reg_name] = _SkillSource("text", entry.resolve())
         except Exception:
             logger.warning("TextSkill %s skipped", entry, exc_info=True)
+
+    def _attr_taken(self, name: str) -> bool:
+        """Whether the agent has ``name``'s attribute from something other than this skill."""
+        attr = self._attr_name(name)
+        return name not in self._loaded and (
+            hasattr(self._agent, attr) or attr in set(self._attr_map.values())
+        )
+
+    def _register_local_text_skill(self, entry: "Path") -> None:
+        """Register an agent-written SKILL.md directory as ``local.<dir_name>``."""
+        from nooa.skill import TextSkill
+
+        reg_name = f"local.{entry.name}"
+        if reg_name in self._loaded or self._attr_taken(reg_name):
+            return
+        try:
+            skill = TextSkill(path=entry)
+            self.register(reg_name, skill)
+            self._sources[reg_name] = _SkillSource("text", entry.resolve())
+        except Exception:
+            logger.warning("Text skill %s skipped", entry, exc_info=True)
 
     def _register_python_skill(self, entry: "Path") -> None:
         """Register a Python skill from a .py file."""
@@ -1305,7 +1342,7 @@ class SkillRegistry(Skill):
 
         if active_tools:
             lines.append(
-                "Active Skills (use via self.<attr>, docs via doc(self.<attr>),"
+                "Active Skills (use via self.<attr>, docs via print(doc(self.<attr>)),"
                 " deactivate via self.skills.deactivate(['name'])):"
             )
             for _name, attr, desc in active_tools:

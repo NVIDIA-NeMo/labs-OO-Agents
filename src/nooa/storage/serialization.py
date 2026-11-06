@@ -21,6 +21,12 @@ Envelope format for non-primitive types::
 
     {"__type__": "tuple",
      "data": [...]}
+
+A plain dict that itself carries an envelope key (``__type__`` or
+``__class__``) is escaped as ``{"__type__": "plain_dict", "data": {...}}`` so
+it comes back as the same plain dict instead of being read as an envelope:
+data must not choose what ``deserialize()`` builds. Blobs written before the
+escape existed contain no ``plain_dict`` envelopes and load unchanged.
 """
 
 from __future__ import annotations
@@ -68,9 +74,16 @@ _PYDANTIC = "pydantic"
 _DATACLASS = "dataclass"
 _DICT_CLASS = "dict_class"
 _TUPLE = "tuple"
+_PLAIN_DICT = "plain_dict"
+# Keys that make a dict look like an envelope; plain dicts carrying them are escaped.
+_ENVELOPE_KEYS = ("__type__", "__class__")
 _ENVELOPE_TYPES = frozenset({_PYDANTIC, _DATACLASS, _DICT_CLASS, _TUPLE})
 _LEGACY_CLASS_PREFIXES = {
     "nemo_oo_agents.": "nooa.",
+    # Sessions saved by nooa-coder, which became nooa-atom (its coding/
+    # module became agent/).
+    "nooa_coder.coding.": "nooa_atom.agent.",
+    "nooa_coder.": "nooa_atom.",
 }
 
 
@@ -317,6 +330,8 @@ def _serialize(value: Any, state: _SerializeState, depth: int) -> Any:
                     elif (serialized := _serialize(v, state, depth)) is not SKIP:
                         result[k] = serialized
                 else:
+                    if any(key in value for key in _ENVELOPE_KEYS):
+                        return {"__type__": _PLAIN_DICT, "data": result}
                     return result
             except _PathError as exc:
                 exc.segments.append(f"[{k!r}]")
@@ -345,8 +360,14 @@ def _serialize(value: Any, state: _SerializeState, depth: int) -> Any:
                 # Durable JSON types can own their schema and migration. Other
                 # models still need recursive envelopes for arbitrary live fields.
                 data = snapshot_data()
-                # Restore walks this data with the depth limit, so save must too.
-                _check_snapshot_data_depth(data, depth)
+                if isinstance(data, dict):
+                    # Serialize each value too, so a nested plain dict that looks
+                    # like an envelope is escaped and comes back as a dict, not a
+                    # typed object. This also applies the cycle and depth checks.
+                    data = _serialize_fields(data.items(), state, depth, {})
+                else:
+                    # Restore walks this data with the depth limit, so save must too.
+                    _check_snapshot_data_depth(data, depth)
                 return {"__type__": _PYDANTIC, "__class__": fqn, "data": data}
             # Iterate over model_fields directly so nested non-Pydantic objects
             # (dataclasses, @snapshotable) are serialized with their type envelopes
@@ -444,7 +465,7 @@ def _serialize_lenient_dict(
                     result[k] = v
                 elif (serialized := _serialize(v, state, depth)) is not SKIP:
                     result[k] = serialized
-            except (_PathError, SerializationError) as exc:
+            except (_PathError, SerializationError, TypeError, ValueError, RecursionError) as exc:
                 reason = (
                     exc.render(f"Value for {k!r}", depth)
                     if isinstance(exc, _PathError)
@@ -457,6 +478,10 @@ def _serialize_lenient_dict(
                     type(v).__name__,
                     reason,
                 )
+        # Same escape as the plain-dict branch: keys must not choose what
+        # deserialize() builds.
+        if any(k in value for k in _ENVELOPE_KEYS):
+            return {"__type__": _PLAIN_DICT, "data": result}
         return result
     finally:
         del active[key]
@@ -494,6 +519,9 @@ def _check_blob_depth(blob: Any, depth: int) -> None:
         if depth >= MAX_SNAPSHOT_DEPTH:
             raise _PathError()
         envelope_type = blob.get("__type__")
+        if envelope_type == _PLAIN_DICT and isinstance(blob.get("data"), dict):
+            blob = blob["data"]  # an escaped plain dict counts as one level
+            envelope_type = None
         if envelope_type == _TUPLE and "data" in blob:
             items = blob["data"]
         elif envelope_type in _ENVELOPE_TYPES and "__class__" in blob and "data" in blob:
@@ -571,6 +599,20 @@ def _deserialize(blob: Any, allowlist: set[str], depth: int) -> Any:
         if depth >= MAX_SNAPSHOT_DEPTH:
             raise _PathError()
         envelope_type = blob.get("__type__")
+        if envelope_type == _PLAIN_DICT and isinstance(blob.get("data"), dict):
+            # An escaped plain dict: restore its values, never the dict itself.
+            # Its values sit one level below the escaped dict, as for a regular dict.
+            result = {}
+            k = None
+            try:
+                for k, v in blob["data"].items():
+                    result[k] = (
+                        v if type(v) in _PRIMITIVE_TYPES else _deserialize(v, allowlist, depth + 1)
+                    )
+            except _PathError as exc:
+                exc.segments.append(f"[{k!r}]")
+                raise
+            return result
         if envelope_type == _TUPLE and "data" in blob:
             return tuple(_deserialize_items(blob["data"], allowlist, depth + 1))
         if envelope_type in _ENVELOPE_TYPES and "__class__" in blob and "data" in blob:

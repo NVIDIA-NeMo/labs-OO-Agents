@@ -1,11 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Shared attribute-access facade over an owner's existing ``vars`` mapping.
+"""Shared persistent-dict facade over an owner's existing ``vars`` mapping.
 
 This generalizes the ``TodoVars`` proxy formerly defined in ``nooa.tools.todo``;
-it does not implement a new persistence backend. Core ``Todo.v`` uses this proxy;
-applications may opt into it for ``self.v``. ``InteractiveAgent.v`` still uses
-its separate ``AgentVars`` proxy and reserved-name rules. It lives beside ``SnapshotVars``
+it does not implement a new persistence backend. Core ``Todo.v`` uses this proxy
+and ``InteractiveAgent.v`` its ``AgentVars`` subclass. It lives beside ``SnapshotVars``
 so the core Todo tool does not depend on the CLI or an interactive session host.
 Snapshot storage and its owner determine when values are saved and restored.
 """
@@ -14,7 +13,7 @@ from typing import Any
 
 
 class PersistentVars:
-    """Durable named state backed by an agent or Todo.
+    """Durable named state backed by an agent or Todo: a persistent dict, also usable as attributes.
 
     Choose the scope deliberately:
 
@@ -27,7 +26,7 @@ class PersistentVars:
     Examples::
 
         self.v.user_name = "Ada"           # create or update cross-task state
-        todo.v.commit = "abc123"            # create or update task state
+        todo.v["commit"] = "abc123"         # the same store: v["k"] is v.k
         print(self.v.user_name)              # read one
         print(todo.v.items())                # inspect all in one scope
         del todo.v.commit                    # remove one
@@ -37,9 +36,9 @@ class PersistentVars:
     numbers, or Pydantic models); unsupported live objects are not stored.
     This facade does not install ``self.v`` on agents or enable disk persistence;
     an application must supply the owner and configure its snapshot storage.
-    Names used by helpers (``keys``, ``items``, ``get``, ``set``, ``clear``) must
-    be read with ``get(name)`` and written with ``set(name, value)``. Attribute
-    access to those names refers to the method, not the stored value.
+    Names used by helpers (``keys``, ``items``, ``get``, ``set``, ``clear``) and
+    names starting with ``_`` must be read with ``get(name)`` and written with
+    ``set(name, value)``; ``v.name`` and ``v[name]`` refuse them.
     """
 
     def __init__(self, owner: Any):
@@ -52,17 +51,35 @@ class PersistentVars:
             raise AttributeError(f"No var {key!r}") from None
 
     def __setattr__(self, key: str, value: Any) -> None:
-        if key.startswith("_") or any(key in cls.__dict__ for cls in type(self).__mro__):
-            raise AttributeError(f"{key!r} is reserved by PersistentVars; use set({key!r}, value)")
+        self._check(key, "use set({key!r}, value)")
         self._owner.vars[key] = value
 
     def __delattr__(self, key: str) -> None:
-        if key.startswith("_") or any(key in cls.__dict__ for cls in type(self).__mro__):
-            raise AttributeError(f"{key!r} is reserved by PersistentVars")
+        self._check(key)
         try:
             del self._owner.vars[key]
         except KeyError:
             raise AttributeError(f"No var {key!r}") from None
+
+    def __getitem__(self, key: str) -> Any:
+        self._check(key, "use get({key!r})")
+        return self._owner.vars[key]
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        self._check(key, "use set({key!r}, value)")
+        self._owner.vars[key] = value
+
+    def __delitem__(self, key: str) -> None:
+        self._check(key)
+        del self._owner.vars[key]
+
+    def _check(self, key: Any, fix: str = "") -> None:
+        """A name ``v.key``/``v[key]`` may use: a str, not ``_``-prefixed or a helper's."""
+        if not isinstance(key, str):
+            raise TypeError(f"var names are str, got {type(key).__name__}")
+        if key.startswith("_") or any(key in cls.__dict__ for cls in type(self).__mro__):
+            hint = "; " + fix.format(key=key) if fix else ""
+            raise AttributeError(f"{key!r} is reserved by {type(self).__name__}{hint}")
 
     def __contains__(self, key: str) -> bool:
         return key in self._owner.vars

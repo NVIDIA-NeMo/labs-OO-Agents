@@ -327,7 +327,7 @@ async def test_abort_before_media_send_closes_iterator_without_more_requests(mon
     ],
 )
 def test_unrelated_provider_errors_with_media_nouns_are_inconclusive(kind, message, param):
-    from nooa.unifiedllm.connect._media import explicitly_rejected
+    from nooa.unifiedllm.media_inputs import explicitly_rejected
 
     class Error(Exception):
         status_code = 400
@@ -791,7 +791,7 @@ def test_wire_evidence_rejects_duplicate_original_attachments(kind):
 )
 def test_text_only_server_refusals_count_as_rejected(message, kind):
     """Hub/vLLM refusals for media on text-only models are explicit, not inconclusive."""
-    from nooa.unifiedllm.connect._media import explicitly_rejected
+    from nooa.unifiedllm.media_inputs import explicitly_rejected
 
     class Error(Exception):
         status_code = 400
@@ -801,7 +801,7 @@ def test_text_only_server_refusals_count_as_rejected(message, kind):
 
 
 def test_unrelated_content_part_rejection_does_not_reject_other_formats():
-    from nooa.unifiedllm.connect._media import explicitly_rejected
+    from nooa.unifiedllm.media_inputs import explicitly_rejected
 
     class Error(Exception):
         status_code = 400
@@ -824,7 +824,7 @@ def test_unrelated_content_part_rejection_does_not_reject_other_formats():
     ],
 )
 def test_more_hub_media_refusal_phrasings(message, kind):
-    from nooa.unifiedllm.connect._media import explicitly_rejected
+    from nooa.unifiedllm.media_inputs import explicitly_rejected
 
     class Error(Exception):
         status_code = 400
@@ -834,7 +834,7 @@ def test_more_hub_media_refusal_phrasings(message, kind):
 
 
 def test_internal_errors_stay_inconclusive():
-    from nooa.unifiedllm.connect._media import explicitly_rejected
+    from nooa.unifiedllm.media_inputs import explicitly_rejected
 
     class Error(Exception):
         status_code = 400

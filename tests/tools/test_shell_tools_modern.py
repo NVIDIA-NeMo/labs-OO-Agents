@@ -120,7 +120,7 @@ async def test_match_anchor_is_editable(repo: Path):
     r = await sh.run("grep -rn 'fooo = 1' .")
     assert r.matches, "should find the assignment"
     m = next(x for x in r.matches if x.path == "a.py")
-    await sh.replace(m, "fooo = 999\n")
+    await sh.replace_match(m, "fooo = 999\n")
     assert "fooo = 999" in (repo / "a.py").read_text()
 
 
@@ -171,7 +171,7 @@ async def test_search_match_stays_bound_after_cwd_change(repo: Path):
     assert result.matches
     match = result.matches[0]
     await sh.run("cd other")
-    await sh.replace(match, "fooo = 999\n")
+    await sh.replace_match(match, "fooo = 999\n")
 
     assert "fooo = 999" in (repo / "a.py").read_text()
     assert (other / "a.py").read_text() == "fooo = 1\n"
@@ -233,7 +233,7 @@ async def test_truncated_head_match_is_editable(repo: Path):
     r = await sh.run("grep -rn 'fooo = 1' . | head -5")
     assert r.matches, "should attach the assignment despite the head pipe"
     m = next(x for x in r.matches if x.path == "a.py")
-    await sh.replace(m, "fooo = 777\n")
+    await sh.replace_match(m, "fooo = 777\n")
     assert "fooo = 777" in (repo / "a.py").read_text()
 
 
@@ -265,7 +265,7 @@ async def test_single_file_grep_match_is_editable(repo: Path):
     sh = ShellTools(cwd=str(repo))
     r = await sh.run("grep -n 'fooo = 1' a.py")
     assert r.matches, "single-file grep should find the assignment"
-    await sh.replace(r.matches[0], "fooo = 999\n")
+    await sh.replace_match(r.matches[0], "fooo = 999\n")
     assert "fooo = 999" in (repo / "a.py").read_text()
 
 

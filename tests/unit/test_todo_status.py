@@ -4,7 +4,7 @@
 
 import pytest
 
-from nooa.tools.todo import TodoManager
+from nooa.tools.todo import Todo, TodoManager
 
 
 @pytest.mark.parametrize("status", ["open", "blocked", "in_progress", "done", None])
@@ -101,19 +101,6 @@ def test_failed_restore_keeps_existing_workspace():
     broken = {**before, "todos": [*before["todos"], {"title": 42}]}
     with pytest.raises(ValueError):
         manager.from_dict(broken)
-    assert manager.to_dict() == before
-
-
-def test_worker_local_dependency_does_not_leave_dangling_parent_id():
-    manager = TodoManager()
-    task = manager.add("work")
-    base = manager.copy_todo(task)
-    worker = TodoManager.with_todo(base)
-    dependency = worker.add("worker-only")
-    worker.add_dep(task.id, dependency)
-    before = manager.to_dict()
-    with pytest.raises(ValueError, match="dependencies are not in the parent"):
-        manager.merge_todo(worker.get(task.id), base=base)
     assert manager.to_dict() == before
 
 
@@ -454,14 +441,6 @@ def test_other_completion_paths_clear_active_root() -> None:
     manager.update(via_update, status="done")
     assert manager.active() is None
 
-    via_merge = manager.add("merged")
-    manager.activate(via_merge)
-    base = manager.copy_todo(via_merge)
-    worker = base.model_copy(deep=True)
-    worker.status = "done"
-    manager.merge_todo(worker, base=base)
-    assert manager.active() is None
-
     direct = manager.add("direct")
     manager.activate(direct)
     direct.status = "done"
@@ -543,16 +522,6 @@ def test_active_dependency_order_is_dependency_first_for_shared_siblings() -> No
     assert [shared.id, dependent.id] == [line.split("[", 1)[1].split("]", 1)[0] for line in rows]
 
 
-def test_with_todo_makes_open_delegated_todo_active() -> None:
-    manager = TodoManager()
-    todo = manager.add("delegated")
-
-    worker_manager = TodoManager.with_todo(todo)
-
-    assert worker_manager.active() is not None
-    assert worker_manager.active().id == todo.id
-
-
 def test_status_bounds_framing_when_no_rows_fit() -> None:
     manager = TodoManager()
     for index in range(1_000):
@@ -595,3 +564,109 @@ def test_status_keeps_open_rows_and_caps_done_rows() -> None:
         row.split("] ", 1)[1].split(" ·")[0].split(" [needs")[0] for row in rows
     ]
     assert "… +3 not shown (3 done)" in output
+
+
+def _long_active_workspace(description_chars: int = 5_000) -> tuple[TodoManager, object]:
+    manager = TodoManager()
+    finished = manager.add("finished elsewhere")
+    manager.complete(finished)
+    manager.add("unrelated open")
+    dep = manager.add("dependency")
+    root = manager.add("active root", deps=[dep], description="word " * (description_chars // 5))
+    manager.activate(root)
+    return manager, root
+
+
+def test_a_long_description_keeps_the_hint_and_other_todos_and_points_to_the_full_text():
+    manager, root = _long_active_workspace()
+
+    output = manager.status()
+
+    assert "… status truncated" not in output
+    assert f"… (full text: self.todo.get('{root.id}').description)" in output
+    assert "Other Todos: 1 open · 1 done" in output
+    assert output.splitlines()[-1].startswith("Hint: clear active: self.todo.deactivate()")
+    assert f'self.todo.comment("{root.id}", "what changed or was learned")' in output
+    assert "  ○ [" in output  # the dependency row still fits
+    description = next(line for line in output.splitlines() if line.startswith("Description: "))
+    assert len(description) < 700
+
+
+def test_a_tight_bound_drops_description_text_before_the_hint_and_other_todos():
+    manager, root = _long_active_workspace()
+    manager.comment(root, "latest " * 400)
+
+    for max_chars in (2_000, 600, 400):
+        output = manager.status(max_chars=max_chars)
+        assert len(output) <= max_chars
+        assert "… status truncated" not in output
+        assert f"Active [{root.id}] active root" in output
+        assert "Status: blocked · 1 dependency · 1 comment" in output
+        assert "Recent activity: latest" in output
+        assert "Other Todos: 1 open · 1 done" in output
+        assert output.splitlines()[-1].startswith("Hint: clear active:")
+        assert f"self.todo.get('{root.id}').description" in output
+
+
+def test_a_short_description_renders_exactly_as_before():
+    manager = TodoManager()
+    manager.add("unrelated open")
+    dep = manager.add("dependency")
+    root = manager.add("active root", deps=[dep], description="Fix   the\nparser bug.")
+    manager.activate(root)
+
+    assert manager.status() == (
+        f"Active [{root.id}] active root\n"
+        "Status: blocked · 1 dependency\n"
+        "Description: Fix the parser bug.\n"
+        "\n"
+        "Dependencies:\n"
+        f"  ○ [{dep.id}] dependency\n"
+        "\n"
+        "Other Todos: 1 open\n"
+        "Hint: clear active: self.todo.deactivate() · "
+        f'record progress: self.todo.comment("{root.id}", "what changed or was learned") · '
+        "show all: self.todo.list_todos()"
+    )
+    exact = manager.add("exactly at the cap", description="x" * 600)
+    manager.activate(exact)
+    assert "Description: " + "x" * 600 + "\n" in manager.status()
+
+
+# ---- insert_copy: a child's local copy of its brief (PR #451 review 3, finding 7)
+
+
+def test_insert_copy_adds_an_independent_copy_and_activates_it() -> None:
+    manager = TodoManager()
+    first = manager.add("first")
+    manager.activate(first)
+    brief = Todo(title="brief", description="REQ", vars={"n": 1})
+    mine = manager.insert_copy(brief)
+    assert mine is not brief and mine == brief and mine.vars is not brief.vars
+    assert manager.get(brief.id) is mine and manager.active() is mine
+    assert [t.id for t in manager.list_todos()] == [first.id, brief.id]
+    manager.set_var(mine, "n", 2)
+    assert brief.vars["n"] == 1
+
+
+def test_insert_copy_adds_a_done_todo_without_activating_it() -> None:
+    manager = TodoManager()
+    first = manager.add("first")
+    manager.activate(first)
+    manager.insert_copy(Todo(title="finished", status="done"))
+    assert manager.active() is first
+
+
+def test_insert_copy_raises_on_a_same_id_clash() -> None:
+    manager = TodoManager()
+    existing = manager.add("existing")
+    with pytest.raises(ValueError, match="already in this TodoManager"):
+        manager.insert_copy(existing.model_copy(update={"title": "other"}))
+    assert manager.get(existing.id) is existing and existing.title == "existing"
+    assert len(manager.list_todos()) == 1
+
+
+def test_insert_copy_is_hidden_from_models() -> None:
+    from nooa.agentdoc import doc
+
+    assert "insert_copy" not in doc(TodoManager())

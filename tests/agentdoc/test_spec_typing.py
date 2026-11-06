@@ -3,12 +3,20 @@
 """Static contracts for spec's annotation, decorator and imperative forms."""
 
 import json
+import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 
 def test_spec_preserves_decorated_types(tmp_path):
+    # pyright runs on Node; without it pyright tries to download Node, which
+    # fails offline. CI always runs this test.
+    if shutil.which("node") is None and not os.environ.get("CI"):
+        pytest.skip("pyright needs Node, which isn't installed (the test always runs in CI)")
     source = tmp_path / "contract.py"
     source.write_text(
         """from typing import assert_type
@@ -26,6 +34,8 @@ assert_type(Model(value="test"), Model)
 assert_type(Model(value="test").value, str)
 assert_type(spec(Model, "value", expand=False), None)
 assert_type(spec(Model, description="Example"), None)
+assert_type(spec(hide_empty=True), SpecAnnotation)
+assert_type(spec(Model, "value", hide_empty=True), None)
 
 @spec(hidden=True)
 def length(value: str) -> int:

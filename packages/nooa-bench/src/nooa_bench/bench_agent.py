@@ -8,7 +8,7 @@ access inside a container. Not tuned for any particular benchmark -- the same
 agent handles SWE-bench, Terminal-Bench, or any Harbor-compatible task.
 
 Core contract:
-- ``self.shell`` for persistent shell access (run/read/replace/write_file)
+- ``self.shell`` for persistent shell access (run/read/replace/replace_match/write_file)
 - ``self.repo`` for code navigation that returns ShellTools Match anchors
 - Structured return: the agent must declare solution_description, evidence,
   and how_to_verify when finishing -- forcing reflection before return.
@@ -19,6 +19,10 @@ from __future__ import annotations
 from nooa_cli.tools.repo_tools import RepoTools
 
 from nooa import hidden as _hidden
+
+# The core TaskResult, re-exported: bench results and the Atom agent's child
+# results are one class. Visible to generated cells.
+from nooa.interactive import TaskResult
 from nooa.tools.method_writing_lib import MethodWriting
 from nooa.tools.shell_tools import ShellTools
 
@@ -28,8 +32,6 @@ with _hidden:
     import logging
     import os
     from typing import TYPE_CHECKING, Annotated, Any
-
-    from pydantic import BaseModel, Field
 
     from nooa import Agent, Context, no_trace, strategy
     from nooa.agentdoc import doc, spec
@@ -69,40 +71,6 @@ _SOLVE_CONTEXT = {
         prefix=True,
     ),
 }
-
-
-class TaskResult(BaseModel):
-    """Structured result the agent must return when finishing a task."""
-
-    solution_description: str = Field(
-        description="What you did and why it solves the problem. Describe root cause and fix."
-    )
-    evidence: str = Field(
-        description=(
-            "Concrete evidence that the task is done: what tests passed, "
-            "what output was produced, what behavior changed. Not a guess -- "
-            "cite the actual results you observed."
-        )
-    )
-    how_to_verify: str = Field(
-        title="How to Verify",
-        description=(
-            "How a verifier can confirm correctness: concrete checks or steps and their "
-            "expected results. Include commands when appropriate; a shell command is not required."
-        ),
-    )
-    report: str = Field(
-        default="",
-        description="Concise human-readable report that a parent or runner shows inline.",
-    )
-    value: str = Field(
-        default="",
-        description=(
-            "The exact output the task asks for, if any, with nothing added: no label, "
-            "explanation or formatting. It is delivered verbatim, whitespace included. "
-            "Leave empty when the task only asks for actions."
-        ),
-    )
 
 
 @_hidden
