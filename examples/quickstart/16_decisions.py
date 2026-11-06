@@ -92,6 +92,12 @@ MESSAGES = [
 
 
 async def main() -> None:
+    if not (os.getenv("OPENROUTER_API_KEY") or os.getenv("DECISION_ENDPOINT")):
+        raise SystemExit(
+            "This example needs a decisions endpoint. Run it as:\n"
+            "  OPENROUTER_API_KEY=... uv run python examples/quickstart/16_decisions.py\n"
+            "or set DECISION_ENDPOINT (and DECISION_MODEL) for another decisions API."
+        )
     decision_model = DecisionClient(
         os.getenv("DECISION_MODEL", "typesafe/jev-1.13"),
         endpoint=os.getenv("DECISION_ENDPOINT", "https://openrouter.ai/api/alpha/decisions"),
