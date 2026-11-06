@@ -6,6 +6,13 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- Owned execution namespace (Atom): a cell helper run in a thread that does
+  not inherit the cell's context (`loop.run_in_executor`, `threading.Thread`)
+  can use `print`, `pprint`, `show` and `self` again; they resolve to the
+  running cell's bindings and the output is captured for that cell. Before,
+  they raised `RuntimeError: Runtime name 'print' has no originating call
+  context`. Used after the cell has ended, they raise a `RuntimeError` that
+  says the output would be lost, instead of losing it silently.
 - `UnifiedLLM`: `_call_once`/`_acall_once` are no longer abstract. A subclass
   written against the older contract, which overrides `call`/`acall`, can be
   built again (it raised `TypeError: Can't instantiate abstract class` since
