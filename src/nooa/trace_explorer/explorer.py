@@ -544,8 +544,9 @@ def _load_spans(trace_path: str | Path, *, strict: bool = False) -> list[dict[st
     - Flat span objects: ``{"span_id": ..., "name": ..., ...}`` (one per line)
 
     Parse errors are normally logged without stopping. ``strict=True`` instead
-    rejects malformed records and unsupported journal envelopes with file/line
-    diagnostics, for accounting callers that must not silently skip records.
+    rejects malformed span records with file/line diagnostics, for accounting
+    callers that must not silently skip usage. Journal-only metadata records
+    are skipped in strict mode; their messages and token counts are not read.
     """
     spans = []
     parse_errors = 0
@@ -558,11 +559,12 @@ def _load_spans(trace_path: str | Path, *, strict: bool = False) -> list[dict[st
                     if strict:
                         if not isinstance(raw, dict):
                             raise ValueError("Expected an OTLP span or TracesData object")
-                        if "nooaJournal" in raw:
-                            raise ValueError(
-                                "Portable journal files are not supported by this report; "
-                                "use an OTLP JSONL export"
-                            )
+                        if (
+                            "nooaJournal" in raw
+                            and "resourceSpans" not in raw
+                            and "spanId" not in raw
+                        ):
+                            continue
                         if "resourceSpans" not in raw and "spanId" not in raw:
                             raise ValueError("Expected an OTLP span or TracesData object")
                     if "resourceSpans" in raw:

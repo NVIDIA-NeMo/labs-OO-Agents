@@ -77,14 +77,14 @@ def test_decimal_cutoff_does_not_drift_at_subsecond_boundary(tmp_path):
 
 
 def test_parent_origin_rollups_models_and_order(tmp_path):
-    """An earlier parent defines time zero, but its rollup is not another call."""
+    """The first LLM call defines time zero; earlier parent rollups are not calls."""
     first = _span(1, attrs={"llm.token_count.prompt_details.cache_read": 8})
     second = _span(2, start=11, end=12, model="large", attrs={"llm.token_count.prompt": 20})
     parent = _span(3, start=8, end=13, kind="CHAIN", attrs={"llm.token_count.total": 999})
     report = load_usage_report(_trace(tmp_path, [second, parent, first]))
-    assert report.start_time_unix_nano == "8000000000"
-    assert report.recorded_duration_seconds == 5
-    assert [p.elapsed_seconds for p in report.timeline] == [3, 4]
+    assert report.start_time_unix_nano == "10000000000"
+    assert report.recorded_duration_seconds == 3
+    assert [p.elapsed_seconds for p in report.timeline] == [1, 2]
     assert report.by_model["small"].known_total_tokens == 15
     assert report.by_model["large"].known_total_tokens == 25
     assert report.totals.known_total_tokens == 40
@@ -93,10 +93,35 @@ def test_parent_origin_rollups_models_and_order(tmp_path):
     assert report.timeline[1].cumulative.known_total_tokens == 40
     assert (
         load_usage_report(
-            _trace(tmp_path, [second, parent, first]), until_seconds=2
+            _trace(tmp_path, [second, parent, first]), until_seconds=0.9
         ).totals.completed_calls
         == 0
     )
+
+
+@pytest.mark.parametrize("kind", ["AGENT", "CHAIN", "TOOL"])
+@pytest.mark.parametrize("until", [None, 1, 7200])
+def test_skewed_non_llm_span_cannot_shift_usage_cutoff(tmp_path, kind, until):
+    """A stray positive timestamp near 1970 cannot silently exclude real LLM calls."""
+    calls = [
+        _span(1, start=1_700_000_000, end=1_700_000_001),
+        _span(2, start=1_700_000_001, end=1_700_000_002),
+    ]
+    expected = load_usage_report(_trace(tmp_path, calls), until_seconds=until)
+    skewed = _span(3, start=1, end=2, kind=kind)
+    skewed["startTimeUnixNano"] = "5"
+    report = load_usage_report(_trace(tmp_path, [skewed, *calls]), until_seconds=until)
+    assert report.to_dict() == expected.to_dict()
+
+
+def test_unfinished_first_llm_still_anchors_time_zero(tmp_path):
+    """Do not move the origin to a later completed call when the first call is pending."""
+    report = load_usage_report(
+        _trace(tmp_path, [_span(end=0), _span(2, start=11, end=12)]), until_seconds=1
+    )
+    assert report.start_time_unix_nano == "10000000000"
+    assert report.totals.completed_calls == 0
+    assert report.in_flight_calls == 2
 
 
 @pytest.mark.parametrize(
@@ -235,6 +260,12 @@ def test_non_llm_and_unfinished_files_have_summary_rows(tmp_path):
         "@cmd",
         "  =cmd",
         "\ttext",
+        "|cmd",
+        "＝1+1",
+        "  |cmd",
+        "\t＝1+1",
+        "model|name",
+        "model＝name",
     ],
 )
 def test_csv_round_trip_and_spreadsheet_text_safety(tmp_path, model):
@@ -242,10 +273,22 @@ def test_csv_round_trip_and_spreadsheet_text_safety(tmp_path, model):
     report = load_usage_report(_trace(tmp_path, [_span(model=model)]))
     assert report.to_dict()["timeline"][0]["model"] == model
     row = list(csv.DictReader(io.StringIO(report.to_csv())))[0]
-    dangerous = model.lstrip().startswith(("=", "+", "-", "@")) or model.startswith(
+    dangerous = model.lstrip().startswith(("=", "+", "-", "@", "|", "＝")) or model.startswith(
         ("\t", "\r", "\n")
     )
     assert row["model"] == ("'" + model if dangerous else model)
+
+
+@pytest.mark.parametrize("key,column", [("traceId", "trace_id"), ("spanId", "span_id")])
+@pytest.mark.parametrize("value", ["|cmd", "＝1+1", "  ＝1+1"])
+def test_csv_formula_guard_also_covers_identifiers(tmp_path, key, column, value):
+    """Apply the same prefix guard to every exported text identifier, not just models."""
+    span = _span()
+    span[key] = value
+    report = load_usage_report(_trace(tmp_path, [span]))
+    assert report.to_dict()["timeline"][0][column] == value
+    row = next(csv.DictReader(io.StringIO(report.to_csv())))
+    assert row[column] == "'" + value
 
 
 def test_csv_uses_lf_record_terminators(tmp_path):
@@ -297,7 +340,6 @@ async def test_cli_csv_survives_stdout_newline_translation(
         "[]",
         "null",
         "{}",
-        '{"nooaJournal":{}}',
         '{"resourceSpans":null}',
         '{"resourceSpans":[null]}',
         '{"resourceSpans":[{"scopeSpans":null}]}',
@@ -311,6 +353,68 @@ def test_bad_records_after_valid_data_are_not_skipped(tmp_path, record):
     """Strict accounting reports the bad line, even after usable earlier calls."""
     with pytest.raises(ValueError, match="Invalid trace record.*:2"):
         load_usage_report(_trace(tmp_path, [_span()], [record]))
+
+
+@pytest.mark.parametrize("record_type", ["manifest", "blocks", "call", "future-metadata"])
+def test_journal_records_are_skipped_without_counting_their_tokens(tmp_path, record_type):
+    """Only OTLP spans count, even if ignored journal records contain usage data."""
+    journal = {
+        "nooaJournal": {
+            "format": "nooa.message_journal",
+            "version": 1,
+            "type": record_type,
+            "call": {"tokens": {"prompt": 999, "completion": 999}},
+        }
+    }
+    report = load_usage_report(_trace(tmp_path, [_span()], [json.dumps(journal)]))
+    assert report.totals.completed_calls == 1
+    assert report.totals.known_total_tokens == 15
+    assert len(report.timeline) == 1
+
+
+def test_journal_tokens_do_not_fill_missing_span_usage(tmp_path):
+    """Missing OTLP usage stays missing even when the journal has complete token counts."""
+    journal = '{"nooaJournal":{"type":"call","call":{"tokens":{"prompt":10,"completion":5}}}}'
+    span = _span(attrs={"llm.token_count.prompt": None, "llm.token_count.completion": None})
+    report = load_usage_report(_trace(tmp_path, [span], [journal]))
+    assert report.totals.completed_calls == 1
+    assert report.totals.missing_usage_calls == 1
+    assert report.totals.known_total_tokens == 0
+    assert report.timeline[0].total_tokens is None
+
+
+@pytest.mark.parametrize("enveloped", [False, True])
+def test_journal_marker_does_not_hide_otlp_in_the_same_record(tmp_path, enveloped):
+    """A metadata marker must not silently discard span data sharing its JSON object."""
+    record = {"resourceSpans": [{"scopeSpans": [{"spans": [_span()]}]}]} if enveloped else _span()
+    record["nooaJournal"] = {"type": "manifest"}
+    report = load_usage_report(_trace(tmp_path, [], [json.dumps(record)]))
+    assert report.totals.known_total_tokens == 15
+
+
+def test_journal_marker_does_not_hide_invalid_otlp(tmp_path):
+    """Validate OTLP fields even if the same JSON object also contains a journal marker."""
+    record = '{"nooaJournal":{"type":"manifest"},"resourceSpans":null}'
+    with pytest.raises(ValueError, match="resourceSpans must be an array"):
+        load_usage_report(_trace(tmp_path, [_span()], [record]))
+
+
+def test_journal_only_capture_is_not_a_complete_zero_report(tmp_path):
+    """Journal call tokens without OTLP spans are not a substitute accounting source."""
+    path = tmp_path / "journal-only.nooa.jsonl"
+    path.write_text(
+        json.dumps({"nooaJournal": {"type": "call", "call": {"tokens": {"prompt": 10}}}}) + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="no spans"):
+        load_usage_report(path)
+
+
+def test_skipping_journal_records_does_not_hide_truncated_otlp(tmp_path):
+    """Skipping journal metadata does not relax strict validation of later span records."""
+    path = _trace(tmp_path, [_span()], ['{"nooaJournal":{"type":"manifest"}}', "{"])
+    with pytest.raises(ValueError, match="Invalid trace record.*:3"):
+        load_usage_report(path)
 
 
 @pytest.mark.parametrize("contents", ["", " \n\n", '{"resourceSpans":[]}\n'])
@@ -345,6 +449,28 @@ async def test_cli_exports_without_constructing_sessions(tmp_path, monkeypatch, 
     if mode == "json":
         report = json.loads(captured.out)
         assert report["totals"]["known_total_tokens"] == 15
+    else:
+        rows = list(csv.DictReader(io.StringIO(captured.out)))
+        assert rows[-1]["known_total_tokens"] == "15"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["json", "csv"])
+async def test_cli_cutoff_ignores_skewed_non_llm_start(tmp_path, monkeypatch, capsys, mode):
+    """The reported 7200-second command still includes calls after a skewed parent span."""
+    skewed = _span(2, start=1, end=2, kind="CHAIN")
+    skewed["startTimeUnixNano"] = "5"
+    path = _trace(tmp_path, [skewed, _span(start=1_700_000_000, end=1_700_000_001)])
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["trace-explorer", str(path), "--usage", "--usage-format", mode, "--until-seconds", "7200"],
+    )
+    await _async_main()
+    captured = capsys.readouterr()
+    assert not captured.err
+    if mode == "json":
+        assert json.loads(captured.out)["totals"]["known_total_tokens"] == 15
     else:
         rows = list(csv.DictReader(io.StringIO(captured.out)))
         assert rows[-1]["known_total_tokens"] == "15"
@@ -505,22 +631,30 @@ def test_ambiguous_any_value_does_not_pick_an_arbitrary_count(tmp_path):
         load_usage_report(_trace(tmp_path, [call]))
 
 
-@pytest.fixture(scope="module")
-def recorded_workload(tmp_path_factory):
-    """Capture a real framework workflow with mocked inference in a fresh process."""
-    directory = tmp_path_factory.mktemp("recorded-usage")
+@pytest.fixture(scope="module", params=["jsonl", "journal_file"])
+def recorded_workload(tmp_path_factory, request):
+    """Capture a real mocked workflow through either production file exporter."""
+    directory = tmp_path_factory.mktemp(f"recorded-usage-{request.param}")
     fixture = Path(__file__).parent / "fixtures" / "usage_workload.py"
     env = {**os.environ, "LITELLM_LOCAL_MODEL_COST_MAP": "True", "OPENAI_API_KEY": "synthetic"}
     result = subprocess.run(
-        [sys.executable, str(fixture), str(directory)],
+        [sys.executable, str(fixture), str(directory), request.param],
         capture_output=True,
         text=True,
         env=env,
         timeout=45,
     )
     assert result.returncode == 0, result.stderr
-    path = directory / "usage-workload.jsonl"
+    extension = "nooa.jsonl" if request.param == "journal_file" else "jsonl"
+    path = directory / f"usage-workload.{extension}"
     assert path.exists()
+    if request.param == "journal_file":
+        records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+        journal = [record["nooaJournal"] for record in records if "nooaJournal" in record]
+        assert {record["type"] for record in journal} == {"manifest", "blocks", "call"}
+        calls = [record["call"] for record in journal if record["type"] == "call"]
+        assert len(calls) == 2
+        assert all(call["tokens"] is not None for call in calls)
     return path
 
 

@@ -81,8 +81,9 @@ class UsageReport:
 
         Unknown per-call counts are empty fields. Cumulative fields are known
         counts only. The summary carries file timing and recorded in-flight
-        counts. Text fields beginning like spreadsheet formulas are apostrophe-
-        prefixed; JSON preserves the original identifiers and model names.
+        counts. Per-model summaries are JSON-only. Text fields beginning like
+        spreadsheet formulas are apostrophe-prefixed; JSON preserves the
+        original identifiers and model names.
         """
         output = io.StringIO(newline="")
         total_fields = list(asdict(self.totals))
@@ -109,7 +110,7 @@ class UsageReport:
             row.update(row.pop("cumulative"))
             for key in ("model", "trace_id", "span_id"):
                 value = row[key]
-                if value.lstrip().startswith(("=", "+", "-", "@")) or value.startswith(
+                if value.lstrip().startswith(("=", "+", "-", "@", "|", "＝")) or value.startswith(
                     ("\t", "\r", "\n")
                 ):
                     row[key] = "'" + value
@@ -198,10 +199,11 @@ def _cutoff_ns(seconds: float) -> int:
 
 
 def load_usage_report(trace_path: str | Path, *, until_seconds: float | None = None) -> UsageReport:
-    """Report completed OpenInference LLM spans from a local OTLP JSONL file.
+    """Report completed OpenInference LLM spans from a local trace file.
 
-    Time zero is the earliest positive start timestamp in the file, including
-    orchestrator/tool spans. The cutoff is inclusive by completion time. Calls
+    Time zero is the first recorded LLM call's start, ignoring earlier non-LLM
+    spans. With no LLM spans, the earliest positive span start anchors the empty
+    report. The cutoff is inclusive by completion time. Calls
     recorded as crossing it (or lacking an end timestamp) are counted separately,
     without assigning partial token consumption. Exporters may not record running
     calls at all, so that count is not proof every in-flight call is represented.
@@ -210,16 +212,23 @@ def load_usage_report(trace_path: str | Path, *, until_seconds: float | None = N
     total is derived only when both input and output counts are available; a
     reported total takes precedence. Cache/reasoning subsets are never added.
     Repeated trace/span IDs with identical accounting are counted once; conflicting
-    records raise. Invalid/truncated JSON and portable-journal envelopes also
-    raise rather than silently producing incomplete accounting. No journal codec,
-    live viewer, cost estimation, or provider request is involved.
+    records raise. Invalid/truncated JSON also raises rather than silently
+    producing incomplete accounting. Portable journal files contribute only
+    their OTLP spans: journal metadata, messages, and call.tokens are skipped,
+    not counted a second time. No message reconstruction, live viewer, cost
+    estimation, or provider request is involved.
     """
     offset = _cutoff_ns(until_seconds) if until_seconds is not None else None
     spans = _load_spans(trace_path, strict=True)
     starts = [s["start_time"] for s in spans if s["start_time"] > 0]
     if not starts:
         raise ValueError("Trace contains no spans with a positive start timestamp")
-    origin = min(starts)
+    llm_starts = [
+        s["start_time"]
+        for s in spans
+        if s["start_time"] > 0 and s["attributes"].get("openinference.span.kind") == "LLM"
+    ]
+    origin = min(llm_starts or starts)
     last = max(max(s["start_time"], s["end_time"]) for s in spans)
     report = UsageReport(str(origin), (last - origin) / 1e9, until_seconds)
     calls: dict[tuple[str, str], _Call] = {}

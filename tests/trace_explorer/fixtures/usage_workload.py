@@ -52,8 +52,10 @@ class Workflow(Agent):
 
 
 async def main() -> None:
-    """Write a standard OTLP artifact using production instrumentation/exporters."""
-    enable_tracing(exporters=[exporters.jsonl(sys.argv[1])])
+    """Write OTLP or portable-journal artifacts through production file exporters."""
+    name = sys.argv[2] if len(sys.argv) > 2 else "jsonl"
+    factory = {"jsonl": exporters.jsonl, "journal_file": exporters.journal_file}[name]
+    enable_tracing(exporters=[factory(sys.argv[1])])
     set_session("usage-workload")
     client = CompletionClient("openai/gpt-4o-mini", mock_response="unused")
     try:
