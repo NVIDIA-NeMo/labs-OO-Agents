@@ -108,6 +108,8 @@ eval "unset __nooa_rc __nooa_f __nooa_was __nooa_stop __nooa_p __nooa_t __nooa_e
 _DRAIN_SECONDS = 0.5
 # How a command ends when its Shell is closed (``aclose``) before or while it runs.
 _CLOSED_BEFORE = "the shell was closed before this command started; it did not run"
+
+
 def _deadline_note(command: str) -> str:
     """The cell deadline's note for the Shell command the cell was awaiting."""
     shown = command if len(command) <= 80 else command[:77] + "..."

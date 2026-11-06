@@ -170,7 +170,10 @@ async def test_inventory_lists_the_newest_bindings_first(tmp_path):
     """Names from the latest cell lead, so old loop temporaries don't hide them."""
     llm = CellLLM(
         [
-            cell("\n".join(f"aaa_{i}=1" for i in range(30)) + "\nreturn_result(Done(explanation='a'))"),
+            cell(
+                "\n".join(f"aaa_{i}=1" for i in range(30))
+                + "\nreturn_result(Done(explanation='a'))"
+            ),
             cell("zzz_report = 'x'\naaa_3 = 2\nreturn_result(Done(explanation='b'))"),
         ]
     )
