@@ -419,3 +419,31 @@ def test_primitive_subclass_is_stored_as_plain_value():
 
     blob, _ = serialize({"s": Marked("x")})
     assert blob == {"s": "x"}
+
+
+@pytest.mark.parametrize("error", [TypeError, AttributeError, RuntimeError])
+def test_restore_skips_any_unrestorable_attribute(caplog, monkeypatch, error):
+    """Any failure restoring one attribute skips it; the others still load."""
+    import logging
+    from types import SimpleNamespace
+
+    from nooa.storage import snapshot as snapshot_module
+    from nooa.storage.snapshot import AgentSnapshot
+
+    real = snapshot_module.deserialize
+
+    def failing(blob, *args, **kwargs):
+        if blob == "BAD":
+            raise error("schema drift")
+        return real(blob, *args, **kwargs)
+
+    monkeypatch.setattr(snapshot_module, "deserialize", failing)
+    snapshot = AgentSnapshot(attributes={"memory": ["a"], "broken": "BAD", "n": 3})
+    agent = SimpleNamespace()
+    with caplog.at_level(logging.WARNING, logger="nooa.storage.snapshot"):
+        snapshot.restore(agent)
+    assert agent.memory == ["a"]
+    assert agent.n == 3
+    assert not hasattr(agent, "broken")
+    (message,) = [r.getMessage() for r in caplog.records if "'broken'" in r.getMessage()]
+    assert "skipping non-restorable attribute" in message

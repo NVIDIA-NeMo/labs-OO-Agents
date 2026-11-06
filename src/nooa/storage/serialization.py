@@ -465,7 +465,7 @@ def _serialize_lenient_dict(
                     result[k] = v
                 elif (serialized := _serialize(v, state, depth)) is not SKIP:
                     result[k] = serialized
-            except (_PathError, SerializationError) as exc:
+            except (_PathError, SerializationError, TypeError, ValueError, RecursionError) as exc:
                 reason = (
                     exc.render(f"Value for {k!r}", depth)
                     if isinstance(exc, _PathError)
