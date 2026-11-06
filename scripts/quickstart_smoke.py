@@ -52,10 +52,12 @@ def validate_result(name: str, printed: list[tuple[Any, ...]], namespace: dict[s
 
 
 def run_example(example: Path) -> None:
+    """Execute an unchanged example and validate its captured application results."""
     printed: list[tuple[Any, ...]] = []
 
     def capture_print(*values: Any, **kwargs: Any) -> None:
         # Capture application results, excluding runtime diagnostics or REPL prints.
+        """Capture result prints from the example entry point while forwarding output."""
         caller = sys._getframe(1)
         if caller.f_code.co_name == "main" and caller.f_code.co_filename == str(example):
             printed.append(values)

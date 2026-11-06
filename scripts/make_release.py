@@ -518,6 +518,7 @@ def temporary_tag(tag: str, sha: str):
 
 
 def quickstart_api_key() -> str:
+    """Require an exported inference credential before expensive release checks."""
     key = os.getenv("NVIDIA_INFERENCE_API_KEY") or os.getenv("NVIDIA_INTERNAL_API_KEY")
     if not key:
         die("fresh-wheel quickstarts require NVIDIA_INFERENCE_API_KEY or NVIDIA_INTERNAL_API_KEY")
@@ -539,6 +540,7 @@ def fresh_wheel_quickstarts(wheel: Path, manifest: ReleaseManifest | None = None
     }
 
     def record() -> None:
+        """Checkpoint quickstart outcomes in the private evidence and manifest."""
         (evidence / "result.json").write_text(json.dumps(result, indent=2) + "\n")
         if manifest:
             manifest.update(quickstart_smoke=result)
@@ -583,6 +585,7 @@ def fresh_wheel_quickstarts(wheel: Path, manifest: ReleaseManifest | None = None
             def command(
                 cmd: list[str], log: str, timeout: int, *, live: bool = False
             ) -> subprocess.CompletedProcess:
+                """Run a bounded smoke command and retain redacted failure output."""
                 try:
                     child_env = env | {"NVIDIA_INFERENCE_API_KEY": key} if live else env
                     proc = run(cmd, cwd=work, env=child_env, check=False, timeout=timeout)
@@ -671,6 +674,7 @@ def fresh_wheel_quickstarts(wheel: Path, manifest: ReleaseManifest | None = None
 def build_and_smoke(
     tag: str, sha: str, manifest: ReleaseManifest | None = None
 ) -> list[dict[str, str]]:
+    """Build versioned artifacts and require fresh-wheel and CLI smoke checks."""
     step("Build wheels and smoke test")
     expected = tag.lstrip("v")
     dist = REPO / "dist"
@@ -1868,6 +1872,7 @@ def ci_main(args: argparse.Namespace) -> int:
 
 
 def local_main(args: argparse.Namespace) -> int:
+    """Run the local release gate and optionally prepare a reviewable draft."""
     if (
         args.create_draft
         or args.candidate_sha

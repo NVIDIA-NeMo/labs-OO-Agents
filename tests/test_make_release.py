@@ -817,6 +817,7 @@ def test_unmerged_rehearsal_does_not_require_github_token(mr, tmp_path, monkeypa
     "failure_point", ["deterministic", "quickstarts", "infrastructure", "hard-gate"]
 )
 def test_ci_never_creates_draft_after_gate_failure(mr, tmp_path, monkeypatch, failure_point):
+    """Any hard gate failure must prevent draft creation."""
     args = _ci_args(mr, tmp_path)
     monkeypatch.setenv("NVIDIA_INTERNAL_API_KEY", "masked")
     monkeypatch.setenv("GH_TOKEN", "masked")
@@ -926,6 +927,7 @@ def test_existing_publication_workflow_still_uses_published_release_trigger():
 def test_fresh_wheel_quickstarts_isolate_customer_install_and_record_failures(
     mr, tmp_path, monkeypatch, failure
 ):
+    """Verify environment isolation and durable evidence across smoke failures."""
     wheel = tmp_path / "nooa-1.2.3-py3-none-any.whl"
     wheel.touch()
     manifest = mr.ReleaseManifest(tmp_path / "evidence" / "release-manifest.json", {})
@@ -939,6 +941,7 @@ def test_fresh_wheel_quickstarts_isolate_customer_install_and_record_failures(
     calls = []
 
     def fake_run(cmd, **kwargs):
+        """Simulate subprocess outcomes without running external services."""
         calls.append((cmd, kwargs))
         assert kwargs["cwd"] != REPO
         assert kwargs["timeout"] > 0
@@ -1008,6 +1011,7 @@ def test_fresh_wheel_quickstarts_isolate_customer_install_and_record_failures(
 
 
 def test_fresh_wheel_quickstarts_require_credentials(mr, tmp_path, monkeypatch):
+    """Missing credentials must produce explicit failed smoke evidence."""
     monkeypatch.delenv("NVIDIA_INTERNAL_API_KEY", raising=False)
     monkeypatch.delenv("NVIDIA_INFERENCE_API_KEY", raising=False)
     manifest = mr.ReleaseManifest(tmp_path / "release-manifest.json", {})
@@ -1018,6 +1022,7 @@ def test_fresh_wheel_quickstarts_require_credentials(mr, tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("flags", [[], ["--skip-capability"], ["--checks-only"], ["--dry-run"]])
 def test_local_release_requires_credentials_before_checks(mr, monkeypatch, flags):
+    """Local release modes must reject missing credentials before expensive checks."""
     monkeypatch.delenv("NVIDIA_INTERNAL_API_KEY", raising=False)
     monkeypatch.delenv("NVIDIA_INFERENCE_API_KEY", raising=False)
     monkeypatch.setattr(
@@ -1029,7 +1034,10 @@ def test_local_release_requires_credentials_before_checks(mr, monkeypatch, flags
 
 @pytest.mark.parametrize("partial", ["partial output", b"partial output"])
 def test_timeout_preserves_partial_output(mr, monkeypatch, partial):
+    """Timeout diagnostics must retain both byte and text subprocess output."""
+
     def timed_out(*_args, **_kwargs):
+        """Model a timeout that retains partial stdout and stderr."""
         raise subprocess.TimeoutExpired(["python"], 1, output=partial, stderr=b"partial stderr")
 
     monkeypatch.setattr(mr.subprocess, "run", timed_out)
@@ -1041,12 +1049,14 @@ def test_timeout_preserves_partial_output(mr, monkeypatch, partial):
 def test_built_core_wheel_must_pass_quickstarts_before_combined_smoke(
     mr, tmp_path, monkeypatch, fail_quickstart
 ):
+    """Fresh core-wheel failures must stop the combined-package smoke checks."""
     monkeypatch.setattr(mr, "REPO", tmp_path)
     monkeypatch.setattr(mr, "temporary_tag", lambda *_args: nullcontext())
     manifest = mr.ReleaseManifest(tmp_path / "release-manifest.json", {})
     calls = []
 
     def fake_run(cmd, **kwargs):
+        """Simulate subprocess outcomes without running external services."""
         calls.append(cmd)
         if "build" in cmd:
             dist = tmp_path / "dist"
@@ -1056,6 +1066,7 @@ def test_built_core_wheel_must_pass_quickstarts_before_combined_smoke(
         return subprocess.CompletedProcess(cmd, 0, "1.2.3", "")
 
     def quickstarts(wheel, received_manifest):
+        """Check that the core-only gate runs before combined-package installation."""
         assert wheel.name == "nooa-1.2.3-py3-none-any.whl"
         assert received_manifest is manifest
         assert not any("install" in cmd for cmd in calls)
