@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import gc
+import inspect
 import typing
 import weakref
 from collections import Counter
@@ -83,6 +84,11 @@ def test_copied_context_expires_and_releases_cached_types(fail):
 
     reference = weakref.ref(Mutable)
     del Mutable
+    # CPython 3.12's getattr_static() keeps a bounded cache of class MROs.
+    # Release that unrelated reference before testing our own cache's lifetime.
+    shadowed_dict = getattr(inspect, "_shadowed_dict_from_mro_tuple", None)
+    if hasattr(shadowed_dict, "cache_clear"):
+        shadowed_dict.cache_clear()
     gc.collect()
     assert reference() is None
 
