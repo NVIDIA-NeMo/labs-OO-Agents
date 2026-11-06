@@ -22,7 +22,7 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
-    "pydantic>=2.5.0",
+    "pydantic>=2.14",
     # context_blocks + unifiedllm now ship as nooa.context_blocks /
     # nooa.unifiedllm subpackages — pull their formerly-external deps in.
     # >=1.97.0: routes GPT-5.4 tool calls through Responses and replays reasoning_items;
@@ -97,7 +97,7 @@ members = [
 
 
 [project.optional-dependencies]
-# Convenience aliases for the sibling distributions, so `pip install
+# Convenience aliases for the sibling distributions, so `uv add
 # nooa[cli]` does what a user reasonably expects. Without these, that command
 # *succeeds* with only a warning and silently installs no CLI.
 #
@@ -111,7 +111,7 @@ memory = ["nooa-memory"]
 bench = ["nooa-bench"]
 acp = ["nooa-acp"]
 # ARC-AGI-3 example agent (examples/arc_agi_3): the public ARC-AGI-3 SDK + deps.
-# Install with `pip install "nooa[arc]"` (or `uv sync --extra arc`).
+# Install from the repo root with `uv sync --extra arc`.
 arc = [
     "arc-agi>=0.9.8",
     "arcengine>=0.9.3",

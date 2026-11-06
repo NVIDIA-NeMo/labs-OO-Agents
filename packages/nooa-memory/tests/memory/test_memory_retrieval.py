@@ -3,7 +3,7 @@
 """Tests for retrieval: scoring, recency/importance, multi-hop spread."""
 
 import pytest
-from nooa_memory.config import RetrievalConfig
+from nooa_memory.config import RetrievalConfig, ScoringWeights
 from nooa_memory.embeddings import HashingEmbedder
 from nooa_memory.retrieval import RetrievalEngine, base_level_activation
 from nooa_memory.schema import AccessRecord, EdgeType, Memory
@@ -85,6 +85,27 @@ def test_spread_decays_per_hop(store, emb):
     assert b.id in spread1 and c.id not in spread1
 
 
+def test_spread_decay_is_one_factor_per_hop(store, emb):
+    # The docstring and ``per_hop_decay``'s own comment both say the decay is
+    # per hop, so at hop h the activation is delta**h along unit-weight causal
+    # edges -- not a compounded power that dies under ``activation_floor``.
+    a = _add(store, emb, "seed node alpha")
+    b = _add(store, emb, "node beta")
+    c = _add(store, emb, "node gamma")
+    d = _add(store, emb, "node delta")
+    for src, dst in ((a, b), (b, c), (c, d)):
+        store.add_edge(src.id, dst.id, EdgeType.CAUSES, 1.0)
+    eng = RetrievalEngine(
+        store,
+        emb,
+        RetrievalConfig(per_hop_decay=0.6, per_hop_fanout=5, activation_floor=0.05),
+    )
+    spread = eng._spread({a.id: 1.0}, hops=3)
+    assert spread[b.id] == pytest.approx(0.6)
+    assert spread[c.id] == pytest.approx(0.6**2)
+    assert spread[d.id] == pytest.approx(0.6**3)
+
+
 def test_multi_hop_surfaces_linked_dissimilar_memory(store, emb):
     # A is relevant to the query; B is dissimilar but linked from A. Several
     # unlinked, equally-dissimilar distractors compete for the second slot.
@@ -99,3 +120,36 @@ def test_multi_hop_surfaces_linked_dissimilar_memory(store, emb):
     # A wins on relevance; B is pulled into the top-2 by associative spread
     # over the causal edge, beating the unlinked distractors.
     assert a.id in ids and b.id in ids
+
+
+@pytest.mark.parametrize("owner", [None, "alice"])
+def test_recall_does_not_resurface_archived_neighbor(store, emb, owner):
+    """Archiving a linked memory removes it from recall, explanations, and touches."""
+    a = _add(store, emb, "deploy ship release production rollout", owner="alice", importance=10)
+    b = _add(store, emb, "obsolete instructions", owner="alice")
+    _add(store, emb, "deploy weather forecast", owner="alice", importance=0)
+    store.add_edge(a.id, b.id, EdgeType.CAUSES)
+    eng = RetrievalEngine(store, emb, RetrievalConfig(weights=ScoringWeights(recency=0)))
+    assert b.id in {m.id for m in eng.recall("deploy ship release", owner=owner, touch=False)}
+
+    store.archive(b.id)
+    res = eng.recall("deploy ship release", owner=owner)
+    assert a.id in {m.id for m in res}
+    assert b.id not in {m.id for m in res}
+    assert store.get(b.id).access_count == 0
+    assert b.id not in {row["id"] for row in eng.explain("deploy ship release", owner=owner)}
+
+
+@pytest.mark.parametrize("owner", [None, "alice"])
+def test_spread_does_not_relay_through_archived_memory(store, emb, owner):
+    """An archived bridge cannot relay activation to otherwise reachable memories."""
+    a = _add(store, emb, "seed node", owner="alice")
+    b = _add(store, emb, "bridge node", owner="alice")
+    c = _add(store, emb, "downstream node", owner="alice")
+    store.add_edge(a.id, b.id, EdgeType.CAUSES)
+    store.add_edge(b.id, c.id, EdgeType.CAUSES)
+    eng = RetrievalEngine(store, emb, RetrievalConfig())
+    assert c.id in eng._spread({a.id: 1.0}, hops=2, owner=owner)
+
+    store.archive(b.id)
+    assert eng._spread({a.id: 1.0}, hops=2, owner=owner) == {}

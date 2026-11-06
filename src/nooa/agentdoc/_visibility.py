@@ -22,7 +22,59 @@ import sys
 import threading
 import types
 import typing
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Annotated, Any, cast
+
+
+class _TypeHintCache:
+    def __init__(self) -> None:
+        self.entries: dict[int, tuple[Any, dict[str, Any]]] = {}
+        self.active = True
+        self.owner_thread = threading.get_ident()
+
+    def is_current(self) -> bool:
+        return self.active and self.owner_thread == threading.get_ident()
+
+
+_type_hints: ContextVar[_TypeHintCache | None] = ContextVar("agentdoc_type_hints", default=None)
+
+
+@contextmanager
+def _type_hint_scope() -> Iterator[None]:
+    """Reuse resolved annotations within a formatting call, never across independent calls.
+
+    Recursive and reentrant formatting on this thread share the cache, so resolved
+    annotations are stable until the outermost formatting call ends. Instance/class spec()
+    overrides remain live. Copied contexts cannot extend the cache's lifetime or
+    share it with another thread; calls outside a formatting call resolve without caching.
+    """
+    current = _type_hints.get()
+    if current is not None and current.is_current():
+        yield
+        return
+    cache = _TypeHintCache()
+    token = _type_hints.set(cache)
+    try:
+        yield
+    finally:
+        # Copied contexts retain this holder even after our ContextVar is reset.
+        # Expire it explicitly, and release objects kept alive by its entries.
+        cache.active = False
+        cache.entries.clear()
+        _type_hints.reset(token)
+
+
+def _resolve_type_hints(obj: Any) -> dict[str, Any]:
+    cache = _type_hints.get()
+    if cache is None or not cache.is_current():
+        return typing.get_type_hints(obj, include_extras=True)
+    # Keep the object alive and key by identity: callable instances can be unhashable.
+    key = id(obj)
+    if key not in cache.entries:
+        cache.entries[key] = (obj, typing.get_type_hints(obj, include_extras=True))
+    return cache.entries[key][1]
 
 
 def _is_dunder(name: str) -> bool:
@@ -159,7 +211,7 @@ def is_hidden_field(cls: Any, name: str) -> bool:
             continue
         # get_type_hints resolves string annotations and forward refs
         try:
-            resolved = typing.get_type_hints(klass, include_extras=True)
+            resolved = _resolve_type_hints(klass)
         except (NameError, AttributeError, TypeError):
             resolved = None
 

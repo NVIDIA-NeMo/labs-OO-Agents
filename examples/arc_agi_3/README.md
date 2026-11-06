@@ -38,7 +38,7 @@ through `arc_agi_3/`, a small vendored wrapper over the public ARC-AGI-3 SDK.
 From a checkout of this repository:
 
 ```bash
-uv sync --extra arc        # or: pip install -e ".[arc]"
+uv sync --extra arc
 ```
 
 The `arc` extra pulls the public **ARC-AGI-3 SDK** (`arc-agi`, `arcengine`) plus

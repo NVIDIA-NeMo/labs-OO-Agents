@@ -28,6 +28,7 @@ from nooa import llm_config, tracing
 from nooa.skill import TextSkill
 from nooa.unifiedllm import connect
 from tests.unifiedllm.connect.connect_http import mock_http, response_body
+from tests.unifiedllm.connect.test_connect_decision_smoke import fixture_response
 
 ROOT = Path(__file__).resolve().parents[3]
 SKILL = ROOT / "skills/nooa-connect/SKILL.md"
@@ -43,6 +44,8 @@ REPORT_KEYS = {
     "run_context",
     "diagnostic_prompt",
 }
+# Save reports also say what was written and how well it was checked.
+SAVE_KEYS = {"saved", "save_status", "verification"}
 BASE = [
     "your-model",
     "--as",
@@ -89,6 +92,7 @@ def offline(monkeypatch, tmp_path):
         "MODEL_KEY",
         "MY_MODEL_KEY",
         "DECISION_KEY",
+        "HUB_KEY",
         "OPENAI_API_KEY",
         "ANTHROPIC_API_KEY",
         "OPENROUTER_API_KEY",
@@ -121,17 +125,13 @@ def offline(monkeypatch, tmp_path):
     def handle(request):
         sent.append(request)
         if request.method == "GET":
-            return httpx.Response(200, json={"data": [{"id": "your-model"}]})
+            # Model IDs used by the documented discover and catalogue examples.
+            ids = ["your-model", "openai/example-model"]
+            return httpx.Response(200, json={"data": [{"id": model} for model in ids]})
         body = json.loads(request.content)
         if "questions" in body:
-            if request.url.path.endswith("systemone") or "alpha/decisions" in request.url.path:
-                data = {"model": body["model"], "answers": {"supported": {"noul": 0.7}}}
-            else:
-                data = {
-                    "model": body["model"],
-                    "answers": [{"type": "predicate", "name": "supported", "probability": 0.7}],
-                }
-            return httpx.Response(200, json=data)
+            # Correct typed answers for routing and the decision smoke cases.
+            return fixture_response(request)
         style = (
             "responses"
             if request.url.path.endswith("/responses")
@@ -172,7 +172,7 @@ def invoke(args):
 def report(result, code=0):
     assert result.exit_code == code, result.output
     data = json.loads(result.stdout)
-    assert set(data) == REPORT_KEYS
+    assert set(data) == (REPORT_KEYS | SAVE_KEYS if data.get("stage") == "save" else REPORT_KEYS)
     assert data["version"] == 1
     assert data["ok"] is (code == 0)
     assert "dummy-docs-key" not in result.output
@@ -193,10 +193,12 @@ def approved_human_answers(monkeypatch):
             return "https://gateway.example/v1"
         if text.startswith("Key environment variable"):
             return "MODEL_KEY"
-        if text.startswith("Search advertised") or text.startswith("Exact model"):
+        if text.startswith(("Search advertised", "Search available", "Exact model")):
             return "your-model"
         if text == "API format":
             return "chat"
+        if text.endswith("(tokens)"):
+            return "16384"
         if text == "Save this model as":
             return "wizard-work"
         assert "default" in kwargs, (text, kwargs)
@@ -204,6 +206,13 @@ def approved_human_answers(monkeypatch):
 
     monkeypatch.setattr(prompts, "prompt", answer)
     monkeypatch.setattr(prompts, "confirm", lambda text, **kw: True)
+
+    def choose(message, options, *, default):
+        asked.append(message)
+        assert default is not None, (message, options)
+        return default
+
+    monkeypatch.setattr(prompts, "labelled_choice", choose)
     monkeypatch.setattr(prompts, "choose_reply_limit", lambda suggested, *args, **kw: suggested)
     monkeypatch.setattr(prompts, "choose_media_mode", lambda **kw: "manual")
     monkeypatch.setattr(prompts, "choose_media_inputs", lambda current=(): list(current))
@@ -211,7 +220,7 @@ def approved_human_answers(monkeypatch):
     return asked
 
 
-@pytest.mark.parametrize("path,expected", [(SKILL, 9), (GUIDE, 10)], ids=["skill", "guide"])
+@pytest.mark.parametrize("path,expected", [(SKILL, 11), (GUIDE, 20)], ids=["skill", "guide"])
 def test_every_documented_shell_command(path, expected, offline, monkeypatch, tmp_path):
     commands = shell_commands(path)
     assert len(commands) == expected, "Review new/removed shell examples explicitly"
@@ -233,6 +242,9 @@ def test_every_documented_shell_command(path, expected, offline, monkeypatch, tm
             redirect = Path(args[offset + 1])
             args = args[:offset]
         before = len(offline)
+        if "--output" in args:
+            # Each documented save is written for an alias that does not exist yet.
+            (tmp_path / args[args.index("--output") + 1]).unlink(missing_ok=True)
         if "--stage" not in args and "--help" not in args:
             monkeypatch.setenv("NEMO_OO_USER_DIR", str(tmp_path / f"wizard-{index}"))
             with monkeypatch.context() as human:
@@ -286,7 +298,7 @@ def test_every_documented_shell_command(path, expected, offline, monkeypatch, tm
     [
         ("discover", 1),
         ("catalogue", 1),
-        ("interfaces", 3),
+        ("interfaces", 1),
         ("plan", 0),
         ("routing", 1),
         ("tools", 1),
@@ -322,26 +334,42 @@ def test_every_stage_independent(stage, count, offline, tmp_path):
 
 def test_documented_stage_table_covers_enum():
     for path in [SKILL, GUIDE]:
-        table = set(re.findall(r"^\| `([a-z]+)` \|", path.read_text(), re.M))
+        table = set(re.findall(r"^\| `([a-z-]+)` \|", path.read_text(), re.M))
         assert table == set(stages.STAGES)
 
 
+CHAT_FAMILY_PATHS = {
+    "chat": "/v1/chat/completions",
+    "responses": "/v1/responses",
+    "anthropic": "/v1/messages",
+}
+
+
+def without_api_style(args):
+    offset = args.index("--api-style")
+    return args[:offset] + args[offset + 2 :]
+
+
 @pytest.mark.parametrize("style", ["chat", "responses", "anthropic"])
-def test_explicit_chat_family_interfaces_still_compares_three(style, offline):
+def test_explicit_interface_checks_that_style_alone(style, offline):
     args = BASE.copy()
     args[args.index("chat")] = style
     data = report(invoke([*args, "--stage", "interfaces", "--output-tokens", "200"]))
+    assert data["data"]["accepted"] == [style]
+    assert [request.url.path for request in offline] == [CHAT_FAMILY_PATHS[style]]
+    assert "entry" not in data["data"]
+
+
+def test_unknown_interface_compares_three_chat_family_styles(offline):
+    args = without_api_style(BASE)
+    data = report(invoke([*args, "--stage", "interfaces", "--output-tokens", "200"]))
     assert data["data"]["accepted"] == ["chat", "responses", "anthropic"]
-    assert [request.url.path for request in offline] == [
-        "/v1/chat/completions",
-        "/v1/responses",
-        "/v1/messages",
-    ]
+    assert [request.url.path for request in offline] == list(CHAT_FAMILY_PATHS.values())
     assert "entry" not in data["data"]
 
 
 @pytest.mark.parametrize("style", ["systemone", "openai"])
-@pytest.mark.parametrize("stage", ["plan", "interfaces", "routing", "all", "save"])
+@pytest.mark.parametrize("stage", ["plan", "interfaces", "routing", "decision", "all", "save"])
 def test_native_decision_contract(style, stage, offline, tmp_path):
     base = [
         "decision-model",
@@ -362,15 +390,22 @@ def test_native_decision_contract(style, stage, offline, tmp_path):
         source.write_text(invoke([*base, "--stage", "plan"]).stdout)
         args = ["--stage", "save", "--input", str(source), "--output", "decision.yaml"]
     data = report(invoke(args))
-    assert len(offline) == (0 if stage in {"plan", "save"} else 1)
+    # Decision and all add three typed smoke requests after routing.
+    expected = {"plan": 0, "save": 0, "interfaces": 1, "routing": 1, "decision": 4, "all": 4}
+    assert len(offline) == expected[stage]
     if offline:
         body = json.loads(offline[0].content)
         if style == "openai":
             assert body["questions"][0]["type"] == "predicate"
         else:
             assert "supported" in body["questions"]
+    for request in offline:
+        body = json.loads(request.content)
         assert "max_tokens" not in body and "max_output_tokens" not in body
-    if stage in {"plan", "routing", "all", "save"}:
+    if stage in {"decision", "all"}:
+        smoke = ["decision:typed", "decision:positive", "decision:negative"]
+        assert all(data["checks"][name]["answer_correct"] is True for name in smoke)
+    if stage in {"plan", "routing", "decision", "all", "save"}:
         entry = data["data"]["entry"]
         assert entry["client_type"] == "decision" and entry["model_name"] == "decision-model"
         assert "max_tokens" not in entry
@@ -403,10 +438,16 @@ def test_permissive_save_and_authorized_whole_alias_replacement(
     args = ["--stage", "save", "--input", str(source), "--output", str(target)]
     report(invoke(args), 2)
     assert target.read_text() == original
+    if failed:
+        # --yes only permits replacement; a failed result also needs --allow-unverified.
+        report(invoke([*args, "--yes"]), 2)
+        assert target.read_text() == original
+        args.append("--allow-unverified")
     result = invoke([*args, "--yes"])
     report(result)
     assert "replacing alias" in result.stderr
-    assert ("checks did not pass" in result.stderr) is failed
+    # Neither an untested plan nor a failed result has passed its checks.
+    assert "have not passed checks" in result.stderr
     saved = yaml.safe_load(target.read_text())["models"]
     assert saved["other"] == {"model_name": "openai/keep", "custom": "retained"}
     assert "# approved registry" in target.read_text()
@@ -435,7 +476,7 @@ def test_permissive_save_and_authorized_whole_alias_replacement(
         ["--reasoning-template", "effort"],
         ["--reasoning-level", "high"],
         ["--catalogue-file", "prior.json"],
-        ["--models-url", "https://listing.example"],
+        ["--models-url", "https://listing.example", "--no-metadata"],
         ["--test-media-inputs", "image", "--media-inputs", "image"],
     ],
 )
@@ -464,7 +505,7 @@ def test_no_catalogue_flag_does_not_disable_catalogue_stage(offline):
 def test_connect_skill_loads_as_text_skill_and_links_resolve():
     skill = TextSkill(path=SKILL.parent)
     assert skill.id == "nooa-connect"
-    assert "permission-first" in skill.description
+    assert "with the user's permission" in skill.description
     assert "--stage" in type(skill).__doc__
     assert skill.read_file("SKILL.md") == SKILL.read_text()
     paths = [
@@ -601,7 +642,8 @@ def test_native_decision_rejects_chat_options(style, extra, offline, tmp_path):
         ]
     )
     # CLI prevalidation is exit 2; library-only guards are handled failures (1).
-    expected = 2 if extra[1] in {"discover", "reasoning"} or "--discovery-file" in extra else 1
+    prevalidated = {"--discovery-file", "--max-tokens"}
+    expected = 2 if extra[1] in {"discover", "reasoning"} or prevalidated & set(extra) else 1
     report(result, expected)
     assert not offline
 
@@ -624,10 +666,11 @@ def test_plan_offline_without_credential_and_save_raw_data_to_project(
 
 
 def test_interface_reasoning_compatibility_cap_is_on_wire(offline):
+    # Without --api-style, interfaces compares all three chat-family styles.
     report(
         invoke(
             [
-                *BASE,
+                *without_api_style(BASE),
                 "--stage",
                 "interfaces",
                 "--output-tokens",
