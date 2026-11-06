@@ -6,6 +6,14 @@
 > This is the last nooa-acp release: it still works, and the `nooa-acp`
 > command prints a deprecation warning to standard error. Please move to
 > nooa-atom.
+>
+> **Moving Zed over.** Installing nooa-atom does not change the command Zed
+> launches: edit the `agent_servers` entry in `settings.json` (keep its `env`).
+> The server is the `atom` subcommand of the `nooa` command that nooa-atom
+> installs, so with uvx set
+> `"command": "uvx", "args": ["--from", "nooa-atom", "nooa", "atom"]`, or, when
+> the worktree's uv project has nooa-atom installed,
+> `"command": "uv", "args": ["run", "nooa", "atom"]`.
 
 **Run the NOOA coding agent inside your editor.** `nooa-acp` is an
 [Agent Client Protocol](https://agentclientprotocol.com) server, so any
