@@ -36,6 +36,8 @@ dependencies = [
     # native Windows (no fcntl there). Only filelock's Windows lock is used, so
     # CVE-2026-112940 (ReadWriteLock) and CVE-2026-112909 (UnixFileLock) do not apply.
     "filelock>=3.29.4; sys_platform == 'win32'",
+    "anthropic>=0.122.0,<1",
+    "openai>=2.44.0,<3",
 ]
 
 [project.urls]

@@ -204,6 +204,7 @@ def _disable_encrypted_reasoning(entry: dict, status: int) -> dict:
     entry["include"] = []
     record = {
         "source": "connect",
+        "transport": "direct" if entry.get("direct", True) else "litellm",
         "outcome": "rejected",
         "status_code": status,
         "reason": "The endpoint rejected encrypted reasoning; omitted from requests. Reasoning replay may be unavailable.",
@@ -270,6 +271,7 @@ _RESERVED = {
     "extra_body",
     "client",
     "transport",
+    "direct",
     "api_style",
     "replay_vendor",
 }
@@ -471,7 +473,7 @@ def verdict(entry: dict) -> Verdict:
     Uses only the stored records (``check_status``); makes no requests and
     assumes nothing about tests that did not run.
     """
-    provenance = entry.get("provenance", {})
+    provenance = _transport_provenance(entry)
     missing = tuple(unobserved_reasoning_levels(entry))
     # A level that turns reasoning off but still reasoned needs attention too.
     flagged = {*missing, *ignored_off_reasoning_levels(entry)}
@@ -996,7 +998,7 @@ def unobserved_reasoning_levels(entry: dict) -> list[str]:
     not changed.
     """
     missing = []
-    records = entry.get("provenance", {}).get("probes", {})
+    records = _transport_provenance(entry).get("probes", {})
     for label, params in entry.get("reasoning_levels", {}).items():
         record = records.get(f"level:{label}", {})
         if record.get("outcome") != "accepted" or record.get("reasoning_observed"):
@@ -1020,12 +1022,79 @@ def unobserved_reasoning_levels(entry: dict) -> list[str]:
     return missing
 
 
+def _transport_provenance(entry: dict, *, selected: bool | None = None) -> dict:
+    """Detach evidence, discarding certification of a different client path.
+
+    The dispatch boolean, independent transport metadata and recorded transport
+    must agree. Legacy booleanless entries did not dispatch by metadata, so their
+    evidence cannot certify Connect's new default. Preserve catalogue/user data.
+    """
+    provenance = deepcopy(entry.get("provenance", {}))
+    if not isinstance(provenance, dict):
+        raise ValueError("provenance must be a mapping")
+    if entry.get("client_type") == "decision":
+        # Decision models use their own HTTP client, not an LLM transport.
+        return provenance
+    selected = entry.get("direct", True) if selected is None else selected
+    transport = "direct" if selected else "litellm"
+    fields = (
+        "probes",
+        "session_checks",
+        "interfaces",
+        "requests_accepted",
+        "reasoning_observed",
+        "encrypted_reasoning",
+    )
+
+    def recorded_transport(value):
+        # Check records name their client path directly or, for records
+        # stamped with a verification identity, in that identity.
+        if "transport" in value:
+            return value["transport"]
+        config = value.get("verification_config")
+        return config.get("transport") if isinstance(config, dict) else None
+
+    def mismatched(value):
+        if isinstance(value, dict):
+            recorded = recorded_transport(value)
+            # A record without a transport label cannot certify anything by
+            # itself: it has no current verification fingerprint either, so
+            # verification_is_current already treats it as stale.
+            return (recorded is not None and recorded != transport) or any(
+                mismatched(child) for child in value.values()
+            )
+        if isinstance(value, (list, tuple)):
+            return any(mismatched(child) for child in value)
+        return False
+
+    # An entry without the boolean (older Connect output) keeps its records:
+    # untagged ones have no current verification fingerprint, and LiteLLM-run
+    # ones carry their transport, so neither certifies the selected path.
+    changed = (
+        selected != entry.get("direct", selected)
+        or entry.get("transport", transport) != transport
+        or any(mismatched(provenance.get(field)) for field in fields)
+        # The learned encrypted-reasoning opt-out has no verification
+        # fingerprint, so an unlabelled outcome cannot be attributed to a path.
+        or isinstance(provenance.get("encrypted_reasoning"), dict)
+        and provenance["encrypted_reasoning"].get("outcome") in {"accepted", "rejected"}
+        and "transport" not in provenance["encrypted_reasoning"]
+    )
+    if changed:
+        for field in fields:
+            provenance.pop(field, None)
+    # Execution and stage isolation require a mapping even after invalidation.
+    provenance.setdefault("probes", {})
+    return provenance
+
+
 def configure_entry(
     entry: dict,
     *,
     reply_tokens: int | None = None,
     cache_enabled: bool | None = None,
     structured_output_mode=STRUCTURED_OUTPUT_UNSET,
+    direct: bool | None = None,
 ) -> dict:
     """Validate ``entry`` and return a copy with Connect's defaults filled in.
 
@@ -1047,6 +1116,11 @@ def configure_entry(
     - ``cache_enabled=False`` turns off explicit prompt-cache options and
       markers (the provider's automatic caching is unaffected); True selects
       the runtime's automatic policy; None keeps the entry's setting.
+    - ``direct`` selects the inference transport. Connect defaults to the
+      official provider SDKs; a stored ``direct=False`` is kept, and an
+      explicit ``direct`` overrides it and invalidates checks recorded over
+      the other transport. Metadata alone never selects a transport in
+      ordinary registry clients.
 
     Also records the active reasoning settings and warnings in
     ``provenance`` and recomputes which test results are still current.
@@ -1082,6 +1156,26 @@ def configure_entry(
     from nooa.unifiedllm.media_inputs import validate_media_inputs
 
     result = deepcopy(entry)
+    if result.get("client_type") == "decision":
+        # Decision models use their own HTTP client; the LLM transport choice
+        # does not apply to them.
+        result.setdefault("transport", "direct")
+    else:
+        selected = result.get("direct", True) if direct is None else direct
+        if not isinstance(selected, bool):
+            raise ValueError("direct must be a boolean")
+        result["provenance"] = _transport_provenance(result, selected=selected)
+        previous_rejection = entry.get("provenance", {}).get("encrypted_reasoning", {})
+        if (
+            previous_rejection.get("source") == "connect"
+            and previous_rejection.get("outcome") == "rejected"
+            and "encrypted_reasoning" not in result["provenance"]
+            and result.get("include") == []
+        ):
+            # A learned transport-specific opt-out is not a user-selected opt-out.
+            result["include"] = ["reasoning.encrypted_content"]
+        result["direct"] = selected
+        result["transport"] = "direct" if selected else "litellm"
     effective_mode = (
         entry.get("structured_output_mode")
         if structured_output_mode is STRUCTURED_OUTPUT_UNSET
@@ -1114,7 +1208,6 @@ def configure_entry(
     for patch in (result.get("reasoning_levels") or {}).values():
         if "media_inputs" in patch or "media_inputs" in (patch.get("extra_body") or {}):
             raise ValueError("media_inputs belongs on the connection, not a reasoning level")
-    result.setdefault("transport", "direct")
     if result.get("client_type") == "decision":
         if cache_enabled is not None:
             raise ValueError("Decision models do not configure chat caching")
@@ -1524,7 +1617,7 @@ def entry_warnings(entry: dict) -> list[str]:
         ]
     )
     cap = entry.get("max_tokens")
-    evidence = entry.get("provenance", {})
+    evidence = _transport_provenance(entry)
     records = {**evidence.get("probes", {}), **evidence.get("session_checks", {})}.values()
     if cap and not any(
         r.get("outcome") == "accepted"
@@ -1679,6 +1772,7 @@ def plan(
     existing_entry: dict | None = None,
     session_checks: bool = False,
     reply_tokens: int | None = None,
+    direct: bool | None = None,
     cache_enabled: bool | None = None,
     structured_output_mode=STRUCTURED_OUTPUT_UNSET,
     media_inputs: list[str] | tuple[str, ...] | None = None,
@@ -1972,6 +2066,7 @@ def plan(
         # Chat and Responses clients expect the API base including /v1.
         "api_base": api_base.removesuffix("/v1") if api_style == "anthropic" else api_base,
         "api_key_env": api_key_env,
+        "direct": direct if direct is not None else (existing_entry or {}).get("direct", True),
     }
     if media_inputs is None and existing_entry and same_media_route(existing_entry, entry):
         entry["media_inputs"] = list(validate_media_inputs(existing_entry.get("media_inputs")))
@@ -2061,6 +2156,8 @@ def plan(
         entry["allowed_openai_params"] = sorted({key for patch in levels.values() for key in patch})
     if (default := reasoning.get("default_effort")) in levels:
         entry["reasoning_default"] = default
+    if existing_entry:
+        existing_entry = {**existing_entry, "provenance": _transport_provenance(existing_entry)}
     if existing_entry and same_media_route(existing_entry, entry):
         if reasoning_levels is None and "reasoning_levels" in existing_entry:
             entry["reasoning_levels"] = deepcopy(existing_entry["reasoning_levels"])
@@ -2094,6 +2191,7 @@ def plan(
             existing_entry
             and same_media_route(existing_entry, entry)
             and existing_entry.get("api_key_env") == entry.get("api_key_env")
+            and existing_entry.get("direct") == entry.get("direct")
         ):
             # Keep the user's store/include values; saves drop provenance, so
             # the values themselves must be carried over.
@@ -2234,6 +2332,7 @@ def plan(
             "structured_output_mode",
             "reasoning_level",
             "reasoning_levels",
+            "direct",
         )
         if all(existing_entry.get(key) == entry.get(key) for key in keys) and existing_entry.get(
             "cache_breakpoint", "auto"
@@ -2339,6 +2438,14 @@ async def _run_probe(alias: str, entry: dict, probe: Probe, api_key: str | None)
     attachments_sent = []
     output_settings_sent = []
     response_status = []
+    transport = "direct" if client.direct else "litellm"
+    wire_evidence = {
+        "api_style": entry["api_style"],
+        "request_count": 0,
+        "telemetry": "owned httpx capture; LiteLLM callbacks unavailable for direct SDKs"
+        if client.direct
+        else "owned httpx capture",
+    }
     reply_evidence = {}
     schema_carrier = None
     schema_completed = False
@@ -2476,6 +2583,12 @@ async def _run_probe(alias: str, entry: dict, probe: Probe, api_key: str | None)
             **(resolved.get("extra_body") or {}),
         }
         wire = json.loads(request.content)
+        wire_evidence["request_count"] += 1
+        wire_evidence["reply_limits"] = {
+            k: wire[k] for k in REPLY_CAP_KEYS if isinstance(wire.get(k), int)
+        }
+        if isinstance(wire.get("model"), str):
+            wire_evidence["model"] = wire["model"][:512]
         if typed_media_check and entry["api_style"] == "anthropic" and not native:
             tools = wire.get("tools", [])
             choice = wire.get("tool_choice", {})
@@ -2584,7 +2697,6 @@ async def _run_probe(alias: str, entry: dict, probe: Probe, api_key: str | None)
             # typed answer, not a tool request, so count it as a final answer.
             # Other test calls are not affected.
             reply_evidence.update(finish_reason="stop", final_answer_observed=True)
-        transport = getattr(client, "transport", "litellm")
         observed = (len(settings_sent) == 1 and all(settings_sent)) if settings_sent else None
         response.metadata["connect_evidence"] = {
             **reply_evidence,
@@ -2594,8 +2706,9 @@ async def _run_probe(alias: str, entry: dict, probe: Probe, api_key: str | None)
             "output_settings_observed": len(output_settings_sent) == 1
             and all(output_settings_sent),
         }
-        return response, observed, transport
+        return response, observed, transport, wire_evidence
     except Exception as exc:
+        exc.__dict__.update(_connect_transport=transport, _connect_wire_evidence=wire_evidence)
         exc._connect_evidence = {
             **reply_evidence,
             **carrier_evidence,
@@ -2847,6 +2960,7 @@ def diagnostic_prompt(
             "endpoint",
             "api_key_env",
             "transport",
+            "direct",
             "max_tokens",
             "store",
             "include",
@@ -2897,6 +3011,8 @@ def diagnostic_prompt(
                         "effective_alias_source",
                         "nooa_version",
                         "transport_override",
+                        "direct",
+                        "requested_transport",
                         "approved_budget_tokens",
                         "remaining_budget_tokens",
                         "output_tokens",
@@ -2973,6 +3089,7 @@ async def run_steps(
             and previous.get("request") == probe.body
             and previous.get("client") == "unifiedllm"
             and previous.get("settings_sent") is True
+            and previous.get("transport") == entry["transport"]
             and previous.get("structured_output_mode") == entry.get("structured_output_mode")
             and (
                 probe.name != "routing"
@@ -2983,7 +3100,9 @@ async def run_steps(
             )
         ):
             if probe.name == "routing" and entry.get("include"):
-                provenance.setdefault("encrypted_reasoning", {})["outcome"] = "accepted"
+                provenance.setdefault("encrypted_reasoning", {}).update(
+                    outcome="accepted", transport=entry["transport"]
+                )
             yield ProbeUpdate(
                 probe.name, {**deepcopy(previous), "reason": "previous result reused"}
             )
@@ -3062,7 +3181,7 @@ async def run_steps(
         }
         try:
             async with deadline:
-                response, settings_sent, transport = await _run_probe(
+                response, settings_sent, transport, wire_evidence = await _run_probe(
                     proposal.alias, entry, probe, key
                 )
             usage = response.usage
@@ -3161,6 +3280,9 @@ async def run_steps(
 
             status = getattr(exc, "_connect_http_status", getattr(exc, "status_code", None))
             record["error"] = type(exc).__name__
+            if hasattr(exc, "_connect_transport"):
+                record["transport"] = exc.__dict__["_connect_transport"]
+                record["wire_evidence"] = exc.__dict__["_connect_wire_evidence"]
             record["elapsed_seconds"] = round(time.monotonic() - started, 3)
             if isinstance(status, int):
                 record["status_code"] = status
@@ -3243,6 +3365,7 @@ async def run_steps(
             elapsed_seconds=round(time.monotonic() - started, 3),
             client="unifiedllm",
             transport=transport,
+            wire_evidence=wire_evidence,
             request=deepcopy(probe.body),
             reasoning_observed=reasoning,
             reasoning_encrypted=reasoning_encrypted,
@@ -3329,7 +3452,9 @@ async def run_steps(
         spent += max(0, tokens - probe.token_estimate)
         yield ProbeUpdate(probe.name, deepcopy(record))
         if probe.name == "routing" and entry.get("include"):
-            provenance.setdefault("encrypted_reasoning", {})["outcome"] = "accepted"
+            provenance.setdefault("encrypted_reasoning", {}).update(
+                outcome="accepted", transport=entry["transport"]
+            )
     provenance["requests_accepted"] = [
         name for name, item in records.items() if item["outcome"] == "accepted"
     ]
@@ -3538,6 +3663,7 @@ async def check_interfaces(
     output_tokens: int = DISCOVERY_OUTPUT_TOKENS,
     api_key: str | None = None,
     styles: tuple[str, ...] = ("chat", "responses", "anthropic"),
+    direct: bool = True,
     endpoints: Mapping[str, str] | None = None,
     allow_cross_origin_credentials: bool = False,
     timeout_seconds: float = INTERFACE_DISCOVERY_TIMEOUT,
@@ -3637,6 +3763,7 @@ async def check_interfaces(
             output_tokens=output_tokens,
             reasoning_levels=style_reasoning_levels,
             reasoning_output_tokens=reasoning_output_tokens,
+            direct=direct,
             decision_checks=False,
         )
         if style in DECISION_API_STYLES:

@@ -75,6 +75,7 @@ class WizardState:
     settings_prefill: Any = field(default_factory=dict, init=False)
     route_settings_prefill: Any = field(default_factory=dict, init=False)
     data: Any = None
+    direct: bool = True
     default_style: Any = None
     discovery_endpoint: Any = None
     endpoint_models_url: Any = None
@@ -265,6 +266,10 @@ async def display_checks(
                     return event
                 missing = connect.unobserved_reasoning_levels(
                     {
+                        # Live events carry actual client identity, not legacy
+                        # persisted metadata. Keep the evidence validator enabled.
+                        "direct": event.outcome.get("transport") == "direct",
+                        "transport": event.outcome.get("transport", "litellm"),
                         "reasoning_levels": reasoning_levels or {},
                         "provenance": {"probes": {event.name: event.outcome}},
                     }
@@ -981,6 +986,7 @@ def check_interfaces(state: WizardState) -> bool:
                             budget_tokens=max(0, state.budget_tokens - state.tokens_spent),
                             output_tokens=state.output_tokens,
                             api_key=state.api_key,
+                            direct=state.direct,
                             styles=retry_styles,
                             endpoints=state.interface_endpoints,
                             allow_cross_origin_credentials=state.share_interface_key,
@@ -1039,6 +1045,7 @@ def check_interfaces(state: WizardState) -> bool:
                             failed_checks,
                             api_key=state.api_key,
                             run_context=diagnostic_context(
+                                direct=state.direct,
                                 target=state.path,
                                 alias=state.alias,
                                 model=state.model,
@@ -2550,6 +2557,7 @@ def configure_checks(state: WizardState) -> bool:
         state.api_style,
         state.endpoint,
         state.api_key_env,
+        direct=state.direct,
         catalogue=planning_candidate,
         catalogue_settings=bool(state.edited_settings),
         endpoint_model=state.selected_endpoint_model,
@@ -2619,6 +2627,10 @@ def configure_checks(state: WizardState) -> bool:
             merged.pop(field, None)
             if field in state.proposal.entry:
                 merged[field] = deepcopy(state.proposal.entry[field])
+        if merged.get("client_type") != "decision":
+            # Decision models use their own HTTP client, not an LLM transport.
+            merged["direct"] = state.direct
+            merged["transport"] = "direct" if state.direct else "litellm"
         # The plan was built with no media inputs, because its route is only
         # an approximation of the saved entry. Put the user's media choice on
         # the saved entry; refresh_plan below checks it before any test call
@@ -2634,7 +2646,7 @@ def configure_checks(state: WizardState) -> bool:
         if "reasoning_levels" not in state.editing and not merged.get("reasoning_levels"):
             merged.pop("reasoning_levels", None)
         merged["provenance"] = {
-            **deepcopy(state.editing.get("provenance", {})),
+            **connect._transport_provenance(state.editing, selected=state.direct),
             **state.proposal.entry["provenance"],
         }
         merged["provenance"]["probes"] = {}  # Old test results do not apply to edits.
@@ -2955,6 +2967,7 @@ def run_checks(state: WizardState) -> bool:
                     checks,
                     api_key=state.api_key,
                     run_context=diagnostic_context(
+                        direct=state.direct,
                         target=state.path,
                         alias=state.alias,
                         model=state.model,
@@ -3893,6 +3906,7 @@ def run_wizard(**options):
                     {"setup": {"outcome": "failed", "error": type(exc).__name__, "detail": detail}},
                     api_key=state.api_key,
                     run_context=diagnostic_context(
+                        direct=state.direct,
                         target=state.path,
                         alias=state.alias,
                         model=state.model,

@@ -131,6 +131,7 @@ def diagnostic_context(
     stage=None,
     discovery_succeeded=None,
     interface_timeout_seconds=90,  # == connect.INTERFACE_DISCOVERY_TIMEOUT (tested)
+    direct=None,
 ):
     """Return a dict describing this run, for troubleshooting output.
 
@@ -183,10 +184,11 @@ def diagnostic_context(
             )
         },
     }
-    override = os.environ.get("NOOA_LLM_TRANSPORT")
-    context["transport_override"] = (
-        override if override in {None, "direct", "litellm"} else "invalid"
-    )
+    # SDK selection is constructor-only; the old environment selector is ignored.
+    context["transport_override"] = None
+    if direct is not None:
+        context["direct"] = direct
+        context["requested_transport"] = "direct" if direct else "litellm"
     try:
         context["registry_files"] = [str(p.resolve()) for p in llm_config_chain()]
         if target:
@@ -217,6 +219,7 @@ def diagnostic_context(
                     model,
                     "--stage",
                     "interfaces",
+                    *(["--litellm"] if direct is False else []),
                     "--endpoint",
                     address,
                     *(

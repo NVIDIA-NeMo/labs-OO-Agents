@@ -509,8 +509,13 @@ async def test_media_unobserved_request_retains_unknown_classification(monkeypat
     original = connect._run_probe
 
     async def unobserved(alias, entry, probe, api_key):
-        response, settings_sent, transport = await original(alias, entry, probe, api_key)
-        return response, None if probe.name.startswith("media:") else settings_sent, transport
+        response, settings_sent, transport, wire = await original(alias, entry, probe, api_key)
+        return (
+            response,
+            None if probe.name.startswith("media:") else settings_sent,
+            transport,
+            wire,
+        )
 
     monkeypatch.setattr(connect, "_run_probe", unobserved)
     calls = []

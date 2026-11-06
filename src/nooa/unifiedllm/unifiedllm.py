@@ -13,7 +13,7 @@ from collections.abc import Callable, Coroutine, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import litellm
 from pydantic import BaseModel, RootModel
@@ -54,6 +54,9 @@ from .structured_output import (
     anthropic_output_format,
     validate_structured_output_mode,
 )
+
+if TYPE_CHECKING:
+    from .direct import DirectTransport
 
 logger = logging.getLogger(__name__)
 
@@ -1259,6 +1262,7 @@ class UnifiedLLM(ABC):
         self,
         model: str,
         *,
+        direct: bool = False,
         structured_output_mode: StructuredOutputMode = None,
         reasoning_levels: dict[str, dict[str, Any]] | None = None,
         reasoning_default: str | None = None,
@@ -1266,6 +1270,14 @@ class UnifiedLLM(ABC):
         media_inputs: list[MediaInput] | tuple[MediaInput, ...] | None = None,
         **config,
     ):
+        if type(direct) is not bool:
+            raise ValueError("direct must be a boolean")
+        extra = config.get("extra_body")
+        if direct and extra is not None and not isinstance(extra, Mapping):
+            raise ValueError("extra_body must be a mapping")
+        if isinstance(extra, Mapping) and "direct" in extra:
+            raise ValueError("direct is a constructor-only setting, not a wire field")
+        self.direct = direct
         self.structured_output_mode = validate_structured_output_mode(structured_output_mode)
         if self.structured_output_mode == "anthropic" and not isinstance(self, CompletionClient):
             raise ValueError(
@@ -1287,7 +1299,14 @@ class UnifiedLLM(ABC):
         self.cache_breakpoint = None
         # Per-client HTTP transport (httpx clients + litellm wrappers). Set by
         # concrete subclasses; guarded here so base helpers stay safe.
-        self._http: _ClientHttp | None = None
+        self._http: _ClientHttp | DirectTransport | None = None
+
+    def _direct_transport(self) -> "DirectTransport":
+        """Narrow the owned transport for official-SDK-only operations."""
+        from .direct import DirectTransport
+
+        assert isinstance(self._http, DirectTransport)
+        return self._http
 
     @property
     def reasoning_levels(self) -> tuple[str, ...] | None:
@@ -1319,6 +1338,11 @@ class UnifiedLLM(ABC):
         """
         from nooa.unifiedllm.route_identity import no_endpoint_override
 
+        extra = overrides.get("extra_body")
+        if self.direct and extra is not None and not isinstance(extra, Mapping):
+            raise ValueError("extra_body must be a mapping")
+        if "direct" in overrides or (isinstance(extra, Mapping) and "direct" in extra):
+            raise ValueError("direct is a constructor-only setting")
         overrides = {
             key: value
             for key, value in overrides.items()
@@ -1433,6 +1457,18 @@ class UnifiedLLM(ABC):
             raise ValueError("model must be a non-empty string")
         return model
 
+    def _replay_scope(self, model, style, params):
+        if not self.direct:
+            return replay_state.replay_scope(model, style, params)
+        import hashlib
+
+        wire_model, provider = self._direct_transport().route(model, params)
+        if provider not in {"openai", "anthropic", "deepseek", "gemini"} or (
+            style == "responses" and provider != "openai"
+        ):
+            return None
+        return f"{style}:{provider}:sha256:{hashlib.sha256(wire_model.encode()).hexdigest()}"
+
     def _validate_cache_breakpoint_model(self, effective_model: str) -> None:
         """Reject applying a model-declared cache mapping to a call override."""
         if self.cache_breakpoint not in {None, "auto"} and effective_model != self.model:
@@ -1441,9 +1477,13 @@ class UnifiedLLM(ABC):
                 "with a per-call model override"
             )
 
-    @staticmethod
-    def _validate_request_config(name: str, call_config: dict[str, Any]) -> None:
+    def _validate_request_config(self, name: str, call_config: dict[str, Any]) -> None:
         """Keep provider payloads and routing on their validated top-level paths."""
+        if self.direct:
+            managed = {"messages", "input", "system", "instructions"}
+            if managed & call_config.keys():
+                raise ValueError("Conversation fields are managed by UnifiedLLM; use messages")
+            self._direct_transport().validate({"model": self.model, **call_config})
         reject_legacy_cache_config(call_config)
         if "structured_output_mode" in call_config or (
             isinstance(call_config.get("extra_body"), Mapping)
@@ -1510,7 +1550,10 @@ class UnifiedLLM(ABC):
         """
         mapping = self.cache_breakpoint
         if mapping == "auto" and not responses:
-            mapping = "anthropic" if _is_anthropic_model(model or self.model) else None
+            if self.direct:
+                mapping = "anthropic" if self._direct_transport().api_style == "anthropic" else None
+            else:
+                mapping = "anthropic" if _is_anthropic_model(model or self.model) else None
         return mapping
 
     def _prepare_cache_boundary(self, messages, *, responses, model=None, instructions=None):
@@ -2303,10 +2346,16 @@ class CompletionClient(UnifiedLLM):
         # client, so a caller-owned client shared by several CompletionClients
         # holds no reference to them; concurrent calls each see their own
         # expected schema through the ContextVar.
-        client = api_params.get("client")
-        http = getattr(client, "_client", None)
-        if http is None:
-            http = getattr(client, "client", None)
+        if self.direct:
+            # Direct SDK clients borrow this client's own httpx pools, so the
+            # same hook checks the request the official SDK actually sends.
+            transport = self._direct_transport()
+            http = transport.httpx_async if is_async else transport.httpx_sync
+        else:
+            client = api_params.get("client")
+            http = getattr(client, "_client", None)
+            if http is None:
+                http = getattr(client, "client", None)
         expected_type = httpx.AsyncClient if is_async else httpx.Client
         if not isinstance(http, expected_type):
             raise ValueError(
@@ -2381,6 +2430,7 @@ class CompletionClient(UnifiedLLM):
         http_config: HttpConfig | None = None,
         cache_breakpoint: Literal["auto", "anthropic"] | None = "auto",
         *,
+        direct: bool = False,
         structured_output_mode: StructuredOutputMode = None,
         media_inputs: list[MediaInput] | tuple[MediaInput, ...] | None = None,
         **config,
@@ -2418,6 +2468,9 @@ class CompletionClient(UnifiedLLM):
                 model and endpoint and is never chosen from the model name.
             media_inputs: Explicit allowed inputs: image, audio, video, pdf.
                 Absent/empty is text-only. PDF means application/pdf only.
+            direct: Strict boolean official SDK opt-in; default False keeps LiteLLM.
+                Constructor-only, never sent on the wire. See docs/direct-provider-sdks.md
+                for supported routes and the direct-mode tracing limitations.
             **config: Additional configuration passed to litellm (api_key, api_base, etc.)
         """
         if cache_breakpoint not in {None, "auto", "anthropic"}:
@@ -2426,6 +2479,7 @@ class CompletionClient(UnifiedLLM):
             )
         super().__init__(
             model,
+            direct=direct,
             structured_output_mode=structured_output_mode,
             media_inputs=media_inputs,
             **config,
@@ -2433,7 +2487,24 @@ class CompletionClient(UnifiedLLM):
         self.retry_config = retry_config or RetryConfig()
         self.cache_breakpoint = cache_breakpoint
         self._http_config = http_config or HttpConfig()
-        self._http = _ClientHttp.for_completion(self.model, self.config, self._http_config)
+        if self.direct:
+            from .direct import DirectTransport
+
+            style = "anthropic" if model.startswith("anthropic/") else "chat"
+            # Native Messages uses 529 for overload. Extend only this client's
+            # default status policy; an explicitly supplied set is authoritative.
+            if style == "anthropic" and (
+                retry_config is None
+                or "retryable_status_codes" not in retry_config.model_fields_set
+            ):
+                self.retry_config = self.retry_config.model_copy(
+                    update={
+                        "retryable_status_codes": self.retry_config.retryable_status_codes | {529}
+                    }
+                )
+            self._http = DirectTransport(model, style, self.config, self._http_config)
+        else:
+            self._http = _ClientHttp.for_completion(self.model, self.config, self._http_config)
 
     def _convert_tool_to_schema(self, tool: Tool) -> dict[str, Any]:
         """Convert Tool object to Completion API schema format"""
@@ -2456,6 +2527,8 @@ class CompletionClient(UnifiedLLM):
         under the other spelling, with a trailing slash or a different host case
         is the same route and keeps the owned transport.
         """
+        if self.direct:
+            return None
         from nooa.unifiedllm.route_identity import endpoint_changed
 
         if (
@@ -2470,7 +2543,7 @@ class CompletionClient(UnifiedLLM):
             # the corresponding call parameters. Let it build the correct client
             # for overrides; these calls use LiteLLM's default HTTP pool settings.
             return None
-        assert self._http is not None
+        assert isinstance(self._http, _ClientHttp)
         client = self._http.async_client if is_async else self._http.sync_client
         return _with_sdk_retries(client, max_retries)
 
@@ -2493,7 +2566,7 @@ class CompletionClient(UnifiedLLM):
         native_output = self._native_output_for_call(kwargs, call_config)
         effective_model = self._effective_model(call_config)
         self._validate_cache_breakpoint_model(effective_model)
-        state_scope = replay_state.replay_scope(effective_model, "chat", call_config)
+        state_scope = self._replay_scope(effective_model, "chat", call_config)
         # Scope's resolved provider (from litellm) and _resolve_cache_mapping
         # can disagree for gateway-routed models; the latter -- not scope --
         # decides whether Anthropic-style cache_control marking is applied.
@@ -2503,6 +2576,7 @@ class CompletionClient(UnifiedLLM):
             state_scope,
             anthropic_cache_marking=cache_mapping == "anthropic",
             media_inputs=self._request_media_inputs(call_config),
+            direct=self.direct,
         )
 
         self._validate_implemented_media(prepared_messages, call_config)
@@ -2548,27 +2622,43 @@ class CompletionClient(UnifiedLLM):
         # RetryConfig owns endpoint retries. LiteLLM otherwise has the OpenAI SDK
         # retry each attempt twice more, tripling the configured budget. An
         # explicit max_retries passthrough still opts into SDK retries.
-        api_params.setdefault("max_retries", 0)
+        if not self.direct:
+            # Direct SDK clients are built with max_retries=0 and reject a
+            # per-request SDK retry setting; RetryConfig owns retries there.
+            api_params.setdefault("max_retries", 0)
 
         retry_on_empty = self.retry_config.retry_on_empty_content if self.retry_config else False
 
-        if "client" in api_params:
-            api_params["client"] = _with_sdk_retries(
-                api_params["client"], api_params["max_retries"]
-            )
-        else:
-            http_client = self._completion_http_client(
-                call_config, is_async=False, max_retries=api_params["max_retries"]
-            )
-            if http_client is not None:
-                api_params["client"] = http_client
+        if not self.direct:
+            if "client" in api_params:
+                api_params["client"] = _with_sdk_retries(
+                    api_params["client"], api_params["max_retries"]
+                )
+            else:
+                http_client = self._completion_http_client(
+                    call_config, is_async=False, max_retries=api_params["max_retries"]
+                )
+                if http_client is not None:
+                    api_params["client"] = http_client
 
         def _make_call():
             with self._native_output_request_scope(
                 api_params, output_model, native_output, is_async=False
             ):
-                raw_response = _collect_sync(litellm.completion(**api_params))
+                raw_response = (
+                    self._direct_transport().call(api_params)
+                    if self.direct
+                    else _collect_sync(litellm.completion(**api_params))
+                )
             reasoning, _ = _extract_reasoning_and_usage(raw_response)
+            if self.direct and not reasoning:
+                # Inspect for retry only; signed blocks own the public capture.
+                blocks = getattr(raw_response.choices[0].message, "thinking_blocks", None) or []
+                reasoning = "\n".join(
+                    block.get("thinking", "") for block in blocks if block.get("type") == "thinking"
+                )
+                if not reasoning and blocks:
+                    reasoning = "[redacted thinking]"
             text_content = raw_response.choices[0].message.content or ""  # type: ignore[union-attr]
 
             # Raise EmptyContentError to trigger retry if configured
@@ -2614,7 +2704,7 @@ class CompletionClient(UnifiedLLM):
         native_output = self._native_output_for_call(kwargs, call_config)
         effective_model = self._effective_model(call_config)
         self._validate_cache_breakpoint_model(effective_model)
-        state_scope = replay_state.replay_scope(effective_model, "chat", call_config)
+        state_scope = self._replay_scope(effective_model, "chat", call_config)
         # Scope's resolved provider (from litellm) and _resolve_cache_mapping
         # can disagree for gateway-routed models; the latter -- not scope --
         # decides whether Anthropic-style cache_control marking is applied.
@@ -2624,6 +2714,7 @@ class CompletionClient(UnifiedLLM):
             state_scope,
             anthropic_cache_marking=cache_mapping == "anthropic",
             media_inputs=self._request_media_inputs(call_config),
+            direct=self.direct,
         )
 
         self._validate_implemented_media(prepared_messages, call_config)
@@ -2669,26 +2760,32 @@ class CompletionClient(UnifiedLLM):
         # RetryConfig owns endpoint retries. LiteLLM otherwise has the OpenAI SDK
         # retry each attempt twice more, tripling the configured budget. An
         # explicit max_retries passthrough still opts into SDK retries.
-        api_params.setdefault("max_retries", 0)
+        if not self.direct:
+            # Direct SDK clients are built with max_retries=0 and reject a
+            # per-request SDK retry setting; RetryConfig owns retries there.
+            api_params.setdefault("max_retries", 0)
 
         retry_on_empty = self.retry_config.retry_on_empty_content if self.retry_config else False
 
-        if "client" in api_params:
-            api_params["client"] = _with_sdk_retries(
-                api_params["client"], api_params["max_retries"]
-            )
-        else:
-            http_client = self._completion_http_client(
-                call_config, is_async=True, max_retries=api_params["max_retries"]
-            )
-            if http_client is not None:
-                api_params["client"] = http_client
+        if not self.direct:
+            if "client" in api_params:
+                api_params["client"] = _with_sdk_retries(
+                    api_params["client"], api_params["max_retries"]
+                )
+            else:
+                http_client = self._completion_http_client(
+                    call_config, is_async=True, max_retries=api_params["max_retries"]
+                )
+                if http_client is not None:
+                    api_params["client"] = http_client
 
         async def _make_call():
             async def provider_call():
                 with self._native_output_request_scope(
                     api_params, output_model, native_output, is_async=True
                 ):
+                    if self.direct:
+                        return await self._direct_transport().acall(api_params)
                     return await _collect_async(await litellm.acompletion(**api_params))
 
             raw_response = await _run_async_provider_call(
@@ -2696,6 +2793,14 @@ class CompletionClient(UnifiedLLM):
                 request_timeout=self._http_config.request_timeout,
             )
             reasoning, _ = _extract_reasoning_and_usage(raw_response)
+            if self.direct and not reasoning:
+                # Inspect for retry only; signed blocks own the public capture.
+                blocks = getattr(raw_response.choices[0].message, "thinking_blocks", None) or []
+                reasoning = "\n".join(
+                    block.get("thinking", "") for block in blocks if block.get("type") == "thinking"
+                )
+                if not reasoning and blocks:
+                    reasoning = "[redacted thinking]"
             text_content = raw_response.choices[0].message.content or ""  # type: ignore[union-attr]
 
             # Raise EmptyContentError to trigger retry if configured
@@ -2831,6 +2936,7 @@ class ResponsesClient(UnifiedLLM):
         http_config: HttpConfig | None = None,
         cache_breakpoint: Literal["auto", "openai"] | None = "auto",
         *,
+        direct: bool = False,
         media_inputs: list[MediaInput] | tuple[MediaInput, ...] | None = None,
         **config,
     ):
@@ -2863,15 +2969,23 @@ class ResponsesClient(UnifiedLLM):
                 explicit mode without a breakpoint, avoiding all cache writes.
             media_inputs: Explicit allowed inputs: image, audio, video, pdf.
                 Absent/empty is text-only. PDF means application/pdf only.
+            direct: Strict boolean official SDK opt-in; default False keeps LiteLLM.
+                Constructor-only, never sent on the wire. See docs/direct-provider-sdks.md
+                for supported routes and the direct-mode tracing limitations.
             **config: Additional configuration passed to litellm (api_key, api_base, etc.)
         """
         if cache_breakpoint not in {None, "auto", "openai"}:
             raise ValueError("ResponsesClient cache_breakpoint must be 'auto', 'openai', or None")
-        super().__init__(model, media_inputs=media_inputs, **config)
+        super().__init__(model, direct=direct, media_inputs=media_inputs, **config)
         self.retry_config = retry_config or RetryConfig()
         self.cache_breakpoint = cache_breakpoint
         self._http_config = http_config or HttpConfig()
-        self._http = _ClientHttp.for_responses(self.model, self.config, self._http_config)
+        if self.direct:
+            from .direct import DirectTransport
+
+            self._http = DirectTransport(model, "responses", self.config, self._http_config)
+        else:
+            self._http = _ClientHttp.for_responses(self.model, self.config, self._http_config)
 
     def _prepare_call_config(self, overrides: dict[str, Any]) -> dict[str, Any]:
         params = super()._prepare_call_config(overrides)
@@ -2926,9 +3040,9 @@ class ResponsesClient(UnifiedLLM):
         self._validate_request_config("input", call_config)
         effective_model = self._effective_model(call_config)
         self._validate_cache_breakpoint_model(effective_model)
-        state_scope = replay_state.replay_scope(effective_model, "responses", call_config)
+        state_scope = self._replay_scope(effective_model, "responses", call_config)
         native_encrypted_reasoning = replay_state.native_encrypted_reasoning_expected(
-            call_config, state_scope
+            call_config, state_scope, direct=self.direct
         )
         input_messages, instructions, openai_explicit = self._prepare_input(
             self._prepare_media_messages(messages, call_config),
@@ -2969,11 +3083,14 @@ class ResponsesClient(UnifiedLLM):
         add_session_affinity_header(api_params)
 
         http_client = self._http
-        assert http_client is not None
-        if http_client.sync_client is not None:
-            api_params.setdefault("client", http_client.sync_client)
+        if not self.direct:
+            assert isinstance(http_client, _ClientHttp)
+            if http_client.sync_client is not None:
+                api_params.setdefault("client", http_client.sync_client)
 
         def _make_call():
+            if self.direct:
+                return self._direct_transport().call(api_params)
             return cast("litellm.ResponsesAPIResponse", litellm.responses(**api_params))
 
         # Track LLM call for debugging (visible via SIGUSR2 if nooa debug handler installed)
@@ -3015,9 +3132,9 @@ class ResponsesClient(UnifiedLLM):
         self._validate_request_config("input", call_config)
         effective_model = self._effective_model(call_config)
         self._validate_cache_breakpoint_model(effective_model)
-        state_scope = replay_state.replay_scope(effective_model, "responses", call_config)
+        state_scope = self._replay_scope(effective_model, "responses", call_config)
         native_encrypted_reasoning = replay_state.native_encrypted_reasoning_expected(
-            call_config, state_scope
+            call_config, state_scope, direct=self.direct
         )
         input_messages, instructions, openai_explicit = self._prepare_input(
             self._prepare_media_messages(messages, call_config),
@@ -3058,12 +3175,15 @@ class ResponsesClient(UnifiedLLM):
         add_session_affinity_header(api_params)
 
         http_client = self._http
-        assert http_client is not None
-        if http_client.async_client is not None:
-            api_params.setdefault("client", http_client.async_client)
+        if not self.direct:
+            assert isinstance(http_client, _ClientHttp)
+            if http_client.async_client is not None:
+                api_params.setdefault("client", http_client.async_client)
 
         async def _make_call():
             async def call_provider():
+                if self.direct:
+                    return await self._direct_transport().acall(api_params)
                 return cast("litellm.ResponsesAPIResponse", await litellm.aresponses(**api_params))
 
             return await _run_async_provider_call(
@@ -3201,7 +3321,9 @@ class ResponsesClient(UnifiedLLM):
                 continue
             msg = dict(original)
             reject_boundary_dict(msg)
-            replay_state.reject_native_message(msg, state_scope)
+            replay_state.reject_native_message(
+                msg, state_scope, reject_google_signature=self.direct
+            )
             if isinstance(msg.get("content"), list) and any(
                 not isinstance(block, dict) for block in msg["content"]
             ):

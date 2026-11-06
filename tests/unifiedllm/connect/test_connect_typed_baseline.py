@@ -99,8 +99,8 @@ async def test_missing_wire_settings_rejects_baseline_and_media(monkeypatch, obs
     original = connect._run_probe
 
     async def unobserved(*args):
-        response, _, transport = await original(*args)
-        return response, observation, transport
+        response, _, transport, wire_evidence = await original(*args)
+        return response, observation, transport, wire_evidence
 
     monkeypatch.setattr(connect, "_run_probe", unobserved)
     result = await connect.check_stage(plan(test_media_inputs=["image"]), "media", api_key="fake")
@@ -232,7 +232,8 @@ async def test_runtime_cap_recovery_blocked_before_second_acall(monkeypatch):
         await client.aclose()
 
 
-async def test_sdk_retry_blocked_by_http_hook_even_if_retry_config_regresses(monkeypatch):
+@pytest.mark.parametrize("direct", [False, True])
+async def test_sdk_retry_blocked_by_http_hook_even_if_retry_config_regresses(monkeypatch, direct):
     sent = []
     real_factory = registry.client_from_config
 
@@ -247,7 +248,12 @@ async def test_sdk_retry_blocked_by_http_hook_even_if_retry_config_regresses(mon
             sent.append(request) or httpx.Response(500, json={"error": {"message": "private"}})
         ),
     )
-    result = await connect.run(plan(), approved="minimal", api_key="fake")
+    result = await connect.run(plan(direct=direct), approved="minimal", api_key="fake")
+    if direct:
+        # Direct SDKs refuse num_retries before sending; RetryConfig owns retries.
+        assert sent == []
+        assert not text_baseline_passed(result.entry["provenance"]["probes"]["routing"])
+        return
     assert len(sent) == 1 and not text_baseline_passed(
         result.entry["provenance"]["probes"]["routing"]
     )

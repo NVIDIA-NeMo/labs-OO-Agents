@@ -38,6 +38,7 @@ YAML schema::
         top_p: 1.0                           # optional
         max_tokens: 4096                     # optional
         drop_params: true                    # optional, defaults to true
+        direct: true                         # optional, explicit official SDK opt-in
         store: false                         # optional Responses API control
         include:                             # optional Responses API output fields
           - reasoning.encrypted_content
@@ -575,6 +576,7 @@ def client_from_config(
         "store",
         "include",
         "cache_breakpoint",
+        "direct",
         "structured_output_mode",
         "output_config",
         "media_inputs",

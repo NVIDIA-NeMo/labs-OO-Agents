@@ -84,8 +84,8 @@ def test_failed_configured_baseline_stops_before_save(monkeypatch, tmp_path, edi
         original = connect._run_probe
 
         async def unobserved(*args):
-            response, _, transport = await original(*args)
-            return response, None, transport
+            response, _, transport, wire_evidence = await original(*args)
+            return response, None, transport, wire_evidence
 
         monkeypatch.setattr(connect, "_run_probe", unobserved)
     monkeypatch.setattr(connect, "write", lambda *a, **kw: writes.append("registry"))

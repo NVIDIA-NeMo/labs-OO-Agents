@@ -67,7 +67,7 @@ async def test_reasoning_observed_counts_an_empty_text_reasoning_part(monkeypatc
             finish_reason="stop",
             usage=LLMUsage(input_tokens=20, output_tokens=2, total_tokens=22),
         )
-        return response, True, "litellm"
+        return response, True, "direct", {}
 
     monkeypatch.setattr(connect, "_run_probe", fake_run_probe)
     proposal = connect.plan(
@@ -104,7 +104,7 @@ async def test_redacted_thinking_block_is_flagged_as_encrypted_not_missing(monke
             finish_reason="stop",
             usage=LLMUsage(input_tokens=147, output_tokens=687, total_tokens=834),
         )
-        return response, True, "litellm"
+        return response, True, "direct", {}
 
     monkeypatch.setattr(connect, "_run_probe", fake_run_probe)
     proposal = connect.plan(
@@ -139,7 +139,7 @@ async def test_redacted_thinking_falls_back_to_char_count_for_non_base64_data(mo
             finish_reason="stop",
             usage=LLMUsage(input_tokens=147, output_tokens=687, total_tokens=834),
         )
-        return response, True, "litellm"
+        return response, True, "direct", {}
 
     monkeypatch.setattr(connect, "_run_probe", fake_run_probe)
     proposal = connect.plan(
@@ -181,7 +181,7 @@ async def test_signed_thinking_block_with_empty_text_is_flagged_with_no_size(mon
             finish_reason="stop",
             usage=LLMUsage(input_tokens=147, output_tokens=687, total_tokens=834),
         )
-        return response, True, "litellm"
+        return response, True, "direct", {}
 
     monkeypatch.setattr(connect, "_run_probe", fake_run_probe)
     proposal = connect.plan(
@@ -221,7 +221,7 @@ async def test_responses_encrypted_reasoning_item_is_flagged_as_encrypted(monkey
             finish_reason="stop",
             usage=LLMUsage(input_tokens=101, output_tokens=259, total_tokens=360),
         )
-        return response, True, "litellm"
+        return response, True, "direct", {}
 
     monkeypatch.setattr(connect, "_run_probe", fake_run_probe)
     proposal = connect.plan(
@@ -264,7 +264,7 @@ async def test_chat_encrypted_reasoning_item_is_flagged_as_encrypted(monkeypatch
             finish_reason="stop",
             usage=LLMUsage(input_tokens=101, output_tokens=259, total_tokens=360),
         )
-        return response, True, "litellm"
+        return response, True, "direct", {}
 
     monkeypatch.setattr(connect, "_run_probe", fake_run_probe)
     proposal = connect.plan(
@@ -304,7 +304,7 @@ async def test_responses_visible_summary_with_encrypted_content_is_not_flagged_a
             finish_reason="stop",
             usage=LLMUsage(input_tokens=101, output_tokens=259, total_tokens=360),
         )
-        return response, True, "litellm"
+        return response, True, "direct", {}
 
     monkeypatch.setattr(connect, "_run_probe", fake_run_probe)
     proposal = connect.plan(
@@ -344,7 +344,7 @@ async def test_chat_visible_summary_with_encrypted_content_is_not_flagged_as_wit
             finish_reason="stop",
             usage=LLMUsage(input_tokens=101, output_tokens=259, total_tokens=360),
         )
-        return response, True, "litellm"
+        return response, True, "direct", {}
 
     monkeypatch.setattr(connect, "_run_probe", fake_run_probe)
     proposal = connect.plan(
@@ -384,7 +384,7 @@ async def test_signed_thinking_block_with_real_text_is_not_flagged_as_withheld(m
             finish_reason="stop",
             usage=LLMUsage(input_tokens=147, output_tokens=687, total_tokens=834),
         )
-        return response, True, "litellm"
+        return response, True, "direct", {}
 
     monkeypatch.setattr(connect, "_run_probe", fake_run_probe)
     proposal = connect.plan(
@@ -418,7 +418,7 @@ async def test_visible_reasoning_text_with_no_litellm_estimate_reports_char_coun
             finish_reason="stop",
             usage=LLMUsage(input_tokens=115, output_tokens=2329, total_tokens=2444),
         )
-        return response, True, "litellm"
+        return response, True, "direct", {}
 
     monkeypatch.setattr(connect, "_run_probe", fake_run_probe)
     proposal = connect.plan(
@@ -445,7 +445,7 @@ async def test_no_visible_reasoning_text_reports_no_char_count(monkeypatch):
             finish_reason="stop",
             usage=LLMUsage(input_tokens=115, output_tokens=20, total_tokens=135),
         )
-        return response, True, "litellm"
+        return response, True, "direct", {}
 
     monkeypatch.setattr(connect, "_run_probe", fake_run_probe)
     proposal = connect.plan(
@@ -532,7 +532,7 @@ async def test_billed_reasoning_tokens_without_any_captured_part_is_not_observed
                 input_tokens=115, output_tokens=20, total_tokens=135, reasoning_tokens=53
             ),
         )
-        return response, True, "litellm"
+        return response, True, "direct", {}
 
     monkeypatch.setattr(connect, "_run_probe", fake_run_probe)
     proposal = connect.plan(
