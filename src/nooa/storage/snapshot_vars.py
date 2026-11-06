@@ -13,7 +13,9 @@ ever holds serializable data and the snapshot can never choke on it. Because it
 is a ``MutableMapping`` (not a ``dict`` subclass) decorated with
 ``@snapshotable``, the serializer routes it through the snapshotable branch and
 captures its internal ``_data`` (already clean), instead of the strict dict
-branch.
+branch. Values are stored live, so one can still become unserializable after
+the write (``l`` in ``v["a"] = l; l.append(l)``); the checkpoint then skips
+just that key with a warning (``__snapshot_lenient_dict__``).
 
 Pydantic models can embed ``SnapshotVars`` as a field (``Todo.vars``). Python-mode
 ``model_dump()`` and ``model_copy()`` keep the ``SnapshotVars`` object. JSON mode
@@ -34,7 +36,7 @@ from typing import Any
 
 from nooa.errors.storage import SerializationError
 from nooa.storage.markers import snapshotable
-from nooa.storage.serialization import serialize
+from nooa.storage.serialization import MAX_SNAPSHOT_DEPTH, serialize
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +89,19 @@ def _is_tagged(data: Any) -> bool:
     return isinstance(data, dict) and _is_tagged_value(data.get(_TAGGED_KEY))
 
 
+# How many containers sit above a ``SnapshotVars`` value in a real checkpoint,
+# measured from the checkpoint paths (``AgentSnapshot.from_agent``):
+#   agent vars:  <attr vars>._data['k']                    -> 2
+#   todo vars:   <attr todo>._todos['id'].vars._data['k']  -> 5
+# ``SnapshotVars`` does not know which placement it is in, so the write-time
+# check uses the deepest one: a value accepted here fits within
+# ``MAX_SNAPSHOT_DEPTH`` at checkpoint wherever it sits. This is conservative
+# for agent vars, which reject values 3 levels shallower than they could
+# checkpoint. tests/storage/test_snapshot_vars.py re-measures both placements
+# and fails if this is short.
+CHECKPOINT_VALUE_DEPTH = 5
+
+
 @snapshotable
 class SnapshotVars(MutableMapping):
     """A dict-like store that silently drops non-snapshot-serializable values.
@@ -104,6 +119,10 @@ class SnapshotVars(MutableMapping):
     """
 
     _data: "dict[str, Any]"
+    # Checkpoints serialize ``_data`` per key: a value that became
+    # unserializable after it was stored (e.g. a list that now contains itself)
+    # is skipped with a warning instead of dropping every var.
+    __snapshot_lenient_dict__ = "_data"
 
     def __init__(self, data: "dict[str, Any] | None" = None) -> None:
         self._data = {}
@@ -128,14 +147,22 @@ class SnapshotVars(MutableMapping):
             logger.warning("SnapshotVars: %r will NOT be stored: %s", key, _TAGGED_REFUSED)
             return
         try:
-            serialize(value)
+            serialize(value, base_depth=CHECKPOINT_VALUE_DEPTH)
         except (SerializationError, TypeError, ValueError, RecursionError) as exc:
+            hint = ""
+            if getattr(exc, "reason", None) == "depth":
+                hint = (
+                    f" (a vars value sits up to {CHECKPOINT_VALUE_DEPTH} levels deep in a "
+                    f"checkpoint, so it may nest at most "
+                    f"{MAX_SNAPSHOT_DEPTH - CHECKPOINT_VALUE_DEPTH} levels)"
+                )
             logger.warning(
                 "SnapshotVars: value for %r (%s) is not snapshot-serializable and "
-                "will NOT be persisted (it won't survive /exit + resume): %s",
+                "will NOT be persisted (it won't survive /exit + resume): %s%s",
                 key,
                 type(value).__name__,
                 exc,
+                hint,
             )
             return
         self._data[key] = value
