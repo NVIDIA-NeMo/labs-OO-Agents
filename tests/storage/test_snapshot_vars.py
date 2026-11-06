@@ -522,3 +522,17 @@ def test_depth_hint_uses_error_reason_not_text(caplog, monkeypatch):
         v["deep"] = 1
     (message,) = [r.getMessage() for r in caplog.records if "'deep'" in r.getMessage()]
     assert "may nest at most" in message
+
+
+@pytest.mark.parametrize("marker", ["__type__", "__class__"])
+def test_vars_whose_keys_look_like_an_envelope_restore_as_a_dict(marker):
+    """Keys must not choose what deserialize() builds, on the lenient path too."""
+    from nooa.storage.serialization import deserialize
+
+    v = SnapshotVars()
+    v[marker] = "tuple"
+    v["data"] = [1, 2]
+    blob, allowlist = serialize(v)
+    restored = deserialize(blob, allowlist)
+    assert isinstance(restored._data, dict)
+    assert restored._data == {marker: "tuple", "data": [1, 2]}

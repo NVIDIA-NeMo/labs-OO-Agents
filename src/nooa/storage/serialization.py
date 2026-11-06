@@ -478,6 +478,10 @@ def _serialize_lenient_dict(
                     type(v).__name__,
                     reason,
                 )
+        # Same escape as the plain-dict branch: keys must not choose what
+        # deserialize() builds.
+        if any(k in value for k in _ENVELOPE_KEYS):
+            return {"__type__": _PLAIN_DICT, "data": result}
         return result
     finally:
         del active[key]
