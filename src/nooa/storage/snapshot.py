@@ -188,6 +188,11 @@ class AgentSnapshot(BaseModel):
                 # deeper than ``MAX_SNAPSHOT_DEPTH`` in an older checkpoint, a
                 # schema-drifted model, or a failing ``__restore_snapshot__``)
                 # must not abort the whole restore. Skip it and warn.
-                logger.warning("Snapshot: skipping non-restorable attribute %r: %s", attr_name, exc)
+                logger.warning(
+                    "Snapshot: skipping non-restorable attribute %r: %s",
+                    attr_name,
+                    exc,
+                    exc_info=True,
+                )
                 continue
             setattr(agent, attr_name, value)

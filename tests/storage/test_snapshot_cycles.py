@@ -445,5 +445,6 @@ def test_restore_skips_any_unrestorable_attribute(caplog, monkeypatch, error):
     assert agent.memory == ["a"]
     assert agent.n == 3
     assert not hasattr(agent, "broken")
-    (message,) = [r.getMessage() for r in caplog.records if "'broken'" in r.getMessage()]
-    assert "skipping non-restorable attribute" in message
+    (record,) = [r for r in caplog.records if "'broken'" in r.getMessage()]
+    assert "skipping non-restorable attribute" in record.getMessage()
+    assert record.exc_info is not None and record.exc_info[0] is error  # traceback kept
