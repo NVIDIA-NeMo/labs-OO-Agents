@@ -17,6 +17,7 @@ from typing import Any
 
 from nooa.library_manager import LibraryManager
 from nooa.skill import Skill
+from nooa.skill_registry import _RESERVED_ATTRS
 
 # ---------------------------------------------------------------------------
 # LintReport
@@ -228,6 +229,14 @@ class SkillWriting(Skill):
                 f"Invalid skill name {lib_name!r}: use {kind}, such as 'stats' or "
                 "'release_notes', with no path separators or '..'; choose another name"
             )
+        # The SkillRegistry refuses these attributes (it would save the skill but
+        # never load it), and the manager would overwrite the agent's own state.
+        attr = name.replace("-", "_")
+        if attr.startswith("_") or attr in _RESERVED_ATTRS:
+            raise ValueError(
+                f"Invalid skill name {lib_name!r}: self.{attr} is reserved (names may not "
+                "start with '_' or '-', or be an agent internal); choose another name"
+            )
 
     def _attr_conflict(self, lib_name: str) -> str | None:
         """What already holds the attribute ``lib_name`` would be loaded as, else None."""
@@ -242,9 +251,23 @@ class SkillWriting(Skill):
             existing = getattr(self._agent, attr)
         except AttributeError:
             return None
-        if isinstance(existing, Skill):
-            return None  # a skill (this one, reloaded); replacing it is a reload
+        if isinstance(existing, Skill) and self._is_this_local_skill(existing, lib_name):
+            return None  # this local skill, loaded from its directory: replacing it is a reload
         return f"self.{attr} is already an attribute of the agent ({type(existing).__name__})"
+
+    def _is_this_local_skill(self, existing: Skill, lib_name: str) -> bool:
+        """Whether ``existing`` is the skill the manager loaded from ``lib_name``'s directory.
+
+        Without a registry nothing else records ownership: any other skill on the
+        agent (``self.skill_writing`` itself, ...) has a different source directory.
+        """
+        source = existing.source_dir
+        if source is None:
+            return False
+        try:
+            return Path(source).resolve() == self._dir(lib_name).resolve()
+        except OSError:
+            return False
 
     def _dir(self, lib_name: str) -> Path:
         """The directory of a skill: the save directory's, else an older one's that exists."""
