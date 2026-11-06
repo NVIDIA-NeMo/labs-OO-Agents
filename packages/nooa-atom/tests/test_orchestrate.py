@@ -4,6 +4,7 @@
 
 import asyncio
 import hashlib
+import inspect
 
 import pytest
 from atom_test_agents import ATOM_SPEC, AtomModels, CellLLM, cell
@@ -40,8 +41,11 @@ UNCHANGED_PROMPTS = {
     # question (no options). Then the stable turn instructions moved into the
     # class doc: handle() keeps three sentences, and the locals paragraph left
     # every turn method's doc.
-    "handle": "f4558376a3b74ecd3f6685a44b534581336a1e1ea701e3e71f55afac858d72ad",
-    "handle_batch": "9eef8eb5f2d8067d02c0eb742c4f6b8006ae8fff001130277e119a8510f6027d",
+    # Digests of the inspect.cleandoc() text (2026-11-06): the same on Python
+    # 3.12 and 3.13. The earlier digests were of the raw 3.13 ``__doc__``
+    # (f4558376... and 9eef8eb5...), which only differs by its final newline.
+    "handle": "ee8d7b5f75633c30767450a5859854db4791732288c537d237508c4445e97a26",
+    "handle_batch": "718cf3c2b7434820409b57f5fded58023b2be19d88812a152dc41997a9229059",
 }
 
 RESULT = (
@@ -105,7 +109,10 @@ async def test_handle_orchestrate_rejects_need_input(tmp_path):
 
 @pytest.mark.parametrize("method", list(UNCHANGED_PROMPTS))
 def test_the_interactive_and_batch_prompts_are_unchanged(method):
-    prompt = getattr(AtomAgentBase, method).__doc__
+    # cleandoc: Python 3.13+ strips docstring indentation at compile time and
+    # 3.12 keeps it, so the raw ``__doc__`` differs between them; the prompt
+    # the model sees is the cleaned text.
+    prompt = inspect.cleandoc(getattr(AtomAgentBase, method).__doc__)
     assert hashlib.sha256(prompt.encode()).hexdigest() == UNCHANGED_PROMPTS[method]
     for phrase in ORCHESTRATOR_TEXT:
         assert phrase not in prompt
