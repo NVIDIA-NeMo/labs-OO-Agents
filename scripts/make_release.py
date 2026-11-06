@@ -59,7 +59,7 @@ GATE_MODELS = [
 GATE_RUNS = 3
 GATE_PARALLEL = 40
 CAPABILITY_CONFIG = Path("tests/capability/config.yaml")
-PACKAGES = ["nooa", "nooa-cli", "nooa-acp", "nooa-memory", "nooa-bench"]
+PACKAGES = ["nooa", "nooa-cli", "nooa-acp", "nooa-memory", "nooa-bench", "nooa-atom"]
 REPORT_PATH = REPO / "tmp" / "release-check" / "capability-report.md"
 GITHUB_REPO = "NVIDIA-NeMo/labs-OO-Agents"
 TAG_RE = re.compile(r"^v(?P<version>(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))$")
@@ -556,7 +556,7 @@ def build_and_smoke(
                 [
                     str(python),
                     "-c",
-                    "import nooa, nooa_acp, nooa_cli, nooa_memory, nooa_bench; print(nooa.__version__)",
+                    "import nooa, nooa_acp, nooa_cli, nooa_memory, nooa_bench, nooa_atom; print(nooa.__version__)",
                 ],
                 text=True,
                 capture_output=True,
