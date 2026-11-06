@@ -29,6 +29,7 @@ from pydantic import (
     ValidationError,
     field_serializer,
     field_validator,
+    model_validator,
 )
 
 from nooa import hidden, strategy
@@ -107,6 +108,17 @@ def _blank_to_none(value: str | None) -> str | None:
     return None if value is None else (value.strip() or None)
 
 
+def _without_own_kind(cls: Any, data: Any) -> Any:
+    """Accept the JSON form's ``"kind"`` tag when it names this result type.
+
+    The result types forbid unknown fields, so ``{"kind": "done", ...}`` would
+    otherwise fail; a mismatched kind still fails as an unknown field.
+    """
+    if isinstance(data, dict) and data.get("kind") == cls._turn_kind:
+        return {key: value for key, value in data.items() if key != "kind"}
+    return data
+
+
 class Done(BaseModel):
     """Turn result: the work for this turn is finished.
 
@@ -120,7 +132,9 @@ class Done(BaseModel):
     turn, ``handle_work``, requires one; other turns may leave it unset).
     """
 
+    model_config = {"extra": "forbid"}
     _turn_kind: ClassVar[ResultKind] = "done"
+    _accept_own_kind = model_validator(mode="before")(classmethod(_without_own_kind))
     explanation: str = Field(description="Status line saying what was finished; not the reply")
     message: str | None = Field(default=None, description="The reply to show the user")
     evidence: list[str] = Field(
@@ -153,6 +167,7 @@ class NeedInput(BaseModel):
 
     model_config = {"extra": "forbid"}
     _turn_kind: ClassVar[ResultKind] = "need_input"
+    _accept_own_kind = model_validator(mode="before")(classmethod(_without_own_kind))
 
     question: str = Field(description="The question to show the person")
     reason: str | None = Field(
@@ -173,7 +188,9 @@ class Waiting(BaseModel):
     next turn when one of them delivers.
     """
 
+    model_config = {"extra": "forbid"}
     _turn_kind: ClassVar[ResultKind] = "waiting"
+    _accept_own_kind = model_validator(mode="before")(classmethod(_without_own_kind))
     explanation: str = Field(description="Why the turn is waiting")
     message: str | None = Field(default=None, description="Line to show the user while waiting")
     on: list[str] = Field(

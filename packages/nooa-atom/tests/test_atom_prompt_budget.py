@@ -202,19 +202,25 @@ RESULT = (
 # -> 22,300 / 23,633, handle_work 22,459 / 23,789 -> 22,468 / 23,801,
 # handle_orchestrate 22,594 / 23,924 -> 22,603 / 23,936. Only handle_orchestrate
 # passed its system limit (22,600), so it and the bench ceiling go to 22,700.
+# Raised again when rename_session became visible in <self> (2026-11-05, Paul's
+# decision on PASS): +127 chars on every method. Measured system / total before
+# -> after: handle 22,375 / 23,708 -> 22,502 / 23,835, handle_batch 22,300 /
+# 23,633 -> 22,427 / 23,760, handle_work 22,468 / 23,801 -> 22,595 / 23,928,
+# handle_orchestrate 22,603 / 23,936 -> 22,730 / 24,063.
 LIMITS = {
-    (ATOM, "handle"): (22_600, 23_800),
-    (ATOM, "handle_batch"): (22_300, 23_900),
-    (ATOM, "handle_work"): (22_500, 24_100),
-    (ATOM, "handle_orchestrate"): (22_700, 24_200),
+    (ATOM, "handle"): (22_600, 23_900),
+    (ATOM, "handle_batch"): (22_500, 23_900),
+    (ATOM, "handle_work"): (22_700, 24_100),
+    (ATOM, "handle_orchestrate"): (22_800, 24_200),
 }
 # The bench guard's system-prompt ceiling; every agent stays under it.
 # Raised from 20,000 for the Done(message=...) guidance (2026-10-29, see above),
 # then from 21,200 to 22,600 for self.jobs.after/every/tail (2026-10-30), and
 # lowered to 22,300 when self.jobs.tail was dropped (2026-10-30), then raised to
 # 22,600 for the PR512 small fixes (2026-10-30, see above; handle_orchestrate 22,098),
-# then to 22,700 for the self.skill_writing rename (2026-11-04, see above).
-BENCH_SYSTEM_LIMIT = 22_700
+# then to 22,700 for the self.skill_writing rename (2026-11-04, see above),
+# then to 22,800 for the visible rename_session (2026-11-05, see above).
+BENCH_SYSTEM_LIMIT = 22_800
 # The one line every agent (root and child) gets in python_cell_lifetime.
 LIVE_NAMES_LINE = (
     "The python_cell_state block lists up to 20 of your live Python names and "

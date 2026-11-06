@@ -56,6 +56,7 @@ from typing import IO, Annotated, Any, Literal
 
 from nooa import hidden
 from nooa.agentdoc import spec
+from nooa.runtime.cell_deadline import deadline_cancel
 from nooa.tools import BashSession
 from nooa_atom.agent.metrics import atom_metrics
 from nooa_atom.agent.work_manager import _progress_sink, current_name, describe, job_dir
@@ -107,6 +108,16 @@ eval "unset __nooa_rc __nooa_f __nooa_was __nooa_stop __nooa_p __nooa_t __nooa_e
 _DRAIN_SECONDS = 0.5
 # How a command ends when its Shell is closed (``aclose``) before or while it runs.
 _CLOSED_BEFORE = "the shell was closed before this command started; it did not run"
+def _deadline_note(command: str) -> str:
+    """The cell deadline's note for the Shell command the cell was awaiting."""
+    shown = command if len(command) <= 80 else command[:77] + "..."
+    return (
+        f"It stopped the Shell command {shown!r}; the Shell is still usable. A command's own "
+        "timeout= returns exit 124 instead. For long commands, use "
+        "self.jobs.launch(sh.run(cmd), name=...) and return Waiting."
+    )
+
+
 _CLOSED_BEFORE_ENTRY = "the shell was closed before it was entered; no bash started"
 _CLOSED_STARTING = "the shell was closed while bash was starting; the command did not run"
 _CLOSED_DURING = "the shell was closed while this command ran; the command was stopped"
@@ -760,6 +771,8 @@ class Shell:
             except asyncio.CancelledError:
                 if progress is not None:
                     progress.close()
+                if (deadline := deadline_cancel()) is not None:
+                    deadline.note(_deadline_note(command))
                 if await self._interrupt(inner, before, session, generation):
                     raise asyncio.CancelledError(self._note) from None
                 raise

@@ -594,10 +594,10 @@ async def test_first_call_offers_one_work_vocabulary(
         "async def send(self, task",
         "async def message(self, text",  # Subagent's: the model uses Job.message
         "await self.jobs.launch(sh.run",  # commands are awaited directly
-        "rename_session",  # the host's title request names it
         'on=["mesh"]',
     ):
         assert legacy not in rendered, legacy
+    assert "async def rename_session(self, title: str)" in rendered  # documented in <self>
     for other, text in ROLE_INSTRUCTIONS.items():
         if other != MODES[method]:
             assert text not in rendered, other

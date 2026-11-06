@@ -26,8 +26,10 @@ async def test_the_deadline_cancel_is_recognised_and_its_notes_end_the_error():
         await run_with_deadline(_waiter(seen), 0.05)
     assert seen[0] is not None
     assert str(caught.value) == (
-        "Code execution timed out after 0.05 seconds. "
-        "Check for infinite loops or blocking operations. job x is still running."
+        "Code execution timed out after 0.05 seconds; the cell was stopped and "
+        "whatever it awaited was cancelled. Check for infinite loops or blocking operations, "
+        "and run long work in the background instead of awaiting it in one cell. "
+        "job x is still running."
     )
     assert deadline_cancel() is None  # outside the cell
 

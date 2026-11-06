@@ -382,3 +382,23 @@ async def test_shared_autoimport_fix_preserves_explicit_non_atom_user_binding():
         assert len(llm.calls) == 2
     finally:
         await agent.aclose()
+
+
+async def test_cell_context_lists_only_the_classes_of_active_skills(tmp_path):
+    """A loaded skill that is not active stays bound but is not advertised."""
+    from nooa.skill import Skill
+
+    class IdleSkill(Skill):
+        """A loaded, inactive skill."""
+
+    agent = AtomAgent(cwd=tmp_path, llm=CellLLM([]))
+    try:
+        agent.skills.register("test.idle_skill", IdleSkill())
+        agent.idle_skill = agent.skills.registry["test.idle_skill"]
+        assert "test.idle_skill" in agent.skills.loaded()
+        assert "test.idle_skill" not in agent.skills.activated()
+        assert "IdleSkill" not in await AtomCodeAct().python_cell_context(agent.runtime)
+        agent.skills.registry.activate(["test.idle_skill"])
+        assert "IdleSkill" in await AtomCodeAct().python_cell_context(agent.runtime)
+    finally:
+        await agent.aclose()
