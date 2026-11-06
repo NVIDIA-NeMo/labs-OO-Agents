@@ -6,7 +6,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import shlex
+import signal
 import socket
+import sys
 from uuid import uuid4
 
 import httpx
@@ -1205,35 +1209,129 @@ def test_trace_exporters_select_live_otlp_and_jsonl_spool(tmp_path):
 
 # --- worker: the local shell stops everything a command started -----------------------------
 
-# The grandchild outlives a plain kill of /bin/sh: it is a separate process the shell is waiting on.
-_OUTLIVES_THE_SHELL = "sh -c 'sleep 1; touch {marker}' & wait"
+# The grandchild outlives a plain kill of /bin/sh: it is a separate process the shell is waiting
+# on. It writes its PID (exec keeps it) before the command is stopped.
+_OUTLIVES_THE_SHELL = (
+    "sh -c 'echo $$ > {pidfile}.tmp && mv {pidfile}.tmp {pidfile}; exec sleep 30' & wait"
+)
+
+
+async def _pid_from(pidfile, *, deadline: float = 10.0) -> int:
+    """The PID the command's descendant wrote, once it is running."""
+    loop = asyncio.get_running_loop()
+    end = loop.time() + deadline
+    while not pidfile.exists():
+        assert loop.time() < end, "the descendant never started"
+        await asyncio.sleep(0.02)
+    return int(pidfile.read_text())
+
+
+async def _assert_exits(pid: int, *, deadline: float = 10.0) -> None:
+    """``pid`` is gone (killed, then reaped by its new parent) before ``deadline`` seconds."""
+    loop = asyncio.get_running_loop()
+    end = loop.time() + deadline
+    while True:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return
+        if loop.time() >= end:
+            os.kill(pid, signal.SIGKILL)  # do not leave it behind
+            raise AssertionError(f"process {pid} the stopped command started kept running")
+        await asyncio.sleep(0.05)
 
 
 async def test_a_cancelled_local_shell_command_kills_its_whole_process_group(tmp_path):
     from nooa_bench.gym_worker import _local_shell
 
-    marker = tmp_path / "after_cancel"
+    pidfile = tmp_path / "descendant.pid"
     call = asyncio.ensure_future(
-        _local_shell(_OUTLIVES_THE_SHELL.format(marker=marker), cwd=str(tmp_path), timeout=30)
+        _local_shell(_OUTLIVES_THE_SHELL.format(pidfile=pidfile), cwd=str(tmp_path), timeout=30)
     )
-    await asyncio.sleep(0.3)
+    pid = await _pid_from(pidfile)
     call.cancel()
     with pytest.raises(asyncio.CancelledError):
         await call
-    await asyncio.sleep(1.5)  # longer than the grandchild's sleep
-    assert not marker.exists(), "a process the cancelled command started kept running"
+    await _assert_exits(pid)
 
 
 async def test_a_timed_out_local_shell_command_kills_its_whole_process_group(tmp_path):
     from nooa_bench.gym_worker import _local_shell
 
-    marker = tmp_path / "after_timeout"
+    pidfile = tmp_path / "descendant.pid"
     with pytest.raises(RuntimeError, match="timed out"):
         await _local_shell(
-            _OUTLIVES_THE_SHELL.format(marker=marker), cwd=str(tmp_path), timeout=0.3
+            _OUTLIVES_THE_SHELL.format(pidfile=pidfile), cwd=str(tmp_path), timeout=1
         )
-    await asyncio.sleep(1.5)
-    assert not marker.exists()
+    await _assert_exits(await _pid_from(pidfile, deadline=0))
+
+
+@pytest.mark.parametrize("stop", ["timeout", "cancel"])
+async def test_stopping_a_command_does_not_wait_for_its_unread_output(tmp_path, stop):
+    """Output nobody reads any more (the reader pauses when full) must not block the reaping."""
+    from nooa_bench.gym_worker import _local_shell
+
+    call = asyncio.ensure_future(
+        _local_shell("yes", cwd=str(tmp_path), timeout=0.5 if stop == "timeout" else 30)
+    )
+    if stop == "cancel":
+        await asyncio.sleep(0.5)
+        call.cancel()
+    done, _ = await asyncio.wait([call], timeout=10)
+    assert done, "stopping the command hung on its output pipe"
+    if stop == "timeout":
+        with pytest.raises(RuntimeError, match="timed out"):
+            call.result()
+    else:
+        assert call.cancelled()
+
+
+async def test_stopping_a_command_does_not_wait_for_a_process_outside_its_group(tmp_path):
+    """A process that left the session (so the group kill misses it) may keep the output open."""
+    from nooa_bench.gym_worker import _local_shell
+
+    pidfile = tmp_path / "escaped.pid"
+    escape = (
+        f"{shlex.quote(sys.executable)} -c "
+        f"'import os, pathlib, time; os.setsid(); "
+        f'pathlib.Path("{pidfile}").write_text(str(os.getpid())); time.sleep(30)\' & wait'
+    )
+    call = asyncio.ensure_future(_local_shell(escape, cwd=str(tmp_path), timeout=30))
+    pid = await _pid_from(pidfile)
+    try:
+        call.cancel()
+        done, _ = await asyncio.wait([call], timeout=10)
+        assert done, "reaping the shell waited for a process outside its group"
+    finally:
+        os.kill(pid, signal.SIGKILL)
+
+
+async def test_a_command_cancelled_while_it_starts_is_stopped_too(tmp_path, monkeypatch):
+    """Cancelled after the fork but before the start returns: the group is still killed."""
+    from nooa_bench import gym_worker
+
+    pidfile = tmp_path / "descendant.pid"
+    real = asyncio.create_subprocess_shell
+    started = asyncio.Event()
+
+    async def slow_start(*args, **kwargs):
+        process = await real(*args, **kwargs)
+        started.set()
+        await asyncio.sleep(1)  # the window: process running, start not returned yet
+        return process
+
+    monkeypatch.setattr(gym_worker.asyncio, "create_subprocess_shell", slow_start)
+    call = asyncio.ensure_future(
+        gym_worker._local_shell(
+            _OUTLIVES_THE_SHELL.format(pidfile=pidfile), cwd=str(tmp_path), timeout=30
+        )
+    )
+    await started.wait()
+    pid = await _pid_from(pidfile)
+    call.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await call
+    await _assert_exits(pid)
 
 
 async def test_a_local_shell_command_that_finishes_returns_its_output(tmp_path):

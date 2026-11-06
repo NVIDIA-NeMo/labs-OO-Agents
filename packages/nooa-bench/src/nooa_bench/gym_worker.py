@@ -61,16 +61,71 @@ def _kill_process_group(process: asyncio.subprocess.Process) -> None:
         pass  # already gone (the group too)
 
 
-async def _stop(process: asyncio.subprocess.Process) -> None:
-    """Kill the command's process group and wait for the shell, even while being cancelled."""
+async def _uncancellable(future: asyncio.Future[Any]) -> Any:
+    """Await ``future`` to its end even if this task is cancelled meanwhile; return its result."""
+    while True:
+        try:
+            return await asyncio.shield(future)
+        except asyncio.CancelledError:
+            if future.done():
+                raise  # the future itself was cancelled (or raised CancelledError)
+
+
+async def _stop(process: asyncio.subprocess.Process, output: asyncio.ReadTransport) -> None:
+    """Kill the command's process group, drop its output and reap the shell, even while cancelled.
+
+    Closing the read end of the output pipe first means nothing waits on that pipe:
+    neither on unread output (the reader pauses once its buffer is full, so the pipe
+    would never reach end-of-file) nor on a process outside the group that still holds
+    the write end. The shell's own exit is all that is awaited.
+    """
     _kill_process_group(process)
+    output.close()
     waiting = asyncio.ensure_future(process.wait())
     try:
         await asyncio.shield(waiting)
     except asyncio.CancelledError:
         # Cancelled again while reaping: finish the wait, then keep cancelling.
-        await waiting
+        await _uncancellable(waiting)
         raise
+
+
+async def _start(
+    command: str, *, cwd: str, stdout: int, output: asyncio.ReadTransport
+) -> asyncio.subprocess.Process:
+    """Start the command in its own session; a cancellation while starting still stops it.
+
+    ``create_subprocess_shell`` forks before it returns (it then connects the pipes);
+    cancelled in between it would kill only the shell, not what the shell started.
+    So the start finishes under a shield and the whole group is stopped before the
+    cancellation goes on.
+    """
+    starting = asyncio.ensure_future(
+        asyncio.create_subprocess_shell(
+            command,
+            cwd=cwd,
+            stdout=stdout,
+            stderr=asyncio.subprocess.STDOUT,
+            start_new_session=True,
+        )
+    )
+    try:
+        return await asyncio.shield(starting)
+    except asyncio.CancelledError:
+        if starting.done():
+            raise
+        try:
+            process = await _uncancellable(starting)
+        except Exception:
+            raise asyncio.CancelledError from None  # it never started: nothing to stop
+        await _stop(process, output)
+        raise
+
+
+async def _read_all(reader: asyncio.StreamReader, process: asyncio.subprocess.Process) -> bytes:
+    data = await reader.read()
+    await process.wait()
+    return data
 
 
 async def _local_shell(command: str, *, cwd: str, timeout: float) -> str:
@@ -79,24 +134,38 @@ async def _local_shell(command: str, *, cwd: str, timeout: float) -> str:
     The command runs in its own session (process group). When it times out or the
     call is cancelled (the worker's deadline), the whole group is killed and reaped,
     so nothing it started keeps changing the sandbox after the call returns.
+
+    Its output goes to a pipe this function owns rather than an asyncio subprocess
+    pipe, so reaping the shell never waits for that pipe to drain or to close.
     """
-    process = await asyncio.create_subprocess_shell(
-        command,
-        cwd=cwd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-        start_new_session=True,
-    )
+    loop = asyncio.get_running_loop()
+    read_fd, write_fd = os.pipe()
+    reader = asyncio.StreamReader()
     try:
-        stdout, _ = await asyncio.wait_for(process.communicate(), timeout)
-    except TimeoutError:
-        await _stop(process)
-        raise RuntimeError(
-            f"command timed out after {timeout:g}s: {shlex.quote(command)}"
-        ) from None
+        output, _ = await loop.connect_read_pipe(
+            lambda: asyncio.StreamReaderProtocol(reader), os.fdopen(read_fd, "rb", buffering=0)
+        )
     except BaseException:
-        await _stop(process)
+        os.close(read_fd)
+        os.close(write_fd)
         raise
+    try:
+        try:
+            process = await _start(command, cwd=cwd, stdout=write_fd, output=output)
+        finally:
+            os.close(write_fd)  # the command holds its own copy
+        try:
+            stdout = await asyncio.wait_for(_read_all(reader, process), timeout)
+        except TimeoutError:
+            await _stop(process, output)
+            raise RuntimeError(
+                f"command timed out after {timeout:g}s: {shlex.quote(command)}"
+            ) from None
+        except BaseException:
+            await _stop(process, output)
+            raise
+    finally:
+        output.close()
     text = stdout.decode(errors="replace").rstrip()
     if process.returncode != 0:
         raise RuntimeError(f"{text}\n[exit {process.returncode}]")
