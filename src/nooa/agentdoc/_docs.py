@@ -39,11 +39,11 @@ Extension point:
 from __future__ import annotations
 
 import contextlib
-from typing import Annotated, Any
+from typing import Annotated, Any, overload
 
 from nooa.agentdoc._metadata import set_docs_metadata, set_field_metadata
 
-_SENTINEL = object()
+_SENTINEL: Any = object()
 
 
 def _sync_hidden(target: Any, hidden_value: bool | None) -> None:
@@ -79,7 +79,7 @@ class SpecAnnotation:
     def __init__(self, **kwargs: Any) -> None:
         self.kwargs = kwargs
 
-    def __call__(self, target: Any) -> Any:
+    def __call__[T](self, target: T) -> T:
         """Apply as decorator: ``@spec(...)``."""
         # Sync _agentdoc_hidden attribute so is_hidden_method() and the _ prefix
         # override check in _extract_methods() both see the correct state.
@@ -105,6 +105,34 @@ class Spec:
     Public names are visible by default; private names are hidden unless
     explicitly shown with ``spec(hidden=False)``.
     """
+
+    @overload
+    def __call__(
+        self,
+        /,
+        *,
+        hidden: bool | None = None,
+        description: str | None = None,
+        expand: bool | None = None,
+        max_length: int | None = ...,
+        max_string: int | None = ...,
+        max_depth: int | None = ...,
+    ) -> SpecAnnotation: ...
+
+    @overload
+    def __call__(
+        self,
+        target: Any,
+        field: str | None = None,
+        /,
+        *,
+        hidden: bool | None = None,
+        description: str | None = None,
+        expand: bool | None = None,
+        max_length: int | None = ...,
+        max_string: int | None = ...,
+        max_depth: int | None = ...,
+    ) -> None: ...
 
     def __call__(
         self,
