@@ -117,6 +117,7 @@ class Spec:
         max_length: int | None = ...,
         max_string: int | None = ...,
         max_depth: int | None = ...,
+        hide_empty: bool | None = None,
     ) -> SpecAnnotation: ...
 
     @overload
@@ -132,6 +133,7 @@ class Spec:
         max_length: int | None = ...,
         max_string: int | None = ...,
         max_depth: int | None = ...,
+        hide_empty: bool | None = None,
     ) -> None: ...
 
     def __call__(
