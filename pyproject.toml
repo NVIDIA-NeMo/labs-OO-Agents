@@ -22,7 +22,7 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
-    "pydantic>=2.5.0",
+    "pydantic>=2.14",
     # context_blocks + unifiedllm now ship as nooa.context_blocks /
     # nooa.unifiedllm subpackages — pull their formerly-external deps in.
     # >=1.97.0: routes GPT-5.4 tool calls through Responses and replays reasoning_items;
@@ -36,6 +36,12 @@ dependencies = [
     # native Windows (no fcntl there). Only filelock's Windows lock is used, so
     # CVE-2026-112940 (ReadWriteLock) and CVE-2026-112909 (UnixFileLock) do not apply.
     "filelock>=3.29.4; sys_platform == 'win32'",
+    # Security floors for transitive runtime deps (via httpx/openai and
+    # requests), so installs that don't use our uv.lock skip the versions
+    # nSpect flags: anyio<4.15.1 (CVE-2026-63374) and urllib3<2.8.0
+    # (CVE-2026-97687, CVE-2026-97689).
+    "anyio>=4.15.1",
+    "urllib3>=2.8.0",
 ]
 
 [project.urls]
@@ -133,9 +139,16 @@ sandbox = [
 # (kept optional so glibc<2.28 hosts can `uv sync` without pulling
 # pydantic-core wheels that only target manylinux_2_28). See issue 189.
 mcp = [
-    # 1.24.0 is the first release with both cursor-based discovery and the
-    # streamable_http_client API used by nooa.mcp.
-    "mcp>=1.24.0",
+    # 1.30 carries the 1.x security fix (and has the cursor-based discovery
+    # and streamable_http_client API nooa.mcp needs, added in 1.24). mcp 2.x
+    # stops raising tool-level errors, so stay on 1.x until NOOA is adapted;
+    # this matches the workspace constraint in [tool.uv].
+    "mcp>=1.30,<2",
+    # mcp pulls in PyJWT[crypto]; floor it and cryptography past the versions
+    # nSpect flags (PyJWT<2.15.1, e.g. CVE-2026-102268; cryptography<50.0.2,
+    # CVE-2026-69247) without adding crypto to bare core.
+    "PyJWT[crypto]>=2.15.1",
+    "cryptography>=50.0.2",
 ]
 # NeMo Relay integration (guardrails, intercepts, event subscribers, ATIF
 # export).

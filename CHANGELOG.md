@@ -6,6 +6,19 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- Snapshot save and restore now detect cycles explicitly and cap nesting at 200
+  levels (`MAX_SNAPSHOT_DEPTH`), whatever the caller's stack depth. Errors for
+  cycles, too-deep values, unsupported types and non-string dict keys name the
+  path to the offending value (e.g. `<root>['a'][0]`) and set
+  `SerializationError.reason` / `DeserializationError.reason`. Restoring a
+  too-deep blob raises `DeserializationError`, not `RecursionError`. An agent
+  attribute that can't be saved or restored is skipped with a warning, on save
+  and now also on restore; checkpoints saved before this change with an
+  attribute nested more than 200 levels deep restore without that attribute.
+  `SnapshotVars` (agent and todo vars) rejects values too deep to checkpoint at
+  write time, and a stored var that later becomes unserializable (e.g. a list
+  that now contains itself) is skipped at checkpoint with a warning instead of
+  dropping every var.
 - CodeAct cells now refuse every call in `DEFAULT_BLOCKED_CALLS` before the
   cell runs, also when the module is imported in the same cell
   (`import os; os.system(...)`, `from time import sleep`, `import time as t`),
@@ -55,6 +68,10 @@ to follow semantic versioning.
   invalid tool calls and failed result validation, still add up across the
   call. Previously a few scattered transient endpoint errors could end a long
   turn even though every retry succeeded.
+- Published minimum versions now exclude the vulnerable releases of
+  dependencies installed through nooa, so `pip install -U nooa` gets the fixes
+  too: `anyio>=4.15.1` and `urllib3>=2.8.0` in core, and `mcp>=1.30,<2`,
+  `PyJWT[crypto]>=2.15.1` and `cryptography>=50.0.2` in the `mcp` extra.
 - Dependency security update: the locked versions of Pillow, PyJWT,
   cryptography, aiohttp, urllib3, AnyIO, filelock, multidict, Werkzeug,
   setuptools, certifi, OpenTelemetry, and mcp now include their published
