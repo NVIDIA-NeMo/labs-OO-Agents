@@ -1201,3 +1201,44 @@ def test_trace_exporters_select_live_otlp_and_jsonl_spool(tmp_path):
     )
     assert len(live_only) == 1 and set(enabled) == {"otlp_endpoint"}
     assert _trace_exporters({"trace_jsonl": True}, None) == ([], {})  # a spool needs a directory
+
+
+# --- worker: the local shell stops everything a command started -----------------------------
+
+# The grandchild outlives a plain kill of /bin/sh: it is a separate process the shell is waiting on.
+_OUTLIVES_THE_SHELL = "sh -c 'sleep 1; touch {marker}' & wait"
+
+
+async def test_a_cancelled_local_shell_command_kills_its_whole_process_group(tmp_path):
+    from nooa_bench.gym_worker import _local_shell
+
+    marker = tmp_path / "after_cancel"
+    call = asyncio.ensure_future(
+        _local_shell(_OUTLIVES_THE_SHELL.format(marker=marker), cwd=str(tmp_path), timeout=30)
+    )
+    await asyncio.sleep(0.3)
+    call.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await call
+    await asyncio.sleep(1.5)  # longer than the grandchild's sleep
+    assert not marker.exists(), "a process the cancelled command started kept running"
+
+
+async def test_a_timed_out_local_shell_command_kills_its_whole_process_group(tmp_path):
+    from nooa_bench.gym_worker import _local_shell
+
+    marker = tmp_path / "after_timeout"
+    with pytest.raises(RuntimeError, match="timed out"):
+        await _local_shell(
+            _OUTLIVES_THE_SHELL.format(marker=marker), cwd=str(tmp_path), timeout=0.3
+        )
+    await asyncio.sleep(1.5)
+    assert not marker.exists()
+
+
+async def test_a_local_shell_command_that_finishes_returns_its_output(tmp_path):
+    from nooa_bench.gym_worker import _local_shell
+
+    assert await _local_shell("echo hi", cwd=str(tmp_path), timeout=10) == "hi\n[exit 0]"
+    with pytest.raises(RuntimeError, match=r"\[exit 3\]"):
+        await _local_shell("exit 3", cwd=str(tmp_path), timeout=10)

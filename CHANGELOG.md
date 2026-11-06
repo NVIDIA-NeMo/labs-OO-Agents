@@ -6,6 +6,10 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- `nooa-bench` Gym worker: a local shell command that is cancelled (the
+  worker's deadline) or times out now has its whole process group killed and
+  reaped. Before, a cancelled command (and whatever it started) kept running
+  after the worker stopped and could change the sandbox while Gym graded it.
 - `SkillWriting` (`self.skill_writing`): `create()` refuses a skill whose name
   is already an attribute of the agent (`self.shell`, another skill) with
   "Not created: self.shell is already an attribute of the agent; choose

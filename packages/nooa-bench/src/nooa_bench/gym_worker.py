@@ -50,19 +50,53 @@ from typing import Any
 from nooa_bench.gym import bind_gym_tools, resource_tools, run_gym_episode
 
 
+def _kill_process_group(process: asyncio.subprocess.Process) -> None:
+    """SIGKILL the command's whole process group: the shell and everything it started."""
+    try:
+        if hasattr(os, "killpg"):
+            os.killpg(process.pid, signal.SIGKILL)  # its own session: pgid == pid
+        elif process.returncode is None:  # pragma: no cover - the sandbox worker runs on POSIX
+            process.kill()
+    except ProcessLookupError:
+        pass  # already gone (the group too)
+
+
+async def _stop(process: asyncio.subprocess.Process) -> None:
+    """Kill the command's process group and wait for the shell, even while being cancelled."""
+    _kill_process_group(process)
+    waiting = asyncio.ensure_future(process.wait())
+    try:
+        await asyncio.shield(waiting)
+    except asyncio.CancelledError:
+        # Cancelled again while reaping: finish the wait, then keep cancelling.
+        await waiting
+        raise
+
+
 async def _local_shell(command: str, *, cwd: str, timeout: float) -> str:
-    """The sandbox is the local machine here: run the command where the task lives."""
+    """The sandbox is the local machine here: run the command where the task lives.
+
+    The command runs in its own session (process group). When it times out or the
+    call is cancelled (the worker's deadline), the whole group is killed and reaped,
+    so nothing it started keeps changing the sandbox after the call returns.
+    """
     process = await asyncio.create_subprocess_shell(
-        command, cwd=cwd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
+        command,
+        cwd=cwd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+        start_new_session=True,
     )
     try:
         stdout, _ = await asyncio.wait_for(process.communicate(), timeout)
     except TimeoutError:
-        process.kill()
-        await process.wait()
+        await _stop(process)
         raise RuntimeError(
             f"command timed out after {timeout:g}s: {shlex.quote(command)}"
         ) from None
+    except BaseException:
+        await _stop(process)
+        raise
     text = stdout.decode(errors="replace").rstrip()
     if process.returncode != 0:
         raise RuntimeError(f"{text}\n[exit {process.returncode}]")
