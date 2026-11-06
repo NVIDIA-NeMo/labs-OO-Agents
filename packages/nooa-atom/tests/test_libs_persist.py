@@ -212,6 +212,13 @@ async def test_a_text_skill_named_like_an_agent_attribute_is_refused(tmp_path):
         assert "choose another name" in reloaded
         assert agent.shell is shell
         assert "local.shell" not in agent.skills.registry.loaded()
+        # Control: the same SKILL.md under a free name does load, so the refusal
+        # above is the collision, not the file.
+        free_dir = tmp_path / ".nooa" / "skills" / "shell_tips"
+        free_dir.mkdir(parents=True)
+        (free_dir / "SKILL.md").write_text("---\nname: shell_tips\ndescription: x\n---\nHi.\n")
+        assert "OK — written and loaded" in await agent.skill_writing.reload("shell_tips")
+        assert "local.shell_tips" in agent.skills.registry.loaded()
     finally:
         await agent.aclose()
 
