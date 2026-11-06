@@ -341,8 +341,9 @@ class MemoryStore:
                 return str(row["id"])
             if len(id_or_prefix) < 6:
                 return None
+            prefix = id_or_prefix.replace("!", "!!").replace("%", "!%").replace("_", "!_")
             rows = self._conn.execute(
-                "SELECT id FROM memories WHERE id LIKE ? LIMIT 2", (id_or_prefix + "%",)
+                "SELECT id FROM memories WHERE id LIKE ? ESCAPE '!' LIMIT 2", (prefix + "%",)
             ).fetchall()
             if len(rows) > 1:
                 raise ValueError(f"memory id prefix {id_or_prefix!r} is ambiguous")

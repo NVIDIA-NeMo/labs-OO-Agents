@@ -16,6 +16,7 @@ import typing
 from typing import Any
 
 from nooa.agentdoc._info import REQUIRED, CallableInfo, FieldInfo, ModuleInfo, TypeInfo
+from nooa.agentdoc._visibility import _resolve_type_hints
 from nooa.agentdoc.protocols import SupportsCallableInfo, SupportsTypeInfo
 
 # Re-export REQUIRED for backward compatibility
@@ -238,7 +239,7 @@ def extract_callable_info(obj: Any) -> CallableInfo:
             hint_targets = (call_method,) if call_method is not None else (sig_obj,)
         for hint_target in hint_targets:
             try:
-                resolved = typing.get_type_hints(hint_target, include_extras=True)
+                resolved = _resolve_type_hints(hint_target)
                 break
             except (NameError, AttributeError, TypeError):
                 continue
@@ -656,7 +657,7 @@ def _extract_dataclass_fields(obj: type) -> list[FieldInfo]:
     """Extract fields from dataclass."""
     # Resolve full hints (preserving Annotated metadata) for description extraction
     try:
-        resolved = typing.get_type_hints(obj, include_extras=True)
+        resolved = _resolve_type_hints(obj)
     except (NameError, AttributeError, TypeError):
         resolved = {}
 
@@ -729,7 +730,7 @@ def _extract_namedtuple_fields(obj: type) -> list[FieldInfo]:
     fields = []
     field_names = obj._fields
     try:
-        field_types = typing.get_type_hints(obj, include_extras=True)
+        field_types = _resolve_type_hints(obj)
     except (NameError, AttributeError, TypeError):
         field_types = inspect.get_annotations(obj)
     defaults = getattr(obj, "_field_defaults", {})
@@ -750,7 +751,7 @@ def _extract_typeddict_fields(obj: type) -> list[FieldInfo]:
     rather than showing a default value (which would be semantically incorrect).
     """
     try:
-        annotations = typing.get_type_hints(obj, include_extras=True)
+        annotations = _resolve_type_hints(obj)
     except (NameError, AttributeError, TypeError):
         annotations = inspect.get_annotations(obj)
     required = getattr(obj, "__required_keys__", set())
@@ -837,7 +838,7 @@ def _augment_docstring_with_annotated_descriptions(
     """
     if resolved_hints is None:
         try:
-            resolved = typing.get_type_hints(func, include_extras=True)
+            resolved = _resolve_type_hints(func)
         except (NameError, AttributeError, TypeError):
             resolved = None
     else:
@@ -997,7 +998,7 @@ def _extract_plain_class_fields(obj: type) -> list[FieldInfo]:
     # (from `from __future__ import annotations`) and preserve Annotated metadata.
     # Fall back to raw __annotations__ if resolution fails (e.g. forward refs).
     try:
-        resolved_hints = typing.get_type_hints(obj, include_extras=True)
+        resolved_hints = _resolve_type_hints(obj)
     except (NameError, AttributeError, TypeError):
         resolved_hints = None
 

@@ -163,7 +163,7 @@ async def test_selected_cap_media_budget_and_actual_saved_config(monkeypatch, st
     assert records["media:image"]["outcome"] == "passed"
     assert result.entry["provenance"]["tokens_charged_to_budget"] == approved
     assert result.entry["max_tokens"] == 1000 and result.entry["reasoning_level"] == "selected"
-    assert records["routing"]["baseline_config"]["reasoning_levels"]["selected"][cap_key] == cap
+    assert records["routing"]["verification_config"]["params"][cap_key] == cap
     sent.clear()
     too_small = await connect.check_stage(
         replace(refreshed, budget_tokens=approved - 1), "media", api_key="fake"
