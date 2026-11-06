@@ -18,7 +18,13 @@ from nooa.unifiedllm import ResponsesClient, RetryConfig
 def make_mock_responses_response(content: str = "ok"):
     """Create a minimal litellm.ResponsesAPIResponse-like object for testing."""
     resp = MagicMock()
-    resp.output = [MagicMock(type="message", content=[MagicMock(type="output_text", text=content)])]
+    resp.output = [
+        {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": content}],
+        }
+    ]
     resp.output_text = content
     resp.usage = None
     return resp
@@ -100,6 +106,49 @@ class TestResponsesClientSyncRetry:
             with pytest.raises(litellm.BadRequestError):
                 client.call(messages=[{"role": "user", "content": "hi"}])
         assert mock_responses.call_count == 1
+
+    def test_reasoning_state_retains_interleaving_without_copying_public_calls(self):
+        """The canonical state has enough anchors for exact ordered replay."""
+        reasoning_1 = {"type": "reasoning", "encrypted_content": "one"}
+        call_1 = {
+            "type": "function_call",
+            "call_id": "call-1",
+            "name": "one",
+            "arguments": "{}",
+        }
+        reasoning_2 = {"type": "reasoning", "encrypted_content": "two"}
+        call_2 = {
+            "type": "function_call",
+            "call_id": "call-2",
+            "name": "two",
+            "arguments": "{}",
+        }
+        raw_response = MagicMock(
+            output=[reasoning_1, call_1, reasoning_2, call_2],
+            output_text="",
+            usage=None,
+        )
+        client = ResponsesClient(model="openai/gpt-5.6", api_key="test", retry_config=NO_RETRY)
+
+        with patch("litellm.responses", return_value=raw_response):
+            response = client.call(messages=[{"role": "user", "content": "hi"}])
+
+        assert [call.id for call in response.tool_calls] == ["call-1", "call-2"]
+        from nooa.unifiedllm.response_parts import project_turn
+
+        assert project_turn(response, response.replay_scope) == [
+            reasoning_1,
+            call_1,
+            reasoning_2,
+            call_2,
+        ]
+        assert [part.kind for part in response.parts] == [
+            "reasoning",
+            "tool_call",
+            "reasoning",
+            "tool_call",
+        ]
+        client.close()
 
 
 class TestResponsesClientAsyncRetry:

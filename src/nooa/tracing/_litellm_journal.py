@@ -36,6 +36,7 @@ from litellm.integrations.custom_logger import CustomLogger
 from opentelemetry import trace as otel_trace
 
 from nooa.tracing._journal_builder import _encode_image
+from nooa.tracing._secret_scrubber import scrub_value
 from nooa.tracing._session import get_session
 
 log = logging.getLogger(__name__)
@@ -65,8 +66,17 @@ def _msg_to_dict(msg: Any) -> dict:
         return msg.model_dump(exclude_unset=True)
     try:
         return dict(msg)
-    except TypeError:
-        return {"raw": str(msg)}
+    except (TypeError, ValueError):
+        # repr/str may embed encrypted reasoning or credentials that structured
+        # scrubbing cannot recognize. Unsupported objects are observable by type
+        # only; never stringify their contents as a fallback.
+        return {"unsupported_type": type(msg).__name__}
+
+
+def _safe_msg_to_dict(msg: Any) -> dict:
+    """Normalize one provider message and remove provider-only opaque state."""
+    scrubbed, _ = scrub_value(_msg_to_dict(msg))
+    return scrubbed if isinstance(scrubbed, dict) else {}
 
 
 def _extract_output_msgs(response_obj: Any) -> list[dict]:
@@ -83,12 +93,7 @@ def _extract_output_msgs(response_obj: Any) -> list[dict]:
         # Responses API: response has .output (list of output items)
         elif hasattr(response_obj, "output") and response_obj.output:
             for item in response_obj.output:
-                if hasattr(item, "model_dump"):
-                    msgs.append(item.model_dump())
-                elif isinstance(item, dict):
-                    msgs.append(item)
-                else:
-                    msgs.append({"type": getattr(item, "type", "unknown"), "repr": repr(item)})
+                msgs.append(_msg_to_dict(item))
     except Exception as exc:
         log.debug("Failed to extract output messages: %s", exc)
     return msgs
@@ -109,6 +114,7 @@ def _skeleton_dict_message(msg: dict, blocks: dict[str, str]) -> dict:
     Fields transformed:
 
     * ``content`` (string) → replaced with ``parts=[{"block_hash": …}]``.
+    * ``reasoning_content`` (string) → replaced with ``reasoning_content_hash``.
     * ``tool_calls[i].function.arguments`` (string) → replaced with
       ``arguments_hash`` under the same ``function`` object.
     * ``images`` (list[str]) → replaced with ``image_hashes``
@@ -118,6 +124,13 @@ def _skeleton_dict_message(msg: dict, blocks: dict[str, str]) -> dict:
     message-level extras) are carried through untouched.
     """
     entry: dict = {k: v for k, v in msg.items() if k not in ("content", "tool_calls", "images")}
+
+    reasoning = msg.get("reasoning_content")
+    if isinstance(reasoning, str) and reasoning:
+        h = _hash_str(reasoning)
+        blocks[h] = reasoning
+        entry.pop("reasoning_content")
+        entry["reasoning_content_hash"] = h
 
     content = msg.get("content")
     if content is not None:
@@ -546,7 +559,7 @@ class MessageJournalCallback(CustomLogger):
             # No sideband — publish the raw messages as the skeleton
             # with no block refs. The viewer just uses their content
             # as-is, matching what the wire shows.
-            input_skeleton = [_msg_to_dict(m) for m in messages]
+            input_skeleton = [_safe_msg_to_dict(m) for m in messages]
 
         span_id = self._current_span_id()
         with self._lock:
@@ -578,7 +591,9 @@ class MessageJournalCallback(CustomLogger):
         # small and re-uses any hash that overlaps with messages the
         # agent will echo back on subsequent turns.
         output_blocks: dict[str, str] = {}
-        output_messages = [_skeleton_dict_message(m, output_blocks) for m in raw_output]
+        output_messages = [
+            _skeleton_dict_message(_safe_msg_to_dict(m), output_blocks) for m in raw_output
+        ]
         if output_blocks:
             self._send_new_blocks(session_id, output_blocks)
 
@@ -619,9 +634,37 @@ class MessageJournalCallback(CustomLogger):
     def log_failure_event(
         self, kwargs: dict, response_obj: Any, start_time: Any, end_time: Any
     ) -> None:
+        del response_obj
+        session_id = self._session()
         call_id = kwargs.get("litellm_call_id", "")
         with self._lock:
-            self._call_inputs.pop(call_id, None)
+            stored = self._call_inputs.pop(call_id, None)
+        if stored is None:
+            log.warning(
+                "[MessageJournal] log_failure_event fired for call_id=%r with no prior "
+                "log_pre_api_call — input_skeleton will be empty (retry or out-of-order event?)",
+                call_id,
+            )
+            input_skeleton, span_id = [], None
+        else:
+            input_skeleton, span_id = stored
+
+        # Failed LLM spans are stripped by the journal exporter just like successful
+        # spans. Publish the input-side call record even though there is no assistant
+        # output so readers can reconstruct the prompt that caused the failure.
+        record: dict = {
+            "call_id": call_id,
+            "session_id": session_id,
+            "model": kwargs.get("model", ""),
+            "ts_start": _to_ts(start_time),
+            "ts_end": _to_ts(end_time),
+            "input_skeleton": input_skeleton,
+            "output_messages": [],
+            "tokens": None,
+        }
+        if span_id:
+            record["span_id"] = span_id
+        self._send_call(session_id, record)
 
     # ------------------------------------------------------------------
     # Async hooks — delegate to sync; ContextVar propagates correctly

@@ -14,9 +14,13 @@ class SerializationError(NemoOOAgentsError):
     raising. To exclude a field from snapshots deliberately, annotate it
     with ``Annotated[T, nosnapshot]`` or set ``__nosnapshot__ = True`` on
     its class (see ``storage/markers.py``).
+
+    ``reason`` says why ``serialize()`` failed when it knows: ``"type"``
+    (unsupported value), ``"key"`` (non-string dict key), ``"cycle"`` or
+    ``"depth"`` (nests deeper than ``MAX_SNAPSHOT_DEPTH``); otherwise ``None``.
     """
 
-    pass
+    reason: str | None = None
 
 
 class DeserializationError(NemoOOAgentsError):
@@ -25,9 +29,12 @@ class DeserializationError(NemoOOAgentsError):
     Raised when a serialized value cannot be restored — e.g., the
     envelope references a class not in the allowlist, the class
     cannot be imported, or the data doesn't match the expected format.
+
+    ``reason`` is ``"depth"`` when the blob nests deeper than
+    ``MAX_SNAPSHOT_DEPTH``; otherwise ``None``.
     """
 
-    pass
+    reason: str | None = None
 
 
 class SnapshotNotFoundError(NemoOOAgentsError):

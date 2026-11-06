@@ -3,7 +3,7 @@
 """Integration test for event management with Event-based API."""
 
 from nooa import Agent, strategy
-from nooa.events import LLMOutput, Task
+from nooa.events import LLMResponse, Task
 from nooa.strategies.pure_python import PurePythonStrategy
 from nooa.unifiedllm import FakeLLMClient
 
@@ -75,7 +75,7 @@ def test_history_operations():
     hm.add(Task(prompt="Test task"))
     assert len(hm) == 1
 
-    hm.add(LLMOutput(content="Test response"))
+    hm.add(LLMResponse(content="Test response"))
     assert len(hm) == 2
 
     # Convert to OpenAI format via formatter

@@ -8,7 +8,7 @@ Captures all context needed by strategies to generate code for a method call.
 import inspect
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, get_type_hints
+from typing import TYPE_CHECKING, Annotated, Any, TypedDict, get_type_hints
 from uuid import uuid4
 
 from nooa.ellipsis_detection import get_pre_ellipsis_code
@@ -17,12 +17,135 @@ if TYPE_CHECKING:
     from nooa.config.truncation_config import TruncationConfig
 
 
-@dataclass(frozen=True)
+def bind_call_arguments(
+    signature: inspect.Signature,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    *,
+    partial: bool = False,
+) -> inspect.BoundArguments:
+    """Bind Python call arguments, including defaults, across supported CPython versions."""
+    var_keyword = next(
+        (p.name for p in signature.parameters.values() if p.kind is inspect.Parameter.VAR_KEYWORD),
+        None,
+    )
+    # Older CPython inspect versions reject positional-only names in **kwargs
+    # when the positional value is omitted, although Python accepts the call.
+    # Bind those keywords separately so they cannot replace a positional default.
+    positional_keywords = {
+        p.name: kwargs[p.name]
+        for p in signature.parameters.values()
+        if var_keyword is not None
+        and p.kind is inspect.Parameter.POSITIONAL_ONLY
+        and p.name in kwargs
+    }
+    binding_kwargs = {k: v for k, v in kwargs.items() if k not in positional_keywords}
+    bind = signature.bind_partial if partial else signature.bind
+    bound = bind(*args, **binding_kwargs)
+
+    bound.apply_defaults()
+    if positional_keywords and var_keyword is not None:
+        captured = bound.arguments[var_keyword]
+        bound.arguments[var_keyword] = {
+            k: v for k, v in kwargs.items() if k in positional_keywords or k in captured
+        }
+
+    return bound
+
+
+def merge_call_arguments(
+    signature: inspect.Signature | None,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Return effective named arguments, including omitted Python defaults.
+
+    Values for fixed positional parameters are mirrored under their names for
+    prompt expansion and execution. Variadic positional values are collected
+    under their declared parameter name as a tuple rather than being assigned
+    to later keyword-only parameters. Values captured by ``**kwargs`` remain
+    available under their original keys for compatibility and are also grouped
+    under the declared variadic keyword parameter. This preserves both inputs
+    when a keyword has the same name as a positional-only or ``*args`` parameter.
+    Defaults are added only when the caller supplied no value.
+
+    Binding is partial because required arguments may still be absent when this
+    context is constructed. Invalid combinations are left to the calling wrapper's
+    existing validation path rather than raising a new error here.
+    """
+    supplied_kwargs = dict(kwargs or {})
+    if signature is None:
+        return supplied_kwargs
+
+    parameters = [parameter for name, parameter in signature.parameters.items() if name != "self"]
+    call_signature = signature.replace(parameters=parameters)
+    try:
+        bound = bind_call_arguments(call_signature, args, supplied_kwargs, partial=True)
+    except TypeError:
+        return supplied_kwargs
+
+    # Keep unmatched keywords at the top level for compatibility, then overlay
+    # the canonical Python locals. If a keyword collides with a positional-only
+    # or *args name, its value remains available inside the bound **kwargs dict.
+    merged = dict(supplied_kwargs)
+    merged.update(bound.arguments)
+
+    return merged
+
+
+class SignatureParameterNames(TypedDict):
+    """Parameter-name metadata that :class:`CurrentCall` takes from a live signature."""
+
+    param_names: list[str] | None
+    positional_param_names: list[str] | None
+    var_positional_param_name: str | None
+    var_keyword_param_name: str | None
+
+
+def signature_parameter_names(signature: inspect.Signature | None) -> SignatureParameterNames:
+    """Classify a live signature's parameters (``self`` excluded) for :class:`CurrentCall`.
+
+    Every place that builds a ``CurrentCall`` uses this, so the runtime's top-level
+    call and :meth:`CurrentCall.from_method` cannot drift apart. Taking the names
+    from the live signature avoids reparsing the display-only signature string and
+    keeps fixed, variadic and keyword-only parameters apart. All values are
+    ``None`` when no signature is available.
+    """
+    if signature is None:
+        return SignatureParameterNames(
+            param_names=None,
+            positional_param_names=None,
+            var_positional_param_name=None,
+            var_keyword_param_name=None,
+        )
+    parameters = [parameter for name, parameter in signature.parameters.items() if name != "self"]
+    positional_kinds = (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    return SignatureParameterNames(
+        param_names=[parameter.name for parameter in parameters],
+        positional_param_names=[p.name for p in parameters if p.kind in positional_kinds],
+        var_positional_param_name=next(
+            (p.name for p in parameters if p.kind is inspect.Parameter.VAR_POSITIONAL), None
+        ),
+        var_keyword_param_name=next(
+            (p.name for p in parameters if p.kind is inspect.Parameter.VAR_KEYWORD), None
+        ),
+    )
+
+
+@dataclass
 class CurrentCall:
     """Represents a method call being generated.
 
-    This is an immutable snapshot of a method invocation, containing
-    all the context a strategy needs to generate code.
+    This is a mutable per-invocation record: strategies bind its task tag and
+    execution namespace during setup. Do not change ``id`` while using the call
+    as a set member or dictionary key; equality and hashing use that ID.
+    ``session_locals`` is the optional caller-owned seed/writeback dictionary for
+    carrying names between invocations. CodeAct copies it into a fresh execution
+    namespace and writes filtered names back when the call completes.
+    ``execution_locals`` refers to that live per-invocation namespace, including
+    names created by earlier cells and session internals such as ``Out``. Dynamic
+    context blocks use it while the call is running; it exists even when the caller
+    did not provide ``session_locals``. Strategies without a REPL may leave it unset.
 
     Attributes:
         id: Unique identifier for this call (for correlation/tracing).
@@ -36,6 +159,12 @@ class CurrentCall:
         is_async: Whether the method is async (for proper def/async def in prompts).
         return_type: Return type annotation (optional, for prefill/error hints).
         pre_ellipsis_code: Setup code before `...` marker (optional, for prefill).
+        positional_param_names: Ordered fixed positional parameter names captured
+            from the live signature (optional).
+        var_positional_param_name: Variadic positional parameter name captured
+            from the live signature (optional).
+        var_keyword_param_name: Variadic keyword parameter name captured from
+            the live signature (optional).
 
     Example:
         call = CurrentCall(
@@ -60,7 +189,14 @@ class CurrentCall:
     is_async: bool = False
     return_type: type | None = None
     pre_ellipsis_code: str | None = None
-    session_locals: dict[str, Any] | None = None
+    session_locals: Annotated[
+        dict[str, Any] | None,
+        "Optional caller-owned seed/writeback state across invocations; not the live REPL namespace",
+    ] = None
+    execution_locals: Annotated[
+        dict[str, Any] | None,
+        "Live per-invocation REPL namespace for dynamic context, including new cell names and internals",
+    ] = None
     # Per-parameter spec overrides extracted from Annotated metadata.
     # Each value is a dict of kwargs from spec() — e.g. {"max_length": 20,
     # "max_string": 500}. Used by format_parameters_as_code to override the
@@ -71,6 +207,15 @@ class CurrentCall:
     # avoids re-parsing the stringified signature (which can't reliably split on
     # commas inside Annotated[...]/defaults).
     param_names: list[str] | None = None
+    # Display tag of CodeAct's Task event, separate from the correlation UUID.
+    task_tag: str | None = None
+    # Fixed positional parameter names and the optional *args name from the live
+    # signature. Together they let bound_parameters() preserve Python binding
+    # semantics without parsing the stringified signature. Append new fields
+    # after existing ones to preserve positional constructor compatibility.
+    positional_param_names: list[str] | None = None
+    var_positional_param_name: str | None = None
+    var_keyword_param_name: str | None = None
 
     def __hash__(self) -> int:
         """Hash by id for use in sets/dicts."""
@@ -85,11 +230,14 @@ class CurrentCall:
     def bound_parameters(self) -> dict[str, Any]:
         """Return effective parameter name → value, each input represented exactly once.
 
-        Positional arguments are mapped to the authoritative parameter names
-        (``self.param_names``, captured from the live signature by :meth:`from_method`);
-        keyword arguments override and extend them. Positional args beyond the named
-        parameters (e.g. ``*args``, or when no ``param_names`` is available) are
-        included under synthetic ``arg_<i>`` keys.
+        Positional arguments are mapped using the live signature metadata captured
+        by :meth:`from_method`. Fixed arguments use their declared names and all
+        values accepted by ``*args`` are collected under its declared name as a
+        tuple. Values accepted by ``**kwargs`` are grouped under that parameter's
+        declared name, matching the locals visible inside the Python method. When
+        signature metadata is unavailable, positional values fall back to
+        ``param_names`` and then synthetic ``arg_<i>`` keys. Keyword arguments
+        override and extend the result.
 
         This de-duplicates the overlap created by :meth:`from_method`, which stores
         positional args in both ``args`` and (mapped by name) ``kwargs`` for template
@@ -110,13 +258,32 @@ class CurrentCall:
             returns ``{"image": img}`` — ``img`` appears exactly once.
         """
         result: dict[str, Any] = {}
-        param_names = self.param_names or []
-        for i, value in enumerate(self.args):
-            if i < len(param_names):
-                result[param_names[i]] = value
+        if self.positional_param_names is not None:
+            positional_count = len(self.positional_param_names)
+            for name, value in zip(self.positional_param_names, self.args, strict=False):
+                result[name] = value
+
+            if self.var_positional_param_name is not None:
+                result[self.var_positional_param_name] = tuple(self.args[positional_count:])
             else:
-                result[f"arg_{i}"] = value
-        result.update(self.kwargs)
+                for i, value in enumerate(self.args[positional_count:], start=positional_count):
+                    result[f"arg_{i}"] = value
+        else:
+            param_names = self.param_names or []
+            for i, value in enumerate(self.args):
+                if i < len(param_names):
+                    result[param_names[i]] = value
+                else:
+                    result[f"arg_{i}"] = value
+        if self.var_keyword_param_name is None or self.param_names is None:
+            result.update(self.kwargs)
+        else:
+            # ``kwargs`` retains unmatched keywords as top-level compatibility
+            # aliases, but the Python method sees them inside **kwargs. Only add
+            # declared locals here so every caller input is represented once.
+            for name in self.param_names or []:
+                if name in self.kwargs:
+                    result[name] = self.kwargs[name]
         return result
 
     def format_parameters_as_code(
@@ -273,19 +440,10 @@ class CurrentCall:
         # Check if async
         is_async = inspect.iscoroutinefunction(method)
 
-        # Map positional args to parameter names (for template expansion)
-        # This ensures positional arguments are available as template variables
-        merged_kwargs = dict(kwargs or {})
-        if sig and args:
-            # Get parameter names (excluding 'self')
-            param_names = [p for p in sig.parameters.keys() if p != "self"]
-            # Map positional args to their parameter names
-            for i, value in enumerate(args):
-                if i < len(param_names):
-                    param_name = param_names[i]
-                    # Don't overwrite explicitly passed kwargs
-                    if param_name not in merged_kwargs:
-                        merged_kwargs[param_name] = value
+        # Mirror supplied positional values by name and materialize omitted
+        # defaults so prompts and strategy execution see normal Python call
+        # semantics.
+        merged_kwargs = merge_call_arguments(sig, args, kwargs)
 
         # Extract return type — use get_type_hints to resolve PEP 563
         # stringified annotations back to actual type objects.
@@ -331,9 +489,6 @@ class CurrentCall:
         # Extract pre-ellipsis code (setup code before ... marker)
         pre_ellipsis_code = get_pre_ellipsis_code(method)
 
-        # Authoritative ordered names from the live signature (excludes 'self').
-        live_param_names = [p for p in sig.parameters if p != "self"] if sig is not None else None
-
         return cls(
             id=call_id,
             method_name=method.__name__,
@@ -347,5 +502,5 @@ class CurrentCall:
             return_type=return_type,
             pre_ellipsis_code=pre_ellipsis_code,
             param_specs=param_specs,
-            param_names=live_param_names,
+            **signature_parameter_names(sig),
         )

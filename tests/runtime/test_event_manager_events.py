@@ -4,9 +4,11 @@
 
 from unittest.mock import MagicMock
 
+import pytest
+
 from nooa import Agent
 from nooa.context_blocks import ResultStatus
-from nooa.events import LLMOutput, PythonOutput, Task
+from nooa.events import LLMResponse, PythonOutput, Task
 from nooa.runtime.event_manager import EventManager
 from nooa.runtime.events import EventsApi
 from nooa.unifiedllm import FakeLLMClient
@@ -108,6 +110,29 @@ class TestEventManagerAdd:
 class TestEventManagerOn:
     """Tests for EventManager.on() method."""
 
+    @pytest.mark.parametrize("event_type", ["LLMOutput", "LLMComplete"])
+    def test_removed_llm_event_subscription_explains_migration(self, event_type):
+        """Executable consumers fail loudly; stored legacy rows still migrate."""
+        manager = EventManager()
+
+        with pytest.raises(ValueError) as exc_info:
+            manager.on(event_type, lambda _event: None)
+
+        message = str(exc_info.value)
+        assert f"removed event type {event_type!r}" in message
+        assert "Use 'LLMResponse' instead" in message
+        if event_type == "LLMOutput":
+            assert "Stored LLMOutput rows are migrated" in message
+        else:
+            assert "non-persisted runtime event" in message
+        assert event_type not in manager._handlers
+
+    def test_removed_llm_output_query_fails_instead_of_returning_empty(self):
+        manager = EventManager()
+
+        with pytest.raises(ValueError, match="Use 'LLMResponse' instead"):
+            manager.filter(type="LLMOutput")
+
     def test_on_registers_handler(self):
         """on() should register handler for event type."""
         manager = EventManager()
@@ -135,17 +160,17 @@ class TestEventManagerOn:
         """on() should dispatch to correct handlers based on event_type."""
         manager = EventManager()
         task_handler = MagicMock()
-        llm_output_handler = MagicMock()
+        llm_response_handler = MagicMock()
 
         # Register handlers by event_type
         manager.on("Task", task_handler)
-        manager.on("LLMOutput", llm_output_handler)
+        manager.on("LLMResponse", llm_response_handler)
 
         manager.add(Task(prompt="Question"))
-        manager.add(LLMOutput(content="Answer"))  # Uses LLMOutput via alias
+        manager.add(LLMResponse(content="Answer"))  # Uses LLMResponse via alias
 
         task_handler.assert_called_once()
-        llm_output_handler.assert_called_once()
+        llm_response_handler.assert_called_once()
 
     def test_on_returns_unsubscribe_function(self):
         """on() should return function to unsubscribe."""
@@ -166,7 +191,7 @@ class TestEventManagerOn:
         manager.on("*", handler)
 
         manager.add(Task(prompt="Task"))
-        manager.add(LLMOutput(content="Response"))
+        manager.add(LLMResponse(content="Response"))
 
         assert handler.call_count == 2
 
@@ -270,7 +295,7 @@ class TestEventManagerQuery:
         event1.metadata["call_id"] = "call_1"
         manager.add(event1)
 
-        event2 = LLMOutput(content="Response 1")
+        event2 = LLMResponse(content="Response 1")
         event2.metadata["call_id"] = "call_1"
         manager.add(event2)
 
@@ -418,7 +443,7 @@ class TestOpenAIProviderFormatter:
         """format_events() converts events to OpenAI format."""
         manager = EventManager()
         manager.add(Task(prompt="Hello"))
-        manager.add(LLMOutput(content="Hi there"))
+        manager.add(LLMResponse(content="Hi there"))
 
         messages = _format_events_for_test(manager.values())
         assert len(messages) == 2

@@ -9,9 +9,11 @@ class TokenBudgetConfig(BaseModel):
     """Config for TokenBudgetSummarizer.
 
     Set via: TokenBudgetSummarizer.install(agent, config=TokenBudgetConfig(...))
+
+    The summarizer always forks the parent's completed request.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     max_tokens: int = 100_000
     preserve_recent: int = 10

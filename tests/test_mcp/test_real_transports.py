@@ -32,9 +32,12 @@ import sys
 
 from examples.assets.wiki_mcp_server import mcp
 
-mcp.settings.host = "127.0.0.1"
-mcp.settings.port = int(sys.argv[1])
-mcp.run(transport="streamable-http")
+if hasattr(mcp.settings, "host"):
+    mcp.settings.host = "127.0.0.1"
+    mcp.settings.port = int(sys.argv[1])
+    mcp.run(transport="streamable-http")
+else:
+    mcp.run(transport="streamable-http", host="127.0.0.1", port=int(sys.argv[1]))
 """
 
 
