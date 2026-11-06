@@ -27,9 +27,16 @@ dependencies = [
     # nooa.unifiedllm subpackages — pull their formerly-external deps in.
     # >=1.97.0: routes GPT-5.4 tool calls through Responses and replays reasoning_items;
     # also stays past CVE-2026-49468 and the yanked 1.82.7/1.82.8 backdoor.
-    # LiteLLM 1.106+ imports optional MCP dependencies for ordinary tool calls.
-    # Keep core installs working until a stable release includes upstream #45961.
-    "litellm>=1.97.0,<1.106.0",
+    # These released versions import optional MCP dependencies for ordinary tool calls.
+    # Exclude reproduced failures individually so future patch/security fixes stay eligible.
+    # Fixed upstream by https://github.com/BerriAI/litellm/pull/45961.
+    """litellm>=1.97.0,\
+        !=1.106.0.dev2,!=1.106.0.dev3,!=1.106.0rc1,!=1.106.0rc2,\
+        !=1.106.0rc3,!=1.106.0rc4,!=1.106.0,!=1.106.1,\
+        !=1.106.2,!=1.106.3,!=1.106.4,!=1.106.5,\
+        !=1.106.6,!=1.106.7,!=1.107.0.dev1,!=1.107.0.dev2,\
+        !=1.107.0.dev3,!=1.107.0rc1,!=1.107.0rc2,!=1.107.0rc3,\
+        !=1.108.0rc1,!=1.108.0,!=1.108.1""",
     # from mcp-nemo-oo-agents (now internal)
     "httpx>=0.27.0",
     "openinference-instrumentation-litellm>=0.1.30",

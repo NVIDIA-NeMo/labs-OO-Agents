@@ -6,8 +6,10 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
-- Core installs now require `litellm>=1.97.0,<1.106.0`, temporarily excluding
-  releases that import optional MCP dependencies during ordinary tool calls.
+- Core installs now exclude the individually verified LiteLLM releases affected
+  by the optional-MCP import regression (1.106.0–1.106.7, 1.108.0–1.108.1, and
+  affected prereleases). Future patch and security releases remain eligible;
+  there is no upper version bound.
   The release gate now runs quickstarts 01–03 with real LLM calls against the
   built core wheel in a fresh environment with freshly resolved dependencies.
   A separate harness validates their results without editing the examples;
