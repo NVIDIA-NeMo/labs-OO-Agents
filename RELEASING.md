@@ -21,16 +21,21 @@ the gate; GitLab YAML only provisions and invokes it.
 
 The strict gate performs:
 
-1. Ruff lint and formatting, SPDX checks, unit tests, and explicit OS sandbox
+1. Checks, without provider calls, that every provider-check model alias
+   resolves from that wheel and that its credential variable is set.
+2. Ruff lint and formatting, SPDX checks, unit tests, and explicit OS sandbox
    containment tests.
-2. Builds all five wheels and source distributions under a temporary local tag,
+3. Builds all five wheels and source distributions under a temporary local tag,
    verifies their versions, and smoke-tests imports and `nooa --version` in a
    clean environment.
-3. Runs the full capability suite for the candidate and previous release, fresh
+4. Runs seven bounded [provider replay/cache checks](docs/release-provider-validation.md)
+   on the candidate (17 capped provider requests, no retries), including SQLite resume
+   and changing trailing dynamic context. Missing or skipped results fail the gate.
+5. Runs the full capability suite for the candidate and previous release, fresh
    and back-to-back: four gate models, three runs, full data, no response cache.
-4. Writes private results, traces, distributions, checksums, a JSON manifest,
+6. Writes private results, traces, distributions, checksums, a JSON manifest,
    and sanitized public notes to the GitLab job artifacts.
-5. After every hard gate passes, creates or safely updates one GitHub **draft**
+7. After every hard gate passes, creates or safely updates one GitHub **draft**
    targeting the exact tested SHA.
 
 The candidate and baseline environments receive the same explicit
@@ -112,9 +117,10 @@ uv run python scripts/make_release.py v0.0.10
 ```
 
 This is deliberately narrower than the old workflow: it may create a draft but
-cannot publish it. It retains local compatibility for model aliases, prompts
-before drafting advisory results, and still blocks the capability floor. Use it
-only for recovery, record the evidence separately, and publish only through the
+cannot publish it. It uses the model aliases installed in the local environment
+for both the provider checks and the capability comparison, prompts before
+drafting advisory results, and still blocks the capability floor. Use it only
+for recovery, record the evidence separately, and publish only through the
 GitHub draft UI.
 
 ## Trusted Publishing setup
