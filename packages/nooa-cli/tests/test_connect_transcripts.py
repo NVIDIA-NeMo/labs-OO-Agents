@@ -12,6 +12,7 @@ import yaml
 from click.testing import CliRunner
 from nooa_cli.commands import _connect_view as view
 from nooa_cli.commands import _connect_wizard as wizard
+from nooa_cli.commands._connect_prompts import confirm
 from nooa_cli.commands.connect import command
 
 from nooa import llm_config
@@ -21,6 +22,22 @@ from tests.unifiedllm.connect.connect_http import mock_http, response_body
 
 def plain(output):
     return " ".join(click.unstyle(output).split())
+
+
+@pytest.mark.parametrize("columns", [24, 40, 80, 120])
+@pytest.mark.parametrize("answer,expected", [("yes", True), ("no", False)])
+def test_pipe_confirmation_reserves_space_for_echoed_answer(monkeypatch, columns, answer, expected):
+    monkeypatch.setattr(
+        view.shutil, "get_terminal_size", lambda *a, **k: os.terminal_size((columns, 24))
+    )
+
+    @click.command()
+    def ask():
+        assert confirm("x" * (columns - 10), default=True) is expected
+
+    result = CliRunner().invoke(ask, input=answer + "\n")
+    assert result.exit_code == 0, result.output
+    assert all(len(row) <= columns for row in click.unstyle(result.output).splitlines())
 
 
 @pytest.mark.parametrize("columns", [24, 40, 80, 120])
