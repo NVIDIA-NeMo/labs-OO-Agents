@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+from importlib.metadata import EntryPoint, EntryPoints
+
 import pytest
 from click.testing import CliRunner
 from nooa_bench import agents, runner
@@ -74,10 +76,27 @@ def test_an_unknown_agent_lists_the_installed_ones(monkeypatch):
         runner._import_agent_class("nope")
 
 
-def test_the_real_entry_point_group_is_queried():
-    # Whatever is installed, the group lookup itself works.
+def test_the_entry_point_group_is_queried_and_keyed_by_name(monkeypatch):
+    known = EntryPoint("known", "nooa_bench.bench_agent:BenchAgent", agents.ENTRY_POINT_GROUP)
+    asked: list[str] = []
+
+    def installed(*, group: str) -> EntryPoints:
+        asked.append(group)
+        return EntryPoints([known] if group == agents.ENTRY_POINT_GROUP else [])
+
+    monkeypatch.setattr(agents, "entry_points", installed)
     points = agents._entry_points()
-    assert all(point.group == agents.ENTRY_POINT_GROUP for point in points.values())
+    assert asked == [agents.ENTRY_POINT_GROUP]
+    assert list(points) == ["known"]
+    assert points["known"].name == "known"
+    assert points["known"].group == "nooa_bench.agents"
+    assert agents.load_agent("known") is BenchAgent
+
+
+def test_no_installed_entry_points_leaves_the_builtin_agents(monkeypatch):
+    monkeypatch.setattr(agents, "entry_points", lambda *, group: EntryPoints([]))
+    assert agents._entry_points() == {}
+    assert agents.available_agents() == ["bench", "rlm"]
 
 
 def test_nooa_bench_run_without_atom_is_a_clear_usage_error(monkeypatch, tmp_path):
