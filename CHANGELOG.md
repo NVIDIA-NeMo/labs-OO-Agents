@@ -9,7 +9,8 @@ to follow semantic versioning.
 - Core installs now require `litellm>=1.97.0,<1.106.0`, temporarily excluding
   releases that import optional MCP dependencies during ordinary tool calls.
   The release gate now runs quickstarts 01–03 with real LLM calls against the
-  built core wheel in a fresh environment with freshly resolved dependencies;
+  built core wheel in a fresh environment with freshly resolved dependencies.
+  A separate harness validates their results without editing the examples;
   failures and timeouts block draft creation.
 - Snapshot save and restore now detect cycles explicitly and cap nesting at 200
   levels (`MAX_SNAPSHOT_DEPTH`), whatever the caller's stack depth. Errors for

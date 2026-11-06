@@ -617,6 +617,10 @@ def fresh_wheel_quickstarts(wheel: Path, manifest: ReleaseManifest | None = None
                 60,
             )
             result["environment"] = json.loads(inspection.stdout)
+            validator_source = REPO / "scripts" / "quickstart_smoke.py"
+            validator = work / validator_source.name
+            shutil.copy2(validator_source, validator)
+            result["validator_sha256"] = sha256(validator_source)
             record()
             for name in QUICKSTART_EXAMPLES:
                 source = REPO / "examples" / "quickstart" / name
@@ -625,7 +629,7 @@ def fresh_wheel_quickstarts(wheel: Path, manifest: ReleaseManifest | None = None
                 case = {"example": name, "sha256": sha256(source), "outcome": "running"}
                 result["examples"].append(case)
                 record()
-                command([str(python), "-I", "-u", str(example)], f"{name}.log", 180)
+                command([str(python), "-I", "-u", str(validator), str(example)], f"{name}.log", 180)
                 case["outcome"] = "passed"
                 record()
                 ok(f"fresh-wheel quickstart {name}")

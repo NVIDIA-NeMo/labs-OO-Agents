@@ -967,6 +967,8 @@ def test_fresh_wheel_quickstarts_isolate_customer_install_and_record_failures(
             assert copied.parent == kwargs["cwd"]
             assert copied.read_bytes() == (REPO / "examples/quickstart" / copied.name).read_bytes()
             assert cmd[1:3] == ["-I", "-u"]
+            assert Path(cmd[-2]).name == "quickstart_smoke.py"
+            assert Path(cmd[-2]).read_bytes() == (REPO / "scripts/quickstart_smoke.py").read_bytes()
             if failure == "timeout":
                 raise mr.ReleaseError("command timed out")
             if failure == "example":
@@ -991,6 +993,7 @@ def test_fresh_wheel_quickstarts_isolate_customer_install_and_record_failures(
     if failure is None:
         assert [case["example"] for case in report["examples"]] == mr.QUICKSTART_EXAMPLES
         assert all(case["outcome"] == "passed" for case in report["examples"])
+        assert report["validator_sha256"] == mr.sha256(REPO / "scripts/quickstart_smoke.py")
     for log in (manifest.path.parent / "quickstart-smoke").iterdir():
         assert "test-inference-key" not in log.read_text()
 
