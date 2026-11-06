@@ -21,4 +21,5 @@ class FeedbackAgent(Agent, llm=llm):
 async def main():
     agent = FeedbackAgent()
     result = await agent.analyze_feedback("Great product, but shipping was slow")
+    assert isinstance(result, str) and result.strip(), "Expected a nonempty feedback analysis"
     print(result)

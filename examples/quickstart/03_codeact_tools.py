@@ -49,6 +49,8 @@ class InventoryAgent(Agent, llm=llm):
 async def main():
     agent = InventoryAgent()
     result = await agent.can_fulfill_order(["apple", "banana", "orange"], budget=5.0)
+    assert result["can_fulfill"] is False, "An out-of-stock item prevents fulfillment"
+    assert "orange" in result["unavailable_items"], "Expected the out-of-stock orange"
     print(f"Can fulfill: {result['can_fulfill']}")
     print(f"Total cost: {result['total_cost']}")
     print(f"Unavailable items: {result['unavailable_items']}")

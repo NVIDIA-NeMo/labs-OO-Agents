@@ -27,7 +27,9 @@ dependencies = [
     # nooa.unifiedllm subpackages — pull their formerly-external deps in.
     # >=1.97.0: routes GPT-5.4 tool calls through Responses and replays reasoning_items;
     # also stays past CVE-2026-49468 and the yanked 1.82.7/1.82.8 backdoor.
-    "litellm>=1.97.0",
+    # LiteLLM 1.106+ imports optional MCP dependencies for ordinary tool calls.
+    # Keep core installs working until a stable release includes upstream #45961.
+    "litellm>=1.97.0,<1.106.0",
     # from mcp-nemo-oo-agents (now internal)
     "httpx>=0.27.0",
     "openinference-instrumentation-litellm>=0.1.30",

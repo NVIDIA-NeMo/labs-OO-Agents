@@ -36,4 +36,6 @@ class FeedbackAgent(Agent, llm=llm):
 async def main():
     agent = FeedbackAgent()
     result = await agent.analyze_feedback("Broken feature, needs immediate fix!")
+    assert isinstance(result, FeedbackAnalysis), "Expected a validated FeedbackAnalysis"
+    assert result.topics and result.summary.strip(), "Expected topics and a summary"
     print(result)  # Guaranteed valid FeedbackAnalysis instance

@@ -25,7 +25,13 @@ The strict gate performs:
    containment tests.
 2. Builds all five wheels and source distributions under a temporary local tag,
    verifies their versions, and smoke-tests imports and `nooa --version` in a
-   clean environment.
+   clean environment. In a separate core-only environment, installs the built
+   `nooa` wheel from outside the checkout with freshly resolved PyPI dependencies
+   (no lockfile, workspace constraints, or optional extras), then runs quickstarts
+   01–03 against the real LLM: basic generation, structured outputs, and Python
+   tools. A failed example, assertion, dependency install, or timeout blocks the
+   release. The examples use the quickstart helper's NVIDIA inference route and
+   the protected inference key; no internal model adapter is installed.
 3. Runs the full capability suite for the candidate and previous release, fresh
    and back-to-back: four gate models, three runs, full data, no response cache.
 4. Writes private results, traces, distributions, checksums, a JSON manifest,
@@ -68,6 +74,10 @@ GitLab retains the release evidence for 90 days. Start with `job-summary.md` and
 toolchain identity, check outcomes, capability scope/results, distribution
 checksums, and draft identity. Raw `.noo-eval.jsonl` files and traces are private
 artifacts and must not be copied into the public draft.
+
+`quickstart-smoke/` records the fresh environment's resolved package versions,
+the example source hashes and outcomes, and per-command logs. The manifest's
+`quickstart_smoke` entry is updated as each example completes, including failures.
 
 Hard-gate failure or capability-infrastructure failure before draft creation
 creates no draft. Fix the problem and start a new pipeline with the same tag
