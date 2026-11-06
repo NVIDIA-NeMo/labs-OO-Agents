@@ -150,7 +150,9 @@ line.
 It returns a `TaskRun` with the final `Done` and its `TaskResult`, the
 reason it stopped otherwise, the turn count, the usage and the root agent's
 events. `nooa-bench run` and the benchmark runner's `atom` agent type use
-it.
+it, through `nooa_atom.bench_agent.AtomBenchAgent`, which this package
+registers in nooa-bench's `nooa_bench.agents` entry-point group (nooa-bench
+does not depend on nooa-atom).
 
 A host never holds a session's agent (`Session._agent` is private). It
 submits items (`submit`, `prompt`, `steer`, `withdraw`, `cancel`) and reads

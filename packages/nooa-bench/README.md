@@ -14,9 +14,31 @@ nemo-harbor --help
 See the [main repository](https://github.com/NVIDIA-NeMo/labs-OO-Agents) for
 documentation.
 
+## Benchmark agents and the `atom` agent
+
+nooa-bench ships the `bench` and `rlm` agents. Other packages add agents
+through the `nooa_bench.agents` entry-point group, and nooa-bench loads one
+only when it is asked for (`nooa_bench.agents.load_agent`). nooa-atom
+registers the `atom` agent there, so install it next to nooa-bench to run
+Atom:
+
+```bash
+uv add nooa-bench nooa-atom
+```
+
+Without nooa-atom, `nooa-bench run` and `nemo-harbor --agent-type atom`
+stop with "No benchmark agent named 'atom' is installed ... install
+nooa-atom". A package registers its own agent the same way:
+
+```toml
+[project.entry-points."nooa_bench.agents"]
+my-agent = "my_package.bench:MyBenchAgent"
+```
+
 ## Running the Atom agent headless
 
-`nooa-bench run` runs one task with the Atom agent, without
+`nooa-bench run` runs one task with the Atom agent (`--agent atom`, the
+default; any installed agent with a `run_headless` class method works), without
 Harbor. The agent works unattended in the workspace directory, and its
 session is stored in `.nooa/sessions` there (or in `NOOA_SESSIONS_DIR`), so
 it can be opened afterwards like any other session:
@@ -54,7 +76,8 @@ counts come from the session's usage, children included, and
 ## Agent types
 
 Three agent types are available through `nemo-harbor --agent-type`: `atom`
-(above) and two variants on the older agent loop:
+(above, `AtomBenchAgent` in `nooa_atom.bench_agent`, with nooa-atom installed)
+and two built-in variants on the older agent loop:
 
 - `bench` — `BenchAgent` in `nooa_bench.bench_agent`: compact CodeAct baseline
   with automatic summarization and optional delegation.

@@ -1790,7 +1790,6 @@ source = { editable = "packages/nooa-bench" }
 dependencies = [
     { name = "click" },
     { name = "nooa" },
-    { name = "nooa-atom" },
     { name = "nooa-cli" },
 ]
 
@@ -1798,7 +1797,6 @@ dependencies = [
 requires-dist = [
     { name = "click", specifier = ">=8.1" },
     { name = "nooa", editable = "." },
-    { name = "nooa-atom", editable = "packages/nooa-atom" },
     { name = "nooa-cli", editable = "packages/nooa-cli" },
 ]
 

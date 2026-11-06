@@ -13,7 +13,8 @@ requires-python = ">=3.12,<3.14"
 dependencies = [
     "nooa",
     "nooa-cli",
-    "nooa-atom",
+    # No nooa-atom dependency: nooa-atom registers the `atom` agent in the
+    # `nooa_bench.agents` entry-point group (see nooa_bench.agents).
     "click>=8.1",
 ]
 
@@ -29,7 +30,6 @@ nooa-bench = "nooa_bench.cli:main"
 [tool.uv.sources]
 nooa = { workspace = true }
 nooa-cli = { workspace = true }
-nooa-atom = { workspace = true }
 
 [build-system]
 requires = ["hatchling>=1.26.0", "uv-dynamic-versioning>=0.14.0"]

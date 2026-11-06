@@ -6,6 +6,52 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- `nooa-bench` Gym worker: a local shell command that is cancelled (the
+  worker's deadline) or times out now has its whole process group killed and
+  reaped. Before, a cancelled command (and whatever it started) kept running
+  after the worker stopped and could change the sandbox while Gym graded it.
+- `SkillWriting` (`self.skill_writing`): `create()` refuses a skill whose name
+  is already an attribute of the agent (`self.shell`, another skill) with
+  "Not created: self.shell is already an attribute of the agent; choose
+  another name for the skill". Before, a text skill was reported created but
+  never loaded, and `reload()` then imported its SKILL.md-only directory as a
+  module and replaced the real attribute. `reload()` no longer imports a
+  directory without a pyproject.toml, never replaces an attribute that is not
+  a skill, and reports a text skill that did not load. Skill names are
+  validated wherever they become a path (`create`, `path`, `reload`,
+  `run_tests`): a Python identifier (a text skill may also use `-`), so
+  `"../x"`, `"a/b"` or `".."` raise `ValueError` instead of writing outside
+  `.nooa/skills`.
+- Owned execution namespace (Atom): a cell helper run in a thread that does
+  not inherit the cell's context (`loop.run_in_executor`, `threading.Thread`)
+  can use `print`, `pprint`, `show` and `self` again; they resolve to the
+  running cell's bindings and the output is captured for that cell. Before,
+  they raised `RuntimeError: Runtime name 'print' has no originating call
+  context`. Used after the cell has ended, they raise a `RuntimeError` that
+  says the output would be lost, instead of losing it silently.
+- `UnifiedLLM`: `_call_once`/`_acall_once` are no longer abstract. A subclass
+  written against the older contract, which overrides `call`/`acall`, can be
+  built again (it raised `TypeError: Can't instantiate abstract class` since
+  the media-recovery change); it keeps working but does not get the new
+  media recovery, which `call`/`acall` wrap around `_call_once`/`_acall_once`.
+  New subclasses should implement `_call_once`/`_acall_once`. A subclass
+  that overrides neither now raises `NotImplementedError` when called.
+- `nooa-acp` is deprecated, replaced by `nooa-atom` (`nooa atom`), and this is
+  its last release. It still works; the `nooa-acp` command (and `nooa acp`)
+  now prints a deprecation warning to standard error that points to
+  nooa-atom. Its README and package description say so. It is still built
+  and published this once; the next release drops it.
+- `nooa-bench` no longer depends on `nooa-atom`, so it installs from PyPI on
+  its own. The `atom` benchmark agent moved to `nooa_atom.bench_agent`
+  (`AtomBenchAgent`; was `nooa_bench.atom_agent`), and nooa-atom registers it
+  in the new `nooa_bench.agents` entry-point group. nooa-bench loads agents
+  through `nooa_bench.agents.load_agent` (built-in `bench`/`rlm`, then entry
+  points), so `nemo-harbor --agent-type atom` and `nooa-bench run` need
+  nooa-atom installed and otherwise stop with "No benchmark agent named
+  'atom' is installed ... install nooa-atom". `nooa-bench run` gains
+  `--agent` (default `atom`). `nooa_bench.bench_agent.TaskResult` is now
+  `nooa.interactive.TaskResult` (the same class nooa-atom re-exports), and
+  `AGENT_CLASSES` lists only the built-in agents.
 - MCP (behaviour change): a tool call whose result carries `structuredContent`
   (most FastMCP tools with a typed return) now returns that structured value
   as a `dict`, not the text of its first content block. FastMCP's

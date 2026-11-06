@@ -353,6 +353,9 @@ class CallBindings:
     values: Mapping[str, Any]
     active: bool = True
     cell_task: asyncio.Task | None = None
+    # The running cell's context (output capture included), for threads that
+    # do not inherit it (``run_in_executor``, ``threading.Thread``).
+    cell_context: contextvars.Context | None = None
 
 
 _calls: contextvars.ContextVar[tuple[CallBindings, ...]] = contextvars.ContextVar(
@@ -382,13 +385,30 @@ class _RuntimeBuiltins(dict):
 
     def __missing__(self, name):
         if name in self.owner.reserved:
-            for call in reversed(_calls.get()):
+            calls = _calls.get()
+            for call in reversed(calls):
                 if call.owner is self.owner:
                     if name in call.values:
                         return call.values[name]
                     break
+            else:
+                # No call of this namespace in this context: a thread that did not inherit it.
+                return self.owner._thread_fallback(name)
             raise RuntimeError(f"Runtime name {name!r} has no originating call context")
         raise KeyError(name)
+
+
+def _in_context(context: contextvars.Context, function):
+    """``function`` run in a copy of ``context``: its output goes to that cell's capture."""
+
+    def run(*args, **kwargs):
+        # A Context can be entered by one thread at a time; a copy per call
+        # shares the same capture buffers, so output still lands in the cell.
+        return context.copy().run(function, *args, **kwargs)
+
+    run.__wrapped__ = function
+    run.__doc__ = getattr(function, "__doc__", None)
+    return run
 
 
 def _discard_sources(entries: dict[str, tuple]) -> None:
@@ -541,10 +561,37 @@ class ExecutionNamespace:
         if call.cell_task is not None:
             raise RuntimeError("Concurrent/reentrant cell execution in the same namespace")
         call.cell_task = asyncio.current_task()
+        call.cell_context = contextvars.copy_context()
         try:
             yield
         finally:
             call.cell_task = None
+            call.cell_context = None
+
+    def _thread_fallback(self, name: str) -> Any:
+        """A runtime name used where no call context was inherited.
+
+        ``loop.run_in_executor`` and ``threading.Thread`` do not copy
+        contextvars, so a helper a cell runs there sees no call. While that
+        cell runs, the name resolves to the foreground call's binding, and
+        callables (``print``, ``pprint``, ``show``) run in the cell's context,
+        so their output is captured for that cell. After the cell has ended
+        the output would be lost, so this raises a clear error instead.
+        """
+        call = self._foreground
+        context = call.cell_context if call is not None and call.active else None
+        if call is None or context is None:
+            raise RuntimeError(
+                f"Runtime name {name!r} was used from a thread or executor after its cell "
+                "ended; its output would be lost. Wait for thread and run_in_executor work "
+                "before the cell ends (or use asyncio.to_thread, which keeps the cell's context)."
+            )
+        if name not in call.values:
+            raise RuntimeError(f"Runtime name {name!r} has no originating call context")
+        value = call.values[name]
+        if name != "self" and callable(value):
+            return _in_context(context, value)
+        return value
 
     def inventory(self) -> dict[str, Any]:
         """Bounded names/types only, newest binding first; no repr, deep walks or callbacks."""
