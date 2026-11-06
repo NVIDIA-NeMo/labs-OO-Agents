@@ -1,5 +1,12 @@
 # nooa-acp
 
+> **Deprecated.** nooa-acp is replaced by
+> [nooa-atom](https://github.com/NVIDIA-NeMo/labs-OO-Agents/tree/main/packages/nooa-atom)
+> (`uv add nooa-atom`, then `nooa atom`), the NOOA Atom agent's ACP server.
+> This is the last nooa-acp release: it still works, and the `nooa-acp`
+> command prints a deprecation warning to standard error. Please move to
+> nooa-atom.
+
 **Run the NOOA coding agent inside your editor.** `nooa-acp` is an
 [Agent Client Protocol](https://agentclientprotocol.com) server, so any
 ACP-speaking client — Zed today — can drive the same agent the terminal host

@@ -102,7 +102,7 @@ uv add "nooa[cli,memory]"       # several at once
 | Package | Extra | What it adds |
 |---|---|---|
 | `nooa-cli` | `nooa[cli]` | the `nooa` command, trace-viewer command, eval runner |
-| `nooa-acp` | `nooa[acp]` | coding agent for Agent Client Protocol hosts such as Zed — [setup](packages/nooa-acp/README.md) |
+| `nooa-acp` | `nooa[acp]` | **deprecated, replaced by nooa-atom (last release)**: coding agent for Agent Client Protocol hosts such as Zed — [setup](packages/nooa-acp/README.md) |
 | `nooa-memory` | `nooa[memory]` | long-term memory subsystem (`MemoryManager`) |
 | `nooa-bench` | `nooa[bench]` | `BenchAgent` and the Harbor benchmark runner |
 

@@ -6,6 +6,11 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- `nooa-acp` is deprecated, replaced by `nooa-atom` (`nooa atom`), and this is
+  its last release. It still works; the `nooa-acp` command (and `nooa acp`)
+  now prints a deprecation warning to standard error that points to
+  nooa-atom. Its README and package description say so. It is still built
+  and published this once; the next release drops it.
 - `nooa-bench` no longer depends on `nooa-atom`, so it installs from PyPI on
   its own. The `atom` benchmark agent moved to `nooa_atom.bench_agent`
   (`AtomBenchAgent`; was `nooa_bench.atom_agent`), and nooa-atom registers it
