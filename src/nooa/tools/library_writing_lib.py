@@ -154,7 +154,7 @@ class SkillWriting(Skill):
 
     requires = ("nemo.shell",)
 
-    def __init__(self, agent: Any, path: Path) -> None:
+    def __init__(self, agent: Any, path: Path, *, load_existing: bool = True) -> None:
         self._agent = agent
         self._path = path
         self._path.mkdir(parents=True, exist_ok=True)
@@ -162,11 +162,12 @@ class SkillWriting(Skill):
         if libs_str not in sys.path:
             sys.path.insert(0, libs_str)
         # Discover and register libs via SkillRegistry if available
-        if hasattr(agent, "skills"):
-            agent.skills.discover_libs(self._path)
-            agent.skills.activate(["local.*"])
-        else:
-            LibraryManager.install(self._agent, libs_dir=self._path)
+        if load_existing:
+            if hasattr(agent, "skills"):
+                agent.skills.discover_libs(self._path)
+                agent.skills.activate(["local.*"])
+            else:
+                LibraryManager.install(self._agent, libs_dir=self._path)
         super().__init__()
 
     def path(self, lib_name: str, relative: str = "") -> str:
