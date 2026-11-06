@@ -53,7 +53,7 @@ class ResearchAgent(Agent, llm=llm):
     flow through the NeMo Relay middleware pipeline, producing a nested ATIF trace.
     """
 
-    def get_current_year(self) -> int:
+    async def get_current_year(self) -> int:
         """Return the current year (deterministic helper)."""
         import datetime
 
@@ -71,7 +71,7 @@ class ResearchAgent(Agent, llm=llm):
         """Research the topic using the available tools.
 
         Steps:
-        1. Use self.get_current_year() to anchor your research to the present.
+        1. Use await self.get_current_year() to anchor your research to the present.
         2. Write a concise 2–3 sentence summary.
         3. Call await self.fact_check(summary) to verify the summary is plausible.
         4. Return the summary.

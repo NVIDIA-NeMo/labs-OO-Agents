@@ -122,7 +122,7 @@ workspace packages.
 uv add "nooa @ git+https://github.com/NVIDIA-NeMo/labs-OO-Agents.git@main"
 
 # pinned to a release tag
-uv add "nooa @ git+https://github.com/NVIDIA-NeMo/labs-OO-Agents.git@v0.0.7"
+uv add "nooa @ git+https://github.com/NVIDIA-NeMo/labs-OO-Agents.git@v0.0.12"
 ```
 
 </details>
@@ -240,6 +240,7 @@ from nooa.media import Image
 from nooa.unifiedllm import get_llm_client
 
 # This alias must allow image input and use an endpoint that accepts it.
+# Create it with `uv run nooa connect` (alias `vision`, image input enabled).
 vision = get_llm_client("vision")
 
 class PhotoReader(Agent, llm=vision):
