@@ -1264,6 +1264,7 @@ class UnifiedLLM(ABC):
         reasoning_default: str | None = None,
         reasoning_level: str | None = None,
         media_inputs: list[MediaInput] | tuple[MediaInput, ...] | None = None,
+        context_window: int | None = None,
         **config,
     ):
         self.structured_output_mode = validate_structured_output_mode(structured_output_mode)
@@ -1283,6 +1284,7 @@ class UnifiedLLM(ABC):
         self.media_inputs = validate_media_inputs(media_inputs)
         self.model = model
         self.config = config
+        self._context_window = context_window
         self._registry_config = None
         self.cache_breakpoint = None
         # Per-client HTTP transport (httpx clients + litellm wrappers). Set by
@@ -1550,7 +1552,7 @@ class UnifiedLLM(ABC):
         """Get context window size (max input tokens).
 
         Resolution order:
-        1. Explicit ``context_window`` config passed to the client constructor
+        1. Explicit ``context_window`` passed to the client constructor
         2. Registry config (if created via get_llm_client())
         3. Unambiguous registry lookup by compatible route (direct clients only)
         4. litellm model info (for known models)
@@ -1559,10 +1561,9 @@ class UnifiedLLM(ABC):
         Returns:
             Maximum input tokens for this model, or None if unknown.
         """
-        # First, honor explicit direct-client config.
-        cw = self.config.get("context_window")
-        if cw is not None:
-            return cw
+        # Keep local context-budget metadata out of provider API requests.
+        if self._context_window is not None:
+            return self._context_window
 
         from nooa.unifiedllm.route_identity import same_context_route
 
@@ -2383,6 +2384,7 @@ class CompletionClient(UnifiedLLM):
         *,
         structured_output_mode: StructuredOutputMode = None,
         media_inputs: list[MediaInput] | tuple[MediaInput, ...] | None = None,
+        context_window: int | None = None,
         **config,
     ):
         """
@@ -2418,6 +2420,8 @@ class CompletionClient(UnifiedLLM):
                 model and endpoint and is never chosen from the model name.
             media_inputs: Explicit allowed inputs: image, audio, video, pdf.
                 Absent/empty is text-only. PDF means application/pdf only.
+            context_window: Optional model context-window metadata used for local
+                context budgeting. It is never sent to the inference API.
             **config: Additional configuration passed to litellm (api_key, api_base, etc.)
         """
         if cache_breakpoint not in {None, "auto", "anthropic"}:
@@ -2428,6 +2432,7 @@ class CompletionClient(UnifiedLLM):
             model,
             structured_output_mode=structured_output_mode,
             media_inputs=media_inputs,
+            context_window=context_window,
             **config,
         )
         self.retry_config = retry_config or RetryConfig()
@@ -2832,6 +2837,7 @@ class ResponsesClient(UnifiedLLM):
         cache_breakpoint: Literal["auto", "openai"] | None = "auto",
         *,
         media_inputs: list[MediaInput] | tuple[MediaInput, ...] | None = None,
+        context_window: int | None = None,
         **config,
     ):
         """
@@ -2863,11 +2869,13 @@ class ResponsesClient(UnifiedLLM):
                 explicit mode without a breakpoint, avoiding all cache writes.
             media_inputs: Explicit allowed inputs: image, audio, video, pdf.
                 Absent/empty is text-only. PDF means application/pdf only.
+            context_window: Optional model context-window metadata used for local
+                context budgeting. It is never sent to the inference API.
             **config: Additional configuration passed to litellm (api_key, api_base, etc.)
         """
         if cache_breakpoint not in {None, "auto", "openai"}:
             raise ValueError("ResponsesClient cache_breakpoint must be 'auto', 'openai', or None")
-        super().__init__(model, media_inputs=media_inputs, **config)
+        super().__init__(model, media_inputs=media_inputs, context_window=context_window, **config)
         self.retry_config = retry_config or RetryConfig()
         self.cache_breakpoint = cache_breakpoint
         self._http_config = http_config or HttpConfig()
