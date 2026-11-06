@@ -477,6 +477,22 @@ async def test_cli_cutoff_ignores_skewed_non_llm_start(tmp_path, monkeypatch, ca
 
 
 @pytest.mark.asyncio
+async def test_cli_help_describes_llm_anchored_cutoff(monkeypatch, capsys):
+    """Command help matches the documented LLM origin and no-LLM fallback."""
+    monkeypatch.setattr(sys, "argv", ["trace-explorer", "--help"])
+    with pytest.raises(SystemExit) as caught:
+        await _async_main()
+    assert caught.value.code == 0
+    captured = capsys.readouterr()
+    help_text = " ".join(captured.out.split())
+    assert "local OTLP or journal file" in help_text
+    assert "seconds from the first LLM call start" in help_text
+    assert "earliest positive span start if there are no LLM calls" in help_text
+    assert "from the earliest span" not in help_text
+    assert not captured.err
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "options",
     [
@@ -583,6 +599,46 @@ def test_malformed_otlp_int_values_are_not_truncated(tmp_path, value):
     call["attributes"].append({"key": "llm.token_count.total", "value": {"intValue": value}})
     with pytest.raises(ValueError, match="intValue must be an integer"):
         load_usage_report(_trace(tmp_path, [call]))
+
+
+@pytest.mark.parametrize("key", ["openinference.span.kind", "llm.model_name", "custom.note"])
+@pytest.mark.parametrize("value", [None, True, 12, 1.5, [], ["LLM"], {}])
+def test_malformed_otlp_string_values_are_rejected(tmp_path, key, value):
+    """Invalid string wrappers cannot silently drop calls or corrupt model grouping."""
+    call = _span()
+    call["attributes"] = [attr for attr in call["attributes"] if attr["key"] != key]
+    call["attributes"].append({"key": key, "value": {"stringValue": value}})
+    with pytest.raises(ValueError, match=f"{key} stringValue must be a string"):
+        load_usage_report(_trace(tmp_path, [call]))
+
+
+def test_tolerant_loader_keeps_existing_string_value_behavior(tmp_path):
+    """The new string-type guard is opt-in and does not change default Explorer loading."""
+    call = _span()
+    call["attributes"][0]["value"] = {"stringValue": ["LLM"]}
+    spans = _load_spans(_trace(tmp_path, [call]))
+    assert spans[0]["attributes"]["openinference.span.kind"] == ["LLM"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["json", "csv"])
+async def test_cli_rejects_malformed_string_kind_without_partial_report(
+    tmp_path, monkeypatch, capsys, mode
+):
+    """Malformed span kinds produce a nonzero error, not a successful zero-call report."""
+    call = _span()
+    call["attributes"][0]["value"] = {"stringValue": ["LLM"]}
+    path = _trace(tmp_path, [call])
+    monkeypatch.setattr(
+        sys, "argv", ["trace-explorer", str(path), "--usage", "--usage-format", mode]
+    )
+    with pytest.raises(SystemExit) as caught:
+        await _async_main()
+    assert caught.value.code == 1
+    captured = capsys.readouterr()
+    assert not captured.out
+    assert f"{path}:1" in captured.err
+    assert "openinference.span.kind stringValue must be a string" in captured.err
 
 
 def test_duplicate_attribute_keys_are_not_last_value_wins(tmp_path):

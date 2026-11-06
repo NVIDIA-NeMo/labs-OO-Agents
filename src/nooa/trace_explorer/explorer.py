@@ -464,7 +464,7 @@ def _format_turn_status(error: str | None) -> str:
 
 
 def _normalize_otlp_span(span: dict[str, Any], *, strict: bool = False) -> dict[str, Any]:
-    """Convert an OTLP span, optionally rejecting lossy integer coercion."""
+    """Convert an OTLP span, optionally validating string and integer fields."""
     if strict:
         if not all(isinstance(span.get(key), str) and span[key] for key in ("traceId", "spanId")):
             raise ValueError("Spans require non-empty traceId and spanId")
@@ -499,6 +499,8 @@ def _normalize_otlp_span(span: dict[str, Any], *, strict: bool = False) -> dict[
             }
             if len(typed_fields.intersection(value)) > 1:
                 raise ValueError(f"{key} AnyValue must have at most one typed value")
+            if "stringValue" in value and not isinstance(value["stringValue"], str):
+                raise ValueError(f"{key} stringValue must be a string")
             if "intValue" in value:
                 integer = value["intValue"]
                 if type(integer) is not int and not (
@@ -6117,7 +6119,7 @@ Examples (experiment mode):
     parser.add_argument(
         "--usage",
         action="store_true",
-        help="Report recorded token usage from a local OTLP file (default: JSON)",
+        help="Report recorded token usage from a local OTLP or journal file (default: JSON)",
     )
     parser.add_argument(
         "--usage-format",
@@ -6128,7 +6130,10 @@ Examples (experiment mode):
         "--until-seconds",
         type=float,
         metavar="SECONDS",
-        help="Inclusive completion-time cutoff from the earliest span; requires --usage",
+        help=(
+            "Inclusive completion-time cutoff, in seconds from the first LLM call start "
+            "(earliest positive span start if there are no LLM calls); requires --usage"
+        ),
     )
     parser.add_argument(
         "--root-generation",
