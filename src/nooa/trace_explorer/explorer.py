@@ -463,8 +463,50 @@ def _format_turn_status(error: str | None) -> str:
     return f"[ERR: {msg}]"
 
 
-def _normalize_otlp_span(span: dict[str, Any]) -> dict[str, Any]:
-    """Convert an OTLP span to internal flat-attribute format."""
+def _normalize_otlp_span(span: dict[str, Any], *, strict: bool = False) -> dict[str, Any]:
+    """Convert an OTLP span, optionally validating string and integer fields."""
+    if strict:
+        if not all(isinstance(span.get(key), str) and span[key] for key in ("traceId", "spanId")):
+            raise ValueError("Spans require non-empty traceId and spanId")
+        for key in ("startTimeUnixNano", "endTimeUnixNano"):
+            value = span.get(key, 0)
+            if type(value) is not int and not (
+                isinstance(value, str) and re.fullmatch(r"-?[0-9]+", value)
+            ):
+                raise ValueError(f"{key} must be an integer timestamp")
+            if not 0 <= int(value) <= (1 << 64) - 1:
+                raise ValueError(f"{key} timestamp is outside the OTLP uint64 range")
+        attributes = span.get("attributes", [])
+        if not isinstance(attributes, list):
+            raise ValueError("attributes must be an array")
+        seen = set()
+        for attribute in attributes:
+            key = attribute["key"]
+            if key in seen:
+                raise ValueError(f"Duplicate span attribute {key!r}")
+            seen.add(key)
+            value = attribute.get("value", {})
+            if not isinstance(value, dict):
+                raise ValueError(f"{key} value must be an OTLP AnyValue object")
+            typed_fields = {
+                "stringValue",
+                "intValue",
+                "doubleValue",
+                "boolValue",
+                "bytesValue",
+                "arrayValue",
+                "kvlistValue",
+            }
+            if len(typed_fields.intersection(value)) > 1:
+                raise ValueError(f"{key} AnyValue must have at most one typed value")
+            if "stringValue" in value and not isinstance(value["stringValue"], str):
+                raise ValueError(f"{key} stringValue must be a string")
+            if "intValue" in value:
+                integer = value["intValue"]
+                if type(integer) is not int and not (
+                    isinstance(integer, str) and re.fullmatch(r"-?[0-9]+", integer)
+                ):
+                    raise ValueError(f"{key} intValue must be an integer")
     status = span.get("status", {})
     code = status.get("code", 0)
     # Map OTLP status: 0 (UNSET) and 1 (OK) both map to "OK" for compat
@@ -496,14 +538,17 @@ def _normalize_otlp_span(span: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _load_spans(trace_path: str | Path) -> list[dict[str, Any]]:
+def _load_spans(trace_path: str | Path, *, strict: bool = False) -> list[dict[str, Any]]:
     """Load all spans from a .jsonl file and normalize to internal format.
 
     Handles two formats:
     - OTLP TracesData envelope: ``{"resourceSpans": [...]}`` (one per line)
     - Flat span objects: ``{"span_id": ..., "name": ..., ...}`` (one per line)
 
-    Parse errors are logged to stderr but don't stop loading.
+    Parse errors are normally logged without stopping. ``strict=True`` instead
+    rejects malformed span records with file/line diagnostics, for accounting
+    callers that must not silently skip usage. Journal-only metadata records
+    are skipped in strict mode; their messages and token counts are not read.
     """
     spans = []
     parse_errors = 0
@@ -513,18 +558,41 @@ def _load_spans(trace_path: str | Path) -> list[dict[str, Any]]:
             if line:
                 try:
                     raw = json.loads(line)
+                    if strict:
+                        if not isinstance(raw, dict):
+                            raise ValueError("Expected an OTLP span or TracesData object")
+                        if (
+                            "nooaJournal" in raw
+                            and "resourceSpans" not in raw
+                            and "spanId" not in raw
+                        ):
+                            continue
+                        if "resourceSpans" not in raw and "spanId" not in raw:
+                            raise ValueError("Expected an OTLP span or TracesData object")
                     if "resourceSpans" in raw:
                         # OTLP TracesData envelope — unwrap to individual spans
+                        if strict and not isinstance(raw["resourceSpans"], list):
+                            raise ValueError("resourceSpans must be an array")
                         for rs in raw.get("resourceSpans", []):
                             resource = rs.get("resource", {})
+                            if strict and not isinstance(rs.get("scopeSpans", []), list):
+                                raise ValueError("scopeSpans must be an array")
                             for ss in rs.get("scopeSpans", []):
+                                if strict and not isinstance(ss.get("spans", []), list):
+                                    raise ValueError("spans must be an array")
                                 for span in ss.get("spans", []):
                                     span["_resource"] = resource
-                                    spans.append(_normalize_otlp_span(span))
+                                    spans.append(_normalize_otlp_span(span, strict=strict))
                     else:
                         # Legacy flat span format
-                        spans.append(_normalize_otlp_span(raw))
-                except json.JSONDecodeError as e:
+                        spans.append(_normalize_otlp_span(raw, strict=strict))
+                except (ValueError, TypeError, AttributeError, KeyError) as e:
+                    if strict:
+                        raise ValueError(
+                            f"Invalid trace record at {trace_path}:{line_num}: {e}"
+                        ) from e
+                    if not isinstance(e, json.JSONDecodeError):
+                        raise
                     parse_errors += 1
                     if not _quiet_mode.get() and parse_errors <= 3:  # Limit noise
                         print(f"Warning: Parse error at line {line_num}: {e}", file=sys.stderr)
@@ -5981,6 +6049,8 @@ Examples (file mode):
   trace-explorer trace.jsonl --root-generation 1  # Select root generation
   trace-explorer trace.jsonl --timeline         # Show event timeline
   trace-explorer trace.jsonl --first-error      # Jump to first error
+  trace-explorer trace.jsonl --usage --until-seconds 7200  # Usage report (JSON)
+  trace-explorer trace.jsonl --usage --usage-format csv  # Usage series + summary
   trace-explorer trace.jsonl --raw abc123       # Show raw span data
   trace-explorer trace.jsonl --api-help         # Show API guide
 
@@ -6047,6 +6117,25 @@ Examples (experiment mode):
     parser.add_argument("--api-help", action="store_true", help="Show API guide")
     parser.add_argument("--json", action="store_true", help="Output structured JSON")
     parser.add_argument(
+        "--usage",
+        action="store_true",
+        help="Report recorded token usage from a local OTLP or journal file (default: JSON)",
+    )
+    parser.add_argument(
+        "--usage-format",
+        choices=("json", "csv"),
+        help="Usage report serialization (default: JSON); requires --usage",
+    )
+    parser.add_argument(
+        "--until-seconds",
+        type=float,
+        metavar="SECONDS",
+        help=(
+            "Inclusive completion-time cutoff, in seconds from the first LLM call start "
+            "(earliest positive span start if there are no LLM calls); requires --usage"
+        ),
+    )
+    parser.add_argument(
         "--root-generation",
         type=int,
         metavar="N",
@@ -6064,6 +6153,47 @@ Examples (experiment mode):
     )
 
     args = parser.parse_args()
+
+    if args.usage:
+        from nooa.trace_explorer.usage import load_usage_report
+
+        incompatible = (
+            args.viewer
+            or args.session_id
+            or args.span_id
+            or args.experiment
+            or args.session
+            or args.turn is not None
+            or args.root_generation is not None
+            or args.errors
+            or args.failures
+            or args.eval
+            or args.search
+            or args.diff
+            or args.timeline
+            or args.first_error
+            or args.raw
+            or args.harness
+            or args.api_help
+            or args.install_skill
+            or args.verbose
+            or args.no_reasoning
+        )
+        if not args.trace_file or incompatible or (args.usage_format == "csv" and args.json):
+            parser.error("--usage requires a local trace_file and cannot combine with other views")
+        try:
+            report = load_usage_report(args.trace_file, until_seconds=args.until_seconds)
+        except (OSError, ValueError) as exc:
+            parser.exit(1, f"Error: {exc}\n")
+        if args.usage_format == "csv":
+            print(report.to_csv(), end="")
+        else:
+            print(json.dumps(report.to_dict(), indent=2))
+        return
+    if args.until_seconds is not None:
+        parser.error("--until-seconds requires --usage")
+    if args.usage_format is not None:
+        parser.error("--usage-format requires --usage")
 
     # Handle --api-help and --install-skill without requiring trace file
     if args.api_help:
