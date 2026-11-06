@@ -84,18 +84,41 @@ def test_resolve_spec_filesystem_disabled_has_no_rules():
     assert spec.landlock_rules == ()
 
 
+def test_resolve_spec_env_inherited_by_default():
+    assert SandboxConfig().env_allowlist is None
+    assert resolve_spec(SandboxConfig()).env_allowlist is None
+
+
+def test_resolve_spec_carries_env_allowlist():
+    spec = resolve_spec(SandboxConfig(env_allowlist=("PATH", "LANG")))
+    assert spec.env_allowlist == ("PATH", "LANG")
+
+
+def test_context_block_empty_env_allowlist():
+    block = render_sandbox_block(SandboxConfig(env_allowlist=()), cell_timeout=None)
+    assert "Environment: no variables are set" in block
+
+
 def test_context_block_lists_only_active_guards():
     block = render_sandbox_block(SandboxConfig(network=True, filesystem=False), cell_timeout=None)
     assert "Network: disabled" not in block  # network allowed -> omitted
     assert "Filesystem" not in block  # filesystem off -> omitted
+    assert "Environment" not in block  # env inherited -> omitted
     assert "picklable" in block  # always present
 
 
 def test_context_block_includes_active_guards():
     block = render_sandbox_block(
-        SandboxConfig(workspace="/w", network=False, max_memory_mb=512, max_cpu_seconds=30),
+        SandboxConfig(
+            workspace="/w",
+            network=False,
+            max_memory_mb=512,
+            max_cpu_seconds=30,
+            env_allowlist=("PATH", "LANG"),
+        ),
         cell_timeout=60.0,
     )
+    assert "at most LANG, PATH are set" in block
     assert "60s" in block
     assert "512 MB" in block
     assert "30s of CPU" in block

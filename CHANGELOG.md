@@ -6,6 +6,20 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- `SandboxConfig.env_allowlist` keeps only the listed environment variables in
+  the sandbox worker. The worker is a fork, so it inherited every variable of the
+  parent, model API keys included, and a cell could print them. Removing them
+  from `os.environ` alone is not enough: `/proc/self/environ` still shows the
+  block the kernel copied in at `exec`, so the worker also zeroes that block,
+  and fails to start if it is still readable afterwards. Only the environment
+  is cleaned: a key the parent already holds in memory, such as an LLM client's,
+  is still in the forked worker. Zeroing and checking the block is Linux-only;
+  on other hosts (reachable with `require=False`) the worker only clears
+  `os.environ`, so variables set directly through libc may remain readable.
+  The parent's own environment is still at `/proc/<parent-pid>/environ`; with
+  `filesystem=True` (the default) Landlock denies the worker that read, but with
+  `filesystem=False` a cell can still read the parent's variables there.
+  The default (`None`) keeps the current behaviour, inheriting everything.
 - Registry entries' `base_url`, `timeout` and `custom_llm_provider` settings
   are now passed to the clients built from them. They were ignored before, so
   configs that set them may now send requests to a different endpoint or
