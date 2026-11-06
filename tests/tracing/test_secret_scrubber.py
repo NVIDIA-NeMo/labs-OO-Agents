@@ -34,12 +34,14 @@ def _no_collection_during_deep_recursion():
     finalizer's own error cannot be handled ("Failed to process unraisable
     exception") and the test fails depending on test order.
     """
+    was_enabled = gc.isenabled()
     gc.collect()
     gc.disable()
     try:
         yield
     finally:
-        gc.enable()
+        if was_enabled:
+            gc.enable()
 
 
 @pytest.mark.usefixtures("_no_collection_during_deep_recursion")
