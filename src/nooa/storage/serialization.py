@@ -29,12 +29,15 @@ import dataclasses
 import enum
 import importlib
 import inspect
+import logging
 from typing import Any
 
 from pydantic import BaseModel
 
 from nooa.errors.storage import DeserializationError, SerializationError
 from nooa.storage.markers import is_nosnapshot_value, is_snapshotable_class
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Sentinel for "skip this value" (nosnapshot)
@@ -92,8 +95,9 @@ MAX_SNAPSHOT_DEPTH = 200
 # Abbreviate error paths longer than this many segments.
 _MAX_PATH_SEGMENTS = 16
 
-# Exact types handled inline without a recursive call. Subclasses (enums,
-# marked str subclasses...) still take the full dispatch.
+# Exact types handled inline without a recursive call. Subclasses take the
+# full dispatch, where enums are unwrapped (step 1) and any other str, int,
+# float or bool subclass passes through as a plain value (step 2).
 _PRIMITIVE_TYPES = frozenset({str, int, float, bool, type(None)})
 
 
@@ -120,16 +124,20 @@ def serialize(value: Any, *, base_depth: int = 0) -> tuple[Any, set[str]]:
 
     Raises:
         SerializationError: If the value contains an unsupported type, a
-            cycle (a container that contains itself, directly or through
-            other objects), or nests deeper than ``MAX_SNAPSHOT_DEPTH``. The
-            message names the path to the offending value. Shared references
-            that do not form a cycle are fine (each is serialized as a copy).
+            non-string dict key, a cycle (a container that contains itself,
+            directly or through other objects), or nests deeper than
+            ``MAX_SNAPSHOT_DEPTH``. The message names the path to the offending
+            value and ``reason`` is ``"type"``, ``"key"``, ``"cycle"`` or
+            ``"depth"``. Shared references that do not form a cycle are fine
+            (each is serialized as a copy).
     """
     state = _SerializeState()
     try:
         blob = _serialize(value, state, base_depth)
     except _PathError as exc:
-        raise SerializationError(exc.render("Snapshot value", base_depth)) from None
+        error = SerializationError(exc.render("Snapshot value", base_depth))
+        error.reason = exc.reason
+        raise error from None
     except RecursionError as exc:
         # Cycles and over-deep values are detected above, so this is something
         # else, e.g. a recursive ``__snapshot_data__`` or a caller that is
@@ -156,13 +164,15 @@ def deserialize(blob: Any, allowlist: set[str]) -> Any:
     Raises:
         DeserializationError: If the blob references a class not in the
             allowlist, the class cannot be imported, the blob nests deeper
-            than ``MAX_SNAPSHOT_DEPTH``, or restoring hits Python's
-            recursion limit.
+            than ``MAX_SNAPSHOT_DEPTH`` (``reason`` is ``"depth"``), or
+            restoring hits Python's recursion limit.
     """
     try:
         return _deserialize(blob, allowlist, 0)
     except _PathError as exc:
-        raise DeserializationError(exc.render("Snapshot blob", 0)) from None
+        error = DeserializationError(exc.render("Snapshot blob", 0))
+        error.reason = exc.reason
+        raise error from None
     except RecursionError as exc:
         raise DeserializationError(
             "Snapshot restore hit Python's recursion limit within the snapshot "
@@ -176,28 +186,43 @@ def deserialize(blob: Any, allowlist: set[str]) -> Any:
 
 
 class _PathError(Exception):
-    """Internal cycle or depth failure, converted to the public error at the top.
+    """Internal failure with a path, converted to the public error at the top.
 
     The happy path keeps no path at all. While this exception unwinds, each
     container frame appends the segment (``['k']``, ``[0]``, ``.attr``) of the
     child it was working on, so ``segments`` lists the path innermost first.
+    ``reason`` is ``"depth"``, ``"cycle"``, ``"type"`` (unsupported value) or
+    ``"key"`` (non-string dict key); the last two carry their message in
+    ``detail``, with ``{path}`` where the path goes.
     """
 
-    def __init__(self, cycle_start: int | None = None, type_name: str = "") -> None:
+    def __init__(
+        self,
+        reason: str = "depth",
+        *,
+        cycle_start: int = 0,
+        type_name: str = "",
+        detail: str = "",
+    ) -> None:
         super().__init__()
         self.segments: list[str] = []
-        # Depth of the container a cycle refers back to (None: depth error).
+        self.reason = reason
+        # Depth of the container a cycle refers back to.
         self.cycle_start = cycle_start
         self.type_name = type_name
+        self.detail = detail
 
     def render(self, subject: str, base_depth: int) -> str:
         path = self.segments[::-1]
-        if self.cycle_start is None:
+        if self.reason == "depth":
             return (
                 f"{subject} nests deeper than the limit of {MAX_SNAPSHOT_DEPTH} "
                 f"levels at {_format_path(path)}"
             )
-        back = path[: self.cycle_start - base_depth]
+        if self.reason != "cycle":
+            return self.detail.replace("{path}", _format_path(path))
+        # A cycle can refer back above ``base_depth``; name the root then.
+        back = path[: max(self.cycle_start - base_depth, 0)]
         return (
             f"{subject} contains a cycle: {_format_path(path)} "
             f"refers back to {_format_path(back)} ({self.type_name})"
@@ -257,18 +282,21 @@ def _serialize(value: Any, state: _SerializeState, depth: int) -> Any:
     if isinstance(value, enum.Enum):
         return _serialize(value.value, state, depth)
 
-    # 2. JSON primitives — pass through
+    # 2. JSON primitives — pass through. This includes str/int/float/bool
+    # subclasses, which are stored as plain values (restored as the base type);
+    # a ``__nosnapshot__`` marker on such a subclass is not honoured.
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
 
-    # 3. nosnapshot — check before collections so marked subclasses are skipped
+    # 3. nosnapshot — check before collections so marked dict/list/tuple
+    # subclasses are skipped
     if is_nosnapshot_value(value):
         return SKIP
 
     key = id(value)
     active = state.active
     if (start := active.get(key)) is not None:
-        raise _PathError(cycle_start=start, type_name=type(value).__name__)
+        raise _PathError("cycle", cycle_start=start, type_name=type(value).__name__)
     if depth >= MAX_SNAPSHOT_DEPTH:
         raise _PathError()
     active[key] = depth
@@ -283,18 +311,18 @@ def _serialize(value: Any, state: _SerializeState, depth: int) -> Any:
             try:
                 for k, v in value.items():
                     if not isinstance(k, str):
-                        raise SerializationError(
-                            f"Dict key {k!r} (type: {type(k).__name__}) is not a string. "
-                            f"JSON requires string keys."
-                        )
+                        break
                     if type(v) in _PRIMITIVE_TYPES:
                         result[k] = v
                     elif (serialized := _serialize(v, state, depth)) is not SKIP:
                         result[k] = serialized
+                else:
+                    return result
             except _PathError as exc:
                 exc.segments.append(f"[{k!r}]")
                 raise
-            return result
+            # Raised outside the try: the path names this dict, not the key.
+            raise _PathError("key", detail=_bad_key_message(k))
         if isinstance(value, (tuple, list)):
             items = []
             i = -1
@@ -349,18 +377,87 @@ def _serialize(value: Any, state: _SerializeState, depth: int) -> Any:
         if is_snapshotable_class(type(value)):
             fqn = _fqn(type(value))
             allowlist.add(fqn)
-            data = _serialize_fields(vars(value).items(), state, depth, {})
+            fields = vars(value)
+            lenient = getattr(type(value), "__snapshot_lenient_dict__", None)
+            if isinstance(fields.get(lenient), dict):
+                fields = dict(fields)
+                lenient_dict = fields.pop(lenient)
+                data = _serialize_fields(fields.items(), state, depth, {})
+                data[lenient] = _serialize_lenient_dict(
+                    type(value).__name__, lenient, lenient_dict, state, depth
+                )
+            else:
+                data = _serialize_fields(fields.items(), state, depth, {})
             return {"__type__": _DICT_CLASS, "__class__": fqn, "data": data}
 
         # 8. Unknown type — error with helpful message
         type_name = type(value).__qualname__
-        raise SerializationError(
-            f"Cannot serialize value of type {type_name!r}.\n"
+        raise _PathError(
+            "type",
+            detail=f"Cannot serialize value of type {type_name!r} at {{path}}.\n"
             f"To fix, either:\n"
             f"  1. Decorate {type_name} with @snapshotable to serialize via vars()\n"
             f"  2. Mark the field as Annotated[{type_name}, nosnapshot] to skip it\n"
-            f"  3. Wrap the value in a Pydantic BaseModel for automatic serialization"
+            f"  3. Wrap the value in a Pydantic BaseModel for automatic serialization",
         )
+    finally:
+        del active[key]
+
+
+def _bad_key_message(k: Any) -> str:
+    return (
+        f"Dict key {k!r} (type: {type(k).__name__}) at {{path}} is not a string. "
+        f"JSON requires string keys."
+    )
+
+
+def _serialize_lenient_dict(
+    owner: str, name: str, value: dict, state: _SerializeState, depth: int
+) -> dict:
+    """Serialize the ``__snapshot_lenient_dict__`` attribute ``name`` at ``depth``.
+
+    ``@snapshotable`` classes such as ``SnapshotVars`` name a dict attribute
+    whose entries are independent: an entry that fails to serialize (a cycle,
+    too deep, an unsupported type or key) is skipped with a warning naming its
+    key, so the other entries still persist. The dict itself is checked like
+    any other container.
+    """
+    key = id(value)
+    active = state.active
+    try:
+        if (start := active.get(key)) is not None:
+            raise _PathError("cycle", cycle_start=start, type_name="dict")
+        if depth >= MAX_SNAPSHOT_DEPTH:
+            raise _PathError()
+    except _PathError as exc:
+        exc.segments.append(f".{name}")
+        raise
+    active[key] = depth
+    depth += 1  # the entries
+    try:
+        result = {}
+        for k, v in value.items():
+            try:
+                if not isinstance(k, str):
+                    raise _PathError("key", detail=_bad_key_message(k))
+                if type(v) in _PRIMITIVE_TYPES:
+                    result[k] = v
+                elif (serialized := _serialize(v, state, depth)) is not SKIP:
+                    result[k] = serialized
+            except (_PathError, SerializationError) as exc:
+                reason = (
+                    exc.render(f"Value for {k!r}", depth)
+                    if isinstance(exc, _PathError)
+                    else str(exc)
+                )
+                logger.warning(
+                    "Snapshot: skipping non-serializable %s key %r (%s): %s",
+                    owner,
+                    k,
+                    type(v).__name__,
+                    reason,
+                )
+        return result
     finally:
         del active[key]
 

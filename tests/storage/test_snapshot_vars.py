@@ -246,3 +246,45 @@ def test_too_deep_value_rejected_at_write_with_clear_warning(caplog):
     assert "will NOT be persisted" in message
     assert f"nests deeper than the limit of {MAX_SNAPSHOT_DEPTH} levels at <root>[0]" in message
     assert f"may nest at most {budget} levels" in message
+
+
+def test_value_that_becomes_unserializable_is_skipped_at_checkpoint(caplog):
+    """A live value can turn into a cycle after the write; only its key is lost."""
+    from nooa.storage.serialization import deserialize
+    from nooa.storage.snapshot import AgentSnapshot
+
+    agent, stores = _checkpoint_agent()
+    for store in stores.values():
+        loop = []
+        store["a"] = loop
+        store["b"] = {"keep": 1}
+        loop.append(loop)  # accepted at write, a cycle by checkpoint time
+    with caplog.at_level(logging.WARNING):
+        snapshot = AgentSnapshot.from_agent(agent)
+    restored_vars = deserialize(snapshot.attributes["vars"], snapshot.type_allowlist)
+    assert dict(restored_vars) == {"b": {"keep": 1}}
+    assert "todo" in snapshot.attributes  # the todo (and its other var) survives
+    assert "'keep': 1" in str(snapshot.attributes["todo"])
+    messages = [r.getMessage() for r in caplog.records]
+    skipped = [m for m in messages if "skipping non-serializable SnapshotVars key 'a'" in m]
+    assert len(skipped) == 2, messages
+    assert "contains a cycle" in skipped[0]
+    assert not any("skipping non-serializable attribute" in m for m in messages)
+
+
+def test_depth_hint_uses_error_reason_not_text(caplog, monkeypatch):
+    """The write-time hint keys off ``SerializationError.reason``."""
+    from nooa.errors.storage import SerializationError
+    from nooa.storage import snapshot_vars
+
+    def fake_serialize(value, *, base_depth=0):
+        error = SerializationError("worded differently")
+        error.reason = "depth"
+        raise error
+
+    monkeypatch.setattr(snapshot_vars, "serialize", fake_serialize)
+    v = SnapshotVars()
+    with caplog.at_level(logging.WARNING):
+        v["deep"] = 1
+    (message,) = [r.getMessage() for r in caplog.records if "'deep'" in r.getMessage()]
+    assert "may nest at most" in message

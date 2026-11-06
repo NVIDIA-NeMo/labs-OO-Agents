@@ -352,3 +352,63 @@ def test_snapshot_data_saves_iff_it_restores(kind, outer):
     # Exactly the levels that fit: the envelope plus ``outer`` lists sit above.
     limit = MAX_SNAPSHOT_DEPTH - outer - 1
     assert results == {n: n <= limit for n in results}
+
+
+# -- review follow-ups (#540) -------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("value", "reason", "fragment"),
+    [
+        ([[[object()]]], "type", "type 'object' at <root>[0][0][0]"),
+        ([[{1: 2}]], "key", "Dict key 1 (type: int) at <root>[0][0] is not a string"),
+        ({"a": _Data(child={"b": {(1, 2): 3}})}, "key", "at <root>['a'].child['b']"),
+    ],
+)
+def test_type_and_key_errors_name_the_path(value, reason, fragment):
+    with pytest.raises(SerializationError) as info:
+        serialize(value)
+    assert fragment in str(info.value)
+    assert info.value.reason == reason
+
+
+def test_cycle_and_depth_errors_carry_reason():
+    with pytest.raises(SerializationError) as cycle:
+        serialize(_list_cycle())
+    assert cycle.value.reason == "cycle"
+    with pytest.raises(SerializationError) as deep:
+        serialize(_deep_blob(MAX_SNAPSHOT_DEPTH + 1))
+    assert deep.value.reason == "depth"
+    with pytest.raises(DeserializationError) as restore:
+        deserialize(_deep_blob(MAX_SNAPSHOT_DEPTH + 1), set())
+    assert restore.value.reason == "depth"
+
+
+def test_restore_skips_too_deep_attribute_and_warns(caplog):
+    import logging
+    from types import SimpleNamespace
+
+    from nooa.storage.snapshot import AgentSnapshot
+
+    snapshot = AgentSnapshot(
+        attributes={"memory": ["a", "b"], "deep": _deep_blob(MAX_SNAPSHOT_DEPTH + 1), "n": 3}
+    )
+    agent = SimpleNamespace()
+    with caplog.at_level(logging.WARNING, logger="nooa.storage.snapshot"):
+        snapshot.restore(agent)
+    assert agent.memory == ["a", "b"]
+    assert agent.n == 3
+    assert not hasattr(agent, "deep")
+    (message,) = [r.getMessage() for r in caplog.records if "'deep'" in r.getMessage()]
+    assert "skipping non-restorable attribute" in message
+    assert "nests deeper than the limit" in message
+
+
+def test_primitive_subclass_is_stored_as_plain_value():
+    """Primitive subclasses pass through; a nosnapshot marker on them is not honoured."""
+
+    class Marked(str):
+        __nosnapshot__ = True
+
+    blob, _ = serialize({"s": Marked("x")})
+    assert blob == {"s": "x"}
