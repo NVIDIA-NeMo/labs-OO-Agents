@@ -16,12 +16,13 @@ Core contract:
 
 from __future__ import annotations
 
-# The Session layer's TaskResult, re-exported: bench results and the Atom
-# agent's child results are one class. Visible to generated cells.
-from nooa_atom.session.items import TaskResult
 from nooa_cli.tools.repo_tools import RepoTools
 
 from nooa import hidden as _hidden
+
+# The core TaskResult, re-exported: bench results and the Atom agent's child
+# results are one class. Visible to generated cells.
+from nooa.interactive import TaskResult
 from nooa.tools.method_writing_lib import MethodWriting
 from nooa.tools.shell_tools import ShellTools
 

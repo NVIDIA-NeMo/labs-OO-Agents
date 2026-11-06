@@ -716,7 +716,7 @@ async def test_solve_task_uses_v2_single_tool_contract(agent_type, tmp_path):
         await agent.close()
 
 
-def test_bench_import_does_not_import_the_atom_agent():
+def test_bench_import_does_not_import_nooa_atom():
     import subprocess
     import sys
 
@@ -730,9 +730,10 @@ from nooa_bench import bench_agent
 assert bench_agent.BenchAgent
 for name in ('agent', 'activity', 'slash_commands', 'settings'):
     assert 'nooa_cli.coding.' + name not in sys.modules, name
-    assert 'nooa_atom.agent.' + name not in sys.modules, name
-assert 'nooa_atom.session.items' in sys.modules
-assert not [m for m in sys.modules if m.startswith('nooa_atom.agent')]
+# When nooa-atom is installed, nooa-cli loads its light `nooa atom` command
+# plugin; nothing else of nooa-atom (its session layer, agent, bench agent).
+plugin = {'nooa_atom', 'nooa_atom.acp', 'nooa_atom.acp.cli'}
+assert not [m for m in sys.modules if m.startswith('nooa_atom') and m not in plugin]
 """,
         ],
         check=True,
@@ -797,11 +798,11 @@ async def test_original_task_remains_after_prefill_compaction(agent_type, tmp_pa
         await agent.close()
 
 
-def test_task_result_is_the_session_layers_class():
-    """Bench and the Atom agent's children return one TaskResult class."""
-    from nooa_atom.session.items import TaskResult as SessionTaskResult
+def test_task_result_is_the_core_class():
+    """Bench and the Atom agent's children return one TaskResult class: the core one."""
+    from nooa.interactive import TaskResult as CoreTaskResult
 
-    assert TaskResult is SessionTaskResult
+    assert TaskResult is CoreTaskResult
     fields = TaskResult.model_fields
     assert "cite the actual results" in (fields["evidence"].description or "")
     assert fields["how_to_verify"].title == "How to Verify"

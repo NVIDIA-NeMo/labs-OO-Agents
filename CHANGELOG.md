@@ -6,6 +6,17 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- `nooa-bench` no longer depends on `nooa-atom`, so it installs from PyPI on
+  its own. The `atom` benchmark agent moved to `nooa_atom.bench_agent`
+  (`AtomBenchAgent`; was `nooa_bench.atom_agent`), and nooa-atom registers it
+  in the new `nooa_bench.agents` entry-point group. nooa-bench loads agents
+  through `nooa_bench.agents.load_agent` (built-in `bench`/`rlm`, then entry
+  points), so `nemo-harbor --agent-type atom` and `nooa-bench run` need
+  nooa-atom installed and otherwise stop with "No benchmark agent named
+  'atom' is installed ... install nooa-atom". `nooa-bench run` gains
+  `--agent` (default `atom`). `nooa_bench.bench_agent.TaskResult` is now
+  `nooa.interactive.TaskResult` (the same class nooa-atom re-exports), and
+  `AGENT_CLASSES` lists only the built-in agents.
 - MCP (behaviour change): a tool call whose result carries `structuredContent`
   (most FastMCP tools with a typed return) now returns that structured value
   as a `dict`, not the text of its first content block. FastMCP's

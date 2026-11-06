@@ -23,7 +23,6 @@ inside each agent class, not here.
 from __future__ import annotations
 
 import asyncio
-import importlib
 import inspect
 import json
 import logging
@@ -112,16 +111,10 @@ def _setup_tracing(model: str, agent_type: str) -> None:
 
 
 def _import_agent_class(agent_type: str) -> type:
-    from nooa_bench import AGENT_CLASSES
+    """The agent class for ``agent_type``: built in, or from a ``nooa_bench.agents`` entry point."""
+    from nooa_bench.agents import load_agent
 
-    entry = AGENT_CLASSES.get(agent_type)
-    if entry is None:
-        raise ValueError(
-            f"Unknown agent_type: {agent_type!r}.  Must be one of: {sorted(AGENT_CLASSES)}"
-        )
-    module_path, class_name = entry.rsplit(":", 1)
-    mod = importlib.import_module(module_path)
-    return getattr(mod, class_name)
+    return load_agent(agent_type)
 
 
 def _write_result(result: dict[str, Any], model: str, agent_type: str) -> None:
@@ -378,12 +371,10 @@ def main(
         logger.info("  api_base:   %s", api_base)
 
     # Validate agent_type early so we get a clean error before any heavy imports.
-    from nooa_bench import AGENT_CLASSES
+    from nooa_bench.agents import available_agents, missing_agent_message
 
-    if agent_type not in AGENT_CLASSES:
-        logger.error(
-            "Unknown agent_type: %r.  Must be one of: %s", agent_type, sorted(AGENT_CLASSES)
-        )
+    if agent_type not in available_agents():
+        logger.error("%s", missing_agent_message(agent_type))
         sys.exit(1)
 
     _setup_tracing(model=model, agent_type=agent_type)
