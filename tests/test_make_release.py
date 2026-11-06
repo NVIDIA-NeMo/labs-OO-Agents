@@ -922,7 +922,7 @@ def test_existing_publication_workflow_still_uses_published_release_trigger():
     assert "if: github.event_name == 'release'" in workflow
 
 
-@pytest.mark.parametrize("failure", [None, "install", "example", "timeout"])
+@pytest.mark.parametrize("failure", [None, "install", "example", "timeout", "unexpected"])
 def test_fresh_wheel_quickstarts_isolate_customer_install_and_record_failures(
     mr, tmp_path, monkeypatch, failure
 ):
@@ -943,7 +943,8 @@ def test_fresh_wheel_quickstarts_isolate_customer_install_and_record_failures(
         assert kwargs["cwd"] != REPO
         assert kwargs["timeout"] > 0
         env = kwargs["env"]
-        assert env["NVIDIA_INFERENCE_API_KEY"] == "test-inference-key"
+        live = cmd[-1].endswith(tuple(mr.QUICKSTART_EXAMPLES))
+        assert env.get("NVIDIA_INFERENCE_API_KEY") == ("test-inference-key" if live else None)
         for name in (
             "GH_TOKEN",
             "OPENAI_API_KEY",
@@ -956,10 +957,13 @@ def test_fresh_wheel_quickstarts_isolate_customer_install_and_record_failures(
         if "install" in cmd and failure == "install":
             return subprocess.CompletedProcess(cmd, 1, "", "resolver failed")
         if "-c" in cmd:
+            Path(cmd[-1]).write_text(
+                json.dumps({"packages": {"nooa": "1.2.3", "example-dependency": "4.5.6"}})
+            )
             return subprocess.CompletedProcess(
                 cmd,
                 0,
-                json.dumps({"packages": {"nooa": "1.2.3", "litellm": "1.105.7"}}),
+                "import banner on stdout",
                 "",
             )
         if cmd[-1].endswith(mr.QUICKSTART_EXAMPLES[0]):
@@ -970,9 +974,11 @@ def test_fresh_wheel_quickstarts_isolate_customer_install_and_record_failures(
             assert Path(cmd[-2]).name == "quickstart_smoke.py"
             assert Path(cmd[-2]).read_bytes() == (REPO / "scripts/quickstart_smoke.py").read_bytes()
             if failure == "timeout":
-                raise mr.ReleaseError("command timed out")
+                raise mr.ReleaseError("command timed out\npartial output test-inference-key")
             if failure == "example":
                 return subprocess.CompletedProcess(cmd, 1, "", "error test-inference-key")
+            if failure == "unexpected":
+                raise TypeError("unexpected failure test-inference-key")
         return subprocess.CompletedProcess(cmd, 0, "OK", "")
 
     monkeypatch.setattr(mr, "run", fake_run)
@@ -987,9 +993,12 @@ def test_fresh_wheel_quickstarts_isolate_customer_install_and_record_failures(
     install = next(cmd for cmd, _ in calls if "install" in cmd)
     assert install[:4] == ["uv", "--no-config", "pip", "install"]
     assert install[-3:] == ["--index-url", "https://pypi.org/simple", str(wheel)]
-    if failure in ("example", "timeout"):
+    if failure in ("example", "timeout", "unexpected"):
         assert report["examples"][0]["outcome"] == "failed"
-        assert len(report["examples"]) == 1
+        assert [case["outcome"] for case in report["examples"][1:]] == ["not_run", "not_run"]
+    if failure == "timeout":
+        log = manifest.path.parent / "quickstart-smoke" / f"{mr.QUICKSTART_EXAMPLES[0]}.log"
+        assert "partial output [REDACTED]" in log.read_text()
     if failure is None:
         assert [case["example"] for case in report["examples"]] == mr.QUICKSTART_EXAMPLES
         assert all(case["outcome"] == "passed" for case in report["examples"])
@@ -1005,6 +1014,27 @@ def test_fresh_wheel_quickstarts_require_credentials(mr, tmp_path, monkeypatch):
     with pytest.raises(mr.ReleaseError, match="require NVIDIA"):
         mr.fresh_wheel_quickstarts(tmp_path / "nooa.whl", manifest)
     assert manifest.data["quickstart_smoke"]["outcome"] == "failed"
+
+
+@pytest.mark.parametrize("flags", [[], ["--skip-capability"], ["--checks-only"], ["--dry-run"]])
+def test_local_release_requires_credentials_before_checks(mr, monkeypatch, flags):
+    monkeypatch.delenv("NVIDIA_INTERNAL_API_KEY", raising=False)
+    monkeypatch.delenv("NVIDIA_INFERENCE_API_KEY", raising=False)
+    monkeypatch.setattr(
+        mr, "preflight", lambda *_args: pytest.fail("preflight ran before checking credentials")
+    )
+    with pytest.raises(mr.ReleaseError, match="require NVIDIA"):
+        mr.local_main(mr._parser().parse_args(["v1.2.3", *flags]))
+
+
+@pytest.mark.parametrize("partial", ["partial output", b"partial output"])
+def test_timeout_preserves_partial_output(mr, monkeypatch, partial):
+    def timed_out(*_args, **_kwargs):
+        raise subprocess.TimeoutExpired(["python"], 1, output=partial, stderr=b"partial stderr")
+
+    monkeypatch.setattr(mr.subprocess, "run", timed_out)
+    with pytest.raises(mr.ReleaseError, match="partial output\\s*partial stderr"):
+        mr.run(["python"], timeout=1)
 
 
 @pytest.mark.parametrize("fail_quickstart", [False, True])

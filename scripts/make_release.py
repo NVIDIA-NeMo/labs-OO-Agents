@@ -145,8 +145,12 @@ def run(
         )
     except FileNotFoundError as exc:
         die(f"required executable is unavailable: {cmd[0]} ({exc})")
-    except subprocess.TimeoutExpired:
-        die(f"command timed out after {timeout}s: {' '.join(cmd)}")
+    except subprocess.TimeoutExpired as exc:
+        output = "".join(
+            value.decode(errors="replace") if isinstance(value, bytes) else value or ""
+            for value in (exc.stdout, exc.stderr)
+        )
+        die(f"command timed out after {timeout}s: {' '.join(cmd)}\n{output}")
     if check and proc.returncode != 0:
         detail = (proc.stderr or proc.stdout or "").strip() if capture else ""
         die(f"command failed ({proc.returncode}): {' '.join(cmd)}\n{detail}")
@@ -513,6 +517,13 @@ def temporary_tag(tag: str, sha: str):
             git("tag", "-d", tag, check=False)
 
 
+def quickstart_api_key() -> str:
+    key = os.getenv("NVIDIA_INFERENCE_API_KEY") or os.getenv("NVIDIA_INTERNAL_API_KEY")
+    if not key:
+        die("fresh-wheel quickstarts require NVIDIA_INFERENCE_API_KEY or NVIDIA_INTERNAL_API_KEY")
+    return key
+
+
 def fresh_wheel_quickstarts(wheel: Path, manifest: ReleaseManifest | None = None) -> None:
     """Exercise customer installs, independently of the lock and workspace extras."""
     step("Run quickstarts against a fresh core-wheel install (live LLM)")
@@ -522,7 +533,10 @@ def fresh_wheel_quickstarts(wheel: Path, manifest: ReleaseManifest | None = None
         else REPO / "tmp" / "release-check" / "quickstart-smoke"
     )
     evidence.mkdir(parents=True, exist_ok=True)
-    result: dict[str, Any] = {"outcome": "running", "examples": []}
+    result: dict[str, Any] = {
+        "outcome": "running",
+        "examples": [{"example": name, "outcome": "not_run"} for name in QUICKSTART_EXAMPLES],
+    }
 
     def record() -> None:
         (evidence / "result.json").write_text(json.dumps(result, indent=2) + "\n")
@@ -530,12 +544,9 @@ def fresh_wheel_quickstarts(wheel: Path, manifest: ReleaseManifest | None = None
             manifest.update(quickstart_smoke=result)
 
     record()
+    key = ""
     try:
-        key = os.getenv("NVIDIA_INFERENCE_API_KEY") or os.getenv("NVIDIA_INTERNAL_API_KEY")
-        if not key:
-            die(
-                "fresh-wheel quickstarts require NVIDIA_INFERENCE_API_KEY or NVIDIA_INTERNAL_API_KEY"
-            )
+        key = quickstart_api_key()
         with tempfile.TemporaryDirectory(prefix="nooa-quickstarts-") as directory:
             work = Path(directory)
             # Keep transport/tool settings, but no ambient Python paths, uv constraints,
@@ -564,18 +575,21 @@ def fresh_wheel_quickstarts(wheel: Path, manifest: ReleaseManifest | None = None
             }
             env = {name: value for name, value in os.environ.items() if name in keep}
             env.update(
-                NVIDIA_INFERENCE_API_KEY=key,
                 XDG_CONFIG_HOME=str(work / "config"),
                 PYTHON_DOTENV_DISABLED="1",
                 PYTHONNOUSERSITE="1",
             )
 
-            def command(cmd: list[str], log: str, timeout: int) -> subprocess.CompletedProcess:
+            def command(
+                cmd: list[str], log: str, timeout: int, *, live: bool = False
+            ) -> subprocess.CompletedProcess:
                 try:
-                    proc = run(cmd, cwd=work, env=env, check=False, timeout=timeout)
+                    child_env = env | {"NVIDIA_INFERENCE_API_KEY": key} if live else env
+                    proc = run(cmd, cwd=work, env=child_env, check=False, timeout=timeout)
                 except ReleaseError as exc:
-                    (evidence / log).write_text(str(exc).replace(key, "[REDACTED]"))
-                    raise
+                    output = str(exc).replace(key, "[REDACTED]")
+                    (evidence / log).write_text(output)
+                    raise ReleaseError(output) from None
                 output = (proc.stdout + proc.stderr).replace(key, "[REDACTED]")
                 (evidence / log).write_text(output)
                 if proc.returncode:
@@ -603,39 +617,46 @@ def fresh_wheel_quickstarts(wheel: Path, manifest: ReleaseManifest | None = None
                 "install.log",
                 300,
             )
-            inspection = command(
+            metadata = work / "environment.json"
+            command(
                 [
                     str(python),
                     "-I",
                     "-c",
-                    "import importlib.metadata as m, json, nooa, sys; "
-                    "print(json.dumps({'python': sys.version, 'nooa_path': nooa.__file__, "
+                    "import importlib.metadata as m, json, nooa, sys; from pathlib import Path; "
+                    "Path(sys.argv[1]).write_text(json.dumps({'python': sys.version, 'nooa_path': nooa.__file__, "
                     "'packages': dict(sorted((d.metadata['Name'], d.version) "
                     "for d in m.distributions()))}))",
+                    str(metadata),
                 ],
                 "environment.log",
                 60,
             )
-            result["environment"] = json.loads(inspection.stdout)
+            result["environment"] = json.loads(metadata.read_text())
             validator_source = REPO / "scripts" / "quickstart_smoke.py"
             validator = work / validator_source.name
             shutil.copy2(validator_source, validator)
             result["validator_sha256"] = sha256(validator_source)
             record()
-            for name in QUICKSTART_EXAMPLES:
+            for case in result["examples"]:
+                name = case["example"]
                 source = REPO / "examples" / "quickstart" / name
                 example = work / name
                 shutil.copy2(source, example)
-                case = {"example": name, "sha256": sha256(source), "outcome": "running"}
-                result["examples"].append(case)
+                case.update(sha256=sha256(source), outcome="running")
                 record()
-                command([str(python), "-I", "-u", str(validator), str(example)], f"{name}.log", 180)
+                command(
+                    [str(python), "-I", "-u", str(validator), str(example)],
+                    f"{name}.log",
+                    180,
+                    live=True,
+                )
                 case["outcome"] = "passed"
                 record()
                 ok(f"fresh-wheel quickstart {name}")
         result["outcome"] = "passed"
         record()
-    except (ReleaseError, OSError, ValueError) as exc:
+    except Exception as exc:
         result["outcome"] = "failed"
         result["error"] = str(exc).replace(key, "[REDACTED]") if key else str(exc)
         for case in result["examples"]:
@@ -644,7 +665,7 @@ def fresh_wheel_quickstarts(wheel: Path, manifest: ReleaseManifest | None = None
         record()
         if isinstance(exc, ReleaseError):
             raise
-        die(f"fresh-wheel quickstart setup failed: {exc}")
+        raise ReleaseError(f"fresh-wheel quickstart failed: {result['error']}") from None
 
 
 def build_and_smoke(
@@ -1861,6 +1882,7 @@ def local_main(args: argparse.Namespace) -> int:
     if rehearsal and not args.checks_only and not args.dry_run:
         die("--models/--runs/--limit reduce the gate's power; pair them with --checks-only")
 
+    quickstart_api_key()
     head_sha, prev_tag, _prev_sha, existing = preflight(args.tag, args.allow_dirty)
     fast_checks()
     build_and_smoke(args.tag, head_sha)

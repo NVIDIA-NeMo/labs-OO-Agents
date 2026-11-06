@@ -120,6 +120,11 @@ the existing PyPI OIDC identities.
 If the private controller is unavailable, a trusted maintainer may run the
 public script from a clean, current `main` checkout:
 
+Export `NVIDIA_INFERENCE_API_KEY` or `NVIDIA_INTERNAL_API_KEY` first. The fresh-wheel
+quickstarts make live calls even with `--skip-capability`, `--checks-only`, or
+`--dry-run`; those options do not skip the quickstart gate. A `.env` file alone
+does not satisfy this preflight check.
+
 ```bash
 uv run python scripts/make_release.py v0.0.10
 ```

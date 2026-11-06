@@ -64,6 +64,11 @@ def run_example(example: Path) -> None:
     namespace = runpy.run_path(
         str(example), init_globals={"print": capture_print}, run_name="__main__"
     )
+    if not printed:
+        raise ValueError(
+            f"Release harness captured no print output from main() in {example.name}; "
+            "check whether the example's entry point or output mechanism changed"
+        )
     validate_result(example.name, printed, namespace)
     print(f"Validated result: {example.name}")
 

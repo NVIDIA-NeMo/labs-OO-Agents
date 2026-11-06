@@ -99,3 +99,10 @@ def test_harness_runs_source_unchanged_and_checks_main_output(smoke, tmp_path, c
         with pytest.raises(ValueError, match="nonempty feedback"):
             smoke.run_example(example)
     assert example.read_text() == source
+
+
+def test_changed_entrypoint_reports_capture_failure(smoke, tmp_path):
+    example = tmp_path / "01_first_generation_method.py"
+    example.write_text("def renamed_main():\n    print('A useful response')\nrenamed_main()\n")
+    with pytest.raises(ValueError, match="captured no print output.*entry point"):
+        smoke.run_example(example)
