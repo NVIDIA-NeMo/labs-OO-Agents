@@ -29,7 +29,7 @@ The strict gate performs:
    `nooa` wheel from outside the checkout with freshly resolved PyPI dependencies
    (no lockfile, workspace constraints, or optional extras), then runs quickstarts
    01–03 against the real LLM: basic generation, structured outputs, and Python
-   tools. A failed example, assertion, dependency install, or timeout blocks the
+   tools. A failed example, dependency install, or timeout blocks the
    release. The examples use the quickstart helper's NVIDIA inference route and
    the protected inference key; no internal model adapter is installed.
 3. Runs the full capability suite for the candidate and previous release, fresh
