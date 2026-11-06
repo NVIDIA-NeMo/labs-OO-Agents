@@ -12,7 +12,7 @@ from typing import Any, Final, Literal
 from pydantic import BaseModel, field_serializer, field_validator
 
 from nooa.context_blocks import DynamicContext
-from nooa.errors.storage import DeserializationError, SerializationError
+from nooa.errors.storage import SerializationError
 from nooa.storage.markers import is_nosnapshot_field, is_nosnapshot_value
 from nooa.storage.serialization import SKIP, deserialize, serialize
 
@@ -183,10 +183,16 @@ class AgentSnapshot(BaseModel):
         for attr_name, attr_value in self.attributes.items():
             try:
                 value = deserialize(attr_value, self.type_allowlist)
-            except DeserializationError as exc:
+            except Exception as exc:
                 # Mirror ``from_agent``: one unrestorable attribute (e.g. nested
-                # deeper than ``MAX_SNAPSHOT_DEPTH`` in an older checkpoint) must
-                # not abort the whole restore. Skip it and warn.
-                logger.warning("Snapshot: skipping non-restorable attribute %r: %s", attr_name, exc)
+                # deeper than ``MAX_SNAPSHOT_DEPTH`` in an older checkpoint, a
+                # schema-drifted model, or a failing ``__restore_snapshot__``)
+                # must not abort the whole restore. Skip it and warn.
+                logger.warning(
+                    "Snapshot: skipping non-restorable attribute %r: %s",
+                    attr_name,
+                    exc,
+                    exc_info=True,
+                )
                 continue
             setattr(agent, attr_name, value)

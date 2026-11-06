@@ -536,3 +536,31 @@ def test_vars_whose_keys_look_like_an_envelope_restore_as_a_dict(marker):
     restored = deserialize(blob, allowlist)
     assert isinstance(restored._data, dict)
     assert restored._data == {marker: "tuple", "data": [1, 2]}
+
+
+@pytest.mark.parametrize("error", [RecursionError, TypeError, ValueError])
+def test_value_whose_serializer_fails_late_is_skipped_at_checkpoint(caplog, monkeypatch, error):
+    """A non-path failure at checkpoint time loses only that key, not the whole vars."""
+    from nooa.storage import serialization
+    from nooa.storage.snapshot import AgentSnapshot
+
+    agent, stores = _checkpoint_agent()
+    bad = []
+    for store in stores.values():
+        store["a"] = bad
+        store["b"] = {"keep": 1}
+    real = serialization._serialize
+
+    def failing(value, *args, **kwargs):
+        if value is bad:
+            raise error("hook failed")
+        return real(value, *args, **kwargs)
+
+    monkeypatch.setattr(serialization, "_serialize", failing)
+    with caplog.at_level(logging.WARNING):
+        snapshot = AgentSnapshot.from_agent(agent)
+    restored_vars = serialization.deserialize(snapshot.attributes["vars"], snapshot.type_allowlist)
+    assert dict(restored_vars) == {"b": {"keep": 1}}
+    assert "'keep': 1" in str(snapshot.attributes["todo"])
+    messages = [r.getMessage() for r in caplog.records]
+    assert len([m for m in messages if "skipping non-serializable SnapshotVars key 'a'" in m]) == 2
