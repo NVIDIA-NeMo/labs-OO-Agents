@@ -4,11 +4,13 @@
 
 import logging
 
+import pytest
+
 from nooa.storage.json_snapshot import (  # noqa: F401
     snapshot_from_dict,
     snapshot_to_dict,
 )
-from nooa.storage.serialization import serialize
+from nooa.storage.serialization import MAX_SNAPSHOT_DEPTH, serialize
 from nooa.storage.snapshot_vars import SnapshotVars
 
 
@@ -377,3 +379,146 @@ class TestTaggedKeyAndNonFiniteVars:
             "big": 1e308,
             "neg": -0.0,
         }
+
+
+# -- depth: write-time check matches the checkpoint ---------------------------
+
+
+def _checkpoint_agent():
+    """An interactive agent with agent vars and a todo, as real sessions have."""
+    from nooa.interactive import InteractiveAgent
+    from nooa.tools.todo import TodoManager
+    from nooa.unifiedllm import FakeLLMClient
+
+    class _Agent(InteractiveAgent, llm=FakeLLMClient()):
+        pass
+
+    agent = _Agent()
+    agent.todo = TodoManager()
+    todo = agent.todo.add("t")
+    return agent, {"vars": agent.vars, "todo": todo.vars}
+
+
+def _restore_depths(blob, marker, depth=0, path=""):
+    """Yield (depth, path) of ``marker`` in ``blob``, counting levels as restore does."""
+    if isinstance(blob, list):
+        for i, item in enumerate(blob):
+            yield from _restore_depths(item, marker, depth + 1, f"{path}[{i}]")
+    elif isinstance(blob, dict):
+        kind = blob.get("__type__")
+        if kind == "tuple" and "data" in blob:
+            for i, item in enumerate(blob["data"]):
+                yield from _restore_depths(item, marker, depth + 1, f"{path}[{i}]")
+        elif kind and "__class__" in blob and "data" in blob:
+            for k, v in blob["data"].items():
+                yield from _restore_depths(v, marker, depth + 1, f"{path}.{k}")
+        else:
+            for k, v in blob.items():
+                yield from _restore_depths(v, marker, depth + 1, f"{path}[{k!r}]")
+    elif blob == marker:
+        yield depth, path
+
+
+def _nested_list(levels):
+    value = None
+    for _ in range(levels):
+        value = [value]
+    return value
+
+
+def test_checkpoint_value_depth_covers_real_placements():
+    """Re-measure where vars values sit in a real checkpoint (agent and todo vars)."""
+    from nooa.storage.snapshot import AgentSnapshot
+    from nooa.storage.snapshot_vars import CHECKPOINT_VALUE_DEPTH
+
+    agent, stores = _checkpoint_agent()
+    for store in stores.values():
+        store["probe"] = "__depth_marker__"
+    snapshot = AgentSnapshot.from_agent(agent)
+    measured = {
+        name: list(_restore_depths(snapshot.attributes[name], "__depth_marker__"))
+        for name in stores
+    }
+    assert {name: [d for d, _ in found] for name, found in measured.items()} == {
+        "vars": [2],
+        "todo": [5],
+    }, measured
+    assert max(d for found in measured.values() for d, _ in found) == CHECKPOINT_VALUE_DEPTH
+
+
+@pytest.mark.parametrize("placement", ["vars", "todo"])
+def test_value_accepted_at_write_survives_checkpoint(placement):
+    """Near the depth limit, whatever vars accepts is in the next checkpoint."""
+    from nooa.storage.snapshot import AgentSnapshot
+
+    outcomes = {}
+    for levels in range(MAX_SNAPSHOT_DEPTH - 8, MAX_SNAPSHOT_DEPTH + 1):
+        agent, stores = _checkpoint_agent()
+        store = stores[placement]
+        store["keep"] = 1
+        store["deep"] = _nested_list(levels)
+        accepted = "deep" in store
+        snapshot = AgentSnapshot.from_agent(agent)
+        kept = placement in snapshot.attributes
+        outcomes[levels] = (accepted, kept)
+        assert kept, f"{placement} dropped from the checkpoint at {levels} levels"
+    # Too-deep values are rejected at write time, not at checkpoint.
+    assert outcomes[MAX_SNAPSHOT_DEPTH][0] is False
+
+
+def test_too_deep_value_rejected_at_write_with_clear_warning(caplog):
+    from nooa.storage.snapshot_vars import CHECKPOINT_VALUE_DEPTH
+
+    budget = MAX_SNAPSHOT_DEPTH - CHECKPOINT_VALUE_DEPTH
+    v = SnapshotVars()
+    v["fits"] = _nested_list(budget)
+    assert "fits" in v
+    with caplog.at_level(logging.WARNING):
+        v["deep"] = _nested_list(budget + 1)
+    assert "deep" not in v
+    (message,) = [r.getMessage() for r in caplog.records if "'deep'" in r.getMessage()]
+    assert "will NOT be persisted" in message
+    assert f"nests deeper than the limit of {MAX_SNAPSHOT_DEPTH} levels at <root>[0]" in message
+    assert f"may nest at most {budget} levels" in message
+
+
+def test_value_that_becomes_unserializable_is_skipped_at_checkpoint(caplog):
+    """A live value can turn into a cycle after the write; only its key is lost."""
+    from nooa.storage.serialization import deserialize
+    from nooa.storage.snapshot import AgentSnapshot
+
+    agent, stores = _checkpoint_agent()
+    for store in stores.values():
+        loop = []
+        store["a"] = loop
+        store["b"] = {"keep": 1}
+        loop.append(loop)  # accepted at write, a cycle by checkpoint time
+    with caplog.at_level(logging.WARNING):
+        snapshot = AgentSnapshot.from_agent(agent)
+    restored_vars = deserialize(snapshot.attributes["vars"], snapshot.type_allowlist)
+    assert dict(restored_vars) == {"b": {"keep": 1}}
+    assert "todo" in snapshot.attributes  # the todo (and its other var) survives
+    assert "'keep': 1" in str(snapshot.attributes["todo"])
+    messages = [r.getMessage() for r in caplog.records]
+    skipped = [m for m in messages if "skipping non-serializable SnapshotVars key 'a'" in m]
+    assert len(skipped) == 2, messages
+    assert "contains a cycle" in skipped[0]
+    assert not any("skipping non-serializable attribute" in m for m in messages)
+
+
+def test_depth_hint_uses_error_reason_not_text(caplog, monkeypatch):
+    """The write-time hint keys off ``SerializationError.reason``."""
+    from nooa.errors.storage import SerializationError
+    from nooa.storage import snapshot_vars
+
+    def fake_serialize(value, *, base_depth=0):
+        error = SerializationError("worded differently")
+        error.reason = "depth"
+        raise error
+
+    monkeypatch.setattr(snapshot_vars, "serialize", fake_serialize)
+    v = SnapshotVars()
+    with caplog.at_level(logging.WARNING):
+        v["deep"] = 1
+    (message,) = [r.getMessage() for r in caplog.records if "'deep'" in r.getMessage()]
+    assert "may nest at most" in message

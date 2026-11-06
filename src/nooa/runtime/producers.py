@@ -103,8 +103,9 @@ async def monitor(cmd: str):
     stderr is merged into stdout.  Uses ``start_new_session=True``
     for process-group isolation so multiple concurrent monitors
     (and the agent itself) don't contend for ptys or interfere
-    with each other.  On cancellation the entire process group
-    is killed to prevent orphaned children.
+    with each other. On cancellation or early close, the entire process
+    group is killed, even if its leader has already exited, to prevent
+    orphaned children.
 
     POSIX-only (process groups); on native Windows the first iteration
     raises :class:`~nooa._platform.PosixOnlyFeatureError`.
@@ -117,17 +118,22 @@ async def monitor(cmd: str):
         start_new_session=True,
     )
     assert proc.stdout is not None
+    completed = False
     try:
         async for line in proc.stdout:
             yield line.decode("utf-8", errors="replace").rstrip("\n")
         await proc.wait()
+        completed = True
     finally:
-        if proc.returncode is None:
+        # A child can retain stdout after the group leader exits. Its exit
+        # status alone must not suppress cleanup of an interrupted stream.
+        if not completed:
             try:
                 os.killpg(proc.pid, signal.SIGKILL)
             except (ProcessLookupError, OSError):
-                try:
-                    proc.kill()
-                except ProcessLookupError:
-                    pass
+                if proc.returncode is None:
+                    try:
+                        proc.kill()
+                    except ProcessLookupError:
+                        pass
             await proc.wait()
