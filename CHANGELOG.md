@@ -6,6 +6,13 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- `UnifiedLLM`: `_call_once`/`_acall_once` are no longer abstract. A subclass
+  written against the older contract, which overrides `call`/`acall`, can be
+  built again (it raised `TypeError: Can't instantiate abstract class` since
+  the media-recovery change); it keeps working but does not get the new
+  media recovery, which `call`/`acall` wrap around `_call_once`/`_acall_once`.
+  New subclasses should implement `_call_once`/`_acall_once`. A subclass
+  that overrides neither now raises `NotImplementedError` when called.
 - `nooa-acp` is deprecated, replaced by `nooa-atom` (`nooa atom`), and this is
   its last release. It still works; the `nooa-acp` command (and `nooa acp`)
   now prints a deprecation warning to standard error that points to
