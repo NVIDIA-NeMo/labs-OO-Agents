@@ -12,7 +12,7 @@ from typing import Any, Final, Literal
 from pydantic import BaseModel, field_serializer, field_validator
 
 from nooa.context_blocks import DynamicContext
-from nooa.errors.storage import SerializationError
+from nooa.errors.storage import DeserializationError, SerializationError
 from nooa.storage.markers import is_nosnapshot_field, is_nosnapshot_value
 from nooa.storage.serialization import SKIP, deserialize, serialize
 
@@ -144,8 +144,12 @@ class AgentSnapshot(BaseModel):
         Args:
             agent: A freshly constructed Agent instance to restore into.
 
+        An attribute that fails to deserialize is skipped with a warning; the
+        other attributes are still restored.
+
         Raises:
             SerializationError: If the snapshot version doesn't match.
+            DeserializationError: If a static context block can't be restored.
         """
         if self.version != SNAPSHOT_VERSION:
             raise SerializationError(
@@ -177,4 +181,12 @@ class AgentSnapshot(BaseModel):
             agent.context_manager.disable(*self.disabled_context)
 
         for attr_name, attr_value in self.attributes.items():
-            setattr(agent, attr_name, deserialize(attr_value, self.type_allowlist))
+            try:
+                value = deserialize(attr_value, self.type_allowlist)
+            except DeserializationError as exc:
+                # Mirror ``from_agent``: one unrestorable attribute (e.g. nested
+                # deeper than ``MAX_SNAPSHOT_DEPTH`` in an older checkpoint) must
+                # not abort the whole restore. Skip it and warn.
+                logger.warning("Snapshot: skipping non-restorable attribute %r: %s", attr_name, exc)
+                continue
+            setattr(agent, attr_name, value)

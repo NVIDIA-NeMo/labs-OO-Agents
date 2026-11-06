@@ -6,6 +6,19 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- Snapshot save and restore now detect cycles explicitly and cap nesting at 200
+  levels (`MAX_SNAPSHOT_DEPTH`), whatever the caller's stack depth. Errors for
+  cycles, too-deep values, unsupported types and non-string dict keys name the
+  path to the offending value (e.g. `<root>['a'][0]`) and set
+  `SerializationError.reason` / `DeserializationError.reason`. Restoring a
+  too-deep blob raises `DeserializationError`, not `RecursionError`. An agent
+  attribute that can't be saved or restored is skipped with a warning, on save
+  and now also on restore; checkpoints saved before this change with an
+  attribute nested more than 200 levels deep restore without that attribute.
+  `SnapshotVars` (agent and todo vars) rejects values too deep to checkpoint at
+  write time, and a stored var that later becomes unserializable (e.g. a list
+  that now contains itself) is skipped at checkpoint with a warning instead of
+  dropping every var.
 - Registry entries' `base_url`, `timeout` and `custom_llm_provider` settings
   are now passed to the clients built from them. They were ignored before, so
   configs that set them may now send requests to a different endpoint or
