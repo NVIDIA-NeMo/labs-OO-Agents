@@ -137,3 +137,31 @@ def test_an_item_recorded_under_a_nooa_coder_type_loads_typed():
         "report": "r",
     }
     assert load_typed("nooa_coder.session.items:TaskResult", data) == TaskResult(**data)
+
+
+def test_nooa_coder_snapshot_class_paths_resolve_through_the_core_hook():
+    """nooa-atom registers its legacy prefixes with the core serializer on import."""
+    from nooa_atom.agent.jobs import JobInfo
+    from nooa_atom.session import loader
+
+    from nooa.storage import serialization
+    from nooa.storage.serialization import _import_class
+
+    for old, new in loader.LEGACY_MODULE_PREFIXES.items():
+        assert serialization._LEGACY_CLASS_PREFIXES[old] == new
+    assert _import_class("nooa_coder.session.items.TaskResult") is TaskResult
+    assert _import_class("nooa_coder.coding.jobs.JobInfo") is JobInfo
+
+
+def test_importing_the_atom_agent_registers_the_prefixes():
+    """A fresh interpreter that imports only the Atom agent can restore nooa_coder paths."""
+    import subprocess
+    import sys
+
+    code = (
+        "from nooa_atom.agent.agent import AtomAgent\n"
+        "from nooa.storage.serialization import _import_class\n"
+        "from nooa_atom.session.items import TaskResult\n"
+        "assert _import_class('nooa_coder.session.items.TaskResult') is TaskResult\n"
+    )
+    subprocess.run([sys.executable, "-c", code], check=True, timeout=120)

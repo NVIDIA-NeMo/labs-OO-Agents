@@ -17,6 +17,7 @@ from pydantic import BaseModel
 
 from nooa.interactive import InteractiveAgent
 from nooa.storage.manager import StorageManager
+from nooa.storage.serialization import register_legacy_module_prefix
 from nooa_atom.session.options import SessionOptions
 
 logger = logging.getLogger(__name__)
@@ -58,7 +59,12 @@ LEGACY_MODULE_PREFIXES = {
 """Module prefixes nooa-coder recorded, and the nooa-atom modules that replaced them.
 
 The first matching prefix applies, so the more specific one comes first.
+Registered with the core snapshot serializer when this module is imported, so
+snapshots that recorded ``nooa_coder.*`` class paths still restore.
 """
+
+for _old, _new in LEGACY_MODULE_PREFIXES.items():
+    register_legacy_module_prefix(_old, _new)
 
 
 def canonical_module(module_name: str) -> str:
