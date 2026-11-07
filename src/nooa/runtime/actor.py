@@ -1980,6 +1980,21 @@ class ActorRuntime:
             captured_locals: dict[str, Any] = {}
             wrapper_line_offset = 0  # Lines of wrapper before user code (for error adjustment)
 
+            def _frozen_output() -> dict[str, Any]:
+                """Freeze the capture scope, then read this cell's captured output.
+
+                The single place a result's output is taken: ``finish()`` runs
+                first so no late (descendant) write can land after the read.
+                The scope's ``__exit__`` in the ``finally`` below closes it.
+                """
+                if capture_scope is not None:
+                    capture_scope.finish()
+                return {
+                    "stdout": stdout_buffer.getvalue(),
+                    "stderr": stderr_buffer.getvalue(),
+                    "images": media_buffer.blocks if media_buffer is not None else [],
+                }
+
             try:
                 if execution_namespace is not None:
                     from nooa.runtime.async_safety import agent_async_safety_context
@@ -2189,18 +2204,14 @@ class ActorRuntime:
                     if method_name in exec_globals and callable(exec_globals[method_name])
                 }
 
-                if capture_scope is not None:
-                    capture_scope.finish()
                 result = ExecutionResult(
-                    stdout=stdout_buffer.getvalue(),
-                    stderr=stderr_buffer.getvalue(),
+                    **_frozen_output(),
                     error=None,
                     defined_methods=defined_methods,
                     returned_value=returned_value,
                     explicit_return=has_explicit_return,
                     captured_locals=captured_locals,
                     wrapper_line_offset=wrapper_line_offset,
-                    images=media_buffer.blocks,
                 )
                 return result
 
@@ -2211,11 +2222,8 @@ class ActorRuntime:
                 # that were defined before the signal was raised.
                 captured_locals = _extract_captured_locals(exec_globals)
 
-                if capture_scope is not None:
-                    capture_scope.finish()
                 result = ExecutionResult(
-                    stdout=stdout_buffer.getvalue(),
-                    stderr=stderr_buffer.getvalue(),
+                    **_frozen_output(),
                     error=None,  # NOT an error
                     signal=sig,  # Store signal separately
                     defined_methods={},
@@ -2223,7 +2231,6 @@ class ActorRuntime:
                     explicit_return=False,
                     captured_locals=captured_locals,
                     wrapper_line_offset=wrapper_line_offset,
-                    images=media_buffer.blocks,
                 )
                 return result
 
@@ -2247,18 +2254,14 @@ class ActorRuntime:
                 )
                 wrapped.__cause__ = e
 
-                if capture_scope is not None:
-                    capture_scope.finish()
                 result = ExecutionResult(
-                    stdout=stdout_buffer.getvalue(),
-                    stderr=stderr_buffer.getvalue(),
+                    **_frozen_output(),
                     error=wrapped,
                     defined_methods={},
                     returned_value=_NO_RETURN,
                     explicit_return=False,
                     captured_locals=captured_locals,
                     wrapper_line_offset=wrapper_line_offset,
-                    images=media_buffer.blocks,
                 )
                 return result
 
@@ -2269,18 +2272,14 @@ class ActorRuntime:
                 # that were defined before the exception was raised.
                 captured_locals = _extract_captured_locals(exec_globals)
 
-                if capture_scope is not None:
-                    capture_scope.finish()
                 result = ExecutionResult(
-                    stdout=stdout_buffer.getvalue(),
-                    stderr=stderr_buffer.getvalue(),
+                    **_frozen_output(),
                     error=e,
                     defined_methods={},
                     returned_value=_NO_RETURN,
                     explicit_return=False,
                     captured_locals=captured_locals,
                     wrapper_line_offset=wrapper_line_offset,
-                    images=media_buffer.blocks,
                 )
                 return result
 
@@ -2294,21 +2293,12 @@ class ActorRuntime:
             # Nested execute_code calls see the same exception and each appends
             # its own result, innermost first, so the frame that just unwound is
             # always the last entry.
-            if capture_scope is not None:
-                capture_scope.finish()
             if stdout_buffer is not None and stderr_buffer is not None:
                 results = getattr(error, "execution_results", None)
                 if results is None:
                     results = []
                     error.execution_results = results  # type: ignore[attr-defined]
-                results.append(
-                    ExecutionResult(
-                        stdout=stdout_buffer.getvalue(),
-                        stderr=stderr_buffer.getvalue(),
-                        cancelled=True,
-                        images=media_buffer.blocks if media_buffer is not None else [],
-                    )
-                )
+                results.append(ExecutionResult(**_frozen_output(), cancelled=True))
             raise
         finally:
             # NOTE: We do NOT restore sys.stdout/sys.stderr here.

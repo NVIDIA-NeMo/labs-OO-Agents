@@ -366,3 +366,68 @@ async def test_literal_semantics_survive_actor_execution_and_retained_helpers(li
         assert second.returned_value == eval(literal, {"notification": "B"})
     finally:
         await agent.aclose()
+
+
+@pytest.mark.parametrize("path", ["ok", "signal", "system_exit", "error", "cancelled"])
+async def test_every_exit_path_finishes_scope_before_reading_output(monkeypatch, path):
+    """Each exit freezes the capture scope before reading its output, then exits it once."""
+    from nooa.runtime import capture_scope as capture_module
+
+    events = []
+
+    class RecordingScope(capture_module.CaptureScope):
+        def finish(self):
+            events.append("finish")
+            return super().finish()
+
+        def __exit__(self, *exc):
+            events.append("exit")
+            return super().__exit__(*exc)
+
+    real_getvalue = capture_module._TextLease.getvalue
+
+    def recording_getvalue(lease):
+        events.append("read")
+        return real_getvalue(lease)
+
+    monkeypatch.setattr(capture_module, "CaptureScope", RecordingScope)
+    monkeypatch.setattr(capture_module._TextLease, "getvalue", recording_getvalue)
+    agent, ns = CellAgent(), namespace()
+    call = CurrentCall(id="one", method_name="answer", decorator="agent", return_type=int)
+    builtins = CodeActStrategy()._build_builtins(agent.runtime, call)
+
+    def stop():
+        raise SystemExit(3)  # past the validator, which rejects a literal raise SystemExit
+
+    builtins["stop"] = stop
+    body = {
+        "ok": "pass",
+        "signal": "return_result(1)",
+        "system_exit": "stop()",
+        "error": "1/0",
+        "cancelled": "await asyncio.sleep(60)",
+    }[path]
+    code = f"print('out')\n{body}"
+    with ns.enter({}):
+        if path == "cancelled":
+            task = asyncio.create_task(run(agent, ns, code, **builtins))
+            await asyncio.sleep(0.2)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError) as cancelled:
+                await task
+            (result,) = cancelled.value.execution_results
+            assert result.cancelled
+        else:
+            result = await run(agent, ns, code, **builtins)
+    assert result.stdout == "out\n"
+    assert "finish" in events and events.index("finish") < events.index("read")
+    assert events.count("exit") == 1 and events.index("read") < events.index("exit")
+    if path in ("ok", "signal", "cancelled"):
+        assert result.error is None
+    elif path == "system_exit":
+        assert isinstance(result.error, RuntimeError)
+        assert isinstance(result.error.__cause__, SystemExit)
+    else:
+        assert isinstance(result.error, ZeroDivisionError)
+    if path == "signal":
+        assert result.signal.result == {"result": 1}
