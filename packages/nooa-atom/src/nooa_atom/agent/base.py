@@ -211,6 +211,8 @@ class AtomAgentBase(InteractiveAgent):
         **kwargs: Any,
     ) -> None:
         super().__init__(llm=llm, **kwargs)
+        # Jobs are cancelled through self.jobs; the model never sees queue_manager.
+        self.queue_manager.set_default_cancel_hint(None)
         self.session = None
         self._slash_commands_in = self.queue_manager.queue("slash_commands")
         self._system_messages_in = self.queue_manager.queue("system_messages")

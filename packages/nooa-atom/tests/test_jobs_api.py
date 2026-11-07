@@ -777,6 +777,7 @@ async def test_replace_without_a_running_job_just_starts(agent):
 
 async def test_status_has_no_queue_manager_cancel_hint_for_skill_channels():
     qm = QueueManager()
+    qm.set_default_cancel_hint(None)  # as AtomAgent does
     qm.queue("mesh")
 
     async def pump():

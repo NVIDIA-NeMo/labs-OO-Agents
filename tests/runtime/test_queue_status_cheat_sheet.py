@@ -102,6 +102,50 @@ async def test_active_spawns_shown_when_queues_empty():
     await qm.shutdown()
 
 
+@pytest.mark.asyncio
+async def test_undescribed_spawn_shows_default_stop_line():
+    """A running job nobody described gets one line naming the call that stops it."""
+    qm = QueueManager()
+    qm.queue("ci_monitor")
+    qm.spawn(_dummy_gen(), channel="ci_monitor")
+    qm.spawn(_dummy_gen(), channel="ci_monitor")
+    await asyncio.sleep(0.05)
+    status = qm.status()
+    stop = "Stop: await self.queue_manager.cancel('ci_monitor')"
+    assert status.endswith("\n" + stop)
+    assert status.count(stop) == 1
+    await qm.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_described_or_hinted_spawn_shows_only_the_owner_text():
+    """An owner's describe() or set_cancel_hint replaces the default line."""
+    qm = QueueManager()
+    qm.queue("described")
+    qm.queue("hinted")
+    h = qm.spawn(_dummy_gen(), channel="described")
+    h.describe = lambda: "watching CI for PR 7"
+    qm.set_cancel_hint("hinted", "Stop a monitor: await self.ci.stop('<label>')")
+    qm.spawn(_dummy_gen(), channel="hinted")
+    await asyncio.sleep(0.05)
+    status = qm.status()
+    assert "  • watching CI for PR 7" in status
+    assert status.endswith("\nStop a monitor: await self.ci.stop('<label>')")
+    assert "queue_manager" not in status
+    await qm.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_default_stop_line_can_be_turned_off():
+    qm = QueueManager()
+    qm.queue("ci_monitor")
+    qm.set_default_cancel_hint(None)
+    qm.spawn(_dummy_gen(), channel="ci_monitor")
+    await asyncio.sleep(0.05)
+    assert "Stop:" not in qm.status()
+    await qm.shutdown()
+
+
 def test_no_active_spawns_shown_when_none_running():
     """No spawn section when all handles are done."""
     qm = QueueManager()

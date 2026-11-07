@@ -774,6 +774,10 @@ class QueueManager:
         self._notify_callback: Callable[[], None] | None = None
         # channel name -> one status() line saying how to cancel its jobs.
         self._cancel_hints: dict[str, str] = {}
+        # Line for a running job that has neither a ``describe`` nor a cancel
+        # hint; ``{channel}`` is filled in. None shows nothing (an agent whose
+        # model does not see ``queue_manager``, e.g. Atom, turns it off).
+        self._default_cancel_hint: str | None = "Stop: await self.queue_manager.cancel('{channel}')"
 
     def set_cancel_hint(self, channel: str, hint: str) -> None:
         """Show ``hint`` once, after the status sections, while jobs on ``channel`` run.
@@ -787,6 +791,16 @@ class QueueManager:
         not offer the channel for removal.
         """
         self._cancel_hints[channel] = hint
+
+    def set_default_cancel_hint(self, template: str | None) -> None:
+        """Set the line ``status()`` shows for a running job nobody described.
+
+        Applies to spawned jobs with no ``describe`` and no ``set_cancel_hint``
+        for their channel; ``{channel}`` is replaced by the channel name. The
+        default names ``await self.queue_manager.cancel('<channel>')``; pass
+        ``None`` when the model cannot see ``queue_manager``.
+        """
+        self._default_cancel_hint = template
 
     def set_notify_callback(self, callback: Callable[[], None] | None) -> None:
         """Register an extra callback fired after each channel ``put()``.
@@ -993,6 +1007,9 @@ class QueueManager:
         - ``Running:`` running spawned jobs (their ``describe()``, else
           ``<label> → <channel>``), then the host's ``more_work`` lines.
         - ``Idle:`` the host's ``idle`` lines (work with nothing to do).
+        - Then one line per channel with running jobs: its ``set_cancel_hint``,
+          else (if no job there is described) the default hint
+          (``set_default_cancel_hint``).
 
         Returns ``"(nothing queued)"`` when there is nothing to show.
         """
@@ -1024,11 +1041,16 @@ class QueueManager:
             if heading == "Unread:" and hints:
                 lines.append("Read now: " + " · ".join(dict.fromkeys(hints)))
 
-        # Cancel hints come only from the API that owns a channel
-        # (``set_cancel_hint``); the status never names the hidden queue_manager.
-        # Each hint shows once, however many of its jobs are running.
+        # A channel's owner (``set_cancel_hint``) says how to cancel its jobs;
+        # a job its owner describes needs no line. Any other running job gets
+        # the default line naming its channel. Each line shows once.
         owned = self._cancel_hints
-        lines += dict.fromkeys(owned[h.name] for h in active_spawns if h.name in owned)
+        default = self._default_cancel_hint
+        lines += dict.fromkeys(
+            owned[h.name] if h.name in owned else default.format(channel=h.name)
+            for h in active_spawns
+            if h.name in owned or (default is not None and h.describe is None)
+        )
 
         return "\n".join(lines) or "(nothing queued)"
 
