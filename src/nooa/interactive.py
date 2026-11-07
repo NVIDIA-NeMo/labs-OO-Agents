@@ -21,7 +21,7 @@ queues and re-enters ``handle()`` once per notification. It provides:
 interactive hosts such as the TUI and ACP.
 """
 
-from typing import Annotated, Any, ClassVar, Literal
+from typing import Annotated, Any, ClassVar, Literal, Protocol, runtime_checkable
 
 from pydantic import (
     BaseModel,
@@ -263,6 +263,18 @@ ONE_SHOT_QUESTION: Annotated[str, hidden] = (
 )
 
 
+@runtime_checkable
+class AskPolicy(Protocol):
+    """Whether a turn may end with ``NeedInput``: someone is there to answer it.
+
+    A host installs one as ``InteractiveAgent.ask_policy`` (Atom: its session
+    port, ``False`` for a one-shot worker); ``require_task_result`` reads it.
+    """
+
+    @property
+    def may_ask(self) -> bool: ...
+
+
 @hidden
 def require_task_result(agent: Any, result: Any, call: Any) -> None:
     """Reject a worker ``Done`` whose ``result`` is not a ``TaskResult``, and a one-shot question.
@@ -270,12 +282,12 @@ def require_task_result(agent: Any, result: Any, call: Any) -> None:
     The postcondition of every worker turn (``handle_work``). A worker's
     parent reads it as ``ChildResult.result``; ``self.message()`` text reaches it only as
     progress notes. A dict that validates as a ``TaskResult`` is accepted
-    (the parent receives it as one). A one-shot worker may not ask: its
-    session port says so (``agent.session.may_ask``).
+    (the parent receives it as one). A worker that may not ask (a one-shot
+    worker) says so through its host-installed ``InteractiveAgent.ask_policy``.
     """
     if isinstance(result, NeedInput):
-        port = getattr(agent, "session", None)
-        if port is not None and not getattr(port, "may_ask", True):
+        policy = agent.ask_policy if isinstance(agent, InteractiveAgent) else None
+        if policy is not None and not policy.may_ask:
             raise InvariantError(ONE_SHOT_QUESTION)
         return
     if not isinstance(result, Done) or isinstance(result.result, TaskResult):
@@ -485,11 +497,15 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
     # across sessions (snapshot-backed). Accessed via the ``self.v``
     # proxy for dot-attribute reads/writes (``self.v.spec = "..."``).
     vars: SnapshotVars
+    # Installed by the host: whether a turn may end with NeedInput (see
+    # AskPolicy). None: no host policy, a turn may ask.
+    ask_policy: Annotated[AskPolicy | None, hidden, nosnapshot]
 
     def __init__(self, llm=None, *, producers: bool = True, **kwargs):  # noqa: F811 (not the module)
         """``producers=False``: no ``self.producers`` (a subclass with its own timers)."""
         super().__init__(llm=llm or _DEFAULT_LLM, **kwargs)
         self._render_message = None
+        self.ask_policy = None
         self.vars = SnapshotVars()
         self.queue_manager = QueueManager(event_manager=self.event_manager)
         self._user_messages_in = self.queue_manager.queue("user_messages")

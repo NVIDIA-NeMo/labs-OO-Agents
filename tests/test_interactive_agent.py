@@ -350,3 +350,41 @@ def test_need_input_roundtrip_and_extra_rejection():
 def test_need_input_rejects_a_typed_answer():
     with pytest.raises(ValidationError):
         NeedInput(question="How many?", answer_type=BaseModel)
+
+
+def test_require_task_result_reads_the_typed_ask_policy():
+    from types import SimpleNamespace
+
+    from nooa.interactive import AskPolicy, require_task_result
+    from nooa.strategy_validation import InvariantError
+
+    question = NeedInput(question="Which branch?")
+    host = _Host(llm=FakeLLMClient())
+    assert host.ask_policy is None
+    require_task_result(host, question, None)  # no host policy: may ask
+    host.ask_policy = SimpleNamespace(may_ask=True)
+    require_task_result(host, question, None)
+    host.ask_policy = SimpleNamespace(may_ask=False)
+    assert isinstance(host.ask_policy, AskPolicy)
+    with pytest.raises(InvariantError, match="can't answer a one-shot worker"):
+        require_task_result(host, question, None)
+
+
+def test_ask_policy_is_not_snapshotted():
+    from types import SimpleNamespace
+
+    from nooa.storage.json_snapshot import snapshot_to_json
+
+    host = _Host(llm=FakeLLMClient())
+    host.ask_policy = SimpleNamespace(may_ask=False)
+    assert "ask_policy" not in snapshot_to_json(host)["attributes"]
+
+
+def test_require_task_result_no_longer_duck_types_a_session_attribute():
+    """Only the InteractiveAgent contract counts, not an arbitrary ``session.may_ask``."""
+    from types import SimpleNamespace
+
+    from nooa.interactive import require_task_result
+
+    stranger = SimpleNamespace(session=SimpleNamespace(may_ask=False))
+    require_task_result(stranger, NeedInput(question="Which branch?"), None)

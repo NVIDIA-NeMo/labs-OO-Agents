@@ -298,3 +298,17 @@ async def test_workspace_shell_and_python_paths_remain_independent(tmp_path, mon
         assert "Python paths use cell cwd, not Shell cwd." in agent.context["workspace_state"]
     finally:
         await agent.aclose()
+
+
+async def test_the_session_port_is_the_agents_ask_policy(options):
+    """Atom implements the core AskPolicy contract: the port installed as ask_policy."""
+    from nooa.interactive import AskPolicy
+
+    registry = SessionRegistry(SessionStore(options.sessions_dir), agent_factory=AtomModels())
+    try:
+        root = await registry.create(options)
+        agent = root._agent
+        assert agent.ask_policy is agent.session
+        assert isinstance(agent.ask_policy, AskPolicy) and agent.ask_policy.may_ask
+    finally:
+        await registry.close_all()

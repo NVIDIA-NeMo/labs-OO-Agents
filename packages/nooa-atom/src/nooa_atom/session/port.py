@@ -442,6 +442,8 @@ def install_port(
         visible = bool(getattr(type(agent), "session_port_visible", True))
     port = SessionPort(session, registry)
     agent.session = port  # type: ignore[attr-defined]
+    # The core AskPolicy contract: require_task_result reads may_ask here.
+    agent.ask_policy = port
     if not visible:
         spec(agent, "session", hidden=True)
     if "delegates" not in agent.queue_manager.channels():
