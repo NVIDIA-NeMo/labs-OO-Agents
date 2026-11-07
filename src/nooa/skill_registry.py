@@ -218,6 +218,9 @@ class SkillRegistry(Skill):
         self._load_order: list[str] = []  # deterministic dependency-safe teardown order
         self._sources: dict[str, _SkillSource] = {}
         self._python_modules: dict[str, Any] = {}  # local synthetic name → imported module
+        # Agent-written skills not loaded because their attribute name is
+        # taken: registry name → the line shown to the agent (name_conflicts()).
+        self._name_conflicts: dict[str, str] = {}
         self._load_generation = 0
         self._discover()
         super().__init__()
@@ -300,7 +303,8 @@ class SkillRegistry(Skill):
             if reg_name in self._loaded:
                 continue
             if agent_written and self._attr_taken(reg_name):
-                continue  # the attribute it registers as is another skill's
+                self._note_name_conflict(reg_name)  # its attribute is something else's
+                continue
             try:
                 skill = self._import_lib(lib_dir, lib_name, target)
                 if skill is not None:
@@ -434,6 +438,21 @@ class SkillRegistry(Skill):
         except Exception:
             logger.warning("TextSkill %s skipped", entry, exc_info=True)
 
+    def name_conflicts(self) -> list[str]:
+        """One line per agent-written skill skipped because its attribute name is taken."""
+        return [self._name_conflicts[name] for name in sorted(self._name_conflicts)]
+
+    def _note_name_conflict(self, reg_name: str) -> None:
+        """Record (and warn once) that ``reg_name`` was skipped: its attribute is taken."""
+        attr = self._attr_name(reg_name)
+        line = (
+            f"skill {reg_name.split('.')[-1]!r} not loaded: the agent already has an "
+            f"attribute named {attr}; rename the skill"
+        )
+        if self._name_conflicts.get(reg_name) != line:
+            logger.warning("Skill %s: %s", reg_name, line)
+        self._name_conflicts[reg_name] = line
+
     def _attr_taken(self, name: str) -> bool:
         """Whether the agent has ``name``'s attribute from something other than this skill."""
         attr = self._attr_name(name)
@@ -446,7 +465,10 @@ class SkillRegistry(Skill):
         from nooa.skill import TextSkill
 
         reg_name = f"local.{entry.name}"
-        if reg_name in self._loaded or self._attr_taken(reg_name):
+        if reg_name in self._loaded:
+            return
+        if self._attr_taken(reg_name):
+            self._note_name_conflict(reg_name)
             return
         try:
             skill = TextSkill(path=entry)
@@ -638,6 +660,7 @@ class SkillRegistry(Skill):
                 skill.attach(self._agent)
         newly_loaded = name not in self._loaded
         self._loaded.add(name)
+        self._name_conflicts.pop(name, None)
         self._attr_map[name] = attr
         if newly_loaded:
             self._load_order.append(name)
@@ -1379,6 +1402,7 @@ class SkillRegistry(Skill):
             for name, desc in available:
                 lines.append(f"  {name:28s} {desc}")
 
+        lines.extend(self.name_conflicts())
         return "\n".join(lines)
 
     # ------------------------------------------------------------------

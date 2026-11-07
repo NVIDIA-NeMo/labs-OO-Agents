@@ -278,6 +278,7 @@ class SkillManager(Skill):
                 "(unconnected MCP: connection status); "
                 "await self.skills.activate(['name']) (async)"
             )
+        lines.extend(self.registry.name_conflicts())
         return "\n".join(lines)
 
     # ------------------------------------------------------------------

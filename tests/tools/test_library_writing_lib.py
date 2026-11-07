@@ -603,3 +603,32 @@ async def test_the_manager_fallback_still_reloads_the_same_local_skill(tmp_path:
     assert "OK — written and loaded" in await libs.reload("rl_same")
     assert agent.rl_same is not first
     assert Path(agent.rl_same.source_dir).resolve() == (tmp_path / "rl_same").resolve()
+
+
+def test_a_saved_skill_whose_name_is_taken_is_skipped_with_a_visible_line(tmp_path: Path, caplog):
+    """Loading saved skills skips a name the agent already has, but says so."""
+    import logging
+
+    from nooa.skill_registry import SkillRegistry
+
+    agent = _make_agent()
+    shell = agent.shell
+    agent.skills = SkillRegistry(agent)
+    _make_lib_dir(tmp_path, "shell", SIMPLE_SOURCE)  # a code skill under an attribute's name
+    text_dir = tmp_path / "runtime"  # a text skill under another attribute's name
+    text_dir.mkdir()
+    (text_dir / "SKILL.md").write_text("---\nname: runtime\ndescription: d\n---\n\nbody\n")
+    with caplog.at_level(logging.WARNING, logger="nooa.skill_registry"):
+        SkillWriting(agent, path=tmp_path)
+    assert agent.shell is shell
+    expected = [
+        "skill 'runtime' not loaded: the agent already has an attribute named runtime; "
+        "rename the skill",
+        "skill 'shell' not loaded: the agent already has an attribute named shell; "
+        "rename the skill",
+    ]
+    assert agent.skills.name_conflicts() == expected
+    status = agent.skills.status()
+    assert all(line in status for line in expected)
+    warned = [r.getMessage() for r in caplog.records if "not loaded" in r.getMessage()]
+    assert len(warned) == 2

@@ -523,3 +523,18 @@ async def test_search_calls_a_duplicate_leaf_code_skill_on_its_registered_attrib
         assert made.greeter is made.skills.registry["tools.greeter"]
     finally:
         await made.aclose()
+
+
+async def test_a_saved_skill_named_like_an_agent_attribute_is_reported_in_the_block(
+    agent, tmp_path
+):
+    """A saved skill the agent already has a name for is not loaded, and the block says so."""
+    saved = tmp_path / "saved"
+    (saved / "shell").mkdir(parents=True)
+    (saved / "shell" / "SKILL.md").write_text("---\nname: shell\ndescription: d\n---\nbody\n")
+    shell = agent.shell
+    agent.skills.registry.discover_libs(saved, agent_written=True)
+    assert agent.shell is shell
+    assert agent.skills.status().splitlines()[-1] == (
+        "skill 'shell' not loaded: the agent already has an attribute named shell; rename the skill"
+    )
