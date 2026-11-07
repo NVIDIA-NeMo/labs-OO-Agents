@@ -260,3 +260,48 @@ def test_generated_llm_span_takes_the_record_session(writer, monkeypatch):
     assert spans[explicit["span_id"]].attributes["session.id"] == "explicit-session"
     assert s2 == ambient["session_id"] == "ambient-session"
     assert spans[ambient["span_id"]].attributes["session.id"] == "ambient-session"
+
+
+def test_a_failed_call_marks_the_reused_llm_span(writer, monkeypatch):
+    from openinference.semconv.trace import OpenInferenceSpanKindValues, SpanAttributes
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+    from opentelemetry.trace import StatusCode, use_span
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    llm_kind = {SpanAttributes.OPENINFERENCE_SPAN_KIND: OpenInferenceSpanKindValues.LLM.value}
+    for response in (None, _assistant("ok")):
+        span = provider.get_tracer("t").start_span("client", attributes=llm_kind)
+        with use_span(span, end_on_exit=True):
+            journal_llm_call(
+                model="m", messages=[{"role": "user", "content": "hi"}], response=response
+            )
+    failed, ok = exporter.get_finished_spans()
+    assert [c["span_id"] for _, c in writer.calls] == [
+        format(s.context.span_id, "016x") for s in (failed, ok)
+    ]
+    assert failed.status.status_code is StatusCode.ERROR
+    assert ok.status.status_code is StatusCode.UNSET
+
+
+def test_a_failed_call_keeps_the_reused_spans_error_description(writer):
+    from openinference.semconv.trace import OpenInferenceSpanKindValues, SpanAttributes
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+    from opentelemetry.trace import Status, StatusCode, use_span
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    llm_kind = {SpanAttributes.OPENINFERENCE_SPAN_KIND: OpenInferenceSpanKindValues.LLM.value}
+    span = provider.get_tracer("t").start_span("client", attributes=llm_kind)
+    with use_span(span, end_on_exit=True):
+        span.set_status(Status(StatusCode.ERROR, "rate limited"))
+        journal_llm_call(model="m", messages=[{"role": "user", "content": "hi"}], response=None)
+    (failed,) = exporter.get_finished_spans()
+    assert failed.status.status_code is StatusCode.ERROR
+    assert failed.status.description == "rate limited"

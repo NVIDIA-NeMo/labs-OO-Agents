@@ -290,6 +290,15 @@ async def test_create_writes_pyproject_and_init(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_create_text_skill_without_a_registry_is_refused(tmp_path: Path):
+    """Without a skill registry nothing loads a SKILL.md, so none is written."""
+    libs = SkillWriting(_make_agent(), path=tmp_path)
+    result = await libs.create("notes", DESCRIPTION, text="Steps.")
+    assert result.startswith("Not created")
+    assert not (tmp_path / "notes").exists()
+
+
+@pytest.mark.asyncio
 async def test_create_does_not_write_source_file(tmp_path: Path):
     """create() only scaffolds the package — no code files are written."""
     libs = SkillWriting(_make_agent(), path=tmp_path)
@@ -400,11 +409,14 @@ async def test_reload_reports_registry_failure(tmp_path: Path):
     """A reload that the registry rejects must NOT be reported as loaded."""
 
     class _FailingSkills:
-        def discover_libs(self, path):
+        def discover_libs(self, path, *, agent_written=False):
             pass
 
         def activate(self, patterns):
             pass
+
+        def loaded(self):
+            return []
 
         async def reload(self, name: str) -> str:
             return f"Reload failed for {name}: boom"
@@ -427,11 +439,14 @@ async def test_reload_reports_success(tmp_path: Path):
     """A reload the registry accepts is reported as loaded."""
 
     class _OkSkills:
-        def discover_libs(self, path):
+        def discover_libs(self, path, *, agent_written=False):
             pass
 
         def activate(self, patterns):
             pass
+
+        def loaded(self):
+            return []
 
         async def reload(self, name: str) -> str:
             return f"Reloaded {name} (self.rl_ok)"
@@ -445,3 +460,146 @@ async def test_reload_reports_success(tmp_path: Path):
     result = await libs.reload("rl_ok")
 
     assert "OK — written and loaded" in result
+
+
+# ---------------------------------------------------------------------------
+# Skill names (m7) and attribute collisions (M3)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "bad", ["../../escaped", "a/b", "..", "a\\b", "", "1abc", "with space", "class"]
+)
+@pytest.mark.asyncio
+async def test_a_skill_name_that_is_not_identifier_like_is_refused_everywhere(
+    tmp_path: Path, bad: str
+):
+    libs = SkillWriting(_make_agent(), path=tmp_path / "skills")
+    for attempt in (
+        libs.create(bad, DESCRIPTION),
+        libs.create(bad, DESCRIPTION, text="Steps."),
+        libs.reload(bad),
+        libs.run_tests(bad),
+    ):
+        with pytest.raises(ValueError, match="choose another name"):
+            await attempt
+    with pytest.raises(ValueError, match="Invalid skill name"):
+        libs.path(bad)
+    # Nothing was written outside (or inside) the skills directory.
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["skills"]
+    assert list((tmp_path / "skills").iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_a_text_skill_name_may_contain_a_hyphen_but_a_code_skill_name_may_not(
+    tmp_path: Path,
+):
+    libs = SkillWriting(_make_agent(), path=tmp_path)
+    assert libs.path("release-notes").endswith("release-notes")
+    with pytest.raises(ValueError, match="Python identifier"):
+        await libs.create("release-notes", DESCRIPTION)
+
+
+@pytest.mark.asyncio
+async def test_a_code_skill_named_like_an_agent_attribute_is_refused(tmp_path: Path):
+    agent = _make_agent()
+    shell = agent.shell
+    libs = SkillWriting(agent, path=tmp_path)
+    result = await libs.create("shell", DESCRIPTION)
+    assert result.startswith("Not created")
+    assert "self.shell is already an attribute" in result
+    assert "choose another name" in result
+    assert not (tmp_path / "shell").exists()
+    assert agent.shell is shell
+
+
+@pytest.mark.asyncio
+async def test_reload_never_replaces_a_non_skill_attribute(tmp_path: Path):
+    """A skill directory written by hand under an attribute's name is not attached."""
+    agent = _make_agent()
+    shell = agent.shell
+    libs = SkillWriting(agent, path=tmp_path)
+    _make_lib_dir(tmp_path, "shell", SIMPLE_SOURCE)
+    result = await libs.reload("shell")
+    assert "not loaded" in result.lower()
+    assert "choose another name" in result
+    assert agent.shell is shell
+
+
+@pytest.mark.asyncio
+async def test_reload_of_a_text_only_directory_does_not_import_it_as_a_module(tmp_path: Path):
+    agent = _make_agent()
+    libs = SkillWriting(agent, path=tmp_path)
+    (tmp_path / "notes").mkdir()
+    (tmp_path / "notes" / "SKILL.md").write_text("---\nname: notes\n---\nHi.\n")
+    result = await libs.reload("notes")
+    assert "not loaded" in result.lower()
+    assert "notes" not in vars(agent)
+
+
+# ---------------------------------------------------------------------------
+# Reserved names and the manager fallback's ownership (CodeRabbit on #556)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("reserved", ["_notes", "-notes", "_", "runtime", "event_manager"])
+@pytest.mark.asyncio
+async def test_a_reserved_registry_name_is_refused_for_text_and_code_skills(
+    tmp_path: Path, reserved: str
+):
+    from nooa.skill_registry import SkillRegistry
+
+    agent = _make_agent()
+    agent.skills = SkillRegistry(agent)
+    libs = SkillWriting(agent, path=tmp_path / "skills")
+    attempts = [libs.create(reserved, DESCRIPTION, text="Steps.")]
+    if not reserved.startswith("-"):
+        attempts.append(libs.create(reserved, DESCRIPTION))
+    for attempt in attempts:
+        with pytest.raises(ValueError, match="reserved.*choose another name"):
+            await attempt
+    assert list((tmp_path / "skills").iterdir()) == []
+
+
+@pytest.mark.parametrize("name", ["release-notes", "a-"])
+@pytest.mark.asyncio
+async def test_a_hyphenated_text_skill_name_is_created_and_loaded(tmp_path: Path, name: str):
+    from nooa.skill_registry import SkillRegistry
+
+    agent = _make_agent()
+    agent.skills = SkillRegistry(agent)
+    libs = SkillWriting(agent, path=tmp_path)
+    result = await libs.create(name, DESCRIPTION, text="Steps.")
+    assert result.startswith("Created text skill"), result
+    assert f"local.{name}" in agent.skills.loaded()
+    assert "Steps." in str(getattr(agent, name.replace("-", "_")).__doc__)
+
+
+@pytest.mark.asyncio
+async def test_the_manager_fallback_refuses_a_skill_named_like_another_skill(tmp_path: Path):
+    """Without a registry, an unrelated skill (here SkillWriting itself) is not a reload."""
+    agent = _make_agent()
+    libs = SkillWriting(agent, path=tmp_path)
+    agent.skill_writing = libs
+    result = await libs.create("skill_writing", DESCRIPTION)
+    assert result.startswith("Not created"), result
+    assert "self.skill_writing is already an attribute" in result
+    assert not (tmp_path / "skill_writing").exists()
+    # A hand-written directory under that name is not attached either.
+    _make_lib_dir(tmp_path, "skill_writing", SIMPLE_SOURCE)
+    result = await libs.reload("skill_writing")
+    assert "not loaded" in result.lower()
+    assert agent.skill_writing is libs
+
+
+@pytest.mark.asyncio
+async def test_the_manager_fallback_still_reloads_the_same_local_skill(tmp_path: Path):
+    agent = _make_agent()
+    libs = SkillWriting(agent, path=tmp_path)
+    await libs.create("rl_same", DESCRIPTION)
+    (tmp_path / "rl_same" / "rl_same.py").write_text(SIMPLE_SOURCE)
+    assert "OK — written and loaded" in await libs.reload("rl_same")
+    first = agent.rl_same
+    assert "OK — written and loaded" in await libs.reload("rl_same")
+    assert agent.rl_same is not first
+    assert Path(agent.rl_same.source_dir).resolve() == (tmp_path / "rl_same").resolve()

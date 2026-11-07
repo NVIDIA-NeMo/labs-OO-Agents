@@ -6,9 +6,10 @@ Pure functions that format validation errors into actionable LLM feedback.
 Extracted from CodeActStrategy to keep the strategy class focused on control flow.
 """
 
+import dataclasses
 import inspect
 import json
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import ValidationError as PydanticValidationError
 from pydantic_core import ErrorDetails
@@ -17,6 +18,139 @@ from nooa.agentdoc import pformat
 from nooa.agentdoc.visibility import is_hidden_field
 from nooa.config.truncation_config import DEFAULT_TRUNCATION_CONFIG, TruncationConfig
 from nooa.strategy_validation import InvariantError
+
+
+def _return_type_members(return_type: Any) -> tuple[Any, ...]:
+    """The members of a union return type, or the type itself."""
+    import types
+    import typing
+
+    origin = typing.get_origin(return_type)
+    if origin is typing.Union or origin is types.UnionType:
+        return tuple(a for a in typing.get_args(return_type) if a is not type(None))
+    return (return_type,)
+
+
+def return_type_field_names(return_type: Any) -> set[str]:
+    """Field names of a model/dataclass/TypedDict return type (all union members together)."""
+    names: set[str] = set()
+    for member in _return_type_members(return_type):
+        fields = getattr(member, "model_fields", None)
+        if isinstance(fields, dict):
+            names.update(fields)
+        elif isinstance(member, type) and dataclasses.is_dataclass(member):
+            names.update(f.name for f in dataclasses.fields(member))
+        elif isinstance(member, type) and issubclass(member, dict):
+            names.update(inspect.get_annotations(member))
+    return names
+
+
+def positional_result(kwargs: dict[str, Any], return_type: Any) -> dict[str, Any] | None:
+    """``{"result": x}`` for ``return_result(value=x)``, the builtin's parameter name.
+
+    Only when the return type has no ``value`` field (then ``value=`` is that
+    field). Pure: callers count the alias. Shared by the in-cell builtin
+    and a provider ``return_result`` call.
+    """
+    if (
+        list(kwargs) == ["value"]
+        and return_type is not None
+        and return_type is not type(None)
+        and "value" not in return_type_field_names(return_type)
+    ):
+        return {"result": kwargs["value"]}
+    return None
+
+
+ReturnForm = Literal["cell", "tool", "alias"]
+
+
+def return_call_hint(
+    return_type: Any, form: ReturnForm = "cell", python_tool: str = "python_cell"
+) -> str | None:
+    """Name the call that returns a model return type, e.g. ``return_result(Done(...))``.
+
+    Only for return types whose members are all Pydantic models: other types
+    already get an example from the formatter. ``form`` is how the failed
+    call was made: ``cell`` (``return_result(...)`` in code), ``tool`` (a
+    direct ``return_result`` tool call, JSON arguments: the constructor form
+    is labelled as ``python_tool`` code and a JSON example follows) or
+    ``alias`` (a provider call when there is no such tool: the cell form only).
+    """
+    forms = []
+    json_forms = []
+    for member in _return_type_members(return_type):
+        fields = getattr(member, "model_fields", None)
+        if not isinstance(member, type) or not isinstance(fields, dict):
+            return None
+        required = [
+            name
+            for name, info in fields.items()
+            if info.is_required() and not is_hidden_field(member, name)
+        ]
+        args = ", ".join(f"{name}=..." for name in required)
+        forms.append(f"return_result({member.__name__}({args}))")
+        fields_json = ", ".join(f'"{name}": ...' for name in required)
+        json_forms.append(f'{{"result": {{{fields_json}}}}}')
+    if not forms:
+        return None
+    call = forms[0] if len(forms) == 1 else f"one of: {', '.join(forms)}"
+    if form == "cell":
+        return f"Call it as {call}."
+    if form == "alias":
+        return f"To finish, call {python_tool} with {call}."
+    return (
+        f"In {python_tool} code, call it as {call}. As a direct return_result tool call, "
+        f"pass JSON arguments: {' or '.join(json_forms)}."
+    )
+
+
+def return_doc_hint(return_type: Any, namespace: Any) -> str | None:
+    """``Fields: print(doc(Done, NeedInput))`` for a model return type, else None.
+
+    Only when every member's name is bound to that member in the cell
+    ``namespace``, so the call runs as written there.
+    """
+    if not isinstance(namespace, dict):
+        return None
+    names = []
+    for member in _return_type_members(return_type):
+        name = getattr(member, "__name__", None)
+        if (
+            not isinstance(member, type)
+            or not isinstance(getattr(member, "model_fields", None), dict)
+            or not name
+            or namespace.get(name) is not member
+        ):
+            return None
+        names.append(name)
+    return f"Fields: print(doc({', '.join(names)}))" if names else None
+
+
+def _shown_value(value: Any, limit: int) -> str:
+    shown = repr(value)
+    return shown[: limit - 1] + "…" if len(shown) > limit else shown
+
+
+def return_alias_note(
+    python_tool: str, value: Any, *, valid: bool, limit: int = 200, keyword: str | None = None
+) -> str:
+    """The note on a provider ``return_result`` call run as the builtin.
+
+    ``valid``: the value was accepted (a note after "Result accepted.") or
+    not (the first line, before the validation errors). ``keyword``: the
+    value went in as that keyword (``value=`` for a return type's own field).
+    """
+    lead = f"return_result isn't a tool. It's a function you call inside {python_tool}"
+    shown = _shown_value(value, limit)
+    if keyword:
+        shown = f"{keyword}={shown}"
+    if valid:
+        return f"{lead}; this call ran as return_result({shown})"
+    return (
+        f"{lead}. I ran your call as {python_tool} code return_result({shown}), "
+        "and that value isn't a valid result:"
+    )
 
 
 def format_validation_error(

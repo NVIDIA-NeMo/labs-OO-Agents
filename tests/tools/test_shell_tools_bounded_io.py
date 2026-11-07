@@ -280,7 +280,7 @@ async def test_replace_by_match_over_budget_leaves_file_untouched(tmp_path):
     path.write_text(original)
 
     with pytest.raises(FileTooLargeError):
-        await sh.replace(Match("big.py", 1, 1, "a\n", resolved_path=path), "b\n")
+        await sh.replace_match(Match("big.py", 1, 1, "a\n", resolved_path=path), "b\n")
 
     assert path.read_text() == original
 
@@ -402,14 +402,9 @@ def test_whole_file_read_enforces_budget_when_stat_underreports(tmp_path, monkey
     class _StaleStat:
         st_size = 4
 
-    real_stat = Path.stat
-
-    def stale_size_only_for_target(candidate, *args, **kwargs):
-        if candidate == path:
-            return _StaleStat()
-        return real_stat(candidate, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "stat", stale_size_only_for_target)
+    # The helper sizes the open handle with os.fstat, so make that stale: the
+    # read-time limit check, not the up-front size check, must catch it.
+    monkeypatch.setattr("nooa.tools._bounded_io.os.fstat", lambda _fd: _StaleStat())
 
     with pytest.raises(FileTooLargeError):
         read_whole_file_checked(path, 10, hint="raise the limit")

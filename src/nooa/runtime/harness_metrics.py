@@ -28,7 +28,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any, ClassVar, NamedTuple
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +95,56 @@ class SchemaEntry(NamedTuple):
     is_detail: bool = False
 
 
+# ── Extensions (counters a package adds) ────────────────────────────
+
+
+class HarnessMetricsExtension(BaseModel):
+    """Counters a package adds to :class:`HarnessMetrics`, with their span attributes.
+
+    Subclass it with the fields and recorder methods, set ``span_schema`` (its
+    entries' ``value_fn`` receives the extension instance, not the
+    HarnessMetrics), and register the class with
+    :func:`register_harness_metrics_extension`. Record with
+    ``get_harness_metrics().extension(MyMetrics).my_counter()``: a session
+    creates the extension on first use, so agents that never record one carry
+    none of its fields, and outside a session the call is a no-op.
+    """
+
+    span_schema: ClassVar[tuple[SchemaEntry, ...]] = ()
+
+    def _append(self, lst: list[str], value: str, limit: int = _MAX_STRING_CHARS) -> None:
+        """Append ``value`` truncated to ``limit`` unless ``lst`` is full."""
+        if len(lst) < _MAX_LIST_ITEMS:
+            lst.append(_truncate(value, limit))
+
+    def _append_item(self, lst: list[Any], item: Any) -> None:
+        """Append ``item`` unless ``lst`` is full (no truncation: records, ints)."""
+        if len(lst) < _MAX_LIST_ITEMS:
+            lst.append(item)
+
+
+# Registered extension classes, in registration order (drives get_span_schema()).
+_EXTENSIONS: list[type[HarnessMetricsExtension]] = []
+
+
+def register_harness_metrics_extension[E: HarnessMetricsExtension](cls: type[E]) -> type[E]:
+    """Register an extension so :func:`get_span_schema` lists its attributes.
+
+    Usable as a class decorator; registering the same class again is a no-op.
+    Raises ``ValueError`` if one of its span keys is already in the schema or
+    appears twice in its own ``span_schema``.
+    """
+    if cls in _EXTENSIONS:
+        return cls
+    keys = [entry.key for entry in cls.span_schema]
+    taken = {entry.key for entry in get_span_schema()}
+    clashes = sorted({key for key in keys if key in taken or keys.count(key) > 1})
+    if clashes:
+        raise ValueError(f"{cls.__name__} span keys already in the schema or repeated: {clashes}")
+    _EXTENSIONS.append(cls)
+    return cls
+
+
 # ── HarnessMetrics ──────────────────────────────────────────────────
 
 
@@ -124,6 +174,8 @@ class HarnessMetrics(BaseModel):
     text_only_loop_aborts_count: int = 0
     loop_guard_nudges_count: int = 0
     loop_guard_stops_count: int = 0
+    tool_call_skipped_count: int = 0
+    text_only_tool_markup_count: int = 0
     empty_response_count: int = 0
     gpt4o_double_quote_fix_count: int = 0
     gpt4o_double_quote_fix_previews: list[str] = Field(default_factory=list)
@@ -138,6 +190,11 @@ class HarnessMetrics(BaseModel):
     # ── Return Value Handling ──
     explicit_return_auto_completed: int = 0
     implicit_return_transformed: int = 0
+    # return_result(value=x) read as return_result(x) (in a cell or as a provider tool call)
+    return_result_keyword_aliases: list[str] = Field(default_factory=list)
+    # Invalid return_result values sent back as a retryable cell error; the error type
+    return_result_invalid_retries: list[str] = Field(default_factory=list)
+    return_result_tool_aliases: int = 0  # provider return_result calls taken as the cell builtin
 
     # ── Error Recovery ──
     validation_errors: list[ErrorRecord] = Field(default_factory=list)
@@ -168,6 +225,12 @@ class HarnessMetrics(BaseModel):
     llm_queue_max_depth: int = 0
     llm_queue_wait: TimingStat = Field(default_factory=TimingStat)
 
+    # ── Media Recovery (from unifiedllm via callback) ──
+    # A provider rejected an attachment; retried with a note in its place (kind)
+    media_rejected_retries: list[str] = Field(default_factory=list)
+    media_image_limit_collapses: list[int] = Field(default_factory=list)  # limit M per recovery
+    media_image_limit_events_collapsed: int = 0
+
     # ── Code Execution ──
     exec_python_total: int = 0
     exec_python_success: int = 0
@@ -179,6 +242,9 @@ class HarnessMetrics(BaseModel):
     shell_deaths: list[ErrorRecord] = Field(default_factory=list)
     repo_failures: list[ErrorRecord] = Field(default_factory=list)
     tool_avoidance: list[str] = Field(default_factory=list)
+    mcp_result_errors: list[str] = Field(default_factory=list)
+    # LLM-facing queue reads that timed out mid-cell (channel name)
+    queue_read_timeouts: list[str] = Field(default_factory=list)
 
     # ── Code Validation ──
     missing_awaits_detected: list[str] = Field(default_factory=list)
@@ -206,15 +272,28 @@ class HarnessMetrics(BaseModel):
     time_tracing_overhead: TimingStat = Field(default_factory=TimingStat)
     turn_count: int = 0
 
+    # Package extensions (HarnessMetricsExtension), created on first use
+    _extensions: dict[type[HarnessMetricsExtension], HarnessMetricsExtension] = PrivateAttr(
+        default_factory=dict
+    )
+
+    def extension[E: HarnessMetricsExtension](self, cls: type[E]) -> E:
+        """This session's instance of extension ``cls``, created on first use."""
+        ext = self._extensions.get(cls)
+        if ext is None:
+            ext = self._extensions[cls] = cls()
+        return ext  # type: ignore[return-value]
+
     # ── Helpers ──────────────────────────────────────────────────────
 
     def _append(self, lst: list[str], value: str, limit: int = _MAX_STRING_CHARS) -> None:
         if len(lst) < _MAX_LIST_ITEMS:
             lst.append(_truncate(value, limit))
 
-    def _append_error(self, lst: list[ErrorRecord], rec: ErrorRecord) -> None:
+    def _append_item(self, lst: list[Any], item: Any) -> None:
+        """Append ``item`` unless ``lst`` is full (no truncation: records, ints)."""
         if len(lst) < _MAX_LIST_ITEMS:
-            lst.append(rec)
+            lst.append(item)
 
     # ── Convenience record methods ──────────────────────────────────
     # Method names follow a consistent pattern: match the field name
@@ -257,6 +336,14 @@ class HarnessMetrics(BaseModel):
     def loop_guard_stop(self) -> None:
         self.loop_guard_stops_count += 1
 
+    def tool_call_skipped(self, count: int = 1) -> None:
+        """Record calls of a response not run because an earlier one failed or finished."""
+        self.tool_call_skipped_count += count
+
+    def text_only_tool_markup(self) -> None:
+        """Record a text-only reply that contained a tool call written as text."""
+        self.text_only_tool_markup_count += 1
+
     def empty_response(self) -> None:
         self.empty_response_count += 1
 
@@ -290,9 +377,21 @@ class HarnessMetrics(BaseModel):
     def implicit_return(self) -> None:
         self.implicit_return_transformed += 1
 
+    def return_result_keyword_alias(self, keyword: str) -> None:
+        """return_result(value=x) was read as return_result(x)."""
+        self._append(self.return_result_keyword_aliases, keyword)
+
+    def return_result_invalid(self, error_type: str) -> None:
+        """An invalid return_result value went back to the model as a retryable error."""
+        self._append(self.return_result_invalid_retries, error_type)
+
+    def queue_read_timeout(self, channel: str) -> None:
+        """A cell's ``await self.<channel>.get()`` timed out with nothing queued."""
+        self._append(self.queue_read_timeouts, channel)
+
     # Error Recovery
     def validation_error(self, error_type: str, message: str) -> None:
-        self._append_error(
+        self._append_item(
             self.validation_errors,
             ErrorRecord(error_type=_truncate(error_type), message=_truncate(message)),
         )
@@ -361,6 +460,16 @@ class HarnessMetrics(BaseModel):
         if isinstance(wait_s, int | float) and not isinstance(wait_s, bool):
             self.llm_queue_wait.record(float(wait_s))
 
+    # Media recovery (dispatched from unifiedllm callback)
+    def media_image_limit_collapsed(self, limit: int, events: int) -> None:
+        """The request's images exceeded the provider limit ``limit``; ``events`` were collapsed."""
+        self._append_item(self.media_image_limit_collapses, int(limit))
+        self.media_image_limit_events_collapsed += int(events)
+
+    def media_rejected_retry(self, kind: Any) -> None:
+        """The provider rejected an attachment; the request was retried without it."""
+        self._append(self.media_rejected_retries, str(kind or "unknown"))
+
     # Code Execution
     def exec_python(self, *, success: bool) -> None:
         self.exec_python_total += 1
@@ -370,7 +479,7 @@ class HarnessMetrics(BaseModel):
     def exec_error(
         self, error_type: str, message: str, turn: int = 0, code_preview: str = ""
     ) -> None:
-        self._append_error(
+        self._append_item(
             self.exec_errors,
             ErrorRecord(
                 error_type=_truncate(error_type),
@@ -387,7 +496,7 @@ class HarnessMetrics(BaseModel):
 
     def shell_failure(self, tool_method: str, message: str, code_preview: str = "") -> None:
         """Record a shell tool failure (non-zero exit, timeout, file not found, etc.)."""
-        self._append_error(
+        self._append_item(
             self.shell_failures,
             ErrorRecord(
                 error_type=_truncate(tool_method),
@@ -398,7 +507,7 @@ class HarnessMetrics(BaseModel):
 
     def shell_death(self, context: str, diagnostics: str) -> None:
         """Record a bash process death event with diagnostics."""
-        self._append_error(
+        self._append_item(
             self.shell_deaths,
             ErrorRecord(
                 error_type=_truncate(context),
@@ -408,7 +517,7 @@ class HarnessMetrics(BaseModel):
 
     def repo_failure(self, tool_method: str, message: str, code_preview: str = "") -> None:
         """Record a repo tool failure (file not found, no results, timeout, etc.)."""
-        self._append_error(
+        self._append_item(
             self.repo_failures,
             ErrorRecord(
                 error_type=_truncate(tool_method),
@@ -428,6 +537,17 @@ class HarnessMetrics(BaseModel):
     # Code Validation
     def missing_await(self, method_name: str) -> None:
         self._append(self.missing_awaits_detected, method_name)
+
+    def return_result_tool_alias(self) -> None:
+        """A provider-tool ``return_result(value=...)`` call was taken as the cell builtin."""
+        self.return_result_tool_aliases += 1
+
+    def mcp_result_error(self, call: str) -> None:
+        """An MCP tool returned a structured result with an ``error`` field (not isError).
+
+        ``call`` is ``<server>.<tool>``; the tool docs say to check for this.
+        """
+        self._append(self.mcp_result_errors, call)
 
     def infinite_loop(self) -> None:
         self.infinite_loops_detected += 1
@@ -477,6 +597,11 @@ class HarnessMetrics(BaseModel):
             value = entry.value_fn(self)
             if value:
                 attrs[entry.key] = value
+        for ext in self._extensions.values():
+            for entry in type(ext).span_schema:
+                value = entry.value_fn(ext)
+                if value:
+                    attrs[entry.key] = value
         return attrs
 
     def flush_to_span(self) -> None:
@@ -646,6 +771,18 @@ _SPAN_SCHEMA: tuple[SchemaEntry, ...] = (
         lambda m: m.loop_guard_stops_count,
     ),
     SchemaEntry(
+        "harness.tool_call_skipped.count",
+        "Tool calls not run after an earlier call failed or finished",
+        "Response Format Fixups",
+        lambda m: m.tool_call_skipped_count,
+    ),
+    SchemaEntry(
+        "harness.text_only_tool_markup.count",
+        "Text-only replies with a tool call written as text",
+        "Response Format Fixups",
+        lambda m: m.text_only_tool_markup_count,
+    ),
+    SchemaEntry(
         "harness.empty_response.count",
         "Empty responses",
         "Response Format Fixups",
@@ -735,6 +872,45 @@ _SPAN_SCHEMA: tuple[SchemaEntry, ...] = (
         "Implicit return transformed",
         "Return Value Handling",
         lambda m: m.implicit_return_transformed,
+    ),
+    SchemaEntry(
+        "harness.return_result_keyword_alias.count",
+        "return_result(value=x) read as return_result(x)",
+        "Return Value Handling",
+        lambda m: len(m.return_result_keyword_aliases),
+    ),
+    SchemaEntry(
+        "harness.return_result_keyword_alias.keywords",
+        "return_result alias keywords",
+        "Return Value Handling",
+        lambda m: m.return_result_keyword_aliases,
+        True,
+    ),
+    SchemaEntry(
+        "harness.return_result_invalid.count",
+        "Invalid return_result values offered a retry",
+        "Return Value Handling",
+        lambda m: len(m.return_result_invalid_retries),
+    ),
+    SchemaEntry(
+        "harness.return_result_invalid.types",
+        "Invalid return_result error types",
+        "Return Value Handling",
+        lambda m: m.return_result_invalid_retries,
+        True,
+    ),
+    SchemaEntry(
+        "harness.queue_read_timeout.count",
+        "Queue reads timed out mid-cell",
+        "Tool Usage",
+        lambda m: len(m.queue_read_timeouts),
+    ),
+    SchemaEntry(
+        "harness.queue_read_timeout.channels",
+        "Timed-out queue channels",
+        "Tool Usage",
+        lambda m: m.queue_read_timeouts,
+        True,
     ),
     # Error Recovery
     SchemaEntry(
@@ -894,6 +1070,39 @@ _SPAN_SCHEMA: tuple[SchemaEntry, ...] = (
         "LLM Admission",
         lambda m: m.llm_queue_wait,
     ),
+    # Media Recovery
+    SchemaEntry(
+        "harness.media_image_limit_collapsed.count",
+        "Image-limit recoveries (oldest images collapsed)",
+        "Media Recovery",
+        lambda m: len(m.media_image_limit_collapses),
+    ),
+    SchemaEntry(
+        "harness.media_image_limit_collapsed.limits",
+        "Provider image limits hit",
+        "Media Recovery",
+        lambda m: m.media_image_limit_collapses,
+        True,
+    ),
+    SchemaEntry(
+        "harness.media_image_limit_collapsed.events",
+        "Image events collapsed for the image limit",
+        "Media Recovery",
+        lambda m: m.media_image_limit_events_collapsed,
+    ),
+    SchemaEntry(
+        "harness.media_rejected_retry.count",
+        "Rejected attachments retried without them",
+        "Media Recovery",
+        lambda m: len(m.media_rejected_retries),
+    ),
+    SchemaEntry(
+        "harness.media_rejected_retry.kinds",
+        "Rejected attachment kinds",
+        "Media Recovery",
+        lambda m: m.media_rejected_retries,
+        True,
+    ),
     # Code Execution
     SchemaEntry(
         "harness.exec_python.total",
@@ -1012,6 +1221,25 @@ _SPAN_SCHEMA: tuple[SchemaEntry, ...] = (
         True,
     ),
     SchemaEntry(
+        "harness.mcp_result_error.count",
+        "MCP results reporting failure in an 'error' field",
+        "Tool Usage",
+        lambda m: len(m.mcp_result_errors),
+    ),
+    SchemaEntry(
+        "harness.mcp_result_error.calls",
+        "MCP tools whose result had an 'error' field, as <server>.<tool>",
+        "Tool Usage",
+        lambda m: m.mcp_result_errors,
+        True,
+    ),
+    SchemaEntry(
+        "harness.return_result_tool_alias.count",
+        "Provider return_result calls taken as the cell builtin",
+        "Return Value Handling",
+        lambda m: m.return_result_tool_aliases,
+    ),
+    SchemaEntry(
         "harness.infinite_loops_detected",
         "Infinite loops detected",
         "Code Validation",
@@ -1078,8 +1306,23 @@ def get_span_schema() -> tuple[SchemaEntry, ...]:
     """Public accessor for the span attribute schema.
 
     Used by trace_explorer to drive display without importing internals.
+    Includes the entries of registered extensions (see
+    :func:`register_harness_metrics_extension`), whose ``value_fn`` takes a
+    HarnessMetrics like the core entries.
     """
-    return _SPAN_SCHEMA
+    if not _EXTENSIONS:
+        return _SPAN_SCHEMA
+    return _SPAN_SCHEMA + tuple(
+        SchemaEntry(
+            entry.key,
+            entry.label,
+            entry.category,
+            lambda m, c=cls, f=entry.value_fn: f(m.extension(c)),
+            entry.is_detail,
+        )
+        for cls in _EXTENSIONS
+        for entry in cls.span_schema
+    )
 
 
 # ── Null object (no-op outside generation sessions) ─────────────────
@@ -1109,10 +1352,17 @@ class _NullMetrics:
     def __getattr__(self, name: str) -> Any:
         if name == "timer":
             return _noop_timer
+        if name == "extension":
+            return _null_extension
         return _noop
 
 
 _NULL_METRICS = _NullMetrics()
+
+
+def _null_extension(_cls: Any) -> _NullMetrics:
+    """``extension(cls)`` outside a session: a no-op recorder too."""
+    return _NULL_METRICS
 
 
 # ── ContextVar lifecycle ────────────────────────────────────────────

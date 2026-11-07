@@ -216,6 +216,9 @@ class CurrentCall:
     positional_param_names: list[str] | None = None
     var_positional_param_name: str | None = None
     var_keyword_param_name: str | None = None
+    # Opt-in coherent namespace owner; never copied into snapshot/user state.
+    # Last so main's positional constructor order above stays unchanged.
+    execution_namespace: Any = None
 
     def __hash__(self) -> int:
         """Hash by id for use in sets/dicts."""

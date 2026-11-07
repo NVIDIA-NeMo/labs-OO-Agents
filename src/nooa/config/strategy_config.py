@@ -68,6 +68,11 @@ class CodeActConfig(BaseModel):
     # consecutive (a successful LLM call resets them); other errors such as
     # invalid tool calls and failed result validation accumulate.
     max_retries: int = 3
+    # Budget for invalid return_result values (failed validation or
+    # postconditions); None: ``max_retries``. They are counted on their own, not
+    # as session errors. Each invalid value goes back to the model as a cell
+    # error it can retry on, with its attempt number.
+    max_result_retries: int | None = None
     # Maximum consecutive turns where the LLM returns plain text instead of a
     # tool call before the run is aborted. A real tool call resets the counter.
     # Set to 0 to disable the guard.
