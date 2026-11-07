@@ -17,6 +17,7 @@ into a picklable :class:`ResultDTO` and reconstructs a faithful
 
 from __future__ import annotations
 
+import hmac
 import pickle
 from dataclasses import asdict, dataclass, field
 from typing import Any, Protocol
@@ -102,6 +103,13 @@ class ErrorDTO:
     type_name: str
     message: str
     diagnostic: str = ""
+    parent_error_token: str = ""
+
+
+def _parent_error_token(message: str, key: bytes) -> str:
+    """Authenticate a bounded queue-full message using the active cell's secret."""
+    payload = b"AdmissionQueueFullError\0" + message.encode("utf-8", errors="surrogatepass")
+    return hmac.digest(key, payload, "sha256").hex()
 
 
 @dataclass
@@ -165,6 +173,7 @@ def dto_from_wire(data: Any) -> ResultDTO:
             for reason in dto.truncation_reasons
         )
         ok = ok and (dto.error is None or all(isinstance(v, str) for v in vars(dto.error).values()))
+        ok = ok and (dto.error is None or len(dto.error.parent_error_token) <= 64)
         ok = ok and (dto.signal is None or isinstance(dto.signal.result, bytes))
         # Exactly one outcome, as result_to_dto produces.
         ok = ok and (dto.error is not None) + (dto.signal is not None) + dto.has_return <= 1
@@ -229,6 +238,10 @@ def result_to_dto(
         except BaseException:
             diagnostic = f"{error_type}: {message}"
 
+        try:
+            token = getattr(err, "_nooa_parent_error_token", "")
+        except BaseException:
+            token = ""
         dto.error = ErrorDTO(
             type_name=error_type,
             message=_bounded_error_message(
@@ -240,6 +253,7 @@ def result_to_dto(
                 diagnostic,
                 max_error=effective_max_error,
             ),
+            parent_error_token=token if type(token) is str and len(token) == 64 else "",
         )
         return dto
 
@@ -274,12 +288,24 @@ def result_to_dto(
     return dto
 
 
-def _reconstruct_error(err: ErrorDTO) -> Exception:
+def _reconstruct_error(err: ErrorDTO, *, parent_error_key: bytes | None = None) -> Exception:
     """Rebuild an exception and wrap worker diagnostics in a typed boundary."""
     import builtins as _bi
 
-    if err.type_name == "CellSerializationError":
-        original: Exception = CellSerializationError(err.message)
+    original: Exception
+    if (
+        parent_error_key is not None
+        and err.type_name == "AdmissionQueueFullError"
+        and hmac.compare_digest(
+            err.parent_error_token.encode("utf-8", errors="surrogatepass"),
+            _parent_error_token(err.message, parent_error_key).encode("ascii"),
+        )
+    ):
+        from nooa.unifiedllm.admission import AdmissionQueueFullError
+
+        original = AdmissionQueueFullError(err.message)
+    elif err.type_name == "CellSerializationError":
+        original = CellSerializationError(err.message)
     elif err.type_name == "SandboxStateError":
         from nooa.runtime.sandbox.readonly import SandboxStateError
 
@@ -310,18 +336,26 @@ def _reconstruct_error(err: ErrorDTO) -> Exception:
     )
 
 
-def dto_to_result(dto: ResultDTO, *, signal_factory: Any = None, codec: Codec | None = None) -> Any:
+def dto_to_result(
+    dto: ResultDTO,
+    *,
+    signal_factory: Any = None,
+    codec: Codec | None = None,
+    parent_error_key: bytes | None = None,
+) -> Any:
     """Reconstruct a parent-side ``ExecutionResult`` from a :class:`ResultDTO`.
 
     ``signal_factory(payload) -> ExecutionSignal`` rebuilds the ``return_result``
     signal from its payload. ``codec`` decodes the worker's payload bytes and
     carries the agent's declared data types; without it only value types decode.
+    ``parent_error_key`` authenticates queue-full errors issued by the parent
+    during this cell; worker-supplied names or tokens alone confer no authority.
     """
     from nooa.events import _NO_RETURN, ExecutionResult
 
     error: Exception | None = None
     if dto.error is not None:
-        error = _reconstruct_error(dto.error)
+        error = _reconstruct_error(dto.error, parent_error_key=parent_error_key)
 
     codec = codec or _CODEC
     signal = None

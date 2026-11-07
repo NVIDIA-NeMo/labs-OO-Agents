@@ -127,6 +127,7 @@ class ChildBroker:
 
 
 def _raise_broker_error(response: dict[str, Any]) -> None:
+    """Raise a catchable surrogate, retaining bounded parent-origin admission metadata."""
     import builtins as _bi
 
     from nooa.runtime.sandbox.errors import CellSerializationError
@@ -149,6 +150,13 @@ def _raise_broker_error(response: dict[str, Any]) -> None:
     if err_type == "CellSerializationError":
         raise CellSerializationError(message)
     exc_cls = getattr(_bi, err_type, ParentToolError)
+    token = response.get("parent_error_token")
+    if err_type == "AdmissionQueueFullError" and isinstance(token, str) and len(token) == 64:
+        from nooa.unifiedllm.admission import AdmissionQueueFullError
+
+        # This response is parent-origin; only the parent can validate its token
+        # after it returns through the untrusted worker's result DTO.
+        exc_cls = AdmissionQueueFullError
     if not isinstance(exc_cls, type) or not issubclass(exc_cls, BaseException):
         exc_cls = ParentToolError
     try:
@@ -159,6 +167,8 @@ def _raise_broker_error(response: dict[str, Any]) -> None:
         # replacing the actual failure with that constructor's TypeError.
         error = ParentToolError(message)
         error.original_type = err_type  # type: ignore[attr-defined]
+    if isinstance(token, str) and len(token) == 64:
+        error._nooa_parent_error_token = token  # type: ignore[attr-defined]
     call_hint = response.get("call_hint")
     if isinstance(call_hint, str) and call_hint:
         error._nooa_call_hint = call_hint  # type: ignore[attr-defined]
