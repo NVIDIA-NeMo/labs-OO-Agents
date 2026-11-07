@@ -236,6 +236,7 @@ dev = [
     "nooa-acp",
     "nooa-memory",
     "nooa-bench",
+    "nooa-atom",
     "pre-commit>=4.5.0",
     "pyright>=1.1.408",
     "pytest-cov>=7.1.0",
