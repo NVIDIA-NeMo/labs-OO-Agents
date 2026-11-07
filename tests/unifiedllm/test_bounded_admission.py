@@ -16,6 +16,8 @@ import pytest
 
 from nooa import Agent, strategy
 from nooa.config import CodeActConfig, PredictConfig
+from nooa.context_blocks import ToolCallEvent
+from nooa.events import AfterTurn, PythonOutput, ResultStatus
 from nooa.strategies.codeact import CodeActStrategy
 from nooa.strategies.codeact_v2 import CodeActV2
 from nooa.strategies.predict import PredictStrategy
@@ -46,7 +48,7 @@ def policy(cap=1, pending=2, **kwargs):
     )
 
 
-def chat(code=None):
+def chat(code=None, tool="execute_python"):
     """Return an offline provider response, optionally with a submission cell."""
     message = {"role": "assistant", "content": "ok"}
     finish = "stop"
@@ -56,7 +58,7 @@ def chat(code=None):
             {
                 "id": "cell",
                 "type": "function",
-                "function": {"name": "execute_python", "arguments": json.dumps({"code": code})},
+                "function": {"name": tool, "arguments": json.dumps({"code": code})},
             }
         ]
         finish = "tool_calls"
@@ -385,6 +387,140 @@ async def test_agent_queue_full_is_terminal(strategy_type, backend):
     finally:
         held.release()
         await agent.aclose()
+        await llm.aclose()
+        if controller:
+            controller.close()
+        if broker:
+            broker.close()
+
+
+@pytest.mark.parametrize("strategy_type", [CodeActStrategy, CodeActV2])
+@pytest.mark.parametrize("nested_strategy_type", [CodeActStrategy, PredictStrategy])
+@pytest.mark.parametrize("backend", ["local", "broker"])
+@pytest.mark.parametrize("entry", ["cell", "pre_ellipsis", "prefill_plugin"])
+@pytest.mark.parametrize("failure", ["queue_full", "ordinary"])
+@pytest.mark.asyncio
+async def test_nested_queue_full_is_terminal_but_cell_errors_recover(
+    strategy_type, nested_strategy_type, backend, entry, failure
+):
+    """Nested overload escapes cells and prefills without changing normal error recovery."""
+    broker = (
+        AdmissionBroker(max_in_flight=1, max_pending=0).start() if backend == "broker" else None
+    )
+    controller = broker.controller() if broker else None
+    settings = (
+        AdmissionControlConfig(controller=controller)
+        if controller
+        else AdmissionControlConfig(max_in_flight=1, max_pending=0, concurrency_group=str(uuid4()))
+    )
+    llm = AdmissionControl(
+        CompletionClient(
+            "test-model", retry_config=RetryConfig(max_retries=3, rate_limit_extra_retries=0)
+        ),
+        settings,
+    )
+    nested_config = (
+        PredictConfig(max_retries=3)
+        if nested_strategy_type is PredictStrategy
+        else CodeActConfig(prefill=None, max_retries=3)
+    )
+
+    class NestedPrefill:
+        """Run a nested generation from the configured prefill plugin."""
+
+        def get_code(self, call, config=None):
+            """Use the same deterministic nested-call setup as a model-written cell."""
+            return "print('before nested call')\nawait self.nested()"
+
+    class NestedAgent(Agent):
+        """Exercise nested admission from real in-process Python execution."""
+
+        @strategy(nested_strategy_type(config=nested_config))
+        async def _inner(self) -> int:
+            """Generate an integer if admission is granted."""
+            ...
+
+        async def nested(self) -> int:
+            """Saturate admission only while the nested generation attempts to enter."""
+            if failure == "ordinary":
+                raise ValueError("ordinary cell failure")
+            held = await llm.controller.acquire(lambda _: None)
+            try:
+                return await self._inner()
+            except AdmissionQueueFullError as error:
+                self._rejection = error
+                raise
+            finally:
+                held.release()
+
+        @strategy(strategy_type(config=CodeActConfig(prefill=None, max_retries=3)))
+        async def _cell(self) -> int:
+            """Execute a model-written cell, then submit an integer."""
+            ...
+
+        @strategy(strategy_type(config=CodeActConfig(prefill=None, max_retries=3)))
+        async def _pre_ellipsis(self) -> int:
+            """Run nested generation in pre-ellipsis setup."""
+            print("before nested call")
+            await self.nested()
+            ...
+
+        @strategy(strategy_type(config=CodeActConfig(prefill=NestedPrefill(), max_retries=3)))
+        async def _prefill_plugin(self) -> int:
+            """Run nested generation through the configured prefill plugin."""
+            ...
+
+    agent = NestedAgent(llm=llm)
+    recovery = ServiceAgent(llm=llm)
+    tool = "python_cell" if strategy_type is CodeActV2 else "execute_python"
+    responses = (
+        [chat("print('before nested call')\nawait self.nested()", tool=tool)]
+        if entry == "cell"
+        else []
+    ) + [chat("return_result(7)", tool=tool)]
+    try:
+        with patch("litellm.acompletion", AsyncMock(side_effect=responses)) as provider:
+            with patch.object(agent.event_manager, "add", wraps=agent.event_manager.add) as add:
+                if failure == "queue_full":
+                    with pytest.raises(AdmissionQueueFullError) as caught:
+                        await getattr(agent, f"_{entry}")()
+                    assert caught.value is agent._rejection
+                    assert provider.await_count == (1 if entry == "cell" else 0)
+                    assert agent.events.query(type="Error") == []
+                    turns = [
+                        item.args[0]
+                        for item in add.call_args_list
+                        if isinstance(item.args[0], AfterTurn)
+                    ]
+                    assert turns
+                    assert all(turn.is_final and not turn.success for turn in turns)
+                    assert all(turn.exception_type == "AdmissionQueueFullError" for turn in turns)
+                else:
+                    assert await getattr(agent, f"_{entry}")() == 7
+                    assert provider.await_count == (2 if entry == "cell" else 1)
+
+        outputs = agent.events.query(type="PythonOutput")
+        failed = [output for output in outputs if output.execution_status is ResultStatus.ERROR]
+        assert len(failed) == 1
+        assert isinstance(failed[0], PythonOutput)
+        assert "before nested call" in failed[0].stdout
+        expected_error = "AdmissionQueueFullError" if failure == "queue_full" else "ValueError"
+        assert expected_error in failed[0].error
+        call = next(
+            event
+            for event in agent.events.query(type="ToolCallEvent")
+            if event.tool_call_id == failed[0].tool_call_id
+        )
+        assert isinstance(call, ToolCallEvent)
+        assert call.result is not None
+        assert call.result.result_status is ResultStatus.ERROR
+
+        # Use the same owner and client after unwinding; no restart or policy reset.
+        with patch("litellm.acompletion", AsyncMock(return_value=chat("return_result(7)"))):
+            assert await recovery._answer() == 7
+    finally:
+        await agent.aclose()
+        await recovery.aclose()
         await llm.aclose()
         if controller:
             controller.close()
