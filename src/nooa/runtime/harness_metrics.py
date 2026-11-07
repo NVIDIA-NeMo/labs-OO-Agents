@@ -162,6 +162,7 @@ class HarnessMetrics(BaseModel):
     llm_queue_admissions: int = 0
     llm_queue_queued: int = 0
     llm_queue_call_cap_rejections: int = 0
+    llm_queue_full_rejections: int = 0
     llm_queue_timeouts: int = 0
     llm_queue_cancellations: int = 0
     llm_queue_unavailable_errors: int = 0
@@ -338,6 +339,7 @@ class HarnessMetrics(BaseModel):
 
     # LLM admission (dispatched from unifiedllm callback)
     def record_llm_queue(self, detail: Any) -> None:
+        """Accumulate admission outcomes, keeping rejected attempts out of admissions."""
         if not isinstance(detail, dict):
             return
         outcome = detail.get("outcome")
@@ -345,6 +347,8 @@ class HarnessMetrics(BaseModel):
             self.llm_queue_admissions += 1
         elif outcome == "call_cap":
             self.llm_queue_call_cap_rejections += 1
+        elif outcome == "queue_full":
+            self.llm_queue_full_rejections += 1
         elif outcome == "timeout":
             self.llm_queue_timeouts += 1
         elif outcome == "cancelled":
@@ -863,6 +867,12 @@ _SPAN_SCHEMA: tuple[SchemaEntry, ...] = (
         "Admission call-cap rejections",
         "LLM Admission",
         lambda m: m.llm_queue_call_cap_rejections,
+    ),
+    SchemaEntry(
+        "harness.llm_queue.full_rejections",
+        "Admission queue-full rejections",
+        "LLM Admission",
+        lambda m: m.llm_queue_full_rejections,
     ),
     SchemaEntry(
         "harness.llm_queue.timeouts",

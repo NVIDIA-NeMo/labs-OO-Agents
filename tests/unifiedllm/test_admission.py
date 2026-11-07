@@ -741,6 +741,37 @@ def test_admission_observation_records_otel_event_and_harness_metrics():
     assert attrs["harness.llm_queue.wait.total_s"] == 0.25
 
 
+def test_queue_full_records_trace_and_rejection_metric():
+    """Queue overflow is neither an admitted nor a queued provider attempt."""
+    harness = HarnessMetrics()
+    span = MagicMock()
+    detail = {
+        "group": "bounded",
+        "outcome": "queue_full",
+        "queued": False,
+        "wait_s": 0.0,
+        "queue_depth": 2,
+        "max_in_flight": 1,
+        "max_pending": 2,
+    }
+    from nooa.unifiedllm.unifiedllm import _llm_metrics_callback
+
+    token = _llm_metrics_callback.set(
+        lambda event, value: harness.record_llm_queue(value) if event == "llm_queue" else None
+    )
+    try:
+        with patch("opentelemetry.trace.get_current_span", return_value=span):
+            _record_admission_observation(detail)
+    finally:
+        _llm_metrics_callback.reset(token)
+    span.add_event.assert_called_once_with("llm.queue", attributes=detail)
+    attrs = harness.to_span_attributes()
+    assert attrs["harness.llm_queue.full_rejections"] == 1
+    assert attrs.get("harness.llm_queue.admissions", 0) == 0
+    assert attrs.get("harness.llm_queue.queued", 0) == 0
+    assert attrs["harness.llm_queue.max_depth"] == 2
+
+
 def test_call_cap_rejection_records_harness_metric():
     harness = HarnessMetrics()
 
