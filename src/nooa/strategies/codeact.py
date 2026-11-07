@@ -224,6 +224,16 @@ _TOOL_CALL_MARKUP = re.compile(
 )
 _JSON_DECODER = json.JSONDecoder()
 _TOOL_CALL_ARGUMENT_KEYS = ("arguments", "parameters")
+# Bounds for _json_tool_call on a long text-only reply with many braces, where
+# trying a decode at every ``{`` would be roughly quadratic. Only the first
+# _JSON_SCAN_MAX_CHARS characters are searched; at most _JSON_MAX_DECODE_ATTEMPTS
+# decodes are tried; and the decoder may read at most _JSON_DECODE_BUDGET_CHARS
+# characters in total (a failed decode costs up to its error position, an
+# over-deep one the rest of the text). Past a bound the search gives up (None):
+# this is a best-effort hint, never a parse of the reply.
+_JSON_SCAN_MAX_CHARS = 100_000
+_JSON_MAX_DECODE_ATTEMPTS = 1_000
+_JSON_DECODE_BUDGET_CHARS = 1_000_000
 
 
 def _holds_tool_call(value: Any) -> bool:
@@ -244,15 +254,28 @@ def _json_tool_call(text: str) -> str | None:
 
     Every ``{`` is tried as the start of a JSON value; one that parses is
     searched in memory (so a call nested in a wrapper object or list counts)
-    and then skipped over, so a long JSON document is parsed once.
+    and then skipped over, so a long JSON document is parsed once. The search
+    is bounded by ``_JSON_SCAN_MAX_CHARS``, ``_JSON_MAX_DECODE_ATTEMPTS`` and
+    ``_JSON_DECODE_BUDGET_CHARS``.
     """
+    text = text[:_JSON_SCAN_MAX_CHARS]
+    budget = _JSON_DECODE_BUDGET_CHARS
     start = text.find("{")
-    while start != -1:
+    for _ in range(_JSON_MAX_DECODE_ATTEMPTS):
+        if start == -1 or budget <= 0:
+            return None
         try:
             value, end = _JSON_DECODER.raw_decode(text, start)
-        except ValueError:
+        except json.JSONDecodeError as error:
+            budget -= max(error.pos - start, 1)
             start = text.find("{", start + 1)
             continue
+        except (ValueError, RecursionError):
+            # Over-deep nesting raises RecursionError after reading ahead.
+            budget -= len(text) - start
+            start = text.find("{", start + 1)
+            continue
+        budget -= end - start
         if _holds_tool_call(value):
             return text[start:end]
         start = text.find("{", end)

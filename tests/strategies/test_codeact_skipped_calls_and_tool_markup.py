@@ -228,6 +228,33 @@ def test_plain_text_has_no_tool_call_markup(text):
     assert text_only_tool_call_markup(text) is None
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "{a" * 100_000,  # 200k chars, a decode attempt fails at every brace
+        '{"a": "' * 30_000,  # every attempt reads to the end before failing
+        '{"a":' * 40_000,  # over-deep nesting (RecursionError in the decoder)
+        "[{" * 100_000,
+    ],
+    ids=["brace-letter", "unterminated-strings", "deep-nesting", "list-brace"],
+)
+def test_json_tool_call_search_is_bounded_on_adversarial_text(text):
+    import time
+
+    started = time.perf_counter()
+    assert text_only_tool_call_markup(text) is None
+    assert time.perf_counter() - started < 1.0
+
+
+def test_json_tool_call_found_after_some_noise_but_not_past_scan_cap():
+    from nooa.strategies import codeact
+
+    call = '{"arguments": {"code": "1"}, "name": "python_cell"}'
+    assert text_only_tool_call_markup("{a " * 50 + call) == call
+    beyond = "x" * codeact._JSON_SCAN_MAX_CHARS + call
+    assert text_only_tool_call_markup(beyond) is None
+
+
 _NEMOTRON = (
     "<think>I will run it.\n<tool_call>\n<function=python_cell>\n<parameter=code>\n"
     "return_result('ok')\n</parameter>\n</function>\n</tool_call>\n</think>"
