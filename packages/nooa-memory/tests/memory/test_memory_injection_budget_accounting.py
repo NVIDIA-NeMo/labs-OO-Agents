@@ -334,3 +334,82 @@ def test_packing_invariants_hold_across_budgets(setup, monkeypatch):
         heads = [line for line in text.split("\n") if line.startswith("- [")]
         if any(line.endswith("…") for line in heads):
             assert len(text) == budget
+
+
+def _todo(letter, importance):
+    return Memory(
+        id=f"{letter}" * 8,
+        type=MemoryType.TODO,
+        status="open",
+        content=f"todo {letter}",
+        importance=importance,
+    )
+
+
+@pytest.mark.parametrize(("cut", "keeps_low"), [(60, False), (80, True)])
+def test_recalled_todo_keeps_its_priority_over_a_less_important_todo(
+    setup, monkeypatch, cut, keeps_low
+):
+    _, manager, _, _ = setup
+    other = _info("a", 30)
+    high, low = _todo("h", 9.0), _todo("l", 1.0)
+    _recall_returns(monkeypatch, manager, [other, high])
+    manager.store.add(low)
+    _budget(manager, cut, inject_open_todos="always")
+    text = manager._format_recall(["deployment"])
+    assert len(text) <= cut
+    assert manager._last_injected_ids == ([high.id, low.id] if keeps_low else [high.id])
+    assert manager.store.get(high.id).injected_count == 1
+    assert manager.store.get(low.id).injected_count == int(keeps_low)
+    assert manager.store.get(other.id).injected_count == 0
+    assert text.startswith("## Open todos")
+
+
+def test_recalled_todo_stays_in_its_section_when_the_block_fits(setup, monkeypatch):
+    _, manager, _, _ = setup
+    high, low = _todo("h", 9.0), _todo("l", 1.0)
+    _recall_returns(monkeypatch, manager, [high])
+    manager.store.add(low)
+    _budget(manager, 2000, inject_open_todos="always")
+    text = manager._format_recall(["deployment"])
+    assert text.index("## Recalled memories") < text.index(manager._identity_marker(high))
+    assert text.index(manager._identity_marker(high)) < text.index("## Open todos")
+    assert text.index("## Open todos") < text.index(manager._identity_marker(low))
+    assert manager._last_injected_ids == [high.id, low.id]
+
+
+def test_recalled_todo_outside_the_selected_todos_keeps_its_rank(setup, monkeypatch):
+    _, manager, _, _ = setup
+    high, low = _todo("h", 9.0), _todo("l", 1.0)
+    _recall_returns(monkeypatch, manager, [low])
+    manager.store.add(high)
+    # open_todos_k=1 selects only the important todo, so the recalled one is an
+    # ordinary associative hit and packs after the "always" section.
+    _budget(manager, 72, inject_open_todos="always", open_todos_k=1)
+    text = manager._format_recall(["deployment"])
+    assert manager._last_injected_ids == [high.id]
+    assert manager._identity_marker(low) not in text
+    # One character over budget, the recalled todo stays in its own section.
+    _budget(manager, 107, inject_open_todos="always", open_todos_k=1)
+    text = manager._format_recall(["deployment"])
+    assert manager._last_injected_ids == [low.id, high.id]
+    assert text.index("## Recalled memories") < text.index(manager._identity_marker(low))
+    assert text.index(manager._identity_marker(low)) < text.index("## Open todos")
+
+
+def test_recalled_todo_is_never_rendered_twice_or_lost_to_a_lesser_todo(setup, monkeypatch):
+    _, manager, _, _ = setup
+    other = _info("a", 200)
+    high, low = _todo("h", 9.0), _todo("l", 1.0)
+    _recall_returns(monkeypatch, manager, [other, high])
+    manager.store.add(low)
+    for cut in range(0, 400):
+        _budget(manager, cut, inject_open_todos="always")
+        text = manager._format_recall(["deployment"])
+        assert len(text) <= cut
+        for memory in (other, high, low):
+            assert text.count(manager._identity_marker(memory)) <= 1
+        if text:
+            assert high.id in manager._last_injected_ids
+        visible = {m.id for m in (other, high, low) if manager._identity_marker(m) in text}
+        assert set(manager._last_injected_ids) == visible

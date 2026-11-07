@@ -691,15 +691,19 @@ class MemoryManager:
                     continue  # todos are reachable via explicit recall/search only
                 seen.setdefault(m.id, m)
         shown = list(seen.values())[:k]
-        extra: list[Memory] = []
-        if sp.inject_open_todos == "always":
-            listed = {m.id for m in shown}
-            extra = [t for t in self._open_todos(sp.open_todos_k) if t.id not in listed]
+        selected = self._open_todos(sp.open_todos_k) if sp.inject_open_todos == "always" else []
+        listed = {m.id for m in shown}
+        extra = [t for t in selected if t.id not in listed]
         recalled = [(m, self._memory_lines(m)) for m in shown]
         todos = [(t, self._memory_lines(t)) for t in extra]
         text = self._render_block(recalled, todos)
         budget = sp.context_char_budget
         if len(text) > budget:
+            # A selected todo that recall also returned joins the "always" section
+            # here, so a less important todo cannot take its room.
+            records = {m.id: (m, block) for m, block in recalled + todos}
+            todos = [records[t.id] for t in selected]
+            recalled = [(m, block) for m, block in recalled if m.id not in {t.id for t in selected}]
             # The "always" section claims budget first so prospective memory
             # survives long associative hits; it still renders last.
             todos = self._pack_section(_TODOS_HEADER, todos, budget)

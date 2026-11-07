@@ -218,7 +218,9 @@ does not fit loses its references, then the rest of its head, and is left out on
 its bare `[type#id]` marker does not fit. Any budget left over then grows the kept heads
 back in the same order, so a block just over budget loses only a few characters. A marker
 is never cut, and an explicit `recall()` still returns the full text. A budget too small
-for a section header and one marker injects nothing.
+for a section header and one marker injects nothing. When packing, a selected open todo
+that recall also returned moves to the `always` section, so the most important todos are
+kept first and none is rendered twice.
 
 A record's references are kept or dropped together. If they do not all fit, the record
 loses every reference, including short ones that would have fit, and they do not come
