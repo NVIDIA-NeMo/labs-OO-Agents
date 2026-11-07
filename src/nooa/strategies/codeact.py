@@ -165,6 +165,14 @@ than repeated as literals.
 """
 
 
+def _raise_if_admission_queue_full(error: Exception | None) -> None:
+    """Propagate policy rejections, including authenticated sandbox originals."""
+    if isinstance(error, SandboxExecutionError):
+        error = error.original_error
+    if isinstance(error, AdmissionQueueFullError):
+        raise error
+
+
 @dataclass(frozen=True)
 class TextOnlyResponseContext:
     """Input passed to a CodeAct text-only response handler.
@@ -2544,8 +2552,7 @@ Standard Python builtins and agent instance (`self`) are available."""
 
         # Nested generation can return a policy error inside ExecutionResult.
         # Keep the cell trace, but do not ask the model to retry an overload.
-        if isinstance(result.error, AdmissionQueueFullError):
-            raise result.error
+        _raise_if_admission_queue_full(result.error)
 
         logger.debug(
             f"[CODEACT] execute_python complete. "
@@ -3593,8 +3600,7 @@ Standard Python builtins and agent instance (`self`) are available."""
 
         if result.error:
             logger.warning(f"[CODEACT] Prefill ({prefill_type}) execution error: {result.error}")
-        if isinstance(result.error, AdmissionQueueFullError):
-            raise result.error
+        _raise_if_admission_queue_full(result.error)
 
     async def _execute_code(
         self,

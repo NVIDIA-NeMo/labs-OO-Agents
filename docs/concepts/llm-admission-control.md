@@ -84,9 +84,11 @@ except AdmissionQueueFullError:
 - Cancellation or timeout removes a waiter and returns its pending position.
   Normal provider retries reacquire admission and can encounter a full queue.
   Queue-full errors are terminal through provider retries and CodeAct/Predict,
-  including uncaught errors from nested generation in in-process cells or
-  prefills. Applications choose their own overload response instead of automatic
-  retries. Failed cells retain their captured output and error status in the trace.
+  including uncaught errors from nested generation in in-process or sandboxed
+  cells and prefills. Applications choose their own overload response instead of
+  automatic retries. Failed cells retain their captured output and error status
+  in the trace.
+  Cell code may explicitly catch a queue-full error and choose its own recovery.
 - All process-local wrappers joining a group must agree on `max_pending`, just
   as they must agree on concurrency and pacing settings. With an injected
   controller, configure queue policy on the application-owned controller instead.

@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -18,6 +20,7 @@ from nooa import Agent, strategy
 from nooa.config import CodeActConfig, PredictConfig
 from nooa.context_blocks import ToolCallEvent
 from nooa.events import AfterTurn, PythonOutput, ResultStatus
+from nooa.runtime.sandbox.config import SandboxConfig
 from nooa.strategies.codeact import CodeActStrategy
 from nooa.strategies.codeact_v2 import CodeActV2
 from nooa.strategies.predict import PredictStrategy
@@ -399,11 +402,17 @@ async def test_agent_queue_full_is_terminal(strategy_type, backend):
 @pytest.mark.parametrize("backend", ["local", "broker"])
 @pytest.mark.parametrize("entry", ["cell", "pre_ellipsis", "prefill_plugin"])
 @pytest.mark.parametrize("failure", ["queue_full", "ordinary"])
+@pytest.mark.parametrize(
+    "execution",
+    ["inprocess", pytest.param("sandbox", marks=pytest.mark.sandbox)],
+)
 @pytest.mark.asyncio
 async def test_nested_queue_full_is_terminal_but_cell_errors_recover(
-    strategy_type, nested_strategy_type, backend, entry, failure
+    strategy_type, nested_strategy_type, backend, entry, failure, execution
 ):
     """Nested overload escapes cells and prefills without changing normal error recovery."""
+    if execution == "sandbox" and sys.platform != "linux":
+        pytest.skip("Guarded worker validation requires Linux")
     broker = (
         AdmissionBroker(max_in_flight=1, max_pending=0).start() if backend == "broker" else None
     )
@@ -430,10 +439,28 @@ async def test_nested_queue_full_is_terminal_but_cell_errors_recover(
 
         def get_code(self, call, config=None):
             """Use the same deterministic nested-call setup as a model-written cell."""
-            return "print('before nested call')\nawait self.nested()"
+            return "self.note_pid(os.getpid())\nprint('before nested call')\nawait self.nested()"
+
+    def outer_config(prefill=None):
+        """Select the execution backend, requiring real network guards for workers."""
+        return CodeActConfig(
+            prefill=prefill,
+            max_retries=3,
+            execution_backend=execution,
+            sandbox=SandboxConfig(require=True, filesystem=False, network=False),
+        )
 
     class NestedAgent(Agent):
-        """Exercise nested admission from real in-process Python execution."""
+        """Exercise nested admission from real Python execution and parent RPC."""
+
+        def __init__(self, **kwargs):
+            """Track the process that actually runs the nested-call cell."""
+            super().__init__(**kwargs)
+            self._pids = []
+
+        def note_pid(self, pid: int) -> None:
+            """Record worker-side execution without relying on configuration alone."""
+            self._pids.append(pid)
 
         @strategy(nested_strategy_type(config=nested_config))
         async def _inner(self) -> int:
@@ -453,19 +480,20 @@ async def test_nested_queue_full_is_terminal_but_cell_errors_recover(
             finally:
                 held.release()
 
-        @strategy(strategy_type(config=CodeActConfig(prefill=None, max_retries=3)))
+        @strategy(strategy_type(config=outer_config()))
         async def _cell(self) -> int:
             """Execute a model-written cell, then submit an integer."""
             ...
 
-        @strategy(strategy_type(config=CodeActConfig(prefill=None, max_retries=3)))
+        @strategy(strategy_type(config=outer_config()))
         async def _pre_ellipsis(self) -> int:
             """Run nested generation in pre-ellipsis setup."""
+            self.note_pid(os.getpid())
             print("before nested call")
             await self.nested()
             ...
 
-        @strategy(strategy_type(config=CodeActConfig(prefill=NestedPrefill(), max_retries=3)))
+        @strategy(strategy_type(config=outer_config(NestedPrefill())))
         async def _prefill_plugin(self) -> int:
             """Run nested generation through the configured prefill plugin."""
             ...
@@ -474,7 +502,12 @@ async def test_nested_queue_full_is_terminal_but_cell_errors_recover(
     recovery = ServiceAgent(llm=llm)
     tool = "python_cell" if strategy_type is CodeActV2 else "execute_python"
     responses = (
-        [chat("print('before nested call')\nawait self.nested()", tool=tool)]
+        [
+            chat(
+                "self.note_pid(os.getpid())\nprint('before nested call')\nawait self.nested()",
+                tool=tool,
+            )
+        ]
         if entry == "cell"
         else []
     ) + [chat("return_result(7)", tool=tool)]
@@ -484,7 +517,10 @@ async def test_nested_queue_full_is_terminal_but_cell_errors_recover(
                 if failure == "queue_full":
                     with pytest.raises(AdmissionQueueFullError) as caught:
                         await getattr(agent, f"_{entry}")()
-                    assert caught.value is agent._rejection
+                    if execution == "inprocess":
+                        assert caught.value is agent._rejection
+                    else:
+                        assert str(caught.value) == str(agent._rejection)
                     assert provider.await_count == (1 if entry == "cell" else 0)
                     assert agent.events.query(type="Error") == []
                     turns = [
@@ -500,6 +536,8 @@ async def test_nested_queue_full_is_terminal_but_cell_errors_recover(
                     assert provider.await_count == (2 if entry == "cell" else 1)
 
         outputs = agent.events.query(type="PythonOutput")
+        assert agent._pids
+        assert all((pid != os.getpid()) == (execution == "sandbox") for pid in agent._pids)
         failed = [output for output in outputs if output.execution_status is ResultStatus.ERROR]
         assert len(failed) == 1
         assert isinstance(failed[0], PythonOutput)
