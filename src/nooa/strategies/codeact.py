@@ -91,7 +91,13 @@ from nooa.strategy_validation import (
     run_postconditions,
     run_preconditions,
 )
-from nooa.unifiedllm import LLMResponse, ReasoningReplayError, Tool, ToolCall
+from nooa.unifiedllm import (
+    AdmissionQueueFullError,
+    LLMResponse,
+    ReasoningReplayError,
+    Tool,
+    ToolCall,
+)
 
 if TYPE_CHECKING:
     from nooa.config.strategy_config import CodeActConfig
@@ -1299,7 +1305,9 @@ Standard Python builtins and agent instance (`self`) are available."""
                         tool_choice=tool_choice,
                         **self._build_sampling_kwargs(),
                     )
-                except ReasoningReplayError:
+                except (ReasoningReplayError, AdmissionQueueFullError):
+                    # Queue overflow is an application policy decision, not a
+                    # provider fault that another strategy retry can repair.
                     turn_state.is_final = True
                     raise
                 except BlockSyntaxError as e:

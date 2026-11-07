@@ -20,6 +20,7 @@ from nooa.unifiedllm import (
     AdmissionBroker,
     AdmissionControl,
     AdmissionControlConfig,
+    AdmissionQueueFullError,
     AdmissionTimeoutError,
     BrokerAdmissionConfig,
     CompletionClient,
@@ -225,6 +226,7 @@ async def _controlled(
     retry: RetryConfig = _NO_RETRY,
     rate: float | None = None,
     max_cooldown: float | None = None,
+    max_pending: int | None = None,
 ) -> AsyncIterator[tuple[AdmissionControl, AdmissionBroker | None]]:
     """Exercise the same transport contract for local and broker-owned policies."""
     base = _base_client(api, endpoint, retry)
@@ -237,6 +239,7 @@ async def _controlled(
                 group="wire-test",
                 requests_per_second=rate,
                 max_cooldown=max_cooldown,
+                max_pending=max_pending,
             ).start()
             controller = broker.controller(queue_timeout=timeout)
             config = AdmissionControlConfig(controller=controller)
@@ -247,6 +250,7 @@ async def _controlled(
                 queue_timeout=timeout,
                 requests_per_second=rate,
                 max_cooldown=max_cooldown,
+                max_pending=max_pending,
             )
         yield AdmissionControl(base, config), broker
     finally:
@@ -255,6 +259,72 @@ async def _controlled(
             controller.close()
         if broker is not None:
             broker.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ["local", "broker"])
+@pytest.mark.parametrize("api", ["chat", "responses"])
+@pytest.mark.parametrize("retries", [0, 2])
+async def test_bounded_queue_rejects_before_http_and_recovers(
+    backend: str,
+    api: str,
+    retries: int,
+) -> None:
+    """Overflow never reaches the wire; cancellation returns a pending position."""
+    release, started = asyncio.Event(), asyncio.Event()
+
+    async def respond(_request: _Request) -> tuple[int, dict[str, str]]:
+        """Hold the first real request until queue and overflow are observed."""
+        started.set()
+        await release.wait()
+        return 200, {}
+
+    retry = RetryConfig(max_retries=retries, rate_limit_extra_retries=0)
+    async with _gateway(respond) as gateway:
+        async with _controlled(
+            api,
+            gateway.api_base,
+            backend,
+            retry=retry,
+            max_pending=1,
+        ) as (llm, broker):
+            tasks = []
+
+            def queued() -> int:
+                """Inspect the actual scheduling owner, not client task counts."""
+                return broker.snapshot().queued if broker else _local_counts(llm)[1]
+
+            try:
+                first = asyncio.create_task(llm.acall(_MESSAGES))
+                tasks.append(first)
+                await asyncio.wait_for(started.wait(), 60)
+                waiter = asyncio.create_task(llm.acall(_MESSAGES))
+                tasks.append(waiter)
+                await _wait_until(lambda: queued() == 1)
+                with pytest.raises(AdmissionQueueFullError):
+                    await llm.acall(_MESSAGES)
+                assert len(gateway.requests) == 1
+                waiter.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await waiter
+                await _wait_until(lambda: queued() == 0)
+                replacement = asyncio.create_task(llm.acall(_MESSAGES))
+                tasks.append(replacement)
+                await _wait_until(lambda: queued() == 1)
+                release.set()
+                assert [r.content for r in await asyncio.gather(first, replacement)] == ["ok", "ok"]
+                assert len(gateway.requests) == 2
+                await _wait_until(lambda: queued() == 0)
+                if broker:
+                    await _wait_until(lambda: broker.snapshot().active == 0)
+                    assert broker.snapshot().admitted_calls == 2
+                else:
+                    assert _local_counts(llm) == (0, 0)
+            finally:
+                release.set()
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
 
 
 @pytest.mark.asyncio

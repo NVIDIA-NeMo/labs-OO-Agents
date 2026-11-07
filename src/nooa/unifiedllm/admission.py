@@ -35,6 +35,7 @@ AdmissionOutcome = Literal[
     "immediate",
     "admitted_after_wait",
     "call_cap",
+    "queue_full",
     "timeout",
     "cancelled",
     "unavailable",
@@ -58,6 +59,10 @@ class AdmissionTimeoutError(AdmissionError):
 
 class AdmissionCallCapError(AdmissionError):
     """Raised before provider dispatch when an admission call budget is exhausted."""
+
+
+class AdmissionQueueFullError(AdmissionError):
+    """Raised before provider dispatch when the shared pending queue is full."""
 
 
 class AdmissionUnavailableError(AdmissionError):
@@ -191,6 +196,7 @@ class _AdmissionGroup:
         max_in_flight: int,
         requests_per_second: float | None = None,
         max_cooldown: float | None = None,
+        max_pending: int | None = None,
     ):
         """Create one jointly scheduled FIFO group with monotonic clocks."""
         self.identity = identity
@@ -198,6 +204,7 @@ class _AdmissionGroup:
         self.max_in_flight = max_in_flight
         self.requests_per_second = requests_per_second
         self.max_cooldown = max_cooldown
+        self.max_pending = max_pending
         self._interval = 0.0 if requests_per_second is None else 1.0 / requests_per_second
         self._next_admission = 0.0
         self._cooldown_until = 0.0
@@ -230,7 +237,11 @@ class _AdmissionGroup:
         loop = asyncio.get_running_loop()
 
         with self._lock:
+            # Service eligible older waiters before deciding whether the pending
+            # queue is full. Granted-but-unclaimed permits already count as active.
+            self._pump_locked()
             now = time.monotonic()
+            queue_full = False
             if (
                 self._active < self.max_in_flight
                 and not self._waiters
@@ -241,12 +252,26 @@ class _AdmissionGroup:
                 immediate = True
                 waiter = None
                 queue_depth = 0
+            elif self.max_pending is not None and self._queued >= self.max_pending:
+                immediate = False
+                queue_full = True
+                waiter = None
+                queue_depth = self._queued
             else:
                 immediate = False
                 queue_depth = self._queued_count_locked() + 1
                 waiter = _Waiter(loop, asyncio.Event(), started, queue_depth)
                 self._waiters.append(waiter)
                 self._queued += 1
+
+        if queue_full:
+            self._observe_terminal(
+                observer, self._observation("queue_full", False, 0.0, queue_depth)
+            )
+            raise AdmissionQueueFullError(
+                f"LLM admission queue full for group {self.display_name!r} "
+                f"(max_pending={self.max_pending})"
+            )
 
         if immediate:
             return self._permit_with_observation(
@@ -392,7 +417,8 @@ class _AdmissionGroup:
         wait_s: float,
         queue_depth: int,
     ) -> dict[str, Any]:
-        return {
+        """Describe one acquisition outcome without retaining request contents."""
+        detail = {
             "group": self.display_name,
             "outcome": outcome,
             "queued": queued,
@@ -400,6 +426,9 @@ class _AdmissionGroup:
             "queue_depth": queue_depth,
             "max_in_flight": self.max_in_flight,
         }
+        if self.max_pending is not None:
+            detail["max_pending"] = self.max_pending
+        return detail
 
     def _cancel_waiter(self, waiter: _Waiter) -> None:
         """Remove a cancelled waiter and wake its FIFO successor."""
@@ -473,6 +502,17 @@ def _validated_timeout(queue_timeout: float | None) -> float | None:
     return _validated_positive_option(queue_timeout, "queue_timeout")
 
 
+def _validated_max_pending(max_pending: int | None) -> int | None:
+    """Validate an optional nonnegative queue bound, excluding booleans."""
+    if max_pending is None:
+        return None
+    if isinstance(max_pending, bool) or not isinstance(max_pending, int):
+        raise TypeError("max_pending must be a nonnegative integer or None")
+    if max_pending < 0:
+        raise ValueError("max_pending must be nonnegative")
+    return max_pending
+
+
 def _validated_positive_option(value: float | None, name: str) -> float | None:
     """Validate an optional finite, positive numeric policy setting."""
     if value is None:
@@ -530,6 +570,7 @@ def _get_or_create_group(
     max_in_flight: int | None,
     requests_per_second: float | None = None,
     max_cooldown: float | None = None,
+    max_pending: int | None = None,
 ) -> _AdmissionGroup | None:
     """Reuse a group only when all shared policy settings agree."""
     with _groups_lock:
@@ -545,12 +586,13 @@ def _get_or_create_group(
             for name, value in (
                 ("requests_per_second", requests_per_second),
                 ("max_cooldown", max_cooldown),
+                ("max_pending", max_pending),
             ):
                 if getattr(existing, name) != value:
                     raise ValueError(f"Conflicting {name} for admission group {display_name!r}")
             return existing
         group = _AdmissionGroup(
-            identity, display_name, max_in_flight, requests_per_second, max_cooldown
+            identity, display_name, max_in_flight, requests_per_second, max_cooldown, max_pending
         )
         _groups[identity] = group
         return group
@@ -568,12 +610,14 @@ class AdmissionPolicy:
         api_base: str | None,
         requests_per_second: float | None = None,
         max_cooldown: float | None = None,
+        max_pending: int | None = None,
     ):
         """Validate wrapper settings and join its named or inferred group."""
         self.max_in_flight = _validated_limit(max_in_flight)
         if self.max_in_flight is None:
             raise ValueError("max_in_flight is required for process-local admission")
         self.queue_timeout = _validated_timeout(queue_timeout)
+        self.max_pending = _validated_max_pending(max_pending)
         self.requests_per_second = _validated_positive_option(
             requests_per_second, "requests_per_second"
         )
@@ -596,6 +640,7 @@ class AdmissionPolicy:
             self.max_in_flight,
             self.requests_per_second,
             self.max_cooldown,
+            self.max_pending,
         )
 
     async def acquire(self, observer: AdmissionObserver) -> _Permit:
@@ -606,6 +651,7 @@ class AdmissionPolicy:
             self.max_in_flight,
             self.requests_per_second,
             self.max_cooldown,
+            self.max_pending,
         )
         assert group is not None
         return await group.acquire(queue_timeout=self.queue_timeout, observer=observer)
@@ -619,6 +665,9 @@ class AdmissionControlConfig:
     ``max_in_flight`` for the built-in process-local controller. Local groups
     may be named explicitly; otherwise the wrapped client's HTTP endpoint is
     normalized into an opaque group identity when the wrapper is created.
+    ``max_pending=None`` leaves waiting unbounded; ``0`` allows only immediate
+    admission. Positive bounds count pending acquisitions across the group,
+    including pacing and cooldown waits, but exclude already granted permits.
     """
 
     max_in_flight: int | None = None
@@ -627,6 +676,7 @@ class AdmissionControlConfig:
     controller: AdmissionController | None = None
     requests_per_second: float | None = None
     max_cooldown: float | None = None
+    max_pending: int | None = None
 
     def __post_init__(self) -> None:
         """Validate either an injected controller or one explicit local policy."""
@@ -639,11 +689,13 @@ class AdmissionControlConfig:
                     self.queue_timeout,
                     self.requests_per_second,
                     self.max_cooldown,
+                    self.max_pending,
                 )
             ):
                 raise ValueError(
                     "controller cannot be combined with max_in_flight, "
-                    "concurrency_group, queue_timeout, requests_per_second, or max_cooldown"
+                    "concurrency_group, queue_timeout, requests_per_second, max_cooldown, "
+                    "or max_pending"
                 )
             if not isinstance(self.controller, AdmissionController):
                 raise TypeError("controller must implement AdmissionController")
@@ -654,6 +706,7 @@ class AdmissionControlConfig:
                 "max_in_flight is required when an admission controller is not supplied"
             )
         _validated_limit(self.max_in_flight)
+        _validated_max_pending(self.max_pending)
         _validated_timeout(self.queue_timeout)
         rate = _validated_positive_option(self.requests_per_second, "requests_per_second")
         if rate is not None and not math.isfinite(1.0 / rate):
@@ -679,6 +732,7 @@ class AdmissionControlConfig:
             api_base=api_base,
             requests_per_second=self.requests_per_second,
             max_cooldown=self.max_cooldown,
+            max_pending=self.max_pending,
         )
 
 
@@ -697,6 +751,7 @@ __all__ = [
     "AdmissionError",
     "AdmissionPermit",
     "AdmissionPolicy",
+    "AdmissionQueueFullError",
     "AdmissionTimeoutError",
     "AdmissionUnavailableError",
     "CooldownAdmissionPermit",
