@@ -32,15 +32,19 @@ from nooa.unifiedllm.admission import (
     AdmissionCallCapError,
     AdmissionObserver,
     AdmissionOutcome,
+    AdmissionQueueFullError,
     AdmissionTimeoutError,
     AdmissionUnavailableError,
     _named_group_identity,
     _validated_limit,
+    _validated_max_pending,
     _validated_positive_option,
     _validated_timeout,
 )
 
-_PROTOCOL_VERSION = 3
+# Queue-full is a terminal wire outcome. Upgrade owner and workers together so
+# an older owner cannot silently ignore the pending bound expected by a client.
+_PROTOCOL_VERSION = 4
 _MAX_MESSAGE_BYTES = 16 * 1024
 _IDLE_CONNECTION_SECONDS = 1.0
 _WRITER_CLOSE_TIMEOUT_SECONDS = 0.5
@@ -78,10 +82,12 @@ class BrokerAdmissionConfig:
     queue_timeout: float | None
     requests_per_second: float | None = None
     max_cooldown: float | None = None
+    max_pending: int | None = None
 
     def __post_init__(self) -> None:
-        """Prevent controller credentials from being sent over a non-loopback socket."""
+        """Validate the loopback destination and shared scheduling settings."""
         _validated_loopback_host(self.host)
+        _validated_max_pending(self.max_pending)
         rate = _validated_positive_option(self.requests_per_second, "requests_per_second")
         if rate is not None and not math.isfinite(1 / rate):
             raise ValueError("requests_per_second must have a finite admission interval")
@@ -102,6 +108,7 @@ class BrokerAdmissionSnapshot:
     admitted_calls: int
     max_in_flight: int
     max_calls: int | None
+    max_pending: int | None = None
 
 
 @dataclass(slots=True)
@@ -123,10 +130,13 @@ class _BrokerState:
         max_calls: int | None,
         requests_per_second: float | None = None,
         max_cooldown: float | None = None,
+        max_pending: int | None = None,
     ):
+        """Own shared queue, concurrency, pacing, and call-budget accounting."""
         self.group = group
         self.max_in_flight = max_in_flight
         self.max_calls = max_calls
+        self.max_pending = max_pending
         self.active = 0
         self.peak_active = 0
         self.admitted_calls = 0
@@ -141,11 +151,16 @@ class _BrokerState:
     def enqueue(self, ticket: str) -> _BrokerWaiter:
         """Append one FIFO waiter and offer any currently available capacity."""
         loop = asyncio.get_running_loop()
+        self._offer_available()
         queued = (
             bool(self.waiters)
             or self.active >= self.max_in_flight
             or loop.time() < self._not_before
             or bool(self._interval and self.reserved_calls)
+            or (
+                self.max_calls is not None
+                and self.admitted_calls + self.reserved_calls >= self.max_calls
+            )
         )
         waiter = _BrokerWaiter(
             ticket=ticket,
@@ -154,6 +169,26 @@ class _BrokerState:
             queued=queued,
             future=loop.create_future(),
         )
+        # Committed call-cap exhaustion is permanent and takes precedence over
+        # transient queue pressure. An unconfirmed reservation is not exhaustion.
+        capped = self.max_calls is not None and self.admitted_calls >= self.max_calls
+        if (
+            not capped
+            and queued
+            and self.max_pending is not None
+            and len(self.waiters) >= self.max_pending
+        ):
+            waiter.state = "terminal"
+            waiter.future.set_result(
+                {
+                    "status": "queue_full",
+                    "queued": False,
+                    "queue_depth": len(self.waiters),
+                    "wait_s": 0.0,
+                    "admitted_calls": self.admitted_calls,
+                }
+            )
+            return waiter
         self.waiters.append(waiter)
         self._offer_available()
         return waiter
@@ -281,6 +316,7 @@ class _BrokerState:
             self._wake = None
 
     def snapshot(self) -> BrokerAdmissionSnapshot:
+        """Expose current capacity and pending bounds without mutating state."""
         return BrokerAdmissionSnapshot(
             active=self.active,
             peak_active=self.peak_active,
@@ -288,6 +324,7 @@ class _BrokerState:
             admitted_calls=self.admitted_calls,
             max_in_flight=self.max_in_flight,
             max_calls=self.max_calls,
+            max_pending=self.max_pending,
         )
 
 
@@ -382,7 +419,7 @@ class _AdmissionBrokerServer:
                 outcome = await self._wait_for_outcome(reader, waiter)
                 if outcome is None:
                     return
-                if outcome["status"] == "call_cap":
+                if outcome["status"] in ("call_cap", "queue_full"):
                     await self._write(writer, outcome)
                     return
 
@@ -640,6 +677,7 @@ class BrokerAdmissionController:
         self._closed = False
 
     async def acquire(self, observer: AdmissionObserver) -> _BrokerAdmissionPermit:
+        """Acquire a lease or report a terminal rejection before provider dispatch."""
         started = time.perf_counter()
         loop = asyncio.get_running_loop()
         writer: asyncio.StreamWriter | None = None
@@ -676,6 +714,11 @@ class BrokerAdmissionController:
                     )
                 response = json.loads(first)
                 status = response.get("status")
+                if status == "queue_full":
+                    raise AdmissionQueueFullError(
+                        f"LLM admission queue full for group {self.config.group!r} "
+                        f"(max_pending={self.config.max_pending})"
+                    )
                 if status == "call_cap":
                     raise AdmissionCallCapError(
                         f"LLM admission call cap reached for group {self.config.group!r} "
@@ -729,6 +772,9 @@ class BrokerAdmissionController:
             except AdmissionCallCapError:
                 self._observe(observer, "call_cap", response, started)
                 raise
+            except AdmissionQueueFullError:
+                self._observe_terminal(observer, "queue_full", response, started)
+                raise
             except AdmissionUnavailableError:
                 self._observe(observer, "unavailable", {}, started)
                 raise
@@ -777,29 +823,31 @@ class BrokerAdmissionController:
         response: dict[str, Any],
         started: float,
     ) -> None:
+        """Report one acquisition outcome with the owner's configured limits."""
         queued = bool(response.get("queued", outcome in ("timeout", "cancelled")))
-        observer(
-            {
-                "group": self.config.group,
-                "outcome": outcome,
-                "queued": queued,
-                "wait_s": round(time.perf_counter() - started, 6),
-                "queue_depth": int(response.get("queue_depth", 0)),
-                "max_in_flight": self.config.max_in_flight,
-                "max_calls": self.config.max_calls,
-                "admitted_calls": int(response.get("admitted_calls", 0)),
-                "backend": "parent_broker",
-            }
-        )
+        detail = {
+            "group": self.config.group,
+            "outcome": outcome,
+            "queued": queued,
+            "wait_s": round(time.perf_counter() - started, 6),
+            "queue_depth": int(response.get("queue_depth", 0)),
+            "max_in_flight": self.config.max_in_flight,
+            "max_calls": self.config.max_calls,
+            "admitted_calls": int(response.get("admitted_calls", 0)),
+            "backend": "parent_broker",
+        }
+        if self.config.max_pending is not None:
+            detail["max_pending"] = self.config.max_pending
+        observer(detail)
 
     def _observe_terminal(
         self,
         observer: AdmissionObserver,
-        outcome: Literal["timeout", "cancelled"],
+        outcome: Literal["timeout", "cancelled", "queue_full"],
         response: dict[str, Any],
         started: float,
     ) -> None:
-        """Report timeout or cancellation without replacing that exception."""
+        """Report a terminal outcome without replacing its exception."""
         try:
             self._observe(observer, outcome, response, started)
         except BaseException:
@@ -915,7 +963,13 @@ class BrokerAdmissionController:
 
 
 class AdmissionBroker:
-    """Lifecycle owner for one host-local, application-scoped admission group."""
+    """Lifecycle owner for one host-local, application-scoped admission group.
+
+    ``max_pending`` bounds waiting acquisitions across connected workers. The
+    default ``None`` leaves waiting unbounded; ``0`` disallows waiting. Broker
+    offers already own active capacity and do not consume pending positions.
+    This does not bound upstream task creation or open socket connections.
+    """
 
     def __init__(
         self,
@@ -927,7 +981,9 @@ class AdmissionBroker:
         port: int = 0,
         requests_per_second: float | None = None,
         max_cooldown: float | None = None,
+        max_pending: int | None = None,
     ):
+        """Validate policy settings without opening sockets or starting threads."""
         limit = _validated_limit(max_in_flight)
         assert limit is not None
         if isinstance(max_calls, bool) or (
@@ -940,6 +996,7 @@ class AdmissionBroker:
 
         self.max_in_flight = limit
         self.max_calls = max_calls
+        self.max_pending = _validated_max_pending(max_pending)
         self.requests_per_second = _validated_positive_option(
             requests_per_second, "requests_per_second"
         )
@@ -965,6 +1022,7 @@ class AdmissionBroker:
                 max_calls=self.max_calls,
                 requests_per_second=self.requests_per_second,
                 max_cooldown=self.max_cooldown,
+                max_pending=self.max_pending,
             ),
             auth_token=auth_token,
         )
@@ -990,6 +1048,7 @@ class AdmissionBroker:
             queue_timeout=_validated_timeout(queue_timeout),
             requests_per_second=self.requests_per_second,
             max_cooldown=self.max_cooldown,
+            max_pending=self.max_pending,
         )
 
     def controller(self, *, queue_timeout: float | None = None) -> BrokerAdmissionController:
