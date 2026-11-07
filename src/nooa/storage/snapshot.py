@@ -132,7 +132,7 @@ class AgentSnapshot(BaseModel):
             type_allowlist=all_allowlist,
         )
 
-    def restore(self, agent: Any) -> None:
+    def restore(self, agent: Any) -> dict[str, str]:
         """Restore this snapshot's state into an agent, mutating it in place.
 
         Note: this performs additive restoration — it does not clear
@@ -146,6 +146,10 @@ class AgentSnapshot(BaseModel):
 
         An attribute that fails to deserialize is skipped with a warning; the
         other attributes are still restored.
+
+        Returns:
+            The skipped attributes: name mapped to a short reason
+            (``"<ExceptionType>: <message>"``). Empty when everything restored.
 
         Raises:
             SerializationError: If the snapshot version doesn't match.
@@ -180,6 +184,7 @@ class AgentSnapshot(BaseModel):
         if self.disabled_context:
             agent.context_manager.disable(*self.disabled_context)
 
+        skipped: dict[str, str] = {}
         for attr_name, attr_value in self.attributes.items():
             try:
                 value = deserialize(attr_value, self.type_allowlist)
@@ -194,5 +199,7 @@ class AgentSnapshot(BaseModel):
                     exc,
                     exc_info=True,
                 )
+                skipped[attr_name] = f"{type(exc).__name__}: {exc}"
                 continue
             setattr(agent, attr_name, value)
+        return skipped

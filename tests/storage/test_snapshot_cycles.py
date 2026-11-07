@@ -448,3 +448,44 @@ def test_restore_skips_any_unrestorable_attribute(caplog, monkeypatch, error):
     (record,) = [r for r in caplog.records if "'broken'" in r.getMessage()]
     assert "skipping non-restorable attribute" in record.getMessage()
     assert record.exc_info is not None and record.exc_info[0] is error  # traceback kept
+
+
+@pytest.mark.parametrize("error", [TypeError, AttributeError, RuntimeError])
+def test_restore_returns_skipped_attributes_with_reason(caplog, monkeypatch, error):
+    """restore() reports each skipped attribute with a short reason, and still warns."""
+    import logging
+    from types import SimpleNamespace
+
+    from nooa.storage import snapshot as snapshot_module
+    from nooa.storage.snapshot import AgentSnapshot
+
+    real = snapshot_module.deserialize
+
+    def failing(blob, *args, **kwargs):
+        if blob in ("BAD", "WORSE"):
+            raise error(f"schema drift in {blob}")
+        return real(blob, *args, **kwargs)
+
+    monkeypatch.setattr(snapshot_module, "deserialize", failing)
+    snapshot = AgentSnapshot(
+        attributes={"memory": ["a"], "broken": "BAD", "n": 3, "other": "WORSE"}
+    )
+    agent = SimpleNamespace()
+    with caplog.at_level(logging.WARNING, logger="nooa.storage.snapshot"):
+        skipped = snapshot.restore(agent)
+    assert skipped == {
+        "broken": f"{error.__name__}: schema drift in BAD",
+        "other": f"{error.__name__}: schema drift in WORSE",
+    }
+    assert agent.memory == ["a"] and agent.n == 3
+    assert sum("skipping non-restorable attribute" in r.getMessage() for r in caplog.records) == 2
+
+
+def test_restore_returns_empty_when_nothing_skipped():
+    from types import SimpleNamespace
+
+    from nooa.storage.snapshot import AgentSnapshot
+
+    agent = SimpleNamespace()
+    assert AgentSnapshot(attributes={"n": 3}).restore(agent) == {}
+    assert agent.n == 3
