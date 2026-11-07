@@ -106,13 +106,17 @@ def run_terminal(
             elif help and phase == 1 and "Agentworkflow:nooa-connect" in compact:
                 os.write(master, b"\x1bOP" + keys.encode())
                 phase = 2
-        if proc.poll() is None:
+        # PTY EOF/EIO can arrive just before waitpid observes the child's exit.
+        # Give it the remaining deadline to be reaped instead of racing poll().
+        try:
+            proc.wait(timeout=max(0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
             raise AssertionError(
                 "Terminal did not finish; phase="
                 + str(phase)
                 + "\n"
                 + clean(output.decode(errors="replace"))
-            )
+            ) from None
     finally:
         if proc.poll() is None:
             proc.kill()
@@ -167,6 +171,18 @@ def test_real_tty_preserves_checked_order_defaults_off_and_cancel(tmp_path, keys
         tmp_path, keys="\x1b[A" * 3 + keys, current=["pdf", "image"], help=True
     )
     assert result == expected
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux PTY contract")
+def test_real_tty_waits_for_child_after_terminal_closes(tmp_path, monkeypatch):
+    # Simulate a child that closes its terminal before finishing interpreter cleanup.
+    monkeypatch.setitem(
+        globals(),
+        "CHILD",
+        CHILD + "\nfor fd in (0, 1, 2): os.close(fd)\nimport time\ntime.sleep(0.2)\n",
+    )
+    result, _ = run_terminal(tmp_path, keys="\r", available=["image"])
+    assert result == []
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux PTY contract")

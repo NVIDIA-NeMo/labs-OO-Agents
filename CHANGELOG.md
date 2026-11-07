@@ -6,6 +6,27 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- Core installs now exclude the individually verified LiteLLM releases affected
+  by the optional-MCP import regression (1.106.0–1.106.7, 1.108.0–1.108.1, and
+  affected prereleases). Future patch and security releases remain eligible;
+  there is no upper version bound.
+  The release gate now runs quickstarts 01–03 with real LLM calls against the
+  built core wheel in a fresh environment with freshly resolved dependencies.
+  A separate harness validates their results without editing the examples;
+  failures and timeouts block draft creation.
+- Snapshot save and restore now detect cycles explicitly and cap nesting at 200
+  levels (`MAX_SNAPSHOT_DEPTH`), whatever the caller's stack depth. Errors for
+  cycles, too-deep values, unsupported types and non-string dict keys name the
+  path to the offending value (e.g. `<root>['a'][0]`) and set
+  `SerializationError.reason` / `DeserializationError.reason`. Restoring a
+  too-deep blob raises `DeserializationError`, not `RecursionError`. An agent
+  attribute that can't be saved or restored is skipped with a warning, on save
+  and now also on restore; checkpoints saved before this change with an
+  attribute nested more than 200 levels deep restore without that attribute.
+  `SnapshotVars` (agent and todo vars) rejects values too deep to checkpoint at
+  write time, and a stored var that later becomes unserializable (e.g. a list
+  that now contains itself) is skipped at checkpoint with a warning instead of
+  dropping every var.
 - `nooa-memory`: an over-budget injected memory block is now packed record by
   record instead of being cut at `context_char_budget`. One long memory no
   longer crowds out the rest, `inject_open_todos="always"` survives a full
@@ -46,6 +67,10 @@ to follow semantic versioning.
   invalid tool calls and failed result validation, still add up across the
   call. Previously a few scattered transient endpoint errors could end a long
   turn even though every retry succeeded.
+- Published minimum versions now exclude the vulnerable releases of
+  dependencies installed through nooa, so `pip install -U nooa` gets the fixes
+  too: `anyio>=4.15.1` and `urllib3>=2.8.0` in core, and `mcp>=1.30,<2`,
+  `PyJWT[crypto]>=2.15.1` and `cryptography>=50.0.2` in the `mcp` extra.
 - Dependency security update: the locked versions of Pillow, PyJWT,
   cryptography, aiohttp, urllib3, AnyIO, filelock, multidict, Werkzeug,
   setuptools, certifi, OpenTelemetry, and mcp now include their published

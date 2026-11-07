@@ -17,6 +17,42 @@ if TYPE_CHECKING:
     from nooa.config.truncation_config import TruncationConfig
 
 
+def bind_call_arguments(
+    signature: inspect.Signature,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    *,
+    partial: bool = False,
+) -> inspect.BoundArguments:
+    """Bind Python call arguments, including defaults, across supported CPython versions."""
+    var_keyword = next(
+        (p.name for p in signature.parameters.values() if p.kind is inspect.Parameter.VAR_KEYWORD),
+        None,
+    )
+    # Older CPython inspect versions reject positional-only names in **kwargs
+    # when the positional value is omitted, although Python accepts the call.
+    # Bind those keywords separately so they cannot replace a positional default.
+    positional_keywords = {
+        p.name: kwargs[p.name]
+        for p in signature.parameters.values()
+        if var_keyword is not None
+        and p.kind is inspect.Parameter.POSITIONAL_ONLY
+        and p.name in kwargs
+    }
+    binding_kwargs = {k: v for k, v in kwargs.items() if k not in positional_keywords}
+    bind = signature.bind_partial if partial else signature.bind
+    bound = bind(*args, **binding_kwargs)
+
+    bound.apply_defaults()
+    if positional_keywords and var_keyword is not None:
+        captured = bound.arguments[var_keyword]
+        bound.arguments[var_keyword] = {
+            k: v for k, v in kwargs.items() if k in positional_keywords or k in captured
+        }
+
+    return bound
+
+
 def merge_call_arguments(
     signature: inspect.Signature | None,
     args: tuple[Any, ...],
@@ -44,11 +80,9 @@ def merge_call_arguments(
     parameters = [parameter for name, parameter in signature.parameters.items() if name != "self"]
     call_signature = signature.replace(parameters=parameters)
     try:
-        bound = call_signature.bind_partial(*args, **supplied_kwargs)
+        bound = bind_call_arguments(call_signature, args, supplied_kwargs, partial=True)
     except TypeError:
         return supplied_kwargs
-
-    bound.apply_defaults()
 
     # Keep unmatched keywords at the top level for compatibility, then overlay
     # the canonical Python locals. If a keyword collides with a positional-only

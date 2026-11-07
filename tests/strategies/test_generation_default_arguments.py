@@ -163,23 +163,42 @@ def test_variadic_keyword_collision_preserves_both_values() -> None:
     }
 
 
-def test_positional_only_keyword_collision_preserves_default_and_metadata() -> None:
+@pytest.mark.parametrize("args, expected", [((), "default"), (("explicit",), "explicit")])
+def test_positional_only_keyword_collision_preserves_default_and_metadata(args, expected) -> None:
     """A same-named keyword cannot replace an omitted positional-only default."""
 
     def render(self: object, value: str = "default", /, **metadata: str) -> str:
         """Render a value."""
         return value
 
-    call = CurrentCall.from_method(render, kwargs={"value": "keyword"})
+    call = CurrentCall.from_method(render, args=args, kwargs={"value": "keyword"})
 
     assert call.kwargs == {
-        "value": "default",
+        "value": expected,
         "metadata": {"value": "keyword"},
     }
     assert call.bound_parameters() == {
-        "value": "default",
+        "value": expected,
         "metadata": {"value": "keyword"},
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "args, expected", [((), "defaultkeyword"), (("explicit",), "explicitkeyword")]
+)
+async def test_positional_only_collision_is_available_to_generated_code(args, expected) -> None:
+    """CodeAct receives the positional value and the same-named captured keyword."""
+    llm = FakeLLMClient(scripted_responses=[_execute_result("value + metadata['value']")])
+
+    class RenderAgent(Agent, llm=llm):
+        @strategy(CodeActStrategy(config=CodeActConfig(max_iterations=1)))
+        async def render(self, value: str = "default", /, **metadata: str) -> str:
+            """Join the positional value and its captured keyword."""
+            ...
+
+    assert await RenderAgent().render(*args, value="keyword") == expected
+    assert llm.call_count == 1
 
 
 @pytest.mark.asyncio
