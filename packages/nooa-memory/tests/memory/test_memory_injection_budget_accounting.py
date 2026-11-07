@@ -219,3 +219,118 @@ def test_bracket_inside_memory_id_does_not_end_identity_marker(setup, monkeypatc
     _budget(manager, len(header) + len(marker))
     manager._format_recall(["deployment"])
     assert manager._last_injected_ids == [odd.id]
+
+
+def _recall_returns(monkeypatch, manager, memories):
+    for memory in memories:
+        manager.store.add(memory)
+    monkeypatch.setattr(
+        manager.retrieval,
+        "recall",
+        lambda *args, **kwargs: [manager.store.get(m.id) for m in memories],
+    )
+
+
+def _info(letter, length):
+    return Memory(id=f"{letter}" * 8, type=MemoryType.INFO, content=letter.upper() * length)
+
+
+@pytest.mark.parametrize("over", [1, 6, 100])
+def test_block_just_over_budget_loses_only_the_overflow(setup, monkeypatch, over):
+    _, manager, _, _ = setup
+    memories = [_info(letter, 474) for letter in "abcd"]
+    _recall_returns(monkeypatch, manager, memories)
+    full = _expected_text(manager, memories)
+    _budget(manager, len(full) - over, top_k=4)
+    text = manager._format_recall(["deployment"])
+    assert len(text) == len(full) - over
+    assert manager._last_injected_ids == [m.id for m in memories]
+    # The earlier ranks stay whole; the shortfall comes off the last head.
+    for memory in memories[:3]:
+        assert memory.content in text
+    assert memories[3].content not in text
+    assert text.endswith("…")
+
+
+def test_regrowth_keeps_short_records_beside_a_long_one(setup, monkeypatch):
+    _, manager, _, _ = setup
+    long_one = _info("a", 4000)
+    short = [_info(letter, 40) for letter in "bcde"]
+    _recall_returns(monkeypatch, manager, [long_one, *short])
+    _budget(manager, 2000, top_k=5)
+    text = manager._format_recall(["deployment"])
+    assert len(text) == 2000
+    assert manager._last_injected_ids == [m.id for m in (long_one, *short)]
+    for memory in short:
+        assert memory.content in text
+
+
+def test_regrowth_does_not_bring_back_a_dropped_reference(setup, monkeypatch):
+    agent, manager, _, _ = setup
+    agent.vars = {"live": "reference " + "R" * 150}
+    first = _info("a", 300)
+    first.references = [MemoryRef(kind="var", key="live")]
+    second = _info("b", 13)
+    _recall_returns(monkeypatch, manager, [first, second])
+    full = _expected_text(manager, [first, second])
+    # Room for the whole head and the second record, but not for the reference
+    # beside even a capped head.
+    head_only = [manager._head_line(first), manager._head_line(second)]
+    _budget(manager, len("\n".join(["## Recalled memories (associative)", *head_only])))
+    assert len(full) > manager.config.spontaneous.context_char_budget
+    text = manager._format_recall(["deployment"])
+    assert first.content in text and second.content in text
+    assert "reference" not in text
+
+
+def test_long_always_todo_regrows_without_starving_recalled_records(setup, monkeypatch):
+    _, manager, _, _ = setup
+    recalled = _info("a", 30)
+    todo = Memory(id="t" * 8, type=MemoryType.TODO, status="open", content="T" * 3000)
+    _recall_returns(monkeypatch, manager, [recalled])
+    manager.store.add(todo)
+    _budget(manager, 500, inject_open_todos="always")
+    text = manager._format_recall(["deployment"])
+    assert len(text) == 500
+    assert recalled.content in text
+    assert manager._last_injected_ids == [recalled.id, todo.id]
+
+
+def test_regrowth_follows_the_always_section_first(setup, monkeypatch):
+    _, manager, _, _ = setup
+    recalled = _info("a", 400)
+    todo = Memory(id="t" * 8, type=MemoryType.TODO, status="open", content="T" * 400)
+    _recall_returns(monkeypatch, manager, [recalled])
+    manager.store.add(todo)
+    _budget(manager, 700, inject_open_todos="always")
+    text = manager._format_recall(["deployment"])
+    assert len(text) == 700
+    assert todo.content in text and recalled.content not in text
+    assert manager._last_injected_ids == [recalled.id, todo.id]
+
+
+def test_packing_invariants_hold_across_budgets(setup, monkeypatch):
+    agent, manager, _, _ = setup
+    agent.vars = {"short": "S" * 20, "long": "L" * 190}
+    lengths = {"a": 700, "b": 30, "c": 300, "d": 90}
+    memories = [_info(letter, length) for letter, length in lengths.items()]
+    memories[0].references = [MemoryRef(kind="var", key="short")]
+    memories[2].references = [
+        MemoryRef(kind="var", key="short"),
+        MemoryRef(kind="var", key="long"),
+    ]
+    todo = Memory(id="t" * 8, type=MemoryType.TODO, status="open", content="T" * 250)
+    _recall_returns(monkeypatch, manager, memories)
+    manager.store.add(todo)
+    records = [*memories, todo]
+    for budget in range(0, 1700, 3):
+        _budget(manager, budget, inject_open_todos="always", top_k=4)
+        text = manager._format_recall(["deployment"])
+        assert len(text) <= budget
+        expected = [m.id for m in records if manager._identity_marker(m) in text]
+        assert manager._last_injected_ids == expected
+        assert text.count("[info#") + text.count("[todo:open#") == len(expected)
+        # While any head is still cut, no budget is left unspent.
+        heads = [line for line in text.split("\n") if line.startswith("- [")]
+        if any(line.endswith("…") for line in heads):
+            assert len(text) == budget

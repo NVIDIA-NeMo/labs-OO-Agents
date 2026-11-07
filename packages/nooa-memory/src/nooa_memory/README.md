@@ -215,9 +215,14 @@ recency/strength bumped), so the ACT-R signal stays meaningful.
 as is. One that does not is packed in rank order, with the `always` open-todo section
 claiming budget first: heads are capped at 160 characters, and a record that still
 does not fit loses its references, then the rest of its head, and is left out only if
-its bare `[type#id]` marker does not fit. A marker is never cut, and an explicit `recall()`
-still returns the full text. A budget too small for a section header and one marker
-injects nothing.
+its bare `[type#id]` marker does not fit. Any budget left over then grows the kept heads
+back in the same order, so a block just over budget loses only a few characters. A marker
+is never cut, and an explicit `recall()` still returns the full text. A budget too small
+for a section header and one marker injects nothing.
+
+A record's references are kept or dropped together. If they do not all fit, the record
+loses every reference, including short ones that would have fit, and they do not come
+back when heads grow.
 
 Injection IDs, per-memory injection counters, and `MemoryInjected.n_memories`
 describe exactly the records whose marker reached the context. Omitted records are
