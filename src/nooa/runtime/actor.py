@@ -816,7 +816,11 @@ class ActorRuntime:
         """
 
         def context_window(exc: BaseException) -> bool | None:
-            return recover_context_window(exc) if _is_context_window_error(exc) else None
+            if not _is_context_window_error(exc):
+                return None
+            if getattr(getattr(self, "agent", None), "context_error_policy", "recover") == "raise":
+                return False
+            return recover_context_window(exc)
 
         handlers = [recovery.recover for recovery in self._request_recoveries]
         handlers.append(context_window)

@@ -81,6 +81,7 @@ def create_session_agent(options: SessionOptions, storage: StorageManager) -> In
             "cwd": workspace,
             "skills_dirs": atom_options.skills_dirs,
             "summarization": atom_options.summarization,
+            "context_error_policy": atom_options.context_error_policy,
             "libs_dir": workspace / ".nooa" / "skills",
         }
         if issubclass(agent_class, AtomAgent):
