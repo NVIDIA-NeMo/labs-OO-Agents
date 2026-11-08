@@ -16,11 +16,17 @@ from typing import Any
 import litellm
 import pytest
 
+from nooa import Agent, strategy
+from nooa.config import CodeActConfig
+from nooa.strategies.codeact import CodeActStrategy
+from nooa.strategies.codeact_v2 import CodeActV2
 from nooa.unifiedllm import (
     AdmissionBroker,
+    AdmissionCallCapError,
     AdmissionControl,
     AdmissionControlConfig,
     AdmissionTimeoutError,
+    AdmissionUnavailableError,
     BrokerAdmissionConfig,
     CompletionClient,
     ResponsesClient,
@@ -213,6 +219,81 @@ def _local_counts(client: AdmissionControl) -> tuple[int, int]:
     """Inspect slot accounting only to synchronize deterministic queue tests."""
     group = admission_module._groups[client.controller.identity]
     return group.active, group.queued
+
+
+@pytest.mark.parametrize("strategy_type", [CodeActStrategy, CodeActV2])
+@pytest.mark.parametrize("api", ["chat", "responses"])
+@pytest.mark.parametrize("provider_retries", [0, 3])
+@pytest.mark.parametrize(
+    "error_type", [AdmissionCallCapError, AdmissionTimeoutError, AdmissionUnavailableError]
+)
+async def test_codeact_admission_rejection_sends_no_http_and_client_recovers(
+    strategy_type, api, provider_retries, error_type
+):
+    """Strategy retries must not turn one policy decision into repeated acquisitions."""
+    failure = error_type("synthetic application admission rejection")
+    attempts = 0
+    delegate = admission_module.AdmissionPolicy(
+        max_in_flight=1,
+        concurrency_group=f"terminal-{id(failure)}",
+        queue_timeout=None,
+        api_base=None,
+    )
+
+    class RejectOnce:
+        """Reject once, then reuse actual local admission for the recovery request."""
+
+        async def acquire(self, observer):
+            """Count real attempts without mocking either provider transport."""
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise failure
+            return await delegate.acquire(observer)
+
+    async def respond(_request):
+        """Any admitted recovery request receives a valid protocol response."""
+        return 200, {}
+
+    async with _gateway(respond) as gateway:
+        llm = AdmissionControl(
+            _base_client(
+                api,
+                gateway.api_base,
+                RetryConfig(
+                    max_retries=provider_retries,
+                    rate_limit_extra_retries=0,
+                ),
+            ),
+            AdmissionControlConfig(controller=RejectOnce()),
+        )
+
+        class PolicyAgent(Agent):
+            """Reach the ordinary strategy and transport stack under application policy."""
+
+            @strategy(strategy_type(config=CodeActConfig(prefill=None, max_retries=3)))
+            async def answer(self) -> int:
+                """Generate an integer if the controller admits this request."""
+                ...
+
+        agent = PolicyAgent(llm=llm)
+        try:
+            with pytest.raises(error_type) as caught:
+                await agent.answer()
+            assert caught.value is failure
+            assert attempts == 1
+            assert gateway.requests == []
+            assert agent.events.query(type="Error") == []
+            # The same wrapper/controller is still usable; no reset or restart.
+            assert (await llm.acall(_MESSAGES)).content == "ok"
+            assert attempts == 2
+            assert len(gateway.requests) == 1
+            assert gateway.requests[0].path == (
+                "/v1/chat/completions" if api == "chat" else "/v1/responses"
+            )
+        finally:
+            await agent.aclose()
+            await llm.aclose()
 
 
 @asynccontextmanager
