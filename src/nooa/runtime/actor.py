@@ -1269,7 +1269,10 @@ class ActorRuntime:
                     try:
                         ctx = await em.run_middleware("llm_call", ctx, _core_llm)
                     except Exception as _cw_exc:
-                        if not _is_context_window_error(_cw_exc):
+                        if (
+                            self.agent.context_error_policy == "raise"
+                            or not _is_context_window_error(_cw_exc)
+                        ):
                             raise
                         # Always archive first — even if we can't reduce max_tokens,
                         # shedding events lets the retry (or caller's next attempt) succeed.
@@ -1352,7 +1355,10 @@ class ActorRuntime:
                             **_kwargs,
                         )
                     except Exception as _cw_exc:
-                        if not _is_context_window_error(_cw_exc):
+                        if (
+                            self.agent.context_error_policy == "raise"
+                            or not _is_context_window_error(_cw_exc)
+                        ):
                             raise
                         # Always archive first — even if we can't reduce max_tokens,
                         # shedding events lets the retry (or caller's next attempt) succeed.

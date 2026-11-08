@@ -3,7 +3,7 @@
 """Agent base class."""
 
 import logging
-from typing import TYPE_CHECKING, Annotated, Any, cast
+from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 from uuid import uuid4
 
 from nooa.agentdoc import hidden
@@ -105,6 +105,7 @@ class Agent(metaclass=AgentMeta):
     context_manager: Annotated["ContextManager", hidden, nosnapshot]
     event_query: Annotated["EventQuery | None", hidden, nosnapshot]
     render_config: Annotated["RenderConfig", hidden, nosnapshot]
+    context_error_policy: Annotated[Literal["recover", "raise"], hidden, nosnapshot]
     _agent_id: Annotated[str, hidden, nosnapshot]
     _llm: Annotated["UnifiedLLM | None", hidden, nosnapshot]
     _decision_model: Annotated["UnifiedDecisionModel | None", hidden, nosnapshot]
@@ -192,6 +193,7 @@ class Agent(metaclass=AgentMeta):
         decision_model: "UnifiedDecisionModel | str | None | _InheritSentinel" = INHERIT,
         truncation: "TruncationConfig | None" = None,
         render_config: "RenderConfig | None" = None,
+        context_error_policy: Literal["recover", "raise"] = "recover",
         context: "dict[str, str | DynamicContext | None] | None" = None,
         event_query: "EventQuery | None" = None,
         storage: "StorageManager | None" = None,
@@ -206,6 +208,10 @@ class Agent(metaclass=AgentMeta):
                 inherited decision model.
             truncation: Optional truncation configuration.
             render_config: RenderConfig for block/provider formatter selection.
+            context_error_policy: On a provider context-window error, recover by
+                archiving history and retrying (default), or raise the original
+                error without archival or CodeAct API retries. Independent of
+                summarization and explicit calls to events.collapse().
             context: Instance-level context block overrides.
                 - str: Static content
                 - DynamicContext("expr"): DynamicContext expression, re-evaluated each turn
@@ -233,6 +239,10 @@ class Agent(metaclass=AgentMeta):
         from nooa.runtime.context_manager import ContextManager
         from nooa.runtime.event_manager import EventManager
         from nooa.storage import InMemoryStorageManager
+
+        if context_error_policy not in ("recover", "raise"):
+            raise ValueError("context_error_policy must be 'recover' or 'raise'")
+        self.context_error_policy = context_error_policy
 
         # Generate agent ID
         self._agent_id = str(uuid4())

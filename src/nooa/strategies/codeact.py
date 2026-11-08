@@ -1101,6 +1101,12 @@ Standard Python builtins and agent instance (`self`) are available."""
                     continue
 
                 except Exception as e:
+                    if getattr(runtime.agent, "context_error_policy", "recover") == "raise":
+                        from nooa.runtime.actor import _is_context_window_error
+
+                        if _is_context_window_error(e):
+                            turn_state.is_final = True
+                            raise
                     # LLM API errors (rate limits, connection errors, timeouts, etc.)
                     # Note: unifiedllm already has retry logic with exponential backoff
                     # for 429, 500, 502, 503, 504 errors. This handles cases where

@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -24,6 +24,7 @@ class AtomOptions(BaseModel):
 
     working_dir: str = "."
     summarization: SummarizationConfig = Field(default_factory=SummarizationConfig)
+    context_error_policy: Literal["recover", "raise"] = "recover"
     agent_spec: str | None = None
     skills_dirs: list[Path] = Field(default_factory=list)
     additional_skills_dirs: list[Path] = Field(default_factory=list)

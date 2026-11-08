@@ -401,3 +401,28 @@ async def test_a_host_registry_builds_the_workspace_default_model(
         assert client.closed is True
     finally:
         await registry.close_all()
+
+
+@pytest.mark.parametrize("policy", ["recover", "raise"])
+async def test_context_error_policy_reaches_root_and_child(
+    workspace, sessions_dir, monkeypatch, policy
+):
+    """Every real session factory loads the policy; summarization stays independent."""
+    settings = workspace / "policy.yaml"
+    settings.write_text(
+        f"atom:\n  context_error_policy: {policy}\n  summarization:\n    policy: none\n"
+    )
+    monkeypatch.setenv("NEMO_OO_SETTINGS", str(settings))
+    monkeypatch.setattr("nooa.agent._auto_tracing_attempted", True)
+    registry = SessionRegistry(SessionStore(sessions_dir), agent_factory=create_session_agent)
+    options = _options(workspace, sessions_dir, llm=FakeLLMClient(), agent_spec=PUBLIC_ATOM_SPEC)
+    try:
+        root = await registry.create(options)
+        child = await registry.create(options.inherit(), parent_id=root.id)
+        for session in (root, child):
+            assert session._agent.context_error_policy == policy
+            assert session._agent.get_summarization_status()["policy"] == "none"
+        assert child.parent_id == root.id
+        assert root._agent is not child._agent
+    finally:
+        await registry.close_all()
