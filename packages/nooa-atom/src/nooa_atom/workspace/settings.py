@@ -291,15 +291,19 @@ def load_acp_verbosity(workspace: str | Path) -> Literal["silent", "concise", "v
 def load_behavior_settings(workspace: str | Path) -> dict[str, Any]:
     """The workspace's resolved behaviour settings; the defaults if they are invalid.
 
-    A value of the wrong type (``active_skills: "one"``) must not stop a
-    session from starting: a warning names the settings file and the error,
-    and every setting falls back to its default.
+    Invalid settings normally produce a warning and fall back to defaults.
+    An explicit ``atom.context_error_policy: raise`` instead preserves the
+    validation error, so fallback cannot silently re-enable context recovery.
     """
     from pydantic import ValidationError
 
+    data = load_settings_data(workspace)
     try:
-        return resolve_behavior_settings(load_settings_data(workspace))
+        return resolve_behavior_settings(data)
     except ValidationError as exc:
+        atom = data.get(SETTINGS_SECTION)
+        if isinstance(atom, dict) and atom.get("context_error_policy") == "raise":
+            raise
         errors = "; ".join(
             f"{'.'.join(str(part) for part in error['loc'])}: {error['msg']}"
             for error in exc.errors()

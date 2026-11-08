@@ -39,7 +39,8 @@ class AtomOptions(BaseModel):
     def load(cls, workspace: str | Path, **overrides: Any) -> AtomOptions:
         """Load the workspace's ``atom`` settings (and the legacy ``tui`` ones).
 
-        Invalid settings are reported and replaced by the defaults.
+        Invalid settings use defaults unless the file requests context errors
+        to raise; that strict policy also rejects settings validation errors.
         """
         root = Path(workspace).expanduser().resolve()
         from .settings import load_behavior_settings
