@@ -426,3 +426,59 @@ async def test_context_error_policy_reaches_root_and_child(
         assert root._agent is not child._agent
     finally:
         await registry.close_all()
+
+
+@pytest.mark.parametrize("child", [False, True])
+async def test_strict_context_policy_rejects_invalid_layered_settings(
+    workspace, sessions_dir, monkeypatch, child
+):
+    from pydantic import ValidationError
+
+    settings = workspace / "policy.yaml"
+    settings.write_text(
+        "atom:\n  context_error_policy: raise\n  summarization:\n    policy: none\n"
+    )
+    monkeypatch.setenv("NEMO_OO_SETTINGS", str(settings))
+    monkeypatch.setattr("nooa.agent._auto_tracing_attempted", True)
+    registry = SessionRegistry(SessionStore(sessions_dir), agent_factory=create_session_agent)
+    options = _options(workspace, sessions_dir, llm=FakeLLMClient(), agent_spec=PUBLIC_ATOM_SPEC)
+    try:
+        parent = await registry.create(options) if child else None
+        project = workspace / ".nooa" / "settings.yaml"
+        project.parent.mkdir(exist_ok=True)
+        project.write_text("atom:\n  active_skills: invalid-string\n")
+        with pytest.raises(ValidationError) as caught:
+            await registry.create(options.inherit(), parent_id=parent.id if parent else None)
+        assert any(error["loc"] == ("active_skills",) for error in caught.value.errors())
+    finally:
+        await registry.close_all()
+
+
+def test_strict_settings_accept_a_valid_higher_priority_override(workspace, monkeypatch):
+    from nooa_atom.workspace.options import AtomOptions
+
+    project = workspace / ".nooa" / "settings.yaml"
+    project.parent.mkdir()
+    project.write_text("atom:\n  active_skills: invalid-string\n")
+    settings = workspace / "policy.yaml"
+    settings.write_text(
+        "atom:\n  context_error_policy: raise\n  active_skills: []\n"
+        "  summarization:\n    policy: none\n"
+    )
+    monkeypatch.setenv("NEMO_OO_SETTINGS", str(settings))
+    options = AtomOptions.load(workspace)
+    assert options.context_error_policy == "raise"
+    assert options.summarization.policy == "none"
+    assert options.active_skills == []
+
+
+def test_recover_settings_keep_validation_fallback(workspace, monkeypatch, caplog):
+    from nooa_atom.workspace.options import AtomOptions
+
+    settings = workspace / "policy.yaml"
+    settings.write_text("atom:\n  context_error_policy: recover\n  active_skills: invalid-string\n")
+    monkeypatch.setenv("NEMO_OO_SETTINGS", str(settings))
+    options = AtomOptions.load(workspace)
+    assert options.context_error_policy == "recover"
+    assert options.active_skills == []
+    assert "using the defaults" in caplog.text
