@@ -486,3 +486,11 @@ async def test_an_untouched_session_is_still_discarded_at_close(atom_adapter, wo
     restarted = await atom_adapter([], capabilities=TERMINAL)
     with pytest.raises(RequestError):
         await restarted.load_session(str(workspace), session_id)
+
+
+def test_a_client_without_auth_capabilities_is_not_a_terminal_client():
+    from acp.schema import ClientCapabilities
+
+    # A client that leaves ``auth`` out gets the schema's plain-dict default.
+    assert terminal_auth.supports_terminal_auth(ClientCapabilities()) is False
+    assert terminal_auth.supports_terminal_auth(None) is False
