@@ -152,3 +152,53 @@ def test_no_active_spawns_shown_when_none_running():
     qm.queue("user_messages")
     status = qm.status()
     assert "Running:" not in status
+
+
+class _Sourced:
+    """An item whose sender line is item code (``status_source()``)."""
+
+    def __init__(self, n: int) -> None:
+        self.n = n
+
+    def status_source(self) -> str:
+        return f"/root/w{self.n % 5}"
+
+
+def test_status_survives_concurrent_cross_thread_puts():
+    """status() copies items under the batch lock, so a put loop never breaks it."""
+    import threading
+    import time
+
+    qm = QueueManager()
+    ch = qm.queue("ci_monitor")
+    stop = threading.Event()
+    errors: list[BaseException] = []
+
+    def produce() -> None:
+        n = 0
+        try:
+            while not stop.is_set():
+                ch.put(_Sourced(n))
+                n += 1
+                if ch.qsize() > 200:
+                    ch.clear()
+        except BaseException as exc:  # noqa: BLE001 - reported below
+            errors.append(exc)
+
+    producer = threading.Thread(target=produce, daemon=True)
+    producer.start()
+    deadline = time.monotonic() + 1.0
+    calls = 0
+    try:
+        while time.monotonic() < deadline:
+            status = qm.status()
+            line = ch.status()
+            assert status
+            assert line == "" or line.startswith("ci_monitor: ")
+            calls += 1
+    finally:
+        stop.set()
+        producer.join(timeout=2)
+    assert not producer.is_alive()
+    assert not errors
+    assert calls > 0

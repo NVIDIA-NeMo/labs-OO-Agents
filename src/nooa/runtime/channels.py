@@ -620,10 +620,15 @@ class Channel[T]:
         event-mode (no buffer) or drained, so ``QueueManager.status()`` can
         skip it.
         """
-        if self.mode != "queue" or not self._items:
+        if self.mode != "queue":
+            return ""
+        # Copy under the lock (cross-thread puts hold it), then format
+        # outside it: ``status_source()`` is item code and may be slow.
+        items = self.snapshot()
+        if not items:
             return ""
         return _count_line(
-            self.name, list(self._items), max_items=max_items, max_chars=max_chars, unit=" unread"
+            self.name, items, max_items=max_items, max_chars=max_chars, unit=" unread"
         )
 
     # ---- lifecycle -------------------------------------------------------
@@ -1013,10 +1018,19 @@ class QueueManager:
 
         Returns ``"(nothing queued)"`` when there is nothing to show.
         """
-        waiting = [ch for ch in self._channels.values() if ch.mode == "queue" and ch.qsize()]
+        # Copy every queue's items under the shared batch lock (an RLock that
+        # cross-thread puts also take), then format outside it: the senders
+        # come from item code (``status_source()``) that must not run locked.
+        with self._batch_lock:
+            pending = [
+                (ch, list(ch._items))
+                for ch in list(self._channels.values())
+                if ch.mode == "queue" and ch._items
+            ]
+        waiting = [ch for ch, _ in pending]
         unread = [
-            _count_line(ch.name, list(ch._items), max_items=max_items, max_chars=max_chars)
-            for ch in waiting
+            _count_line(ch.name, items, max_items=max_items, max_chars=max_chars)
+            for ch, items in pending
         ]
         unread += [line for line in more_unread if line]
         hints = [read_hints[ch.name] for ch in waiting if read_hints and ch.name in read_hints]
