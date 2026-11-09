@@ -33,9 +33,10 @@ Requirements:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any
 
@@ -69,7 +70,13 @@ def _relay_response(response: LLMResponse) -> dict[str, Any]:
     """Project the canonical response only when NeMo Relay needs wire JSON."""
     result: dict[str, Any] = {"finish_reason": response.finish_reason}
     if response.content or response.tool_calls or response.reasoning:
-        result["message"] = response.public_message()
+        # Relay's generic ATIF extractor recognizes assistant_message, not
+        # message. Keep this a public projection, never the provider response.
+        result["assistant_message"] = response.public_message()
+    else:
+        result["content"] = ""
+    if response.reasoning:
+        result["reasoning"] = response.reasoning
     if response.usage is not None:
         result["usage"] = {
             "prompt_tokens": response.usage.input_tokens,
@@ -103,15 +110,6 @@ except ImportError:
     _HAS_NEMO_RELAY = False
     nemo_relay = None  # type: ignore[assignment]
     LLMRequest = None  # type: ignore[assignment,misc]
-
-# The ContextVar holding NeMo Relay's mutable ScopeStack. It is private
-# upstream (not in ``nemo_relay.__all__``), so resolve it defensively: if a
-# future release renames it we degrade to the old shared-stack behaviour —
-# correct for sequential nesting, broken only for overlapping calls, which is
-# exactly where we are today. ``tests/test_nemo_relay_middleware.py`` asserts
-# the attribute still exists so an upstream rename fails in CI rather than
-# silently reverting. See nemo_relay_agent_call_middleware for why it matters.
-_SCOPE_STACK_VAR = getattr(nemo_relay, "_scope_stack_var", None) if _HAS_NEMO_RELAY else None
 
 # Current NeMo Relay scope as ``(handle, owning asyncio task)``. Unlike the
 # upstream ScopeStack this holds an *immutable* handle, so a child task that
@@ -179,8 +177,8 @@ async def nemo_relay_llm_middleware(
     """
     assert nemo_relay is not None
 
-    # Get model name from the agent's LLM client (not in params).
-    model_name = _extract_model_name(ctx.agent)
+    # Method-level overrides live on the effective client, not agent._llm.
+    model_name = ctx.client.model if ctx.client is not None else _extract_model_name(ctx.agent)
     safe_params = {
         k: v
         for k, v in ctx.params.items()
@@ -264,6 +262,7 @@ async def nemo_relay_tool_middleware(
 
     async def _wrapper(inner_args: Any) -> Any:
         nonlocal captured_ctx
+        assert nemo_relay is not None
         # Apply request intercept modifications back to ctx.
         # NeMo Relay tool request intercepts can transform args (e.g. rewrite code,
         # modify timeout).  The modified args are passed here as `inner_args`;
@@ -277,9 +276,6 @@ async def nemo_relay_tool_middleware(
         # Call the rest of the middleware chain → eventually executes code
         captured_ctx = await nxt(ctx)
         result = captured_ctx.result
-        if result is None:
-            return codec.to_json(None)
-
         # Extract meaningful return value (returned_value > signal > stdout)
         from nooa.events import _NO_RETURN
 
@@ -295,14 +291,36 @@ async def nemo_relay_tool_middleware(
             else:
                 rv = getattr(result, "stdout", None) or None
 
-        return codec.to_json(rv)
+        encoded = codec.to_json(rv)
+        error = getattr(result, "error", None)
+        cancelled = getattr(result, "cancelled", False)
+        if error is not None:
+            content = f"{type(error).__name__}: {error}"
+        elif cancelled:
+            content = "Execution cancelled"
+        else:
+            content = (
+                encoded if isinstance(encoded, str) else json.dumps(encoded, ensure_ascii=False)
+            )
+        # ATIF content must be text or content parts. Retain typed data in
+        # result while giving numeric/structured returns a readable observation.
+        payload = {
+            "schema": "nemo.relay.tool_result@1",
+            "content": content,
+            "is_error": error is not None or cancelled,
+            "result": encoded,
+            "cache": {"replayable": False},  # Python cells mutate live REPL state.
+        }
+        return nemo_relay.ToolExecutionResult(payload)
 
     # Note: nemo_relay.tools.execute() returns the pre-guardrail result.
     # Sanitize-response guardrails transform data for NeMo Relay internals
     # (ATIF export, event subscribers) but the caller always receives
     # the original result.  Conditional-execution guardrails that reject
     # raise GuardrailRejected, which propagates naturally.
-    await nemo_relay.tools.execute("execute_python", args, _wrapper)  # type: ignore[union-attr]
+    await nemo_relay.tools.execute(  # type: ignore[union-attr]
+        "execute_python", args, _wrapper, tool_call_id=ctx.params.get("tool_call_id")
+    )
 
     if captured_ctx is not None:
         return captured_ctx
@@ -345,8 +363,8 @@ async def nemo_relay_agent_call_middleware(
 
     The fix is to give a concurrently-dispatched call its own scope stack, so
     its pushes and pops can never interleave with a sibling's.  Parent linkage
-    survives isolation because ``scope.push(handle=...)`` accepts an explicit
-    parent handle from another stack.  A call that runs in the *same* task as
+    survives isolation through Relay's public propagation and stack-binding
+    APIs. A call that runs in the *same* task as
     its parent keeps the shared stack — sequential nesting is already correct,
     and staying on the shared stack preserves ``scope_local`` registrations
     made on ancestor scopes.
@@ -369,40 +387,26 @@ async def nemo_relay_agent_call_middleware(
         parent, owner_task = prev
 
     task = asyncio.current_task()
-    stack_token = None
-    if owner_task is not task and _SCOPE_STACK_VAR is not None:
-        # Concurrent sibling — isolate its stack so pops stay in order.
-        stack_token = _SCOPE_STACK_VAR.set(nemo_relay.create_scope_stack())  # type: ignore[union-attr]
+    stack_context = nullcontext()
+    if owner_task is not task:
+        # Preserve causal parent/root while isolating concurrent mutations.
+        stack = nemo_relay.create_scope_stack_from_propagation(  # type: ignore[union-attr]
+            nemo_relay.capture_propagation_context()
+        )
+        stack_context = nemo_relay.use_scope_stack(stack)  # type: ignore[union-attr,assignment]
 
     scope_name = f"{type(ctx.agent).__name__}.{ctx.method_name}"
-    handle = nemo_relay.scope.push(  # type: ignore[union-attr]
-        scope_name, nemo_relay.ScopeType.Function, handle=parent
-    )
-    token = _current_relay_scope.set((handle, task))
-    try:
-        return await nxt(ctx)
-    finally:
+    with (
+        stack_context,
+        nemo_relay.scope.scope(  # type: ignore[union-attr]
+            scope_name, nemo_relay.ScopeType.Function, handle=parent
+        ) as handle,
+    ):
+        token = _current_relay_scope.set((handle, task))
         try:
+            return await nxt(ctx)
+        finally:
             _current_relay_scope.reset(token)
-        except ValueError:
-            # Token created in a different Context (manual __aenter__/__aexit__
-            # across a task boundary). Fall back to restoring the value.
-            _current_relay_scope.set(prev)
-        try:
-            nemo_relay.scope.pop(handle)  # type: ignore[union-attr]
-        except Exception:
-            # With per-task isolation this is genuinely exceptional — it means
-            # the stack is out of sync, so log loudly rather than hiding it.
-            _logger.warning(
-                "nemo_relay_agent_call_middleware: scope.pop() failed for %r; "
-                "the NeMo Relay scope stack may be out of sync",
-                scope_name,
-                exc_info=True,
-            )
-        # Must happen AFTER the pop: restoring the stack var first makes the
-        # handle unreachable and the pop fails with "scope handle not found".
-        if stack_token is not None and _SCOPE_STACK_VAR is not None:
-            _SCOPE_STACK_VAR.reset(stack_token)
 
 
 # ---------------------------------------------------------------------------

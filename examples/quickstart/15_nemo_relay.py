@@ -9,7 +9,7 @@ management, lifecycle events, and a configurable middleware pipeline
 It is wired in through ``event_manager.intercept()``.
 
 This example shows how to:
-  1. Register an LLM request intercept (inject a system header into every request)
+  1. Register an LLM request intercept (attach a header to Relay's request view)
   2. Register a tool conditional-execution guardrail (block dangerous code)
   3. Subscribe to lifecycle events for console logging
   4. Export an ATIF trajectory after the run
@@ -23,9 +23,18 @@ Prerequisites:
 
 Usage:
   uv run python examples/quickstart/15_nemo_relay.py
+
+Optional local diagnostics and CPU/memory measurements:
+  NOOA_RELAY_DIAGNOSTICS=1 uv run python examples/quickstart/15_nemo_relay.py
+
+Relay 0.11 exports ATIF-v1.7 (Harbor also accepts v1.8, which adds audio).
+Diagnostics can contain private runtime details; keep the local output private.
 """
 
 import json
+import os
+from dataclasses import asdict
+from pathlib import Path
 from typing import Literal
 
 try:
@@ -37,6 +46,7 @@ except ModuleNotFoundError:
     sys.exit(0)
 from pydantic import BaseModel
 
+from nooa import hidden
 from nooa.nemo_relay_middleware import nemo_relay_scope
 from nooa.util.quickstart import *
 
@@ -141,7 +151,7 @@ class ReturnTypeDemoAgent(Agent, llm=llm):
 
 
 # ---------------------------------------------------------------------------
-# 1. LLM request intercept — inject a tracing header into every LLM request
+# 1. LLM request intercept — annotate Relay's request view for subscribers
 # ---------------------------------------------------------------------------
 
 
@@ -150,9 +160,11 @@ def _add_tracing_header(
     request: nemo_relay.LLMRequest,
     annotated: nemo_relay.AnnotatedLLMRequest | None,
 ) -> nemo_relay.LLMRequestInterceptOutcome:
-    """Inject a custom header into every outgoing LLM request."""
-    request.headers["X-NemoOO-Trace"] = "quickstart-15"
-    return nemo_relay.LLMRequestInterceptOutcome(request, annotated)
+    """Attach a correlation header to Relay telemetry, not the HTTP transport."""
+    updated = nemo_relay.LLMRequest(
+        {**request.headers, "X-NemoOO-Trace": "quickstart-15"}, request.content
+    )
+    return nemo_relay.LLMRequestInterceptOutcome(updated, annotated)
 
 
 nemo_relay.intercepts.register_llm_request(
@@ -235,8 +247,8 @@ nemo_relay.subscribers.register("tool-output-capture", _capture_tool_output)
 # ---------------------------------------------------------------------------
 
 
-@autorun
-async def main():
+@hidden
+async def run_demo():
     # 4. ATIF exporter — set up here so its lifetime is explicit and scoped to main()
     exporter = nemo_relay.AtifExporter(
         session_id="qs-15-session",
@@ -262,7 +274,7 @@ async def main():
     # each step carries it in extra.ancestry.parent_name (e.g. the nested
     # fact_check turns report parent_name="ResearchAgent.fact_check").
     # Event dispatch is async in nemo_relay; flush before reading the export.
-    nemo_relay.subscribers.flush()
+    await nemo_relay.subscribers.flush_async()
     trajectory_json = exporter.export_json()
     trajectory = json.loads(trajectory_json)
     trajectory_path = "/tmp/nemo_relay_trajectory_research.json"
@@ -303,12 +315,14 @@ async def main():
 
     traj: dict = {}
     for method_name, method in demo_cases:
+        await nemo_relay.subscribers.flush_async()
+        exporter.clear()
         _captured_tool_outputs.clear()
 
         async with nemo_relay_scope(demo_agent, f"demo-{method_name}"):
             value = await method()
 
-        nemo_relay.subscribers.flush()
+        await nemo_relay.subscribers.flush_async()
         traj = json.loads(exporter.export_json())
 
         # Tool outputs are captured by _capture_tool_output subscriber
@@ -349,7 +363,7 @@ async def main():
     print("  - Nested generation: summarize() → fact_check() created nested scopes")
     print("      → Both inner LLM and tool calls flowed through the NeMo Relay pipeline")
     print("  - Every LLM call went through the NeMo Relay LLM pipeline:")
-    print("      → add-tracing-header intercept injected X-NemoOO-Trace header")
+    print("      → add-tracing-header annotated Relay's request view with X-NemoOO-Trace")
     print("  - Every execute_python call went through the NeMo Relay tool pipeline:")
     print("      → code-safety guardrail rejected any shell-execution code")
     print("      → returned_value exposed via BestEffortAnyCodec:")
@@ -358,3 +372,40 @@ async def main():
     print("          DataFrame / complex obj  → pickle blob (opaque)")
     print("  - ATIF exporter collected all events into trajectory JSON files")
     print("=" * 70)
+
+
+@autorun
+async def main():
+    if os.getenv("NOOA_RELAY_DIAGNOSTICS") != "1":
+        await run_demo()
+        return
+
+    # One activation belongs to the application, not to individual agents.
+    config = nemo_relay.plugin.PluginConfig(
+        diagnostics={"enabled": True},
+        components=[
+            nemo_relay.plugin.ComponentSpec(
+                kind="resource_metrics",
+                config={
+                    "measurement_scope": "application_process",
+                    "polling": {"enabled": True, "interval_millis": 1000},
+                    "cpu": {"enabled": True},
+                    "memory": {"enabled": True},
+                    "process": {"enabled": False},
+                    "disk": {"enabled": False},
+                    "gpu": {"enabled": False},
+                    "network": {"enabled": False},
+                },
+            ),
+        ],
+    )
+    async with nemo_relay.plugin.activate(config):
+        await run_demo()
+        await nemo_relay.subscribers.flush_async()
+        snapshot = nemo_relay.diagnostics.reader().snapshot()
+        metrics = asdict(await nemo_relay.resource_metrics.collect())
+        output = Path("/tmp/nooa-relay-diagnostics.json")
+        output.write_text(
+            json.dumps({"diagnostics": snapshot, "resources": metrics}, default=str, indent=2)
+        )
+        print(f"\n--- Relay diagnostics and CPU/memory snapshot → {output} ---")
