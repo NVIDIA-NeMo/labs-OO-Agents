@@ -540,11 +540,11 @@ async def test_replace_contract_survives_the_default_concise_tool_context(tmp_pa
         assert "async def run(self, cmd: str, *, name: str" in tools
         assert str(agent.context["python_cell_tools"]) == tools
         for rendered in (tools, doc(ActivityShellTools, concise=True)):
-            assert "replace(self, path: str, old: str, new: str)" in rendered
-            assert "for a Match use replace_match(match, new)" in rendered
-            assert "replace_match(self, match: Match, new: str)" in rendered
-            assert "line numbers are not handles" in rendered
-            assert "old_or_new" not in rendered
+            assert (
+                "replace(self, target: Any, old_or_new: str = '', new: str | None = None)"
+                in rendered
+            )
+            assert "replace_match" not in rendered
             assert "Anchors are never relocated" not in rendered
     finally:
         await agent.aclose()

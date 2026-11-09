@@ -85,7 +85,7 @@ class Files:
 
     async def replace_match(self, match: Match, new: str) -> FileWrite:
         """Rewrite the lines a ``Match`` covers (from ``read`` or ``self.repo``)."""
-        return await self._shell.replace_match(match, new)
+        return await self._shell.replace(match, new)
 
     async def write_file(self, path: str, content: str) -> FileWrite:
         """Create or overwrite a file."""
@@ -577,7 +577,7 @@ def _progress_parts(job: Job) -> list[str]:
 # Shared repo-tool docs that name the legacy shell; this agent edits through
 # self.files and its repo searches start in the workspace.
 _DOC_FIXES: Annotated[tuple[tuple[str, str], ...], hidden] = (
-    ("self.shell.replace_match()", "self.files.replace_match()"),
+    ("self.shell.replace()", "self.files.replace_match()"),
     ("as ShellTools ``Match`` anchors", "as ``Match`` anchors (edit with ``self.files``)"),
     ("defaults to the shell's current directory", "defaults to the workspace"),
 )

@@ -280,7 +280,7 @@ async def test_replace_by_match_over_budget_leaves_file_untouched(tmp_path):
     path.write_text(original)
 
     with pytest.raises(FileTooLargeError):
-        await sh.replace_match(Match("big.py", 1, 1, "a\n", resolved_path=path), "b\n")
+        await sh.replace(Match("big.py", 1, 1, "a\n", resolved_path=path), "b\n")
 
     assert path.read_text() == original
 

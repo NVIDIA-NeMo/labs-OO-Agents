@@ -65,7 +65,7 @@ async def test_match_replace_emits_actual_before_and_after_text(tmp_path):
     (tmp_path / "example.txt").write_text("one\ntwo\nthree\n")
     try:
         match = await shell.read("example.txt", lines=(2, 2))
-        await shell.replace_match(match, "changed")
+        await shell.replace(match, "changed")
     finally:
         await shell.close()
 
@@ -85,7 +85,7 @@ async def test_match_replace_at_end_of_file_keeps_the_file_terminated(tmp_path):
     (tmp_path / "example.txt").write_text("one\ntwo\nthree\n")
     try:
         match = await shell.read("example.txt", lines=(3, 3))
-        await shell.replace_match(match, "changed")
+        await shell.replace(match, "changed")
     finally:
         await shell.close()
 
@@ -106,7 +106,7 @@ async def test_match_replace_after_cwd_change_emits_original_path(tmp_path):
     try:
         match = await shell.read("example.txt")
         await shell.run("cd other")
-        await shell.replace_match(match, "after")
+        await shell.replace(match, "after")
     finally:
         await shell.close()
 
@@ -515,73 +515,40 @@ async def test_a_large_diff_is_computed_off_the_event_loop(tmp_path, monkeypatch
     assert on_loop == [True, False, False, True]
 
 
-def test_activity_shell_exposes_replace_and_replace_match_with_shell_signatures():
+def test_activity_shell_replace_keeps_the_shell_signature():
     import inspect
 
     from nooa.agentdoc import doc
 
-    for name in ("replace", "replace_match"):
-        assert inspect.iscoroutinefunction(getattr(ActivityShellTools, name))
-        assert inspect.signature(getattr(ActivityShellTools, name)) == inspect.signature(
-            getattr(ShellTools, name)
-        )
+    assert inspect.iscoroutinefunction(ActivityShellTools.replace)
+    assert inspect.signature(ActivityShellTools.replace) == inspect.signature(ShellTools.replace)
+    assert not hasattr(ShellTools, "replace_match")
+    assert not hasattr(ActivityShellTools, "replace_match")
     rendered = doc(ActivityShellTools, concise=True)
-    assert "async def replace(self, path: str, old: str, new: str)" in rendered
-    assert "async def replace_match(self, match: Match, new: str)" in rendered
-    assert "old_or_new" not in rendered
+    assert "async def replace(self, target: Any" in rendered
+    assert "replace_match" not in rendered
 
 
 @pytest.mark.parametrize(
-    ("method", "make_args", "needle"),
+    ("make_args", "error_type", "needle"),
     [
-        ("replace", lambda m: (m, "two\n"), "replace_match(match, new)"),
-        ("replace", lambda m: (m, "two\n", "x"), "replace_match(match, new)"),
-        ("replace_match", lambda m: ("example.txt", "x"), "replace(path, old, new)"),
-        ("replace_match", lambda m: ("example.txt", "two", "x"), "replace(path, old, new)"),
-        ("replace", lambda m: ("example.txt",), "replace(path, old, new)"),
+        (lambda m: (m, "two\n", "x"), ValueError, "replace(match, old, new) is ambiguous"),
+        (lambda m: ("example.txt", "x"), ValueError, "requires 3 arguments"),
+        (lambda m: (Path("example.txt"), "two", "x"), TypeError, "Match or file path str"),
     ],
 )
 async def test_activity_wrong_form_calls_raise_without_writing_or_events(
-    tmp_path, method, make_args, needle
+    tmp_path, make_args, error_type, needle
 ):
     shell, events = _observed_shell(tmp_path)
     (tmp_path / "example.txt").write_text("one\ntwo\n")
     try:
         match = await shell.read("example.txt", lines=(2, 2))
-        with pytest.raises(TypeError) as error:
-            await getattr(shell, method)(*make_args(match))
+        with pytest.raises(error_type) as error:
+            await shell.replace(*make_args(match))
     finally:
         await shell.close()
 
     assert needle in str(error.value)
-    assert "no file was changed" in str(error.value)
     assert (tmp_path / "example.txt").read_text() == "one\ntwo\n"
     assert not [event for event in events if isinstance(event, FileEdit)]
-
-
-async def test_activity_rejects_legacy_replace_keywords(tmp_path):
-    shell, events = _observed_shell(tmp_path)
-    (tmp_path / "example.txt").write_text("one\n")
-    try:
-        with pytest.raises(TypeError) as error:
-            await shell.replace(target="example.txt", old_or_new="one", new="two")
-    finally:
-        await shell.close()
-
-    assert "old_or_new=" in str(error.value)
-    assert "target=" in str(error.value)
-    assert (tmp_path / "example.txt").read_text() == "one\n"
-    assert not [event for event in events if isinstance(event, FileEdit)]
-
-
-async def test_replace_match_with_a_path_raises_and_reports_nothing(tmp_path):
-    """#447 review finding 9: no wrapper branch; ShellTools' TypeError surfaces."""
-    shell, events = _observed_shell(tmp_path)
-    (tmp_path / "example.txt").write_text("one\n")
-    try:
-        with pytest.raises(TypeError, match="replace"):
-            await shell.replace_match("example.txt", "two")
-    finally:
-        await shell.close()
-    assert (tmp_path / "example.txt").read_text() == "one\n"
-    assert not any(isinstance(event, FileEdit) for event in events)

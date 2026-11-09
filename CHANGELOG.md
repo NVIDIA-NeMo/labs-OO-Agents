@@ -83,14 +83,6 @@ to follow semantic versioning.
 - `self.v["x"] = ...` now raises a `TypeError` that names the working form
   (`write self.v.x = ... instead`). It used to be Python's bare "'AgentVars'
   object does not support item assignment". Nothing is stored either way.
-- `ShellTools.replace()` is split into two methods, with no backward
-  compatibility: `replace(path, old, new)` edits a file by unique substring and
-  `replace_match(match, new)` rewrites a Match's whole line region (same
-  stale-anchor and resolved-path checks as before). The `target=` and
-  `old_or_new=` keywords are gone. Passing a Match to `replace()` or a path to
-  `replace_match()` raises a `TypeError` that names the right method; no file is
-  written. `ActivityShellTools` (nooa-atom) and the nooa-cli coding shell expose
-  both methods.
 - Snapshot save and restore now detect cycles explicitly and cap nesting at 200
   levels (`MAX_SNAPSHOT_DEPTH`), whatever the caller's stack depth. Errors for
   cycles, too-deep values, unsupported types and non-string dict keys name the
