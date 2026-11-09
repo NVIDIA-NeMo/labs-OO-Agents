@@ -1061,6 +1061,12 @@ class Session:
         run one after another. A failure is logged and the turn is not
         affected; the next settled turn tries again.
         """
+        prepare = getattr(self._agent, "before_checkpoint", None)
+        if callable(prepare):
+            try:
+                prepare()  # e.g. Atom captures its cell state into a snapshot attribute
+            except Exception:
+                logger.warning("Session %s: before_checkpoint failed", self.id, exc_info=True)
         try:
             blob = json.dumps(snapshot_to_json(self._agent), sort_keys=True)
         except Exception:
