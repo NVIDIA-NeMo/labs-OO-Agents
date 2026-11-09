@@ -458,8 +458,8 @@ class SkillManager(Skill):
         self.registry.discover_skills_dirs(dirs)
 
     @hidden
-    def discover_libs(self, path: Any, *, agent_written: bool = False) -> None:
-        self.registry.discover_libs(path, agent_written=agent_written)
+    def discover_libs(self, path: Any) -> None:
+        self.registry.discover_libs(path)
 
     @hidden
     async def reload(self, name: str | None = None) -> str:
@@ -656,6 +656,9 @@ class SkillManager(Skill):
             return await self._connect(entry)
         self.registry.activate([_literal(entry.key)])
         if entry.key not in self.registry.activated():
+            conflict = self.registry.name_conflict(entry.key)
+            if conflict is not None:
+                return f"{entry.name}: {conflict}"
             return f"{entry.name}: could not be activated; see the log"
         return f"{entry.name}: active; use self.{_leaf(entry.key)}"
 

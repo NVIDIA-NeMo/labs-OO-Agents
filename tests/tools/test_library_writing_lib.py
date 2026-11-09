@@ -409,7 +409,7 @@ async def test_reload_reports_registry_failure(tmp_path: Path):
     """A reload that the registry rejects must NOT be reported as loaded."""
 
     class _FailingSkills:
-        def discover_libs(self, path, *, agent_written=False):
+        def discover_libs(self, path):
             pass
 
         def activate(self, patterns):
@@ -439,7 +439,7 @@ async def test_reload_reports_success(tmp_path: Path):
     """A reload the registry accepts is reported as loaded."""
 
     class _OkSkills:
-        def discover_libs(self, path, *, agent_written=False):
+        def discover_libs(self, path):
             pass
 
         def activate(self, patterns):

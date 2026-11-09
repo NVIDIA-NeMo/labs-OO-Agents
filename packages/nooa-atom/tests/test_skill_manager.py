@@ -502,9 +502,8 @@ async def test_search_matches_a_connected_mcp_servers_tools(agent):
     assert "probe has probe (MCP tool: await self.probe.probe(...))" in agent.skills.search("probe")
 
 
-async def test_search_calls_a_duplicate_leaf_code_skill_on_its_registered_attribute(
-    monkeypatch, tmp_path
-):
+async def test_a_duplicate_leaf_entry_point_skill_is_a_name_conflict(monkeypatch, tmp_path):
+    """The second entry-point skill with the same leaf is not loaded over the first."""
     points = [
         _EntryPoint("tools.greeter", Greeter, "Greeting helpers"),
         _EntryPoint("other.greeter", Greeter, "Other greeting helpers"),
@@ -513,14 +512,18 @@ async def test_search_calls_a_duplicate_leaf_code_skill_on_its_registered_attrib
     monkeypatch.setenv("HOME", str(tmp_path))
     made = AtomAgentBase(llm=FakeLLMClient(), cwd=tmp_path)
     try:
-        # The second greeter is shown under its key, but the registry attaches it as its leaf.
+        # The second greeter is shown under its key; its attribute is the first one's.
         names = [entry.name for entry in made.skills.entries() if entry.key.endswith("greeter")]
         assert names == ["greeter", "tools.greeter"]
         activated = await made.skills.activate(["tools.greeter"])
-        assert activated == "tools.greeter: active; use self.greeter"
-        found = made.skills.search("greet").splitlines()
-        assert "tools.greeter has greet (method: self.greeter.greet)" in found
-        assert made.greeter is made.skills.registry["tools.greeter"]
+        line = (
+            "skill 'greeter' not loaded: the agent already has an attribute named greeter; "
+            "rename the skill"
+        )
+        assert activated == f"tools.greeter: {line}"
+        assert "tools.greeter" not in made.skills.registry.loaded()
+        assert made.greeter is made.skills.registry["other.greeter"]
+        assert line in made.skills.registry.name_conflicts()
     finally:
         await made.aclose()
 
@@ -533,7 +536,7 @@ async def test_a_saved_skill_named_like_an_agent_attribute_is_reported_in_the_bl
     (saved / "shell").mkdir(parents=True)
     (saved / "shell" / "SKILL.md").write_text("---\nname: shell\ndescription: d\n---\nbody\n")
     shell = agent.shell
-    agent.skills.registry.discover_libs(saved, agent_written=True)
+    agent.skills.registry.discover_libs(saved)
     assert agent.shell is shell
     assert agent.skills.status().splitlines()[-1] == (
         "skill 'shell' not loaded: the agent already has an attribute named shell; rename the skill"

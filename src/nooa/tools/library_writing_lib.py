@@ -199,7 +199,7 @@ class SkillWriting(Skill):
         registry = self._registry()
         if registry is not None:
             for root in roots:
-                registry.discover_libs(root, agent_written=True)
+                registry.discover_libs(root)
             registry.activate(["local.*"])
         else:
             for root in roots:
@@ -352,7 +352,7 @@ class SkillWriting(Skill):
             if f"local.{lib_name}" in registry.loaded():
                 await registry.reload(f"local.{lib_name}")
             else:
-                registry.discover_libs(self._path, agent_written=True)
+                registry.discover_libs(self._path)
             registry.activate([f"local.{lib_name}"])
             if f"local.{lib_name}" not in registry.loaded():
                 return (
@@ -433,7 +433,7 @@ class SkillWriting(Skill):
         if registry is not None:
             if f"local.{lib_name}" not in registry.loaded() and not is_code:
                 # A text skill (SKILL.md only): register it from its directory.
-                registry.discover_libs(lib_dir.parent, agent_written=True)
+                registry.discover_libs(lib_dir.parent)
                 registry.activate([f"local.{lib_name}"])
                 if f"local.{lib_name}" in registry.loaded():
                     return f"Reloaded local.{lib_name}"
