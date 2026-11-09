@@ -74,14 +74,18 @@ class Context(BaseModel):
             "shell": Context(expr="doc(self.shell)", prefix=True),    # prefix, evaluated each turn
             "config": Context("stable config", prefix=True),          # prefix, literal
             "status": Context(expr="f'{self.done}/{self.total}'"),    # suffix, evaluated
-            "self": None,                                             # suppress block
+            "notes": None,                                            # suppress a block by name
         }
 
     At runtime::
 
         self.context["shell"] = Context(expr="doc(self.shell)", prefix=True)
         self.context["status"] = Context(expr="f'{self.done}/{self.total}'")
-        self.context["self"] = None  # suppress
+        self.context["notes"] = None  # suppress
+
+    ``None`` suppresses user, skill, and decorator/scoped blocks. Blocks a view
+    builds itself (``system_prompt``, ``self``, ``state``, strategy instructions)
+    are configured on the view, e.g. ``CodeActView(state=False)``.
     """
 
     model_config = ConfigDict(frozen=True)

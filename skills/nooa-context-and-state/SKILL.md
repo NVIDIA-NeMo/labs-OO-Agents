@@ -184,8 +184,13 @@ See `examples/advanced/memory.py` and `examples/quickstart/12_memory.py`.
 - Reading an expression block returns its declaration, not a value:
   `self.context["progress"]` is `Context(expr="self.format_project_state()")`.
   Call `self.format_project_state()` for the current value.
-- `self.context["k"] = None` suppresses a block from prompt rendering. Use
-  `del self.context["k"]` / `.pop("k")` to remove a user block entirely.
+- `self.context["k"] = None` suppresses a user, skill, or decorator/scoped
+  block from prompt rendering. Use `del self.context["k"]` / `.pop("k")` to
+  remove a user block entirely.
+- Blocks the view builds (`system_prompt`, `self`, `state`, strategy
+  instructions) are not in `self.context`. Storing one of those names adds a
+  separate block; turn the view's blocks off with its options, e.g.
+  `@strategy(context_view=CodeActView(state=False))`.
 - A bare `self.context["k"] = value` is fixed content in the volatile suffix.
   Use `Context(value, prefix=True)` for stable, cache-friendly content.
 - `set_static()`, `set_dynamic()`, and `DynamicContext` are legacy APIs. They

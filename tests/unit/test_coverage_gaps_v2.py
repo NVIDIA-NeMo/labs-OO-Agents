@@ -1391,26 +1391,6 @@ class TestDefaultContextViewNoneContent:
         assert len(result) == 1
         assert result[0].content == "None"
 
-    async def test_protected_block_static_meta(self):
-        """A protected literal block has no expr label and user_block=False."""
-        from nooa.default_context_view import materialize_manager_blocks
-        from nooa.runtime.context_manager import ContextManager
-        from nooa.strategies.current_call import CurrentCall
-
-        # Create a context manager with a static protected block
-        cm = ContextManager()
-        cm.set_static_protected("my_key", "static value")
-
-        result = await materialize_manager_blocks(
-            cm,
-            object(),
-            CurrentCall(id="1", method_name="run", decorator="plan"),
-        )
-        assert len(result) == 1
-        assert result[0].key == "my_key"
-        assert result[0].metadata.expr is None
-        assert result[0].metadata.user_block is False
-
 
 # =============================================================================
 # runtime/code_validator.py

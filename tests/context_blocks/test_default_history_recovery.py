@@ -42,16 +42,18 @@ def response(*ids):
 async def test_default_view_omits_incomplete_turn_and_keeps_task():
     from nooa import Context
 
+    class NoOwnBlocksView(ManagedContextView):
+        async def view_blocks(self, owner, call):
+            return ()
+
     agent = Agent(llm=object())
-    for key in ("system_prompt", "self", "state"):
-        agent.context[key] = None
     agent.context["task"] = Context("continue", prefix=False)
     event = response("missing")
     agent.event_manager.add(event)
     original = event.model_dump_json()
     try:
         call = CurrentCall(id="next", method_name="run", decorator="plan", agent=agent)
-        items = await collect_context_items(ManagedContextView(), agent, call)
+        items = await collect_context_items(NoOwnBlocksView(), agent, call)
         result = render_context(
             items, block_formatter=XMLBlockFormatter(), provider_formatter=OpenAIProviderFormatter()
         ).output

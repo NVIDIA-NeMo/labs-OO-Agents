@@ -104,50 +104,6 @@ class TestContextManager:
         agent.context_manager["key"] = None
         assert agent.context_manager.is_disabled("key") is True
 
-    def test_context_api_can_disable_and_enable_protected_blocks(self):
-        """The public API can suppress default framework blocks by key."""
-        fake_llm = FakeLLMClient()
-
-        class TestAgent(Agent, llm=fake_llm):
-            pass
-
-        agent = TestAgent()
-        agent.context.disable("system_prompt", "self", "state")
-        assert agent.context.disabled() == {"system_prompt", "self", "state"}
-        assert agent.context.is_enabled("self") is False
-        assert "self" in agent.context_manager.protected_keys
-
-        agent.context.enable("self")
-        assert agent.context.disabled() == {"system_prompt", "state"}
-        assert agent.context.is_enabled("self") is True
-
-    def test_init_context_none_disables_protected_blocks(self):
-        """context={key: None} suppresses protected framework blocks instead of erroring."""
-        fake_llm = FakeLLMClient()
-
-        class TestAgent(Agent, llm=fake_llm):
-            pass
-
-        agent = TestAgent(context={"self": None})
-        assert agent.context_manager.is_disabled("self") is True
-        assert "self" in agent.context_manager.protected_keys
-
-    def test_remove_protected_accepts_reserved_default_without_override(self):
-        """A framework reservation can be removed before it has a stored declaration."""
-        fake_llm = FakeLLMClient()
-
-        class TestAgent(Agent, llm=fake_llm):
-            pass
-
-        manager = TestAgent().context_manager
-        manager.disable("state")
-
-        manager.remove_protected("state")
-
-        assert manager.is_protected("state") is False
-        assert manager.is_static("state") is False
-        assert manager.is_disabled("state") is False
-
     def test_disabled_context_blocks_round_trip_through_snapshot(self):
         """Disabled block keys survive save/restore snapshot serialization."""
         from nooa.storage.snapshot import AgentSnapshot
@@ -289,79 +245,6 @@ class TestContextManager:
         agent = TestAgent()
         with pytest.raises(KeyError):
             del agent.context_manager["nonexistent"]
-
-    def test_delete_nonexistent_protected_key_raises_keyerror(self):
-        """del context['nonexistent'] raises KeyError when the key is not in _blocks."""
-        fake_llm = FakeLLMClient()
-
-        class TestAgent(Agent, llm=fake_llm):
-            pass
-
-        agent = TestAgent()
-        # A key that doesn't exist at all should raise KeyError
-        assert "nonexistent" not in agent.context_manager._blocks
-        with pytest.raises(KeyError):
-            del agent.context_manager["nonexistent"]
-
-    def test_delete_existing_protected_key_raises_protected_error(self):
-        """del context['system_prompt'] raises ProtectedBlockError when key is protected."""
-        from nooa.context_blocks.exceptions import ProtectedBlockError
-
-        fake_llm = FakeLLMClient()
-
-        class TestAgent(Agent, llm=fake_llm):
-            pass
-
-        agent = TestAgent()
-        # The default view owns the declaration; the manager reserves its key.
-        assert "system_prompt" in agent.context_manager.protected_keys
-        assert "system_prompt" not in agent.context_manager._blocks
-        with pytest.raises(ProtectedBlockError):
-            del agent.context_manager["system_prompt"]
-
-    def test_pop_protected_key_raises_protected_error(self):
-        """pop() on an existing protected key raises ProtectedBlockError."""
-        from nooa.context_blocks.exceptions import ProtectedBlockError
-
-        fake_llm = FakeLLMClient()
-
-        class TestAgent(Agent, llm=fake_llm):
-            pass
-
-        agent = TestAgent()
-        # Directly inject a block into _blocks AND mark as protected
-        agent.context_manager._blocks["guarded"] = "value"
-        agent.context_manager.protected_keys.add("guarded")
-        with pytest.raises(ProtectedBlockError):
-            agent.context_manager.pop("guarded")
-
-    def test_pop_nonexistent_protected_key_raises_keyerror(self):
-        """pop() on a key not in _blocks raises KeyError."""
-        fake_llm = FakeLLMClient()
-
-        class TestAgent(Agent, llm=fake_llm):
-            pass
-
-        agent = TestAgent()
-        assert "nonexistent" not in agent.context_manager._blocks
-        with pytest.raises(KeyError):
-            agent.context_manager.pop("nonexistent")
-
-    def test_pop_existing_protected_key_raises_protected_error(self):
-        """pop() on a protected key that is in _blocks raises ProtectedBlockError."""
-        from nooa.context_blocks.exceptions import ProtectedBlockError
-
-        fake_llm = FakeLLMClient()
-
-        class TestAgent(Agent, llm=fake_llm):
-            pass
-
-        agent = TestAgent()
-        # The default view owns the declaration; the manager reserves its key.
-        assert "system_prompt" in agent.context_manager.protected_keys
-        assert "system_prompt" not in agent.context_manager._blocks
-        with pytest.raises(ProtectedBlockError):
-            agent.context_manager.pop("system_prompt")
 
 
 class TestBuildMessages:

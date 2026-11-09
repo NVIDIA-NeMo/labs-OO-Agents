@@ -140,14 +140,16 @@ class CodeActConfig(BaseModel):
     #     Returning a Python source string runs it as a synthetic prefill step
     #     in the REPL session; returning ``None`` skips that step.
     #
-    # To override the *strategy prompt* (the "## Strategy" instruction block),
-    # use the existing ``@strategy(..., context=ScopedContext(...))`` decorator
-    # API — the decorator-context phase runs after strategy overrides and wins:
+    # The *strategy prompt* (the "## Strategy" instruction block) belongs to the
+    # context view. To replace it, override the view's ``instruction_blocks``:
     #
-    #     @strategy(
-    #         CodeActStrategy(),
-    #         ScopedContext(context={"strategy_prompt": "Custom instructions."}),
-    #     )
+    #     class LeanView(CodeActView):
+    #         async def instruction_blocks(self, owner, call):
+    #             blocks = dict(await super().instruction_blocks(owner, call))
+    #             blocks["strategy_prompt"] = Context("Custom instructions.", prefix=True)
+    #             return blocks
+    #
+    #     @strategy(CodeActStrategy(), context_view=LeanView())
     #     async def my_method(self, ...): ...
     # Typed as ``Any`` to sidestep Pydantic's forward-reference resolution for
     # the ``Prefill`` protocol (which lives in ``strategies.prefill`` and would

@@ -110,18 +110,14 @@ for event in replayable(
 
 ```python
 class CodeActView(ContextView[Agent]):
+    def __init__(self, *, state=True): ...
+
     async def assemble(self, agent, call):
-        disabled = agent.context_manager.disabled()
-        declared = frozenset(key for key, _ in agent.context_manager.declarations())
-        blocks = await self._materialize_agent_blocks(
-            agent, call, disabled=disabled, declaration_keys=declared
-        )
-        skill_blocks = await collect_skill_blocks(
-            agent, call, disabled=disabled, declaration_keys=declared
-        )
-        blocks = replace_blocks_by_key(blocks, skill_blocks)
-        blocks = await self._apply_override_layers(agent, call, blocks, disabled=disabled)
-        blocks = order_blocks(blocks, self.block_order)
+        # system prompt, self, events_api, state (unless state=False), strategy instructions
+        own = await self.view_blocks(agent, call)
+        # self.context blocks, skill blocks, then decorator and scoped context
+        added = await self.context_blocks(agent, call)
+        blocks = order_blocks((*own, *added), self.block_order)
         prefix, trailing = partition_blocks(blocks)
 
         history = replayable(self.history(agent, call))  # visible_events(agent)
@@ -134,9 +130,9 @@ class CodeActView(ContextView[Agent]):
             yield item
 ```
 
-The private phase methods contain source-specific detail. `assemble()` keeps global order, event placement, cache placement, and budgeting visible. `apply_block_overrides` preserves replacement, deletion, inherited placement, and explicit prefix hints. `history()` returns `visible_events` (active model-facing history) and is the override point for event selection; `replayable` then pairs its tool calls and results without reconstructing absent records.
+`view_blocks()` and `context_blocks()` contain source-specific detail. `assemble()` keeps global order, event placement, cache placement, and budgeting visible. `apply_block_overrides` applies decorator and scoped context to the added blocks: replacement, deletion, inherited placement, and explicit prefix hints. `history()` returns `visible_events` (active model-facing history) and is the override point for event selection; `replayable` then pairs its tool calls and results without reconstructing absent records.
 
-The three built-in helpers derive content directly from the agent. Protected-key registration selects which defaults apply; disable state and stored overrides are checked before evaluation. The manager stores those controls and user declarations, but does not create defaults or store evaluated values: reading an expression block returns its `Context(expr=...)` declaration, so call the expression's code for its current value.
+The view owns the blocks it builds; their helpers derive content directly from the agent or strategy, and only for an `Agent` owner (standalone functions get the strategy blocks). The view's constructor documents what can be changed, such as `CodeActView(state=False)`; anything else needs a custom view. `self.context` only adds blocks: a stored block named `system_prompt` is an extra block, and `None` suppresses user, skill, and decorator/scoped blocks by name but never a view's own. The manager stores user declarations and that suppression set, but not evaluated values: reading an expression block returns its `Context(expr=...)` declaration, so call the expression's code for its current value.
 
 The decision default evaluates explicit decorator/scoped context and includes no history by default. Custom views may select other agent state or active history. Here, `evaluate_value` resolves one literal or expression:
 
@@ -150,7 +146,7 @@ class DecisionContextView(ContextView[Agent]):
                 yield Block(key=key, content=await evaluate_value(value, agent, call))
 ```
 
-`collect_skill_blocks` iterates active skills and materializes their declared `context_block = (key, Context(...))`, evaluating expressions with `self` bound to the skill, without registering it in `self.context`. `Context` validates the expression when the skill class is defined; `prefix=True` marks the block cacheable as for agent blocks. It skips disabled, explicitly declared, and protected keys before evaluation. The view chooses whether to include these blocks and where to place them. Other views may use skill state or documentation directly.
+`collect_skill_blocks` iterates active skills and materializes their declared `context_block = (key, Context(...))`, evaluating expressions with `self` bound to the skill, without registering it in `self.context`. `Context` validates the expression when the skill class is defined; `prefix=True` marks the block cacheable as for agent blocks. It skips disabled and explicitly declared keys before evaluation. The view chooses whether to include these blocks and where to place them. Other views may use skill state or documentation directly.
 
 Registry skills participate when active; directly attached public skills are active by default. Hidden and inactive skills contribute nothing in the default views.
 

@@ -57,12 +57,7 @@ async def test_named_helpers_make_framework_sources_explicit():
     system = await system_prompt_block(agent, call)
     interface = await agent_interface_block(agent, call)
     state = await agent_state_block(agent, call)
-    stored = await materialize_manager_blocks(
-        agent.context_manager,
-        agent,
-        call,
-        exclude=frozenset({"system_prompt", "self", "state"}),
-    )
+    stored = await materialize_manager_blocks(agent.context_manager, agent, call)
 
     assert [system.key, interface.key, state.key] == ["system_prompt", "self", "state"]
     assert system.metadata.expr is None
@@ -101,16 +96,13 @@ async def test_assembly_does_not_write_to_the_context_manager():
         agent.context_manager["system_prompt"]
 
 
-async def test_unregistered_framework_defaults_are_not_built():
+async def test_owner_that_is_not_an_agent_gets_no_agent_blocks():
     class MinimalManager:
         def disabled(self):
             return set()
 
         def declarations(self):
             return ()
-
-        def is_protected(self, key):
-            return False
 
     owner = SimpleNamespace(
         context_manager=MinimalManager(),
@@ -120,7 +112,7 @@ async def test_unregistered_framework_defaults_are_not_built():
     assert await collect_context_items(ManagedContextView(), owner, _call(ExampleAgent())) == ()
 
 
-async def test_unprotected_framework_declaration_is_still_materialized():
+async def test_stored_block_named_like_a_view_block_is_materialized_for_any_owner():
     from nooa.runtime.context_manager import ContextManager
 
     manager = ContextManager()
@@ -136,29 +128,30 @@ async def test_unprotected_framework_declaration_is_still_materialized():
     ).content == ("standalone override")
 
 
-@pytest.mark.parametrize("policy", ["disabled", "override"])
-async def test_unselected_system_prompt_is_not_evaluated(policy):
-    class ExplodingAgent(Agent, llm=object()):
-        """{self.mark_called()}"""
-
-        calls = 0
-
-        def mark_called(self):
-            self.calls += 1
-            return "unexpected"
+async def test_self_context_cannot_replace_or_hide_view_blocks():
+    class PromptAgent(Agent, llm=object()):
+        """Real prompt."""
 
         async def run(self): ...
 
-    agent = ExplodingAgent()
-    if policy == "disabled":
-        agent.context["system_prompt"] = None
-    else:
-        agent.context_manager.apply_override("system_prompt", Context("replacement", prefix=True))
+    agent = PromptAgent()
+    agent.context["system_prompt"] = "pirate"
+    agent.context["state"] = None
+    call = _call(agent, scoped={"self": None})
 
-    items = await collect_context_items(ManagedContextView(), agent, _call(agent))
+    items = await collect_context_items(ManagedContextView(), agent, call)
+    keys = [item.key for item in items if hasattr(item, "key")]
     prompts = [item.content for item in items if getattr(item, "key", None) == "system_prompt"]
-    assert prompts == ([] if policy == "disabled" else ["replacement"])
-    assert agent.calls == 0
+    assert prompts == ["Real prompt.", "pirate"]
+    assert {"self", "state"} <= set(keys)
+
+
+async def test_state_option_omits_the_state_block():
+    agent = ExampleAgent()
+    items = await collect_context_items(ManagedContextView(state=False), agent, _call(agent))
+    keys = {item.key for item in items if hasattr(item, "key")}
+    assert "state" not in keys
+    assert {"system_prompt", "self"} <= keys
 
 
 async def test_malformed_system_prompt_is_materialized_as_an_error():
@@ -213,20 +206,21 @@ async def test_interface_and_state_failures_are_materialized_as_errors():
 
 async def test_default_source_precedence_and_removal_are_visible_policy():
     agent = ExampleAgent(context={"shared": "stored", "removed": "stored"})
-    view = ExampleView({"shared": "strategy", "removed": "strategy"})
+    view = ExampleView({"strategy_prompt": "instructions"})
     call = _call(
         agent,
         decorator={"shared": "decorator"},
-        scoped={"shared": "scoped", "removed": None},
+        scoped={"shared": "scoped", "removed": None, "strategy_prompt": None},
     )
 
     blocks = await collect_context_items(view, agent, call)
     by_key = {block.key: block for block in blocks if hasattr(block, "key")}
     assert by_key["shared"].content == "scoped"
     assert "removed" not in by_key
+    assert by_key["strategy_prompt"].content == "instructions"
 
 
-async def test_disabled_key_suppresses_every_source():
+async def test_disabled_key_suppresses_user_skill_and_call_blocks():
     agent = ExampleAgent(context={"shared": "stored"})
     agent.context_manager.disable("shared")
     call = _call(
@@ -235,11 +229,11 @@ async def test_disabled_key_suppresses_every_source():
         scoped={"shared": "scoped"},
     )
 
-    blocks = await collect_context_items(ExampleView({"shared": "strategy"}), agent, call)
+    blocks = await collect_context_items(ManagedContextView(), agent, call)
     assert "shared" not in {block.key for block in blocks if hasattr(block, "key")}
 
 
-@pytest.mark.parametrize("source", ["strategy", "decorator", "scoped"])
+@pytest.mark.parametrize("source", ["decorator", "scoped"])
 async def test_each_override_source_shares_dynamic_error_and_none_semantics(source):
     agent = ExampleAgent(context={"broken": "stored", "removed": "stored"})
     overrides = {"broken": DynamicContext("1 / 0"), "removed": None}
@@ -249,8 +243,7 @@ async def test_each_override_source_shares_dynamic_error_and_none_semantics(sour
         scoped=overrides if source == "scoped" else None,
     )
 
-    view = ExampleView(overrides) if source == "strategy" else ManagedContextView()
-    blocks = await collect_context_items(view, agent, call)
+    blocks = await collect_context_items(ManagedContextView(), agent, call)
     by_key = {block.key: block for block in blocks if hasattr(block, "key")}
     assert by_key["broken"].content == "ZeroDivisionError: division by zero"
     assert "removed" not in by_key

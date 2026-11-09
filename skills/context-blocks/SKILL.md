@@ -9,7 +9,7 @@ user-invocable: false
 
 # Context Blocks API
 
-Context blocks are named sections of the system prompt. They come from multiple sources (framework, strategy, skills, developer) and are managed through a **single unified interface**.
+Context blocks are named sections of the system prompt. The strategy's context view builds its own blocks (system prompt, agent API, state, strategy instructions); you add blocks next to them through a **single unified interface** (`self.context`, class/instance `context=`, `@strategy(context=...)`, `ScopedContext`). Skills can add blocks too.
 
 ## Core Concept
 
@@ -23,7 +23,7 @@ context = {
     "shell": Context(expr="doc(self.shell)", prefix=True),     # evaluated each turn, cacheable prefix
     "config": Context("stable config text", prefix=True),      # literal, cacheable prefix
     "status": Context(expr="f'{self.done}/{self.total}'"),     # evaluated each turn, volatile suffix
-    "self": None,                                              # suppress block from prompt
+    "notes": None,                                             # suppress a user/skill block
 }
 ```
 
@@ -35,7 +35,7 @@ context = {
 | `Context("text", prefix=True)` | prefix (cacheable) | Fixed literal |
 | `Context(expr="self.x()")` | suffix (volatile) | Re-evaluated each LLM turn |
 | `Context(expr="self.x()", prefix=True)` | prefix (cacheable) | Re-evaluated each turn |
-| `None` | — | Suppress block from rendering |
+| `None` | — | Suppress a user, skill, or decorator/scoped block |
 
 ## Entry Points (same dict shape everywhere)
 
@@ -43,7 +43,6 @@ context = {
 # 1. Class-level
 class MyAgent(Agent, llm=llm, context={
     "role": Context("Security expert", prefix=True),
-    "self": None,  # suppress doc(self) block
 }):
     pass
 
@@ -53,41 +52,53 @@ agent = MyAgent(context={"focus": "performance analysis"})
 # 3. @strategy decorator (agent methods)
 @strategy(CodeActStrategy(), context={
     "focus": "Write comprehensive tests",
-    "state": None,
 })
 async def write_tests(self, code: str) -> str: ...
 
 # 4. @strategy decorator (standalone functions)
 @strategy(CodeActStrategy(), context={
     "role": "expert summarizer",
-    "execution_context": None,
 }, llm=llm)
 async def summarise(text: str) -> str:
     """Summarise the text in one sentence."""
     ...
 
 # 5. Scoped (with-block, temporary)
-with ScopedContext(context={"urgency": "high", "state": None}):
+with ScopedContext(context={"urgency": "high", "notes": None}):
     result = await agent.analyze(data)
 
 # 6. Runtime (inside agent code or constructors) — SAME TYPES
 self.context["role"] = "You are an expert"
 self.context["shell"] = Context(expr="doc(self.shell)", prefix=True)
 self.context["status"] = Context(expr="f'{self.done}/{self.total}'")
-self.context["self"] = None  # suppress
+self.context["notes"] = None  # suppress
 ```
 
-## Well-Known Block Keys
+## Blocks the View Builds
 
-| Key | Source | Content | In standalone? |
-|-----|--------|---------|---------------|
-| `system_prompt` | Framework | Agent class docstring | ❌ |
-| `self` | Framework | `doc(type(self))` — class API introspection | ❌ |
-| `state` | Framework | Current instance field values (pformat) | ❌ |
-| `strategy_prompt` | Strategy | Strategy instructions (## Strategy block) | ✅ |
-| `execution_context` | Strategy/CodeAct | Available imports, types, functions | ✅ |
+| Key | Content | In standalone? |
+|-----|---------|---------------|
+| `system_prompt` | Agent class docstring | ❌ |
+| `self` | `doc(type(self))` — class API introspection | ❌ |
+| `events_api` | Events API guidance, when `self.events` is exposed | ❌ |
+| `state` | Current instance field values (pformat) | ❌ |
+| `strategy_prompt` | Strategy instructions | ✅ |
+| `execution_context` | Available imports, types, functions (CodeAct) | ✅ |
 
-Suppress any of these with `context={"key": None}` or `self.context["key"] = None`.
+The view owns these blocks. `self.context` cannot change or hide them: storing
+`self.context["system_prompt"] = "..."` adds a separate block with that name, and
+`None` under one of these names has no effect on them. To change them, use the
+view's documented options or write your own view:
+
+```python
+from nooa import CodeActView, strategy
+
+@strategy(context_view=CodeActView(state=False))  # no <state> block
+async def summarize(self, text: str) -> str: ...
+```
+
+The default views (`CodeActView`, `PredictView`, `PurePythonView`,
+`CodeActV2View`) accept `state=False`.
 
 ## Prefix vs Suffix
 
@@ -103,13 +114,12 @@ Rule of thumb:
 
 ```python
 # In agent code:
-self.context.all_keys()      # All block keys (framework + strategy + user)
+self.context.keys()          # Your stored blocks
 self.context.disabled()      # Currently suppressed keys
 self.context.is_enabled("k") # Check if a specific key renders
 
 # From outside:
-agent.context_manager.keys()            # All registered keys
-agent.context_manager.protected_keys    # Framework-protected keys
+agent.context_manager.keys()            # Stored block keys
 agent.context_manager.disabled_keys     # Suppressed set
 ```
 

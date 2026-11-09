@@ -185,16 +185,22 @@ CodeActConfig(restrictions=RestrictionsConfig(
 
 ## Overriding the strategy prompt
 
-Not a config field — use the decorator's scoped-context:
+Not a config field, and not something `self.context` or `context=` can change: the context view owns the strategy blocks. Override the view's `instruction_blocks`:
 
 ```python
-from nooa.context_blocks import ScopedContext
+from nooa import CodeActView, Context
 
-@strategy(CodeActStrategy(), ScopedContext(context={"strategy_prompt": "My leaner instructions..."}))
+class LeanView(CodeActView):
+    async def instruction_blocks(self, owner, call):
+        blocks = dict(await super().instruction_blocks(owner, call))
+        blocks["strategy_prompt"] = Context("My leaner instructions...", prefix=True)
+        return blocks
+
+@strategy(CodeActStrategy(), context_view=LeanView())
 async def solve(self, q: str) -> str: ...
 ```
 
-Block order is `[system_prompt, strategy_prompt, execution_context, self]`; both strategy blocks are dynamic expressions you can replace per method.
+Block order is `[system_prompt, strategy_prompt, sandbox, execution_context, self]`.
 
 ## Advanced PredictStrategy (`PredictConfig`)
 

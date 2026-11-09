@@ -19,7 +19,7 @@ from typing import Annotated
 
 from pydantic import BaseModel
 
-from nooa import Agent, hidden, strategy
+from nooa import Agent, CodeActView, hidden, strategy
 from nooa.agentdoc.core import doc
 from nooa.config.strategy_config import CodeActConfig
 from nooa.events import Feedback
@@ -242,7 +242,7 @@ class Portfolio:
 # ---------------------------------------------------------------------------
 # Finder — explores source and submits novel PoCs
 # ---------------------------------------------------------------------------
-class Finder(Agent, context={"state": None}):
+class Finder(Agent):
     """Generator agent: reads source, crafts PoCs, calls self.submit()."""
 
     _portfolio: Annotated[Portfolio | None, hidden] = None
@@ -298,7 +298,8 @@ class Finder(Agent, context={"state": None}):
     @strategy(
         CodeActStrategy(
             config=CodeActConfig(max_iterations=MAX_ITERATIONS, max_tokens=MAX_OUTPUT_TOKENS)
-        )
+        ),
+        context_view=CodeActView(state=False),
     )
     async def find(
         self, vulnerability_description: str
@@ -362,7 +363,7 @@ class Finder(Agent, context={"state": None}):
 # ---------------------------------------------------------------------------
 # Expander — takes a seed crash and explores path variants
 # ---------------------------------------------------------------------------
-class Expander(Agent, context={"state": None}):
+class Expander(Agent):
     """Expander agent: given a seed crash, finds variant trigger paths."""
 
     _portfolio: Annotated[Portfolio | None, hidden] = None
@@ -398,7 +399,8 @@ class Expander(Agent, context={"state": None}):
     @strategy(
         CodeActStrategy(
             config=CodeActConfig(max_iterations=MAX_ITERATIONS // 2, max_tokens=MAX_OUTPUT_TOKENS)
-        )
+        ),
+        context_view=CodeActView(state=False),
     )
     async def expand(
         self,
@@ -432,7 +434,7 @@ class Expander(Agent, context={"state": None}):
 # ---------------------------------------------------------------------------
 # CyberGymAgent — orchestrator + reviewer
 # ---------------------------------------------------------------------------
-class CyberGymAgent(Agent, context={"state": None}):
+class CyberGymAgent(Agent):
     """Entry point: orchestrates workers, reviews the portfolio, decides when to stop."""
 
     description: str = ""
@@ -576,6 +578,7 @@ class CyberGymAgent(Agent, context={"state": None}):
         return done
 
     @hidden
+    @strategy(context_view=CodeActView(state=False))
     async def _review(self, current_portfolio_state: str) -> Review:
         """Review the current portfolio. Decide on-target, guidance, and stop.
 
