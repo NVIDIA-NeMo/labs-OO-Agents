@@ -75,7 +75,13 @@ from nooa.strategy_validation import (
     run_postconditions,
     run_preconditions,
 )
-from nooa.unifiedllm import LLMResponse, ReasoningReplayError, Tool, ToolCall
+from nooa.unifiedllm import (
+    AdmissionQueueFullError,
+    LLMResponse,
+    ReasoningReplayError,
+    Tool,
+    ToolCall,
+)
 
 if TYPE_CHECKING:
     from nooa.config.strategy_config import CodeActConfig
@@ -86,6 +92,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _EXECUTE_PYTHON_RECEIPT = "status: accepted"
+
 
 OUTPUT_TOKENS_EXHAUSTED_MESSAGE = (
     "The model used all available output tokens before completing a tool call. "
@@ -102,6 +109,14 @@ MAX_ITERATIONS_MESSAGE = (
 Hosts map these two to protocol stop reasons, so they are named here rather
 than repeated as literals.
 """
+
+
+def _raise_if_admission_queue_full(error: Exception | None) -> None:
+    """Propagate policy rejections, including authenticated sandbox originals."""
+    if isinstance(error, SandboxExecutionError):
+        error = error.original_error
+    if isinstance(error, AdmissionQueueFullError):
+        raise error
 
 
 @dataclass(frozen=True)
@@ -368,6 +383,8 @@ class CodeActSession:
         except Exception as exc:
             if state.exception is None:  # Don't overwrite caller-set value
                 state.exception = type(exc).__name__
+            if isinstance(exc, AdmissionQueueFullError):
+                state.is_final = True
             raise
         finally:
             event_manager.add(
@@ -957,7 +974,7 @@ Standard Python builtins and agent instance (`self`) are available."""
         try:
             with _init_hm.timer("time_prefill"):
                 await self._run_prefill(runtime, call, builtins, session)
-        except ReasoningReplayError:
+        except (ReasoningReplayError, AdmissionQueueFullError):
             raise
         except Exception as e:
             logger.warning(f"[CODEACT] Prefill error (continuing): {e}")
@@ -1006,7 +1023,9 @@ Standard Python builtins and agent instance (`self`) are available."""
                         tool_choice=tool_choice,
                         **self._build_sampling_kwargs(),
                     )
-                except ReasoningReplayError:
+                except (ReasoningReplayError, AdmissionQueueFullError):
+                    # Queue overflow is an application policy decision, not a
+                    # provider fault that another strategy retry can repair.
                     turn_state.is_final = True
                     raise
                 except BlockSyntaxError as e:
@@ -2087,6 +2106,10 @@ Standard Python builtins and agent instance (`self`) are available."""
             )
         )
 
+        # Nested generation can return a policy error inside ExecutionResult.
+        # Keep the cell trace, but do not ask the model to retry an overload.
+        _raise_if_admission_queue_full(result.error)
+
         logger.debug(
             f"[CODEACT] execute_python complete. "
             f"stdout_len={len(result.stdout)}, "
@@ -3101,6 +3124,7 @@ Standard Python builtins and agent instance (`self`) are available."""
 
         if result.error:
             logger.warning(f"[CODEACT] Prefill ({prefill_type}) execution error: {result.error}")
+        _raise_if_admission_queue_full(result.error)
 
     async def _execute_code(
         self,

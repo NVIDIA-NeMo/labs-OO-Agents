@@ -1,8 +1,9 @@
 # LLM admission control
 
 `AdmissionControl` is an opt-in wrapper that places a ceiling on asynchronous
-provider attempts. Calls above the ceiling wait before provider dispatch
-instead of producing an unbounded burst at the inference gateway.
+provider attempts. Calls above the ceiling wait before provider dispatch,
+or reject when an optional pending limit is full, instead of producing an
+unbounded burst at the inference gateway.
 
 The base client and registry remain unchanged. Wrap a client only where a
 particular application use needs admission control:
@@ -39,10 +40,75 @@ each worker's client with a controller whose state is owned by a parent broker.
 - Each retry reacquires capacity. Retry backoff does not hold a slot.
 - A queued cancellation removes the waiter. After dispatch, capacity remains
   occupied until the provider task exits, even if its caller is cancelled.
-- Different concurrency, pacing, or cooldown settings for the same process-local
+- Different concurrency, pending-queue, pacing, or cooldown settings for the same process-local
   group fail when the wrapper is constructed instead of depending on
   construction order.
 - Synchronous `call()` is unchanged in this version.
+
+## Bounded pending queues
+
+Concurrency limits bound active attempts, not the number waiting for admission.
+Use an optional `max_pending` to shed excess waiting work before provider dispatch:
+
+```python
+from nooa.unifiedllm import AdmissionQueueFullError
+
+llm = AdmissionControl(
+    base_llm,
+    AdmissionControlConfig(
+        max_in_flight=4,
+        max_pending=16,
+        concurrency_group="bounded-inference",
+        queue_timeout=30,
+    ),
+)
+
+try:
+    result = await llm.acall(messages)
+except AdmissionQueueFullError:
+    # The application chooses whether to reject, defer, or retry later.
+    # No provider request was made by this rejected acquisition.
+    ...
+```
+
+- `None` (the default) preserves an unbounded pending queue. `0` permits only
+  immediate admission; positive integers bound waiting attempts across the group,
+  not per client. Booleans and negative values are rejected.
+- Waiting for concurrency, pacing, cooldown, or an unconfirmed broker call-budget
+  reservation counts as pending. Granted slots and broker offers already count
+  against active capacity, not the pending allowance. FIFO order is unchanged.
+- A full queue rejects immediately with `AdmissionQueueFullError`, not a queue
+  timeout. It does not enter the FIFO queue, create a provider task, or consume
+  the broker's total-call budget. An exhausted committed call cap still raises
+  `AdmissionCallCapError` rather than a queue-full error.
+- Cancellation or timeout removes a waiter and returns its pending position.
+  Normal provider retries reacquire admission and can encounter a full queue.
+  Queue-full errors are terminal through provider retries and CodeAct/Predict,
+  including uncaught errors from nested generation in in-process or sandboxed
+  cells and prefills. Applications choose their own overload response instead of
+  automatic retries. Failed cells retain their captured output and error status
+  in the trace.
+  Cell code may explicitly catch a queue-full error and choose its own recovery.
+- All process-local wrappers joining a group must agree on `max_pending`, just
+  as they must agree on concurrency and pacing settings. With an injected
+  controller, configure queue policy on the application-owned controller instead.
+
+For multiprocess applications, configure the bound on the existing host-local
+owner: `AdmissionBroker(max_in_flight=4, max_pending=16, max_calls=100)`.
+Every connected worker shares those sixteen positions. Connection settings and
+snapshots expose the owner's bound. Broker protocol version 4 adds the terminal
+queue-full outcome: upgrade the owner and workers together and regenerate
+connection settings. Mixed protocol versions fail closed before dispatch.
+
+Queue-full observations use `outcome="queue_full"`, `queued=False`, and the
+current pending depth, without counting the rejected acquisition as a waiter.
+Configured bounds appear as `max_pending` in observations. Harness summaries
+expose `harness.llm_queue.full_rejections` separately from timeouts and call caps.
+
+This bounds the scheduler's pending queue, **not total application memory**.
+Tasks, request bodies, upstream buffers, and broker connections/handshakes may
+already exist before admission. Applications should also bound ingress and task
+creation where needed. The broker remains host-local, not a multi-host limiter.
 
 ## Shared request pacing and overload cooldown
 
@@ -184,7 +250,13 @@ The broker binds only to a numeric loopback address (`127.0.0.0/8` or `::1`)
 and grants FIFO, connection-scoped leases. It does not provide TLS, so both the
 broker and its serializable controller configuration reject non-loopback hosts.
 The queue deadline covers connection setup, protocol writes, and waiting for a
-lease. A timeout or cancellation before admission closes the connection without
+lease, including its acknowledgement exchange. It is an elapsed-time budget,
+not a guarantee that available capacity will be acquired within that duration:
+connection bursts or a delayed client event loop can exhaust it before provider
+dispatch. Size the deadline for the application's connection and scheduling
+costs, and bound upstream task creation as well as the broker's pending queue.
+Increasing a deadline alone does not fix overload or connection churn.
+A timeout or cancellation before admission closes the connection without
 provider dispatch. If a child exits while holding a lease, its closed connection
 returns the concurrency slot. The application must keep the parent broker alive
 for the entire run. Restarting the same broker object creates a fresh bearer
@@ -212,7 +284,7 @@ client can be wrapped differently for separate uses.
 
 Configured attempts add an `llm.queue` event to the active trace span with the
 group, outcome, queued flag, wait duration, queue depth, and limit. Generation
-harness metrics aggregate admissions, queued attempts, call-cap rejections,
+harness metrics aggregate admissions, queued attempts, call-cap and queue-full rejections,
 timeouts, cancellations, unavailable-controller errors, maximum depth, and
 wait-time statistics.
 
