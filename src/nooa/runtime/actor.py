@@ -43,6 +43,7 @@ if TYPE_CHECKING:
     from nooa.runtime.event_query import EventQuery
     from nooa.runtime.restrictions import RestrictionsConfig
 
+from nooa.errors.formatting import rewrite_never_awaited_warnings
 from nooa.events import (
     DecisionCallEnd,
     DecisionCallStart,
@@ -517,59 +518,6 @@ def _pop_generation_id() -> str | None:
     popped = current[-1]
     _generation_id_stack_var.set(current[:-1])
     return popped
-
-
-# "Cell In[3]:3: RuntimeWarning: coroutine 'ShellTools.read' was never awaited",
-# optionally followed by its source line, then CPython's tracemalloc note.
-_NEVER_AWAITED_RE = _re.compile(
-    r"^[^\n]*RuntimeWarning: coroutine '(?P<qualname>[^'\n]+)' was never awaited\n"
-    r"(?:(?![^\n]*RuntimeWarning:)[ \t]+[^\n]*\n)?"
-    r"(?:RuntimeWarning: Enable tracemalloc to get the object allocation traceback\n"
-    r"|Object allocated at \(most recent call last\):\n(?:[ \t]+[^\n]*\n)*)?",
-    _re.MULTILINE,
-)
-
-
-def _agent_call_for(qualname: str, agent: Any) -> str | None:
-    """``"ShellTools.read"`` -> ``"self.shell.read"`` when the agent holds it."""
-    owner, _, method = qualname.rpartition(".")
-    owner = owner.rsplit(".", 1)[-1]
-    if not owner or not method.isidentifier() or agent is None:
-        return None
-    if any(cls.__name__ == owner for cls in type(agent).__mro__):
-        return f"self.{method}"
-    try:
-        attributes = vars(agent)
-    except TypeError:
-        return None
-    for name, value in attributes.items():
-        if name.startswith("_") or not name.isidentifier():
-            continue
-        if any(cls.__name__ == owner for cls in type(value).__mro__):
-            return f"self.{name}.{method}"
-        # A wrapper may copy the wrapped method's name: ActivityShellTools.read
-        # is @wraps(ShellTools.read), so its coroutine says 'ShellTools.read'.
-        if getattr(getattr(type(value), method, None), "__qualname__", None) == qualname:
-            return f"self.{name}.{method}"
-    return None
-
-
-def _rewrite_never_awaited_warnings(text: str, agent: Any = None) -> str:
-    """Turn CPython's "coroutine ... was never awaited" warning into a one-line hint.
-
-    The stock text names the coroutine but not the fix, and adds a tracemalloc
-    note that means nothing to a model. Other warnings are left unchanged.
-    """
-    if "was never awaited" not in text:
-        return text
-
-    def hint(match: _re.Match[str]) -> str:
-        qualname = match.group("qualname")
-        call = _agent_call_for(qualname, agent)
-        fix = f"use `await {call}(...)`" if call else "put `await` before the call"
-        return f"`{qualname}(...)` was called without await and never ran; {fix}\n"
-
-    return _NEVER_AWAITED_RE.sub(hint, text)
 
 
 def _make_capture_buffer(limit: int, capture: "CaptureConfig") -> TruncatingStringIO:
@@ -2353,7 +2301,7 @@ class ActorRuntime:
             partial_results = getattr(execution_exception, "execution_results", None) or []
             for finished in (result, *partial_results[-1:]):
                 if finished is not None and finished.stderr:
-                    finished.stderr = _rewrite_never_awaited_warnings(finished.stderr, self.agent)
+                    finished.stderr = rewrite_never_awaited_warnings(finished.stderr, self.agent)
             # Call after_code_execution hook
             call_after_hook(
                 "after_code_execution",
