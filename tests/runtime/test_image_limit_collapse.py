@@ -132,10 +132,10 @@ async def test_the_oldest_images_are_collapsed_and_can_be_shown_again(monkeypatc
     original = em[tag]
     again = Image.from_url(original.images[0]["image_url"]["url"])
     assert again.data_url == agent.first.data_url
-    [attrs] = [a for a in flushed if "harness.media_image_limit_collapsed.count" in a]
-    assert attrs["harness.media_image_limit_collapsed.count"] == 2  # the retry, then proactive
-    assert attrs["harness.media_image_limit_collapsed.limits"] == [1, 1]
-    assert attrs["harness.media_image_limit_collapsed.events"] == 2
+    [attrs] = [a for a in flushed if "harness.media.image_limit_collapsed.count" in a]
+    assert attrs["harness.media.image_limit_collapsed.count"] == 2  # the retry, then proactive
+    assert attrs["harness.media.image_limit_collapsed.limits"] == [1, 1]
+    assert attrs["harness.media.image_limit_collapsed.events"] == 2
 
 
 async def test_a_collapsed_cell_keeps_its_printed_output_and_tool_pairing():

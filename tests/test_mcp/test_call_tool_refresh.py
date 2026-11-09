@@ -199,7 +199,7 @@ async def test_a_structured_error_field_is_returned_and_counted():
     tool = _create_tool_instance("hcb", _OneResultClient(result), tools)
     with harness_metrics_session() as metrics:
         assert await tool.lookup() == payload
-    assert metrics.to_span_attributes()["harness.mcp_result_error.calls"] == ["hcb.lookup"]
+    assert metrics.to_span_attributes()["harness.mcp.result_error.calls"] == ["hcb.lookup"]
 
 
 @pytest.mark.asyncio

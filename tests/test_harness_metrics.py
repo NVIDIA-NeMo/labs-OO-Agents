@@ -246,11 +246,13 @@ class TestRecording:
             assert not any("need_input" in key for key in m.to_span_attributes())
 
     def test_media_rejected_retry(self):
+        from nooa.runtime.media_recovery import MediaHarnessMetrics
+
         m = HarnessMetrics()
-        m.media_rejected_retry("image")
+        m.extension(MediaHarnessMetrics).rejected_retry("image")
         attrs = m.to_span_attributes()
-        assert attrs["harness.media_rejected_retry.count"] == 1
-        assert attrs["harness.media_rejected_retry.kinds"] == ["image"]
+        assert attrs["harness.media.rejected_retry.count"] == 1
+        assert attrs["harness.media.rejected_retry.kinds"] == ["image"]
 
     def test_missing_await(self):
         m = HarnessMetrics()

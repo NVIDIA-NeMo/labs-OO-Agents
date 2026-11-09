@@ -65,10 +65,12 @@ from nooa.runtime.execution_namespace import ExecutionNamespace
 from nooa.runtime.harness_metrics import (
     HarnessMetrics,
     get_harness_metrics,
+    llm_metric_event_handler,
     restore_harness_metrics,
     start_harness_metrics,
 )
 from nooa.runtime.hooks import call_after_hook, call_before_hook, call_on_llm_call
+from nooa.runtime.media_recovery import MediaHarnessMetrics
 
 logger = logging.getLogger(__name__)
 
@@ -131,13 +133,16 @@ def _make_llm_metrics_bridge(hm: "HarnessMetrics") -> Callable[[str, Any], None]
         "reasoning_as_structured_output": lambda _: hm.record_reasoning_as_structured_output(),
         "token_usage": _handle_token_usage,
         "llm_queue": lambda detail: hm.record_llm_queue(detail),
-        "media_rejected_retry": lambda kind: hm.media_rejected_retry(kind),
     }
 
     def bridge(event: str, detail: Any = None) -> None:
         handler = _dispatch.get(event)
         if handler:
             handler(detail)
+            return
+        registered = llm_metric_event_handler(event)  # a package's event (e.g. media)
+        if registered is not None:
+            registered(hm, detail)
         else:
             logger.debug("[HARNESS_METRICS] Unknown LLM metric event: %s", event)
 
@@ -896,7 +901,9 @@ class ActorRuntime:
                 continue
             collapsed += 1
         if collapsed:
-            get_harness_metrics().media_image_limit_collapsed(limit, collapsed)
+            get_harness_metrics().extension(MediaHarnessMetrics).image_limit_collapsed(
+                limit, collapsed
+            )
         return collapsed
 
     async def _call_with_recovery(

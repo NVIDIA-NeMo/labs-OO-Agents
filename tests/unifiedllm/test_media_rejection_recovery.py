@@ -124,8 +124,8 @@ async def test_rejected_image_retry_is_a_harness_metric():
     finally:
         _llm_metrics_callback.reset(token)
     attrs = metrics.to_span_attributes()
-    assert attrs["harness.media_rejected_retry.count"] == 1
-    assert attrs["harness.media_rejected_retry.kinds"] == ["image"]
+    assert attrs["harness.media.rejected_retry.count"] == 1
+    assert attrs["harness.media.rejected_retry.kinds"] == ["image"]
 
 
 async def test_generic_400_still_fails_without_a_retry():
