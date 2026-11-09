@@ -3,8 +3,7 @@
 """The workspace's settings: behaviour settings, skill directories, and persistence.
 
 One layered ``settings.yaml`` holds them for every interactive host:
-bundled defaults (the ``nooa.bundled_settings`` entry points), then the
-user file, the project ``.nooa/`` file and the files ``NEMO_OO_SETTINGS``
+the user file, the project ``.nooa/`` file and the files ``NEMO_OO_SETTINGS``
 names, highest priority last (``load_settings_layers``). Atom reads and
 writes its ``atom`` section. The TUI and ``nooa-acp`` keep using
 ``coding``, the section Atom used to share with them: the first time Atom
@@ -23,7 +22,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
 
-from nooa.layered_config import bundled_settings_paths, load_layered_yaml
+from nooa.layered_config import load_layered_yaml
 
 SETTINGS_FILENAME = "settings.yaml"
 SETTINGS_ENV_VAR = "NEMO_OO_SETTINGS"
@@ -109,90 +108,13 @@ def load_skills_dirs(
     return result
 
 
-EXTENDED_LIST_SETTINGS = ("active_skills", "additional_skills_dirs")
-"""Lists that a higher settings layer adds to the bundled defaults instead of replacing.
-
-Within the user, project and ``NEMO_OO_SETTINGS`` layers a list replaces
-the one below it, as every other value does. The bundled defaults are
-different: a bundled ``atom.active_skills`` or ``atom.additional_skills_dirs``
-is the base the merged list starts from, and the other layers' list
-(already merged among themselves) is added after it, without duplicates.
-A user turns a bundled skill off with ``inactive_skills``, which wins over
-``active_skills``, and drops every bundled entry by setting the key to
-``null`` (in the highest layer that sets it).
-"""
-
-_SKILL_SECTIONS = (SETTINGS_SECTION, "tui", CODING_SECTION)
-
-
 def load_settings_layers(project_dir: Path | None = None) -> dict[str, Any]:
     """Merge every ``settings.yaml`` layer for the project ``.nooa`` directory *project_dir*.
 
-    The bundled defaults (``nooa.bundled_settings`` entry points) are the
-    lowest layer; the user file, the project file and ``NEMO_OO_SETTINGS``
-    override them (``nooa.layered_config.load_layered_yaml``), except for
-    the lists in ``EXTENDED_LIST_SETTINGS``, which extend the bundled ones.
-    A relative ``additional_skills_dirs`` entry in a bundled file is relative
-    to that file's directory, so a package can ship its skills beside it.
+    The user file, the project file and ``NEMO_OO_SETTINGS``, highest
+    priority last (``nooa.layered_config.load_layered_yaml``).
     """
-    from nooa.layered_config import _deep_merge
-
-    bundled: dict[str, Any] = {}
-    for path in bundled_settings_paths():
-        bundled = _deep_merge(bundled, _read_bundled_settings(path))
-    layered = load_layered_yaml(SETTINGS_FILENAME, SETTINGS_ENV_VAR, project_dir=project_dir)
-    if not bundled:
-        return layered
-    # Merged file by file, so a ``null`` in a higher layer deletes a bundled key.
-    merged = load_layered_yaml(
-        SETTINGS_FILENAME, SETTINGS_ENV_VAR, project_dir=project_dir, base=bundled
-    )
-    for name, section in bundled.items():
-        target = merged.get(name)
-        override = layered.get(name)
-        if not isinstance(section, Mapping) or not isinstance(target, dict):
-            continue
-        if not isinstance(override, Mapping):
-            continue
-        for key in EXTENDED_LIST_SETTINGS:
-            base, extra = section.get(key), override.get(key)
-            if isinstance(base, list) and isinstance(extra, list):
-                # Order-preserving and by equality, so an unhashable (invalid)
-                # entry still reaches settings validation instead of raising here.
-                combined: list[Any] = []
-                for item in [*base, *extra]:
-                    if item not in combined:
-                        combined.append(item)
-                target[key] = combined
-    return merged
-
-
-def _read_bundled_settings(path: Path) -> dict[str, Any]:
-    """One bundled settings file, its relative skill directories made absolute."""
-    import yaml
-
-    try:
-        data = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, yaml.YAMLError) as exc:
-        logger.warning("Failed to load bundled settings %s: %s", path, exc)
-        return {}
-    if data is None:
-        return {}
-    if not isinstance(data, dict):
-        logger.warning("Bundled settings %s is not a YAML mapping; skipping", path)
-        return {}
-    base = path.expanduser().resolve().parent
-    for name in _SKILL_SECTIONS:
-        section = data.get(name)
-        if not isinstance(section, dict):
-            continue
-        dirs = section.get("additional_skills_dirs")
-        if isinstance(dirs, (str, list)):
-            section["additional_skills_dirs"] = [
-                str(_resolve_configured(entry, base)) if isinstance(entry, str) else entry
-                for entry in ([dirs] if isinstance(dirs, str) else dirs)
-            ]
-    return data
+    return load_layered_yaml(SETTINGS_FILENAME, SETTINGS_ENV_VAR, project_dir=project_dir)
 
 
 def _setting_paths(settings: Mapping[str, Any], section: str) -> list[str | Path]:
@@ -321,7 +243,6 @@ def _invalid_settings_files(workspace: str | Path) -> list[str]:
     for path in layered_paths(
         SETTINGS_FILENAME,
         SETTINGS_ENV_VAR,
-        prepend=bundled_settings_paths(),
         project_dir=project,
     ):
         try:

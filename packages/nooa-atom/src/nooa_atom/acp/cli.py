@@ -344,7 +344,7 @@ def llm_config_summary(workspace: Path) -> str:
     """One line naming the LLM configuration files of a workspace, for the log.
 
     Answers "where is it loading the model configuration from?" without a
-    debugger: the layered chain (bundled, user, project, the workspace's
+    debugger: the layered chain (user, project, the workspace's
     ``.nooa/llm_config.yaml``, then the ``NEMO_OO_LLM_CONFIG`` paths,
     highest priority last) and whether the environment variable is set.
     """

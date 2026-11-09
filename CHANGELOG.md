@@ -6,6 +6,13 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- Bundled config layers are removed: the `nooa.bundled_configs` and
+  `nooa.bundled_settings` entry-point groups are no longer read
+  (`nooa.llm_config.bundled_config_paths`, `nooa.layered_config.bundled_settings_paths`,
+  `BUNDLED_SETTINGS_ENTRY_POINT_GROUP` and `entry_point_paths` are gone), and
+  `nooa config eject`, which copied a bundled `llm_config.yaml`, is removed. The
+  LLM config and settings layers are the user file, the project file and the
+  `NEMO_OO_LLM_CONFIG` / `NEMO_OO_SETTINGS` files.
 - `PersistentVars`, `AgentVars` and `TodoVars` are removed: `self.v` and
   `todo.v` are the owner's `vars`, a `SnapshotVars` (a dict, also usable as
   attributes).

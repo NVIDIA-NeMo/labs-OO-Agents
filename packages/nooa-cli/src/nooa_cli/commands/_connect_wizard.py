@@ -357,10 +357,7 @@ def select_connection(state: WizardState) -> bool:
         # saved entry and its test results are not changed.
         connect.configure_entry({**state.editing, "media_inputs": repaired})
         if not state.output:
-            from nooa.llm_config import bundled_config_paths
-
-            if source_path.resolve() not in {p.resolve() for p in bundled_config_paths()}:
-                state.path = source_path
+            state.path = source_path
         state.alias = state.alias or state.edit_model
         routed = state.editing.get("model_name", state.edit_model)
         state.api_style = state.editing.get("api_style") or (
