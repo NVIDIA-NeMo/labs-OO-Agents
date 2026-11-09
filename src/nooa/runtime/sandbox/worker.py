@@ -361,15 +361,10 @@ def build_namespace(
     restrictions: Any,
 ) -> dict[str, Any]:
     """Build the worker's persistent cell namespace, mirroring actor exec_globals."""
-    import typing as _typing
-
     from nooa.agentdoc import doc
     from nooa.agentdoc.introspect import methods, variables
     from nooa.agentdoc.visibility import filter_mro_module_globals
-    from nooa.decorators import strategy
-    from nooa.media import Audio, File, Image, Media, Video
-    from nooa.runtime.media_capture import show
-    from nooa.runtime.pprint import pprint
+    from nooa.runtime.namespace_providers import cell_namespace_names
     from nooa.runtime.restrictions import RestrictionsConfig
 
     # Only ``self.*`` brokers to the live parent; module-level state is a private
@@ -378,44 +373,17 @@ def build_namespace(
     # fails loud (SandboxStateError) instead. Applied to the module globals only,
     # before ``self`` / the framework builtins are added below.
     from nooa.runtime.sandbox.readonly import freeze_module_state
-    from nooa.strategies import (
-        CodeActStrategy,
-        CompositeStrategy,
-        PredictStrategy,
-        ReflexionStrategy,
-        TemplateStrategy,
-    )
-    from nooa.strategies.pure_python import PurePythonStrategy
 
     ns: dict[str, Any] = freeze_module_state(filter_mro_module_globals(type(agent)))
+    # The same registered names as the in-process namespace (core, media, strategies...).
+    ns.update({"self": proxy, "asyncio": asyncio, **cell_namespace_names()})
+    # Introspection runs on the live parent object, not the proxy.
     ns.update(
         {
-            "self": proxy,
-            "asyncio": asyncio,
-            "typing": _typing,
-            "Annotated": _typing.Annotated,
-            "Any": _typing.Any,
-            "Literal": _typing.Literal,
-            "Optional": _typing.Optional,
-            "Union": _typing.Union,
             "doc": _introspect_wrapper(doc, proxy, agent),
             "methods": _introspect_wrapper(methods, proxy, agent),
             "variables": _introspect_wrapper(variables, proxy, agent),
             "help": _introspect_wrapper(doc, proxy, agent),
-            "pprint": pprint,
-            "show": show,
-            "Media": Media,
-            "Image": Image,
-            "Audio": Audio,
-            "Video": Video,
-            "File": File,
-            "strategy": strategy,
-            "PurePythonStrategy": PurePythonStrategy,
-            "CodeActStrategy": CodeActStrategy,
-            "ReflexionStrategy": ReflexionStrategy,
-            "PredictStrategy": PredictStrategy,
-            "TemplateStrategy": TemplateStrategy,
-            "CompositeStrategy": CompositeStrategy,
         }
     )
     if framework_builtins:

@@ -1582,59 +1582,12 @@ class ActorRuntime:
 
             exec_globals = filter_mro_module_globals(type(self.agent))
 
-            # Import agentdoc functions for use in generated code
-            # Import decorators and strategies for use in generated code
-            # NOTE: stdout/stderr capture is handled by ContextVarStream wrappers
-            # installed below.
-            import typing as _typing
+            # The names every cell sees (core, media, strategies...): one registry,
+            # shared with the sandbox worker. NOTE: stdout/stderr capture is
+            # handled by ContextVarStream wrappers installed below.
+            from nooa.runtime.namespace_providers import cell_namespace_names
 
-            from nooa.agentdoc import doc
-            from nooa.decorators import strategy
-            from nooa.media import Audio, File, Image, Media, Video
-            from nooa.runtime.media_capture import show
-            from nooa.runtime.pprint import pprint
-            from nooa.strategies import (
-                CodeActStrategy,
-                CompositeStrategy,
-                PredictStrategy,
-                ReflexionStrategy,
-                TemplateStrategy,
-            )
-            from nooa.strategies.pure_python import PurePythonStrategy
-
-            core_globals = {
-                "self": self.agent,
-                "asyncio": asyncio,
-                "typing": _typing,
-                # Common typing constructs — LLMs use these constantly
-                "Annotated": _typing.Annotated,
-                "Any": _typing.Any,
-                "Literal": _typing.Literal,
-                "Optional": _typing.Optional,
-                "Union": _typing.Union,
-                # agentdoc introspection (doc respects hidden fields)
-                "doc": doc,
-                "methods": methods,
-                "variables": variables,
-                "help": doc,  # Shadow built-in help() to prevent blocking on stdin
-                # Pretty printing with Rich-compatible API
-                "pprint": pprint,
-                # Media display for multimodal models
-                "show": show,
-                "Media": Media,
-                "Image": Image,
-                "Audio": Audio,
-                "Video": Video,
-                "File": File,
-                # decorators and strategies for LLM-generated methods
-                "strategy": strategy,
-                "PurePythonStrategy": PurePythonStrategy,
-                "CodeActStrategy": CodeActStrategy,
-                "ReflexionStrategy": ReflexionStrategy,
-                "PredictStrategy": PredictStrategy,
-                "TemplateStrategy": TemplateStrategy,
-                "CompositeStrategy": CompositeStrategy,
-            }
+            core_globals = {"self": self.agent, "asyncio": asyncio, **cell_namespace_names()}
             exec_globals.update(core_globals)
 
             # Add strategy builtins (includes reasoning, message, method args)

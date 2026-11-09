@@ -112,7 +112,7 @@ class CodeActV2(CodeActStrategy):
                 "# Runtime helpers (already available):",
                 f"# {names}",
                 "# Standard-library modules asyncio and typing are also available.",
-                *(f"# {line}" for line in self.SHOW_NOTE_LINES),
+                *(f"# {line}" for line in self._namespace_note_lines()),
                 "```",
             )
         )

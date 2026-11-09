@@ -32,7 +32,6 @@ from typing import (
     TYPE_CHECKING,
     Annotated,
     Any,
-    ClassVar,
     Literal,
     get_args,
     get_origin,
@@ -872,18 +871,19 @@ Standard Python builtins and agent instance (`self`) are available."""
         except Exception:
             return ", ".join(name for name, _ in ordered)
 
-    # show() is in every cell's namespace, for both CodeAct strategies.
-    SHOW_NOTE_LINES: ClassVar[tuple[str, ...]] = (
-        "show(obj) attaches a nooa.media.Image/Audio/Video/File so you can see or hear it;",
-        "here `Image` is nooa.media.Image (e.g. Image.from_file(path)), not PIL.Image.",
-    )
+    @staticmethod
+    def _namespace_note_lines() -> tuple[str, ...]:
+        """Prompt notes of the cell-namespace providers (e.g. media's ``show()``)."""
+        from nooa.runtime.namespace_providers import namespace_prompt_notes
+
+        return namespace_prompt_notes()
 
     def _always_available_text(self) -> str:
         names = ", ".join(f"`{name}`" for name in self._always_available_builtins())
         return (
             f"Always available without import: {names}, plus stdlib `asyncio` and `typing`. "
             "`print(doc(x))` explains any object, function or skill: its signature, docs and methods (`doc()` returns text, so print it). "
-            + " ".join(self.SHOW_NOTE_LINES)
+            + " ".join(self._namespace_note_lines())
         )
 
     def _always_available_builtins(self) -> tuple[str, ...]:
