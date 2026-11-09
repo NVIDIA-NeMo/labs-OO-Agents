@@ -87,11 +87,8 @@ def test_vars_proxy_item_access_is_the_attribute_store(agent):
         agent.v[1] = 3
 
 
-def test_message_records_event_and_renders(agent):
-    rendered: list[str] = []
-    agent._render_message = lambda text, **kw: rendered.append(text)
+def test_message_records_an_agent_message_event(agent):
     agent.message("**hi**")
-    assert rendered == ["**hi**"]
     events = [e for e in agent.event_manager.values() if isinstance(e, AgentMessage)]
     assert len(events) == 1
     assert events[0].content == "**hi**"

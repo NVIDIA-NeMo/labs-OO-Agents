@@ -44,8 +44,6 @@ from nooa.storage.persistent_vars import PersistentVars
 from nooa.storage.snapshot_vars import SnapshotVars
 
 with hidden:
-    from collections.abc import Callable
-
     from nooa import Agent, no_trace
     from nooa.agents import TokenBudgetSummarizer
     from nooa.config import CodeActConfig, PredictConfig  # noqa: F401
@@ -478,7 +476,6 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
     state that should survive across turns.
     """
 
-    _render_message: Annotated[Callable[[str], None] | None, hidden, nosnapshot]
     # QueueManager owns the channel registry. Hidden from the LLM by
     # default — the LLM should access individual channels (e.g.
     # ``self.user_messages``) directly, not through a string-keyed
@@ -504,7 +501,6 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
     def __init__(self, llm=None, *, producers: bool = True, **kwargs):  # noqa: F811 (not the module)
         """``producers=False``: no ``self.producers`` (a subclass with its own timers)."""
         super().__init__(llm=llm or _DEFAULT_LLM, **kwargs)
-        self._render_message = None
         self.ask_policy = None
         self.vars = SnapshotVars()
         self.queue_manager = QueueManager(event_manager=self.event_manager)
@@ -611,14 +607,11 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
 
     @hidden
     def _send_message(self, text: str, *, is_result_text: bool = False) -> None:
-        """Record and render one message; ``is_result_text`` marks a turn result's message."""
-        event = AgentMessage(content=str(text), is_result_text=is_result_text)
-        tag = self.event_manager.add(event)
-        if self._render_message is not None:
-            try:
-                self._render_message(text, event_id=str(event.id), tags={str(tag)})
-            except TypeError:
-                self._render_message(text)
+        """Record one message as an AgentMessage event; hosts render it from the event.
+
+        ``is_result_text`` marks a turn result's message.
+        """
+        self.event_manager.add(AgentMessage(content=str(text), is_result_text=is_result_text))
 
     @hidden
     @strategy(CodeActStrategy())
