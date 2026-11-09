@@ -182,9 +182,13 @@ async def test_the_context_window_retry_is_covered_by_image_recovery():
 
     from nooa.runtime.actor import ActorRuntime
 
+    class ImageRecovery:
+        def recover(self, exc):
+            return True if isinstance(exc, _TooManyImages) else None
+
     class Runtime:
-        def _recover_image_limit(self, exc):
-            return isinstance(exc, _TooManyImages)
+        def __init__(self):
+            self._request_recoveries = [ImageRecovery()]
 
     window = ContextWindowExceededError("context length exceeded", "m", "openai")
     errors = [window, _TooManyImages("Too many images: 2 (max 1)")]
@@ -214,6 +218,7 @@ async def test_the_context_window_retry_is_covered_by_image_recovery():
 def test_only_the_events_the_request_includes_count_toward_the_limit():
     from nooa.events import ResultStatus
     from nooa.runtime.event_query import EventQuery
+    from nooa.runtime.media_recovery import image_limit_recovery
 
     done = ResultStatus.COMPLETE
 
@@ -234,7 +239,7 @@ def test_only_the_events_the_request_includes_count_toward_the_limit():
     )
     em.set_event_query(EventQuery(limit=1))  # the request renders only the newest event
     try:
-        assert agent.runtime._collapse_images_over_limit(1) == 0  # one included image: fits
+        assert image_limit_recovery(agent.runtime).collapse(1) == 0  # one included image: fits
     finally:
         em.set_event_query(None)
-    assert agent.runtime._collapse_images_over_limit(1) == 1  # without the query both count
+    assert image_limit_recovery(agent.runtime).collapse(1) == 1  # without the query both count
