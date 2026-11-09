@@ -6,6 +6,9 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- `PersistentVars`, `AgentVars` and `TodoVars` are removed: `self.v` and
+  `todo.v` are the owner's `vars`, a `SnapshotVars` (a dict, also usable as
+  attributes).
 - Core installs now exclude the individually verified LiteLLM releases affected
   by the optional-MCP import regression (1.106.0–1.106.7, 1.108.0–1.108.1, and
   affected prereleases). Future patch and security releases remain eligible;

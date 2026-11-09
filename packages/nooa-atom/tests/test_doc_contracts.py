@@ -17,18 +17,19 @@ from nooa_atom.session.store import SessionStore
 from nooa_atom.tools.todo_list import Todo, TodoList
 
 from nooa.agentdoc import doc
-from nooa.interactive import AgentVars, Done
+from nooa.interactive import Done
+from nooa.storage.snapshot_vars import SnapshotVars
 from nooa.tools.shell_tools import FileWrite
 
 
 def test_per_todo_state_is_advertised_and_round_trips_without_a_new_field():
-    assert "self.todo.get(id).v" in doc(AgentVars)
-    assert "self.todo.<id>.v" not in doc(AgentVars)
+    assert "self.todo.get(id).v" in doc(SnapshotVars)
+    assert "self.todo.<id>.v" not in doc(SnapshotVars)
     todos = TodoList()
     item = todos.add("check the example")
     todos.get(item.id).v.finding = "durable"
     text = doc(TodoList, concise=True)
-    assert "v: PersistentVars" in text
+    assert "v: SnapshotVars" in text
     assert "notes:" not in text
     assert "v" not in Todo.model_fields
     saved = item.model_dump()

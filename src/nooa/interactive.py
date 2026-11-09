@@ -40,7 +40,6 @@ from nooa.context_blocks import Metadata
 from nooa.context_blocks.roles import Role
 from nooa.runtime.turn_loop import ResultKind
 from nooa.storage.markers import nosnapshot
-from nooa.storage.persistent_vars import PersistentVars
 from nooa.storage.snapshot_vars import SnapshotVars
 
 with hidden:
@@ -428,27 +427,6 @@ def install_summarizer(config: SummarizationConfig, agent: Agent) -> None:
     summarizer._automatic_context_budget_percent = config.threshold_fraction
 
 
-class AgentVars(PersistentVars):
-    """An agent's persistent ``vars`` dict, also usable as attributes.
-
-    ``self.v.spec = "..."`` and ``self.v["spec"] = "..."`` write the same
-    entry. Reads and writes go straight through to ``self.vars`` so
-    snapshot serialization is unaffected.
-
-    Use for variables that need to survive across turns and across
-    sessions but aren't tied to a specific todo. (For per-todo state,
-    use ``self.todo.get(id).v`` — same shape, narrower scope.)
-
-    Values are snapshot-backed: assigning something that can't be
-    snapshot-serialized (a live client, socket, callable, ...) logs a
-    warning and is **not stored** — it won't survive ``/exit`` + resume.
-    Store serializable data (dict/str/number/Pydantic model) instead.
-    Helper names (``keys``, ``items``, ``get``, ``set``, ``clear``) and
-    ``_``-prefixed names are read with ``get(name)`` and written with
-    ``set(name, value)``.
-    """
-
-
 # The ``queues`` context block. Its expression is shown to the model, so it
 # goes through a hidden method rather than naming ``self.queue_manager``.
 _QUEUES_EXPR: Annotated[str, hidden] = "self._queue_status()"
@@ -563,12 +541,12 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
         )
 
     @property
-    def v(self) -> AgentVars:
+    def v(self) -> SnapshotVars:
         """Durable facts: write ``self.v.key = value``, read ``self.v.key``, delete ``del self.v.key`` (or ``self.v["key"]``). Store serializable values.
 
         Use for state that should survive across turns and sessions
-        but isn't tied to a specific todo. Snapshot-backed via
-        ``self.vars``.
+        but isn't tied to a specific todo. ``self.v`` is ``self.vars``
+        (a :class:`SnapshotVars`), snapshot-backed.
 
         Usage::
 
@@ -580,10 +558,10 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
         Compare:
         - REPL locals → cleared between turns.
         - ``self.v.k = v`` → snapshot-backed, survives turns + sessions.
-        - ``self.todo.<t>.v.k = v`` → same as ``self.v`` but scoped to
+        - ``self.todo.get(id).v.k = v`` → same as ``self.v`` but scoped to
           one todo.
         """
-        return AgentVars(self)
+        return self.vars
 
     def message(self, text: str, *, echo: bool = False) -> None:
         """Send a Markdown message to the user.

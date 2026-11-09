@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the TodoVars proxy: a persistent dict, also usable as attributes."""
+"""Tests for Todo.v: the todo's SnapshotVars, a persistent dict also usable as attributes."""
 
 import pytest
 
@@ -8,7 +8,7 @@ from nooa.tools.todo import Todo, TodoManager
 
 
 class TestTodoVars:
-    """Tests for the TodoVars proxy."""
+    """Tests for Todo.v."""
 
     def test_set_and_get(self):
         t = Todo(title="test")
@@ -95,16 +95,20 @@ class TestTodoVars:
         with pytest.raises(KeyError):
             del t.v["nope"]
 
-    def test_item_access_validates_names_like_attributes(self):
+    def test_attribute_access_refuses_reserved_names_item_access_stores_them(self):
         t = Todo(title="test")
         with pytest.raises(AttributeError, match=r"'keys' is reserved.*use set\('keys', value\)"):
-            t.v["keys"] = 1
-        with pytest.raises(AttributeError, match=r"'_owner' is reserved.*use get\('_owner'\)"):
-            _ = t.v["_owner"]
-        with pytest.raises(TypeError, match="var names are str, got int"):
-            t.v[1] = "x"
-        t.v.set("keys", 1)
-        assert t.v.get("keys") == 1
+            t.v.keys = 1
+        with pytest.raises(AttributeError, match=r"'_x' is reserved.*use set\('_x', value\)"):
+            t.v._x = 1
+        with pytest.raises(AttributeError):
+            _ = t.v._x
+        t.v["keys"] = 1
+        t.v["_x"] = 2
+        t.v[1] = "x"  # a non-str key is not stored (logs a warning)
+        assert dict(t.v) == {"keys": 1, "_x": 2}
+        t.v.set("keys", 3)
+        assert t.v.get("keys") == 3 and callable(t.v.keys)
 
     def test_item_writes_survive_serialization(self):
         mgr = TodoManager()

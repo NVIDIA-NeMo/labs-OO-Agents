@@ -17,7 +17,6 @@ from nooa_atom.agent.base import AtomAgentBase
 from nooa_atom.skills.manager import SkillManager
 
 from nooa.context_blocks.models import ContextWindowStats
-from nooa.interactive import AgentVars
 from nooa.runtime.events import EventsApi
 from nooa.storage.snapshot_vars import SnapshotVars
 from nooa.tools.todo import TodoManager
@@ -37,7 +36,7 @@ def _calls(text: str) -> list[str]:
 
 def _owner() -> SimpleNamespace:
     owner = SimpleNamespace(vars=SnapshotVars())
-    owner.v = AgentVars(owner)
+    owner.v = owner.vars
     owner.v.note = "kept"
     owner.todo = TodoManager()
     owner.skills = create_autospec(SkillManager, instance=True)

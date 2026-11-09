@@ -140,7 +140,7 @@ def test_persistent_vars_public_api_round_trip():
     with pytest.raises(AttributeError, match="No var"):
         _ = proxy.result
     proxy.clear()
-    assert proxy.items() == []
+    assert list(proxy.items()) == []
 
 
 def test_status_hides_description_payload_and_advertises_inspection() -> None:
