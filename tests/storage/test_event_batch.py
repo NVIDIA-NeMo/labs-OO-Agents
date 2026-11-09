@@ -153,140 +153,146 @@ def test_direct_backend_batch_also_rejects_invalid_inputs(tmp_path, backend_kind
         assert backend.append_batch([fresh]) == ["1"]
 
 
-@pytest.mark.parametrize("backend_kind", ["memory", "sqlite"])
-@pytest.mark.parametrize("entrypoint", ["manager", "backend"])
-@pytest.mark.parametrize(
-    "unsupported",
-    [
-        "frozen_model",
-        "frozen_tag",
-        "assignment_validation",
-        "setter",
-        "handler",
-        "instance_handler",
-        "cached_handler",
-        "descriptor",
-        "classvar",
-    ],
-)
-def test_batch_rejects_unsafe_tag_publication_before_any_mutation(
-    tmp_path, monkeypatch, backend_kind, entrypoint, unsupported
-):
-    from contextlib import ExitStack
-    from typing import ClassVar
-
-    from pydantic import Field, field_validator
-
+def _batch_backend(stack, tmp_path, backend_kind):
     from nooa.runtime.event_backend import InMemoryBackend
 
-    calls = []
+    if backend_kind == "sqlite":
+        return stack.enter_context(SQLiteStorageManager(tmp_path / "batch.db")).event_backend
+    return InMemoryBackend()
 
-    class FrozenMetadata(Metadata):
-        model_config = {"frozen": True}
 
-    class FrozenTagMetadata(Metadata):
-        tag: str | None = Field(default=None, frozen=True)
+def _counters(backend):
+    return backend._next_tag_num, getattr(backend, "_insertion_counter", None)
+
+
+@pytest.mark.parametrize("backend_kind", ["memory", "sqlite"])
+@pytest.mark.parametrize("entrypoint", ["manager", "backend"])
+@pytest.mark.parametrize("failing", ["validator", "setter", "frozen_model"])
+def test_batch_failing_tag_setter_stores_nothing_and_resets_tags(
+    tmp_path, backend_kind, entrypoint, failing
+):
+    """Tags are set with the model's own setter first; a failure stores nothing."""
+    from contextlib import ExitStack
+
+    from pydantic import field_validator
 
     class ValidatedMetadata(Metadata):
         model_config = {"validate_assignment": True}
 
         @field_validator("tag")
         @classmethod
-        def reject_tag(cls, value):
-            calls.append("validator")
-            raise ValueError("no tag assignments")
+        def reject_third(cls, value):
+            if value == "3":
+                raise ValueError("no tag 3")
+            return value
 
     class SetterMetadata(Metadata):
         def __setattr__(self, name, value):
-            if name == "tag":
-                calls.append("setter")
-                raise ValueError("no tag assignments")
+            if name == "tag" and value == "3":
+                raise ValueError("no tag 3")
             return super().__setattr__(name, value)
 
-    class InheritedSetterMetadata(SetterMetadata):
-        pass
+    class FrozenMetadata(Metadata):
+        model_config = {"frozen": True}
 
-    class HandlerMetadata(Metadata):
-        def _setattr_handler(self, name, value):
-            if name == "tag":
-                calls.append("handler")
-                raise ValueError("no tag assignments")
-            return super()._setattr_handler(name, value)
-
-    class DescriptorMetadata(Metadata):
-        pass
-
-    class ClassVarMetadata(Metadata):
-        tag: ClassVar[str | None] = None
-
-    def reject(*args):
-        calls.append("custom handler")
-        raise ValueError("no tag assignments")
-
-    classes = {
+    cls = {
+        "validator": ValidatedMetadata,
+        "setter": SetterMetadata,
         "frozen_model": FrozenMetadata,
-        "frozen_tag": FrozenTagMetadata,
-        "assignment_validation": ValidatedMetadata,
-        "setter": InheritedSetterMetadata,
-        "handler": HandlerMetadata,
-        "descriptor": DescriptorMetadata,
-        "classvar": ClassVarMetadata,
-    }
-    # Explicit discriminator avoids the frozen subclass's initialization setter.
-    cls = classes.get(unsupported, Metadata)
-    bad = cls(description="unsupported", event_type=cls.__name__)
-    if unsupported == "descriptor":
-        monkeypatch.setattr(
-            DescriptorMetadata, "tag", property(lambda self: None, reject), raising=False
-        )
-    elif unsupported == "instance_handler":
-        bad.__dict__["_setattr_handler"] = reject
-    elif unsupported == "cached_handler":
-        if not hasattr(cls, "__pydantic_setattr_handlers__"):
-            pytest.skip("Pydantic version has no cached assignment handlers")
-        monkeypatch.setitem(cls.__pydantic_setattr_handlers__, "tag", reject)
-
+    }[failing]
     with ExitStack() as stack:
-        backend = InMemoryBackend()
-        path = tmp_path / "unsafe.db"
-        if backend_kind == "sqlite":
-            backend = stack.enter_context(SQLiteStorageManager(path)).event_backend
+        backend = _batch_backend(stack, tmp_path, backend_kind)
         manager = EventManager(backend=backend)
-        # Use normal add for setup: custom handler cache is intentionally unsafe
-        # for batch publication, but setup itself never assigns a tag.
-        existing = Metadata(description="existing", tag="1")
-        backend.store("1", existing)
-        fresh = Metadata(description="fresh")
-        events = [fresh, bad]
-        snapshots = [(dict(event.__dict__), set(event.model_fields_set)) for event in events]
-        tags_before = backend.active_tags()
-        counters_before = (backend._next_tag_num, getattr(backend, "_insertion_counter", None))
+        backend.store("1", Metadata(description="existing", tag="1"))
         seen = []
         manager.on("*", seen.append)
-        if backend_kind == "sqlite":
-            monkeypatch.setattr(backend, "_serialize", reject)
+        first = cls(description="first", event_type=cls.__name__)
+        if failing == "frozen_model":
+            first = Metadata(description="first")
+        events = [first, cls(description="second", event_type=cls.__name__)]
+        counters = _counters(backend)
         append = manager.record_batch if entrypoint == "manager" else backend.append_batch
-        with pytest.raises(ValueError, match="safely writable tags"):
+        with pytest.raises(ValueError):
             append(events)
-        assert calls == [] and seen == []
         assert [event.tag for event in events] == [None, None]
-        assert [
-            (dict(event.__dict__), set(event.model_fields_set)) for event in events
-        ] == snapshots
-        assert backend.active_tags() == tags_before
-        assert (
-            backend._next_tag_num,
-            getattr(backend, "_insertion_counter", None),
-        ) == counters_before
-        assert len(backend) == 1
+        assert seen == []
+        assert _counters(backend) == counters
+        assert backend.active_tags() == ["1"] and len(backend) == 1
         if backend_kind == "sqlite":
-            with sqlite3.connect(path) as connection:
+            with sqlite3.connect(tmp_path / "batch.db") as connection:
                 assert connection.execute("SELECT tag FROM events").fetchall() == [("1",)]
                 assert connection.execute("SELECT tag FROM active_tags").fetchall() == [("1",)]
+        # The same fresh first event can still be recorded.
+        assert append([events[0]]) == ["2"]
+        assert events[0].tag == "2"
+
+
+@pytest.mark.parametrize("failure", ["serialize", "commit"])
+def test_sqlite_batch_serialize_or_commit_failure_resets_all_tags(tmp_path, monkeypatch, failure):
+    with SQLiteStorageManager(tmp_path / "fail.db") as storage:
+        backend = storage.event_backend
+        events = [Metadata(description="one"), Metadata(description="two")]
+        counters = _counters(backend)
+        if failure == "serialize":
+            real = backend._serialize
+
+            def serialize(event):
+                if event is events[1]:
+                    raise RuntimeError("serialize failed")
+                return real(event)
+
+            monkeypatch.setattr(backend, "_serialize", serialize)
+            expected = RuntimeError
+        else:
+            # Fails the second executemany inside the transaction.
+            with sqlite3.connect(tmp_path / "fail.db") as connection:
+                connection.execute(
+                    "CREATE TRIGGER fail_active BEFORE INSERT ON active_tags "
+                    "BEGIN SELECT RAISE(ABORT, 'commit failed'); END"
+                )
+            expected = sqlite3.IntegrityError
+        with pytest.raises(expected):
+            backend.append_batch(events)
+        assert [event.tag for event in events] == [None, None]
+        assert _counters(backend) == counters
+        assert list(backend.all_events()) == [] and backend.active_tags() == []
         monkeypatch.undo()
-        assert append([fresh, Metadata(description="next")]) == ["2", "3"]
-        assert fresh.tag == "2" and "tag" in fresh.model_fields_set
-        assert backend.active_tags() == ["1", "2", "3"]
+        if failure == "commit":
+            with sqlite3.connect(tmp_path / "fail.db") as connection:
+                connection.execute("DROP TRIGGER fail_active")
+        assert backend.append_batch(events) == ["1", "2"]
+
+
+@pytest.mark.parametrize("backend_kind", ["memory", "sqlite"])
+def test_batch_accepts_validate_assignment_model_that_accepts_tag(tmp_path, backend_kind):
+    """Previously rejected up front; now the model's own setter just runs."""
+    from contextlib import ExitStack
+
+    from pydantic import field_validator
+
+    calls = []
+
+    class ValidatedMetadata(Metadata):
+        model_config = {"validate_assignment": True}
+
+        @field_validator("tag")
+        @classmethod
+        def record(cls, value):
+            calls.append(value)
+            return value
+
+    with ExitStack() as stack:
+        backend = _batch_backend(stack, tmp_path, backend_kind)
+        events = [
+            ValidatedMetadata(description=name, event_type="ValidatedMetadata")
+            for name in ("one", "two")
+        ]
+        calls.clear()
+        assert EventManager(backend=backend).record_batch(events) == ["1", "2"]
+        assert calls == ["1", "2"]
+        assert [event.tag for event in events] == ["1", "2"]
+        assert backend.active_tags() == ["1", "2"]
+        assert backend.get("2").tag == "2"
 
 
 @pytest.mark.parametrize("backend_kind", ["memory", "sqlite"])

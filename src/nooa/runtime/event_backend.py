@@ -12,10 +12,7 @@ The EventManager uses a backend for storage while handling:
 """
 
 from collections.abc import Iterator
-from inspect import getattr_static
 from typing import Any, Protocol, runtime_checkable
-
-from pydantic import BaseModel
 
 from nooa.context_blocks import EventBase, EventStatus
 from nooa.context_blocks.roles import Role
@@ -37,48 +34,29 @@ def _tag_max_num(tag: str) -> int:
         return 0
 
 
-def _validate_batch_tag_publication(event: EventBase) -> None:
-    """Accept only ordinary, non-validating Pydantic tag assignment.
+def _assign_batch_tags(events: list[EventBase], tags: list[str]) -> None:
+    """Assign batch tags with each model's own setter before anything is stored.
 
-    Batch recording publishes tags after committing storage. A trial assignment
-    (even on a copy) cannot prove a custom setter/validator is nonfallible or
-    side-effect free. Reject those models before touching any caller or storage
-    state instead of bypassing their invariants during publication or rollback.
-    Constructor-only validators and unrelated frozen fields remain supported.
+    If an assignment raises, reset the tags assigned so far to None (best
+    effort) and re-raise, so a failing setter fails the batch with nothing stored.
     """
-    cls = type(event)
-    field = cls.model_fields.get("tag")
-    missing = object()
-    unsafe = (
-        cls.model_config.get("frozen")
-        or cls.model_config.get("validate_assignment")
-        or field is None
-        or field.frozen
-        or "tag" in cls.__class_vars__
-        or getattr_static(cls, "tag", missing) is not missing
-        or cls.__setattr__ is not BaseModel.__setattr__
-        or cls.__getattribute__ is not BaseModel.__getattribute__
-    )
-    if unsafe:
-        raise ValueError("record_batch requires events with safely writable tags")
-    # Newer Pydantic versions memoize assignment handlers; older versions use
-    # __setattr__ directly. Do not clear or replace user-provided handlers.
-    handler = getattr(BaseModel, "_setattr_handler", None)
-    if handler is not None:
-        unsafe = unsafe or cls._setattr_handler is not handler
-        unsafe = unsafe or "_setattr_handler" in event.__dict__
-        unsafe = unsafe or "_setattr_handler" in (event.__pydantic_extra__ or {})
-        handlers = event.__pydantic_setattr_handlers__
-        ordinary = handler(EventBase(), "tag", "1")
-        unsafe = unsafe or type(handlers) is not dict
-        unsafe = unsafe or handlers.get("tag", ordinary) is not ordinary
-    unsafe = unsafe or any(
-        name in event.__dict__ for name in ("__pydantic_setattr_handlers__", "__class__")
-    )
-    unsafe = unsafe or type(event.__dict__) is not dict
-    unsafe = unsafe or type(event.__pydantic_fields_set__) is not set
-    if unsafe:
-        raise ValueError("record_batch requires events with safely writable tags")
+    assigned: list[EventBase] = []
+    try:
+        for tag, event in zip(tags, events, strict=True):
+            assigned.append(event)
+            event.tag = tag
+    except BaseException:
+        _reset_batch_tags(assigned)
+        raise
+
+
+def _reset_batch_tags(events: list[EventBase]) -> None:
+    """Best effort: set every batch tag back to None after a failed append."""
+    for event in events:
+        try:
+            event.tag = None
+        except Exception:  # noqa: BLE001 - best effort; the original error propagates
+            pass
 
 
 def _validate_fresh_batch(
@@ -104,7 +82,6 @@ def _validate_fresh_batch(
             )
         ):
             raise ValueError("record_batch requires fresh events with unique objects and event IDs")
-        _validate_batch_tag_publication(event)
         objects.add(id(event))
         identities.add(event.id)
 
@@ -321,13 +298,12 @@ class InMemoryBackend:
         """Append fresh events without observers (single-loop memory backend)."""
         _validate_fresh_batch(events, self)
         tags = [str(self._next_tag_num + i) for i in range(len(events))]
-        # Stage all containers rather than incrementally calling store().
+        # Tag with the model's own setter first; a failing setter stores nothing.
+        _assign_batch_tags(events, tags)
+        # Publish all containers at once rather than incrementally calling store().
         stored = [*self._events, *events]
         mapping = {**self._tag_to_event, **dict(zip(tags, events, strict=True))}
         active = [*self._active_tags, *tags]
-        # Preflight excludes frozen models, validators and custom tag setters.
-        for tag, event in zip(tags, events, strict=True):
-            event.tag = tag
         self._events, self._tag_to_event, self._active_tags = stored, mapping, active
         self._next_tag_num += len(events)
         return tags

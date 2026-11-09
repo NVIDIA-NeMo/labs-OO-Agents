@@ -156,12 +156,14 @@ Rules:
 - The in-memory and SQLite backends implement it.
 - Only fresh, durable, non-summary events are accepted.
 - Rejected before any change: tagged or reused objects, the same object twice in a
-  batch, duplicate event IDs, IDs already in storage, and events whose tag cannot
-  be set by ordinary field assignment (frozen, validated or custom setters).
+  batch, duplicate event IDs and IDs already in storage.
+- Tags are assigned with the model's own setter before anything is stored.
+  A failing setter fails the batch: nothing is stored, the counters do not move
+  and the tags already assigned are reset to `None`.
 - `append_batch` validates the batch once. Backends can be called directly.
 - SQLite allocates tags and inserts events and active tags in one locked transaction.
 - SQLite advances its counters only after success. It does not use the single-row
   reconnect/retry path.
-- SQLite serializes tagged copies and sets the caller's tags only after commit,
-  so the same inputs can be retried after a rollback.
+- SQLite serializes the tagged events. If serialization or the commit fails, it
+  resets the tags to `None`, so the same inputs can be retried after a rollback.
 - Ordinary `add()` keeps its existing order: observers run before the event is stored.

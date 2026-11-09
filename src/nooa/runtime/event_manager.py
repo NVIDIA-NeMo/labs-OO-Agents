@@ -209,9 +209,9 @@ class EventManager:
         This explicit recorder path is for mandatory ledger transitions.
         A backend without atomic append support fails rather than degrading
         to partial single-event writes. Runtime events and summaries are not
-        accepted. Tags must support ordinary mutable Pydantic field assignment:
-        frozen tags/models, assignment validation and custom setters are rejected
-        before mutation. Use add() for ordinary context/observer events.
+        accepted. Tags are assigned with the model's own setter before storage;
+        a failing setter fails the batch with nothing stored and every tag
+        reset to None. Use add() for ordinary context/observer events.
         """
         if any(
             not isinstance(event, EventBase)
