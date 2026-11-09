@@ -22,7 +22,9 @@ from nooa import hidden as _hidden
 
 # The core TaskResult, re-exported: bench results and the Atom agent's child
 # results are one class. Visible to generated cells.
+from nooa.errors import hints as _hints
 from nooa.interactive import TaskResult
+from nooa.tools import shell_tools as _shell_tools
 from nooa.tools.method_writing_lib import MethodWriting
 from nooa.tools.shell_tools import ShellTools
 
@@ -251,3 +253,7 @@ class BenchAgent(
         in ``value`` and keep any explanation in the other fields.
         """
         ...
+
+
+# A blocked subprocess/os.system: use self.shell (installed in _install_python_tools).
+_hints.register_hint(_hints.RUN_COMMAND, _shell_tools.SHELL_RUN_HINT, owner=BenchAgent)

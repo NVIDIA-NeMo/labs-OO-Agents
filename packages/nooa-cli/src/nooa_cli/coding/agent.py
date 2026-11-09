@@ -11,6 +11,7 @@ from nooa import Context, hidden, strategy
 from nooa.agentdoc import doc, spec
 from nooa.agents import TokenBudgetSummarizer
 from nooa.config import CodeActConfig, PredictConfig
+from nooa.errors import hints as _hints
 from nooa.interactive import (
     Done,
     InteractiveAgent,
@@ -25,6 +26,7 @@ from nooa.skill_registry import SkillRegistry
 from nooa.storage.markers import nosnapshot
 from nooa.strategies import CodeActStrategy, PredictStrategy
 from nooa.tools import SkillWriting, TodoManager
+from nooa.tools import shell_tools as _shell_tools
 from nooa.tools.library_writing_lib import older_skill_dirs
 from nooa.tools.shell_tools import ShellTools
 from nooa_cli.coding.activity import ActivityShellTools
@@ -234,3 +236,7 @@ class CodingAgent(InteractiveAgent):
                     await shell.close()
                 finally:
                     await self.llm.aclose()
+
+
+# A blocked subprocess/os.system: use the agent's shell.
+_hints.register_hint(_hints.RUN_COMMAND, _shell_tools.SHELL_RUN_HINT, owner=CodingAgent)

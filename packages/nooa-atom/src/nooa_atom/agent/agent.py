@@ -27,6 +27,7 @@ from typing import Annotated, Any, ClassVar
 # Subagent work, and Context/strategy/PredictStrategy for skill and method writing.
 from nooa import Context, hidden, strategy
 from nooa.agentdoc import doc, spec
+from nooa.errors import hints as _hints
 from nooa.interactive import Done, NeedInput, Waiting
 from nooa.runtime.execution_namespace import ExecutionNamespace
 from nooa.strategies import CodeActV2, PredictStrategy  # noqa: F401
@@ -698,8 +699,6 @@ class AtomAgent(
     _session_namespace_was_live: Annotated[bool, hidden]
     # The session runs every turn with this method, whatever its turn_method.
     turn_entry: ClassVar[str] = "handle"
-    # The fix hint of a blocked subprocess/os.system/network import or call.
-    _shell_run_hint: ClassVar[str] = "use a Shell: `sh = Shell()` then `r = await sh.run(cmd)`"
 
     def __init__(
         self,
@@ -1123,6 +1122,10 @@ class AtomAgent(
 # "producers" is also core's nemo.producers entry-point skill, which doc() would list.
 for _name in ("shell", "delegates", "producers", "system_messages", "cwd"):
     spec(AtomAgent, _name, hidden=True)
+# The fix hint of a blocked subprocess/os.system/network import or call.
+_hints.register_hint(
+    _hints.RUN_COMMAND, "use a Shell: `sh = Shell()` then `r = await sh.run(cmd)`", owner=AtomAgent
+)
 spec(AtomAgent, "jobs", description="Run and track work: see WorkManager")
 spec(
     AtomAgent,

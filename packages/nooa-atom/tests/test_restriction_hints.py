@@ -9,13 +9,14 @@ from nooa_atom import SessionOptions, SessionStore
 from nooa_atom.agent.agent import AtomAgent
 from nooa_atom.session.registry import SessionRegistry
 
-from nooa.runtime.code_validator import _module_fix_hint, _shell_hint
+from nooa.errors.hints import RUN_COMMAND, lookup_hint
+from nooa.runtime.code_validator import _module_fix_hint
 
 SHELL = "use a Shell: `sh = Shell()` then `r = await sh.run(cmd)`"
 
 
 def test_each_blocked_module_or_call_names_its_alternative():
-    shell = _shell_hint(AtomAgent)
+    shell = lookup_hint(RUN_COMMAND, AtomAgent)
     assert shell == SHELL
     assert _module_fix_hint("subprocess", shell) == SHELL
     assert _module_fix_hint("os", shell, "system") == SHELL
