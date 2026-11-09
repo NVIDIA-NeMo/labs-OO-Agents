@@ -330,18 +330,20 @@ def test_record_batch_validates_each_batch_once(tmp_path, monkeypatch, backend_k
     The manager and the backend both validated, so a sqlite batch ran the
     per-event ID lookup twice.
     """
-    from contextlib import ExitStack
+    from contextlib import ExitStack, contextmanager
 
     from nooa.runtime import event_backend
 
-    real = event_backend._validate_fresh_batch
+    real = event_backend.tagged_batch
     calls = []
 
+    @contextmanager
     def counting(events, backend, **kwargs):
         calls.append(len(events))
-        return real(events, backend, **kwargs)
+        with real(events, backend, **kwargs) as tags:
+            yield tags
 
-    monkeypatch.setattr(event_backend, "_validate_fresh_batch", counting)
+    monkeypatch.setattr(event_backend, "tagged_batch", counting)
     with ExitStack() as stack:
         manager = EventManager()
         if backend_kind == "sqlite":

@@ -161,6 +161,8 @@ Rules:
   A failing setter fails the batch: nothing is stored, the counters do not move
   and the tags already assigned are reset to `None`.
 - `append_batch` validates the batch once. Backends can be called directly.
+- Both backends use `tagged_batch(events, backend, *, contains_id=None)`: it validates
+  the batch, assigns the tags, yields them, and resets them to `None` on any exception.
 - SQLite allocates tags and inserts events and active tags in one locked transaction.
 - SQLite advances its counters only after success. It does not use the single-row
   reconnect/retry path.

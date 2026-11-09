@@ -369,53 +369,39 @@ class SQLiteEventBackend:
         storage; if that, serialization or the commit fails, the tags are reset
         to None and nothing is stored. Counters advance only on success.
         """
-        from nooa.runtime.event_backend import (
-            _assign_batch_tags,
-            _reset_batch_tags,
-            _validate_fresh_batch,
-        )
+        from nooa.runtime.event_backend import tagged_batch
 
-        with self._lock:
-            _validate_fresh_batch(
-                events,
-                self,
-                contains_id=lambda identity: (
-                    self._conn.execute(
-                        "SELECT 1 FROM events WHERE event_id = ? LIMIT 1", (identity,)
-                    ).fetchone()
-                    is not None
-                ),
-            )
+        def stored(identity: str) -> bool:
+            row = self._conn.execute(
+                "SELECT 1 FROM events WHERE event_id = ? LIMIT 1", (identity,)
+            ).fetchone()
+            return row is not None
+
+        with self._lock, tagged_batch(events, self, contains_id=stored) as tags:
             if not events:
                 return []
-            tags = [str(self._next_tag_num + i) for i in range(len(events))]
-            _assign_batch_tags(events, tags)
-            try:
-                rows = [
-                    (
-                        tag,
-                        event.id,
-                        event.event_type,
-                        event.status.value,
-                        self._serialize(event),
-                        self._insertion_counter + i,
-                    )
-                    for i, (tag, event) in enumerate(zip(tags, events, strict=True))
-                ]
-                position = self._max_position() + 1
-                with self._conn:
-                    self._conn.executemany(
-                        "INSERT INTO events (tag, event_id, event_type, status, data, "
-                        "insertion_order) VALUES (?, ?, ?, ?, ?, ?)",
-                        rows,
-                    )
-                    self._conn.executemany(
-                        "INSERT INTO active_tags (position, tag) VALUES (?, ?)",
-                        [(position + i, tag) for i, tag in enumerate(tags)],
-                    )
-            except BaseException:
-                _reset_batch_tags(events)
-                raise
+            rows = [
+                (
+                    tag,
+                    event.id,
+                    event.event_type,
+                    event.status.value,
+                    self._serialize(event),
+                    self._insertion_counter + i,
+                )
+                for i, (tag, event) in enumerate(zip(tags, events, strict=True))
+            ]
+            position = self._max_position() + 1
+            with self._conn:
+                self._conn.executemany(
+                    "INSERT INTO events (tag, event_id, event_type, status, data, "
+                    "insertion_order) VALUES (?, ?, ?, ?, ?, ?)",
+                    rows,
+                )
+                self._conn.executemany(
+                    "INSERT INTO active_tags (position, tag) VALUES (?, ?)",
+                    [(position + i, tag) for i, tag in enumerate(tags)],
+                )
             self._next_tag_num += len(events)
             self._insertion_counter += len(events)
             return tags
