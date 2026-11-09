@@ -175,6 +175,9 @@ class AtomAgentBase(InteractiveAgent):
     _command_registry: Annotated[Any, hidden, nosnapshot]
     _system_messages_in: Annotated[Channel, hidden, nosnapshot]
     system_messages: Annotated[Any, nosnapshot]
+    # The workspace's atom.reflection settings; the Session reads them
+    # (nooa_atom.session.reflection). create_session_agent() sets them.
+    _reflection_settings: Annotated[Any, hidden, nosnapshot]
     shell: Annotated[ActivityShellTools, nosnapshot]
     repo: Annotated[RepoTools, nosnapshot]
     todo: TodoManager
@@ -293,6 +296,7 @@ class AtomAgentBase(InteractiveAgent):
         self.context_manager.remove_protected("events_api")
 
         self._summarization = summarization or SummarizationConfig()
+        self._reflection_settings = None
         install_summarizer(self._summarization, self)
 
     @no_trace

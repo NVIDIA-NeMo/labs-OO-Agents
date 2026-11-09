@@ -109,6 +109,8 @@ def create_session_agent(options: SessionOptions, storage: StorageManager) -> In
     agent = agent_class(**kwargs)
 
     if atom_options is not None and isinstance(agent, AtomAgentBase):
+        # Read by the Session (nooa_atom.session.reflection), not by the agent.
+        agent._reflection_settings = atom_options.reflection
         for warning in configure_session_skills(agent, atom_options):
             logger.warning("Session in %s: %s", options.workspace, warning)
         # The /skills and /mcp controls belong to the agent, not to one host:
