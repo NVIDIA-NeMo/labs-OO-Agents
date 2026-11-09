@@ -72,8 +72,9 @@ class SkillWriting(Skill):
     """Write skills that later sessions get: code skills or text instructions.
 
     A code skill is a Python package; a text skill is a SKILL.md with
-    instructions. Use ``self.shell`` for file I/O (write, edit, view, grep);
-    this skill handles scaffolding, linting, hot-reload, and testing.
+    instructions. You write and edit a skill's files yourself, in
+    ``self.skill_writing.path(name)``; this skill handles scaffolding,
+    linting, hot-reload, and testing.
 
     ## Skill contract
 
@@ -115,7 +116,7 @@ class SkillWriting(Skill):
                 # Do work...
                 return (
                     f"Ran {args} checks. Found 3 issues.\n\n"
-                    "Fix them with `await self.shell.run(...)` or ask the user for guidance."
+                    "Fix them, or ask the user for guidance."
                 )
 
     Key points:
@@ -139,15 +140,14 @@ class SkillWriting(Skill):
         # A code skill: 1. scaffold the package
         await self.skill_writing.create("stats", "Statistical utilities.")
 
-        # 2. Write code using self.shell
-        await self.shell.write_file(self.skill_writing.path("stats", "stats.py"), source)
+        # 2. Write the code yourself, in the skill's directory
+        path = self.skill_writing.path("stats")   # write stats.py there
 
         # 3. Lint + reload
         await self.skill_writing.reload("stats")
         # -> lints, hot-reloads; self.stats is now available
 
-        # 4. Edit using self.shell (replace(path, old, new); old must be unique)
-        await self.shell.replace(self.skill_writing.path("stats", "stats.py"), old, new)
+        # 4. Edit the files in path, then reload
         await self.skill_writing.reload("stats")
 
         # 5. Test
@@ -162,7 +162,7 @@ class SkillWriting(Skill):
     ``.nooa/skills`` wins. A later session loads each one at start as
     ``self.<name>`` (``local.<name>`` in ``self.skills.search``), with nothing
     to import or activate, unless the agent already has that attribute (such
-    as ``shell``): that one keeps its attribute and is not loaded.
+    as ``files``): that one keeps its attribute and is not loaded.
     ``await self.skill_writing.list()`` names them all.
 
     ## Discovery
@@ -289,7 +289,7 @@ class SkillWriting(Skill):
                       If empty, returns the skill's root directory.
 
         Returns:
-            Absolute path as a string (for self.shell.write_file/replace/read).
+            Absolute path as a string.
         """
         p = self._dir(lib_name)
         if relative:
@@ -316,8 +316,8 @@ class SkillWriting(Skill):
         description, then ``text``), saved and active at once as
         ``self.<lib_name>``. Without: a code skill scaffold (pyproject.toml +
         ``__init__.py`` with a Skill subclass); nothing is loaded yet. Write
-        code with self.shell.write_file() then call self.skill_writing.reload()
-        to lint and activate.
+        the code in ``self.skill_writing.path(lib_name)``, then call
+        ``self.skill_writing.reload()`` to lint and activate.
 
         Args:
             lib_name: Skill name, a module name for a code skill (e.g. "stats").
