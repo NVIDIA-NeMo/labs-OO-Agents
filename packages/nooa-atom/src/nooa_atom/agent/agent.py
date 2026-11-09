@@ -766,7 +766,7 @@ class AtomAgent(
 
     @hidden
     @no_trace
-    def _execution_namespace_for(self, call: Any) -> ExecutionNamespace:
+    def execution_namespace_for(self, call: Any) -> ExecutionNamespace:
         """Handle shares this live session's namespace; other agent methods start each call fresh."""
         from nooa.runtime.execution_namespace import RUNTIME_NAMES
 

@@ -2,10 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Opt-in cell engine: one owned globals dictionary per session.
 
-CodeAct uses it when the agent defines ``_execution_namespace_for(call)`` and
-that hook returns an :class:`ExecutionNamespace` (see
-``CodeActStrategy.execute``); agents without the hook keep the default cell
-execution. Atom defines the hook and uses this engine on every call.
+CodeAct uses it when the agent's ``Agent.execution_namespace_for(call)`` hook
+returns an :class:`ExecutionNamespace` (see ``CodeActStrategy.execute``); the
+default hook returns None, which keeps the default cell execution. An agent
+can override the hook to use this engine on every call.
 
 The async wrapper preserves Python's return/await/finally semantics. Only its
 bindings are lifted into one authoritative globals dictionary. Runtime names

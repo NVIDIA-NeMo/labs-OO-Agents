@@ -467,3 +467,9 @@ async def test_advertising_and_availability_share_reserved_internal_exclusions(i
             "owner",
             good,
         )
+
+
+def test_the_agent_hook_defaults_to_the_default_cell_execution():
+    from nooa.agent import Agent
+
+    assert Agent.execution_namespace_for(object(), None) is None  # declared hook, no probing

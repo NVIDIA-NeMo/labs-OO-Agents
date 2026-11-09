@@ -3,7 +3,7 @@
 """Owner/lifetime leases on the existing ContextVarStream capture plumbing.
 
 Used by the opt-in execution namespace (see
-:mod:`nooa.runtime.execution_namespace`), which Atom always uses. Descendant
+:mod:`nooa.runtime.execution_namespace`). Descendant
 writes use the originating OPEN scope; late writes are dropped, never
 redirected to a later cell or a closed file. Managed jobs install their own
 scope and publish its bounded output through the job's existing delivery.

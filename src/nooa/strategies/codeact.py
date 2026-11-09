@@ -1086,17 +1086,16 @@ Standard Python builtins and agent instance (`self`) are available."""
         Raises:
             GenerationError: If generation fails after max retries/iterations.
 
-        Execution namespace hook: if the agent defines
-        ``_execution_namespace_for(call)``, it is called once per call. A
+        Execution namespace: :meth:`Agent.execution_namespace_for(call)
+        <nooa.agent.Agent.execution_namespace_for>` is called once per call. A
         returned :class:`~nooa.runtime.execution_namespace.ExecutionNamespace`
         runs this call's cells in that namespace (in-process backend only);
-        ``None``, or no hook, keeps the default cell execution. Atom defines
-        the hook and always returns a namespace.
+        ``None`` (the default) keeps the default cell execution.
         """
         # Guarantee the sandbox worker is torn down on EVERY exit — including the
         # GenerationError paths inside the loop — not just the success returns.
         session_holder: dict[str, Any] = {}
-        selector = getattr(runtime.agent, "_execution_namespace_for", None)
+        selector = getattr(runtime.agent, "execution_namespace_for", None)  # None: not an Agent
         namespace = selector(call) if selector is not None else None
         call.execution_namespace = namespace
         try:
@@ -3775,7 +3774,7 @@ Standard Python builtins and agent instance (`self`) are available."""
         from nooa.agentdoc.visibility import filter_mro_module_globals
 
         # Include inherited module exports as static too, even for an owned
-        # nested method using ordinary CodeActV2 rather than AtomCodeAct.
+        # nested method using ordinary CodeActV2 rather than a subclass of it.
         static_names = set(filter_mro_module_globals(type(runtime.agent)))
         static_names.update(self._extract_module_context(module, agent=None))
         context = self._extract_module_context(module, agent=runtime.agent)
@@ -3804,7 +3803,7 @@ Standard Python builtins and agent instance (`self`) are available."""
             call = getattr(getattr(agent, "runtime", None), "current_call", None)
             reserved = RUNTIME_NAMES | frozenset(getattr(call, "kwargs", {}))
             if call is None:
-                # Out-of-call discovery (e.g. an Atom context preview) uses the
+                # Out-of-call discovery (e.g. a host's context preview) uses the
                 # agent's declared turn entry when one exists. No method runs.
                 entry = getattr(agent, "turn_entry", None)
                 method = getattr(type(agent), entry, None) if isinstance(entry, str) else None

@@ -230,7 +230,7 @@ class CurrentCall:
     var_positional_param_name: str | None = None
     var_keyword_param_name: str | None = None
     # The namespace this call's cells run in, when the agent's
-    # ``_execution_namespace_for`` hook supplies one (else None: default cell
+    # ``execution_namespace_for`` hook supplies one (else None: default cell
     # execution); never copied into snapshot/user state. Last so main's
     # positional constructor order above stays unchanged.
     execution_namespace: ExecutionNamespace | None = None
