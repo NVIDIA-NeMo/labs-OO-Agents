@@ -2797,3 +2797,56 @@ async def test_concise_message_during_a_running_cell_moves_its_card_below(tmp_pa
     assert start.raw_input == {"code": code}
     await bridge.close()
     await agent.aclose()
+
+
+async def test_a_reflection_turn_is_one_status_card_and_no_chat(bridged):
+    agent, session, client, bridge = bridged
+    session.emit(TurnStartedUpdate(session_id="session-1", item_ids=["r1"], reflection=True))
+    agent.event_manager.add(
+        ToolCallEvent(tool_call_id="t1", name="python_cell", arguments={"code": "del x"})
+    )
+    agent.event_manager.add(
+        PythonOutput(tool_call_id="t1", execution_status=ResultStatus.COMPLETE, execution_count=1)
+    )
+    agent.event_manager.add(AgentMessage(content="Tidied up."))  # not shown either
+    session.emit(
+        TurnEndedUpdate(
+            session_id="session-1",
+            outcome_kind="done",
+            outcome={"explanation": "renamed, compacted 3 ranges"},
+            reflection=True,
+        )
+    )
+    await bridge.flush()
+    assert _messages(client) == []
+    assert _types(client) == [ToolCallStart]
+    [card] = _status_cards(client)
+    _assert_status_card(card, "Reflected: renamed, compacted 3 ranges", None)
+    # The next ordinary turn is shown as usual again.
+    session.emit(TurnStartedUpdate(session_id="session-1", item_ids=["u2"]))
+    agent.event_manager.add(AgentMessage(content="Back to work."))
+    await bridge.flush()
+    assert _messages(client) == ["Back to work.\n\n"]
+
+
+@pytest.mark.parametrize(
+    ("kind", "outcome", "title"),
+    [
+        ("waiting", {"explanation": "tidied", "on": ["jobs"]}, "Reflected: tidied"),
+        ("done", {}, "Reflected"),
+        ("error", {"error": "boom"}, "Reflection failed"),
+        ("cancelled", {"by": "user"}, "Reflection stopped"),
+    ],
+)
+async def test_every_reflection_ending_is_one_card(bridged, kind, outcome, title):
+    _agent, session, client, bridge = bridged
+    session.emit(TurnStartedUpdate(session_id="session-1", item_ids=["r1"], reflection=True))
+    if kind == "cancelled":
+        session.emit(CancelledUpdate(session_id="session-1", by="user"))
+    session.emit(
+        TurnEndedUpdate(session_id="session-1", outcome_kind=kind, outcome=outcome, reflection=True)
+    )
+    await bridge.flush()
+    assert _messages(client) == []
+    [card] = _status_cards(client)
+    assert card.title == title

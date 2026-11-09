@@ -237,6 +237,19 @@ def result_card(kind: str, outcome: dict[str, Any]) -> tuple[str, str | None] | 
     return title, (explanation if rest else None)
 
 
+def reflection_card(kind: str, outcome: dict[str, Any]) -> tuple[str, str | None]:
+    """The one card a reflection turn shows: ``Reflected: <first line>``, or what went wrong."""
+    if kind in ("done", "waiting"):
+        explanation = str(outcome.get("explanation") or "").strip()
+        first, *rest = explanation.splitlines() or [""]
+        return (f"Reflected: {first}" if first else "Reflected"), (explanation if rest else None)
+    if kind == "need_input":
+        return "Reflection asked a question", str(outcome.get("question") or "") or None
+    if kind == "cancelled":
+        return "Reflection stopped", None
+    return "Reflection failed", str(outcome.get("error") or "") or None
+
+
 def end_line(update: Any) -> Any:
     """``update``, with its text ending in a blank line when it is a whole agent message.
 
@@ -376,6 +389,9 @@ class ACPEventBridge:
         self._echoed_items: set[str] = set()
         # Recently taken item ids, for a steer registered after its item was taken.
         self._taken: dict[str, None] = {}
+        # In a reflection turn (TurnStartedUpdate.reflection): this session's own
+        # agent events are not shown; the turn ends as one status card.
+        self._reflecting = False
         # By event type. Cards come from this session's agent and, mirrored,
         # from its children's; messages, thoughts and usage only from its own.
         self._card_handlers: dict[str, Callable[[Any, str | None], None]] = {
@@ -428,6 +444,8 @@ class ACPEventBridge:
         a child whose tool cards are mirrored (cards only: a child's
         messages, thoughts and usage are not this conversation's).
         """
+        if self._reflecting and source is None:
+            return  # a quiet reflection turn: its end is one card (_on_turn_ended)
         card = self._card_handlers.get(event.event_type)
         if card is not None:
             card(event, source)
@@ -684,6 +702,9 @@ class ACPEventBridge:
             )
         elif getattr(update, "kind", None) == "turn_started":
             self._reset_rolling("A new turn started.")
+            self._reflecting = bool(getattr(update, "reflection", False))
+        elif isinstance(update, CancelledUpdate) and self._reflecting:
+            self.fail_open_tools(cancel_text(update.by), title="Cancelled")
         elif isinstance(update, CancelledUpdate):
             self._reset_rolling(cancel_text(update.by), title="Cancelled")
             # Before the prompt's future resolves: the Session emits this first,
@@ -701,6 +722,13 @@ class ACPEventBridge:
 
     def _on_turn_ended(self, update: TurnEndedUpdate) -> None:
         self._reset_rolling("Turn ended before this finished.")
+        if getattr(update, "reflection", False) or self._reflecting:
+            self._reflecting = False
+            # A reflection turn is housekeeping, not a reply: one card, no chat text.
+            self.fail_open_tools("Did not finish.", title="Unfinished")
+            self._status_card(*reflection_card(update.outcome_kind, update.outcome))
+            self._publish_plan()
+            return
         if update.outcome_kind == "need_input":
             # Rendered once per turn, here; the next prompt answers it as text.
             question = str(update.outcome.get("question", ""))
