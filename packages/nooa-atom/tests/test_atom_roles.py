@@ -77,9 +77,8 @@ async def test_a_restore_keeps_the_hosts_instructions_not_the_saved_ones(tmp_pat
     for instructions, expected in ((None, None), ("   ", None), ("NEW ROLE", "NEW ROLE")):
         agent = _agent(tmp_path, instructions=instructions)
         try:
+            # The restore brings the saved copy back, then its after_restore() sets the host's.
             snapshot_from_json(data, agent)
-            assert agent.context.get("role") == "OLD ROLE"  # restore brought the saved copy back
-            agent.after_restore()
             assert agent.context.get("role") == expected
         finally:
             await agent.aclose()

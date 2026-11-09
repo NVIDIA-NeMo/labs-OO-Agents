@@ -154,14 +154,13 @@ async def test_the_queues_block_does_not_name_the_queue_manager(tmp_path):
     try:
         assert "queue_manager" not in _queues_expr(agent)
         assert agent._queue_status() == agent.queue_manager.status()
-        # An older snapshot still carries the old expression; after_restore puts it back.
+        # An older snapshot still carries the old expression; the restore's after_restore puts it back.
         snapshot = AgentSnapshot.from_agent(agent)
         for block in snapshot.context:
             if block.key == "queues":
                 block.expr = "self.queue_manager.status()"
         restored = AtomAgentBase(llm=FakeLLMClient(), cwd=tmp_path)
         snapshot.restore(restored)
-        restored.after_restore()
         assert "queue_manager" not in _queues_expr(restored)
         await restored.aclose()
     finally:

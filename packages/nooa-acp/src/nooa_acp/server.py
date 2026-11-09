@@ -533,11 +533,8 @@ class CodingACPAdapter:
             # close() also closes the agent's LLM client, so the new agent gets its own.
             await agent.close()
             return self._build_agent(self._llm_factory(), root, handle), False
-        # The agent's after_restore() repairs what did not survive the restart
-        # (Atom's, for one, reports self.jobs jobs lost in the previous process).
-        after_restore = getattr(agent, "after_restore", None)
-        if restored and callable(after_restore):
-            after_restore()
+        # The restore ran the agent's after_restore() (AgentSnapshot.restore),
+        # which repairs what did not survive the restart.
         return agent, restored
 
     async def _create_mcp_tools(

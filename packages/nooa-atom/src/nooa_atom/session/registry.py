@@ -339,19 +339,15 @@ class SessionRegistry:
         may have changed part of the first one.
         """
         try:
+            # A restore runs the agent's after_restore() (AgentSnapshot.restore),
+            # before the session is wired below.
             restored = handle.storage.restore_latest_snapshot(agent)
-            if restored:
-                after_restore = getattr(agent, "after_restore", None)
-                if callable(after_restore):
-                    after_restore()
         except Exception as exc:
             logger.warning(
                 "Session %s: could not restore its latest saved state", handle.id, exc_info=True
             )
             agent, restored, note = await self._restore_older(agent, options, handle, exc)
             handle.events.add(SnapshotRestoreFailed(error=note))
-            if restored and callable(after_restore := getattr(agent, "after_restore", None)):
-                after_restore()
         agent.event_manager.add(TuiSessionResumed(session_id=handle.id, restored=restored))
         return agent
 

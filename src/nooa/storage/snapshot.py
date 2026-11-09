@@ -145,7 +145,10 @@ class AgentSnapshot(BaseModel):
             agent: A freshly constructed Agent instance to restore into.
 
         An attribute that fails to deserialize is skipped with a warning; the
-        other attributes are still restored.
+        other attributes are still restored. Last, if the agent has a callable
+        ``after_restore`` (``InteractiveAgent`` and its subclasses), it runs
+        once, so every restore path repairs what did not survive the restart;
+        hosts do not call it again.
 
         Returns:
             The skipped attributes: name mapped to a short reason
@@ -202,4 +205,7 @@ class AgentSnapshot(BaseModel):
                 skipped[attr_name] = f"{type(exc).__name__}: {exc}"
                 continue
             setattr(agent, attr_name, value)
+        after_restore = getattr(agent, "after_restore", None)
+        if callable(after_restore):
+            after_restore()
         return skipped

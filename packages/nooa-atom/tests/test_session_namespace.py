@@ -479,8 +479,7 @@ async def test_namespace_nosnapshot_restart_notice_once_and_self_v_survives(tmp_
         assert "_handle_namespace" not in snapshot["attributes"]
         assert "_namespace_lifetime" not in snapshot["attributes"]
         restored = AtomAgent(cwd=tmp_path, llm=CellLLM())
-        snapshot_from_json(snapshot, restored)
-        restored.after_restore()
+        snapshot_from_json(snapshot, restored)  # runs restored.after_restore()
         assert restored._handle_namespace is None and restored.v.fact == "durable"
         notes = restored._system_messages_in.snapshot()
         assert (

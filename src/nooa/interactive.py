@@ -547,9 +547,10 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
 
     @hidden
     def after_restore(self) -> None:
-        """Called by a host after it restores a snapshot into this agent.
+        """Called once at the end of ``AgentSnapshot.restore()`` (every snapshot restore).
 
         Subclasses extend it to repair state that did not survive the restart.
+        Hosts do not call it themselves.
         """
         # A snapshot from before the queues block stopped naming the hidden
         # queue_manager restores the old expression; put the current one back.

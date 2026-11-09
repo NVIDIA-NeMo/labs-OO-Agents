@@ -537,7 +537,7 @@ class AtomAgentBase(InteractiveAgent):
 
     @hidden
     def after_restore(self) -> None:
-        """Called by the session registry after it restores a snapshot into this agent.
+        """Called by ``AgentSnapshot.restore()`` after it restores a snapshot into this agent.
 
         Reports, once, the ``self.jobs`` jobs that were running when the saved
         session stopped (a ``JobsLost`` event); they did not survive.

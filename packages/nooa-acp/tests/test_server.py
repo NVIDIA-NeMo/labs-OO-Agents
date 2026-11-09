@@ -1618,6 +1618,26 @@ async def test_load_session_restores_the_agent_state_from_the_last_turn(tmp_path
     await second.close()
 
 
+async def test_load_session_runs_after_restore_once(tmp_path, monkeypatch):
+    """The restore itself runs after_restore() (AgentSnapshot.restore); the adapter adds no second call."""
+    from nooa_acp.server import CodingAgent
+
+    first, session_id = await _session_that_remembered(tmp_path)
+    await first.close()
+
+    calls: list[object] = []
+
+    class CountingAgent(CodingAgent):
+        def after_restore(self) -> None:
+            calls.append(self)
+            super().after_restore()
+
+    monkeypatch.setattr("nooa_acp.server.CodingAgent", CountingAgent)
+    second, session = await _reload(tmp_path, session_id)
+    assert calls == [session.agent]
+    await second.close()
+
+
 async def test_an_unchanged_state_is_not_saved_again(tmp_path):
     adapter, session_id = await _session_that_remembered(tmp_path)
     session = await _session(adapter, session_id)

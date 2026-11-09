@@ -163,6 +163,38 @@ async def test_load_of_a_live_id_attaches_to_the_same_session(registry, root_opt
     assert await registry.load(root.id) is root
 
 
+async def test_load_runs_after_restore_once_before_the_session_is_wired(
+    registry, root_options, sessions_dir, models
+):
+    """The restore runs after_restore() (AgentSnapshot.restore) once, before the port is installed."""
+    models.scripts[None] = [cell("self.v.note = 'kept'\nreturn_result(Done(explanation='noted'))")]
+    root = await registry.create(root_options)
+    assert await asyncio.wait_for(root.prompt("first"), TIMEOUT) == Done(explanation="noted")
+    await root.wait_for_checkpoint()
+    await registry.close_all()
+
+    resumed_models = ScriptedModels({None: []})
+    calls: list[tuple[object, object]] = []
+
+    def factory(options, storage):
+        built = type(resumed_models(options, storage))
+
+        class CountingAgent(built):
+            def after_restore(self) -> None:
+                calls.append((self, getattr(self, "session", None)))
+                super().after_restore()
+
+        return CountingAgent(storage=storage, llm=resumed_models.llms[options.name])
+
+    fresh = SessionRegistry(SessionStore(sessions_dir), agent_factory=factory)
+    try:
+        loaded = await fresh.load(root.id)
+        assert loaded._agent.v.note == "kept"
+        assert calls == [(loaded._agent, None)]
+    finally:
+        await fresh.close_all()
+
+
 async def test_load_restores_state_and_requeues_unhandled_items(
     registry, root_options, sessions_dir, models
 ):

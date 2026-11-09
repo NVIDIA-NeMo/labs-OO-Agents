@@ -831,8 +831,7 @@ async def test_jobs_running_at_a_snapshot_are_reported_once_after_restore(tmp_pa
     assert set(old._jobs_running) == {"tests"}  # a shutdown keeps the record
 
     new = Host(llm=FakeLLMClient())
-    snapshot.restore(new)
-    new.after_restore()
+    snapshot.restore(new)  # runs new.after_restore()
     [event] = new.event_manager.filter(type="JobsLost")
     assert isinstance(event, JobsLost)
     assert event.jobs == [
