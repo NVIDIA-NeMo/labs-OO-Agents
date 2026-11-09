@@ -107,11 +107,11 @@ async def test_a_kept_child_waiting_on_its_parent_is_told_to_ask(
     merged: dict = {}
     for attrs in span_attributes:
         for key in (
-            "harness.waiting_on_person_rejected.roles",
+            "harness.atom.waiting_on_person_rejected.roles",
             "harness.queue_read_timeout.channels",
         ):
             merged.setdefault(key, []).extend(attrs.get(key, []))
-    assert merged["harness.waiting_on_person_rejected.roles"] == ["child"]
+    assert merged["harness.atom.waiting_on_person_rejected.roles"] == ["child"]
     assert merged["harness.queue_read_timeout.channels"] == ["user_messages"]
 
 

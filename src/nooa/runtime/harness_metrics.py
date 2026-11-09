@@ -22,13 +22,14 @@ it returns a no-op singleton, so call sites never need an ``if`` guard.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from collections.abc import Callable
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any, ClassVar, NamedTuple
 
-from pydantic import BaseModel, Field, PrivateAttr
+from pydantic import BaseModel, Field, PrivateAttr, model_serializer
 
 logger = logging.getLogger(__name__)
 
@@ -101,16 +102,38 @@ class SchemaEntry(NamedTuple):
 class HarnessMetricsExtension(BaseModel):
     """Counters a package adds to :class:`HarnessMetrics`, with their span attributes.
 
-    Subclass it with the fields and recorder methods, set ``span_schema`` (its
-    entries' ``value_fn`` receives the extension instance, not the
-    HarnessMetrics), and register the class with
-    :func:`register_harness_metrics_extension`. Record with
-    ``get_harness_metrics().extension(MyMetrics).my_counter()``: a session
+    Subclass it under a namespace (``namespace: ClassVar[str] = "mypkg"`` in
+    the class body: a lowercase identifier; a class keyword can't be used, as
+    pydantic's metaclass owns ``namespace``), with the fields and recorder
+    methods, set ``span_schema`` and register the class with
+    :func:`register_harness_metrics_extension`.
+
+    ``span_schema`` entries carry short keys (``"poke.count"``); the span key is
+    ``harness.<namespace>.<short key>`` (see :func:`extension_span_key`), and
+    their ``value_fn`` receives the extension instance, not the HarnessMetrics.
+
+    Record with ``get_harness_metrics().mypkg.my_counter()`` (registered
+    extensions) or ``get_harness_metrics().extension(MyMetrics)``: a session
     creates the extension on first use, so agents that never record one carry
     none of its fields, and outside a session the call is a no-op.
     """
 
+    namespace: ClassVar[str] = ""
     span_schema: ClassVar[tuple[SchemaEntry, ...]] = ()
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        namespace = cls.namespace
+        if not namespace:
+            raise TypeError(
+                f"{cls.__name__} needs a namespace: set "
+                f'namespace: ClassVar[str] = "<name>" in its class body'
+            )
+        if not isinstance(namespace, str) or not _NAMESPACE_RE.fullmatch(namespace):
+            raise ValueError(
+                f"{cls.__name__} namespace {namespace!r} must be a lowercase identifier "
+                "(letters, digits, '_'; no dots or slashes)"
+            )
 
     def _append(self, lst: list[str], value: str, limit: int = _MAX_STRING_CHARS) -> None:
         """Append ``value`` truncated to ``limit`` unless ``lst`` is full."""
@@ -123,25 +146,50 @@ class HarnessMetricsExtension(BaseModel):
             lst.append(item)
 
 
-# Registered extension classes, in registration order (drives get_span_schema()).
-_EXTENSIONS: list[type[HarnessMetricsExtension]] = []
+_NAMESPACE_RE = re.compile(r"[a-z][a-z0-9_]*")
+
+
+def extension_span_key(namespace: str, short_key: str) -> str:
+    """The span attribute key of an extension entry: ``harness.<namespace>.<short_key>``.
+
+    The one place extension keys are built, so no extension can drift from it.
+    """
+    return f"harness.{namespace}.{short_key}"
+
+
+# Registered extension classes by namespace, in registration order (drives get_span_schema()).
+_EXTENSIONS: dict[str, type[HarnessMetricsExtension]] = {}
 
 
 def register_harness_metrics_extension[E: HarnessMetricsExtension](cls: type[E]) -> type[E]:
-    """Register an extension so :func:`get_span_schema` lists its attributes.
+    """Register an extension: ``get_harness_metrics().<namespace>`` and :func:`get_span_schema`.
 
     Usable as a class decorator; registering the same class again is a no-op.
-    Raises ``ValueError`` if one of its span keys is already in the schema or
-    appears twice in its own ``span_schema``.
+    Raises ``ValueError`` if another class already claims its namespace, if the
+    namespace would shadow a :class:`HarnessMetrics` attribute, or if its
+    ``span_schema`` has a full ``harness.`` key or a short key twice.
     """
-    if cls in _EXTENSIONS:
+    namespace = cls.namespace
+    owner = _EXTENSIONS.get(namespace)
+    if owner is cls:
         return cls
+    if owner is not None:
+        raise ValueError(
+            f"harness metrics namespace {namespace!r} is claimed by both "
+            f"{owner.__module__}.{owner.__qualname__} and {cls.__module__}.{cls.__qualname__}"
+        )
+    if hasattr(HarnessMetrics, namespace) or namespace in HarnessMetrics.model_fields:
+        raise ValueError(
+            f"{cls.__name__} namespace {namespace!r} shadows a HarnessMetrics attribute"
+        )
     keys = [entry.key for entry in cls.span_schema]
-    taken = {entry.key for entry in get_span_schema()}
-    clashes = sorted({key for key in keys if key in taken or keys.count(key) > 1})
-    if clashes:
-        raise ValueError(f"{cls.__name__} span keys already in the schema or repeated: {clashes}")
-    _EXTENSIONS.append(cls)
+    bad = sorted({key for key in keys if key.startswith("harness.") or keys.count(key) > 1})
+    if bad:
+        raise ValueError(
+            f"{cls.__name__} span_schema keys must be short (no 'harness.' prefix, "
+            f"which is built from the namespace) and unique: {bad}"
+        )
+    _EXTENSIONS[namespace] = cls
     return cls
 
 
@@ -283,6 +331,21 @@ class HarnessMetrics(BaseModel):
         if ext is None:
             ext = self._extensions[cls] = cls()
         return ext  # type: ignore[return-value]
+
+    def __getattr__(self, name: str) -> Any:
+        # get_harness_metrics().<namespace>: a registered extension's instance
+        cls = _EXTENSIONS.get(name)
+        if cls is not None:
+            return self.extension(cls)
+        return super().__getattr__(name)  # type: ignore[misc]
+
+    @model_serializer(mode="wrap")
+    def _dump_with_extensions(self, handler: Any) -> dict[str, Any]:
+        """Core fields, plus each extension used as ``{namespace: {...}}``."""
+        data = handler(self)
+        for cls, ext in self._extensions.items():
+            data[cls.namespace] = ext.model_dump()
+        return data
 
     # ── Helpers ──────────────────────────────────────────────────────
 
@@ -597,11 +660,11 @@ class HarnessMetrics(BaseModel):
             value = entry.value_fn(self)
             if value:
                 attrs[entry.key] = value
-        for ext in self._extensions.values():
-            for entry in type(ext).span_schema:
+        for cls, ext in self._extensions.items():
+            for entry in cls.span_schema:
                 value = entry.value_fn(ext)
                 if value:
-                    attrs[entry.key] = value
+                    attrs[extension_span_key(cls.namespace, entry.key)] = value
         return attrs
 
     def flush_to_span(self) -> None:
@@ -1307,20 +1370,21 @@ def get_span_schema() -> tuple[SchemaEntry, ...]:
 
     Used by trace_explorer to drive display without importing internals.
     Includes the entries of registered extensions (see
-    :func:`register_harness_metrics_extension`), whose ``value_fn`` takes a
+    :func:`register_harness_metrics_extension`) under their full
+    ``harness.<namespace>.<short key>`` keys, whose ``value_fn`` takes a
     HarnessMetrics like the core entries.
     """
     if not _EXTENSIONS:
         return _SPAN_SCHEMA
     return _SPAN_SCHEMA + tuple(
         SchemaEntry(
-            entry.key,
+            extension_span_key(cls.namespace, entry.key),
             entry.label,
             entry.category,
             lambda m, c=cls, f=entry.value_fn: f(m.extension(c)),
             entry.is_detail,
         )
-        for cls in _EXTENSIONS
+        for cls in _EXTENSIONS.values()
         for entry in cls.span_schema
     )
 
@@ -1354,6 +1418,8 @@ class _NullMetrics:
             return _noop_timer
         if name == "extension":
             return _null_extension
+        if name in _EXTENSIONS:
+            return _NULL_METRICS  # get_harness_metrics().<namespace>.recorder(): no-op
         return _noop
 
 

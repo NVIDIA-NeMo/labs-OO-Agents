@@ -3,9 +3,10 @@
 """Atom's harness counters: an extension of core's HarnessMetrics.
 
 Only Atom records these, so they live here rather than on every agent's
-HarnessMetrics. Their span attribute keys and values are the ones core used
-to emit (Gym/HCB analysis reads them); importing this module registers them,
-so ``get_span_schema()`` lists them whenever Atom is in use.
+HarnessMetrics. They live in the ``atom`` namespace: span attribute keys are
+``harness.atom.<name>`` (Gym/HCB analysis reads them) and
+``get_harness_metrics().atom`` is this session's instance. Importing this
+module registers them, so ``get_span_schema()`` lists them whenever Atom is in use.
 
 Record with ``atom_metrics().shell_queued()``; outside a metrics session the
 call is a no-op, like ``get_harness_metrics()``.
@@ -31,6 +32,8 @@ __all__ = ["AtomHarnessMetrics", "atom_metrics"]
 class AtomHarnessMetrics(HarnessMetricsExtension):
     """Counters for Atom's Shell, subagents, cell-error hints and Waiting rules."""
 
+    namespace: ClassVar[str] = "atom"
+
     # A Shell command queued behind another still running in the same Shell
     shell_queued_behind_running: int = 0
     # A Shell command awaited in a cell refused: the Shell runs a launched job's command
@@ -47,96 +50,96 @@ class AtomHarnessMetrics(HarnessMetricsExtension):
 
     span_schema: ClassVar[tuple[SchemaEntry, ...]] = (
         SchemaEntry(
-            "harness.shell_queued_behind_running.count",
+            "shell_queued_behind_running.count",
             "Shell commands queued behind a running one",
             "Tool Usage",
             lambda m: m.shell_queued_behind_running,
         ),
         SchemaEntry(
-            "harness.shell_busy_rejected.count",
+            "shell_busy_rejected.count",
             "Shell commands refused behind a background job",
             "Tool Usage",
             lambda m: m.shell_busy_rejected,
         ),
         SchemaEntry(
-            "harness.child_detached_at_deadline.count",
+            "child_detached_at_deadline.count",
             "Children awaited in a cell kept running as jobs at the cell deadline",
             "Tool Usage",
             lambda m: m.child_detached_at_deadline,
         ),
         SchemaEntry(
-            "harness.waiting_on_person_rejected.count",
+            "waiting_on_person_rejected.count",
             "Waiting on user_messages rejected",
             "Tool Usage",
             lambda m: len(m.waiting_on_person_rejections),
         ),
         SchemaEntry(
-            "harness.waiting_on_person_rejected.roles",
+            "waiting_on_person_rejected.roles",
             "Roles that waited on the person",
             "Tool Usage",
             lambda m: m.waiting_on_person_rejections,
             True,
         ),
         SchemaEntry(
-            "harness.shell_exit_hint.count",
+            "shell_exit_hint.count",
             "Commands that ended their Shell's bash (exit/errexit)",
             "Tool Usage",
             lambda m: len(m.shell_exit_hints),
         ),
         SchemaEntry(
-            "harness.shell_exit_hint.codes",
+            "shell_exit_hint.codes",
             "Exit statuses of commands that ended their Shell's bash",
             "Tool Usage",
             lambda m: m.shell_exit_hints,
             True,
         ),
         SchemaEntry(
-            "harness.shell_cwd_fallback.count",
+            "shell_cwd_fallback.count",
             "Restarted Shells whose kept cwd was gone",
             "Tool Usage",
             lambda m: len(m.shell_cwd_fallbacks),
         ),
         SchemaEntry(
-            "harness.shell_cwd_fallback.details",
+            "shell_cwd_fallback.details",
             "Gone cwd -> fallback directory",
             "Tool Usage",
             lambda m: m.shell_cwd_fallbacks,
             True,
         ),
         SchemaEntry(
-            "harness.name_error_hint.count",
+            "name_error_hint.count",
             "NameErrors pointed at python_cell_state",
             "Code Validation",
             lambda m: len(m.name_error_hints),
         ),
         SchemaEntry(
-            "harness.name_error_hint.names",
+            "name_error_hint.names",
             "Undefined names in hinted NameErrors",
             "Code Validation",
             lambda m: m.name_error_hints,
             True,
         ),
         SchemaEntry(
-            "harness.mcp_tool_name_hint.count",
+            "mcp_tool_name_hint.count",
             "MCP tools called bare or as self.<tool>, pointed at their server",
             "Code Validation",
             lambda m: len(m.mcp_tool_name_hints),
         ),
         SchemaEntry(
-            "harness.mcp_tool_name_hint.calls",
+            "mcp_tool_name_hint.calls",
             "Hinted MCP tools as <server>.<tool>",
             "Code Validation",
             lambda m: m.mcp_tool_name_hints,
             True,
         ),
         SchemaEntry(
-            "harness.module_not_found_hint.count",
+            "module_not_found_hint.count",
             "Cell ModuleNotFoundErrors pointed at the task's python3",
             "Code Validation",
             lambda m: len(m.module_not_found_hints),
         ),
         SchemaEntry(
-            "harness.module_not_found_hint.modules",
+            "module_not_found_hint.modules",
             "Missing modules in hinted ModuleNotFoundErrors",
             "Code Validation",
             lambda m: m.module_not_found_hints,
@@ -188,5 +191,8 @@ class AtomHarnessMetrics(HarnessMetricsExtension):
 
 
 def atom_metrics() -> AtomHarnessMetrics:
-    """This metrics session's Atom counters (a no-op recorder outside a session)."""
+    """This metrics session's Atom counters, ``get_harness_metrics().atom``.
+
+    A no-op recorder outside a session.
+    """
     return get_harness_metrics().extension(AtomHarnessMetrics)

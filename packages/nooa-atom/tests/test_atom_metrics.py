@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Atom's harness counters: same span attributes as before the move out of core."""
+"""Atom's harness counters: the ``atom`` extension of core's HarnessMetrics."""
 
 from __future__ import annotations
 
@@ -25,23 +25,23 @@ from nooa.runtime.harness_metrics import (
 from nooa.strategies import CodeActV2
 from nooa.unifiedllm import FakeLLMClient, LLMResponse, ToolCall
 
-# Gym/HCB analysis reads these names: they must not change.
+# Gym/HCB analysis reads these names (namespaced harness.atom.* since #558).
 ATOM_KEYS = {
-    "harness.shell_queued_behind_running.count": ("Tool Usage", False),
-    "harness.shell_busy_rejected.count": ("Tool Usage", False),
-    "harness.child_detached_at_deadline.count": ("Tool Usage", False),
-    "harness.waiting_on_person_rejected.count": ("Tool Usage", False),
-    "harness.waiting_on_person_rejected.roles": ("Tool Usage", True),
-    "harness.shell_exit_hint.count": ("Tool Usage", False),
-    "harness.shell_exit_hint.codes": ("Tool Usage", True),
-    "harness.shell_cwd_fallback.count": ("Tool Usage", False),
-    "harness.shell_cwd_fallback.details": ("Tool Usage", True),
-    "harness.name_error_hint.count": ("Code Validation", False),
-    "harness.name_error_hint.names": ("Code Validation", True),
-    "harness.mcp_tool_name_hint.count": ("Code Validation", False),
-    "harness.mcp_tool_name_hint.calls": ("Code Validation", True),
-    "harness.module_not_found_hint.count": ("Code Validation", False),
-    "harness.module_not_found_hint.modules": ("Code Validation", True),
+    "harness.atom.shell_queued_behind_running.count": ("Tool Usage", False),
+    "harness.atom.shell_busy_rejected.count": ("Tool Usage", False),
+    "harness.atom.child_detached_at_deadline.count": ("Tool Usage", False),
+    "harness.atom.waiting_on_person_rejected.count": ("Tool Usage", False),
+    "harness.atom.waiting_on_person_rejected.roles": ("Tool Usage", True),
+    "harness.atom.shell_exit_hint.count": ("Tool Usage", False),
+    "harness.atom.shell_exit_hint.codes": ("Tool Usage", True),
+    "harness.atom.shell_cwd_fallback.count": ("Tool Usage", False),
+    "harness.atom.shell_cwd_fallback.details": ("Tool Usage", True),
+    "harness.atom.name_error_hint.count": ("Code Validation", False),
+    "harness.atom.name_error_hint.names": ("Code Validation", True),
+    "harness.atom.mcp_tool_name_hint.count": ("Code Validation", False),
+    "harness.atom.mcp_tool_name_hint.calls": ("Code Validation", True),
+    "harness.atom.module_not_found_hint.count": ("Code Validation", False),
+    "harness.atom.module_not_found_hint.modules": ("Code Validation", True),
 }
 
 RECORD_ALL = (
@@ -54,21 +54,21 @@ RECORD_ALL = (
 )
 
 EXPECTED = {
-    "harness.shell_queued_behind_running.count": 1,
-    "harness.shell_busy_rejected.count": 1,
-    "harness.child_detached_at_deadline.count": 1,
-    "harness.waiting_on_person_rejected.count": 1,
-    "harness.waiting_on_person_rejected.roles": ["child"],
-    "harness.shell_exit_hint.count": 1,
-    "harness.shell_exit_hint.codes": [5],
-    "harness.shell_cwd_fallback.count": 1,
-    "harness.shell_cwd_fallback.details": ["/gone -> /ws"],
-    "harness.name_error_hint.count": 1,
-    "harness.name_error_hint.names": ["sh"],
-    "harness.mcp_tool_name_hint.count": 1,
-    "harness.mcp_tool_name_hint.calls": ["srv.tool"],
-    "harness.module_not_found_hint.count": 1,
-    "harness.module_not_found_hint.modules": ["cv2"],
+    "harness.atom.shell_queued_behind_running.count": 1,
+    "harness.atom.shell_busy_rejected.count": 1,
+    "harness.atom.child_detached_at_deadline.count": 1,
+    "harness.atom.waiting_on_person_rejected.count": 1,
+    "harness.atom.waiting_on_person_rejected.roles": ["child"],
+    "harness.atom.shell_exit_hint.count": 1,
+    "harness.atom.shell_exit_hint.codes": [5],
+    "harness.atom.shell_cwd_fallback.count": 1,
+    "harness.atom.shell_cwd_fallback.details": ["/gone -> /ws"],
+    "harness.atom.name_error_hint.count": 1,
+    "harness.atom.name_error_hint.names": ["sh"],
+    "harness.atom.mcp_tool_name_hint.count": 1,
+    "harness.atom.mcp_tool_name_hint.calls": ["srv.tool"],
+    "harness.atom.module_not_found_hint.count": 1,
+    "harness.atom.module_not_found_hint.modules": ["cv2"],
 }
 
 
@@ -106,6 +106,21 @@ def test_recorders_emit_the_same_attributes():
     assert metrics.to_span_attributes() == EXPECTED
 
 
+def test_atom_counters_live_in_the_atom_namespace():
+    from nooa.runtime.harness_metrics import get_harness_metrics
+
+    with harness_metrics_session() as metrics:
+        atom_metrics().shell_busy()
+        get_harness_metrics().atom.shell_queued()
+        assert get_harness_metrics().atom is atom_metrics()
+        assert atom_metrics() is metrics.extension(AtomHarnessMetrics)
+    assert AtomHarnessMetrics.namespace == "atom"
+    assert metrics.atom.shell_busy_rejected == 1
+    assert metrics.atom.shell_queued_behind_running == 1
+    assert all(k.startswith("harness.atom.") for k in metrics.to_span_attributes())
+    assert metrics.model_dump()["atom"]["shell_busy_rejected"] == 1
+
+
 def test_outside_a_session_recording_is_a_no_op():
     atom_metrics().shell_queued()  # no session: nothing to record into, no error
 
@@ -122,7 +137,7 @@ async def test_an_atom_turns_harness_span_has_the_nine_counters(tmp_path, flushe
         assert await asyncio.wait_for(root.prompt("go"), 60) == Done(explanation="ok")
     finally:
         await registry.close_all()
-    [attrs] = [a for a in flushed if "harness.shell_busy_rejected.count" in a]
+    [attrs] = [a for a in flushed if "harness.atom.shell_busy_rejected.count" in a]
     assert {k: v for k, v in attrs.items() if k in ATOM_KEYS} == EXPECTED
 
 

@@ -1318,9 +1318,9 @@ async def test_a_name_error_points_at_python_cell_state_and_is_counted(
     after_results = seen(2)
     assert "name 'results' is not defined" in after_results
     assert after_results.count("Create it first") == after_sh.count("Create it first")
-    [attrs] = [a for a in flushed if "harness.name_error_hint.count" in a]
-    assert attrs["harness.name_error_hint.count"] == 2
-    assert attrs["harness.name_error_hint.names"] == ["sh", "results"]
+    [attrs] = [a for a in flushed if "harness.atom.name_error_hint.count" in a]
+    assert attrs["harness.atom.name_error_hint.count"] == 2
+    assert attrs["harness.atom.name_error_hint.names"] == ["sh", "results"]
 
 
 async def test_a_module_not_found_error_points_at_the_task_python_and_is_counted(
@@ -1352,6 +1352,6 @@ async def test_a_module_not_found_error_points_at_the_task_python_and_is_counted
     ) in seen
     assert "python3 -c 'import" not in seen
     assert "Live names are listed" not in seen
-    [attrs] = [a for a in flushed if "harness.module_not_found_hint.count" in a]
-    assert attrs["harness.module_not_found_hint.count"] == 1
-    assert attrs["harness.module_not_found_hint.modules"] == ["no_such_task_pkg_xyz"]
+    [attrs] = [a for a in flushed if "harness.atom.module_not_found_hint.count" in a]
+    assert attrs["harness.atom.module_not_found_hint.count"] == 1
+    assert attrs["harness.atom.module_not_found_hint.modules"] == ["no_such_task_pkg_xyz"]

@@ -1794,10 +1794,10 @@ class TestHarnessTelemetryUnknownKeys:
     async def test_unregistered_extension_attributes_show_under_other(self, monkeypatch):
         from nooa.runtime import harness_metrics
 
-        monkeypatch.setattr(harness_metrics, "_EXTENSIONS", [])
+        monkeypatch.setattr(harness_metrics, "_EXTENSIONS", {})
         span = make_generation_span("gen1", "aaaaaa000000")
         span["attributes"] += _otlp_attrs(
-            {"harness.fence_removal.count": 1, "harness.shell_busy_rejected.count": 2}
+            {"harness.fence_removal.count": 1, "harness.atom.shell_busy_rejected.count": 2}
         )
         trace_file = create_trace_file([span])
         try:

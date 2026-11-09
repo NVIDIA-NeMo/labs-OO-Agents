@@ -116,7 +116,7 @@ async def test_a_child_awaited_at_the_deadline_runs_on_as_a_job_and_wakes_waitin
     assert root._agent.v.note == "NOTE: late"  # the child's notes are the job's items
     assert root._agent.jobs.get("subagent").status == "done"
     attrs = root_metrics[0].to_span_attributes()
-    assert attrs["harness.child_detached_at_deadline.count"] == 1
+    assert attrs["harness.atom.child_detached_at_deadline.count"] == 1
 
 
 async def test_a_detached_child_that_fails_arrives_as_failed(
@@ -221,7 +221,7 @@ async def test_an_awaited_request_job_survives_the_deadline_and_is_named(
     assert "job review#1 is still running" in feedback
     attrs = root_metrics[0].to_span_attributes()
     # A kept child's request detached at the deadline counts like a one-shot child.
-    assert attrs["harness.child_detached_at_deadline.count"] == 1
+    assert attrs["harness.atom.child_detached_at_deadline.count"] == 1
 
 
 async def test_an_awaited_plain_job_at_the_deadline_is_not_a_detached_child(
@@ -241,4 +241,4 @@ async def test_an_awaited_plain_job_at_the_deadline_is_not_a_detached_child(
     assert outcome == Done(explanation="SLEPT")
     assert "job nap is still running" in _prompt(models, None, 1)
     attrs = root_metrics[0].to_span_attributes()
-    assert "harness.child_detached_at_deadline.count" not in attrs
+    assert "harness.atom.child_detached_at_deadline.count" not in attrs

@@ -638,7 +638,7 @@ async def test_a_commands_own_exit_says_how_to_keep_the_shell(tmp_path):
             assert "this command ended the Shell's bash (exit 1)" in r.stderr
             assert (await sh.run("(exit 4)")).stderr == ""  # a subshell keeps bash
     assert metrics.extension(AtomHarnessMetrics).shell_exit_hints == [5, 1]
-    assert metrics.to_span_attributes()["harness.shell_exit_hint.count"] == 2
+    assert metrics.to_span_attributes()["harness.atom.shell_exit_hint.count"] == 2
 
 
 async def test_nonzero_statuses_are_reported_as_is(tmp_path):
@@ -680,7 +680,7 @@ async def test_a_restarted_shell_whose_kept_cwd_is_gone_starts_where_it_started(
         f"{gone.resolve()} -> {tmp_path.resolve()}"
     ]
     attrs = metrics.to_span_attributes()
-    assert attrs["harness.shell_cwd_fallback.count"] == 1
+    assert attrs["harness.atom.shell_cwd_fallback.count"] == 1
 
 
 async def test_nounset_and_pipefail(tmp_path):
@@ -1243,8 +1243,8 @@ async def test_an_inline_command_behind_a_job_fails_at_once_naming_it(manager, t
         assert "busy running `sleep 30; echo never` (job log)" in message
         assert "launched in the background" in message and "another Shell()" in message
         attrs = metrics.to_span_attributes()
-        assert attrs["harness.shell_busy_rejected.count"] == 1
-        assert "harness.shell_queued_behind_running.count" not in attrs
+        assert attrs["harness.atom.shell_busy_rejected.count"] == 1
+        assert "harness.atom.shell_queued_behind_running.count" not in attrs
         assert log.status == "running"  # the job goes on
         await log.cancel()
         after = await asyncio.wait_for(sh.run("echo next", timeout=10), 20)
@@ -1295,8 +1295,8 @@ async def test_a_job_behind_a_job_waits_and_its_timeout_counts_from_its_start(ma
             assert (second.returncode, second.timed_out) == (0, False)
             assert "waited" not in second.stderr  # under the 5 s note threshold
         attrs = metrics.to_span_attributes()
-        assert attrs["harness.shell_queued_behind_running.count"] == 1
-        assert "harness.shell_busy_rejected.count" not in attrs
+        assert attrs["harness.atom.shell_queued_behind_running.count"] == 1
+        assert "harness.atom.shell_busy_rejected.count" not in attrs
 
 
 async def test_a_long_wait_behind_a_job_is_noted_on_the_result(manager, tmp_path, monkeypatch):
