@@ -366,6 +366,55 @@ Reflection may summarize only captured completed evidence, preserve archival
 originals, update its own notes block, and conservatively propose obsolete primitive
 bindings for deletion. It is not an automatic background expiry service.
 
+## Reflection turns
+
+From time to time a root session gives its agent a quiet housekeeping turn, a
+*reflection*: rename the session to what it works on now, compact history it no
+longer needs in full, delete stale Python names, tidy `self.todo` and `self.v`,
+and make sure needed jobs can be relaunched after a restart. This is a turn the
+session queues, unlike `experimental_done_reflection` above (one bounded
+prediction after a `Done`); the two are independent.
+
+When a root session's turn ends with `Done` or `Waiting`, a reflection is due if
+at least `min_gap_turns` turns passed since the last one and `every_turns` turns
+or `every_minutes` minutes passed, or the context window is at least
+`context_fraction` full (the share the agent's `context_usage` line shows).
+Reflection turns do not count. The time and turn window starts when the session
+is created or loaded and restarts after each reflection.
+
+The instructions are queued on the agent's `slash_commands` channel (where
+`/compact` goes) with source `reflection`. A reflection runs only when no other
+input waits: if a message, job event or command is queued, the reflection steps
+aside and runs after it. At most one is pending, and one queued before a restart
+is not replayed. The turn is quiet: its `Done` sends no reply, and over ACP the
+whole turn is one status card, `Reflected: <the Done explanation>`
+(`TurnStartedUpdate.reflection`, `TurnEndedUpdate.reflection`). Each queued
+reflection emits an `atom.reflection` span with `nooa.atom.reflection.reason`
+(`turns`, `minutes` or `context`), `.turns_since_last`, `.minutes_since_last`
+and `.context_fraction`, and is counted in `harness.atom.reflection.count` /
+`.reasons`.
+
+Settings, in `atom.reflection` (defaults shown; a partial section overrides
+only the keys it sets):
+
+```yaml
+atom:
+  reflection:
+    enabled: null          # null: on for interactive hosts (ACP, TUI), off headless
+    children: false        # child sessions reflect too
+    every_turns: 20        # null turns a trigger off
+    every_minutes: 60
+    min_gap_turns: 5
+    context_fraction: 0.5
+    instructions: "..."    # the queued text (nooa_atom.session.reflection.DEFAULT_INSTRUCTIONS)
+```
+
+The default follows `SessionOptions.host`: `"acp"` (Pool, Zed and other ACP
+clients) and `"tui"` reflect; `"headless"`, the default for `run_task`, the Gym
+adapter and `nooa-bench`, does not. `enabled: true`/`false` decides for every
+host, and `SessionOptions(reflection=True)` (or `False`) overrides both for one
+run, e.g. a benchmark arm.
+
 ### Native Gym benchmark policy (separate prerequisite)
 
 `nooa_atom.gym:AtomHarness` runs through `nooa_bench.gym_worker`. This native adapter

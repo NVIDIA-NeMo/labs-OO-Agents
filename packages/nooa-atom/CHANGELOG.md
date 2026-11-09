@@ -7,6 +7,19 @@ based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+- `nooa-atom`: reflection turns. When a root session's turn ends with `Done`
+  or `Waiting` and a reflection is due (20 turns or 60 minutes since the last,
+  or the context half full; at least 5 turns apart), the session queues
+  housekeeping instructions on the `slash_commands` channel: rename the
+  session, compact history, delete stale names, tidy todos and `self.v`. It
+  runs only when nothing else waits, at most one is pending, and over ACP the
+  turn is one "Reflected: ..." status card with no reply. On by default for
+  ACP and TUI hosts, off headless (benchmarks, Gym, `nooa-bench`); configure
+  it in `atom.reflection` or override with `SessionOptions(reflection=...)`.
+  Each one emits an `atom.reflection` span.
+- `nooa-atom`: a job lost in a restart now reports the launching cell's code
+  (at most 40 lines / about 4,000 characters) and the names that cell used
+  which are gone after the restart.
 - `nooa-atom`: AtomAgent drops the core `<events_api>` guidance block (added on
   main for agents that expose `self.events`). `self.events` stays exposed, and
   Atom's `context_usage` block already names `self.events.collapse(...)` and
