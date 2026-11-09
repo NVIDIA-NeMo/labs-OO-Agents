@@ -3224,16 +3224,21 @@ class ActorRuntime:
 
                 # Use the shared builder so Annotated parameter specs reach
                 # prefill rendering on agent calls as well as nested strategy calls.
-                call = CurrentCall.from_method(method, args=args, kwargs=kwargs)
-                # Preserve runtime identity, expanded instructions and caller state.
-                # Events must match the wrapper's call ID, not the builder's UUID.
-                call.id = self._agent_call_id or str(uuid4())
-                call.method_name = method_name
-                call.docstring = expanded_docstring
-                call.parent_id = (
-                    self._agent_call_stack[-2] if len(self._agent_call_stack) >= 2 else None
+                # Pass runtime identity, expanded instructions and caller state at
+                # construction. Events must match the wrapper's call ID, not a
+                # builder-generated one.
+                call = CurrentCall.from_method(
+                    method,
+                    args=args,
+                    kwargs=kwargs,
+                    parent_id=(
+                        self._agent_call_stack[-2] if len(self._agent_call_stack) >= 2 else None
+                    ),
+                    call_id=self._agent_call_id or str(uuid4()),
+                    method_name=method_name,
+                    docstring=expanded_docstring,
+                    session_locals=call_session_locals,
                 )
-                call.session_locals = call_session_locals
 
                 # Store current call context in context vars for RuntimeServices.generate()
                 # Using context vars (not instance attrs) allows parallel nested calls
