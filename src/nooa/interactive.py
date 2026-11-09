@@ -124,9 +124,9 @@ class Done(BaseModel):
     ``self.message()`` remains for text you want to show before the turn
     ends. ``explanation`` stays a short status line. ``evidence`` is
     optional: short factual lines a reviewer can check, used when you
-    verified something. ``result`` is set only when a delegated objective
-    or benchmark task completes; it is then a ``TaskResult`` (a worker
-    turn, ``handle_work``, requires one; other turns may leave it unset).
+    verified something. ``result`` is set only when a delegated task
+    completes; it is then a ``TaskResult`` (a worker turn, ``handle_work``,
+    requires one; other turns may leave it unset).
     """
 
     model_config = {"extra": "forbid"}
@@ -139,7 +139,7 @@ class Done(BaseModel):
         description='Short checkable facts, e.g. "pytest tests/x.py: 24 passed"',
     )
     result: Any | None = Field(
-        default=None, description="TaskResult when a delegated or bench task completes"
+        default=None, description="TaskResult when a delegated task completes"
     )
 
     _check_explanation = field_validator("explanation")(_non_blank)
@@ -205,7 +205,7 @@ class Waiting(BaseModel):
 
 
 class TaskResult(BaseModel):
-    """Structured result of a delegated objective or a benchmark task.
+    """Structured result of a delegated task.
 
     A worker turn (``handle_work``) ends with a ``Done`` whose ``result`` is
     one. The field descriptions are what the model reads when it builds one.
@@ -264,8 +264,8 @@ ONE_SHOT_QUESTION: Annotated[str, hidden] = (
 class AskPolicy(Protocol):
     """Whether a turn may end with ``NeedInput``: someone is there to answer it.
 
-    A host installs one as ``InteractiveAgent.ask_policy`` (Atom: its session
-    port, ``False`` for a one-shot worker); ``require_task_result`` reads it.
+    A host installs one as ``InteractiveAgent.ask_policy`` (e.g. ``may_ask``
+    False for a one-shot worker); ``require_task_result`` reads it.
     """
 
     @property
@@ -277,7 +277,7 @@ def require_task_result(agent: Any, result: Any, call: Any) -> None:
     """Reject a worker ``Done`` whose ``result`` is not a ``TaskResult``, and a one-shot question.
 
     The postcondition of every worker turn (``handle_work``). A worker's
-    parent reads it as ``ChildResult.result``; ``self.message()`` text reaches it only as
+    parent reads its ``result``; ``self.message()`` text reaches it only as
     progress notes. A dict that validates as a ``TaskResult`` is accepted
     (the parent receives it as one). A worker that may not ask (a one-shot
     worker) says so through its host-installed ``InteractiveAgent.ask_policy``.
@@ -434,7 +434,7 @@ _QUEUES_EXPR: Annotated[str, hidden] = "self._queue_status()"
 
 @hidden
 class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
-    """Base class for agents driven by an outer dispatcher (TUI, harness, ...).
+    """Base class for agents driven by an outer dispatcher (an interactive host, a harness...).
 
     Subclass this and implement ``handle()`` to build a custom interactive
     agent. ``message()`` is provided for free.
@@ -706,8 +706,8 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
         reads only your result. The task is in ``notification["user_messages"]``;
         its first line says whether you can ask your parent questions (later
         messages there are follow-ups). Your task is the brief; your
-        ``TaskResult`` is your report; a Todo in your list is your own working
-        copy. Do all the work, verify it, then end with exactly one
+        ``TaskResult`` is your report. Do all the work, verify it, then end
+        with exactly one
         ``return_result(...)``:
 
         - ``Done`` with a ``TaskResult``, when the task is finished or blocked
@@ -732,7 +732,7 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
           is still running.
 
         Your parent reads your result: do not send routine progress notes.
-        Use ``self.message()`` (it reaches your parent as a ``ChildMessage``)
+        Use ``self.message()`` (it reaches your parent as a note)
         only for a short note your parent needs before you finish, never the
         report. The full report goes only in ``TaskResult.report``.
         """
