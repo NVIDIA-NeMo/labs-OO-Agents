@@ -50,6 +50,11 @@ def connect_auth_method() -> TerminalAuthMethod:
 def supports_terminal_auth(capabilities: ClientCapabilities | None) -> bool:
     """Whether the client said it runs ``terminal`` auth methods."""
     auth = capabilities.auth if capabilities is not None else None
+    # The schema's default for a missing ``auth`` is the plain dict
+    # ``{"terminal": False}`` (pydantic does not validate defaults), so a
+    # client that leaves ``auth`` out gives a dict here, not AuthCapabilities.
+    if isinstance(auth, dict):
+        return bool(auth.get("terminal"))
     return bool(auth is not None and auth.terminal)
 
 
