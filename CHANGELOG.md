@@ -6,6 +6,16 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- The optional NeMo Relay integration now supports `>=0.11.1,<0.12`, using an
+  explicit reviewed exception to the frozen dependency cutoff. ATIF-v1.7 exports
+  now contain actual answer text, explicit tool-call correlation and readable,
+  bounded tool observations. Legacy LLM/tool response-sanitizer payloads are
+  preserved; only sanitized output is projected into `assistant_message` and
+  `nemo.relay.tool_result@1` events. Scope cleanup cannot replace a method result
+  or exception, nested callback continuations retain per-run policies, and
+  concurrent run roots use isolated stacks. The example offers opt-in Relay
+  diagnostics and CPU/memory measurements. See [the migration guide](docs/nemo-relay.md)
+  for exported event-shape changes and remaining upstream ATIF attribution limits.
 - Core installs now exclude the individually verified LiteLLM releases affected
   by the optional-MCP import regression (1.106.0–1.106.7, 1.108.0–1.108.1, and
   affected prereleases). Future patch and security releases remain eligible;

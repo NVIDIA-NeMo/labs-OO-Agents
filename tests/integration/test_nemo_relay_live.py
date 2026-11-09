@@ -5,9 +5,9 @@
 NOOA_RUN_RELAY_LIVE=1 uv run --extra nemo-relay pytest -m integration -s \
     tests/integration/test_nemo_relay_live.py
 
-Uses existing NVIDIA internal gateway credentials (or OPENAI_API_KEY). Optional
-NOOA_RELAY_LIVE_MODEL and NOOA_RELAY_LIVE_BASE_URL select another Responses
-model/endpoint. No configuration is saved. Artifacts go to pytest's temp directory.
+Uses existing NVIDIA internal gateway credentials (or OPENAI_API_KEY), bound to
+their respective trusted endpoint. NOOA_RELAY_LIVE_MODEL selects another model.
+No configuration is saved. Artifacts go to pytest's temp directory.
 """
 
 from __future__ import annotations
@@ -34,6 +34,38 @@ class RelayAnswer(BaseModel):
     label: str
 
 
+@hidden
+def _live_settings(env):
+    key = env.get("NVIDIA_INFERENCE_API_KEY") or env.get("NVIDIA_INTERNAL_API_KEY")
+    if key:
+        model = env.get("NOOA_RELAY_LIVE_MODEL", "openai/azure/openai/gpt-6.1-sol")
+        base = "https://inference-api.nvidia.com/v1"
+    else:
+        key = env.get("OPENAI_API_KEY")
+        model = env.get("NOOA_RELAY_LIVE_MODEL", "gpt-5-mini")
+        base = "https://api.openai.com/v1"
+    if not key:
+        raise ValueError("Live Relay test requires existing model credentials")
+    override = env.get("NOOA_RELAY_LIVE_BASE_URL")
+    if override and override.rstrip("/") != base:
+        raise ValueError("Refusing to forward existing credentials to a custom live-test endpoint")
+    return model, base, key
+
+
+@pytest.mark.parametrize("credential", ["NVIDIA_INFERENCE_API_KEY", "OPENAI_API_KEY"])
+@pytest.mark.parametrize(
+    "base",
+    [
+        "https://example.invalid/v1",
+        "http://inference-api.nvidia.com/v1",
+        "https://user@inference-api.nvidia.com/v1",
+    ],
+)
+def test_live_credentials_reject_other_endpoints(credential, base):
+    with pytest.raises(ValueError, match="Refusing to forward"):
+        _live_settings({credential: "sentinel-key", "NOOA_RELAY_LIVE_BASE_URL": base})
+
+
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_live_relay_nested_concurrent_atif(tmp_path):
@@ -41,16 +73,7 @@ async def test_live_relay_nested_concurrent_atif(tmp_path):
         pytest.skip("Set NOOA_RUN_RELAY_LIVE=1 for paid model calls")
     relay = pytest.importorskip("nemo_relay")
     env = {**dotenv_values(".env"), **os.environ}
-    key = env.get("NVIDIA_INFERENCE_API_KEY") or env.get("NVIDIA_INTERNAL_API_KEY")
-    if key:
-        model = env.get("NOOA_RELAY_LIVE_MODEL", "openai/azure/openai/gpt-6.1-sol")
-        base = env.get("NOOA_RELAY_LIVE_BASE_URL", "https://inference-api.nvidia.com/v1")
-    else:
-        key = env.get("OPENAI_API_KEY")
-        model = env.get("NOOA_RELAY_LIVE_MODEL", "gpt-5-mini")
-        base = env.get("NOOA_RELAY_LIVE_BASE_URL", "https://api.openai.com/v1")
-    if not key:
-        pytest.fail("Live Relay test requires existing model credentials")
+    model, base, key = _live_settings(env)
     client = ResponsesClient(
         model, api_base=base, api_key=key, max_tokens=4096, reasoning={"effort": "low"}
     )

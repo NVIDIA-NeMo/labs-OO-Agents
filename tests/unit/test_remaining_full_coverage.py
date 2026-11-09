@@ -20,7 +20,6 @@ Covers:
 from __future__ import annotations
 
 import asyncio
-import importlib
 import os
 import runpy
 import sys
@@ -821,38 +820,29 @@ class TestNemoRelayMiddlewareModelExtraction:
         """nemo_relay_llm_middleware extracts model_name from ctx.agent._llm.model."""
         fake_nemo_relay, _ = _make_fake_nemo_relay_for_test()
 
-        # Ensure nooa.nemo_relay_middleware is imported
-        import nooa.nemo_relay_middleware as _nm_ensure  # noqa: F401
+        import nooa.nemo_relay_middleware as nm
 
-        with patch.dict(
-            sys.modules,
-            {"nemo_relay": fake_nemo_relay},
+        # Patch only the adapter references, avoiding reload pollution of later
+        # real-Relay tests when the fake sys.modules entry is restored.
+        with (
+            patch.object(nm, "nemo_relay", fake_nemo_relay),
+            patch.object(nm, "LLMRequest", fake_nemo_relay.LLMRequest),
         ):
-            nm = sys.modules["nooa.nemo_relay_middleware"]
-            importlib.reload(nm)
-            try:
-                mock_agent = MagicMock()
-                mock_agent._llm = MagicMock()
-                mock_agent._llm.model = "gpt-4-test"
+            mock_agent = MagicMock()
+            mock_agent._llm.model = "gpt-4-test"
+            ctx = MagicMock()
+            ctx.agent = mock_agent
+            ctx.client = None
+            ctx.params = {"temperature": 0.5}
+            ctx.messages = [{"role": "user", "content": "hi"}]
+            ctx.response = None
 
-                ctx = MagicMock()
-                ctx.agent = mock_agent
-                ctx.params = {"temperature": 0.5}
-                ctx.messages = [{"role": "user", "content": "hi"}]
-                ctx.response = None
+            async def mock_nxt(c):
+                c.response = None
+                return c
 
-                async def mock_nxt(c):
-                    c.response = None
-                    return c
-
-                # The middleware should extract model_name = "gpt-4-test"
-                # We verify it doesn't crash and nemo_relay.llm.execute is called
-                # with the correct model_name
-                await nm.nemo_relay_llm_middleware(ctx, mock_nxt)
-                call_args = fake_nemo_relay.llm.execute.call_args
-                assert call_args[0][0] == "gpt-4-test"  # first positional arg is model_name
-            finally:
-                importlib.reload(nm)
+            await nm.nemo_relay_llm_middleware(ctx, mock_nxt)
+            assert fake_nemo_relay.llm.execute.call_args[0][0] == "gpt-4-test"
 
 
 def _make_fake_nemo_relay_for_test():

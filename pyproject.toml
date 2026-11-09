@@ -81,9 +81,10 @@ nooa-bench = { workspace = true }
 
 [tool.uv]
 # Extra index URLs to search for packages (in addition to PyPI)
-# Ignore packages uploaded less than 7 days ago to mitigate supply-chain attacks
+# Historical dependency cutoff; advance reviewed packages explicitly.
 exclude-newer = "2026-10-21T00:00:00Z"
-# Relay 0.11.1 was published on November 4; keep the cutoff for other packages.
+# Reviewed exception: Relay 0.11.1 was published on November 4. This is not a
+# rolling seven-day cooldown. Keep the frozen cutoff for other packages.
 exclude-newer-package = { nemo-relay = "2026-11-05T00:00:00Z" }
 # Newer LiteLLM/OpenInference releases export opaque provider reasoning state
 # in OTLP spans, and mcp 2.x stops raising MCP tool-level errors. Hold them

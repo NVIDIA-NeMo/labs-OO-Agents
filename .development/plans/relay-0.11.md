@@ -75,3 +75,36 @@ ATIF observation content are acceptance requirements, not just nonempty exports.
   reviewer independently ran 47 targeted tests and validated all three final
   live artifacts. Final broader regressions: 382 passed. Strengthened live test:
   passed in 22.58 seconds, with two synthetic prefills reported separately.
+
+## Follow-up review triage
+
+The 382-test run above was a selected suite, not the full CI suite. The follow-up
+review exposed missing fake-Relay tests and additional real runtime regressions.
+
+| Finding | Verification and resolution |
+| --- | --- |
+| Red CI / old test doubles | Reproduced all 13 failures; updated tool keywords, effective-client fixture and fake-module cleanup. |
+| Scope cleanup masks results/errors | Reproduced; guarded manual push/pop/reset/binding cleanup preserves the NOOA outcome. |
+| Collection-valued dataclass serialization | Reproduced for set, frozenset, range and deque; display projection now uses sanitized native JSON after execution. |
+| Legacy redactors bypassed | Reproduced for response and scope-end sanitizers; retain legacy payloads through both, then project only their sanitized output. Omitted data and metadata stay omitted. |
+| Duplicate reasoning / missing migration entry | Reasoning is moved after redaction, not copied. CHANGELOG and migration documentation updated. |
+| Live-test credential routing | Reproduced with sentinel credentials; existing keys are bound to their fixed trusted endpoint, rejecting custom overrides before client construction. |
+| Unbounded/opaque/empty displays | Cap human text at 4096 characters plus marker; summarize pickle; preserve omitted/empty results instead of displaying null. |
+| Empty tool-call ID | Normalize to None; real native execution-context regression added. |
+| Cache hit called a guardrail rejection | Real short-circuit tests now get an explicit unsupported replacement/cache result error. No cache replay feature added. |
+| Nested scope-local policy loss | Reproduced; native callback tasks are logical method continuations, while genuine fanout still isolates. |
+| Exception text in scope metadata | Reproduced; function/run scopes record status codes without copying exception strings. |
+| Concurrent roots / overlapping installs | Reproduced stack corruption and duplicate events; isolate root stacks and reference-count one installation per EventManager. |
+| Missing behavioral coverage | Added 20 real-Relay regressions plus six off-network credential-routing cases; flush event queues before loop teardown. |
+| Dependency cutoff/runtime check | The narrow release exception was explicitly approved in the upgrade plan. Clarified the frozen cutoff is not a rolling cooldown; supported versions remain constrained by the package extra. No redundant runtime version parser added. |
+| ATIF attribution claims | Narrowed documentation; provider IDs improve correlation but do not eliminate Relay's documented upstream ordering/ownership limitations. |
+
+Follow-up verification: 212 targeted tests pass, including the formerly missed
+unit files. Real concurrent model workflows and the diagnostics quickstart pass;
+all three fresh exports pass the current official Harbor validator. The complete
+non-live CI-equivalent run passed 13,720 tests (five skipped, three xfailed);
+the final overlapping-installation regression also passes in the targeted run.
+The independent reviewer approved the fixes after reproducing the original
+issues and independently passing 73 targeted tests. Final live verification
+passed in 19.73 seconds. GitHub CI must complete before reporting this follow-up
+as finished.

@@ -45,10 +45,11 @@ from nooa.unifiedllm import CacheBoundary
 
 
 @pytest.fixture(autouse=True)
-def _nemo_relay_scope():
+async def _nemo_relay_scope():
     """Enter a NeMo Relay scope for every test so scope stack is initialised."""
     with nemo_relay.scope.scope("test-agent", nemo_relay.ScopeType.Agent):
         yield
+    await nemo_relay.subscribers.flush_async()
 
 
 # ---------------------------------------------------------------------------
@@ -314,7 +315,7 @@ class TestLLMSanitizeResponse:
         subscriber_saw: list[Any] = []
 
         def _sanitize(response: dict, context) -> dict:
-            msg = response.get("assistant_message", {})
+            msg = response.get("message", {})
             if isinstance(msg, dict) and "content" in msg:
                 msg["content"] = msg["content"].replace("hello", "[REDACTED]")
             return response
@@ -503,9 +504,8 @@ class TestToolSanitizeResponse:
         subscriber_saw: list[Any] = []
 
         def _sanitize(tool_name: str, result: Any) -> Any:
-            if isinstance(result, dict):
-                result["content"] = result["content"].replace("secret", "[REDACTED]")
-                result["result"] = result["result"].replace("secret", "[REDACTED]")
+            if isinstance(result, str):
+                return result.replace("secret", "[REDACTED]")
             return result
 
         def _spy(event: nemo_relay.Event):
@@ -823,6 +823,7 @@ class TestATIFExport:
 
                 await nemo_relay_tool_middleware(ctx, nxt)
 
+            await nemo_relay.subscribers.flush_async()
             traj = exporter.export_json()
             if isinstance(traj, str):
                 import json

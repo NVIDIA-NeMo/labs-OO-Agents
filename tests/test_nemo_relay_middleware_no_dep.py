@@ -30,7 +30,7 @@ def test_canonical_response_projects_to_relay_shape_without_private_state():
 
     payload = nm._relay_response(response)
 
-    assert payload["assistant_message"] == {
+    assert payload["message"] == {
         "role": "assistant",
         "content": "hello",
         "reasoning_content": "plain reasoning",
@@ -61,7 +61,7 @@ def test_canonical_response_never_exposes_private_raw_response_to_relay():
 
     payload = nm._relay_response(response)
 
-    assert payload["assistant_message"]["content"] == "public answer"
+    assert payload["message"]["content"] == "public answer"
     assert "provider-secret" not in repr(payload)
     raw.model_dump.assert_not_called()
 
@@ -71,7 +71,7 @@ def test_state_only_response_does_not_create_a_relay_message():
         LLMResponse(parts=(AssistantReasoning(text="", native={"opaque": "provider-only"}),))
     )
 
-    assert "assistant_message" not in payload
+    assert "message" not in payload
     assert "provider-only" not in repr(payload)
 
 

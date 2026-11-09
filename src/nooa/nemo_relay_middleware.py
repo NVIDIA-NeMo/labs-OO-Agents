@@ -35,10 +35,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager, nullcontext
+from collections.abc import AsyncIterator, Callable, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
 from nooa.llm_types import CacheBoundary, LLMResponse
 from nooa.runtime.middleware import (
@@ -70,13 +72,11 @@ def _relay_response(response: LLMResponse) -> dict[str, Any]:
     """Project the canonical response only when NeMo Relay needs wire JSON."""
     result: dict[str, Any] = {"finish_reason": response.finish_reason}
     if response.content or response.tool_calls or response.reasoning:
-        # Relay's generic ATIF extractor recognizes assistant_message, not
-        # message. Keep this a public projection, never the provider response.
-        result["assistant_message"] = response.public_message()
+        # Preserve the payload shape used by existing response sanitizers.
+        # The event projection below converts only their sanitized output.
+        result["message"] = response.public_message()
     else:
         result["content"] = ""
-    if response.reasoning:
-        result["reasoning"] = response.reasoning
     if response.usage is not None:
         result["usage"] = {
             "prompt_tokens": response.usage.input_tokens,
@@ -117,6 +117,136 @@ except ImportError:
 _current_relay_scope: ContextVar[tuple[Any, Any] | None] = ContextVar(
     "_nooa_relay_scope", default=None
 )
+
+_DISPLAY_LIMIT = 4096
+
+
+def _tool_display(value: Any) -> str:
+    """Bound the display copy; keep opaque pickle data out of human text."""
+    if isinstance(value, dict) and "__nv_pickle__" in value:
+        return "[opaque Python value]"
+    if isinstance(value, str):
+        chunks = iter((value,))
+    else:
+        chunks = json.JSONEncoder(ensure_ascii=False, default=str).iterencode(value)
+    parts = []
+    remaining = _DISPLAY_LIMIT
+    for chunk in chunks:
+        if len(chunk) > remaining:
+            parts.append(chunk[:remaining])
+            parts.append("… [truncated]")
+            break
+        parts.append(chunk)
+        remaining -= len(chunk)
+    return "".join(parts)
+
+
+@contextmanager
+def _project_sanitized_events(kind: str, outcome: dict[str, Any]) -> Iterator[None]:
+    """Adapt telemetry AFTER legacy-shaped response sanitizers have run."""
+    assert nemo_relay is not None
+    owner = nemo_relay.scope.get_handle()
+    registration = uuid4().hex
+
+    def project(event, fields):
+        if event.category != kind or str(event.uuid) != outcome.get("uuid"):
+            return fields
+        metadata = fields.get("metadata")
+        data = fields["data"]
+        # None includes sanitizer omission: never restore the original payload.
+        if data is not None:
+            if kind == "llm" and isinstance(data, dict) and isinstance(data.get("message"), dict):
+                data = dict(data)
+                message = dict(data.pop("message"))
+                reasoning = message.pop("reasoning_content", None)
+                data["assistant_message"] = message
+                if reasoning:
+                    data["reasoning"] = reasoning
+            elif kind == "tool":
+                failed = bool(outcome.get("failed"))
+                data = {
+                    "schema": "nemo.relay.tool_result@1",
+                    "content": _tool_display(data),
+                    "result": data,
+                    "is_error": failed,
+                    "cache": {"replayable": False},
+                }
+        if outcome.get("failed") and isinstance(metadata, dict) and "otel.status_code" in metadata:
+            metadata = {**metadata, "otel.status_code": "ERROR"}
+        return {**fields, "data": data, "metadata": metadata}
+
+    # Preserve legacy shapes for response AND scope-end sanitizers. Identify
+    # this call by its native callback UUID, even when sanitizers omit metadata.
+    nemo_relay.scope_local.register_scope_sanitize_end(owner, registration, 2**31 - 1, project)
+    try:
+        yield
+    finally:
+        try:
+            nemo_relay.scope_local.deregister_scope_sanitize_end(owner, registration)
+        except Exception:
+            _logger.warning("NeMo Relay projection cleanup failed; telemetry may be incomplete")
+
+
+def _reset_scope(token, previous) -> None:
+    try:
+        _current_relay_scope.reset(token)
+    except ValueError:
+        _current_relay_scope.set(previous)
+        _logger.warning("NeMo Relay scope context cleanup failed; telemetry may be incomplete")
+
+
+@contextmanager
+def _managed_callback_scope() -> Iterator[None]:
+    """Relay's callback task is a continuation of the owning NOOA method."""
+    previous = _current_relay_scope.get()
+    token = None
+    if previous is not None:
+        token = _current_relay_scope.set((previous[0], asyncio.current_task()))
+    try:
+        yield
+    finally:
+        if token is not None:
+            _reset_scope(token, previous)
+
+
+@contextmanager
+def _relay_stack(isolate: bool) -> Iterator[None]:
+    assert nemo_relay is not None
+    if not isolate:
+        yield
+        return
+    stack = nemo_relay.create_scope_stack_from_propagation(nemo_relay.capture_propagation_context())
+    binding = nemo_relay.use_scope_stack(stack)
+    binding.__enter__()
+    try:
+        yield
+    finally:
+        try:
+            binding.__exit__(None, None, None)
+        except Exception:
+            _logger.warning("NeMo Relay stack cleanup failed; telemetry may be incomplete")
+
+
+@contextmanager
+def _method_scope(name: str, scope_type: Any, parent: Any = None) -> Iterator[Any]:
+    """Record status without copying exception text or masking method outcomes."""
+    assert nemo_relay is not None
+    handle = nemo_relay.scope.push(name, scope_type, handle=parent)
+    status = "OK"
+    try:
+        yield handle
+    except asyncio.CancelledError:
+        status = "UNSET"
+        raise
+    except BaseException:
+        status = "ERROR"
+        raise
+    finally:
+        try:
+            nemo_relay.scope.pop(handle, metadata={"otel.status_code": status})
+        except Exception:
+            _logger.warning("NeMo Relay scope cleanup failed; telemetry may be incomplete")
+
 
 _INSTALL_MSG = (
     "nemo_relay is required for NeMo Relay integration. Install it with "
@@ -197,9 +327,12 @@ async def nemo_relay_llm_middleware(
     request = LLMRequest({}, safe_params)  # type: ignore[misc]
 
     captured_ctx: LLMCallContext | None = None
+    outcome: dict[str, Any] = {}
 
     async def _wrapper(req: Any) -> Any:
         nonlocal captured_ctx
+        assert nemo_relay is not None
+        outcome["uuid"] = str(nemo_relay.capture_propagation_context().parent_uuid)
         # Apply request intercept modifications back to ctx.
         # NeMo Relay request intercepts can transform the LLMRequest (e.g. inject
         # system messages, modify headers).  The modified request is passed
@@ -215,7 +348,8 @@ async def nemo_relay_llm_middleware(
                 if key in intercepted:
                     ctx.params[key] = intercepted[key]
         # Call the rest of the middleware chain → eventually hits acall()
-        captured_ctx = await nxt(ctx)
+        with _managed_callback_scope():
+            captured_ctx = await nxt(ctx)
         # Return JSON to NeMo Relay (guardrails, events, ATIF).
         resp = captured_ctx.response
         if resp is None:
@@ -227,7 +361,10 @@ async def nemo_relay_llm_middleware(
     # (ATIF export, event subscribers) but the caller always receives
     # the original response.  Conditional-execution guardrails that
     # reject raise GuardrailRejected, which propagates naturally.
-    await nemo_relay.llm.execute(model_name, request, _wrapper, model_name=model_name)  # type: ignore[union-attr]
+    with _project_sanitized_events("llm", outcome):
+        await nemo_relay.llm.execute(  # type: ignore[union-attr]
+            model_name, request, _wrapper, model_name=model_name
+        )
 
     if captured_ctx is not None:
         return captured_ctx
@@ -235,8 +372,8 @@ async def nemo_relay_llm_middleware(
     # Raise an explicit error instead of returning ctx without a response,
     # which would trigger a confusing generic RuntimeError downstream.
     raise RuntimeError(
-        "NeMo Relay guardrail blocked the LLM call — the request was rejected "
-        "before reaching the LLM. Check your NeMo Relay guardrail configuration."
+        "NeMo Relay short-circuited the LLM call. NOOA does not support cached or "
+        "replacement responses; disable response caching/execution short circuits."
     )
 
 
@@ -259,10 +396,12 @@ async def nemo_relay_tool_middleware(
     codec = nemo_relay.typed.BestEffortAnyCodec()  # type: ignore[union-attr]
 
     captured_ctx: ExecutePythonContext | None = None
+    outcome: dict[str, Any] = {"failed": False}
 
     async def _wrapper(inner_args: Any) -> Any:
         nonlocal captured_ctx
         assert nemo_relay is not None
+        outcome["uuid"] = str(nemo_relay.capture_propagation_context().parent_uuid)
         # Apply request intercept modifications back to ctx.
         # NeMo Relay tool request intercepts can transform args (e.g. rewrite code,
         # modify timeout).  The modified args are passed here as `inner_args`;
@@ -274,7 +413,8 @@ async def nemo_relay_tool_middleware(
                 if key in inner_args:
                     ctx.params[key] = inner_args[key]
         # Call the rest of the middleware chain → eventually executes code
-        captured_ctx = await nxt(ctx)
+        with _managed_callback_scope():
+            captured_ctx = await nxt(ctx)
         result = captured_ctx.result
         # Extract meaningful return value (returned_value > signal > stdout)
         from nooa.events import _NO_RETURN
@@ -291,43 +431,36 @@ async def nemo_relay_tool_middleware(
             else:
                 rv = getattr(result, "stdout", None) or None
 
-        encoded = codec.to_json(rv)
         error = getattr(result, "error", None)
         cancelled = getattr(result, "cancelled", False)
+        outcome["failed"] = error is not None or bool(cancelled)
         if error is not None:
-            content = f"{type(error).__name__}: {error}"
+            rv = f"{type(error).__name__}: {error}"
         elif cancelled:
-            content = "Execution cancelled"
-        else:
-            content = (
-                encoded if isinstance(encoded, str) else json.dumps(encoded, ensure_ascii=False)
-            )
-        # ATIF content must be text or content parts. Retain typed data in
-        # result while giving numeric/structured returns a readable observation.
-        payload = {
-            "schema": "nemo.relay.tool_result@1",
-            "content": content,
-            "is_error": error is not None or cancelled,
-            "result": encoded,
-            "cache": {"replayable": False},  # Python cells mutate live REPL state.
-        }
-        return nemo_relay.ToolExecutionResult(payload)
+            rv = "Execution cancelled"
+        # Keep raw values through existing tool-response sanitizers. Convert
+        # their sanitized JSON to display/result fields only at publication.
+        return nemo_relay.ToolExecutionResult(codec.to_json(rv))
 
     # Note: nemo_relay.tools.execute() returns the pre-guardrail result.
     # Sanitize-response guardrails transform data for NeMo Relay internals
     # (ATIF export, event subscribers) but the caller always receives
     # the original result.  Conditional-execution guardrails that reject
     # raise GuardrailRejected, which propagates naturally.
-    await nemo_relay.tools.execute(  # type: ignore[union-attr]
-        "execute_python", args, _wrapper, tool_call_id=ctx.params.get("tool_call_id")
-    )
+    with _project_sanitized_events("tool", outcome):
+        await nemo_relay.tools.execute(  # type: ignore[union-attr]
+            "execute_python",
+            args,
+            _wrapper,
+            tool_call_id=ctx.params.get("tool_call_id") or None,
+        )
 
     if captured_ctx is not None:
         return captured_ctx
     # NeMo Relay guardrails blocked code execution (never invoked _wrapper).
     raise RuntimeError(
-        "NeMo Relay guardrail blocked code execution — the request was rejected "
-        "before running. Check your NeMo Relay guardrail configuration."
+        "NeMo Relay short-circuited Python execution. NOOA does not support cached or "
+        "replacement execution results; disable response caching/execution short circuits."
     )
 
 
@@ -387,26 +520,18 @@ async def nemo_relay_agent_call_middleware(
         parent, owner_task = prev
 
     task = asyncio.current_task()
-    stack_context = nullcontext()
-    if owner_task is not task:
-        # Preserve causal parent/root while isolating concurrent mutations.
-        stack = nemo_relay.create_scope_stack_from_propagation(  # type: ignore[union-attr]
-            nemo_relay.capture_propagation_context()
-        )
-        stack_context = nemo_relay.use_scope_stack(stack)  # type: ignore[union-attr,assignment]
-
     scope_name = f"{type(ctx.agent).__name__}.{ctx.method_name}"
     with (
-        stack_context,
-        nemo_relay.scope.scope(  # type: ignore[union-attr]
-            scope_name, nemo_relay.ScopeType.Function, handle=parent
+        _relay_stack(owner_task is not task),
+        _method_scope(  # type: ignore[union-attr]
+            scope_name, nemo_relay.ScopeType.Function, parent=parent
         ) as handle,
     ):
         token = _current_relay_scope.set((handle, task))
         try:
             return await nxt(ctx)
         finally:
-            _current_relay_scope.reset(token)
+            _reset_scope(token, prev)
 
 
 # ---------------------------------------------------------------------------
@@ -414,10 +539,17 @@ async def nemo_relay_agent_call_middleware(
 # ---------------------------------------------------------------------------
 
 
+@dataclass
+class _RelayInstallation:
+    users: int
+    unsubscribe: tuple[Callable[[], None], ...]
+
+
 def install_nemo_relay(event_manager: EventManager) -> Callable[[], None]:
     """Register NeMo Relay middleware on an event manager.
 
-    Returns an uninstall function that removes all three middleware.
+    Overlapping installations share one middleware chain. The last uninstall
+    removes it; each returned uninstall function is idempotent.
 
     Raises:
         ImportError: If ``nemo_relay`` is not installed.
@@ -425,14 +557,30 @@ def install_nemo_relay(event_manager: EventManager) -> Callable[[], None]:
     if not _HAS_NEMO_RELAY:
         raise ImportError(_INSTALL_MSG)
 
-    unsub_agent = event_manager.intercept(MIDDLEWARE_AGENT_CALL, nemo_relay_agent_call_middleware)
-    unsub_llm = event_manager.intercept(MIDDLEWARE_LLM_CALL, nemo_relay_llm_middleware)
-    unsub_exec = event_manager.intercept(MIDDLEWARE_EXECUTE_PYTHON, nemo_relay_tool_middleware)
+    installation = getattr(event_manager, "_nooa_relay_installation", None)
+    if not isinstance(installation, _RelayInstallation):
+        installation = _RelayInstallation(
+            0,
+            (
+                event_manager.intercept(MIDDLEWARE_AGENT_CALL, nemo_relay_agent_call_middleware),
+                event_manager.intercept(MIDDLEWARE_LLM_CALL, nemo_relay_llm_middleware),
+                event_manager.intercept(MIDDLEWARE_EXECUTE_PYTHON, nemo_relay_tool_middleware),
+            ),
+        )
+        setattr(event_manager, "_nooa_relay_installation", installation)  # noqa: B010
+    installation.users += 1
+    active = True
 
     def uninstall() -> None:
-        unsub_agent()
-        unsub_llm()
-        unsub_exec()
+        nonlocal active
+        if not active:
+            return
+        active = False
+        installation.users -= 1
+        if installation.users == 0:
+            for unsubscribe in installation.unsubscribe:
+                unsubscribe()
+            delattr(event_manager, "_nooa_relay_installation")
 
     return uninstall
 
@@ -465,23 +613,20 @@ async def nemo_relay_scope(
         raise ImportError(_INSTALL_MSG)
 
     uninstall = install_nemo_relay(agent.event_manager)
+    previous = _current_relay_scope.get()
+    task = asyncio.current_task()
     try:
-        with nemo_relay.scope.scope(  # type: ignore[union-attr]
-            scope_name,
-            nemo_relay.ScopeType.Agent,  # type: ignore[union-attr]
-        ) as handle:
-            # Seed the root so agent calls parent off it explicitly rather than
-            # off whatever happens to be on top of the shared stack.  The pop
-            # of this scope is deliberately NOT guarded: with per-task stack
-            # isolation it can only fail if the stack is genuinely corrupt, and
-            # that must surface rather than leave every later trace misrooted.
-            token = _current_relay_scope.set((handle, asyncio.current_task()))
+        with (
+            _relay_stack(previous is None or previous[1] is not task),
+            _method_scope(  # type: ignore[union-attr]
+                scope_name,
+                nemo_relay.ScopeType.Agent,  # type: ignore[union-attr]
+            ) as handle,
+        ):
+            token = _current_relay_scope.set((handle, task))
             try:
                 yield handle
             finally:
-                try:
-                    _current_relay_scope.reset(token)
-                except ValueError:
-                    _current_relay_scope.set(None)
+                _reset_scope(token, previous)
     finally:
         uninstall()

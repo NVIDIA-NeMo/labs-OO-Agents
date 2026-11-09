@@ -53,7 +53,7 @@ async def _invoke_wrapper_for_llm(*args, **kwargs):
     await wrapper(request)
 
 
-async def _invoke_wrapper_for_tools(tool_name, args, wrapper):
+async def _invoke_wrapper_for_tools(tool_name, args, wrapper, *, tool_call_id=None, metadata=None):
     """Default: call the wrapper with the args to simulate NeMo Relay invoking it."""
     await wrapper(args)
 
@@ -190,7 +190,7 @@ class TestNemoRelayLLMMiddleware:
             async def nxt(c):
                 return c
 
-            with pytest.raises(RuntimeError, match="NeMo Relay guardrail blocked the LLM call"):
+            with pytest.raises(RuntimeError, match="NeMo Relay short-circuited the LLM call"):
                 await nm.nemo_relay_llm_middleware(ctx, nxt)
 
     async def test_llm_middleware_with_agent_model(self):
@@ -334,7 +334,9 @@ class TestNemoRelayToolMiddleware:
         """When nemo_relay.tools.execute() never invokes _wrapper, raise RuntimeError."""
         with _nemo_relay_patched() as (nm, fake_nemo_relay, _):
 
-            async def blocking_execute(tool_name, args, wrapper):
+            async def blocking_execute(
+                tool_name, args, wrapper, *, tool_call_id=None, metadata=None
+            ):
                 pass  # don't call wrapper
 
             fake_nemo_relay.tools.execute.side_effect = blocking_execute
@@ -344,7 +346,7 @@ class TestNemoRelayToolMiddleware:
             async def nxt(c):
                 return inner
 
-            with pytest.raises(RuntimeError, match="NeMo Relay guardrail blocked code execution"):
+            with pytest.raises(RuntimeError, match="NeMo Relay short-circuited Python execution"):
                 await nm.nemo_relay_tool_middleware(ctx, nxt)
 
     async def test_tool_middleware_result_none(self):
@@ -418,7 +420,9 @@ class TestNemoRelayToolMiddleware:
         """NeMo Relay intercept can rewrite code; it propagates to ctx."""
         with _nemo_relay_patched() as (nm, fake_nemo_relay, _):
 
-            async def intercepting_execute(tool_name, args, wrapper):
+            async def intercepting_execute(
+                tool_name, args, wrapper, *, tool_call_id=None, metadata=None
+            ):
                 modified_args = {"code": "print('intercepted')", "timeout": 5}
                 await wrapper(modified_args)
 
