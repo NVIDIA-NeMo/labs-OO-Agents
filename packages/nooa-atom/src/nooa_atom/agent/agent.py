@@ -39,10 +39,13 @@ from nooa_atom.tools.todo_list import Todo, TodoList  # noqa: F401
 
 with hidden:
     import inspect
+    import logging
     import re
     import sys
     import time
     import types
+
+    logger = logging.getLogger(__name__)
 
     from nooa import no_trace
     from nooa.config import CodeActConfig, PredictConfig, TruncationConfig
@@ -695,6 +698,11 @@ class AtomAgent(
     _reflection_gate: Annotated[_ReflectionGate, hidden, nosnapshot]
     _namespace_restart_notified: Annotated[bool, hidden, nosnapshot]
     _session_namespace_was_live: Annotated[bool, hidden]
+    # The handle namespace's plain data and cell-defined helpers, captured before each
+    # checkpoint (``before_checkpoint``) and revived into the next namespace after a
+    # restart (``nooa.runtime.cell_state``). Saved with the snapshot, like ``self.v``.
+    _saved_cell_state: Annotated[dict[str, Any] | None, hidden]
+    _pending_cell_state: Annotated[Any, hidden, nosnapshot]
     # The session runs every turn with this method, whatever its turn_method.
     turn_entry: ClassVar[str] = "handle"
     # The fix hint of a blocked subprocess/os.system/network import or call.
@@ -729,6 +737,8 @@ class AtomAgent(
         self._reflection_candidate = None
         self._namespace_restart_notified = False
         self._session_namespace_was_live = False
+        self._saved_cell_state = None
+        self._pending_cell_state = None
         # Core's ``self.producers`` (QueueManager.spawn helpers) is not Atom's:
         # its timers are ``self.jobs.after/every``; tails are ``tail -F`` in a Shell.
         super().__init__(*args, producers=False, **kwargs)
@@ -777,7 +787,39 @@ class AtomAgent(
         if call.method_name == "handle":
             self._handle_namespace = owner
             self._session_namespace_was_live = True
+            pending, self._pending_cell_state = self._pending_cell_state, None
+            if pending is not None:
+                from nooa.runtime.cell_state import apply as apply_cell_state
+
+                report = apply_cell_state(owner, pending)
+                if report.failed:
+                    logger.warning(
+                        "Cell state: %d name(s) not restored: %s",
+                        len(report.failed),
+                        "; ".join(f"{f['name']}: {f['reason']}" for f in report.failed),
+                    )
         return owner
+
+    @hidden
+    @no_trace
+    def before_checkpoint(self) -> None:
+        """Capture the handle namespace's plain data and helpers for the snapshot.
+
+        Called by the session right before it serialises the agent. Skipped
+        names and the reason for each are part of the saved state, so the
+        restore notice can name them.
+        """
+        namespace = self._handle_namespace
+        if namespace is None:
+            return
+        from nooa.runtime.cell_state import capture as capture_cell_state
+
+        try:
+            self._saved_cell_state = capture_cell_state(namespace)
+        except Exception:  # noqa: BLE001 - a checkpoint must never fail on cell state
+            logger.warning(
+                "Cell state: capture failed; keeping the previous saved state", exc_info=True
+            )
 
     @hidden
     @no_trace
@@ -998,10 +1040,21 @@ class AtomAgent(
         self._reflection_gate.start_session()
         self._handle_namespace = None
         if not self._namespace_restart_notified:
-            self._system_messages_in.put(
-                "Session restarted: Python cell variables and helpers were lost; "
-                "self.v and saved history remain. Recreate needed live objects."
-            )
+            saved = self._saved_cell_state if isinstance(self._saved_cell_state, dict) else None
+            if saved:
+                from nooa.runtime.cell_state import decode, restore_notice
+
+                # Stage now so the notice is exact; the first handle() call binds the names.
+                staged = decode(saved)
+                report = staged.report
+                report.restored = staged.names
+                self._pending_cell_state = saved
+                self._system_messages_in.put(restore_notice(report))
+            else:
+                self._system_messages_in.put(
+                    "Session restarted: Python cell variables and helpers were lost; "
+                    "self.v and saved history remain. Recreate needed live objects."
+                )
             self._namespace_restart_notified = True
         self._session_namespace_was_live = False
         self._install_todo_list()

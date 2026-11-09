@@ -273,6 +273,11 @@ class _SourceMetadata(ast.NodeTransformer):
 
     visit_AsyncFunctionDef = visit_FunctionDef
 
+    def visit_ClassDef(self, node):
+        # Classes keep their source the same way, so a session snapshot can
+        # define a cell's class again (``nooa.runtime.cell_state``).
+        return self.visit_FunctionDef(node)
+
 
 def _check_reserved(table: symtable.SymbolTable, reserved: frozenset[str]) -> None:
     for symbol in table.get_symbols():
