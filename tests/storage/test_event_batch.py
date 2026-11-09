@@ -315,3 +315,36 @@ def test_batch_accepts_ordinary_subclass_with_unrelated_frozen_field(tmp_path, b
         assert backend.get("1") == event
         if backend_kind == "memory":
             assert backend.get("1") is event
+
+
+@pytest.mark.parametrize("backend_kind", ["memory", "sqlite"])
+def test_record_batch_validates_each_batch_once(tmp_path, monkeypatch, backend_kind):
+    """The manager leaves full validation to the backend: one pass per batch.
+
+    The manager and the backend both validated, so a sqlite batch ran the
+    per-event ID lookup twice.
+    """
+    from contextlib import ExitStack
+
+    from nooa.runtime import event_backend
+
+    real = event_backend._validate_fresh_batch
+    calls = []
+
+    def counting(events, backend, **kwargs):
+        calls.append(len(events))
+        return real(events, backend, **kwargs)
+
+    monkeypatch.setattr(event_backend, "_validate_fresh_batch", counting)
+    with ExitStack() as stack:
+        manager = EventManager()
+        if backend_kind == "sqlite":
+            storage = stack.enter_context(SQLiteStorageManager(tmp_path / "once.db"))
+            manager = EventManager(backend=storage.event_backend)
+        events = [Metadata(description="one"), Metadata(description="two")]
+        assert manager.record_batch(events) == ["1", "2"]
+        assert calls == [2]
+        # Validation still runs: a reused event is rejected by the backend.
+        with pytest.raises(ValueError, match="fresh events"):
+            manager.record_batch([events[0]])
+        assert calls == [2, 1]
