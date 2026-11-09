@@ -55,17 +55,3 @@ class BlockSyntaxError(BlockError):
             f'  self.context["{key}"] = "your content here"'
         )
         super().__init__(message)
-
-
-class ProtectedBlockError(BlockError):
-    """Raised when trying to modify or remove a protected block.
-
-    Protected blocks are set by the framework and cannot be modified
-    by generated code at runtime.
-    """
-
-    def __init__(self, key: str, operation: str = "modify"):
-        self.key = key
-        self.operation = operation
-        message = f'Cannot {operation} protected block: "{key}"'
-        super().__init__(message)

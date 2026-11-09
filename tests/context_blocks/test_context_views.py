@@ -411,7 +411,7 @@ async def test_skill_discovery_does_not_reserve_active_skills_name(method):
     )
 
 
-async def test_protected_key_suppresses_skill_fallback_without_evaluation():
+async def test_skill_block_named_like_a_view_block_is_an_extra_block():
     class DeclaredSkill(Skill):
         context_block = ("state", Context(expr="self.read_skill_state()"))
         reads = 0
@@ -430,8 +430,9 @@ async def test_protected_key_suppresses_skill_fallback_without_evaluation():
 
     agent = Example()
     items = await agent.runtime._prepare_context(Example.run)
-    assert len([item for item in items if getattr(item, "key", None) == "state"]) == 1
-    assert agent.skill.reads == 0
+    states = [item.content for item in items if getattr(item, "key", None) == "state"]
+    assert len(states) == 2
+    assert states[-1] == "skill state"
 
 
 async def test_manager_declaration_wins_without_evaluating_skill_fallback():
@@ -594,10 +595,10 @@ def test_event_helper_preserves_native_only_assistant_replay():
 
 async def test_default_view_boundary_with_empty_history_and_no_trailing_context():
     class Example(Agent, llm=object()):
+        @strategy(context_view=CodeActView(state=False))
         async def run(self): ...
 
     agent = Example()
-    agent.context["state"] = None
     items = await agent.runtime._prepare_context(Example.run)
     assert isinstance(items[-1], CacheBoundary)
     assert sum(isinstance(item, CacheBoundary) for item in items) == 1

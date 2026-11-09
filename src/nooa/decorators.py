@@ -70,8 +70,12 @@ def strategy(
         from nooa.context_blocks import ScopedContext
 
         # Simple context dict (recommended):
-        @strategy(CodeActStrategy(), context={"focus": "security", "self": None})
+        @strategy(CodeActStrategy(), context={"focus": "security", "notes": None})
         async def analyze(self): ...
+
+        # Turn off a block the view builds itself, via the view's own option:
+        @strategy(context_view=CodeActView(state=False))
+        async def summarize(self): ...
 
         # With a custom view owning event selection:
         @strategy(context_view=ResearchView())

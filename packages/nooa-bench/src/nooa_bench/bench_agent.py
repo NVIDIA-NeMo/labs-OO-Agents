@@ -34,12 +34,38 @@ with _hidden:
     from nooa import Agent, Context, no_trace, strategy
     from nooa.agentdoc import doc, spec
     from nooa.config import CodeActConfig, LoopGuardConfig
+    from nooa.context_blocks import BlockMetadata, Role
+    from nooa.context_view import Block
+    from nooa.default_context_view import CodeActV2View
     from nooa.interactive import SummarizationConfig, install_summarizer
     from nooa.strategies import CodeActV2
     from nooa.unifiedllm import FakeLLMClient
 
     # The task text is rendered in full; other inputs keep the default bounds.
     _TaskDescription = Annotated[str, spec(max_string=None)]
+
+    class _BenchView(CodeActV2View):
+        """CodeActV2's view with concise class docs and no state or cell-state inventory.
+
+        The namespace context stays; the duplicated state blocks are dropped.
+        """
+
+        async def view_blocks(self, owner: Any, call: Any) -> tuple[Block, ...]:
+            blocks = await super().view_blocks(owner, call)
+            return tuple(
+                _concise_interface(owner) if block.key == "self" else block
+                for block in blocks
+                if block.key not in {"state", "python_cell_state"}
+            )
+
+    def _concise_interface(owner: Any) -> Block:
+        return Block(
+            key="self",
+            content=doc(type(owner), concise=True),
+            role=Role.SYSTEM,
+            metadata=BlockMetadata(expr="doc(type(self), concise=True)", static=True),
+        )
+
 
 if TYPE_CHECKING:
     from nooa.unifiedllm import UnifiedLLM
@@ -57,11 +83,8 @@ _OPTIONAL_TESTBED_ACTIVATE = (
 _SOLVE_STRATEGY = CodeActV2(
     config=CodeActConfig(max_retries=10, cell_timeout=1800.0, loop_guard=LoopGuardConfig())
 )
+_SOLVE_VIEW = _BenchView()
 _SOLVE_CONTEXT = {
-    "state": None,
-    "execution_context": None,
-    "python_cell_state": None,
-    "self": Context(expr="doc(type(self), concise=True)", prefix=True),
     # Method inputs remain live even if their prefill events are summarized.
     # Honor description's unbounded string spec while keeping other inputs bounded.
     "task": Context(
@@ -268,6 +291,7 @@ class BenchAgent(
     @strategy(
         _SOLVE_STRATEGY,
         context=_SOLVE_CONTEXT,
+        context_view=_SOLVE_VIEW,
     )
     async def _solve_task(
         self,

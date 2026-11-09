@@ -320,19 +320,6 @@ class TestContextBlockSelection:
         assert "my_status" not in cm
         assert registry_ctx.active_skills() == ()
 
-    def test_deactivate_does_not_remove_protected_block(self, registry_ctx, agent_ctx):
-        """If a context block key happens to be protected, deactivate won't remove it."""
-        cm = agent_ctx.context_manager
-        cm.set_dynamic_protected("my_status", "self.something()")
-
-        skill = SkillWithContextBlock()
-        registry_ctx.register("nemo.my_skill", skill)
-        registry_ctx.activate(["nemo.my_skill"])
-        registry_ctx.deactivate(["nemo.my_skill"])
-
-        # Protected block should still be present
-        assert "my_status" in cm
-
     def test_context_block_with_mocked_skill_does_not_mutate_manager(self, registry_ctx, agent_ctx):
         mock_skill = MagicMock()
         registry_ctx.register("nemo.mocked", mock_skill)

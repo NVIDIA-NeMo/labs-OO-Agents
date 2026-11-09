@@ -251,15 +251,6 @@ class Agent(metaclass=AgentMeta):
         # Initialize context state (always present, hidden)
         self.context_manager = ContextManager()
 
-        # Reserve framework block names and their default placement. The default
-        # view derives their content directly from the agent; declarations here
-        # are therefore overrides only.
-        cm = self.context_manager
-        cm.protect("system_prompt", static=True)
-        cm.protect("self", static=True)
-        cm.protect("events_api", static=True)
-        cm.protect("state", static=False)
-
         # Apply class-level context blocks (from __init_subclass__)
         class_context = getattr(self.__class__, "_agent_context_blocks", None)
         if class_context:
@@ -293,20 +284,16 @@ class Agent(metaclass=AgentMeta):
     @no_trace
     @hidden
     def _apply_context_dict(self, blocks: "dict[str, str | DynamicContext | None]") -> None:
-        """Apply a dict of context block overrides.
-
-        Used by __init__ to apply class-level and instance-level context.
-        Routing between protected and unprotected APIs is handled by
-        ContextManager.apply_override().
+        """Store class-level and instance-level context blocks.
 
         Args:
-            blocks: Dict of overrides:
-                - str: Static content
-                - DynamicContext("expr"): DynamicContext expression
-                - None: Remove block (including protected blocks)
+            blocks: Dict of user blocks, as accepted by ``self.context[key] = value``:
+                - str: Literal content
+                - Context(...) / DynamicContext("expr"): Literal or expression block
+                - None: Suppress a user, skill, or decorator/scoped block by name
         """
         for key, value in blocks.items():
-            self.context_manager.apply_override(key, value)
+            self.context_manager[key] = value
 
     @no_trace
     @hidden

@@ -29,8 +29,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_FRAMEWORK_KEYS = frozenset({"system_prompt", "self", "state", "events_api"})
-
 
 def active_skills(agent: "Agent") -> tuple["Skill", ...]:
     """Return visible attached skills in stable attribute order."""
@@ -108,24 +106,18 @@ async def materialize_manager_blocks(
     manager: Any,
     agent: "Agent",
     call: "CurrentCall",
-    *,
-    include: frozenset[str] | None = None,
-    exclude: frozenset[str] = frozenset(),
 ) -> tuple[Block, ...]:
-    """Materialize selected declarations from one ContextManager snapshot."""
+    """Materialize the enabled user blocks of one ContextManager snapshot."""
     blocks: list[Block] = []
     for key, value in manager.declarations():
-        if (include is not None and key not in include) or key in exclude:
-            continue
         if manager.is_disabled(key):
             continue
 
         is_dynamic = isinstance(value, DynamicContext)
         content = await _resolve_value(key, value, owner=agent, call=call)
-        protected = manager.is_protected(key)
         metadata = BlockMetadata(
             expr=value.expr if is_dynamic else None,
-            user_block=not protected,
+            user_block=True,
             static=manager.is_static(key),
         )
         blocks.append(_block(key, content, metadata))
@@ -356,7 +348,7 @@ async def collect_skill_blocks(
         if skill.context_block is None:
             continue
         key, declaration = skill.context_block
-        if key in disabled or key in declaration_keys or agent.context_manager.is_protected(key):
+        if key in disabled or key in declaration_keys:
             continue
         content = await _resolve_value(key, declaration, owner=skill, call=call)
         expr = declaration.expr
@@ -371,12 +363,26 @@ async def collect_skill_blocks(
 
 
 class ManagedContextView(ContextView["Agent"]):
-    """Reusable assembly for the built-in manager-backed context policies."""
+    """Reusable assembly for the built-in manager-backed context policies.
+
+    The view builds its own blocks: the agent's system prompt, its documented
+    interface (``self``), the events API when exposed, the agent state, and the
+    strategy instruction blocks. User blocks from ``self.context``, skill blocks,
+    and decorator/scoped context are added next to them; a block with the same
+    name is an extra block and never replaces or hides one the view builds.
+
+    Args:
+        state: Include the ``state`` block, the agent's current field values.
+    """
 
     block_order: tuple[str, ...] | None = None
+    state: bool = True
+
+    def __init__(self, *, state: bool = True) -> None:
+        self.state = state
 
     async def instruction_blocks(self, owner: "Agent", call: "CurrentCall") -> Mapping[str, Any]:
-        """Return this view's strategy instruction blocks, applied over the agent's blocks."""
+        """Return this view's strategy instruction blocks."""
         return {}
 
     def history(self, owner: "Agent", call: "CurrentCall") -> Iterable[EventBase]:
@@ -386,102 +392,44 @@ class ManagedContextView(ContextView["Agent"]):
         """
         return visible_events(owner)
 
-    async def _materialize_agent_blocks(
-        self,
-        owner: "Agent",
-        call: "CurrentCall",
-        *,
-        disabled: set[str],
-        declaration_keys: frozenset[str],
-    ) -> tuple[Block, ...]:
-        manager = owner.context_manager
-        default_builders = (
-            ("system_prompt", system_prompt_block),
-            ("self", agent_interface_block),
-            ("events_api", events_api_block),
-            ("state", agent_state_block),
-        )
-        blocks_list: list[Block] = []
-        for key, build in default_builders:
-            if key in disabled:
-                continue
-            if key in declaration_keys:
-                overrides = await materialize_manager_blocks(
-                    manager, owner, call, include=frozenset({key})
-                )
-                block = overrides[0] if overrides else None
-            elif not manager.is_protected(key):
-                continue
-            else:
-                block = await build(owner, call)
-            if block is not None:
-                blocks_list.append(block)
+    async def view_blocks(self, owner: "Agent", call: "CurrentCall") -> tuple[Block, ...]:
+        """Build the blocks this view owns from the agent and the strategy.
 
-        blocks: tuple[Block, ...] = tuple(blocks_list)
-        blocks += await materialize_manager_blocks(manager, owner, call, exclude=_FRAMEWORK_KEYS)
-        return blocks
+        Owners that are not an ``Agent``, such as standalone functions, get only
+        the strategy blocks.
+        """
+        from nooa.agent import Agent
 
-    async def _apply_override_layers(
-        self,
-        owner: "Agent",
-        call: "CurrentCall",
-        blocks: tuple[Block, ...],
-        *,
-        disabled: set[str],
-    ) -> tuple[Block, ...]:
-        blocks = await apply_block_overrides(
-            blocks,
-            await self.instruction_blocks(owner, call),
-            agent=owner,
-            call=call,
-            disabled=disabled,
+        builders = []
+        if isinstance(owner, Agent):
+            builders = [system_prompt_block, agent_interface_block, events_api_block]
+            if self.state:
+                builders.append(agent_state_block)
+        blocks = [block for build in builders if (block := await build(owner, call)) is not None]
+        return await apply_block_overrides(
+            blocks, await self.instruction_blocks(owner, call), agent=owner, call=call
         )
 
-        blocks = await apply_block_overrides(
-            blocks,
-            call.decorator_context,
-            agent=owner,
-            call=call,
-            disabled=disabled,
-        )
-        blocks = await apply_block_overrides(
-            blocks,
-            call.scoped_context,
-            agent=owner,
-            call=call,
-            disabled=disabled,
-        )
-        return blocks
-
-    async def assemble(self, owner: "Agent", call: "CurrentCall") -> AsyncIterator[ContextItem]:
+    async def context_blocks(self, owner: "Agent", call: "CurrentCall") -> tuple[Block, ...]:
+        """Materialize user, skill, and decorator/scoped blocks."""
         manager = owner.context_manager
         disabled = manager.disabled()
-        from nooa.agentdoc.visibility import is_hidden_field
-
-        if is_hidden_field(owner, "events"):
-            disabled = disabled | {"events_api"}
-        declaration_keys = frozenset(key for key, _ in manager.declarations())
-
-        blocks = await self._materialize_agent_blocks(
-            owner,
-            call,
-            disabled=disabled,
-            declaration_keys=declaration_keys,
-        )
+        blocks = await materialize_manager_blocks(manager, owner, call)
         skill_blocks = await collect_skill_blocks(
             owner,
             call,
             disabled=disabled,
-            declaration_keys=declaration_keys,
+            declaration_keys=frozenset(key for key, _ in manager.declarations()),
         )
         blocks = replace_blocks_by_key(blocks, skill_blocks)
-        blocks = await self._apply_override_layers(
-            owner,
-            call,
-            blocks,
-            disabled=disabled,
-        )
+        for overrides in (call.decorator_context, call.scoped_context):
+            blocks = await apply_block_overrides(
+                blocks, overrides, agent=owner, call=call, disabled=disabled
+            )
+        return blocks
 
+    async def assemble(self, owner: "Agent", call: "CurrentCall") -> AsyncIterator[ContextItem]:
+        blocks = (*await self.view_blocks(owner, call), *await self.context_blocks(owner, call))
         blocks = order_blocks(blocks, self.block_order)
         prefix, trailing = partition_blocks(blocks)
 
