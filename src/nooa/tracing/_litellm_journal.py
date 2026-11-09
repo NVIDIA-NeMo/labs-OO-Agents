@@ -634,9 +634,37 @@ class MessageJournalCallback(CustomLogger):
     def log_failure_event(
         self, kwargs: dict, response_obj: Any, start_time: Any, end_time: Any
     ) -> None:
+        del response_obj
+        session_id = self._session()
         call_id = kwargs.get("litellm_call_id", "")
         with self._lock:
-            self._call_inputs.pop(call_id, None)
+            stored = self._call_inputs.pop(call_id, None)
+        if stored is None:
+            log.warning(
+                "[MessageJournal] log_failure_event fired for call_id=%r with no prior "
+                "log_pre_api_call — input_skeleton will be empty (retry or out-of-order event?)",
+                call_id,
+            )
+            input_skeleton, span_id = [], None
+        else:
+            input_skeleton, span_id = stored
+
+        # Failed LLM spans are stripped by the journal exporter just like successful
+        # spans. Publish the input-side call record even though there is no assistant
+        # output so readers can reconstruct the prompt that caused the failure.
+        record: dict = {
+            "call_id": call_id,
+            "session_id": session_id,
+            "model": kwargs.get("model", ""),
+            "ts_start": _to_ts(start_time),
+            "ts_end": _to_ts(end_time),
+            "input_skeleton": input_skeleton,
+            "output_messages": [],
+            "tokens": None,
+        }
+        if span_id:
+            record["span_id"] = span_id
+        self._send_call(session_id, record)
 
     # ------------------------------------------------------------------
     # Async hooks — delegate to sync; ContextVar propagates correctly

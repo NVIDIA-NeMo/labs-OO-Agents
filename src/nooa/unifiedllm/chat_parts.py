@@ -11,7 +11,10 @@ from typing import Any
 
 from nooa._immutable_json import json_containers
 from nooa.llm_types import AssistantPart, AssistantReasoning, AssistantText, LLMResponse, ToolCall
+from nooa.request_interface import interface_for_provider
+from nooa.unifiedllm.cache_policy import wrap_anthropic_text
 
+from .media_inputs import check_replayed_native_media
 from .replay_state import (
     ReasoningReplayError,
     _field,
@@ -119,7 +122,14 @@ def capture_chat_parts(message: Any, scope: str | None) -> tuple[AssistantPart, 
     if fields is not None and not isinstance(fields, dict):
         raise ReasoningReplayError("Malformed provider_specific_fields in provider response.")
     if fields:
-        _warn_unknown_fields(fields, {"thought_signatures"}, "a provider message")
+        known = {"thought_signatures"}
+        # LiteLLM moves a readable ``reasoning`` field (vLLM, NVIDIA Inference Hub)
+        # to ``reasoning_content`` but keeps a copy here. That copy is the text
+        # already captured above, not unknown provider state.
+        for key in ("reasoning", "reasoning_content"):
+            if isinstance(fields.get(key), str) and fields[key] == reasoning:
+                known.add(key)
+        _warn_unknown_fields(fields, known, "a provider message")
         if "thought_signatures" in fields:
             signatures = fields["thought_signatures"]
             if (
@@ -180,7 +190,13 @@ def capture_chat_parts(message: Any, scope: str | None) -> tuple[AssistantPart, 
     return tuple(parts)
 
 
-def project_chat_turn(turn: LLMResponse, scope: str | None) -> tuple[dict, dict[str, str]]:
+def project_chat_turn(
+    turn: LLMResponse,
+    scope: str | None,
+    *,
+    anthropic_cache_marking: bool = False,
+    media_inputs=None,
+) -> tuple[dict, dict[str, str]]:
     """Build request-owned Chat fields from an immutable assistant turn.
 
     Projection is the only outbound layer that interprets native part data.
@@ -205,6 +221,13 @@ def project_chat_turn(turn: LLMResponse, scope: str | None) -> tuple[dict, dict[
     call_ids: dict[str, str] = {}
     for part in turn.parts:
         native = json_containers(part.native) if compatible and part.native else {}
+        if isinstance(part, AssistantText) and native:
+            # This projection serves CompletionClient only, which sends either
+            # native Anthropic Messages or OpenAI-compatible Chat. ResponsesClient
+            # turns are projected in response_parts.py with interface="responses".
+            check_replayed_native_media(
+                native, media_inputs, interface=interface_for_provider(provider)
+            )
         if isinstance(part, ToolCall):
             call_id = part.id
             if signature := native.pop("inline_thought_signature", None):
@@ -242,7 +265,13 @@ def project_chat_turn(turn: LLMResponse, scope: str | None) -> tuple[dict, dict[
         elif part.text:
             text.append(part.text)
     if text:
-        message["content"] = "\n\n".join(text)
+        joined = "\n\n".join(text)
+        # Anthropic's cache_control marker needs a content block, not a bare
+        # string; wrap unconditionally so the shape is stable whether or not
+        # this turn is the one apply_cache_policy marks. anthropic_cache_marking is
+        # the actual marking decision, not scope's resolved provider -- see
+        # prepare_chat_messages for why those can disagree.
+        message["content"] = [wrap_anthropic_text(joined)] if anthropic_cache_marking else joined
     elif message.get("tool_calls"):
         message["content"] = None
     return message, call_ids

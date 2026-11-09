@@ -56,7 +56,7 @@ def test_edit_jumps_to_settings_preserving_custom_fields(registry, monkeypatch, 
     monkeypatch.setattr(connect, "discover", forbidden)
     monkeypatch.setattr(connect, "catalogue", forbidden)
 
-    def edit(data):
+    def edit(data, **kwargs):
         assert data["context_length"] == 50000
         data["context_length"] = 64000
         return data
@@ -64,8 +64,9 @@ def test_edit_jumps_to_settings_preserving_custom_fields(registry, monkeypatch, 
     monkeypatch.setattr(_connect_prompts, "edit_model_details", edit)
     result = CliRunner().invoke(
         command,
-        ["--edit-model", *selector, "--no-probe"],
-        input=("saved\n" if not selector else "") + "use\ny\ny\n",
+        ["--edit-model", *selector, "--media-inputs", "", "--no-probe"],
+        input=("saved\n" if not selector else "")
+        + "default\nchange\nlimits\nrecommended\ndefault\nsave\ny\ny\n",
     )
     assert result.exit_code == 0, result.output
     actual = yaml.safe_load(path.read_text())["models"]["saved"]
@@ -89,11 +90,41 @@ def test_edit_cancel_preserves_file(registry, monkeypatch):
 
     path, _ = registry
     before = path.read_bytes()
-    monkeypatch.setattr(_connect_prompts, "edit_model_details", lambda data: data)
-    result = CliRunner().invoke(command, ["--edit-model", "saved", "--no-probe"], input="cancel\n")
+    monkeypatch.setattr(_connect_prompts, "edit_model_details", lambda data, **kwargs: data)
+    result = CliRunner().invoke(
+        command,
+        ["--edit-model", "saved", "--media-inputs", "", "--no-probe"],
+        input="default\nsave\nn\n",
+    )
     assert result.exit_code == 0, result.output
     assert path.read_bytes() == before
     assert not path.with_name("secrets.yaml").exists()
+
+
+def test_edit_decision_model_preserves_flat_entry(registry):
+    path, _ = registry
+    original = {
+        "model_name": "decision-model",
+        "client_type": "decision",
+        "api_style": "systemone",
+        "endpoint": "https://decision.example/v1/systemone",
+        "api_key_env": "EDIT_TEST_KEY",
+        "custom_metadata": "keep me",
+    }
+    path.write_text(yaml.safe_dump({"models": {"saved": original}}))
+
+    result = CliRunner().invoke(
+        command,
+        ["--edit-model", "saved", "--no-probe", "--yes"],
+    )
+
+    assert result.exit_code == 0, result.output
+    actual = yaml.safe_load(path.read_text())["models"]["saved"]
+    for key, value in original.items():
+        assert actual[key] == value
+    assert "max_tokens" not in actual
+    assert "context_window" not in actual
+    assert "No context window selected" not in result.output
 
 
 @pytest.mark.parametrize("explicit", [False, True])
@@ -107,6 +138,8 @@ def test_endpoint_reuses_saved_variable_unless_explicit(registry, explicit):
         "https://api.test/v1/",
         "--api-style",
         "chat",
+        "--media-inputs",
+        "",
         "--no-probe",
         "--no-catalogue",
         "--yes",
@@ -137,10 +170,12 @@ def test_pasted_key_is_saved_only_with_separate_consent(registry, monkeypatch, c
             "--api-key-env",
             "NEW_TEST_KEY",
             "--prompt-key",
+            "--media-inputs",
+            "",
             "--no-probe",
             "--no-catalogue",
         ],
-        input=f"private-value\ny\n{choice}\n",
+        input=f"private-value\n262144\n262144\nsave\ny\n{choice}\n",
     )
     assert result.exit_code == 0, result.output
     secret = path.with_name("secrets.yaml")
@@ -210,11 +245,63 @@ def test_final_save_cancel_does_not_persist_pasted_key(registry):
             "--api-key-env",
             "NEW_TEST_KEY",
             "--prompt-key",
+            "--media-inputs",
+            "",
             "--no-probe",
             "--no-catalogue",
         ],
-        input="private-value\nn\n",
+        input="private-value\n262144\n262144\nsave\nn\n",
     )
     assert result.exit_code == 0, result.output
     assert path.read_bytes() == before
     assert not path.with_name("secrets.yaml").exists()
+
+
+def test_edit_model_with_working_dir_warns_when_source_is_not_the_target(
+    registry, tmp_path, monkeypatch
+):
+    """--edit-model finds an alias via entries(), which only redirects to
+    the --working-dir target's own file when that file already exists on
+    disk (it cannot read a file that isn't there yet) -- otherwise the
+    alias comes from the general chain instead. Saving that into the
+    working-dir target without saying so looks like an in-place edit of the
+    target's own prior settings, when it is actually a copy of a different
+    file's data into a project that never defined this alias.
+    """
+    from nooa_cli.commands import _connect_prompts as _connect_prompts
+
+    from nooa.unifiedllm import connect
+
+    path, _ = registry
+
+    async def forbidden(*args, **kwargs):
+        raise AssertionError("Editing does not discover models or fetch metadata")
+
+    monkeypatch.setattr(connect, "discover", forbidden)
+    monkeypatch.setattr(connect, "catalogue", forbidden)
+    monkeypatch.setattr(
+        _connect_prompts, "choose_reply_limit", lambda suggested, ceiling, **kw: suggested
+    )
+
+    target = tmp_path / "target_project"
+    target.mkdir()
+    result = CliRunner().invoke(
+        command,
+        [
+            "--edit-model",
+            "saved",
+            "--working-dir",
+            str(target),
+            "--media-inputs",
+            "",
+            "--no-probe",
+            "--yes",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    normalized_output = " ".join(result.output.split())
+    assert "Editing saved from" in normalized_output
+    assert "does not define" in normalized_output and "yet" in normalized_output
+    assert "copying it in from" in normalized_output
+    saved = yaml.safe_load((target / ".nooa" / "llm_config.yaml").read_text())
+    assert saved["models"]["saved"]["model_name"] == "openai/vendor/model"

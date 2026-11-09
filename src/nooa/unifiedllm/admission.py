@@ -1,0 +1,703 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+"""Process-local admission control for asynchronous LLM provider calls.
+
+The registry in this module is deliberately process local.  It coordinates
+``UnifiedLLM`` clients and event loops in one Python process, but it is not a
+distributed rate limiter or inference scheduler.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import logging
+import math
+import os
+import re
+import threading
+import time
+from collections import deque
+from collections.abc import Callable, Coroutine, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
+from typing import Any, Literal, Protocol, runtime_checkable
+from urllib.parse import urlsplit, urlunsplit
+
+from .cooldown import retry_after_delay
+
+logger = logging.getLogger(__name__)
+
+_GROUP_LABEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}$")
+
+AdmissionOutcome = Literal[
+    "immediate",
+    "admitted_after_wait",
+    "call_cap",
+    "timeout",
+    "cancelled",
+    "unavailable",
+]
+AdmissionObserver = Callable[[dict[str, Any]], None]
+
+
+class AdmissionError(Exception):
+    """Base class for failures that happen before provider dispatch."""
+
+
+class AdmissionTimeoutError(AdmissionError):
+    """Raised when a provider attempt times out before admission.
+
+    This intentionally does not inherit from :class:`TimeoutError`: the normal
+    provider retry policy treats timeouts as retryable, while an admission
+    timeout must be terminal for that attempt chain to avoid feeding an already
+    congested queue.
+    """
+
+
+class AdmissionCallCapError(AdmissionError):
+    """Raised before provider dispatch when an admission call budget is exhausted."""
+
+
+class AdmissionUnavailableError(AdmissionError):
+    """Raised when a configured external admission controller is unavailable."""
+
+
+@runtime_checkable
+class AdmissionPermit(Protocol):
+    """An idempotently releasable slot returned by an admission controller."""
+
+    def release(self) -> None:
+        """Return temporary concurrency capacity to the controller."""
+
+
+@runtime_checkable
+class CooldownAdmissionPermit(AdmissionPermit, Protocol):
+    """Optional permit feedback for a shared provider-directed cooldown.
+
+    Existing controllers need only implement :class:`AdmissionPermit`. The
+    provider task calls this extension before releasing its slot when an
+    overload response supplies a valid ``Retry-After`` delay.
+    """
+
+    async def cooldown(self, delay_s: float) -> None:
+        """Extend the group's not-before time without retrying the attempt."""
+
+
+@runtime_checkable
+class AdmissionController(Protocol):
+    """Pluggable admission boundary for one asynchronous provider attempt.
+
+    Implementations may coordinate one process, a process family, or a remote
+    service. They report one observation per acquisition outcome and return a
+    permit only when the provider attempt may be dispatched.
+    """
+
+    async def acquire(self, observer: AdmissionObserver) -> AdmissionPermit | None:
+        """Acquire capacity or raise before provider dispatch."""
+
+
+async def _run_admitted_attempt[T](
+    call: Callable[[], Coroutine[Any, Any, T]],
+    permit: AdmissionPermit,
+) -> T:
+    """Run an admitted attempt, publishing optional feedback before release.
+
+    The provider task owns this lifecycle so feedback and cleanup still happen
+    after its caller stops waiting. Overload interpretation and permit-specific
+    feedback stay inside the admission layer; transports need only schedule
+    this generic attempt wrapper. Release-only external permits remain valid.
+    """
+    try:
+        return await call()
+    except Exception as error:
+        if isinstance(permit, CooldownAdmissionPermit):
+            try:
+                delay = retry_after_delay(error)
+                if delay is not None:
+                    await permit.cooldown(delay)
+            except Exception:
+                # Feedback must not replace the provider failure or skip
+                # cleanup. Headers and exception messages can contain secrets.
+                logger.warning("Could not publish shared LLM cooldown")
+        raise
+    finally:
+        permit.release()
+
+
+_current_controller: ContextVar[AdmissionController | None] = ContextVar(
+    "nooa_current_admission_controller",
+    default=None,
+)
+
+
+@contextmanager
+def _admission_controller_scope(controller: AdmissionController) -> Iterator[None]:
+    """Select a controller for provider attempts made in this async context."""
+    token = _current_controller.set(controller)
+    try:
+        yield
+    finally:
+        _current_controller.reset(token)
+
+
+def _current_admission_controller() -> AdmissionController | None:
+    """Return the controller selected by the nearest admission wrapper."""
+    return _current_controller.get()
+
+
+@dataclass(slots=True)
+class _Waiter:
+    loop: asyncio.AbstractEventLoop
+    wakeup: asyncio.Event
+    queued_at: float
+    queue_depth: int
+    state: Literal["queued", "granted", "acquired", "cancelled"] = "queued"
+
+
+class _Permit:
+    """One idempotently releasable admission permit."""
+
+    __slots__ = ("_group", "_released", "_release_lock")
+
+    def __init__(self, group: _AdmissionGroup):
+        self._group = group
+        self._released = False
+        self._release_lock = threading.Lock()
+
+    def release(self) -> None:
+        """Return the permit once, even when called from another thread."""
+        with self._release_lock:
+            if self._released:
+                return
+            self._released = True
+        self._group.release()
+
+    async def cooldown(self, delay_s: float) -> None:
+        """Publish feedback while this permit still owns its active slot."""
+        with self._release_lock:
+            if not self._released:
+                self._group.cooldown(delay_s)
+
+
+class _AdmissionGroup:
+    """A FIFO permit pool that can serve waiters from multiple event loops."""
+
+    def __init__(
+        self,
+        identity: str,
+        display_name: str,
+        max_in_flight: int,
+        requests_per_second: float | None = None,
+        max_cooldown: float | None = None,
+    ):
+        """Create one jointly scheduled FIFO group with monotonic clocks."""
+        self.identity = identity
+        self.display_name = display_name
+        self.max_in_flight = max_in_flight
+        self.requests_per_second = requests_per_second
+        self.max_cooldown = max_cooldown
+        self._interval = 0.0 if requests_per_second is None else 1.0 / requests_per_second
+        self._next_admission = 0.0
+        self._cooldown_until = 0.0
+        self._lock = threading.Lock()
+        self._active = 0
+        self._queued = 0
+        self._waiters: deque[_Waiter] = deque()
+
+    @property
+    def active(self) -> int:
+        with self._lock:
+            return self._active
+
+    @property
+    def queued(self) -> int:
+        with self._lock:
+            return self._queued_count_locked()
+
+    def _queued_count_locked(self) -> int:
+        return self._queued
+
+    async def acquire(
+        self,
+        *,
+        queue_timeout: float | None,
+        observer: AdmissionObserver,
+    ) -> _Permit:
+        """Wait for concurrency and the shared monotonic admission gate."""
+        started = time.perf_counter()
+        loop = asyncio.get_running_loop()
+
+        with self._lock:
+            now = time.monotonic()
+            if (
+                self._active < self.max_in_flight
+                and not self._waiters
+                and now >= self._not_before_locked()
+            ):
+                self._active += 1
+                self._next_admission = now + self._interval
+                immediate = True
+                waiter = None
+                queue_depth = 0
+            else:
+                immediate = False
+                queue_depth = self._queued_count_locked() + 1
+                waiter = _Waiter(loop, asyncio.Event(), started, queue_depth)
+                self._waiters.append(waiter)
+                self._queued += 1
+
+        if immediate:
+            return self._permit_with_observation(
+                observer,
+                self._observation("immediate", False, 0.0, queue_depth),
+            )
+
+        assert waiter is not None
+        try:
+            if queue_timeout is None:
+                await self._wait_for_grant(waiter)
+            else:
+                async with asyncio.timeout(queue_timeout):
+                    await self._wait_for_grant(waiter)
+        except TimeoutError as error:
+            self._cancel_waiter(waiter)
+            wait_s = time.perf_counter() - started
+            self._observe_terminal(
+                observer,
+                self._observation("timeout", True, wait_s, waiter.queue_depth),
+            )
+            raise AdmissionTimeoutError(
+                f"Timed out after {queue_timeout:g}s waiting for LLM admission "
+                f"group {self.display_name!r} (max_in_flight={self.max_in_flight})"
+            ) from error
+        except asyncio.CancelledError:
+            self._cancel_waiter(waiter)
+            wait_s = time.perf_counter() - started
+            self._observe_terminal(
+                observer,
+                self._observation("cancelled", True, wait_s, waiter.queue_depth),
+            )
+            raise
+
+        wait_s = time.perf_counter() - started
+        return self._permit_with_observation(
+            observer,
+            self._observation("admitted_after_wait", True, wait_s, waiter.queue_depth),
+        )
+
+    async def _wait_for_grant(self, waiter: _Waiter) -> None:
+        """Let only the FIFO head own a pacing timer on its own event loop.
+
+        No concurrency slot is held while waiting for time. Waking a new head
+        on release/cancellation also avoids a timer tied to an abandoned loop.
+        """
+        while True:
+            with self._lock:
+                self._pump_locked()
+                if waiter.state == "granted":
+                    waiter.state = "acquired"
+                    return
+                waiter.wakeup.clear()
+                delay = None
+                if self._waiters[0] is waiter and self._active < self.max_in_flight:
+                    delay = max(0.0, self._not_before_locked() - time.monotonic())
+            try:
+                async with asyncio.timeout(delay):
+                    await waiter.wakeup.wait()
+            except TimeoutError:
+                # The shared not-before time may have been extended meanwhile.
+                # Re-check it under the group lock rather than granting early.
+                continue
+
+    def _not_before_locked(self) -> float:
+        """Return the joint pacing/cooldown gate while holding the lock."""
+        return max(self._next_admission, self._cooldown_until)
+
+    def _wake_head_locked(self) -> None:
+        """Wake the FIFO head to reconsider capacity and its delay timer."""
+        while self._waiters:
+            waiter = self._waiters[0]
+            try:
+                waiter.loop.call_soon_threadsafe(waiter.wakeup.set)
+                return
+            except RuntimeError:
+                self._waiters.popleft()
+                self._queued -= 1
+                waiter.state = "cancelled"
+
+    def _pump_locked(self) -> None:
+        """Grant available slots without accumulating missed pacing credits."""
+        while self._waiters and self._active < self.max_in_flight:
+            now = time.monotonic()
+            if now < self._not_before_locked():
+                return
+            waiter = self._waiters.popleft()
+            self._queued -= 1
+            waiter.state = "granted"
+            self._active += 1
+            try:
+                waiter.loop.call_soon_threadsafe(self._deliver_grant, waiter)
+            except RuntimeError:
+                waiter.state = "cancelled"
+                self._active -= 1
+                continue
+            self._next_admission = now + self._interval
+            self._wake_head_locked()
+
+    def cooldown(self, delay_s: float) -> None:
+        """Extend shared cooldown monotonically, with a per-report bound."""
+        delay = _validated_positive_option(delay_s, "delay_s")
+        if delay is None:
+            raise TypeError("delay_s must be a positive number")
+        if self.max_cooldown is None:
+            return
+        with self._lock:
+            self._cooldown_until = max(
+                self._cooldown_until,
+                time.monotonic() + min(delay, self.max_cooldown),
+            )
+            self._wake_head_locked()
+
+    def _permit_with_observation(
+        self,
+        observer: AdmissionObserver,
+        observation: dict[str, Any],
+    ) -> _Permit:
+        """Return a permit without leaking its slot if observation fails."""
+        permit = _Permit(self)
+        try:
+            observer(observation)
+        except BaseException:
+            permit.release()
+            raise
+        return permit
+
+    @staticmethod
+    def _observe_terminal(
+        observer: AdmissionObserver,
+        observation: dict[str, Any],
+    ) -> None:
+        """Report a terminal wait outcome without replacing its exception."""
+        try:
+            observer(observation)
+        except BaseException:
+            pass
+
+    def _observation(
+        self,
+        outcome: AdmissionOutcome,
+        queued: bool,
+        wait_s: float,
+        queue_depth: int,
+    ) -> dict[str, Any]:
+        return {
+            "group": self.display_name,
+            "outcome": outcome,
+            "queued": queued,
+            "wait_s": round(wait_s, 6),
+            "queue_depth": queue_depth,
+            "max_in_flight": self.max_in_flight,
+        }
+
+    def _cancel_waiter(self, waiter: _Waiter) -> None:
+        """Remove a cancelled waiter and wake its FIFO successor."""
+        release_grant = False
+        with self._lock:
+            if waiter.state == "queued":
+                waiter.state = "cancelled"
+                self._queued -= 1
+                # Do not retain cancelled/expired waiters behind a long-lived
+                # provider call.  ``remove`` is bounded by the queue length and
+                # keeps cancellation storms from becoming a memory backlog.
+                try:
+                    self._waiters.remove(waiter)
+                except ValueError:
+                    pass
+                self._wake_head_locked()
+            elif waiter.state == "granted":
+                # Capacity was transferred to this waiter, but cancellation or
+                # timeout won before its task claimed the grant.
+                waiter.state = "cancelled"
+                release_grant = True
+            elif waiter.state in ("acquired", "cancelled"):
+                return
+        if release_grant:
+            self.release()
+
+    def release(self) -> None:
+        """Return concurrency and dispatch eligible FIFO waiters."""
+        with self._lock:
+            if self._active <= 0:
+                raise RuntimeError("Admission permit accounting underflow")
+            self._active -= 1
+            self._pump_locked()
+            self._wake_head_locked()
+
+    def _deliver_grant(self, waiter: _Waiter) -> None:
+        """Deliver a reserved slot on the waiter's event loop."""
+        with self._lock:
+            if waiter.state != "granted":
+                return
+            waiter.wakeup.set()
+
+
+_groups_lock = threading.RLock()
+_groups: dict[str, _AdmissionGroup] = {}
+
+
+def _reset_admission_groups_after_fork() -> None:
+    """Give a forked child clean locks and process-local capacity accounting."""
+    global _groups_lock, _groups
+    _groups_lock = threading.RLock()
+    _groups = {}
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_admission_groups_after_fork)
+
+
+def _validated_limit(max_in_flight: int | None) -> int | None:
+    if max_in_flight is None:
+        return None
+    if isinstance(max_in_flight, bool) or not isinstance(max_in_flight, int):
+        raise TypeError("max_in_flight must be a positive integer or None")
+    if max_in_flight <= 0:
+        raise ValueError("max_in_flight must be greater than zero")
+    return max_in_flight
+
+
+def _validated_timeout(queue_timeout: float | None) -> float | None:
+    """Validate a queue deadline duration."""
+    return _validated_positive_option(queue_timeout, "queue_timeout")
+
+
+def _validated_positive_option(value: float | None, name: str) -> float | None:
+    """Validate an optional finite, positive numeric policy setting."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise TypeError(f"{name} must be a positive number or None")
+    try:
+        result = float(value)
+    except OverflowError as error:
+        raise ValueError(f"{name} must be finite and greater than zero") from error
+    if result <= 0 or not math.isfinite(result):
+        raise ValueError(f"{name} must be finite and greater than zero")
+    return result
+
+
+def _named_group_identity(label: str) -> tuple[str, str]:
+    if not isinstance(label, str):
+        raise TypeError("concurrency_group must be a string or None")
+    if not _GROUP_LABEL_RE.fullmatch(label):
+        raise ValueError(
+            "concurrency_group must be 1-128 characters and contain only "
+            "letters, digits, '.', '_', ':', '/', or '-'"
+        )
+    return f"named:{label}", label
+
+
+def _endpoint_group_identity(api_base: str) -> tuple[str, str]:
+    if not isinstance(api_base, str) or not api_base:
+        raise TypeError("api_base must be a non-empty string for inferred admission groups")
+
+    parts = urlsplit(api_base)
+    if parts.scheme.lower() not in {"http", "https"} or not parts.hostname:
+        raise ValueError(
+            "max_in_flight without concurrency_group requires an absolute HTTP(S) api_base"
+        )
+
+    host = parts.hostname.lower()
+    if ":" in host:
+        host = f"[{host}]"
+    port = parts.port
+    if port is not None and not (
+        (parts.scheme.lower() == "http" and port == 80)
+        or (parts.scheme.lower() == "https" and port == 443)
+    ):
+        host = f"{host}:{port}"
+    path = parts.path.rstrip("/")
+    normalized = urlunsplit((parts.scheme.lower(), host, path, "", ""))
+    digest = hashlib.sha256(normalized.encode()).hexdigest()
+    return f"endpoint:{digest}", f"endpoint:{digest[:12]}"
+
+
+def _get_or_create_group(
+    identity: str,
+    display_name: str,
+    max_in_flight: int | None,
+    requests_per_second: float | None = None,
+    max_cooldown: float | None = None,
+) -> _AdmissionGroup | None:
+    """Reuse a group only when all shared policy settings agree."""
+    with _groups_lock:
+        existing = _groups.get(identity)
+        if max_in_flight is None:
+            return existing
+        if existing is not None:
+            if existing.max_in_flight != max_in_flight:
+                raise ValueError(
+                    f"Conflicting max_in_flight for admission group {display_name!r}: "
+                    f"existing={existing.max_in_flight}, requested={max_in_flight}"
+                )
+            for name, value in (
+                ("requests_per_second", requests_per_second),
+                ("max_cooldown", max_cooldown),
+            ):
+                if getattr(existing, name) != value:
+                    raise ValueError(f"Conflicting {name} for admission group {display_name!r}")
+            return existing
+        group = _AdmissionGroup(
+            identity, display_name, max_in_flight, requests_per_second, max_cooldown
+        )
+        _groups[identity] = group
+        return group
+
+
+class AdmissionPolicy:
+    """Per-wrapper view of a shared, process-local admission group."""
+
+    def __init__(
+        self,
+        *,
+        max_in_flight: int,
+        concurrency_group: str | None,
+        queue_timeout: float | None,
+        api_base: str | None,
+        requests_per_second: float | None = None,
+        max_cooldown: float | None = None,
+    ):
+        """Validate wrapper settings and join its named or inferred group."""
+        self.max_in_flight = _validated_limit(max_in_flight)
+        if self.max_in_flight is None:
+            raise ValueError("max_in_flight is required for process-local admission")
+        self.queue_timeout = _validated_timeout(queue_timeout)
+        self.requests_per_second = _validated_positive_option(
+            requests_per_second, "requests_per_second"
+        )
+        self.max_cooldown = _validated_positive_option(max_cooldown, "max_cooldown")
+        if self.requests_per_second is not None and not math.isfinite(
+            1.0 / self.requests_per_second
+        ):
+            raise ValueError("requests_per_second must have a finite reciprocal")
+
+        if concurrency_group is not None:
+            self.identity, self.display_name = _named_group_identity(concurrency_group)
+        elif api_base is not None:
+            self.identity, self.display_name = _endpoint_group_identity(api_base)
+        else:
+            raise ValueError("max_in_flight requires concurrency_group or api_base")
+
+        _get_or_create_group(
+            self.identity,
+            self.display_name,
+            self.max_in_flight,
+            self.requests_per_second,
+            self.max_cooldown,
+        )
+
+    async def acquire(self, observer: AdmissionObserver) -> _Permit:
+        """Acquire process-local capacity for one provider attempt."""
+        group = _get_or_create_group(
+            self.identity,
+            self.display_name,
+            self.max_in_flight,
+            self.requests_per_second,
+            self.max_cooldown,
+        )
+        assert group is not None
+        return await group.acquire(queue_timeout=self.queue_timeout, observer=observer)
+
+
+@dataclass(frozen=True, slots=True)
+class AdmissionControlConfig:
+    """Explicit per-use admission configuration.
+
+    Supply either an application-owned ``controller`` or a positive
+    ``max_in_flight`` for the built-in process-local controller. Local groups
+    may be named explicitly; otherwise the wrapped client's HTTP endpoint is
+    normalized into an opaque group identity when the wrapper is created.
+    """
+
+    max_in_flight: int | None = None
+    concurrency_group: str | None = None
+    queue_timeout: float | None = None
+    controller: AdmissionController | None = None
+    requests_per_second: float | None = None
+    max_cooldown: float | None = None
+
+    def __post_init__(self) -> None:
+        """Validate either an injected controller or one explicit local policy."""
+        if self.controller is not None:
+            if any(
+                value is not None
+                for value in (
+                    self.max_in_flight,
+                    self.concurrency_group,
+                    self.queue_timeout,
+                    self.requests_per_second,
+                    self.max_cooldown,
+                )
+            ):
+                raise ValueError(
+                    "controller cannot be combined with max_in_flight, "
+                    "concurrency_group, queue_timeout, requests_per_second, or max_cooldown"
+                )
+            if not isinstance(self.controller, AdmissionController):
+                raise TypeError("controller must implement AdmissionController")
+            return
+
+        if self.max_in_flight is None:
+            raise ValueError(
+                "max_in_flight is required when an admission controller is not supplied"
+            )
+        _validated_limit(self.max_in_flight)
+        _validated_timeout(self.queue_timeout)
+        rate = _validated_positive_option(self.requests_per_second, "requests_per_second")
+        if rate is not None and not math.isfinite(1.0 / rate):
+            raise ValueError("requests_per_second must have a finite reciprocal")
+        _validated_positive_option(self.max_cooldown, "max_cooldown")
+        if self.concurrency_group is not None:
+            _named_group_identity(self.concurrency_group)
+
+    def _controller_for(self, llm: Any) -> AdmissionController:
+        """Build or return the controller applied to one wrapped LLM."""
+        if self.controller is not None:
+            return self.controller
+
+        client_config = getattr(llm, "config", None)
+        api_base = None
+        if isinstance(client_config, dict):
+            api_base = client_config.get("api_base") or client_config.get("base_url")
+        assert self.max_in_flight is not None
+        return AdmissionPolicy(
+            max_in_flight=self.max_in_flight,
+            concurrency_group=self.concurrency_group,
+            queue_timeout=self.queue_timeout,
+            api_base=api_base,
+            requests_per_second=self.requests_per_second,
+            max_cooldown=self.max_cooldown,
+        )
+
+
+def _reset_admission_groups_for_tests() -> None:
+    """Clear process-global groups; private helper for isolated unit tests."""
+    with _groups_lock:
+        if any(group.active or group.queued for group in _groups.values()):
+            raise RuntimeError("Cannot reset admission groups while calls are active or queued")
+        _groups.clear()
+
+
+__all__ = [
+    "AdmissionCallCapError",
+    "AdmissionControlConfig",
+    "AdmissionController",
+    "AdmissionError",
+    "AdmissionPermit",
+    "AdmissionPolicy",
+    "AdmissionTimeoutError",
+    "AdmissionUnavailableError",
+    "CooldownAdmissionPermit",
+]

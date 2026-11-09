@@ -223,3 +223,109 @@ async def test_auto_mapping_uses_effective_model_and_none_disables_markers():
     with CompletionClient("anthropic/claude-sonnet-4-5", cache_breakpoint=None) as client:
         wire, _, _ = client._prepare_cache_boundary(original, responses=False)
         assert wire == original
+
+
+def _openai_marked_endpoints(messages):
+    return [
+        index
+        for index, message in enumerate(messages)
+        if any(
+            isinstance(block, dict) and "prompt_cache_breakpoint" in block
+            for block in message.get("output", message.get("content", []))
+        )
+    ]
+
+
+@pytest.mark.parametrize("mapping", ["openai", "auto"])
+def test_openai_growth_retains_previous_endpoint_and_adds_delta(mapping):
+    history = [
+        {"role": "user", "content": [{"type": "input_text", "text": "old"}]},
+        {"role": "assistant", "content": [{"type": "output_text", "text": "answer"}]},
+    ]
+    first, _, _ = apply_cache_policy([*history, CacheBoundary()], mapping, responses=True)
+    appended = {"type": "function_call_output", "call_id": "c1", "output": "delta"}
+    live = {"role": "user", "content": "live"}
+    second, _, _ = apply_cache_policy(
+        [*history, appended, CacheBoundary(), live], mapping, responses=True
+    )
+    assert second[: len(first)] == first
+    assert _openai_marked_endpoints(second) == [0, 2]
+    assert second[-1] is live
+    assert history[0]["content"][0] == {"type": "input_text", "text": "old"}
+    assert appended["output"] == "delta"
+
+
+def test_openai_million_token_scale_history_bounds_marking_and_shares_content():
+    # Roughly one million whitespace-separated tokens, not live inference or
+    # a tokenizer measurement. Marking must not inspect/copy the large strings.
+    texts = [("word " * 10_000) + str(i) for i in range(100)]
+    history = []
+    for text in texts:
+        history.extend(
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "heading"},
+                        {"type": "input_text", "text": text},
+                    ],
+                },
+                {"type": "reasoning", "encrypted_content": "opaque"},
+                {"role": "assistant", "content": [{"type": "output_text", "text": "ok"}]},
+            ]
+        )
+    live = {"role": "user", "content": "live"}
+    from nooa.unifiedllm.cache_policy import _mark_responses_content
+
+    with patch(
+        "nooa.unifiedllm.cache_policy._mark_responses_content",
+        wraps=_mark_responses_content,
+    ) as mark:
+        first, _, _ = apply_cache_policy(
+            [*history, CacheBoundary(), live], "openai", responses=True
+        )
+    assert mark.call_count == 80
+    assert _openai_marked_endpoints(first) == list(range(60, 300, 3))
+    for index, item in enumerate(history):
+        if index in range(60, 300, 3):
+            assert first[index] is not item
+            assert first[index]["content"] is not item["content"]
+            assert first[index]["content"][0] is item["content"][0]
+            assert first[index]["content"][1]["text"] is texts[index // 3]
+            assert "prompt_cache_breakpoint" not in item["content"][1]
+        else:
+            assert first[index] is item
+    assert first[-1] is live
+    appended = {"role": "user", "content": "small append"}
+    second, _, _ = apply_cache_policy(
+        [*history, appended, CacheBoundary(), live], "openai", responses=True
+    )
+    assert _openai_marked_endpoints(second) == [*range(63, 300, 3), 300]
+    # The oldest checkpoint rolls out; the recent warmed endpoint survives.
+    assert second[60] is history[60]
+    assert second[297] == first[297]
+    assert second[-1] is live
+
+
+@pytest.mark.parametrize("mapping", [None, "auto", "openai"])
+@pytest.mark.parametrize("boundary", [False, True])
+def test_openai_multiple_endpoints_respect_opt_out_and_instruction_defaults(mapping, boundary):
+    leading = [
+        {"role": "system", "content": [{"type": "input_text", "text": "one"}]},
+        {"role": "developer", "content": [{"type": "input_text", "text": "two"}]},
+    ]
+    history = {"role": "user", "content": [{"type": "input_text", "text": "history"}]}
+    live = {"role": "user", "content": [{"type": "input_text", "text": "live"}]}
+    original = [*leading, history, *([CacheBoundary()] if boundary else []), live]
+    wire, _, enabled = apply_cache_policy(original, mapping, responses=True)
+    expected = (
+        []
+        if mapping is None or (mapping == "auto" and not boundary)
+        else ([0, 1, 2] if boundary else [0, 1])
+    )
+    assert _openai_marked_endpoints(wire) == expected
+    assert enabled is bool(expected)
+    assert wire[-1] is live
+    assert all(
+        "prompt_cache_breakpoint" not in item["content"][0] for item in [*leading, history, live]
+    )

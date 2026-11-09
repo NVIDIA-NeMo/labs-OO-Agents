@@ -40,7 +40,9 @@ def test_empty_include_sequences_are_explicit_opt_outs(include):
     from nooa.unifiedllm.replay_state import add_encrypted_reasoning_include
 
     params = {"include": include, "api_base": "https://api.openai.com/v1"}
-    add_encrypted_reasoning_include(params, "responses:openai:https://api.openai.com/v1")
+    add_encrypted_reasoning_include(
+        params, "responses:openai:https://api.openai.com/v1", native_encrypted_reasoning=True
+    )
     assert "include" not in params
 
 
@@ -92,13 +94,13 @@ def test_null_secrets_env_is_populated(tmp_path):
 def _write_from_process(path, alias, first_inside, release_first, second_started, second_inside):
     original_write = connect._write_entry
 
-    def held_write(entry, path, *, alias):
+    def held_write(entry, path, *, alias, **kwargs):
         if alias == "first":
             first_inside.set()
             assert release_first.wait(15)
         else:
             second_inside.set()
-        original_write(entry, path, alias=alias)
+        original_write(entry, path, alias=alias, **kwargs)
 
     connect._write_entry = held_write
     if alias == "second":
@@ -151,7 +153,14 @@ async def test_unobserved_unauthenticated_request_is_not_called_dropped_settings
         client = real_factory(*args, **kwargs)
         assert client._http.async_client is None
         # Simulate a successful legacy fallback; no request traverses our owned pool.
-        client.acall = AsyncMock(return_value=LLMResponse(content="323"))
+        from nooa.strategies.predict import PredictStrategy
+
+        client.acall = AsyncMock(
+            return_value=LLMResponse(
+                content='{"value":323}',
+                parsed=PredictStrategy()._create_response_model(int, "compute")(value=323),
+            )
+        )
         return client
 
     monkeypatch.setattr(registry, "client_from_config", accepted_without_owned_pool)
@@ -160,4 +169,37 @@ async def test_unobserved_unauthenticated_request_is_not_called_dropped_settings
     record = result.entry["provenance"]["probes"]["routing"]
     assert record["outcome"] == "not_confirmed"
     assert record["settings_sent"] is None
-    assert "Could not observe" in record["reason"]
+    assert "not observed" in record["reason"]
+
+
+async def test_routing_retries_once_without_rejected_prompt_cache_options(monkeypatch):
+    """Azure o-series models refuse prompt_cache_options; caching is turned off, not fatal."""
+    sent = []
+
+    def handle(request):
+        import json
+
+        body = json.loads(request.content)
+        sent.append(body)
+        if "prompt_cache_options" in request.content.decode():
+            return httpx.Response(
+                400,
+                json={
+                    "error": {
+                        "message": "prompt_cache_options is not supported on this model",
+                        "type": "invalid_request_error",
+                        "param": "prompt_cache_options",
+                    }
+                },
+            )
+        return httpx.Response(200, json=response_body("responses"))
+
+    mock_http(monkeypatch, handle)
+    plan = connect.plan("model", "azure/openai/o4-mini", "responses", "https://hub.test/v1", "")
+    result = await connect.check_stage(plan, "routing", api_key="test-key")
+    assert result.entry["provenance"]["probes"]["routing"]["outcome"] == "accepted"
+    assert result.entry["cache_breakpoint"] is None
+    assert result.entry["provenance"]["explicit_cache"]["outcome"] == "rejected"
+    assert "not supported" not in str(result.entry["provenance"]["explicit_cache"])
+    assert any("prompt_cache_options" in str(body) for body in sent)
+    assert "prompt_cache_options" not in str(sent[-1])

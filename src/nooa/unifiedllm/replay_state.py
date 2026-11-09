@@ -18,7 +18,7 @@ from urllib.parse import urlsplit
 import litellm
 
 from nooa.llm_types import CacheBoundary, LLMResponse
-from nooa.unifiedllm.cache_policy import reject_boundary_dict
+from nooa.unifiedllm.cache_policy import reject_boundary_dict, wrap_anthropic_text
 from nooa.unifiedllm.errors import ReasoningReplayError
 
 logger = logging.getLogger(__name__)
@@ -101,10 +101,21 @@ def _normalized_endpoint(value: Any) -> str:
     return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}{path}{query}"
 
 
+def _configured_endpoint(params: dict[str, Any]) -> str | None:
+    """The endpoint this call's own configuration points at, if any.
+
+    Dispatch always lets a per-call ``base_url`` win over an inherited
+    ``api_base`` (it pops ``base_url`` into ``api_base`` right before the
+    request); every reader of these two keys must agree with that precedence
+    or it can disagree with where the call actually goes for a client whose
+    ``api_base`` and a call's ``base_url`` differ.
+    """
+    return params.get("base_url") or params.get("api_base")
+
+
 def _uses_native_openai_endpoint(api_params: dict[str, Any]) -> bool:
     endpoint = (
-        api_params.get("api_base")
-        or api_params.get("base_url")
+        _configured_endpoint(api_params)
         or getattr(litellm, "api_base", None)
         or os.getenv("OPENAI_BASE_URL")
         or os.getenv("OPENAI_API_BASE")
@@ -125,7 +136,7 @@ def replay_scope(
     do not change the provider wire format, so gateway or credential changes
     must not silently disable capture or replay.
     """
-    configured_endpoint = params.get("api_base") or params.get("base_url")
+    configured_endpoint = _configured_endpoint(params)
     try:
         resolved_model, provider, _, _ = litellm.get_llm_provider(
             model=model,
@@ -285,7 +296,11 @@ def responses_reasoning_text(output: list[Any]) -> str | None:
 
 
 def prepare_chat_messages(
-    messages: list[LLMResponse | dict[str, Any] | CacheBoundary], scope: str | None
+    messages: list[LLMResponse | dict[str, Any] | CacheBoundary],
+    scope: str | None,
+    *,
+    anthropic_cache_marking: bool = False,
+    media_inputs=None,
 ) -> list[dict | CacheBoundary]:
     """Project stored turns; retain explicit fields in caller-written dictionaries.
 
@@ -293,6 +308,16 @@ def prepare_chat_messages(
     reasoning_content field is a caller's explicit wire setting, not a request
     to fold that text into content. Raw dictionaries still cannot carry opaque
     state, and request containers are detached before the SDK can mutate them.
+
+    ``anthropic_cache_marking`` reflects whether this call's cache boundary will
+    actually be marked with Anthropic's ``cache_control`` block form -- the
+    same check ``CompletionClient._prepare_cache_boundary`` uses -- not
+    ``scope``'s resolved provider. litellm's own provider resolution and
+    NOOA's Anthropic-route detection can disagree for gateway-routed models
+    (e.g. ``openai/azure/anthropic/...``), where ``scope`` resolves to
+    ``"openai"`` even though Anthropic-style marking is what's actually
+    applied. Content must be pre-wrapped in whichever shape marking will use,
+    or a message's wire shape flips the turn it stops being the one marked.
     """
     from .chat_parts import project_chat_turn
 
@@ -300,7 +325,12 @@ def prepare_chat_messages(
     private_call_ids: dict[str, str] = {}
     for original in messages:
         if isinstance(original, LLMResponse):
-            message, ids = project_chat_turn(original, scope)
+            message, ids = project_chat_turn(
+                original,
+                scope,
+                anthropic_cache_marking=anthropic_cache_marking,
+                media_inputs=media_inputs,
+            )
             private_call_ids.update(ids)
             if (
                 message.get("content")
@@ -322,6 +352,17 @@ def prepare_chat_messages(
         reject_boundary_dict(message)
         reject_native_message(message, scope)
         message = copy.deepcopy(message)
+        if anthropic_cache_marking and isinstance(message.get("content"), str):
+            # Same stability rationale as project_chat_turn's assistant-content
+            # wrapping -- apply_cache_policy's Anthropic marking wraps whichever
+            # message it marks this turn into a content block; unmarked
+            # plain-dict messages (user turns, tool results) must already be in
+            # that same shape or they'll flip once this message stops being the
+            # one marked. Anthropic rejects an empty text block, so leave a
+            # genuinely empty string alone.
+            content = message["content"]
+            if content:
+                message["content"] = [wrap_anthropic_text(content)]
         call_id = message.get("tool_call_id")
         if isinstance(call_id, str):
             message["tool_call_id"] = private_call_ids.get(call_id, call_id)
@@ -329,7 +370,28 @@ def prepare_chat_messages(
     return prepared
 
 
-def add_encrypted_reasoning_include(api_params: dict[str, Any], scope: str | None) -> None:
+def native_encrypted_reasoning_expected(api_params: dict[str, Any], scope: str | None) -> bool:
+    """Whether this call's route can return real ``reasoning.encrypted_content``.
+
+    LiteLLM's provider resolution collapses every OpenAI-compatible gateway
+    route (Hub-proxied open-weight models included) to the same provider name
+    ("openai") that a genuine OpenAI/Azure call resolves to, so provider name
+    alone cannot tell them apart -- both read as ``responses:openai:...`` or
+    ``responses:azure:...`` in ``scope``. The actual endpoint can: only calls
+    that really reach ``api.openai.com`` or an Azure OpenAI resource ever get
+    an encrypted envelope back. Everything else that exposes reasoning does so
+    as summary text only, as its native (not truncated) wire shape.
+    """
+    if scope and scope.startswith("responses:azure:"):
+        return True
+    return bool(
+        scope and scope.startswith("responses:openai:") and _uses_native_openai_endpoint(api_params)
+    )
+
+
+def add_encrypted_reasoning_include(
+    api_params: dict[str, Any], scope: str | None, *, native_encrypted_reasoning: bool
+) -> None:
     """Request OpenAI encrypted reasoning only on endpoints known to support it."""
     configured = api_params.get("include")
     if isinstance(configured, (list, tuple, set)) and not configured:
@@ -341,11 +403,7 @@ def add_encrypted_reasoning_include(api_params: dict[str, Any], scope: str | Non
     if _ENCRYPTED_REASONING_INCLUDE in include:
         api_params["include"] = include
         return
-    if scope and scope.startswith("responses:azure:"):
-        include.append(_ENCRYPTED_REASONING_INCLUDE)
-    elif (
-        scope and scope.startswith("responses:openai:") and _uses_native_openai_endpoint(api_params)
-    ):
+    if native_encrypted_reasoning:
         include.append(_ENCRYPTED_REASONING_INCLUDE)
     if include:
         api_params["include"] = include

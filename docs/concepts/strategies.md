@@ -1,18 +1,20 @@
 # Strategies
 
-A strategy decides how an agentic method uses an LLM. It does not change the
+A strategy decides how an agentic method uses a model client. It does not change the
 method's Python interface: callers still pass the same arguments and receive
 the declared return type.
 
-NOOA's two primary strategies cover most applications.
+NOOA's primary strategies cover most applications.
 
 | Strategy | Use it when | Execution model |
 |---|---|---|
 | `PredictStrategy` | A non-tool attempt can classify, extract, or produce the typed answer | Structured LLM attempt followed by validation; invalid output may be retried |
 | `CodeActStrategy` | The task needs tools, live Python objects, code execution, or iteration | Repeated LLM turns in a per-call Python REPL; locals persist across cells |
+| `DecideStrategy` | A decision model should produce probabilities, choices, or rubric scores | One typed request through the configured decision model; raises `DecisionModelRequiredError` when none is configured |
 
 CodeAct is the default. Select Predict explicitly when the task does not need
-the extra loop.
+the extra loop. See [Decision models](decisions.md) when calibrated decision
+evidence matters.
 
 ## Predict: one focused judgment
 
@@ -53,6 +55,21 @@ CodeAct gives the model a Python execution loop. Method arguments are live REPL
 variables, helper definitions persist across cells, and generated code can call
 visible methods and tools on `self`. The loop ends when a value validates
 against the return annotation.
+
+The always-available framework names (`self`, `print`, `pprint`, `doc`, and
+`return_result`, plus `python_cell_state` in CodeActV2) cannot be rebound or
+deleted in cell scope or overwritten through an explicit `global` declaration.
+Use ordinary variable names such as `result`; submit with `return_result(result)`.
+Each strategy derives the protected names from its advertised builtins.
+
+An invalid cell is rejected before it executes or compiles helper definitions.
+Binding and missing-`await` findings are reported together, so the model can
+correct both in the next cell. Python syntax diagnostics keep their native
+message and source location. Independent function parameters, function-local
+variables and comprehension targets may still use these names. Deep code that
+does not rebind a helper is not rejected by the binding guard.
+This is an accidental-rebinding guard, not a Python security boundary; dynamic
+namespace mutation is outside its contract.
 
 ### Recovering from a text-only CodeAct turn
 
@@ -147,7 +164,8 @@ Predict and CodeAct lock an agent instance while a generation call is active.
 Calling several agentic methods concurrently on the same instance therefore
 serializes by default. Create one agent instance per independent concurrent
 task. Custom strategies can opt out of locking when they do not share mutable
-runtime state.
+runtime state. `DecideStrategy` does not lock, so decision calls on one
+instance can run concurrently.
 
 ## Common mistakes
 

@@ -92,7 +92,11 @@ def media_to_content_block(media: Any) -> dict[str, Any]:
         # LiteLLM file format
         return {
             "type": "file",
-            "file": {"file_data": media.data_url, "filename": "attachment"},
+            "file": {
+                "file_data": media.data_url,
+                "filename": "attachment",
+                **({"format": media.media_type} if media.media_type else {}),
+            },
         }
 
     # Generic fallback for unknown Media subclasses
@@ -108,6 +112,8 @@ def show(obj: Any) -> None:
 
     Call show() on any Image, Audio, Video, or File object to perceive its contents.
     Also accepts PIL images and matplotlib figures (auto-converted to PNG).
+    If the current model cannot take this kind of media, it is replaced by a
+    short note when the next request is sent.
     """
     from nooa.media import Media
 

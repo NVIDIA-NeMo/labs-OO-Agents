@@ -20,13 +20,19 @@ def plan(**kwargs):
 
 
 def test_separate_caps_are_included_in_token_and_price_estimates():
-    proposal = plan(
+    proposal = connect.plan(
+        "test",
+        "model",
+        "chat",
+        "https://openrouter.ai/api/v1",
+        "",
+        reasoning_levels={"high": {"reasoning_effort": "high"}},
         catalogue={
-            "id": "vendor/model",
+            "id": "model",
             "pricing": {"prompt": "0.000001", "completion": "0.000002"},
-        }
+        },
     )
-    assert proposal.budget_tokens == 131072
+    assert proposal.budget_tokens == connect.DEFAULT_CHECK_BUDGET
     assert proposal.entry["max_tokens"] == 32768
     assert [p.body["max_tokens"] for p in proposal.probes] == [32768] * 3
     assert [p.token_estimate for p in proposal.probes] == [33280] * 3

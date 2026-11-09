@@ -60,6 +60,11 @@ GATE_RUNS = 3
 GATE_PARALLEL = 40
 CAPABILITY_CONFIG = Path("tests/capability/config.yaml")
 PACKAGES = ["nooa", "nooa-cli", "nooa-acp", "nooa-memory", "nooa-bench"]
+QUICKSTART_EXAMPLES = [
+    "01_first_generation_method.py",
+    "02_structured_outputs.py",
+    "03_codeact_tools.py",
+]
 REPORT_PATH = REPO / "tmp" / "release-check" / "capability-report.md"
 GITHUB_REPO = "NVIDIA-NeMo/labs-OO-Agents"
 TAG_RE = re.compile(r"^v(?P<version>(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))$")
@@ -140,8 +145,12 @@ def run(
         )
     except FileNotFoundError as exc:
         die(f"required executable is unavailable: {cmd[0]} ({exc})")
-    except subprocess.TimeoutExpired:
-        die(f"command timed out after {timeout}s: {' '.join(cmd)}")
+    except subprocess.TimeoutExpired as exc:
+        output = "".join(
+            value.decode(errors="replace") if isinstance(value, bytes) else value or ""
+            for value in (exc.stdout, exc.stderr)
+        )
+        die(f"command timed out after {timeout}s: {' '.join(cmd)}\n{output}")
     if check and proc.returncode != 0:
         detail = (proc.stderr or proc.stdout or "").strip() if capture else ""
         die(f"command failed ({proc.returncode}): {' '.join(cmd)}\n{detail}")
@@ -508,9 +517,164 @@ def temporary_tag(tag: str, sha: str):
             git("tag", "-d", tag, check=False)
 
 
+def quickstart_api_key() -> str:
+    """Require an exported inference credential before expensive release checks."""
+    key = os.getenv("NVIDIA_INFERENCE_API_KEY") or os.getenv("NVIDIA_INTERNAL_API_KEY")
+    if not key:
+        die("fresh-wheel quickstarts require NVIDIA_INFERENCE_API_KEY or NVIDIA_INTERNAL_API_KEY")
+    return key
+
+
+def fresh_wheel_quickstarts(wheel: Path, manifest: ReleaseManifest | None = None) -> None:
+    """Exercise customer installs, independently of the lock and workspace extras."""
+    step("Run quickstarts against a fresh core-wheel install (live LLM)")
+    evidence = (
+        manifest.path.parent / "quickstart-smoke"
+        if manifest
+        else REPO / "tmp" / "release-check" / "quickstart-smoke"
+    )
+    evidence.mkdir(parents=True, exist_ok=True)
+    result: dict[str, Any] = {
+        "outcome": "running",
+        "examples": [{"example": name, "outcome": "not_run"} for name in QUICKSTART_EXAMPLES],
+    }
+
+    def record() -> None:
+        """Checkpoint quickstart outcomes in the private evidence and manifest."""
+        (evidence / "result.json").write_text(json.dumps(result, indent=2) + "\n")
+        if manifest:
+            manifest.update(quickstart_smoke=result)
+
+    record()
+    key = ""
+    try:
+        key = quickstart_api_key()
+        with tempfile.TemporaryDirectory(prefix="nooa-quickstarts-") as directory:
+            work = Path(directory)
+            # Keep transport/tool settings, but no ambient Python paths, uv constraints,
+            # provider selection, registry configuration, or release-management tokens.
+            keep = {
+                "PATH",
+                "SYSTEMROOT",
+                "TMPDIR",
+                "TEMP",
+                "TMP",
+                "SSL_CERT_FILE",
+                "SSL_CERT_DIR",
+                "REQUESTS_CA_BUNDLE",
+                "CURL_CA_BUNDLE",
+                "HTTP_PROXY",
+                "HTTPS_PROXY",
+                "ALL_PROXY",
+                "NO_PROXY",
+                "http_proxy",
+                "https_proxy",
+                "all_proxy",
+                "no_proxy",
+                "UV_CACHE_DIR",
+                "UV_NATIVE_TLS",
+                "UV_SYSTEM_CERTS",
+            }
+            env = {name: value for name, value in os.environ.items() if name in keep}
+            env.update(
+                XDG_CONFIG_HOME=str(work / "config"),
+                PYTHON_DOTENV_DISABLED="1",
+                PYTHONNOUSERSITE="1",
+            )
+
+            def command(
+                cmd: list[str], log: str, timeout: int, *, live: bool = False
+            ) -> subprocess.CompletedProcess:
+                """Run a bounded smoke command and retain redacted failure output."""
+                try:
+                    child_env = env | {"NVIDIA_INFERENCE_API_KEY": key} if live else env
+                    proc = run(cmd, cwd=work, env=child_env, check=False, timeout=timeout)
+                except ReleaseError as exc:
+                    output = str(exc).replace(key, "[REDACTED]")
+                    (evidence / log).write_text(output)
+                    raise ReleaseError(output) from None
+                output = (proc.stdout + proc.stderr).replace(key, "[REDACTED]")
+                (evidence / log).write_text(output)
+                if proc.returncode:
+                    die(f"fresh-wheel quickstart command failed ({log}):\n{output[-2000:]}")
+                return proc
+
+            python = work / "venv" / "bin" / "python"
+            command(
+                ["uv", "--no-config", "venv", str(work / "venv"), "--python", "3.12"],
+                "venv.log",
+                180,
+            )
+            command(
+                [
+                    "uv",
+                    "--no-config",
+                    "pip",
+                    "install",
+                    "--python",
+                    str(python),
+                    "--index-url",
+                    "https://pypi.org/simple",
+                    str(wheel.resolve()),
+                ],
+                "install.log",
+                300,
+            )
+            metadata = work / "environment.json"
+            command(
+                [
+                    str(python),
+                    "-I",
+                    "-c",
+                    "import importlib.metadata as m, json, nooa, sys; from pathlib import Path; "
+                    "Path(sys.argv[1]).write_text(json.dumps({'python': sys.version, 'nooa_path': nooa.__file__, "
+                    "'packages': dict(sorted((d.metadata['Name'], d.version) "
+                    "for d in m.distributions()))}))",
+                    str(metadata),
+                ],
+                "environment.log",
+                60,
+            )
+            result["environment"] = json.loads(metadata.read_text())
+            validator_source = REPO / "scripts" / "quickstart_smoke.py"
+            validator = work / validator_source.name
+            shutil.copy2(validator_source, validator)
+            result["validator_sha256"] = sha256(validator_source)
+            record()
+            for case in result["examples"]:
+                name = case["example"]
+                source = REPO / "examples" / "quickstart" / name
+                example = work / name
+                shutil.copy2(source, example)
+                case.update(sha256=sha256(source), outcome="running")
+                record()
+                command(
+                    [str(python), "-I", "-u", str(validator), str(example)],
+                    f"{name}.log",
+                    180,
+                    live=True,
+                )
+                case["outcome"] = "passed"
+                record()
+                ok(f"fresh-wheel quickstart {name}")
+        result["outcome"] = "passed"
+        record()
+    except Exception as exc:
+        result["outcome"] = "failed"
+        result["error"] = str(exc).replace(key, "[REDACTED]") if key else str(exc)
+        for case in result["examples"]:
+            if case["outcome"] == "running":
+                case["outcome"] = "failed"
+        record()
+        if isinstance(exc, ReleaseError):
+            raise
+        raise ReleaseError(f"fresh-wheel quickstart failed: {result['error']}") from None
+
+
 def build_and_smoke(
     tag: str, sha: str, manifest: ReleaseManifest | None = None
 ) -> list[dict[str, str]]:
+    """Build versioned artifacts and require fresh-wheel and CLI smoke checks."""
     step("Build wheels and smoke test")
     expected = tag.lstrip("v")
     dist = REPO / "dist"
@@ -539,6 +703,9 @@ def build_and_smoke(
             if "dev" in version:
                 die(f"{wheel.name} is a dev version — the tag was not reachable")
         ok(f"all wheels at version {expected}")
+
+        core_wheel = next(wheel for wheel in wheels if wheel.name.startswith("nooa-"))
+        fresh_wheel_quickstarts(core_wheel, manifest)
 
         with tempfile.TemporaryDirectory() as tmp:
             venv = Path(tmp) / "smoke"
@@ -1369,59 +1536,14 @@ def local_change_notes(sha: str, prev_tag: str) -> str:
 
 def build_public_notes(
     *,
-    tag: str,
-    sha: str,
-    prev_tag: str,
     diff: Diff,
     change_notes: str,
-    pipeline_url: str,
-    distributions: list[dict[str, str]],
-    capability_gate_ran: bool,
 ) -> str:
-    advisory_count = (
-        len(diff.regressions) + len(diff.new_errors) + len(diff.beyond_noise) + len(diff.removed)
-    )
-    if not capability_gate_ran:
-        verdict = "NOT RUN — the capability gate was skipped for this candidate"
-    elif diff.hard_gate_passed:
-        verdict = "PASS — all automated hard gates passed"
-    else:
-        verdict = f"FAIL — {diff.floor_breach}"
-    checksum_lines = [
-        f"- `{Path(item['path']).name}` — `{item['sha256']}`" for item in distributions
-    ]
-    sections = [
-        "# Unpublished NOOA release candidate",
-        "",
-        "> **This draft is not published. Publishing it is the sole human release approval and immediately starts automatic PyPI publication.**",
-        "",
-        f"- Version: `{tag}`",
-        f"- Immutable candidate: `{sha}`",
-        f"- Previous release: `{prev_tag}`",
-        f"- Automated hard-gate verdict: **{verdict}**",
-        f"- Advisory findings: **{advisory_count}** (review the open sections below)",
-        f"- Private pipeline evidence: {pipeline_url}",
-        "",
-        sanitize_public_text(diff.markdown),
-        "",
-        "## Changes",
-        "",
-        sanitize_public_text(change_notes) or "No generated change notes were returned.",
-        "",
-        "## Candidate build provenance",
-        "",
-        *checksum_lines,
-        "",
-        "The candidate pipeline built and smoke-tested these artifacts. The current publication workflow rebuilds from this exact tag; artifact promotion remains a follow-up.",
-        "",
-        "## Reviewer checklist",
-        "",
-        f"- Confirm the candidate SHA is exactly `{sha}`.",
-        "- Review advisory findings and the private GitLab evidence/traces.",
-        "- **Accept:** click GitHub’s **Publish release** button. This immediately triggers `publish.yml` and automatic PyPI publication.",
-        "- **Reject:** delete this draft (including its tag) or leave it for the documented cleanup procedure.",
-    ]
-    return sanitize_public_text("\n".join(sections).rstrip() + "\n")
+    changes = sanitize_public_text(change_notes).strip()
+    if not changes:
+        changes = "No generated change notes were returned."
+    capability = sanitize_public_text(diff.markdown).strip()
+    return f"{changes}\n\n---\n\n{capability}\n"
 
 
 def create_or_update_draft(
@@ -1720,14 +1842,8 @@ def ci_main(args: argparse.Namespace) -> int:
             else generated_change_notes(args.tag, head_sha, prev_tag)
         )
         notes = build_public_notes(
-            tag=args.tag,
-            sha=head_sha,
-            prev_tag=prev_tag,
             diff=diff,
             change_notes=change_notes,
-            pipeline_url=args.pipeline_url,
-            distributions=distributions,
-            capability_gate_ran=True,
         )
         notes_path = artifact_dir / "public-release-notes.md"
         notes_path.write_text(notes)
@@ -1756,6 +1872,7 @@ def ci_main(args: argparse.Namespace) -> int:
 
 
 def local_main(args: argparse.Namespace) -> int:
+    """Run the local release gate and optionally prepare a reviewable draft."""
     if (
         args.create_draft
         or args.candidate_sha
@@ -1770,6 +1887,7 @@ def local_main(args: argparse.Namespace) -> int:
     if rehearsal and not args.checks_only and not args.dry_run:
         die("--models/--runs/--limit reduce the gate's power; pair them with --checks-only")
 
+    quickstart_api_key()
     head_sha, prev_tag, _prev_sha, existing = preflight(args.tag, args.allow_dirty)
     fast_checks()
     build_and_smoke(args.tag, head_sha)
@@ -1806,18 +1924,8 @@ def local_main(args: argparse.Namespace) -> int:
     change_notes = generated_change_notes(args.tag, head_sha, prev_tag)
     diff = diff if report else Diff(markdown="Capability comparison skipped.")
     notes = build_public_notes(
-        tag=args.tag,
-        sha=head_sha,
-        prev_tag=prev_tag,
         diff=diff,
         change_notes=change_notes,
-        pipeline_url="Local emergency fallback; no private CI evidence URL.",
-        distributions=[
-            {"path": str(path), "sha256": sha256(path)}
-            for path in sorted((REPO / "dist").iterdir())
-            if path.is_file()
-        ],
-        capability_gate_ran=not args.skip_capability,
     )
     with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as fh:
         fh.write(notes)

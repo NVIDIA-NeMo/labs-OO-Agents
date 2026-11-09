@@ -9,11 +9,13 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, model_validator
 
 from nooa.unifiedllm.limits import REPLY_CAP_KEYS
+from nooa.unifiedllm.route_identity import endpoint_or_provider_changed
 
 _DECLARATIONS = {"reasoning_levels", "reasoning_default"}
 # These select the client/request itself, not a provider's effort behavior.
 _RESERVED = _DECLARATIONS | {
     "reasoning_level",
+    "media_inputs",
     "model",
     "api_base",
     "base_url",
@@ -127,11 +129,9 @@ def apply_reasoning_level(
     if level is None:
         return _promote_reply_cap(params)
     patch = declaration.settings(level)
+    # api_base and base_url spell one endpoint; see route_identity.
     if (
-        any(
-            key in overrides and overrides[key] != defaults.get(key)
-            for key in ("api_base", "base_url", "custom_llm_provider")
-        )
+        endpoint_or_provider_changed(defaults, overrides)
         or overrides.get("model", model) != model
         or overrides.get("client") is not None
     ):

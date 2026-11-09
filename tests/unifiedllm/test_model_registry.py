@@ -14,6 +14,7 @@ from nooa.unifiedllm import (
     CompletionClient,
     RetryConfig,
     ensure_loaded,
+    get_decision_model,
     get_llm_client,
     get_registry_config,
     reload_registry,
@@ -141,6 +142,47 @@ class TestGetLlmClient:
     def test_returns_completion_client(self):
         llm = get_llm_client("gpt-4o-mini")
         assert isinstance(llm, CompletionClient)
+
+    def test_decision_alias_builds_decision_client(self, tmp_path, monkeypatch):
+        """client_type selects a decision client without changing registry shape."""
+        from nooa.decisions import DecisionClient
+
+        monkeypatch.setenv("DECISION_TEST_KEY", "secret")
+        path = _write_project_config(
+            _project_dir(tmp_path),
+            """\
+            models:
+              decisions:
+                model_name: decision-model
+                client_type: decision
+                api_style: systemone
+                endpoint: https://decision.example/v1/systemone
+                api_key_env: DECISION_TEST_KEY
+            """,
+        )
+        reload_registry(path)
+
+        client = get_decision_model("decisions")
+
+        assert isinstance(client, DecisionClient)
+        assert client.model == "decision-model"
+        assert client.endpoint == "https://decision.example/v1/systemone"
+
+    def test_decision_alias_is_rejected_by_chat_factory(self, tmp_path):
+        path = _write_project_config(
+            _project_dir(tmp_path),
+            """\
+            models:
+              decisions:
+                model_name: decision-model
+                client_type: decision
+                endpoint: https://decision.example/v1/systemone
+            """,
+        )
+        reload_registry(path)
+
+        with pytest.raises(TypeError, match="cannot be used as an LLM"):
+            get_llm_client("decisions")
 
     def test_unknown_model_passes_through(self):
         """Unknown model names should pass through to CompletionClient directly."""

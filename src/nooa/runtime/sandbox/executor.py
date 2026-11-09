@@ -22,6 +22,7 @@ from multiprocessing.connection import Connection
 from multiprocessing.process import BaseProcess
 from typing import Any
 
+from nooa._platform import require_posix
 from nooa.errors.formatting import _hard_bound_text
 from nooa.events import ExecutionResult
 from nooa.runtime.sandbox import wire
@@ -99,6 +100,7 @@ class SandboxedExecutor:
         max_error: int | None = None,
         error_tail: int | None = None,
     ):
+        require_posix("The CodeAct sandbox (a forked, rlimit-guarded worker)")
         self._agent = agent
         self._config = config
         self._cell_timeout = cell_timeout

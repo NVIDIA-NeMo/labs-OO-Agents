@@ -43,6 +43,13 @@ YAML schema::
           - reasoning.encrypted_content
         cache_breakpoint: openai             # optional: openai or anthropic wire mapping
 
+      decisions:
+        model_name: typesafe/jev-1.13         # exact decision model ID
+        client_type: decision
+        api_style: systemone                 # or openai for OpenAI's /v1/decisions
+        endpoint: https://openrouter.ai/api/alpha/decisions
+        api_key_env: OPENROUTER_API_KEY
+
 Set a model to ``null`` in a later layer to remove it.
 """
 
@@ -54,14 +61,19 @@ import re
 import threading
 from collections.abc import Collection, Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import yaml
 
 if TYPE_CHECKING:
+    from nooa.decisions import UnifiedDecisionModel
     from nooa.unifiedllm import UnifiedLLM
 
 logger = logging.getLogger(__name__)
+# Aliases already warned about a missing media_inputs setting (warn once each).
+_warned_text_only: set[str] = set()
+# Aliases already warned that an override dropped their route settings.
+_warned_route_override: set[str] = set()
 
 # Serializes the (_loaded, MODELS) check-and-mutate so concurrent
 # ensure_loaded() / reload_registry() calls — possible when async agent
@@ -80,6 +92,38 @@ _NVIDIA_KEY_SYNONYMS = {
     "NVIDIA_INTERNAL_API_KEY": "NVIDIA_INFERENCE_API_KEY",
 }
 _ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _lookup_api_key_env(
+    config: Mapping[str, Any], *, allowed_env_vars: Collection[str] | None = None
+) -> tuple[str | None, str | None]:
+    """Return ``(key, problem)`` for the ``api_key_env`` of ``config``, without logging.
+
+    ``key`` is the value of the named env var (or its NVIDIA synonym); an empty
+    value counts as unset. ``problem`` is None on success or when ``api_key_env``
+    is not set, else one of ``"type"``, ``"name"``, ``"not_allowed"`` and
+    ``"unset"``; ``key`` is then None. Never raises for malformed values.
+    """
+    api_key_env = config.get("api_key_env")
+    if not api_key_env:
+        return None, None
+    # Defend against malformed YAML where api_key_env was written as a
+    # number, list, etc. — os.getenv would raise TypeError.
+    if not isinstance(api_key_env, str):
+        return None, "type"
+    if not _ENV_VAR_NAME_RE.fullmatch(api_key_env):
+        return None, "name"
+    if allowed_env_vars is not None and api_key_env not in allowed_env_vars:
+        return None, "not_allowed"
+    api_key = os.getenv(api_key_env)
+    if api_key:
+        return api_key, None
+    synonym = _NVIDIA_KEY_SYNONYMS.get(api_key_env)
+    if synonym:
+        api_key = os.getenv(synonym)
+        if api_key:
+            return api_key, None
+    return None, "unset"
 
 
 def resolve_api_key_from_config(
@@ -104,48 +148,37 @@ def resolve_api_key_from_config(
     partially untrusted config. When supplied, only those exact env-var names
     may be resolved.
     """
+    api_key, problem = _lookup_api_key_env(config, allowed_env_vars=allowed_env_vars)
+    if problem is None:
+        return api_key
     api_key_env = config.get("api_key_env")
-    if not api_key_env:
-        return None
-    # Defend against malformed YAML where api_key_env was written as a
-    # number, list, etc. — os.getenv would raise TypeError.
-    if not isinstance(api_key_env, str):
+    if problem == "type":
         logger.warning(
             "Model %r has invalid api_key_env %r: expected a string env var name, got %s.",
             model_name,
             api_key_env,
             type(api_key_env).__name__,
         )
-        return None
-    if not _ENV_VAR_NAME_RE.fullmatch(api_key_env):
+    elif problem == "name":
         logger.warning(
             "Model %r has invalid api_key_env %r: expected a shell-style env var name.",
             model_name,
             api_key_env,
         )
-        return None
-    if allowed_env_vars is not None and api_key_env not in allowed_env_vars:
+    elif problem == "not_allowed":
         logger.warning(
             "Model %r requested api_key_env %r, which is not in the caller's allowed env-var set.",
             model_name,
             api_key_env,
         )
-        return None
-    api_key = os.getenv(api_key_env)
-    if api_key:
-        return api_key
-    synonym = _NVIDIA_KEY_SYNONYMS.get(api_key_env)
-    if synonym:
-        api_key = os.getenv(synonym)
-        if api_key:
-            return api_key
-    logger.warning(
-        "Model %r is configured to read its API key from env var %r, but "
-        "that variable is unset or empty. Falling back to litellm defaults "
-        "(which may use OPENAI_API_KEY).",
-        model_name,
-        api_key_env,
-    )
+    else:
+        logger.warning(
+            "Model %r is configured to read its API key from env var %r, but "
+            "that variable is unset or empty. Falling back to litellm defaults "
+            "(which may use OPENAI_API_KEY).",
+            model_name,
+            api_key_env,
+        )
     return None
 
 
@@ -194,6 +227,28 @@ MODELS: dict[str, dict[str, Any]] = {}
 _loaded = False
 
 
+def load_model_entries(*paths: Path) -> dict[str, dict[str, Any]]:
+    """Read whole-alias layers without mutating the global registry."""
+    fresh: dict[str, dict[str, Any]] = {}
+    for path in paths:
+        logger.debug("Loading LLM registry config from: %s", path)
+        for name, cfg in _load_models_from_yaml(path).items():
+            if cfg is None:
+                fresh.pop(name, None)
+            elif isinstance(cfg, dict):
+                fresh[name] = cfg
+            else:
+                logger.warning(
+                    "Ignoring model %r in %s: expected mapping or null, got %s",
+                    name,
+                    path,
+                    type(cfg).__name__,
+                )
+                fresh.pop(name, None)
+
+    return fresh
+
+
 def reload_registry(*paths: Path) -> dict[str, dict[str, Any]]:
     """Reload ``MODELS`` from YAML files, last-wins.
 
@@ -226,22 +281,7 @@ def reload_registry(*paths: Path) -> dict[str, dict[str, Any]]:
 
         paths = tuple(llm_config_chain())
 
-    fresh: dict[str, dict[str, Any]] = {}
-    for path in paths:
-        logger.debug("Loading LLM registry config from: %s", path)
-        for name, cfg in _load_models_from_yaml(path).items():
-            if cfg is None:
-                fresh.pop(name, None)
-            elif isinstance(cfg, dict):
-                fresh[name] = cfg
-            else:
-                logger.warning(
-                    "Ignoring model %r in %s: expected mapping or null, got %s",
-                    name,
-                    path,
-                    type(cfg).__name__,
-                )
-                fresh.pop(name, None)
+    fresh = load_model_entries(*paths)
 
     with _registry_lock:
         MODELS.clear()
@@ -348,12 +388,49 @@ def get_llm_client(name: str, *, client_type: str | None = None, **overrides) ->
     with _registry_lock:
         config = dict(MODELS.get(name, {}))
 
-    return client_from_config(name, config, client_type=client_type, **overrides)
+    selected_client_type = client_type or config.get("client_type", "completion")
+    if selected_client_type == "decision":
+        raise TypeError(
+            f"Model alias {name!r} has client_type='decision' and cannot be used as an LLM. "
+            "Pass it through decision_model= or call get_decision_model()."
+        )
+    client = client_from_config(name, config, client_type=client_type, **overrides)
+    if not callable(getattr(client, "acall", None)):
+        raise TypeError(
+            f"Model alias {name!r} has client_type='decision' and cannot be used as an LLM. "
+            "Pass it through decision_model= or call get_decision_model()."
+        )
+    return cast("UnifiedLLM", client)
+
+
+def get_decision_model(name: str, **overrides) -> UnifiedDecisionModel:
+    """Create a decision model from a configured registry alias.
+
+    Decision aliases must be declared explicitly with ``client_type: decision``;
+    unlike chat model names they are not passed through to LiteLLM when absent.
+    """
+    ensure_loaded()
+    with _registry_lock:
+        config = dict(MODELS.get(name, {}))
+    if not config:
+        raise KeyError(f"No decision model alias {name!r} is configured")
+    if config.get("client_type", "completion") != "decision":
+        raise TypeError(
+            f"Model alias {name!r} has client_type={config.get('client_type', 'completion')!r}, "
+            "not 'decision'."
+        )
+    client = client_from_config(name, config, **overrides)
+    if not callable(getattr(client, "adecide", None)):
+        raise TypeError(
+            f"Model alias {name!r} has client_type={config.get('client_type', 'completion')!r}, "
+            "not 'decision'."
+        )
+    return cast("UnifiedDecisionModel", client)
 
 
 def client_from_config(
     name: str, config: dict[str, Any], *, client_type: str | None = None, **overrides
-) -> UnifiedLLM:
+) -> UnifiedLLM | UnifiedDecisionModel:
     """Build a client from a registry entry without registering or saving it.
 
     Model lookup and onboarding share this construction path so a checked
@@ -372,12 +449,97 @@ def client_from_config(
         model = name
         logger.debug("LLM registry miss for %r — passing through to litellm", name)
 
-    params: dict[str, Any] = {
+    selected_client_type = client_type or config.get("client_type", "completion")
+    if selected_client_type == "decision":
+        from nooa.decisions import DecisionClient
+
+        if (
+            overrides.get("structured_output_mode", config.get("structured_output_mode"))
+            is not None
+        ):
+            raise ValueError("Decision routes do not support structured_output_mode")
+        overrides.pop("structured_output_mode", None)
+
+        endpoint = overrides.pop("endpoint", config.get("endpoint"))
+        if not endpoint:
+            raise ValueError(f"Decision model alias {name!r} requires an endpoint")
+        params: dict[str, Any] = {"model": model, "endpoint": endpoint}
+        if "api_style" in config and "api_style" not in overrides:
+            params["api_style"] = config["api_style"]
+        # media_inputs and the image transport settings describe this model
+        # entry's endpoint. When the overrides send the call to a different
+        # model, endpoint, API style, client or client type, they are dropped.
+        route_changed = (
+            overrides.get("model", model) != model
+            or endpoint != config.get("endpoint")
+            or (
+                "api_style" in overrides
+                and overrides["api_style"] != config.get("api_style", "systemone")
+            )
+            or overrides.get("client") is not None
+            or (
+                "decision_image_transport" in overrides
+                and overrides["decision_image_transport"]
+                != config.get("decision_image_transport", "json")
+            )
+            or (
+                "typesafe_danger_zone_images" in overrides
+                and overrides["typesafe_danger_zone_images"]
+                != config.get("typesafe_danger_zone_images", False)
+            )
+            or (client_type is not None and client_type != config.get("client_type", "completion"))
+        )
+        for key in ("media_inputs", "decision_image_transport", "typesafe_danger_zone_images"):
+            if not route_changed and key in config and key not in overrides:
+                params[key] = config[key]
+        if "api_key" not in overrides:
+            api_key = resolve_api_key_from_config(name, config)
+            if api_key is not None:
+                params["api_key"] = api_key
+        if "timeout" in config and "timeout" not in overrides:
+            params["timeout"] = config["timeout"]
+        if "retry_config" in config and "retry_config" not in overrides:
+            retry_config = config["retry_config"]
+            if retry_config is False or retry_config is None:
+                params["retry_config"] = RetryConfig(max_retries=0, rate_limit_extra_retries=0)
+            elif isinstance(retry_config, dict):
+                params["retry_config"] = RetryConfig(**retry_config)
+            else:
+                raise TypeError(
+                    f"Decision model alias {name!r} retry_config must be a mapping, false, or null"
+                )
+        params.update(overrides)
+        client = DecisionClient(**params)
+        client._registry_config = config  # type: ignore[attr-defined]
+        return client
+
+    if selected_client_type not in {"completion", "responses"}:
+        raise ValueError(
+            f"Model alias {name!r} has unsupported client_type {selected_client_type!r}"
+        )
+
+    params = {
         "model": model,
         "drop_params": config.get("drop_params", True),
     }
 
-    if "api_base" not in overrides and (api_base := config.get("api_base")):
+    # api_base and base_url are two spellings of the same endpoint. An override
+    # of None counts as no override: clearing the configured endpoint would send
+    # requests and credentials to the provider's default endpoint. An empty or
+    # whitespace-only string counts as None too. Any other override of either
+    # spelling replaces every spelling the entry configures (set below), so the
+    # owned SDK client never binds the old endpoint.
+    from nooa.unifiedllm.route_identity import no_endpoint_override
+
+    overrides = {
+        key: value
+        for key, value in overrides.items()
+        if not (key in ("api_base", "base_url") and no_endpoint_override(value))
+    }
+    endpoint_override = next(
+        (overrides[key] for key in ("api_base", "base_url") if key in overrides), None
+    )
+    if endpoint_override is None and (api_base := config.get("api_base")):
         params["api_base"] = api_base
 
     # Only resolve the registry's api_key_env when the caller hasn't
@@ -396,8 +558,13 @@ def client_from_config(
     for key in (
         "temperature",
         "top_p",
+        "timeout",
+        "chat_template_kwargs",
+        "base_url",
+        "custom_llm_provider",
         "max_tokens",
         "reasoning",
+        "thinking",
         "reasoning_effort",
         "reasoning_levels",
         "reasoning_default",
@@ -408,9 +575,18 @@ def client_from_config(
         "store",
         "include",
         "cache_breakpoint",
+        "structured_output_mode",
+        "output_config",
+        "media_inputs",
     ):
+        if key == "base_url" and endpoint_override is not None:
+            continue
         if key in config and key not in overrides:
             params[key] = config[key]
+    if endpoint_override is not None:
+        for alias in ("api_base", "base_url"):
+            if alias in config:
+                params[alias] = endpoint_override
 
     # Registry aliases can centrally tune or disable the clients' default endpoint
     # retry behavior. ``retry_config: false`` means a single attempt for every
@@ -432,28 +608,91 @@ def client_from_config(
     # An alias's declared levels describe its route, not any replacement client.
     # Discard inherited selections/defaults as well; explicit declarations below
     # belong to the replacement route and are validated by its constructor.
+    # The configured URL under the other spelling, or normalized differently
+    # (trailing slash, host case), is the same route.
+    from nooa.unifiedllm.route_identity import endpoint_or_provider_changed
+
+    dropped: list[str] = []
     if config and (
         overrides.get("model", model) != model
-        or any(
-            key in overrides and overrides[key] != config.get(key)
-            for key in ("api_base", "base_url", "custom_llm_provider")
-        )
+        or endpoint_or_provider_changed(config, overrides)
         or (client_type is not None and client_type != config.get("client_type", "completion"))
         or overrides.get("client") is not None
     ):
-        for key in ("reasoning_levels", "reasoning_default", "reasoning_level"):
-            params.pop(key, None)
-        if "reasoning_levels" in config:
-            logger.warning(
-                "Route overridden for %r; inherited reasoning choices were cleared. "
-                "Declare reasoning_levels explicitly for the replacement route.",
-                name,
-            )
+        for key in (
+            "reasoning_levels",
+            "reasoning_default",
+            "reasoning_level",
+            "media_inputs",
+            "structured_output_mode",
+        ):
+            if params.pop(key, None) and key in (
+                "reasoning_levels",
+                "media_inputs",
+                "structured_output_mode",
+            ):
+                dropped.append(key)
+
+    # A context_window belongs to one route. If an override changes the model,
+    # endpoint, client type, provider, client object or credentials, drop the
+    # entry's window: it may not hold for the new route. Passing api_key where
+    # the entry used api_key_env counts as a credential change even if the
+    # values match. A context_window passed in the overrides is always kept.
+    from nooa.unifiedllm.route_identity import same_context_route
+
+    # Compare only settings that reach the client. A completion or responses
+    # entry may carry an ``endpoint`` key (the decision-route spelling) that
+    # client_from_config does not forward; including it would make every such
+    # entry look like a changed route and drop its context_window.
+    original_route = {
+        **{key: value for key, value in config.items() if key != "endpoint"},
+        "api_key": params.get("api_key"),
+    }
+    effective_route = {
+        **params,
+        **overrides,
+        "api_key_env": config.get("api_key_env") if "api_key" not in overrides else None,
+    }
+    same_route = same_context_route(
+        model,
+        original_route,
+        config.get("client_type", "completion"),
+        effective_route.get("model", model),
+        effective_route,
+        selected_client_type,
+    )
+    if not same_route and config.pop("context_window", None) is not None:
+        dropped.insert(0, "context_window")
+    # Say once per alias what the override cleared. Name only the alias and the
+    # settings: never the override values, which may hold URLs or credentials.
+    if dropped and name not in _warned_route_override:
+        _warned_route_override.add(name)
+        logger.warning(
+            "Model %r: the overrides change its route, so its configured %s no longer "
+            "apply and were not used. Pass them with the overrides to set them for the "
+            "new route.",
+            name,
+            ", ".join(dropped),
+        )
 
     params.update(overrides)
+    if config and "media_inputs" not in params and name not in _warned_text_only:
+        _warned_text_only.add(name)
+        logger.warning(
+            "Model %r has no media_inputs setting, so it is text-only: images, audio, "
+            "video and PDFs are not sent to it. Add media_inputs: [...] to its "
+            "llm_config.yaml entry (or media_inputs: [] to silence this warning).",
+            name,
+        )
 
     # Select client class: explicit param > YAML config > default
-    client_type = client_type or config.get("client_type", "completion")
-    client = ResponsesClient(**params) if client_type == "responses" else CompletionClient(**params)
-    client._registry_config = config  # For context_window lookup
+    client = (
+        ResponsesClient(**params)
+        if selected_client_type == "responses"
+        else CompletionClient(**params)
+    )
+    # Keep the entry's settings on the client so later context-window lookups
+    # can check they still describe the client's actual route.
+    client._registry_config = config
+    client._registry_context_route = (client.model, dict(client.config), selected_client_type)
     return client

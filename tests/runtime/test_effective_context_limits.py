@@ -163,19 +163,27 @@ def test_summarization_uses_usable_window_and_preserves_explicit_threshold():
     llm = client()
     assert context_budget(llm) == 51_200
     agent = Agent(llm=llm)
-    install_summarizer(SummarizationConfig(max_tokens=12345), agent)
+    install_summarizer(SummarizationConfig(max_tokens=12345, threshold_fraction=0.10), agent)
     apply_model_limits(agent)
     assert agent._summarizers[0].config.max_tokens == 12345
     agent._summarizers[0]._uninstall()
 
 
 @pytest.mark.asyncio
-async def test_automatic_summary_threshold_tracks_actual_call_cap():
+@pytest.mark.parametrize(
+    ("threshold_fraction", "initial_threshold", "call_threshold"),
+    [(0.75, 48_000, 24_000), (0.60, 38_400, 19_200)],
+)
+async def test_automatic_summary_threshold_tracks_actual_call_cap(
+    threshold_fraction, initial_threshold, call_threshold
+):
     llm = client()
     agent = Agent(llm=llm)
-    install_summarizer(SummarizationConfig(preserve_recent=0), agent)
+    install_summarizer(
+        SummarizationConfig(preserve_recent=0, threshold_fraction=threshold_fraction), agent
+    )
     summarizer = agent._summarizers[0]
-    assert summarizer.config.max_tokens == 51_200
+    assert summarizer.config.max_tokens == initial_threshold
     agent.event_manager.add(Message(content="remember this"))
     llm.acall = AsyncMock(return_value=LLMResponse(content="summary"))
     ctx = LLMCallContext(
@@ -194,7 +202,7 @@ async def test_automatic_summary_threshold_tracks_actual_call_cap():
 
     try:
         await agent.event_manager.run_middleware("llm_call", ctx, core)
-        assert summarizer.config.max_tokens == 25_600
+        assert summarizer.config.max_tokens == call_threshold
         assert summarizer._pending_task is not None
         await summarizer._pending_task
         llm.acall.assert_awaited_once()

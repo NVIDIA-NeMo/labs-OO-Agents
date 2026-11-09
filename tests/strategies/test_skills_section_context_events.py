@@ -1,31 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the Skills section in ``<execution_context>``.
+"""Prompt visibility for the context and events APIs.
 
-The base ``Agent`` declares ``self.context: Annotated["ContextApi", hidden, ...]``
-and ``self.events: Annotated["EventsApi", hidden, ...]`` — both are Skill
-subclasses, but they're hidden from the LLM by default. An agent opts in
-per-instance by calling ``spec(self, "context", hidden=False)`` (or
-``"events"``) in its ``__init__``.
-
-These tests pin the contract:
-
-- Base Agent with no ``spec()`` calls: Skills section is absent; neither
-  ``self.context`` nor ``self.events`` appears in the rendered prompt's
-  Skills table.
-- ``spec(self, "context", hidden=False)``: Skills section renders, contains
-  a ``self.context`` row, and emits the "Pin to context" / "Unpin"
-  instruction lines.
-- ``spec(self, "events", hidden=False)``: Skills section renders, contains
-  a ``self.events`` row; pin/unpin lines do NOT appear (those are
-  Context-API-specific).
-- Both ``spec()`` calls: Both rows appear and pin/unpin is present.
-- A real user Skill alongside an un-hidden Context API: both rows appear.
-
-This fixture surfaces a bug fixed alongside these tests:
-``is_hidden_field`` was being called with ``type(runtime.agent)`` (the class)
-instead of the instance, which made the ``spec(self, ...)`` instance-level
-override a no-op. These tests will fail with the old call.
+The execution context no longer renders the old Skills table. Events usage
+guidance lives in a dedicated framework block, enabled by
+instance-level visibility and shared across strategies. Hidden events must
+not inject that block, including after visibility changes on an existing agent.
 """
 
 from __future__ import annotations
@@ -34,8 +14,12 @@ import pytest
 
 from nooa import Agent
 from nooa.agentdoc import spec
+from nooa.decorators import strategy
 from nooa.prompts import build_prompt_data
 from nooa.skill import Skill
+from nooa.strategies.codeact_v2 import CodeActV2
+from nooa.strategies.predict import PredictStrategy
+from nooa.strategies.pure_python import PurePythonStrategy
 from nooa.unifiedllm import FakeLLMClient
 
 _LLM = FakeLLMClient()
@@ -74,6 +58,21 @@ class _EventsOnlyAgent(Agent, llm=_LLM):
         spec(self, "events", hidden=False)
 
     async def go(self) -> str:
+        """Run."""
+        ...
+
+    @strategy(CodeActV2())
+    async def go_v2(self) -> str:
+        """Run."""
+        ...
+
+    @strategy(PredictStrategy())
+    async def predict(self) -> str:
+        """Run."""
+        ...
+
+    @strategy(PurePythonStrategy())
+    async def pure_python(self) -> str:
         """Run."""
         ...
 
@@ -131,6 +130,41 @@ async def _render_execution_context(agent: Agent) -> str:
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method_name", ["go", "go_v2", "predict", "pure_python"])
+async def test_events_guidance_tracks_instance_visibility(method_name):
+    """Visibility toggles the entire guidance block across all strategies."""
+    agent = _EventsOnlyAgent()
+    method = getattr(agent, method_name)
+    prompt = (await build_prompt_data(method)).system_prompt or ""
+    assert "<events_api" in prompt
+    assert "You MUST call doc(self.events) before using it" in prompt
+    assert "print(doc(self.events))" in prompt
+    assert "Query past events by type, tag, text, or call ID" in prompt
+    assert "self.events.collapse" not in prompt
+
+    spec(agent, "events", hidden=True)
+    prompt = (await build_prompt_data(method)).system_prompt or ""
+    assert "<events_api" not in prompt
+    assert "You MUST call doc(self.events) before using it" not in prompt
+    assert "print(doc(self.events))" not in prompt
+
+    spec(agent, "events", hidden=False)
+    prompt = (await build_prompt_data(method)).system_prompt or ""
+    assert "<events_api" in prompt
+    assert "You MUST call doc(self.events) before using it" in prompt
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("agent_cls", [_BaseAgent, _ContextOnlyAgent])
+async def test_hidden_events_have_no_guidance(agent_cls):
+    """Hidden events inject neither instructions nor an empty XML block."""
+    prompt = (await build_prompt_data(agent_cls().go)).system_prompt or ""
+    assert "<events_api" not in prompt
+    assert "You MUST call doc(self.events) before using it" not in prompt
+    assert "print(doc(self.events))" not in prompt
 
 
 class TestSkillsSectionVisibility:

@@ -10,7 +10,7 @@ import pytest
 from pydantic import ValidationError
 
 from nooa.context_blocks.events import ToolCallEvent, ToolResult
-from nooa.context_blocks.formatter import ResponsesProviderFormatter
+from nooa.context_blocks.formatter import OpenAIProviderFormatter
 from nooa.context_blocks.models import BlockMetadata, ResolvedBlock, Role
 from nooa.context_blocks.renderer import render_context
 from nooa.context_blocks.renderers.cached import CachedBlockFormatter
@@ -105,7 +105,7 @@ def render(response, state="live 1", formatter=None):
     return render_context(
         blocks(response, state),
         block_formatter=formatter or CachedBlockFormatter(),
-        provider_formatter=ResponsesProviderFormatter(),
+        provider_formatter=OpenAIProviderFormatter(),
     )
 
 
@@ -270,7 +270,7 @@ def test_rendered_reasoning_edit_discards_native_authority():
     original = turn()
     message = render(original).messages[1]
     edited = message.model_copy(update={"reasoning": "different reasoning"})
-    projected = ResponsesProviderFormatter().format([edited])[0]
+    projected = OpenAIProviderFormatter().format([edited])[0]
     assert type(projected) is dict
     assert projected["reasoning_content"] == "different reasoning"
     assert original.reasoning != "different reasoning"
@@ -397,14 +397,21 @@ async def test_mocked_dispatch_resume_and_changing_live_suffix(monkeypatch, tmp_
         assert captured[-2][:-1] == captured[-1][:-1]
         assert captured[-2][-1] != captured[-1][-1]
         expected = output_items() + [
-            {"type": "function_call_output", "call_id": call_id, "output": "done"}
+            {
+                "type": "function_call_output",
+                "call_id": call_id,
+                "output": [
+                    {
+                        "type": "input_text",
+                        "text": "done",
+                        "prompt_cache_breakpoint": {"mode": "explicit"},
+                    }
+                ],
+            }
             for call_id in ("call_1", "call_2")
         ]
-        expected[-1]["output"] = [
-            {"type": "input_text", "text": "done", "prompt_cache_breakpoint": {"mode": "explicit"}}
-        ]
         assert captured[-1][:-1] == expected
-        assert "live 2" in captured[-1][-1]["content"]
+        assert "live 2" in captured[-1][-1]["content"][0]["text"]
     finally:
         await client.aclose()
 
@@ -443,7 +450,7 @@ def test_only_leading_system_messages_become_instructions(first_conversation):
                 SCOPE,
             )
             assert instructions == "First\n\nSecond"
-            assert wire[-1] == {"role": "system", "content": live}
+            assert wire[-1] == {"role": "system", "content": [{"type": "input_text", "text": live}]}
             if first_conversation == "turn":
                 assert wire[:-1] == output_items()
     finally:
@@ -458,7 +465,7 @@ def test_rendered_public_values_share_strings_but_no_native_objects():
     assert message.tool_calls[0].arguments is original.tool_calls[0].arguments
     assert not hasattr(message.tool_calls[0], "native")
     replacement = message.model_copy(update={"content": "edited"})
-    public = ResponsesProviderFormatter().format([replacement])
+    public = OpenAIProviderFormatter().format([replacement])
     assert isinstance(public[0], dict)
 
 

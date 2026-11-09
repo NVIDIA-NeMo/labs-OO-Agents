@@ -3,7 +3,7 @@
 """Tests for new Channel + QueueManager ergonomic APIs.
 
 Covers:
-- _ChannelReader.flush()
+- ChannelReader.flush()
 - QueueManager.remove_channel()
 - QueueManager.queue(name, replace=True)
 - QueueManager.event(name, replace=True)
@@ -39,12 +39,12 @@ class FakeEventManager:
 
 
 # ---------------------------------------------------------------------------
-# 1. _ChannelReader.flush()
+# 1. ChannelReader.flush()
 # ---------------------------------------------------------------------------
 
 
 class TestChannelReaderFlush:
-    """Tests for _ChannelReader.flush() method."""
+    """Tests for ChannelReader.flush() method."""
 
     @pytest.mark.asyncio
     async def test_flush_empty_channel_returns_zero(self):

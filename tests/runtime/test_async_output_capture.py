@@ -10,6 +10,10 @@ These tests verify that:
 """
 
 import asyncio
+import os
+import subprocess
+import sys
+import textwrap
 
 import pytest
 
@@ -85,25 +89,41 @@ sys.stderr.flush()
         assert result.error is None
         assert "error message" in result.stderr
 
-    @pytest.mark.skip(
-        reason="warnings.warn() uses Python's internal warning system, not sys.stderr.write(). "
-        "The warning is captured by pytest's warning capture, not our stream wrapper."
-    )
-    async def test_warnings_captured(self, agent):
-        """warnings.warn() is captured in stderr.
+    def test_warnings_captured(self):
+        """Capture normal Python warnings without pytest's warning interception."""
+        script = textwrap.dedent("""\
+            import asyncio
+            import warnings
 
-        NOTE: This test is skipped because warnings.warn() doesn't write directly
-        to sys.stderr - it uses Python's internal warning infrastructure which
-        pytest captures separately. Direct sys.stderr.write() IS captured.
-        """
-        code = """
-import warnings
-warnings.warn("this is a warning")
-"""
-        result = await agent.runtime.execute_code(code, validate=False)
+            from nooa import Agent
+            from nooa.unifiedllm import FakeLLMClient
 
-        assert result.error is None
-        assert "this is a warning" in result.stderr
+            class OutputTestAgent(Agent):
+                pass
+
+            async def main():
+                agent = OutputTestAgent(llm=FakeLLMClient())
+                warnings.simplefilter("always")
+                handler = warnings.showwarning
+                result = await agent.runtime.execute_code(
+                    'import warnings\\nwarnings.warn("this is a warning")',
+                    validate=False,
+                )
+                assert result.error is None, repr(result.error)
+                assert "this is a warning" in result.stderr, repr(result.stderr)
+                assert warnings.showwarning is handler
+
+            asyncio.run(main())
+        """)
+        # Propagate pytest's import paths so the child uses this checkout too.
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            env={**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)},
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
 
     async def test_mixed_stdout_stderr(self, agent):
         """Both stdout and stderr are captured separately."""
