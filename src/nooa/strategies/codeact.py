@@ -64,6 +64,7 @@ from nooa.events import (
     Task,
     TextOnlyReply,
 )
+from nooa.runtime.execution_namespace import ExecutionNamespace
 from nooa.runtime.harness_metrics import get_harness_metrics
 from nooa.runtime.hooks import call_after_hook, call_before_hook
 from nooa.runtime.sandbox.errors import SandboxExecutionError
@@ -447,7 +448,8 @@ class CodeActSession:
     session_locals: dict[str, Any] = field(default_factory=dict)
     out_accessor: Any = field(default=None)  # OutAccessor instance, created lazily
     sandbox_executor: Any = field(default=None)  # SandboxedExecutor when backend="sandbox"
-    execution_namespace: Any = field(default=None)  # explicit experimental owner
+    # The namespace the cells run in (CurrentCall.execution_namespace), else None.
+    execution_namespace: ExecutionNamespace | None = field(default=None)
     execution_count: int = 0
     loop_guard: LoopGuard | None = None
 

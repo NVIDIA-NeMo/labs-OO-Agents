@@ -61,6 +61,7 @@ from nooa.runtime.context_vars import (
     _in_generation_session,
     _parent_agent_var,
 )
+from nooa.runtime.execution_namespace import ExecutionNamespace
 from nooa.runtime.harness_metrics import (
     HarnessMetrics,
     get_harness_metrics,
@@ -1575,7 +1576,7 @@ class ActorRuntime:
         execution_count: int = 1,
         restrictions: "RestrictionsConfig | None" = None,
         sandbox_executor: Any = None,
-        execution_namespace: Any = None,
+        execution_namespace: ExecutionNamespace | None = None,
         framework_bindings: dict[str, Any] | None = None,
     ) -> "ExecutionResult":
         """Execute Python code with namespace + strategy builtins (RuntimeServices protocol).
@@ -1594,6 +1595,9 @@ class ActorRuntime:
                 guarded worker process instead of in-process. The surrounding
                 middleware pipeline, before/after_code_execution hooks and events
                 still run here on the parent, so the sandbox composes with them.
+            execution_namespace: When set, the cell runs in this namespace (its
+                globals persist across the call's cells); None runs it in a
+                fresh per-cell namespace.
 
         Returns:
             ExecutionResult with stdout, error, defined_methods, and optionally returned_value.

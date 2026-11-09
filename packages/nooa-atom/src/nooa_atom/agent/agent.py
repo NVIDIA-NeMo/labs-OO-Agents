@@ -28,6 +28,7 @@ from typing import Annotated, Any, ClassVar
 from nooa import Context, hidden, strategy
 from nooa.agentdoc import doc, spec
 from nooa.interactive import Done, NeedInput, Waiting
+from nooa.runtime.execution_namespace import ExecutionNamespace
 from nooa.strategies import CodeActV2, PredictStrategy  # noqa: F401
 from nooa_atom.agent.work_manager import Job, JobEvent, Throttle, WorkManager
 from nooa_atom.agent.work_shell import CommandResult, Shell
@@ -689,7 +690,7 @@ class AtomAgent(
     _turn_policy: Annotated[str, hidden, nosnapshot]
     _role_instructions: Annotated[str | None, hidden, nosnapshot]
     _namespace_lifetime: Annotated[str, hidden, nosnapshot]
-    _handle_namespace: Annotated[Any, hidden, nosnapshot]
+    _handle_namespace: Annotated[ExecutionNamespace | None, hidden, nosnapshot]
     _done_reflection: Annotated[bool, hidden, nosnapshot]
     _reflection_candidate: Annotated[Any, hidden, nosnapshot]
     _reflection_gate: Annotated[_ReflectionGate, hidden, nosnapshot]
@@ -766,9 +767,9 @@ class AtomAgent(
 
     @hidden
     @no_trace
-    def _execution_namespace_for(self, call: Any) -> Any:
+    def _execution_namespace_for(self, call: Any) -> ExecutionNamespace:
         """Handle shares this live session's namespace; other agent methods start each call fresh."""
-        from nooa.runtime.execution_namespace import RUNTIME_NAMES, ExecutionNamespace
+        from nooa.runtime.execution_namespace import RUNTIME_NAMES
 
         if call.method_name == "handle":
             if self._handle_namespace is not None:

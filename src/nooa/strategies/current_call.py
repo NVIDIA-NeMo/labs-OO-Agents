@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Annotated, Any, TypedDict, get_type_hints
 from uuid import uuid4
 
 from nooa.ellipsis_detection import get_pre_ellipsis_code
+from nooa.runtime.execution_namespace import ExecutionNamespace
 
 if TYPE_CHECKING:
     from nooa.config.truncation_config import TruncationConfig
@@ -228,9 +229,11 @@ class CurrentCall:
     positional_param_names: list[str] | None = None
     var_positional_param_name: str | None = None
     var_keyword_param_name: str | None = None
-    # Opt-in coherent namespace owner; never copied into snapshot/user state.
-    # Last so main's positional constructor order above stays unchanged.
-    execution_namespace: Any = None
+    # The namespace this call's cells run in, when the agent's
+    # ``_execution_namespace_for`` hook supplies one (else None: default cell
+    # execution); never copied into snapshot/user state. Last so main's
+    # positional constructor order above stays unchanged.
+    execution_namespace: ExecutionNamespace | None = None
 
     def __hash__(self) -> int:
         """Hash by id for use in sets/dicts."""
