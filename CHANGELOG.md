@@ -7,13 +7,17 @@ to follow semantic versioning.
 ## [Unreleased]
 
 - `nooa.runtime.cell_state`: save and revive an `ExecutionNamespace`'s user
-  names across restarts. `capture()` keeps plain data as msgpack and
-  cell-defined helper functions as validated source, each under a per-name and
-  total byte cap, and reports every skipped name with a reason; `apply()`
-  revives a capture into a namespace, failing only the names it cannot (a
-  tampered or corrupt payload cannot choose a class or code to run on load);
-  `restore_notice()` renders the report for the model. Sessions that want it
-  define `before_checkpoint()`; `nooa-atom` does.
+  names across restarts. `capture()` keeps plain data as msgpack, objects
+  `self.v` would keep through the same serializer and class allowlist,
+  cell-defined helper functions and classes as validated source (definitions
+  that run only library code), and instances of those classes as field data,
+  each under a per-name and total byte cap, and reports every skipped name
+  with a reason; `apply()` revives a capture into a namespace, failing only
+  the names it cannot (a tampered or corrupt payload cannot choose arbitrary
+  code to run on load); `restore_notice()` renders the report for the model.
+  Sessions that want it define `before_checkpoint()`; `nooa-atom` does. The
+  namespace engine now attaches `_generated_source` to classes a cell defines,
+  as it already did for functions.
 - Core installs now exclude the individually verified LiteLLM releases affected
   by the optional-MCP import regression (1.106.0–1.106.7, 1.108.0–1.108.1, and
   affected prereleases). Future patch and security releases remain eligible;

@@ -45,15 +45,15 @@ async def test_snapshot_carries_cell_state_and_a_restored_agent_can_use_it(tmp_p
         assert set(saved["functions"]) == {"bump"}
         skipped = {entry["name"]: entry["reason"] for entry in saved["skipped"]}
         assert skipped["json"].startswith("module")
-        assert "class" in skipped["Shape"] and skipped["handle"].startswith("not plain data")
+        assert set(saved["classes"]) == {"Shape"} and skipped["handle"].startswith("not kept")
         assert "_handle_namespace" not in snapshot["attributes"]
 
         restored = AtomAgent(cwd=tmp_path, llm=CellLLM([SECOND_TURN]))
         snapshot_from_json(snapshot, restored)  # runs restored.after_restore()
         assert restored.v.fact == "durable" and restored._handle_namespace is None
         [notice] = [n for n in _notes(restored) if n.startswith("[python-state-restored]")]
-        assert "available again: bump, counter, notes." in notice
-        assert "json (module: import it again)" in notice and "Shape (" in notice
+        assert "available again: Shape, bump, counter, notes." in notice
+        assert "json (module: import it again)" in notice and "handle (" in notice
         assert not any("variables and helpers were lost" in n for n in _notes(restored))
 
         # The first turn of the restored agent sees the revived names and helper.
@@ -62,7 +62,7 @@ async def test_snapshot_carries_cell_state_and_a_restored_agent_can_use_it(tmp_p
         )
         ns = restored._handle_namespace
         assert ns.globals["bump"].__globals__ is ns.globals
-        assert "json" not in ns.globals and "Shape" not in ns.globals
+        assert "json" not in ns.globals and isinstance(ns.globals["Shape"], type)
         # A second after_restore (another load of the same snapshot) does not repeat the notice.
         restored.after_restore()
         assert sum(n.startswith("[python-state-restored]") for n in _notes(restored)) == 1

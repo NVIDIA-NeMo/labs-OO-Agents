@@ -1045,8 +1045,9 @@ class AtomAgent(
                 from nooa.runtime.cell_state import decode, restore_notice
 
                 # Stage now so the notice is exact; the first handle() call binds the names.
-                values, functions, report = decode(saved)
-                report.restored = sorted([*values, *functions])
+                staged = decode(saved)
+                report = staged.report
+                report.restored = staged.names
                 self._pending_cell_state = saved
                 self._system_messages_in.put(restore_notice(report))
             else:

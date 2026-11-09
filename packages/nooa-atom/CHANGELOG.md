@@ -7,19 +7,26 @@ based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
-- `nooa-atom`: Python cell variables and helpers now survive a restart. Before
-  each checkpoint the agent saves its handle namespace's plain data (`None`,
-  bool, int, float, str, bytes, and list/tuple/set/frozenset/dict of those, as
-  msgpack) and its cell-defined helper functions (as source: a plain `def` or
-  `async def` with literal defaults, no decorators, no closure) into the
-  snapshot next to `self.v`, with a 1 MiB cap per name and 8 MiB in all. On
+- `nooa-atom`: Python cell variables, helpers and classes now survive a
+  restart. Before each checkpoint the agent saves its handle namespace into
+  the snapshot next to `self.v`, with a 1 MiB cap per name and 8 MiB in all:
+  plain data (`None`, bool, int, float, str, bytes, and
+  list/tuple/set/frozenset/dict of those) as msgpack; Pydantic models,
+  dataclasses and enums of importable classes under exactly the rule `self.v`
+  applies; cell-defined helper functions and classes as source, defined again
+  on resume when that runs only library code (a plain `def`/`async def` with
+  literal or name defaults, no decorators, no closure; a class whose base is
+  `BaseModel`, `Enum` or none, decorated only with `@dataclass`, whose body is
+  a docstring, literal attributes, annotated fields and plain methods, with no
+  `__init__`, `__post_init__`, `model_post_init` or `model_config`); and
+  instances of those classes as field data, rebuilt once the class exists. On
   resume the first turn gets them back and a one-time
-  `[python-state-restored]` note lists what returned and what did not, with
-  the reason (modules, classes, lambdas, decorated or closed-over helpers,
-  objects of other types, oversized values). Nothing in the saved state can
-  pick a class to build or code to run when it is loaded; defining a kept
-  helper runs no user code, its body runs only when a cell calls it. Imports,
-  open files, jobs and Shells are still lost, as before.
+  `[python-state-restored]` note on the `system_messages` channel lists what
+  returned and what did not, with the reason (modules, lambdas, decorated or
+  closed-over helpers, classes outside the rules, other objects, oversized
+  values). Nothing in the saved state can pick arbitrary code to run when it
+  is loaded; a helper's body runs only when a cell calls it. Imports, open
+  files, jobs and Shells are still lost, as before.
 - `nooa-atom`: AtomAgent drops the core `<events_api>` guidance block (added on
   main for agents that expose `self.events`). `self.events` stays exposed, and
   Atom's `context_usage` block already names `self.events.collapse(...)` and

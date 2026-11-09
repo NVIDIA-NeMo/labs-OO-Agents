@@ -118,16 +118,16 @@ _private = 5
     )
     saved = cell_state.capture(ns)
     reasons = {entry["name"]: entry["reason"] for entry in saved["skipped"]}
-    assert set(saved["values"]) == {"seed"} and set(saved["functions"]) == {"outer", "passthrough"}
+    assert set(saved["values"]) == {"seed"}
+    assert set(saved["functions"]) == {"outer", "passthrough", "defaulted"}  # x=seed is a name
     assert "_private" not in saved["values"] and "_private" not in reasons
     assert reasons["json"].startswith("module")
-    assert "class" in reasons["K"]
+    assert set(saved["classes"]) == {"K"}  # a plain class with an empty body is restorable
     assert "lambda" in reasons["anon"]
     assert "decorator" in reasons["decorated"]
-    assert reasons["cached"].startswith("not plain data")  # an lru_cache wrapper object
+    assert reasons["cached"].startswith("not kept")  # an lru_cache wrapper object
     assert "closes over" in reasons["closed"]
-    assert "literal" in reasons["defaulted"]
-    assert reasons["opaque"].startswith("not plain data")
+    assert reasons["opaque"].startswith("not kept")
     assert reasons["lru_cache"].startswith("function not kept")
 
 
@@ -204,3 +204,135 @@ def test_restore_notice_names_what_came_back_and_what_did_not():
     assert "self.v and saved history remain" in text
     empty = cell_state.restore_notice(cell_state.RestoreReport())
     assert "could not be revived" in empty
+
+
+async def test_cell_defined_classes_and_their_instances_round_trip():
+    ns = namespace()
+    await fill(
+        ns,
+        """
+from pydantic import BaseModel
+from dataclasses import dataclass
+import enum
+class Color(enum.Enum):
+    RED = 'red'
+    BLUE = 'blue'
+class Item(BaseModel):
+    \"\"\"One line item.\"\"\"
+    name: str
+    qty: int = 1
+    color: Color = Color.RED
+    def total(self, price: float = 2.0) -> float:
+        return self.qty * price
+@dataclass(frozen=True)
+class Point:
+    x: int
+    y: int = 0
+class Bag:
+    limit = 3
+    def describe(self):
+        return f'bag of {len(self.items)}'
+items = [Item(name='a'), Item(name='b', qty=2, color=Color.BLUE)]
+origin = Point(1, 2)
+bag = Bag()
+bag.items = items
+favourite = Color.BLUE
+""",
+    )
+    saved = cell_state.capture(ns)
+    assert set(saved["classes"]) == {"Color", "Item", "Point", "Bag"}
+    assert set(saved["instances"]) == {"items", "origin", "bag", "favourite"}
+    assert saved["models"] == {}
+    assert {e["name"] for e in saved["skipped"]} <= {"dataclass", "enum", "BaseModel"}
+
+    fresh = namespace()
+    report = cell_state.apply(fresh, saved)
+    assert report.failed == []
+    g = fresh.globals
+    assert g["items"][1].qty == 2 and g["items"][1].color is g["Color"].BLUE
+    assert g["items"][0].total(price=3.0) == 3.0
+    assert g["origin"] == g["Point"](1, 2) and g["origin"].y == 2
+    assert g["bag"].describe() == "bag of 2" and g["bag"].limit == 3
+    assert g["favourite"] is g["Color"].BLUE and type(g["favourite"]) is g["Color"]
+    assert g["Item"].__doc__ == "One line item."
+    # Library names the definitions needed are not left behind as user globals.
+    assert "BaseModel" not in g and "dataclass" not in g and "enum" not in g
+    # Round trip again: the revived classes carry their source.
+    assert cell_state.capture(fresh)["classes"] == saved["classes"]
+
+
+async def test_classes_whose_definition_would_run_code_are_skipped_with_a_reason():
+    ns = namespace()
+    await fill(
+        ns,
+        """
+from pydantic import BaseModel, ConfigDict, field_validator
+class Init:
+    def __init__(self):
+        self.x = 1
+class Post(BaseModel):
+    n: int = 0
+    def model_post_init(self, ctx):
+        pass
+class Conf(BaseModel):
+    model_config = ConfigDict(extra='allow')
+class Valid(BaseModel):
+    n: int = 0
+    @field_validator('n')
+    @classmethod
+    def check(cls, v):
+        return v
+class Meta(metaclass=type):
+    pass
+class Computed:
+    size = len('abc')
+class Nested:
+    class Inner:
+        pass
+init = Init()
+""",
+    )
+    saved = cell_state.capture(ns)
+    reasons = {entry["name"]: entry["reason"] for entry in saved["skipped"]}
+    assert saved["classes"] == {}
+    assert "__init__" in reasons["Init"] and "model_post_init" in reasons["Post"]
+    assert "plain names" in reasons["Conf"]
+    assert "decorator" in reasons["Valid"]
+    assert "metaclass" in reasons["Meta"]
+    assert "literal" in reasons["Computed"]
+    assert "ClassDef" in reasons["Nested"]
+    assert "cell class that is not restorable" in reasons["init"]
+
+
+async def test_a_shadowed_library_name_fails_the_class_instead_of_running_it():
+    saved = {
+        "version": cell_state.FORMAT_VERSION,
+        "classes": {"Item": "class Item(BaseModel):\n    n: int = 1"},
+        "instances": {},
+    }
+    ns = namespace()
+    await fill(ns, "BaseModel = object")  # a cell rebound the name
+    report = cell_state.apply(ns, saved)
+    assert report.restored == []
+    assert "bound to something else" in report.failed[0]["reason"]
+    assert "Item" not in ns.globals
+
+    clean = namespace()
+    assert cell_state.apply(clean, saved).restored == ["Item"]
+    assert clean.globals["Item"](n=5).n == 5
+
+
+def test_an_instance_of_a_class_that_did_not_restore_fails_only_itself():
+    encoded = base64.b64encode(
+        cell_state.pack_value({cell_state.INSTANCE_KEY: "Ghost", "data": {"n": 1}})
+    ).decode()
+    ok = base64.b64encode(cell_state.pack_value(2)).decode()
+    saved = {
+        "version": cell_state.FORMAT_VERSION,
+        "instances": {"ghost": encoded},
+        "values": {"ok": ok},
+    }
+    fresh = namespace()
+    report = cell_state.apply(fresh, saved)
+    assert report.restored == ["ok"]
+    assert "Ghost" in report.failed[0]["reason"] and "ghost" not in fresh.globals
