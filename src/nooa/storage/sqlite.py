@@ -36,10 +36,10 @@ from nooa.events import (
     Message,
     PythonOutput,
     Reasoning,
+    SessionCleared,
+    SessionResumed,
     Summary,
     Task,
-    TuiSessionCleared,
-    TuiSessionResumed,
 )
 from nooa.llm_types import LLMResponse
 from nooa.storage.json_snapshot import snapshot_from_dict, snapshot_to_dict
@@ -90,8 +90,8 @@ for _cls in (
     BeforeTurn,
     AfterTurn,
     DecisionRecord,
-    TuiSessionResumed,
-    TuiSessionCleared,
+    SessionResumed,
+    SessionCleared,
 ):
     _key: str = _registry_key(_cls)
     if _key in _CORE_TYPES:
@@ -101,6 +101,12 @@ for _cls in (
             "Each event class must have a unique event_type default."
         )
     _CORE_TYPES[_key] = _cls
+
+# Stored event_type -> the current one, for event classes that were renamed.
+_RENAMED_EVENT_TYPES: dict[str, str] = {
+    "TuiSessionResumed": "SessionResumed",
+    "TuiSessionCleared": "SessionCleared",
+}
 
 _SCHEMA_VERSION = 1
 
@@ -302,6 +308,8 @@ class SQLiteEventBackend:
         if event_type == "LLMOutput":
             raw["event_type"] = "LLMResponse"
             return LLMResponse.model_validate(raw, context={"archive": True})
+        if event_type in _RENAMED_EVENT_TYPES:  # rows stored under an older class name
+            event_type = raw["event_type"] = _RENAMED_EVENT_TYPES[event_type]
         cls = self._registry.get(event_type)
         if cls is None:
             # Fall back to the global auto-registration registry

@@ -19,7 +19,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any, Protocol
 
-from nooa.events import TuiSessionResumed
+from nooa.events import SessionResumed
 from nooa.interactive import AgentMessage, Done
 from nooa.storage.sqlite import SessionAlreadyActiveError
 from nooa_atom.session.events import (
@@ -348,7 +348,7 @@ class SessionRegistry:
             )
             agent, restored, note = await self._restore_older(agent, options, handle, exc)
             handle.events.add(SnapshotRestoreFailed(error=note))
-        agent.event_manager.add(TuiSessionResumed(session_id=handle.id, restored=restored))
+        agent.event_manager.add(SessionResumed(session_id=handle.id, restored=restored))
         return agent
 
     async def _restore_older(
@@ -989,7 +989,7 @@ class SessionRegistry:
         the agent is built and its latest snapshot restored (a snapshot
         that fails to restore leaves a fresh agent and a note in the
         transcript, see ``_restore``; after a restore the agent's
-        ``after_restore()`` runs, if it has one), ``TuiSessionResumed`` is emitted, items admitted but never consumed
+        ``after_restore()`` runs, if it has one), ``SessionResumed`` is emitted, items admitted but never consumed
         or withdrawn are re-queued (``ItemRequeued``), and the session is
         published and started. Loading a child whose parent is not live is
         allowed (a detached child: its results stay in its own transcript).

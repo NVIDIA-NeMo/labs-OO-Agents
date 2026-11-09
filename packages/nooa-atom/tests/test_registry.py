@@ -226,7 +226,7 @@ async def test_load_restores_state_and_requeues_unhandled_items(
 
     def factory(options, storage):
         agent = resumed_models(options, storage)
-        agent.event_manager.on("TuiSessionResumed", resumed_events.append)
+        agent.event_manager.on("SessionResumed", resumed_events.append)
         return agent
 
     fresh = SessionRegistry(SessionStore(sessions_dir), agent_factory=factory)
