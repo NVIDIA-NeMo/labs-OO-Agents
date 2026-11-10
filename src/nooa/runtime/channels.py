@@ -183,10 +183,9 @@ class JobHandle:
         if self._task.done():
             return
         self._task.cancel()
-        try:
-            await self._task
-        except (asyncio.CancelledError, Exception):
-            pass
+        # Collect the job's cancellation as a result, while cancellation of
+        # this await still propagates to our caller.
+        await asyncio.gather(self._task, return_exceptions=True)
         if self.state == "running":
             self.state = "cancelled"
 
@@ -1220,11 +1219,9 @@ class QueueManager:
             done, pending = await asyncio.wait(tasks.keys(), return_when=asyncio.FIRST_COMPLETED)
             for t in pending:
                 t.cancel()
-            for t in pending:
-                try:
-                    await t
-                except BaseException:
-                    pass
+            # A loser's cancellation is a result; our caller's cancellation
+            # must reach the outer handler that restores consumed items.
+            await asyncio.gather(*pending, return_exceptions=True)
 
             # Check if a queue-channel drain won (not the notify sentinel).
             drain_done = [t for t in done if tasks[t] is not None]
@@ -1363,13 +1360,15 @@ class QueueManager:
     async def shutdown(self) -> None:
         """Cancel and await all outstanding spawned jobs.
 
-        Safe to call multiple times. After shutdown, the handles list
-        is cleared.
+        Cancel all jobs concurrently. Completed handles are removed; any
+        unfinished handles remain tracked if shutdown is interrupted.
+        Safe to call multiple times.
         """
         handles = list(self._handles)
-        self._handles.clear()
-        for h in handles:
-            await h.cancel()
+        try:
+            await asyncio.gather(*(h.cancel() for h in handles), return_exceptions=True)
+        finally:
+            self._handles[:] = [h for h in self._handles if h not in handles or not h._task.done()]
 
     # ---- job registry ----------------------------------------------------
 

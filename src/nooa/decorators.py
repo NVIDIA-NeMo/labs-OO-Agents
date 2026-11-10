@@ -37,6 +37,10 @@ def strategy(
     1. At class definition time: Attaches metadata for AgentMeta metaclass to process
     2. At runtime (for dynamically-defined methods): Creates runtime wrapper for execution
 
+    Standalone generation functions must end with a source-verifiable ``...``.
+    For dynamically created functions, register source in ``linecache`` or
+    attach ``_generated_source`` before applying this decorator.
+
     Args:
         strategy_instance: Strategy to use (e.g., ReflexionStrategy())
         context: Context block overrides. Accepts either:
@@ -79,10 +83,11 @@ def strategy(
 
     Raises:
         ValueError: If multiple @strategy decorators are stacked
-        TypeError: If context is not a dict or ScopedContext instance
+        TypeError: If context is invalid or the decorated function cannot use a strategy
     """
 
     def decorator(func: Callable[P, R]) -> Callable[P, R]:
+        """Validate a strategy target and return its runtime wrapper."""
         # Check for duplicate @strategy decorators
         if hasattr(func, "_strategy_override"):
             raise ValueError(f"Cannot stack multiple @strategy decorators on {func.__name__}")
@@ -130,12 +135,19 @@ def strategy(
         if not inspect.iscoroutinefunction(func):
             raise TypeError(f"@strategy method '{func.__name__}' must be async")
 
-        needs_gen = has_ellipsis_body(func)
-
         # Detect standalone functions (no 'self' as first parameter).
         # Each call creates a fresh agent stub — no state, no history.
         _params = list(inspect.signature(func).parameters)
         is_standalone = not _params or _params[0] != "self"
+        needs_gen = has_ellipsis_body(func, require_source=is_standalone)
+
+        if is_standalone and not needs_gen:
+            raise TypeError(
+                f"@strategy(...) on standalone function '{func.__name__}' requires a "
+                f"source-verifiable '...' body — add '...' as the function body or remove "
+                f"the decorator. For dynamically created functions, register their source "
+                f"in linecache or attach _generated_source before decoration."
+            )
 
         if decision_model is not None:
             from nooa.decisions.resolution import validate_decision_model_spec
@@ -167,11 +179,9 @@ def strategy(
                 strat = get_default_strategy()
 
         if is_standalone:
-            if needs_gen:
-                from nooa.standalone import create_standalone_wrapper
+            from nooa.standalone import create_standalone_wrapper
 
-                return create_standalone_wrapper(func, strat, llm, decision_model)
-            return func  # type: ignore[return-value]  # non-generation standalone: nothing to wrap
+            return create_standalone_wrapper(func, strat, llm, decision_model)
 
         from nooa.runtime.method_wrapper import create_agent_method_wrapper
 

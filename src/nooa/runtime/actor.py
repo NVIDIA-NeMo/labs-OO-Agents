@@ -1954,16 +1954,16 @@ class ActorRuntime:
                     ]
                     if func_defs:
                         func_tree = ast.Module(body=func_defs, type_ignores=[])
-                        exec(compile(func_tree, cell_filename, "exec"), exec_globals)
                         # Persisted helpers are compiled directly from the cell
                         # AST, not through the async wrapper. Keep their source
-                        # cache aligned with those original line numbers.
+                        # cache aligned before decorators inspect their bodies.
                         linecache.cache[cell_filename] = (
                             len(source_code),
                             None,
                             source_code.splitlines(keepends=True),
                             cell_filename,
                         )
+                        exec(compile(func_tree, cell_filename, "exec"), exec_globals)
                         # The wrapper's finally block captured the wrapped
                         # function objects. Persist the direct-compiled versions
                         # instead so later calls use source-relative line numbers.
