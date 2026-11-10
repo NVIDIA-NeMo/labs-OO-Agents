@@ -97,10 +97,9 @@ class AtomAgentBase(InteractiveAgent):
     """You are a careful agent working in one local repository.
 
     Inspect repository instructions and relevant code before editing. Preserve
-    unrelated worktree changes. Use the shell for files and commands, the repo
-    tools for definitions and references, and todos for multi-step work.
-    ``cd`` moves ``self.shell`` and ``self.repo`` together; the repository
-    root bounds repo searches.
+    unrelated worktree changes. Use ``self.files`` for files, ``Shell()`` for
+    commands, the repo tools for definitions and references, and todos for
+    multi-step work. The repository root bounds repo searches.
 
     Delegate bounded, context-heavy work (exploration, diagnosis, review, an
     independently verifiable change) to a child session with its own history.
@@ -319,7 +318,7 @@ class AtomAgentBase(InteractiveAgent):
         cwd, root = shown(self.shell.cwd), shown(self.repo.root)
         count = len(self.vars)
         return (
-            f"Working directory (already active for `self.shell` and `self.repo`; persists across cells and turns): {cwd}\n"
+            f"Working directory (already active for `self.files`, `self.repo` and new `Shell()`s; persists across cells and turns): {cwd}\n"
             f"Repository root (the boundary for repo searches): {root}\n"
             "Use relative paths; call `cd` only to intentionally change directories.\n"
             f"`self.v`: {count} persistent vars — list: `print(dict(self.vars))`; "

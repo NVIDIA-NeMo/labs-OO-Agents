@@ -406,8 +406,8 @@ class JobsApi(Skill):
 
     Use for anything that may take more than a minute or two (test suites,
     builds, evals) instead of blocking a cell. Each ``run`` command gets its
-    own fresh bash process, so ``self.shell`` stays free; it starts in the
-    shell's current directory with the shell's exported environment. Output
+    own fresh bash process; it starts in the workspace directory with the
+    agent's exported environment. Output
     arrives as ``JobUpdate`` items in ``notification["jobs"]``, each with ``.name``.
 
         await self.jobs.run("uv run pytest -q", name="tests", description="full run before pushing")
@@ -613,7 +613,7 @@ class JobsApi(Skill):
     async def _shell_context(self) -> tuple[str, dict[str, str]]:
         """The agent shell's directory and exported environment, cheaply.
 
-        Reads them from the running ``self.shell`` session when it is idle
+        Reads them from the running agent shell session when it is idle
         (``BashSession.snapshot_cwd_env``); otherwise falls back to the
         shell's tracked directory and this process's ``os.environ``.
         """
@@ -943,9 +943,9 @@ class JobsApi(Skill):
     ) -> JobInfo:
         """Run a shell command in the background, in its own bash process.
 
-        Like ``self.shell.run`` (same ``stdin``/``cwd``; ``cwd`` is relative to
-        the shell's directory) but returns at once and has no timeout unless
-        given. ``cd``/``export`` in ``cmd`` do not affect ``self.shell``. When
+        Like ``Shell().run`` (same ``stdin``; ``cwd`` is relative to the
+        workspace) but returns at once and has no timeout unless given.
+        ``cd``/``export`` in ``cmd`` do not outlast it. When
         it ends, a ``JobUpdate`` with ``done=True`` arrives in
         ``notification["jobs"]`` with ``returncode`` (124 on timeout),
         ``timed_out``, ``stdout`` and ``stderr``. ``stdout`` and ``stderr`` are

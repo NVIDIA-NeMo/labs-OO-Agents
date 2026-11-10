@@ -1,10 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""RepoTools — code navigation that returns ShellTools Match anchors.
+"""RepoTools — code navigation that returns ``Match`` anchors (edit with ``self.files``).
 
 Use ``symbols()`` to find definitions and ``refs()`` to find usages. Both return
 ``RepoResult``: printable lines plus ``Match`` objects for
-``self.shell.replace(result[i], new_text)`` — the same host filesystem a wired
+``self.files.replace_match(result[i], new_text)`` — the same host filesystem a wired
 ``BashSession`` also operates on. Once core ``Match`` has ``editable`` (#382),
 anchors from a non-host session are read-only (``editable=False``), and the
 tool docs say so only then.
@@ -95,7 +95,7 @@ class FileMapResult:
     truncated: Annotated[bool, spec(description="True if symbols were capped")] = False
     anchors: Annotated[
         list[Match],
-        spec(description="ShellTools-compatible anchors for each symbol line"),
+        spec(description="Match anchors (edit with self.files) for each symbol line"),
     ] = field(default_factory=list)
     diagnostic: str | None = None
 
@@ -120,7 +120,7 @@ class RepoMapResult:
     truncated: Annotated[bool, spec(description="True if output was capped")] = False
     anchors: Annotated[
         list[Match],
-        spec(description="ShellTools-compatible anchors for symbol lines in the map"),
+        spec(description="Match anchors (edit with self.files) for symbol lines in the map"),
     ] = field(default_factory=list)
 
     @property
@@ -139,7 +139,7 @@ class SymbolSearchResult:
     truncated: Annotated[bool, spec(description="True if results were capped")] = False
     anchors: Annotated[
         list[Match],
-        spec(description="ShellTools-compatible anchors for each returned match"),
+        spec(description="Match anchors (edit with self.files) for each returned match"),
     ] = field(default_factory=list)
 
     @property
@@ -165,7 +165,7 @@ class ReferenceSearchResult:
     truncated: Annotated[bool, spec(description="True if results were capped")] = False
     anchors: Annotated[
         list[Match],
-        spec(description="ShellTools-compatible anchors for each returned reference"),
+        spec(description="Match anchors (edit with self.files) for each returned reference"),
     ] = field(default_factory=list)
 
     @property
@@ -193,9 +193,9 @@ class RepoResult(BaseModel):
     matches: list[Match] = Field(
         default_factory=list,
         description=(
-            "Match anchors; only editable=True anchors support self.shell.replace()"
+            "Match anchors; only editable=True anchors support self.files.replace_match()"
             if _MATCH_HAS_EDITABLE
-            else "Match anchors; pass one to self.shell.replace() to edit it"
+            else "Match anchors; pass one to self.files.replace_match() to edit it"
         ),
     )
     total_matches: int = Field(default=0, description="Total matches found")
@@ -510,7 +510,7 @@ def _extract_symbols(
 # RepoTools Skill
 # ---------------------------------------------------------------------------
 class RepoTools(Skill):
-    """Find code locations as ShellTools ``Match`` anchors.
+    """Find code locations as ``Match`` anchors (edit with ``self.files``).
 
     Two methods:
         symbols(path=".", query="")  — definitions / file or repo overview
@@ -519,10 +519,10 @@ class RepoTools(Skill):
     Results print like search output and index/iterate as matches. Host anchors
     support replacement::
         r = await self.repo.symbols("src/", query="Handler")
-        await self.shell.replace(r[0], new_code)
+        await self.files.replace_match(r[0], new_code)
 
     ``cwd`` is the base for relative paths: the wired session's current
-    directory, so a ``cd`` through ``self.shell`` moves these tools too
+    directory, so a ``cd`` in that session moves these tools too
     (``root`` without a session). ``root`` is the repository root: where
     whole-tree searches start and what result paths are shown relative
     to. Neither is a security boundary. Both an absolute ``path=`` argument and a
@@ -585,7 +585,7 @@ class RepoTools(Skill):
 
         A non-``BashSession`` session object (e.g. a scripted session over
         its own in-memory filesystem) may not — its anchors stay read-only
-        so ``self.shell.replace()`` never writes to a same-named but
+        so ``self.files.replace_match()`` never writes to a same-named but
         unrelated host file.
         """
         return self._session is None or isinstance(self._session, BashSession)
@@ -600,16 +600,16 @@ class RepoTools(Skill):
             spec(
                 description=(
                     "Directory relative paths resolve against for this call; "
-                    "defaults to the shell's current directory"
+                    "defaults to the workspace"
                 )
             ),
         ] = None,
     ) -> RepoResult:
-        """Find definitions under a file or directory; ``cwd`` defaults to the shell's current directory.
+        """Find definitions under a file or directory; ``cwd`` defaults to the workspace.
 
-        Returns printable lines plus ``Match`` anchors for ``self.shell.replace``.
-        ``cwd`` (absolute, or relative to the shell's directory) does not move
-        the shell; results are still shown relative to ``root``.
+        Returns printable lines plus ``Match`` anchors for ``self.files.replace_match``.
+        ``cwd`` (absolute, or relative to the workspace) does not change the
+        workspace directory; results are still shown relative to ``root``.
         """
         base = self._base(cwd)
         resolved = self._resolve(path, base)
@@ -686,16 +686,16 @@ class RepoTools(Skill):
             spec(
                 description=(
                     "Directory relative paths resolve against for this call; "
-                    "defaults to the shell's current directory"
+                    "defaults to the workspace"
                 )
             ),
         ] = None,
     ) -> RepoResult:
         """Find references/usages of a symbol, excluding definitions.
 
-        Returns printable lines plus ``Match`` anchors for ``self.shell.replace``.
-        ``cwd`` (absolute, or relative to the shell's directory) does not move
-        the shell; results are still shown relative to ``root``.
+        Returns printable lines plus ``Match`` anchors for ``self.files.replace_match``.
+        ``cwd`` (absolute, or relative to the workspace) does not change the
+        workspace directory; results are still shown relative to ``root``.
         """
         base = self._base(cwd)
         resolved = self._resolve(path, base)
@@ -843,7 +843,7 @@ class RepoTools(Skill):
         Shows definitions but not their bodies.
 
         Args:
-            path: File path (relative to ``cwd``, the shell's directory).
+            path: File path (relative to ``cwd``, the workspace).
             max_symbols: Maximum symbols to show (default: 200).
 
         Returns:

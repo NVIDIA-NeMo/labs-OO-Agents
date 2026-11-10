@@ -576,23 +576,6 @@ def _progress_parts(job: Job) -> list[str]:
     return parts
 
 
-# Shared repo-tool docs that name the legacy shell; this agent edits through
-# self.files and its repo searches start in the workspace.
-_DOC_FIXES: Annotated[tuple[tuple[str, str], ...], hidden] = (
-    ("self.shell.replace()", "self.files.replace_match()"),
-    ("as ShellTools ``Match`` anchors", "as ``Match`` anchors (edit with ``self.files``)"),
-    ("defaults to the shell's current directory", "defaults to the workspace"),
-)
-
-
-@hidden
-def _tools_doc(text: str) -> str:
-    """The tools block for this agent: the shared docs, with only advertised paths."""
-    for old, new in _DOC_FIXES:
-        text = text.replace(old, new)
-    return text
-
-
 # The one place the work workflows are shown (the tools block, before the work types).
 _WORK_EXAMPLES: Annotated[str, hidden] = """\
 # Work: self.jobs is for background work.
@@ -805,7 +788,7 @@ class AtomAgent(
         a static copy). The other blocks (a user's own) are left as restored.
         """
         self.context["python_cell_tools"] = Context(
-            _tools_doc(
+            (
                 doc(doc, runtime_pprint, concise=True, inline_depth=0)
                 + "\n"
                 + doc(RepoTools, Files, TodoList, SkillManager, concise=True)
