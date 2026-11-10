@@ -711,6 +711,19 @@ async def test_after_restore_reports_lost_jobs_once(tmp_path):
         await agent.aclose()
 
 
+async def test_after_restore_reports_a_non_dict_work_record_as_lost(tmp_path):
+    agent = await _agent(tmp_path)
+    try:
+        agent._work_records = ["corrupt"]  # a damaged snapshot
+        agent.after_restore()
+        [event] = agent._jobs_in.snapshot()
+        assert (event.name, event.kind) == ("?", "failed")
+        assert event.value.startswith("lost: the session restarted while it ran")
+        assert agent._work_records == []
+    finally:
+        await agent.aclose()
+
+
 async def test_lost_notice_names_the_launching_cell_and_shell_command(tmp_path):
     from nooa.strategies import codeact
 
@@ -749,6 +762,97 @@ async def test_lost_notice_names_the_launching_cell_and_shell_command(tmp_path):
         )
     finally:
         await agent.aclose()
+
+
+async def test_lost_notice_shows_the_cell_code_and_the_names_now_gone(tmp_path):
+    from nooa.context_blocks.events import ToolCallEvent
+    from nooa.strategies import codeact
+
+    code = "\n".join(
+        [
+            "import os",
+            "dsk = Shell()",
+            "def helper(x):",
+            "    return x",
+            "job = self.jobs.launch(sh_mon.run(cmd), name='tests')",
+            "print(helper(dsk), os.sep, len(Path('.').name), Throttle)",
+            *[f"line{i} = {i}" for i in range(60)],
+        ]
+    )
+    agent = await _agent(tmp_path)
+    try:
+        tag = agent.event_manager.add(
+            ToolCallEvent(tool_call_id="c1", name="python_cell", arguments={"code": code})
+        )
+        token = codeact._current_cell.set((agent, tag))
+        try:
+            job = agent.jobs.launch(asyncio.sleep(30), name="tests")
+        finally:
+            codeact._current_cell.reset(token)
+        records = list(agent._work_records)
+        assert records[0]["tag"] == tag
+        await job.cancel()
+        agent._work_records = records
+        agent.after_restore()
+        [event] = agent._jobs_in.snapshot()
+        first, _, rest = event.value.partition("\n")
+        assert first == (
+            f"lost: the session restarted while it ran (coroutine launched in cell {tag}: "
+            f'self.events["{tag}"]). Relaunch if still needed.'
+        )
+        assert rest.startswith("The cell that launched it:\n```python\nimport os\ndsk = Shell()\n")
+        assert "line33 = 33\n… 26 more lines\n```" in rest and "line34" not in rest
+        # Bound in the cell (dsk, helper, x, os, job) or always provided (self, Path,
+        # Throttle, print, len) is not gone; the free names sh_mon and cmd are.
+        assert rest.endswith("\nNames it used that are gone now: sh_mon, cmd")
+    finally:
+        await agent.aclose()
+
+
+async def test_lost_notice_keeps_turn_parameters_but_lists_earlier_cell_names(tmp_path):
+    from nooa.context_blocks.events import ToolCallEvent
+    from nooa.strategies import codeact
+
+    # ``notification`` is passed in fresh every turn, so it is not gone; ``helper``
+    # and ``np`` came from an earlier cell, whose namespace a restart did lose.
+    code = "job = self.jobs.launch(helper(notification, np), name='tests')"
+    agent = await _agent(tmp_path)
+    try:
+        tag = agent.event_manager.add(
+            ToolCallEvent(tool_call_id="c1", name="python_cell", arguments={"code": code})
+        )
+        token = codeact._current_cell.set((agent, tag))
+        try:
+            job = agent.jobs.launch(asyncio.sleep(30), name="tests")
+        finally:
+            codeact._current_cell.reset(token)
+        records = list(agent._work_records)
+        await job.cancel()
+        agent._work_records = records
+        agent.after_restore()
+        [event] = agent._jobs_in.snapshot()
+        assert event.value.endswith("\nNames it used that are gone now: helper, np")
+    finally:
+        await agent.aclose()
+
+
+def test_lost_notice_cell_bounds_and_free_names():
+    from nooa_atom.agent.agent import _bounded_cell, _free_names, _lost_notice
+
+    assert _bounded_cell("a\nb") == "a\nb"
+    long = _bounded_cell("\n".join("x" * 100 for _ in range(100)))
+    assert long.endswith("\n… 61 more lines") and len(long) < 4100
+    wide = _bounded_cell("\n".join("y" * 1000 for _ in range(10)))
+    assert wide.endswith("\n… 7 more lines") and len(wide) <= 4100
+    assert _bounded_cell("z" * 9000).startswith("z" * 3999 + "…")
+    assert _free_names("for i in xs:\n    total += f(i)\n[y for y in ys]") == ["xs", "f", "ys"]
+    assert _free_names("def (") == []  # not Python: no names, no error
+    notice = _lost_notice({"what": "coroutine"}, "await go()", ["go"])
+    assert notice == (
+        "lost: the session restarted while it ran (coroutine). Relaunch if still needed.\n"
+        "The cell that launched it:\n```python\nawait go()\n```\n"
+        "Names it used that are gone now: go"
+    )
 
 
 def test_lost_notice_for_subagent_todo_and_bounds():
