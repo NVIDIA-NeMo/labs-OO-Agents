@@ -181,6 +181,7 @@ class BenchmarkPolicyGuard:
             self.refuse("session_configuration_invalid", session_id=sid)
 
     def install(self, session) -> None:
+        """Register an observed session under this guard; refuse an unknown or repeated one."""
         sid = session.id
         entry = self.sessions.get(sid)
         if entry is None or entry["registered"]:
@@ -281,6 +282,7 @@ class BenchmarkPolicyGuard:
         self.check_session(session, require_ready=False)
 
     def check_session(self, session, *, require_ready: bool) -> None:
+        """Refuse unless ``session`` is registered, guarded by this policy and validly configured."""
         sid = session.id
         entry = self.sessions.get(sid)
         if entry is None or not entry["registered"] or entry.get("session") is not session:

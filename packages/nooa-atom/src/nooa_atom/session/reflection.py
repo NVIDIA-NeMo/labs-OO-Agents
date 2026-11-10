@@ -112,6 +112,7 @@ class ReflectionTrigger:
     def __init__(
         self, settings: ReflectionSettings, *, clock: Callable[[], float] | None = None
     ) -> None:
+        """Start a fresh window: no turns counted, anchored now."""
         self.settings = settings
         self._clock = clock or time.monotonic
         self.turns = 0
@@ -119,6 +120,7 @@ class ReflectionTrigger:
         self.pending = False
 
     def minutes(self) -> float:
+        """Minutes since the window's anchor."""
         return max(0.0, self._clock() - self.anchor) / 60
 
     def turn_ended(self, kind: str, *, context_fraction: float | None) -> Reason | None:

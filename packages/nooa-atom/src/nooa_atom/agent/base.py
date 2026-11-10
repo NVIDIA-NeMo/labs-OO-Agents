@@ -213,6 +213,7 @@ class AtomAgentBase(InteractiveAgent):
         libs_dir: Path | None = None,
         **kwargs: Any,
     ) -> None:
+        """Set up the agent's workspace, skills, libraries and tools in ``cwd``."""
         super().__init__(llm=llm, **kwargs)
         # Jobs are cancelled through self.jobs; the model never sees queue_manager.
         self.queue_manager.set_default_cancel_hint(None)
