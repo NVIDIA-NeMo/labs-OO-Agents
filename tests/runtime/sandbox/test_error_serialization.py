@@ -582,7 +582,26 @@ async def test_broker_error_text_is_bounded_before_ipc() -> None:
 
     assert response["ok"] is False
     assert len(response["error"]) <= DEFAULT_TRUNCATION_CONFIG.capture.max_error
-    assert response["error"].endswith("...<truncated>")
+    # The head, then render_output's cut line (a transport ceiling keeps no tail).
+    head, _, cut = response["error"].rpartition("\n")
+    assert head == "x" * len(head)
+    assert cut == f"[... {100_000 - len(head):,} chars omitted; full output not kept]"
+
+
+@pytest.mark.parametrize("size", [100, 101, 1_000, 1_000_000])
+def test_hard_bound_text_keeps_the_head_and_one_cut_line_within_the_limit(size: int) -> None:
+    from nooa.errors.formatting import _hard_bound_text
+
+    text = "".join(chr(ord("a") + i % 26) for i in range(size))
+    bounded = _hard_bound_text(text, 100)
+    assert len(bounded) <= 100
+    if size <= 100:
+        assert bounded == text
+        return
+    head, _, cut = bounded.rpartition("\n")
+    assert text.startswith(head)
+    assert cut == f"[... {size - len(head):,} chars omitted; full output not kept]"
+    assert "<truncated>" not in bounded
 
 
 def test_broker_error_with_multi_argument_builtin_uses_surrogate() -> None:

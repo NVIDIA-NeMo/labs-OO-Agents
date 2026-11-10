@@ -8,8 +8,7 @@ Two layers of bounds:
    ``max_context_tokens``.
 2. **Sub-configs by mechanism**:
    - ``capture`` (head/tail truncation of raw text streams: execute_python's
-     stdout / stderr through ``nooa.snapshot.TextStream``, the error field
-     through ``TruncatingStringIO``).
+     stdout / stderr and the error field, through ``nooa.snapshot.TextStream``).
    - ``media_capture`` (``MediaCaptureConfig``): cap on multimodal content
      blocks (images, audio, files) captured by ``show()`` per
      ``execute_python`` cell.
@@ -46,10 +45,10 @@ class CaptureConfig(BaseModel):
     or formats an exception). stdout / stderr keep their head and tail
     (``nooa.runtime.output_capture.CaptureBuffer``, a ``nooa.snapshot.TextStream``)
     around ``render_output``'s cut line, ``[... N chars omitted; full output:
-    PATH]`` or ``[... N chars omitted; full output not kept]``. Error text is
-    head/tail-truncated inside a ``<truncated-output>`` ... ``</truncated-output>``
-    wrapper that says how much was cut; past its hard cap it ends in
-    ``...<truncated>``.
+    PATH]`` or ``[... N chars omitted; full output not kept]``. Error text keeps
+    its head and tail the same way, around ``[... N chars omitted; full output
+    not kept]``; past its hard transport cap only the head is kept, before
+    that line.
 
     Field naming: ``max_<stream>`` — char count, no ``_chars`` suffix needed
     inside the capture config since every field here is char-based.

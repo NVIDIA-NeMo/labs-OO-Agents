@@ -803,16 +803,22 @@ def _cut_text(text: str, limit: int, tail: int | None) -> str:
     return render_output(stream.close())
 
 
-def _hard_bound_text(text: str, limit: int, *, closing: str = "") -> str:
-    """Cap text at ``limit``, optionally preserving a structural closing marker."""
+def _hard_bound_text(text: str, limit: int) -> str:
+    """Cap text at ``limit`` chars in all: its head, then ``render_output``'s cut line.
+
+    A transport ceiling, not a capture budget: it keeps no tail.
+    """
     if len(text) <= limit:
         return text
-    marker = "...<truncated>"
-    suffix = closing if closing and text.endswith(closing) else ""
-    keep = limit - len(marker) - len(suffix)
-    if keep > 0:
-        return text[:keep] + marker + suffix
-    return marker[:limit]
+    stream = TextStream(unit="chars", head=0, tail=0)
+    stream.write(text)
+    notice = render_output(stream.close())
+    keep = limit - len(notice) - 1  # the head and its newline before the line
+    if keep <= 0:
+        return notice[:limit]
+    stream = TextStream(unit="chars", head=keep, tail=0)
+    stream.write(text)
+    return render_output(stream.close())
 
 
 class ErrorFormatter(Protocol):
@@ -875,7 +881,6 @@ class IPythonErrorFormatter:
             return _hard_bound_text(
                 error.diagnostic.rstrip() or str(error),
                 limit + 1_024,
-                closing="\n</truncated-output>",
             )
 
         wrapped_syntax = _wrapped_syntax_error(error)

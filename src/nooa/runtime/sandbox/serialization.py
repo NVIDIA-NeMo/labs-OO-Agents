@@ -77,11 +77,7 @@ def _bounded_diagnostic(value: str, *, max_error: int | None = None) -> str:
     """Enforce the IPC ceiling after the worker formatter applies capture policy."""
     content_limit = effective_error_limit(max_error)
     transport_limit = min(_MAX_ERROR_TRANSPORT, content_limit + 1_024)
-    return _hard_bound_text(
-        value.rstrip(),
-        transport_limit,
-        closing="\n</truncated-output>",
-    )
+    return _hard_bound_text(value.rstrip(), transport_limit)
 
 
 def is_picklable(value: Any) -> bool:
