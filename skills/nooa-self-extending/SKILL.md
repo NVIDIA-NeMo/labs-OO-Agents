@@ -37,7 +37,7 @@ Helpers defined in cells persist as REPL locals for the rest of the method call 
 
 ## Persistent skills (`SkillWriting` / `self.skill_writing`)
 
-`SkillWriting` (`nooa.tools.library_writing_lib`) is how an agent makes the skills later sessions get, in a managed directory: `<workspace>/.nooa/skills` for Atom (an older `.nooa/libs` still loads; a name in `.nooa/skills` wins; new skills always go to `.nooa/skills`). A skill is either a code skill (a real Python package) or a text skill (a `SKILL.md` with front matter `name`/`description` and instructions). Both load in a later session as `local.<name>` (`self.<name>`, found by `self.skills.search`). Requires the shell skill (`requires = ("nemo.shell",)`) since file I/O goes through `self.shell`.
+`SkillWriting` (`nooa.tools.library_writing_lib`) is how an agent makes the skills later sessions get, in a managed directory: `<workspace>/.nooa/skills` for Atom (an older `.nooa/libs` is no longer loaded: the skills status says to move its skills to `.nooa/skills`). A skill is either a code skill (a real Python package) or a text skill (a `SKILL.md` with front matter `name`/`description` and instructions). Both load in a later session as `local.<name>` (`self.<name>`, found by `self.skills.search`). Requires the shell skill (`requires = ("nemo.shell",)`) since file I/O goes through `self.shell`.
 
 The lifecycle the agent follows (documented to it via `doc(self.skill_writing)`):
 

@@ -29,7 +29,6 @@ from nooa.paths import get_project_dir
 from nooa.storage.markers import nosnapshot
 from nooa.strategies import CodeActV2, PredictStrategy
 from nooa.tools import MethodWriting, SkillWriting, Todo, TodoManager
-from nooa.tools.library_writing_lib import older_skill_dirs
 from nooa.tools.shell_tools import ShellTools
 from nooa_atom.agent.activity import ActivityShellTools
 from nooa_atom.agent.instructions import RepositoryInstructions
@@ -232,8 +231,8 @@ class AtomAgentBase(InteractiveAgent):
         self.skills.register("nemo.shell", self.shell)
         self.skills.register("nemo.repo", self.repo)
         self.skills.register("nemo.todo", self.todo)
-        # Skills the agent writes live at <project>/.nooa/skills; an older
-        # <project>/.nooa/libs still loads. get_project_dir() resolves that
+        # Skills the agent writes live at <project>/.nooa/skills (an older
+        # <project>/.nooa/libs is not loaded). get_project_dir() resolves that
         # per process, which is what a one-workspace host like the TUI wants.
         # A host serving several workspaces at once must say which project it
         # means, or every session shares one directory — and SkillWriting puts
@@ -241,9 +240,7 @@ class AtomAgentBase(InteractiveAgent):
         # workspace's agent-authored code to another. Built after the
         # SkillManager so its skills are in the registry (self.skills.search).
         skills_dir = libs_dir or get_project_dir("skills")
-        self.skill_writing = SkillWriting(
-            self, path=skills_dir, also_load=older_skill_dirs(skills_dir)
-        )
+        self.skill_writing = SkillWriting(self, path=skills_dir)
         self.skills.register("nemo.skill_writing", self.skill_writing)
         self.skills.register("nemo.methodwriting", MethodWriting())
         self.skills.registry.activate(

@@ -125,52 +125,31 @@ async def test_a_text_skill_is_a_skill_md_found_and_active_in_a_new_session(tmp_
     assert "release_steps (code, active): How to cut a release: tag, then publish." in out
 
 
-async def test_a_skill_in_the_older_nooa_libs_still_loads(tmp_path):
-    libs = tmp_path / ".nooa" / "libs"
-    for name, doc in (("old_stats", "Old statistics."), ("both", "From libs.")):
-        (libs / name).mkdir(parents=True)
-        (libs / name / "pyproject.toml").write_text(f'[project]\nname = "{name}"\n')
-        (libs / name / "__init__.py").write_text(
-            SOURCE.replace("Mean of numbers.", doc).replace("class Stats", "class Lib")
-        )
-    # The same name in .nooa/skills wins.
-    newer = tmp_path / ".nooa" / "skills" / "both"
-    newer.mkdir(parents=True)
-    (newer / "SKILL.md").write_text("---\nname: both\ndescription: From skills.\n---\nNewer.\n")
-
-    out = _later_session(
-        tmp_path, "agent.old_stats.mean([1.0, 3.0])", "type(agent.both).__doc__.splitlines()[0]"
+async def test_the_older_nooa_libs_is_not_loaded_and_the_status_says_so(tmp_path):
+    libs = tmp_path / ".nooa" / "libs" / "old_stats"
+    libs.mkdir(parents=True)
+    (libs / "pyproject.toml").write_text('[project]\nname = "old_stats"\n')
+    (libs / "__init__.py").write_text(
+        SOURCE.replace("Mean of numbers.", "Old statistics.").replace("class Stats", "class Lib")
     )
-    assert "LIST ['both', 'old_stats']" in out
-    assert "ACTIVE ['local.both', 'local.old_stats']" in out
-    assert "agent.old_stats.mean([1.0, 3.0]) = 2.0" in out
-    assert "= 'From skills.'" in out
-    # New skills still go to .nooa/skills.
     agent = _agent(tmp_path)
     try:
-        await agent.skill_writing.create("fresh", "Fresh one.", text="Hi.")
+        assert not hasattr(agent, "old_stats")
+        assert "local.old_stats" not in agent.skills.registry.loaded()
+        assert await agent.skill_writing.list() == []
+        status = agent.skills.status()
+        assert (
+            status.count("Skills in .nooa/libs are no longer loaded; move them to .nooa/skills.")
+            == 1
+        )
     finally:
         await agent.aclose()
-    assert (tmp_path / ".nooa" / "skills" / "fresh" / "SKILL.md").is_file()
-    assert not (libs / "fresh").exists()
 
 
-async def test_an_older_skill_with_another_entry_point_does_not_replace_a_newer_one(tmp_path):
-    old = tmp_path / ".nooa" / "libs" / "both"
-    old.mkdir(parents=True)
-    (old / "pyproject.toml").write_text(
-        '[project]\nname = "both"\n\n[project.entry-points."nooa.skills"]\n"other.both" = "both"\n'
-    )
-    (old / "__init__.py").write_text(
-        SOURCE.replace("Mean of numbers.", "From libs.").replace("class Stats", "class Lib")
-    )
-    newer = tmp_path / ".nooa" / "skills" / "both"
-    newer.mkdir(parents=True)
-    (newer / "SKILL.md").write_text("---\nname: both\ndescription: From skills.\n---\nNewer.\n")
+async def test_no_libs_hint_without_an_older_nooa_libs(tmp_path):
     agent = _agent(tmp_path)
     try:
-        assert type(agent.both).__doc__.splitlines()[0] == "From skills."
-        assert "other.both" not in agent.skills.registry.loaded()
+        assert ".nooa/libs" not in agent.skills.status()
     finally:
         await agent.aclose()
 

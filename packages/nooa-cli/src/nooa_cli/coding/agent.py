@@ -27,7 +27,6 @@ from nooa.storage.markers import nosnapshot
 from nooa.strategies import CodeActStrategy, PredictStrategy
 from nooa.tools import SkillWriting, TodoManager
 from nooa.tools import shell_tools as _shell_tools
-from nooa.tools.library_writing_lib import older_skill_dirs
 from nooa.tools.shell_tools import ShellTools
 from nooa_cli.coding.activity import ActivityShellTools
 from nooa_cli.coding.instructions import render_agent_instructions
@@ -103,17 +102,15 @@ class CodingAgent(InteractiveAgent):
         self.skills.register("nemo.shell", self.shell)
         self.skills.register("nemo.repo", self.repo)
         self.skills.register("nemo.todo", self.todo)
-        # Skills the agent writes live at <project>/.nooa/skills; an older
-        # <project>/.nooa/libs still loads. get_project_dir() resolves that
+        # Skills the agent writes live at <project>/.nooa/skills (an older
+        # <project>/.nooa/libs is not loaded). get_project_dir() resolves that
         # per process, which is what a one-workspace host like the TUI wants.
         # A host serving several workspaces at once must say which project it
         # means, or every session shares one directory — and SkillWriting puts
         # it on sys.path and activates local.*, so that would expose one
         # workspace's agent-authored code to another.
         skills_dir = libs_dir or get_project_dir("skills")
-        self.skill_writing = SkillWriting(
-            self, path=skills_dir, also_load=older_skill_dirs(skills_dir)
-        )
+        self.skill_writing = SkillWriting(self, path=skills_dir)
         self.skills.register("nemo.skill_writing", self.skill_writing)
         self.skills.activate(["nemo.shell", "nemo.repo", "nemo.todo", "nemo.skill_writing"])
         # Installed ``nooa.skills`` entry points are part of the shared host

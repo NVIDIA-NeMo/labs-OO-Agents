@@ -279,6 +279,7 @@ class SkillManager(Skill):
                 "await self.skills.activate(['name']) (async)"
             )
         lines.extend(self.registry.name_conflicts())
+        lines.extend(self.registry.notices())
         return "\n".join(lines)
 
     # ------------------------------------------------------------------

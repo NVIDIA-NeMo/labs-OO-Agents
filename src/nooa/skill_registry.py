@@ -221,6 +221,8 @@ class SkillRegistry(Skill):
         # Skills not loaded because the agent already has their attribute
         # name: registry name → the line shown to the agent (name_conflicts()).
         self._name_conflicts: dict[str, str] = {}
+        # Lines a host or skill adds to the status (add_notice()), in order.
+        self._notices: list[str] = []
         self._load_generation = 0
         self._discover()
         super().__init__()
@@ -447,6 +449,15 @@ class SkillRegistry(Skill):
     def name_conflicts(self) -> list[str]:
         """One line per skill skipped because the agent already has its attribute name."""
         return [self._name_conflicts[name] for name in sorted(self._name_conflicts)]
+
+    def add_notice(self, line: str) -> None:
+        """Show ``line`` in the skills status (once; e.g. a skills directory no longer loaded)."""
+        if line not in self._notices:
+            self._notices.append(line)
+
+    def notices(self) -> list[str]:
+        """The status lines added with :meth:`add_notice`, in order."""
+        return list(self._notices)
 
     def name_conflict(self, name: str) -> str | None:
         """The name-conflict line for skill ``name``, or None if it has none."""
@@ -1411,6 +1422,7 @@ class SkillRegistry(Skill):
                 lines.append(f"  {name:28s} {desc}")
 
         lines.extend(self.name_conflicts())
+        lines.extend(self.notices())
         return "\n".join(lines)
 
     # ------------------------------------------------------------------

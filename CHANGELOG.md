@@ -6,6 +6,11 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- Skills in an older `<project>/.nooa/libs` directory are no longer loaded;
+  only `.nooa/skills` is. When `.nooa/libs` exists the skills status shows
+  "Skills in .nooa/libs are no longer loaded; move them to .nooa/skills."
+  `older_skill_dirs()` and `SkillWriting(also_load=...)` are removed;
+  `SkillRegistry.add_notice()` adds such a line to the status.
 - Bundled config layers are removed: the `nooa.bundled_configs` and
   `nooa.bundled_settings` entry-point groups are no longer read
   (`nooa.llm_config.bundled_config_paths`, `nooa.layered_config.bundled_settings_paths`,
