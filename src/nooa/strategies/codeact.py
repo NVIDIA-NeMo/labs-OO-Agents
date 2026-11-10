@@ -2700,14 +2700,18 @@ Standard Python builtins and agent instance (`self`) are available."""
 
             # Invalid results have their own budget; they are retryable cell
             # errors, so they do not count toward the session's error_count.
+            # The budget counts retries after the first invalid value: 0 ends
+            # the run on the first one, N allows N more tries.
             session.result_error_count += 1
             attempts = session.result_error_count
             budget = self.config.max_result_retries
             if budget is None:
-                budget = session.max_retries
-            if attempts >= budget:
+                # max_retries counts errors (N of them end the run): N-1 retries.
+                budget = max(session.max_retries - 1, 0)
+            if attempts > budget:
                 raise GenerationError(
-                    f"return_result validation failed after {attempts} attempts.\n"
+                    f"return_result validation failed after {attempts} attempts "
+                    f"({budget} retries allowed).\n"
                     f"Last error:\n{error_msg}"
                 ) from e
 
@@ -2715,7 +2719,7 @@ Standard Python builtins and agent instance (`self`) are available."""
             metrics.return_result_invalid(type(e).__name__)
             # The alias form's hint already says how to finish (in the cell).
             fix = "" if form == "alias" else ": fix the value and call return_result again"
-            return (None, f"{error_msg}\nThe turn goes on{fix} (attempt {attempts} of {budget}).")
+            return (None, f"{error_msg}\nThe turn goes on{fix} (retry {attempts} of {budget}).")
 
         except BaseException as error:
             exception = error
