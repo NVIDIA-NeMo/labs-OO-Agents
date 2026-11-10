@@ -1132,8 +1132,8 @@ class AtomAgent(
         self.skills.after_restore()
         lost, self._work_records = list(self._work_records or []), []
         for record in lost:
-            name = str(record.get("name", "?"))
             record = record if isinstance(record, dict) else {}
+            name = str(record.get("name", "?"))
             notice = _lost_notice(record, *self._lost_cell(record))
             self._jobs_in.put(JobEvent(name, 0, "failed", notice))
         # An earlier Atom's JobsApi records (name -> record of each running job).

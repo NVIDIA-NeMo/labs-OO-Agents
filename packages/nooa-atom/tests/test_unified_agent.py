@@ -711,6 +711,19 @@ async def test_after_restore_reports_lost_jobs_once(tmp_path):
         await agent.aclose()
 
 
+async def test_after_restore_reports_a_non_dict_work_record_as_lost(tmp_path):
+    agent = await _agent(tmp_path)
+    try:
+        agent._work_records = ["corrupt"]  # a damaged snapshot
+        agent.after_restore()
+        [event] = agent._jobs_in.snapshot()
+        assert (event.name, event.kind) == ("?", "failed")
+        assert event.value.startswith("lost: the session restarted while it ran")
+        assert agent._work_records == []
+    finally:
+        await agent.aclose()
+
+
 async def test_lost_notice_names_the_launching_cell_and_shell_command(tmp_path):
     from nooa.strategies import codeact
 
