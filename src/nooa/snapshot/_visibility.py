@@ -9,8 +9,9 @@ What lives here:
   instance;
 - the annotation metadata of a dataclass with string annotations:
   ``typing.get_type_hints(cls, include_extras=True)``; a success is cached
-  by class identity in ``_HINTS``, a failure fails closed for the current
-  capture only and is retried by the next one;
+  by class identity in ``_HINTS``. On a failure each annotation is resolved
+  on its own, only the unresolvable ones fail closed, and that result holds
+  for the current capture only: the next one tries the whole class again;
 - ``_pydantic_entries`` and ``_dataclass_entries``, the readers that yield
   the visible declared fields of a Pydantic v2 model or a dataclass from
   raw instance storage.
@@ -26,6 +27,7 @@ from __future__ import annotations
 
 import dataclasses
 import functools
+import sys
 import typing
 import weakref
 from collections.abc import Callable
@@ -41,10 +43,12 @@ from nooa.snapshot._model import Reason
 from nooa.snapshot._raw import (
     _BASE_MODEL_DICT,
     _NO_SLOT,
+    _TYPE_MRO,
     _copy_storage,
     _FailClosed,
     _instance_storage,
     _namespace,
+    _raw_namespace,
     _slot_value,
 )
 
@@ -137,7 +141,7 @@ def _field_hidden(field_info: FieldInfo, state: _State) -> bool:
 def _annotation_hidden(
     name: str,
     annotation: Any,
-    hints: Callable[[], dict[str, tuple[Any, ...]] | None],
+    hints: Callable[[], dict[str, tuple[Any, ...]]],
     state: _State,
 ) -> bool:
     """Whether a dataclass field's annotation hides it (``_FailClosed``: unreadable).
@@ -147,8 +151,7 @@ def _annotation_hidden(
     inspected, through its raw ``__metadata__``; anything else is visible.
     """
     if type(annotation) is str:
-        resolved = hints()
-        metadata = None if resolved is None else dict.get(resolved, name)
+        metadata = dict.get(hints(), name)
         if metadata is None:
             raise _FailClosed
         return _metadata_hidden(metadata, state)
@@ -165,8 +168,18 @@ _HINTS: dict[int, tuple[weakref.ref[type[Any]], dict[str, tuple[Any, ...]]]] = {
 """Per dataclass, keyed by ``id`` and re-checked by identity: its resolved hint metadata."""
 
 
-def _resolved_metadata(cls: type[Any], state: _State) -> dict[str, tuple[Any, ...]] | None:
-    """The outermost ``Annotated`` metadata of each resolved type hint of ``cls`` (None: unreadable).
+def _hint_metadata(hint: Any) -> tuple[Any, ...]:
+    """The outermost ``Annotated`` metadata of one resolved hint (``()``: none); raises if malformed."""
+    if type(hint) is not _ANNOTATED_ALIAS:
+        return ()
+    found = object.__getattribute__(hint, "__metadata__")
+    if type(found) is not tuple:
+        raise TypeError("unreadable Annotated metadata")
+    return found
+
+
+def _resolved_metadata(cls: type[Any], state: _State) -> dict[str, tuple[Any, ...]]:
+    """The outermost ``Annotated`` metadata of each resolved type hint of ``cls``.
 
     String annotations (PEP 563) are read the way Python reads them:
     ``typing.get_type_hints(cls, include_extras=True)``. A successful result
@@ -176,38 +189,89 @@ def _resolved_metadata(cls: type[Any], state: _State) -> dict[str, tuple[Any, ..
     ``weakref.finalize`` drops the entry with the class. A hint that is not an
     exact ``Annotated`` alias has no metadata (``()``).
 
-    If evaluation raises (for example, a forward reference to a name not
-    defined yet), the class's hints are unreadable for the rest of this
-    capture (recorded on ``state``, so the failure is evaluated once per
-    capture, not once per instance), and the next capture tries again.
+    If evaluation raises (for example, a name imported only under
+    ``TYPE_CHECKING``, or a forward reference to a name not defined yet),
+    each annotation is resolved on its own instead (``_single_hints``), as
+    agentdoc does: only the fields whose annotation can't be resolved are
+    missing from the result, so they alone fail closed. That result is
+    recorded on ``state`` (evaluated once per capture, not once per
+    instance), never cached for the process: the next capture tries the
+    whole class again.
     """
     key = id(cls)
     entry = _HINTS.get(key)
     if entry is not None and entry[0]() is cls:
         return entry[1]
-    if state.unreadable_hints.get(key) is cls:
-        return None
+    failed = state.unreadable_hints.get(key)
+    if failed is not None and failed[0] is cls:
+        return failed[1]
     metadata: dict[str, tuple[Any, ...]] = {}
     try:
         hints = typing.get_type_hints(cls, include_extras=True)
         for name, hint in dict.items(hints):
-            if type(name) is not str:
-                continue
-            found: Any = ()
-            if type(hint) is _ANNOTATED_ALIAS:
-                found = object.__getattribute__(hint, "__metadata__")
-                if type(found) is not tuple:
-                    raise TypeError("unreadable Annotated metadata")
-            metadata[name] = found
+            if type(name) is str:
+                metadata[name] = _hint_metadata(hint)
     except Exception:
-        state.unreadable_hints[key] = cls  # retried by the next capture
-        return None
+        partial = _single_hints(cls, state)
+        state.unreadable_hints[key] = (cls, partial)  # retried by the next capture
+        return partial
     try:
         reference = weakref.ref(cls)
         weakref.finalize(cls, _HINTS.pop, key, None)
     except Exception:
         return metadata  # not cacheable: evaluated again next time
     _HINTS[key] = (reference, metadata)
+    return metadata
+
+
+def _single_hints(cls: type[Any], state: _State) -> dict[str, tuple[Any, ...]]:
+    """The metadata of each annotation of ``cls`` that resolves on its own; the rest are missing.
+
+    Resolves every annotation as ``typing.get_type_hints`` would, one at a
+    time: walking the MRO from ``object`` down (a subclass's annotation
+    wins), each through ``get_type_hints`` of a one-annotation probe class
+    with the declaring class's namespaces and type parameters. An
+    annotation that raises, or a namespace that can't be read, is left out.
+    """
+    metadata: dict[str, tuple[Any, ...]] = {}
+    try:
+        mro = _TYPE_MRO.__get__(cls, type(cls))
+    except Exception:
+        return metadata
+    if type(mro) is not tuple:
+        return metadata
+    for base in reversed(mro):
+        namespace = _raw_namespace(base, state)
+        if namespace is None:
+            continue
+        annotations = dict.get(namespace, "__annotations__")
+        if type(annotations) is not dict:
+            continue
+        module_name = dict.get(namespace, "__module__")
+        module = sys.modules.get(module_name) if type(module_name) is str else None
+        module_globals = getattr(module, "__dict__", None) if module is not None else None
+        if type(module_globals) is not dict:
+            module_globals = {}
+        type_params = dict.get(namespace, "__type_params__", ())
+        for name, raw in list(dict.items(annotations)):
+            if not state.take_node():
+                return metadata
+            if type(name) is not str:
+                continue
+            metadata.pop(name, None)  # this class declares it: an inherited hint no longer applies
+            try:
+                probe = type("_Probe", (), {"__annotations__": {name: raw}})
+                if type(type_params) is tuple and type_params:
+                    probe.__type_params__ = type_params
+                # The arguments are ``get_type_hints``'s own for a class: the
+                # class namespace as globals and the module's as locals, so
+                # module names win, exactly as for the whole class.
+                hint = typing.get_type_hints(
+                    probe, globalns=dict(namespace), localns=module_globals, include_extras=True
+                )[name]
+                metadata[name] = _hint_metadata(hint)
+            except Exception:
+                continue  # unresolvable: this field fails closed
     return metadata
 
 

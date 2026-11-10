@@ -5,10 +5,13 @@
 from __future__ import annotations
 
 import dataclasses
+import importlib
 import json
 import sys
+import types
 import warnings
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Annotated, Any, ClassVar
 
 import pytest
@@ -408,14 +411,79 @@ def test_an_unreadable_field_reason_yields_to_the_objects_own_limit() -> None:
 
 
 @pytest.mark.parametrize("name", ["UnknownMarker", "TypeCheckingOnly", "Unresolvable"])
-def test_dataclass_hints_that_cannot_be_evaluated_fail_closed_for_the_class(name: str) -> None:
-    # ``get_type_hints`` raises (NameError): every string-annotated field is left out.
+def test_dataclass_hints_that_cannot_be_evaluated_fail_closed_field_by_field(name: str) -> None:
+    # ``get_type_hints`` raises (NameError): each annotation is resolved on its
+    # own, and only the field whose annotation can't be resolved is left out.
     snapshot = capture(getattr(_annotation_aliases, name)())
 
     assert "S-" not in render_json(snapshot, max_chars=2000)
     assert isinstance(snapshot, Object)
-    assert snapshot.fields == ()
+    assert snapshot.fields == (("ok", Scalar(1)),)
     assert not snapshot.complete and snapshot.reason == "unreadable"
+
+
+def test_one_type_checking_only_annotation_keeps_the_other_fields(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Severin's repro (#515): one unresolvable annotation used to drop every field.
+    (tmp_path / "snapshot_type_checking_only.py").write_text(
+        "from __future__ import annotations\n"
+        "from dataclasses import dataclass\n"
+        "from typing import TYPE_CHECKING\n"
+        "if TYPE_CHECKING:\n"
+        "    from decimal import Decimal\n"
+        "@dataclass\n"
+        "class A:\n"
+        "    x: int\n"
+        "    y: Decimal\n"
+        "@dataclass\n"
+        "class B:\n"
+        "    x: int\n"
+        "    y: int\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    module = importlib.import_module("snapshot_type_checking_only")
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+
+    partial = capture(module.A(1, 2))
+
+    assert render_python(partial) == "A(x=1, ...)"
+    assert isinstance(partial, Object) and partial.fields == (("x", Scalar(1)),)
+    assert partial.reason == "unreadable"
+    assert render_python(capture(module.B(1, 2))) == "B(x=1, y=2)"
+
+
+def test_field_by_field_hints_follow_the_mro_and_hidden_markers() -> None:
+    module = types.ModuleType("snapshot_partial_hints")
+    sys.modules[module.__name__] = module
+    try:
+        exec(  # noqa: S102 - a module with one name that exists only for type checkers
+            "from __future__ import annotations\n"
+            "from dataclasses import dataclass\n"
+            "from typing import Annotated\n"
+            "from nooa import hidden\n"
+            "@dataclass\n"
+            "class Base:\n"
+            "    shadowed: Missing = 'base'\n"
+            "    token: Annotated[str, hidden] = 's3cret'\n"
+            "@dataclass\n"
+            "class Child(Base):\n"
+            "    shadowed: int = 2\n"
+            "    missing: Missing = 'gone'\n"
+            "    shown: Annotated[str, 'doc'] = 'ok'\n",
+            module.__dict__,
+        )
+        snapshot = capture(module.Child())
+    finally:
+        del sys.modules[module.__name__]
+
+    assert isinstance(snapshot, Object)
+    assert snapshot.fields == (
+        ("shadowed", Scalar(2)),
+        ("shown", Text(head="ok", length=2, unit="chars")),
+    )
+    assert snapshot.reason == "unreadable"
+    assert "s3cret" not in render_json(snapshot, max_chars=2000)
 
 
 def test_dataclass_real_annotations_beside_unevaluable_strings_stay_readable() -> None:
@@ -503,7 +571,10 @@ def test_dataclass_hints_that_fail_are_retried_by_the_next_capture(monkeypatch) 
     later = module.Later
 
     first = capture([later(), later(), later()])
-    assert calls == [later]  # the failure is evaluated once per capture, not once per instance
+    # The failure is evaluated once per capture, not once per instance; then
+    # each annotation once on its own (a probe class per annotation).
+    assert [call for call in calls if call is later] == [later]
+    assert len(calls) == 3
     assert id(later) not in _visibility._HINTS  # and not cached for the process
     assert all(item.reason == "unreadable" for item in first.items)
     assert "s3cret" not in render_python(first)
@@ -581,10 +652,10 @@ def _assert_alias_fields_fail_closed(value: Any) -> None:
     snapshot = capture(value)
 
     # Without the declaring module, get_type_hints can't resolve ``Annotated``:
-    # every string-annotated field is left out.
+    # every field that uses it is left out; ``ok: int`` still resolves.
     assert "S-" not in render_json(snapshot, max_chars=2000)
     assert isinstance(snapshot, Object)
-    assert snapshot.fields == ()
+    assert snapshot.fields == (("ok", Scalar(1)),)
     assert not snapshot.complete and snapshot.reason == "unreadable"
 
 
@@ -606,7 +677,12 @@ def test_dataclass_alias_marker_with_a_reassigned_module_fails_closed() -> None:
 def test_dataclass_plain_annotations_without_a_module_fail_closed() -> None:
     module = _load_aliases_copy("_snapshot_unloaded_visible")
 
-    _assert_alias_fields_fail_closed(module.Visible(nested=[4]))
+    snapshot = capture(module.Visible(nested=[4]))
+
+    # Only builtins resolve without the module: ``xs: list[int]`` is kept.
+    assert isinstance(snapshot, Object)
+    assert [name for name, _ in snapshot.fields] == ["xs"]
+    assert not snapshot.complete and snapshot.reason == "unreadable"
 
 
 # --- cycles and repeated references -----------------------------------------------------
@@ -1013,10 +1089,11 @@ def test_module_namespace_hostile_key_fails_closed(monkeypatch) -> None:
     snapshot = capture(Secret())
 
     # Evaluating the annotations looks names up the way Python does; the
-    # module's key raises during the lookup, so the class's hints are unreadable.
+    # module's key raises during the lookup, so the class's hints are unreadable;
+    # field by field, only the annotation that looks up the hostile name is.
     assert _CollidingKey.calls != []
     assert isinstance(snapshot, Object)
-    assert snapshot.fields == ()
+    assert snapshot.fields == (("ok", Scalar(1)),)
     assert not snapshot.complete and snapshot.reason == "unreadable"
     assert "s3cret" not in render_json(snapshot, max_chars=1000)
 

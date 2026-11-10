@@ -91,9 +91,10 @@ class _State:
         self.active: dict[int, tuple[str, Literal["sequence", "mapping", "object"]]] = {}
         # id(owner) -> (owner, checked copy of its namespace or None); see ``_safe_dict``.
         self.namespaces: dict[int, tuple[Any, dict[str, Any] | None]] = {}
-        # id(class) -> class whose type hints failed to resolve in this capture;
-        # kept alive for the call and retried by the next one (see ``_visibility``).
-        self.unreadable_hints: dict[int, type[Any]] = {}
+        # id(class) -> (class, the metadata of the hints that resolved one by one)
+        # for a class whose ``get_type_hints`` failed in this capture; kept alive
+        # for the call and retried by the next one (see ``_visibility``).
+        self.unreadable_hints: dict[int, tuple[type[Any], dict[str, tuple[Any, ...]]]] = {}
 
     def take_node(self) -> bool:
         """Consume one inspection unit, returning false when exhausted."""
