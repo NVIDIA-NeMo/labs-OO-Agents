@@ -10,6 +10,9 @@ resolution-markers = [
 [options]
 exclude-newer = "2026-10-21T00:00:00Z"
 
+[options.exclude-newer-package]
+nemo-relay = "2026-11-05T00:00:00Z"
+
 [manifest]
 members = [
     "eval-pipeline",
@@ -1437,17 +1440,17 @@ wheels = [
 
 [[package]]
 name = "nemo-relay"
-version = "0.6.0"
+version = "0.11.1"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/16/db/44d7258ee620c5cce6dc588983fcb11be3ee03ae71089a65686c14d9ee02/nemo_relay-0.6.0.tar.gz", hash = "sha256:f3d3088019609bc953357b5598a47481dc3e7dc8f11ecf27002ede251f37eb7b", size = 1071046, upload-time = "2026-08-03T14:55:49.702Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/8c/eb/d0743f8fc560421790ab98debce09889bad19e2d6f136bde083bc10fdac9/nemo_relay-0.11.1.tar.gz", hash = "sha256:fec74b8ce26b34fc3c623bb6051d08bf57a99af79206552b5894991dcd4de0bd", size = 2370766, upload-time = "2026-11-04T16:16:55.712Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/25/65/d320016505457cc30971f575e8dadffb923b7cfc780ab8bb25a4ce9d305c/nemo_relay-0.6.0-cp311-abi3-macosx_11_0_arm64.whl", hash = "sha256:ad5dae6febf6532d7b113abc2a404679c8feffc499df3034b93d9a078185d2bb", size = 9917779, upload-time = "2026-07-22T20:07:48.961Z" },
-    { url = "https://files.pythonhosted.org/packages/ae/c0/f33250e71c4206da1b339072893f9a1e39295fe1aceb9a2fef4b8620a0f2/nemo_relay-0.6.0-cp311-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:c0cd9570f64c6956fe3bfb82af1cdb3ee70cb50b51098cdb0de831c3f9b4e904", size = 8888375, upload-time = "2026-07-22T20:07:51.049Z" },
-    { url = "https://files.pythonhosted.org/packages/a3/f4/d1dfaed022da0f6f14765a122867f976a69cc520fe1faaf99757f5719d1f/nemo_relay-0.6.0-cp311-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:849daa9e45158ac581e54506e0fcc7a24f557d1ed06dbdc074f5de7a00393cbc", size = 9336372, upload-time = "2026-07-22T20:07:53.224Z" },
-    { url = "https://files.pythonhosted.org/packages/60/9e/f8b80509eef5e05702b940a3d1e2f60c962548d87dec2d712fd3804e6cd4/nemo_relay-0.6.0-cp311-abi3-musllinux_1_2_aarch64.whl", hash = "sha256:8c80e534b76bb0455cfc222aaf5c10fa064c088b3c0d5e137eb3c97db46dbc47", size = 10578834, upload-time = "2026-07-30T15:44:44.726Z" },
-    { url = "https://files.pythonhosted.org/packages/f0/a0/84ee49d45a1a874457f2f9260d30fd573af30c9be360d9d97b8bb7835ad9/nemo_relay-0.6.0-cp311-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:c8bc4a792a2f8c35ddef1b900cc43be2b2bbbfcd5e7cf65aa0829c04d25eb77f", size = 10849651, upload-time = "2026-07-30T15:44:40.48Z" },
-    { url = "https://files.pythonhosted.org/packages/3a/b0/908d77f75b9054e1e403da78f7d9430249a45939070d4298abbb41a04b5b/nemo_relay-0.6.0-cp311-abi3-win_amd64.whl", hash = "sha256:bfbbedfd130fa95c9b8c04643c30910df850e0ed3500beeab82b00ca2d94e7ea", size = 9613425, upload-time = "2026-07-22T20:07:55.175Z" },
-    { url = "https://files.pythonhosted.org/packages/cd/71/c438b9d746303ff7f270d99f13b250bf947cdac3e52de2a83fd132cbca0b/nemo_relay-0.6.0-cp311-abi3-win_arm64.whl", hash = "sha256:82fe132943399d89e6ec34dc28df0be7bbe41b84f6698c545928b8816b6010f6", size = 9034810, upload-time = "2026-07-22T20:07:57.467Z" },
+    { url = "https://files.pythonhosted.org/packages/1f/1d/79351abdbc434a24fa01e671d6657fbbc99b1027ca939dafefd8080e542f/nemo_relay-0.11.1-cp311-abi3-macosx_11_0_arm64.whl", hash = "sha256:525f46a42827aff01b1d89535544c104a9d56d206f7533286c608e57abc5141c", size = 11626150, upload-time = "2026-11-04T16:16:03.057Z" },
+    { url = "https://files.pythonhosted.org/packages/f2/3a/8517cfb3a81ca48ef586f2782d9f8c5b93f423eceea24ce7fb9c127a7c0a/nemo_relay-0.11.1-cp311-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:187e151dfb28226ef67fec952f00f49630e2bcbdb1b6a5b9133cd4aed5b0d3d3", size = 10411642, upload-time = "2026-11-04T16:16:05.998Z" },
+    { url = "https://files.pythonhosted.org/packages/57/e4/51816c5079c47ff40047e09cb5264f669bea82667f66c29db6880e285a2f/nemo_relay-0.11.1-cp311-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:e039e97fc2b8b6a5574ece12717ec5d17f492ed048a77a7a270c1a40e101572b", size = 11133886, upload-time = "2026-11-04T16:16:08.82Z" },
+    { url = "https://files.pythonhosted.org/packages/2b/e8/7817b8c618c4004dbc1ce82cee58efbcee58933de728efe9e5b9423c0c92/nemo_relay-0.11.1-cp311-abi3-musllinux_1_2_aarch64.whl", hash = "sha256:353416a5ad6f09ada3cc3566663a2423b577cde722eb54ea547701f92e951811", size = 12823207, upload-time = "2026-11-04T16:16:11.557Z" },
+    { url = "https://files.pythonhosted.org/packages/c2/91/14ac40a48b12a0c6ec5d04e226223fc78871c53097c9b1bb7d698af9c8f1/nemo_relay-0.11.1-cp311-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:760f91d89192096cbf94f77333ddb12a95f24ecaad80ba0ad8bde4135f104aa3", size = 13365350, upload-time = "2026-11-04T16:16:14.677Z" },
+    { url = "https://files.pythonhosted.org/packages/40/2f/6e5fc4198e581cfd1ab16842e4b7d015ae130c88db3e77913b4f53344887/nemo_relay-0.11.1-cp311-abi3-win_amd64.whl", hash = "sha256:080bee4c7a2b81aa14207da3507803f20c2248658593a52e2a353127a7660a50", size = 11016631, upload-time = "2026-11-04T16:16:17.332Z" },
+    { url = "https://files.pythonhosted.org/packages/da/48/8f0f065d23904773e0d8d2a854937329a50e5336b3a64166b86f264faabb/nemo_relay-0.11.1-cp311-abi3-win_arm64.whl", hash = "sha256:918ee4d18552db3808beb63f5b9225f54b20e312bb44d2ac6eec4fa439ef6ef6", size = 10520301, upload-time = "2026-11-04T16:16:19.899Z" },
 ]
 
 [[package]]
@@ -1565,7 +1568,7 @@ requires-dist = [
     { name = "litellm", specifier = ">=1.97.0,!=1.106.0.dev2,!=1.106.0.dev3,!=1.106.0rc1,!=1.106.0rc2,!=1.106.0rc3,!=1.106.0rc4,!=1.106.0,!=1.106.1,!=1.106.2,!=1.106.3,!=1.106.4,!=1.106.5,!=1.106.6,!=1.106.7,!=1.107.0.dev1,!=1.107.0.dev2,!=1.107.0.dev3,!=1.107.0rc1,!=1.107.0rc2,!=1.107.0rc3,!=1.108.0rc1,!=1.108.0,!=1.108.1" },
     { name = "mcp", marker = "extra == 'mcp'", specifier = ">=1.30,<2" },
     { name = "msgpack", specifier = ">=1.2.1" },
-    { name = "nemo-relay", marker = "extra == 'nemo-relay'", specifier = ">=0.6,<0.7" },
+    { name = "nemo-relay", marker = "extra == 'nemo-relay'", specifier = ">=0.11.1,<0.12" },
     { name = "nooa-acp", marker = "extra == 'acp'", editable = "packages/nooa-acp" },
     { name = "nooa-bench", marker = "extra == 'bench'", editable = "packages/nooa-bench" },
     { name = "nooa-cli", marker = "extra == 'cli'", editable = "packages/nooa-cli" },
