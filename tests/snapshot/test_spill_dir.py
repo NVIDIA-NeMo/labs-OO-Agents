@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import os
 import random
@@ -64,6 +65,46 @@ def test_invalid_arguments(tmp_path: Path) -> None:
 def test_target_without_a_folder_is_unchanged() -> None:
     assert SpillTarget() == SpillTarget(path=None, max_bytes=64 * 2**20, always=False)
     assert repr(SpillTarget(path="x")) == "SpillTarget(path='x', max_bytes=67108864, always=False)"
+
+
+def test_replace_keeps_the_folder(tmp_path: Path) -> None:
+    # Severin's repro (#515): ``replace`` used to drop the private folder link.
+    with SpillDir(str(tmp_path), max_files=5, max_bytes=1000) as spills:
+        target = spills.target()
+        assert target is not None and target.path is not None
+        kept = dataclasses.replace(target, always=True)
+
+        assert kept._dir is spills and kept.always
+        assert kept == dataclasses.replace(kept, _dir=None)  # not compared
+        assert "_dir" not in repr(kept)
+        stream = _stream(kept)
+        stream.write(b"hi")
+        assert stream.close().full is not None
+        assert Path(target.path).read_bytes() == b"hi"  # always: kept, and still the folder's
+    assert not os.path.exists(target.path)  # deleted by the folder's close()
+
+
+def test_replace_cannot_raise_the_granted_bytes(tmp_path: Path) -> None:
+    with SpillDir(str(tmp_path), max_files=2, max_bytes=10) as spills:
+        target = spills.target()
+        assert target is not None and target.max_bytes == 5
+        stream = _stream(dataclasses.replace(target, max_bytes=1000))
+        stream.write(b"0123456789")
+        full = stream.close().full
+        assert full is not None and full.kept == 5
+
+
+def test_one_target_opens_one_stream(tmp_path: Path) -> None:
+    with SpillDir(str(tmp_path), max_files=2, max_bytes=100) as spills:
+        target = spills.target(always=True)
+        assert target is not None and target.path is not None
+        first = _stream(target)
+        first.write(b"first")
+        second = _stream(target)  # refused: memory only, and the first file is untouched
+        second.write(b"second")
+        assert second.close().full is None
+        assert first.close().full is not None
+        assert Path(target.path).read_bytes() == b"first"
 
 
 def test_budget_by_count_evicts_the_oldest_closed_file(tmp_path: Path) -> None:

@@ -61,15 +61,19 @@ class SpillTarget:
     ``None``).
 
     ``SpillDir.target()`` hands out targets inside a shared folder; such a
-    target also tells its folder when its stream closes. A target built
-    here belongs to no folder.
+    target also tells its folder when its stream closes, and keeps its
+    folder through ``dataclasses.replace`` (the folder still bounds the
+    stream to the bytes it granted, and one target opens one stream). A
+    target built here belongs to no folder.
     """
 
     path: str | None = None
     max_bytes: int = DEFAULT_SPILL_BYTES
     always: bool = False
     # The folder that handed this target out (``SpillDir.target``), or ``None``.
-    _dir: SpillDir | None = field(default=None, init=False, repr=False, compare=False)
+    # Private: only ``SpillDir.target`` passes it. A real (keyword-only) field,
+    # so ``dataclasses.replace`` keeps it; left out of repr and comparison.
+    _dir: SpillDir | None = field(default=None, repr=False, compare=False, kw_only=True)
 
 
 class TextStream:
@@ -167,7 +171,12 @@ class TextStream:
     def _open(self, spill: SpillTarget) -> None:
         try:
             if self._owner is not None and spill.path is not None:
-                self._file = self._owner._open(spill.path)
+                try:
+                    self._file, granted = self._owner._open(spill.path)
+                except _NotYours:
+                    self._owner = None  # never tell the folder about a file that isn't ours
+                    raise
+                self._spill_max = min(self._spill_max, granted)
                 self._path = spill.path
             elif spill.path is not None:
                 self._file = open(spill.path, "wb")  # noqa: SIM115 - closed in close()
@@ -390,6 +399,10 @@ class TextStream:
 DEFAULT_SPILL_FILES = 20
 
 
+class _NotYours(OSError):
+    """``SpillDir._open`` refused: the file is gone from the folder or has a stream already."""
+
+
 @dataclass
 class _Entry:
     """One file a ``SpillDir`` created: its identity, and its budget while open or once closed."""
@@ -397,6 +410,7 @@ class _Entry:
     ident: tuple[int, int]  # (st_dev, st_ino) when created
     reserved: int  # bytes: the target's ``max_bytes`` while open, the size on disk once closed
     open: bool = True
+    claimed: bool = False  # a stream opened it (one stream per target)
 
 
 class SpillDir:
@@ -519,9 +533,7 @@ class SpillDir:
                 _log.warning("could not create a spill file; keeping memory only", exc_info=True)
                 return None
             self._files[path] = _Entry((info.st_dev, info.st_ino), room)
-        target = SpillTarget(path=path, max_bytes=room, always=always)
-        object.__setattr__(target, "_dir", self)  # frozen: set once, before anyone sees it
-        return target
+        return SpillTarget(path=path, max_bytes=room, always=always, _dir=self)
 
     def _used(self) -> int:
         return sum(entry.reserved for entry in self._files.values())
@@ -529,12 +541,20 @@ class SpillDir:
     def _fits(self, want: int) -> bool:
         return len(self._files) < self.max_files and self._used() + want <= self.max_bytes
 
-    def _open(self, path: str) -> IO[bytes]:
-        """Open a file this folder created for writing, without following a symlink."""
+    def _open(self, path: str) -> tuple[IO[bytes], int]:
+        """Open a file this folder created for writing, without following a symlink.
+
+        Returns the file and the bytes the folder granted it (a target changed
+        by ``dataclasses.replace`` gets no more). Once per file: a second
+        stream on the same target is refused (``OSError``).
+        """
         with self._lock:
             entry = self._files.get(path)
-        if entry is None:
-            raise OSError(f"spill file {path!r} is no longer in its folder")
+            if entry is None or not entry.open:
+                raise _NotYours(f"spill file {path!r} is no longer in its folder")
+            if entry.claimed:
+                raise _NotYours(f"spill file {path!r} already has a stream")
+            entry.claimed = True
         flags = os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
         fd = os.open(path, flags)
         try:
@@ -542,7 +562,7 @@ class SpillDir:
             if (info.st_dev, info.st_ino) != entry.ident or not stat.S_ISREG(info.st_mode):
                 raise OSError(f"spill file {path!r} was replaced")
             os.ftruncate(fd, 0)
-            return os.fdopen(fd, "wb")
+            return os.fdopen(fd, "wb"), entry.reserved
         except BaseException:
             os.close(fd)
             raise
