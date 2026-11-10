@@ -120,7 +120,7 @@ def test_hysteresis_after_a_reflection():
     [
         ("headless", ReflectionSettings(), None, True, False),
         ("acp", ReflectionSettings(), None, True, True),
-        ("tui", ReflectionSettings(), None, True, True),
+        ("tui", ReflectionSettings(), None, True, False),  # only ACP counts as interactive
         ("acp", ReflectionSettings(), None, False, False),  # children are off
         ("acp", ReflectionSettings(children=True), None, False, True),
         ("headless", ReflectionSettings(enabled=True), None, True, True),

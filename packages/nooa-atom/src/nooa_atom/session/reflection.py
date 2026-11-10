@@ -27,7 +27,7 @@ REFLECTION_SOURCE = "reflection"
 
 REFLECTION_CHANNEL = "slash_commands"
 
-INTERACTIVE_HOSTS = frozenset({"acp", "tui"})
+INTERACTIVE_HOSTS = frozenset({"acp"})
 """Hosts where a person is in the loop: reflection is on there unless disabled."""
 
 SPAN_NAME = "atom.reflection"
@@ -59,7 +59,7 @@ class ReflectionSettings(BaseModel):
     """The ``atom.reflection`` settings: when to queue a reflection turn, and its text.
 
     ``enabled``: ``None`` (the default) turns it on for interactive hosts
-    (``INTERACTIVE_HOSTS``: ACP clients such as Pool and Zed, and the TUI)
+    (``INTERACTIVE_HOSTS``: ACP clients such as Pool and Zed)
     and off for headless runs (benchmarks, Gym, ``nooa_bench``); ``True`` or
     ``False`` decides for every host. Only root sessions reflect unless
     ``children`` is true. A reflection is due when a turn ends with ``Done``

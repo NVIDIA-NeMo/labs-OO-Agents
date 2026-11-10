@@ -400,7 +400,7 @@ only the keys it sets):
 ```yaml
 atom:
   reflection:
-    enabled: null          # null: on for interactive hosts (ACP, TUI), off headless
+    enabled: null          # null: on for interactive hosts (ACP), off headless
     children: false        # child sessions reflect too
     every_turns: 20        # null turns a trigger off
     every_minutes: 60
@@ -409,8 +409,8 @@ atom:
     instructions: "..."    # the queued text (nooa_atom.session.reflection.DEFAULT_INSTRUCTIONS)
 ```
 
-The default follows `SessionOptions.host`: `"acp"` (Pool, Zed and other ACP
-clients) and `"tui"` reflect; `"headless"`, the default for `run_task`, the Gym
+The default follows `SessionOptions.host`: only `"acp"` (Pool, Zed and other
+ACP clients) reflects. `"headless"`, the default for `run_task`, the Gym
 adapter and `nooa-bench`, does not. `enabled: true`/`false` decides for every
 host, and `SessionOptions(reflection=True)` (or `False`) overrides both for one
 run, e.g. a benchmark arm.

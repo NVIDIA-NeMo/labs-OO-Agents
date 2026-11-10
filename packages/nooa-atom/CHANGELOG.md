@@ -14,7 +14,7 @@ based on [Keep a Changelog](https://keepachangelog.com/).
   session, compact history, delete stale names, tidy todos and `self.v`. It
   runs only when nothing else waits, at most one is pending, and over ACP the
   turn is one "Reflected: ..." status card with no reply. On by default for
-  ACP and TUI hosts, off headless (benchmarks, Gym, `nooa-bench`); configure
+  ACP hosts, off headless (benchmarks, Gym, `nooa-bench`); configure
   it in `atom.reflection` or override with `SessionOptions(reflection=...)`.
   Each one emits an `atom.reflection` span.
 - `nooa-atom`: a job lost in a restart now reports the launching cell's code
