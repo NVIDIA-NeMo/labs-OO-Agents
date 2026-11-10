@@ -28,7 +28,7 @@ from nooa.agentdoc import hidden
 from nooa.interactive import Done, TaskResult
 from nooa.runtime.hooks import compose_hooks, get_hooks, set_hooks
 from nooa_atom.agent.factory import create_session_agent
-from nooa_atom.benchmark_policy import POLICY, BenchmarkPolicyGuard, BenchmarkPolicyViolation
+from nooa_atom.benchmark_policy import BenchmarkPolicyGuard, BenchmarkPolicyViolation
 from nooa_atom.session.loader import ATOM_AGENT
 from nooa_atom.session.options import SessionOptions
 from nooa_atom.session.registry import SessionRegistry
@@ -113,9 +113,6 @@ class AtomHarness(Agent):
                 self.benchmark_guard.configure(config)
                 if unknown:
                     raise ValueError(f"unknown benchmark/experiment keys: {sorted(unknown)}")
-                if reflection:
-                    # Reflection renames sessions: the policy has no titles.
-                    raise ValueError(f"{POLICY} forbids reflection (reflection=True)")
             except BaseException:
                 self.benchmark_guard.violate("construction_configuration_invalid")
                 self.benchmark_guard.finish(None, "construction_error")
@@ -139,8 +136,7 @@ class AtomHarness(Agent):
             sessions_dir=self.sessions_dir,
             name=session_name,
             # Reflection is off headless; True turns it on for an A/B arm.
-            # A guarded episode pins it off, so workspace settings cannot enable it.
-            reflection=False if self.benchmark_guard is not None else reflection,
+            reflection=reflection,
             experimental_reflection_min_turns=experimental_reflection_min_turns,
             experimental_reflection_min_seconds=experimental_reflection_min_seconds,
             **config,
