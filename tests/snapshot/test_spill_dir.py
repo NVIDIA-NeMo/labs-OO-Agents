@@ -107,31 +107,50 @@ def test_one_target_opens_one_stream(tmp_path: Path) -> None:
         assert Path(target.path).read_bytes() == b"first"
 
 
-def test_always_file_is_never_evicted(tmp_path: Path) -> None:
-    # Severin's repro (#515): a second target used to evict the closed always=True file.
-    with SpillDir(str(tmp_path), max_files=1, max_bytes=1000) as spills:
+def test_closed_always_file_is_evicted_oldest_first(tmp_path: Path) -> None:
+    # Keep the newest files: a closed always=True file makes room like any other.
+    with SpillDir(str(tmp_path), max_files=2, max_bytes=1000) as spills:
         first = TextStream(unit="chars", head=1, tail=1, spill=spills.target(always=True))
         first.write("hello world")
-        full = first.close().full
-        assert full is not None and os.path.exists(full.path)
+        oldest = first.close().full
+        newer = _cut(spills)
+        assert oldest is not None and os.path.exists(oldest.path)
 
-        assert spills.target(always=True) is None  # the budget can't be met: memory only
-        assert spills.target() is None
-        assert os.path.exists(full.path)
-    assert not os.path.exists(full.path)  # close() still deletes it
+        target = spills.target(always=True)  # count full: the oldest closed file goes
+        assert target is not None
+        assert not os.path.exists(oldest.path) and os.path.exists(newer)
+        with pytest.raises(FileNotFoundError):  # how a reader tells it is no longer kept
+            Path(oldest.path).open("rb").close()
 
 
-def test_always_set_by_replace_is_never_evicted(tmp_path: Path) -> None:
+def test_always_set_by_replace_is_evicted_oldest_first(tmp_path: Path) -> None:
     with SpillDir(str(tmp_path), max_files=2, max_bytes=1000) as spills:
         target = spills.target()
         assert target is not None
         stream = _stream(dataclasses.replace(target, always=True))
         stream.write(b"kept")
         kept = stream.close().full
-        evictable = _cut(spills)
+        newer = _cut(spills)
         assert kept is not None
-        assert spills.target() is not None  # evicts the other closed file, not the kept one
-        assert not os.path.exists(evictable) and os.path.exists(kept.path)
+        assert spills.target() is not None  # evicts the older always=True file
+        assert not os.path.exists(kept.path) and os.path.exists(newer)
+        with pytest.raises(FileNotFoundError):
+            Path(kept.path).read_bytes()
+
+
+def test_open_always_stream_file_is_never_evicted(tmp_path: Path) -> None:
+    with SpillDir(str(tmp_path), max_files=1, max_bytes=1000) as spills:
+        open_target = spills.target(always=True)
+        assert open_target is not None and open_target.path is not None
+        running = _stream(open_target)
+        running.write(b"0123456789")
+        assert spills.target() is None  # only an open file: nothing to evict
+        assert os.path.exists(open_target.path)
+        running.write(b"abc")
+        full = running.close().full
+        assert full is not None and Path(full.path).read_bytes() == b"0123456789abc"
+        assert spills.target() is not None  # closed now: evicted for the new one
+        assert not os.path.exists(full.path)
 
 
 def test_budget_by_count_evicts_the_oldest_closed_file(tmp_path: Path) -> None:
