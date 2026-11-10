@@ -50,8 +50,7 @@ class Secrets(BaseModel):
 class ResolvedConfig(BaseModel):
     """Everything the three config files resolve to, as typed objects.
 
-    - ``models`` — alias → :class:`ModelConfig` (from ``llm_config.yaml`` +
-      bundled defaults).
+    - ``models`` — alias → :class:`ModelConfig` (from the ``llm_config.yaml`` layers).
     - ``secrets`` — :class:`Secrets`; values are ``SecretStr`` (masked on
       print/dump; ``.get_secret_value()`` for plaintext).
     - ``settings`` — merged ``settings.yaml`` mapping. Left as a dict because
@@ -94,12 +93,11 @@ def resolved_config() -> ResolvedConfig:
     leaks a key. Read a plaintext value with
     ``resolved_config().secrets.env["KEY"].get_secret_value()``.
     """
-    from nooa.layered_config import bundled_settings_paths, layered_paths, load_layered_yaml
+    from nooa.layered_config import layered_paths, load_layered_yaml
     from nooa.llm_config import llm_config_chain
     from nooa.unifiedllm.registry import load_model_entries
 
-    bundled_settings = bundled_settings_paths()
-    settings = load_layered_yaml(*_SETTINGS, prepend=bundled_settings)
+    settings = load_layered_yaml(*_SETTINGS)
 
     secrets_raw = load_layered_yaml(*_SECRETS)
     env_raw = secrets_raw.get("env")
@@ -119,7 +117,7 @@ def resolved_config() -> ResolvedConfig:
         secrets=Secrets(env=env),
         settings=settings,
         sources={
-            "settings": [str(p) for p in layered_paths(*_SETTINGS, prepend=bundled_settings)],
+            "settings": [str(p) for p in layered_paths(*_SETTINGS)],
             "secrets": [str(p) for p in layered_paths(*_SECRETS)],
             "llm_config": [str(p) for p in llm_config_chain()],
         },

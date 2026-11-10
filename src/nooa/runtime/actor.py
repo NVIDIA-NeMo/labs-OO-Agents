@@ -43,6 +43,7 @@ if TYPE_CHECKING:
     from nooa.runtime.event_query import EventQuery
     from nooa.runtime.restrictions import RestrictionsConfig
 
+from nooa.errors.formatting import rewrite_never_awaited_warnings
 from nooa.events import (
     DecisionCallEnd,
     DecisionCallStart,
@@ -61,13 +62,16 @@ from nooa.runtime.context_vars import (
     _in_generation_session,
     _parent_agent_var,
 )
+from nooa.runtime.execution_namespace import ExecutionNamespace
 from nooa.runtime.harness_metrics import (
     HarnessMetrics,
     get_harness_metrics,
+    llm_metric_event_handler,
     restore_harness_metrics,
     start_harness_metrics,
 )
 from nooa.runtime.hooks import call_after_hook, call_before_hook, call_on_llm_call
+from nooa.runtime.request_recovery import RequestRecovery, request_recoveries_for
 
 logger = logging.getLogger(__name__)
 
@@ -130,13 +134,16 @@ def _make_llm_metrics_bridge(hm: "HarnessMetrics") -> Callable[[str, Any], None]
         "reasoning_as_structured_output": lambda _: hm.record_reasoning_as_structured_output(),
         "token_usage": _handle_token_usage,
         "llm_queue": lambda detail: hm.record_llm_queue(detail),
-        "media_rejected_retry": lambda kind: hm.media_rejected_retry(kind),
     }
 
     def bridge(event: str, detail: Any = None) -> None:
         handler = _dispatch.get(event)
         if handler:
             handler(detail)
+            return
+        registered = llm_metric_event_handler(event)  # a package's event (e.g. media)
+        if registered is not None:
+            registered(hm, detail)
         else:
             logger.debug("[HARNESS_METRICS] Unknown LLM metric event: %s", event)
 
@@ -217,16 +224,6 @@ _ARCHIVE_TARGET_UTILIZATION = 0.60
 # Cold-start chars→tokens ratio (~4 chars per token) used before any provider
 # response has calibrated _tokens_per_char from real usage.
 _DEFAULT_TOKENS_PER_CHAR = 0.25
-
-
-def _image_block_count(event: Any) -> int:
-    """The image content blocks (``image_url``) an event sends to the model."""
-    images = getattr(event, "images", None)
-    if not isinstance(images, list):
-        return 0
-    return sum(
-        1 for block in images if isinstance(block, dict) and block.get("type") == "image_url"
-    )
 
 
 def _collapse_oldest(
@@ -513,59 +510,6 @@ def _pop_generation_id() -> str | None:
     return popped
 
 
-# "Cell In[3]:3: RuntimeWarning: coroutine 'ShellTools.read' was never awaited",
-# optionally followed by its source line, then CPython's tracemalloc note.
-_NEVER_AWAITED_RE = _re.compile(
-    r"^[^\n]*RuntimeWarning: coroutine '(?P<qualname>[^'\n]+)' was never awaited\n"
-    r"(?:(?![^\n]*RuntimeWarning:)[ \t]+[^\n]*\n)?"
-    r"(?:RuntimeWarning: Enable tracemalloc to get the object allocation traceback\n"
-    r"|Object allocated at \(most recent call last\):\n(?:[ \t]+[^\n]*\n)*)?",
-    _re.MULTILINE,
-)
-
-
-def _agent_call_for(qualname: str, agent: Any) -> str | None:
-    """``"ShellTools.read"`` -> ``"self.shell.read"`` when the agent holds it."""
-    owner, _, method = qualname.rpartition(".")
-    owner = owner.rsplit(".", 1)[-1]
-    if not owner or not method.isidentifier() or agent is None:
-        return None
-    if any(cls.__name__ == owner for cls in type(agent).__mro__):
-        return f"self.{method}"
-    try:
-        attributes = vars(agent)
-    except TypeError:
-        return None
-    for name, value in attributes.items():
-        if name.startswith("_") or not name.isidentifier():
-            continue
-        if any(cls.__name__ == owner for cls in type(value).__mro__):
-            return f"self.{name}.{method}"
-        # A wrapper may copy the wrapped method's name: ActivityShellTools.read
-        # is @wraps(ShellTools.read), so its coroutine says 'ShellTools.read'.
-        if getattr(getattr(type(value), method, None), "__qualname__", None) == qualname:
-            return f"self.{name}.{method}"
-    return None
-
-
-def _rewrite_never_awaited_warnings(text: str, agent: Any = None) -> str:
-    """Turn CPython's "coroutine ... was never awaited" warning into a one-line hint.
-
-    The stock text names the coroutine but not the fix, and adds a tracemalloc
-    note that means nothing to a model. Other warnings are left unchanged.
-    """
-    if "was never awaited" not in text:
-        return text
-
-    def hint(match: _re.Match[str]) -> str:
-        qualname = match.group("qualname")
-        call = _agent_call_for(qualname, agent)
-        fix = f"use `await {call}(...)`" if call else "put `await` before the call"
-        return f"`{qualname}(...)` was called without await and never ran; {fix}\n"
-
-    return _NEVER_AWAITED_RE.sub(hint, text)
-
-
 def _make_capture_buffer(limit: int, capture: "CaptureConfig") -> TruncatingStringIO:
     """Create a stdout/stderr capture buffer, file-backed if ``capture`` says so."""
     kind = FileBackedTruncatingStringIO if capture.file_backed else TruncatingStringIO
@@ -667,8 +611,8 @@ class ActorRuntime:
         """
         # Agent instance
         self.agent: Any = agent
-        # A provider's per-request image limit, once a request was refused for it.
-        self._request_image_limit: int | None = None
+        # Recoveries from a refused request that packages registered (e.g. media's image limit).
+        self._request_recoveries: list[RequestRecovery] = request_recoveries_for(self)
 
         # Lock for generation serialization (only one LLM generation session at a time)
         self._generation_lock = asyncio.Lock()
@@ -830,73 +774,21 @@ class ActorRuntime:
                 hm.context_limits_events_collapsed += n_to_archive
                 hm.context_limits_tokens_archived += int(n_to_archive * avg_event_tok)
 
-    def _collapse_images_over_limit(self, limit: int) -> int:
-        """Keep the newest ``limit`` images in the active events; collapse older image events.
+    def _included_event_ids(self) -> set[int] | None:
+        """``id()`` of the events this request renders (the query ``_phase_events`` applies).
 
-        Each image-bearing event (a ``Task`` or ``PythonOutput`` with image
-        blocks) older than the newest ``limit`` images is collapsed on its
-        own. Only its images go: the summary carries the event's text (the
-        cell's printed output, the task prompt) followed by a short note in
-        place of the images, and the original stays readable at
-        ``self.events["<tag>"]``. Returns the number collapsed.
+        None when no query applies (every event is rendered).
         """
-        from nooa.agentdoc import pformat
-
         em = self.event_manager
-        # Only the events this request renders (the query _phase_events applies):
-        # an excluded event neither uses the budget nor gets collapsed.
         query = (
             em.get_event_query()
             or _scoped_events_var.get()
             or _decorator_events_var.get()
             or getattr(self.agent, "event_query", None)
         )
-        included = (
-            {id(e) for e in query.apply(em.values(), current_call_id=self._agent_call_id)}
-            if query
-            else None
-        )
-        bearing: list[tuple[str, int]] = []
-        events: dict[str, Any] = {}
-        for tag in em.keys():
-            try:
-                event = em[tag]
-            except Exception:  # noqa: BLE001
-                continue
-            if included is not None and id(event) not in included:
-                continue
-            count = _image_block_count(event)
-            if count:
-                bearing.append((tag, count))
-                events[tag] = event
-        kept = 0
-        to_collapse: list[str] = []
-        for tag, count in reversed(bearing):
-            if kept + count <= limit:
-                kept += count
-            else:
-                to_collapse.append(tag)
-                kept = limit  # an older, smaller event must not slip in after a skipped one
-        collapsed = 0
-        for tag in reversed(to_collapse):
-            try:
-                text = pformat(events[tag])  # images are repr=False: the event's text only
-            except Exception:  # noqa: BLE001
-                text = ""
-            summary_text = (text + "\n" if text else "") + (
-                f"[image collapsed (request image limit {limit}); "
-                f'original: self.events["{tag}"]; show it again: '
-                f'show(Image.from_url(self.events["{tag}"].images[0]["image_url"]["url"]))]'
-            )
-            try:
-                em.collapse(tag, tag, summary_text=summary_text)
-            except Exception as exc:  # noqa: BLE001
-                logger.debug("image-limit collapse failed for %s: %s", tag, exc)
-                continue
-            collapsed += 1
-        if collapsed:
-            get_harness_metrics().media_image_limit_collapsed(limit, collapsed)
-        return collapsed
+        if not query:
+            return None
+        return {id(e) for e in query.apply(em.values(), current_call_id=self._agent_call_id)}
 
     async def _call_with_recovery(
         self,
@@ -904,44 +796,38 @@ class ActorRuntime:
         rebuild: Callable[[], Awaitable[None]],
         recover_context_window: Callable[[BaseException], bool],
     ) -> Any:
-        """``await call()``, recovering once each from an image limit and a context-window error.
+        """``await call()``, recovering once each with the registered recoveries, then the window.
 
-        Image limit: collapse old images. Context window:
+        The registered recoveries (:mod:`nooa.runtime.request_recovery`, e.g.
+        media's image limit) are asked in order, then the context window:
         ``recover_context_window(exc)`` archives events and lowers the reply
-        budget (False: re-raise). Then the messages are rebuilt and the call
-        made again, so each retry is covered by the other recovery.
+        budget (False: re-raise). After a recovery the messages are rebuilt and
+        the call made again, so each retry is covered by the other recoveries.
         """
-        image_done = context_done = False
+
+        def context_window(exc: BaseException) -> bool | None:
+            return recover_context_window(exc) if _is_context_window_error(exc) else None
+
+        handlers = [recovery.recover for recovery in self._request_recoveries]
+        handlers.append(context_window)
+        used = [False] * len(handlers)
         while True:
             try:
                 return await call()
             except Exception as exc:
-                if not image_done and self._recover_image_limit(exc):
-                    image_done = True
-                elif not context_done and _is_context_window_error(exc):
-                    context_done = True
-                    if not recover_context_window(exc):
+                for index, handler in enumerate(handlers):
+                    if used[index]:
+                        continue
+                    outcome = handler(exc)
+                    if outcome is None:
+                        continue  # not this handler's error
+                    used[index] = True
+                    if not outcome:
                         raise
+                    break
                 else:
                     raise
                 await rebuild()
-
-    def _recover_image_limit(self, exc: BaseException) -> bool:
-        """A provider's per-request image limit: remember it, collapse old images; True to retry."""
-        from nooa.unifiedllm.media_inputs import image_limit
-
-        limit = image_limit(exc)
-        if limit is None:
-            return False
-        self._request_image_limit = limit  # the session's later requests stay under it
-        if self._collapse_images_over_limit(limit) == 0:
-            return False  # nothing left to collapse: the same request would fail again
-        logger.warning(
-            "Provider image limit %d: collapsed older image events and retrying: %s",
-            limit,
-            str(exc)[:300],
-        )
-        return True
 
     @property
     def _agent_call_stack(self) -> tuple[str | None, ...]:
@@ -1261,9 +1147,9 @@ class ActorRuntime:
 
         from nooa.unifiedllm.limits import context_limits_for, reduced_reply_params
 
-        # A provider image limit learned earlier in this session: stay under it.
-        if self._request_image_limit is not None:
-            self._collapse_images_over_limit(self._request_image_limit)
+        # A limit a recovery learned earlier in this session (e.g. images): stay under it.
+        for recovery in self._request_recoveries:
+            recovery.before_request()
         # Build messages from context + events (timers inside _build_messages).
         # No proactive clamping — recovery is error-driven. If the API rejects
         # with ContextWindowExceededError, the except handler archives events,
@@ -1575,7 +1461,7 @@ class ActorRuntime:
         execution_count: int = 1,
         restrictions: "RestrictionsConfig | None" = None,
         sandbox_executor: Any = None,
-        execution_namespace: Any = None,
+        execution_namespace: ExecutionNamespace | None = None,
         framework_bindings: dict[str, Any] | None = None,
     ) -> "ExecutionResult":
         """Execute Python code with namespace + strategy builtins (RuntimeServices protocol).
@@ -1594,6 +1480,9 @@ class ActorRuntime:
                 guarded worker process instead of in-process. The surrounding
                 middleware pipeline, before/after_code_execution hooks and events
                 still run here on the parent, so the sandbox composes with them.
+            execution_namespace: When set, the cell runs in this namespace (its
+                globals persist across the call's cells); None runs it in a
+                fresh per-cell namespace.
 
         Returns:
             ExecutionResult with stdout, error, defined_methods, and optionally returned_value.
@@ -1693,59 +1582,12 @@ class ActorRuntime:
 
             exec_globals = filter_mro_module_globals(type(self.agent))
 
-            # Import agentdoc functions for use in generated code
-            # Import decorators and strategies for use in generated code
-            # NOTE: stdout/stderr capture is handled by ContextVarStream wrappers
-            # installed below.
-            import typing as _typing
+            # The names every cell sees (core, media, strategies...): one registry,
+            # shared with the sandbox worker. NOTE: stdout/stderr capture is
+            # handled by ContextVarStream wrappers installed below.
+            from nooa.runtime.namespace_providers import cell_namespace_names
 
-            from nooa.agentdoc import doc
-            from nooa.decorators import strategy
-            from nooa.media import Audio, File, Image, Media, Video
-            from nooa.runtime.media_capture import show
-            from nooa.runtime.pprint import pprint
-            from nooa.strategies import (
-                CodeActStrategy,
-                CompositeStrategy,
-                PredictStrategy,
-                ReflexionStrategy,
-                TemplateStrategy,
-            )
-            from nooa.strategies.pure_python import PurePythonStrategy
-
-            core_globals = {
-                "self": self.agent,
-                "asyncio": asyncio,
-                "typing": _typing,
-                # Common typing constructs — LLMs use these constantly
-                "Annotated": _typing.Annotated,
-                "Any": _typing.Any,
-                "Literal": _typing.Literal,
-                "Optional": _typing.Optional,
-                "Union": _typing.Union,
-                # agentdoc introspection (doc respects hidden fields)
-                "doc": doc,
-                "methods": methods,
-                "variables": variables,
-                "help": doc,  # Shadow built-in help() to prevent blocking on stdin
-                # Pretty printing with Rich-compatible API
-                "pprint": pprint,
-                # Media display for multimodal models
-                "show": show,
-                "Media": Media,
-                "Image": Image,
-                "Audio": Audio,
-                "Video": Video,
-                "File": File,
-                # decorators and strategies for LLM-generated methods
-                "strategy": strategy,
-                "PurePythonStrategy": PurePythonStrategy,
-                "CodeActStrategy": CodeActStrategy,
-                "ReflexionStrategy": ReflexionStrategy,
-                "PredictStrategy": PredictStrategy,
-                "TemplateStrategy": TemplateStrategy,
-                "CompositeStrategy": CompositeStrategy,
-            }
+            core_globals = {"self": self.agent, "asyncio": asyncio, **cell_namespace_names()}
             exec_globals.update(core_globals)
 
             # Add strategy builtins (includes reasoning, message, method args)
@@ -1793,11 +1635,18 @@ class ActorRuntime:
             from nooa.runtime.code_validator import strip_redundant_imports
 
             # Imports are real writes in the owned engine; removing one based on
-            # a prior binding would silently change rebinding/del semantics.
-            if execution_namespace is None:
-                code, stripped_imports = strip_redundant_imports(code, set(exec_globals.keys()))
-            else:
-                stripped_imports = []
+            # a prior binding would silently change rebinding/del semantics, so
+            # only imports that could not run (no such module) are stripped.
+            code, stripped_imports = strip_redundant_imports(
+                code,
+                set(exec_globals.keys())
+                | (
+                    set(execution_namespace.reserved) | set(execution_namespace.framework)
+                    if execution_namespace is not None
+                    else set()
+                ),
+                only_unresolvable=execution_namespace is not None,
+            )
             for stmt in stripped_imports:
                 hm.import_stripped(stmt)
 
@@ -2342,7 +2191,7 @@ class ActorRuntime:
             partial_results = getattr(execution_exception, "execution_results", None) or []
             for finished in (result, *partial_results[-1:]):
                 if finished is not None and finished.stderr:
-                    finished.stderr = _rewrite_never_awaited_warnings(finished.stderr, self.agent)
+                    finished.stderr = rewrite_never_awaited_warnings(finished.stderr, self.agent)
             # Call after_code_execution hook
             call_after_hook(
                 "after_code_execution",

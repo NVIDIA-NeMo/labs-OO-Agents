@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from nooa.runtime.event_manager import EventManager
     from nooa.runtime.event_query import EventQuery
     from nooa.runtime.events import EventsApi
+    from nooa.runtime.execution_namespace import ExecutionNamespace
     from nooa.storage.manager import StorageManager
     from nooa.unifiedllm import UnifiedLLM
 
@@ -533,6 +534,21 @@ class Agent(metaclass=AgentMeta):
     def decision_model(self) -> "UnifiedDecisionModel | None":
         """Return the decision model configured for this agent, if any."""
         return self._decision_model
+
+    @no_trace
+    @hidden
+    def execution_namespace_for(self, call: Any) -> "ExecutionNamespace":
+        """Hook: the owned namespace this method call's cells run in.
+
+        CodeAct's in-process backend calls it once per call (``call`` is the
+        :class:`~nooa.strategies.current_call.CurrentCall`). The default is a
+        fresh :class:`~nooa.runtime.execution_namespace.ExecutionNamespace` per
+        call (the call's arguments and the runtime names are reserved); override
+        it to share one namespace across calls.
+        """
+        from nooa.runtime.execution_namespace import default_execution_namespace
+
+        return default_execution_namespace(call)
 
     @no_trace
     @hidden

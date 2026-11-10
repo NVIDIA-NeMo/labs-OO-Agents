@@ -32,7 +32,6 @@ from typing import (
     TYPE_CHECKING,
     Annotated,
     Any,
-    ClassVar,
     Literal,
     get_args,
     get_origin,
@@ -64,6 +63,7 @@ from nooa.events import (
     Task,
     TextOnlyReply,
 )
+from nooa.runtime.execution_namespace import ExecutionNamespace
 from nooa.runtime.harness_metrics import get_harness_metrics
 from nooa.runtime.hooks import call_after_hook, call_before_hook
 from nooa.runtime.sandbox.errors import SandboxExecutionError
@@ -447,7 +447,8 @@ class CodeActSession:
     session_locals: dict[str, Any] = field(default_factory=dict)
     out_accessor: Any = field(default=None)  # OutAccessor instance, created lazily
     sandbox_executor: Any = field(default=None)  # SandboxedExecutor when backend="sandbox"
-    execution_namespace: Any = field(default=None)  # explicit experimental owner
+    # The namespace the cells run in (CurrentCall.execution_namespace), else None.
+    execution_namespace: ExecutionNamespace | None = field(default=None)
     execution_count: int = 0
     loop_guard: LoopGuard | None = None
 
@@ -870,18 +871,19 @@ Standard Python builtins and agent instance (`self`) are available."""
         except Exception:
             return ", ".join(name for name, _ in ordered)
 
-    # show() is in every cell's namespace, for both CodeAct strategies.
-    SHOW_NOTE_LINES: ClassVar[tuple[str, ...]] = (
-        "show(obj) attaches a nooa.media.Image/Audio/Video/File so you can see or hear it;",
-        "here `Image` is nooa.media.Image (e.g. Image.from_file(path)), not PIL.Image.",
-    )
+    @staticmethod
+    def _namespace_note_lines() -> tuple[str, ...]:
+        """Prompt notes of the cell-namespace providers (e.g. media's ``show()``)."""
+        from nooa.runtime.namespace_providers import namespace_prompt_notes
+
+        return namespace_prompt_notes()
 
     def _always_available_text(self) -> str:
         names = ", ".join(f"`{name}`" for name in self._always_available_builtins())
         return (
             f"Always available without import: {names}, plus stdlib `asyncio` and `typing`. "
             "`print(doc(x))` explains any object, function or skill: its signature, docs and methods (`doc()` returns text, so print it). "
-            + " ".join(self.SHOW_NOTE_LINES)
+            + " ".join(self._namespace_note_lines())
         )
 
     def _always_available_builtins(self) -> tuple[str, ...]:
@@ -1027,13 +1029,22 @@ Standard Python builtins and agent instance (`self`) are available."""
     @staticmethod
     def _sync_session_locals(call: "CurrentCall", session: "CodeActSession") -> None:
         """Write back session_locals to caller's dict, filtering session internals."""
-        if call.session_locals is None or session.execution_namespace is not None:
+        if call.session_locals is None:
             return
-        filtered = {
-            k: v
-            for k, v in session.session_locals.items()
-            if k not in CodeActStrategy._SESSION_INTERNAL_KEYS
-        }
+        namespace = session.execution_namespace
+        if namespace is not None:
+            # Only names cells (or the caller's seed) bound, not the seeded runtime.
+            filtered = {
+                k: namespace.globals[k]
+                for k in namespace.user_names
+                if k in namespace.globals and k not in CodeActStrategy._SESSION_INTERNAL_KEYS
+            }
+        else:
+            filtered = {
+                k: v
+                for k, v in session.session_locals.items()
+                if k not in CodeActStrategy._SESSION_INTERNAL_KEYS
+            }
         call.session_locals.clear()
         call.session_locals.update(filtered)
 
@@ -1046,6 +1057,11 @@ Standard Python builtins and agent instance (`self`) are available."""
         # ``_call`` is referenced by prefill/introspection cells (doc(_call.return_type));
         # inject it alongside the framework builtins so the worker namespace has it.
         framework_builtins = {**builtins, "_call": call}
+        max_media = getattr(
+            getattr(runtime.truncation_config, "media_capture", None),
+            "max_attachments_per_execution",
+            None,
+        )
         return SandboxedExecutor(
             runtime.agent,
             self.config.sandbox,
@@ -1054,6 +1070,7 @@ Standard Python builtins and agent instance (`self`) are available."""
             restrictions=self.config.restrictions,
             max_error=runtime.truncation_config.capture.max_error,
             error_tail=runtime.truncation_config.capture.tail,
+            max_media_attachments=max_media,
         )
 
     async def _close_sandbox(self, session: "CodeActSession") -> None:
@@ -1084,24 +1101,28 @@ Standard Python builtins and agent instance (`self`) are available."""
         Raises:
             GenerationError: If generation fails after max retries/iterations.
 
-        Execution namespace hook: if the agent defines
-        ``_execution_namespace_for(call)``, it is called once per call. A
-        returned :class:`~nooa.runtime.execution_namespace.ExecutionNamespace`
-        runs this call's cells in that namespace (in-process backend only);
-        ``None``, or no hook, keeps the default cell execution. Atom defines
-        the hook and always returns a namespace.
+        Execution namespace: the in-process backend runs every cell in an
+        owned :class:`~nooa.runtime.execution_namespace.ExecutionNamespace`
+        from :meth:`Agent.execution_namespace_for(call)
+        <nooa.agent.Agent.execution_namespace_for>` (called once per call; a
+        fresh namespace per call by default). The sandbox backend keeps its
+        worker's namespace.
         """
         # Guarantee the sandbox worker is torn down on EVERY exit — including the
         # GenerationError paths inside the loop — not just the success returns.
         session_holder: dict[str, Any] = {}
-        selector = getattr(runtime.agent, "_execution_namespace_for", None)
-        namespace = selector(call) if selector is not None else None
+        namespace = None  # The sandbox backend keeps its worker's namespace.
+        if self.config.execution_backend == "inprocess":
+            from nooa.runtime.execution_namespace import default_execution_namespace
+
+            selector = getattr(runtime.agent, "execution_namespace_for", None)  # None: not an Agent
+            namespace = selector(call) if selector is not None else None
+            if namespace is None:
+                namespace = default_execution_namespace(call)
         call.execution_namespace = namespace
         try:
             if namespace is None:
                 return await self._run_generation(runtime, call, session_holder)
-            if self.config.execution_backend != "inprocess":
-                raise ValueError("Experimental namespaces support only inprocess execution")
             with namespace.enter({}):
                 return await self._run_generation(runtime, call, session_holder)
         finally:
@@ -1139,12 +1160,17 @@ Standard Python builtins and agent instance (`self`) are available."""
 
         session.execution_namespace = call.execution_namespace
         if session.execution_namespace is not None:
+            namespace = session.execution_namespace
+            session.session_locals = namespace.globals
+            # Caller-provided locals (persistent stack) seed the owned namespace
+            # as user globals; _sync_session_locals writes them back.
             if call.session_locals is not None:
-                raise ValueError("Owned namespaces cannot be combined with legacy session_locals")
-            session.session_locals = session.execution_namespace.globals
-
-        # Seed session_locals from caller-provided dict (persistent stack)
-        if call.session_locals is not None:
+                for name, value in call.session_locals.items():
+                    if name not in namespace.reserved:
+                        namespace.globals[name] = value
+                        namespace.user_names.add(name)
+        elif call.session_locals is not None:
+            # Seed session_locals from caller-provided dict (persistent stack)
             session.session_locals.update(call.session_locals)
         # Expose this live dictionary to dynamic context renderers. Unlike
         # call.session_locals, this also receives names defined by model cells.
@@ -3773,7 +3799,7 @@ Standard Python builtins and agent instance (`self`) are available."""
         from nooa.agentdoc.visibility import filter_mro_module_globals
 
         # Include inherited module exports as static too, even for an owned
-        # nested method using ordinary CodeActV2 rather than AtomCodeAct.
+        # nested method using ordinary CodeActV2 rather than a subclass of it.
         static_names = set(filter_mro_module_globals(type(runtime.agent)))
         static_names.update(self._extract_module_context(module, agent=None))
         context = self._extract_module_context(module, agent=runtime.agent)
@@ -3802,7 +3828,7 @@ Standard Python builtins and agent instance (`self`) are available."""
             call = getattr(getattr(agent, "runtime", None), "current_call", None)
             reserved = RUNTIME_NAMES | frozenset(getattr(call, "kwargs", {}))
             if call is None:
-                # Out-of-call discovery (e.g. an Atom context preview) uses the
+                # Out-of-call discovery (e.g. a host's context preview) uses the
                 # agent's declared turn entry when one exists. No method runs.
                 entry = getattr(agent, "turn_entry", None)
                 method = getattr(type(agent), entry, None) if isinstance(entry, str) else None

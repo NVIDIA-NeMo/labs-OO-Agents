@@ -197,10 +197,11 @@ async def test_a_roots_messages_go_to_the_host_not_delegates(registry, root_opti
         cell("self.message('hello host')\nreturn_result(Done(explanation='ok'))")
     ]
     root = await registry.create(root_options)
-    rendered = []
-    root._agent._render_message = lambda text, **_kw: rendered.append(text)
     assert await asyncio.wait_for(root.prompt("go"), TIMEOUT) == Done(explanation="ok")
-    assert rendered == ["hello host"]
+    messages = [
+        e.content for e in root._agent.event_manager.values() if isinstance(e, AgentMessage)
+    ]
+    assert messages == ["hello host"]
     assert _delegates(registry, root.id) == []
     assert root._agent.queue_manager.get_channel("delegates").qsize() == 0
 

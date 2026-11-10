@@ -71,10 +71,9 @@ import types
 from dataclasses import dataclass, field
 from typing import Annotated, Any, ForwardRef, Literal, Protocol, get_args, get_origin
 
-from nooa.agentdoc._metadata import get_field_metadata
-from nooa.agentdoc.visibility import is_hidden_field, is_hidden_method
 from nooa.errors import CodeSyntaxError
 from nooa.errors import RestrictedCodeError as ValidationError
+from nooa.errors.hints import RUN_COMMAND, lookup_hint
 from nooa.runtime.restrictions import (
     RestrictionsConfig,
     match_blocked_module,
@@ -163,47 +162,6 @@ _NETWORK_MODULES = frozenset(
 )
 # Modules an HTTP request is usually made with (or raw sockets); httpx replaces them.
 _HTTP_MODULES = frozenset({"socket", "telnetlib", "http.client", "urllib.request", "xmlrpc.client"})
-_SHELL_RUN_HINT = (
-    'run the command with `await self.shell.run("...")` '
-    "(result has .stdout, .stderr and .returncode)"
-)
-
-
-def _has_shell(agent: Any) -> bool:
-    """True when the agent exposes an async ``self.shell.run``."""
-    if agent is None:
-        return False
-    try:
-        if is_hidden_field(agent, "shell"):
-            return False
-        agent_type = agent if isinstance(agent, type) else type(agent)
-        explicitly_visible = False
-        for owner in (agent, *agent_type.__mro__):
-            visibility = get_field_metadata(owner, "shell").get("hidden")
-            if visibility is True or visibility is False:
-                explicitly_visible = visibility is False
-                break
-        # Inspect the class without invoking getters, even when a cached_property
-        # already has an instance value. Only explicit opt-in overrides @hidden.
-        descriptor = inspect.getattr_static(agent_type, "shell", None)
-        if not explicitly_visible and is_hidden_method(descriptor):
-            return False
-        run = getattr(getattr(agent, "shell", None), "run", None)
-    except Exception:
-        return False
-    return run is not None and inspect.iscoroutinefunction(run)
-
-
-def _shell_hint(agent: Any) -> str | None:
-    """How the agent runs a command: its class's ``_shell_run_hint``, else ``self.shell.run``."""
-    if agent is not None:
-        agent_type = agent if isinstance(agent, type) else type(agent)
-        own = inspect.getattr_static(agent_type, "_shell_run_hint", None)
-        if isinstance(own, str):
-            return own
-    return _SHELL_RUN_HINT if _has_shell(agent) else None
-
-
 _HTTP_HINT = "use `httpx.AsyncClient` (`async with httpx.AsyncClient() as c: r = await c.get(url)`)"
 _AWAIT_HINT = (
     "await instead: `await asyncio.to_thread(fn)` for blocking work, "
@@ -220,8 +178,8 @@ def _module_fix_hint(
 ) -> str | None:
     """Point a blocked module/call at an alternative the agent actually has.
 
-    ``shell`` is how the agent runs a command (``_shell_hint``), None if it
-    has no shell.
+    ``shell`` is how the agent runs a command (its ``RUN_COMMAND`` hint from
+    :mod:`nooa.errors.hints`), None if it registered none.
     ``denied``: the active deny lists; a denied ``httpx`` is not recommended.
     ``unavailable``: modules stripped from the cell namespace (``blocked_modules``);
     a stripped ``asyncio`` is not recommended. A merely restricted import keeps
@@ -682,7 +640,7 @@ class _SecurityVisitor(ast.NodeVisitor):
             code="E002",
             fix_hint=_module_fix_hint(
                 module_name,
-                _shell_hint(self.context.agent),
+                lookup_hint(RUN_COMMAND, self.context.agent),
                 denied=self.context.blocked_modules | self.context.restricted_imports,
                 unavailable=self.context.blocked_modules,
             ),
@@ -1372,7 +1330,7 @@ class BlockingCallValidator:
         visitor = _BlockingCallVisitor(
             exec_globals=context.exec_globals,
             restrictions=self.restrictions,
-            shell_hint=_shell_hint(context.agent),
+            shell_hint=lookup_hint(RUN_COMMAND, context.agent),
         )
         visitor.visit(tree)
         return visitor.issues
@@ -1644,7 +1602,21 @@ class UnifiedCodeValidator:
 # =============================================================================
 # Import Pre-processing
 # =============================================================================
-def strip_redundant_imports(code: str, available_names: set[str]) -> tuple[str, list[str]]:
+def _module_is_unresolvable(module: str | None) -> bool:
+    """True when ``module`` names no importable module (e.g. the habitual ``strategy``)."""
+    if not module:
+        return False
+    import importlib.util
+
+    try:
+        return importlib.util.find_spec(module) is None
+    except (ImportError, ValueError):
+        return True
+
+
+def strip_redundant_imports(
+    code: str, available_names: set[str], *, only_unresolvable: bool = False
+) -> tuple[str, list[str]]:
     """Remove import statements where all imported names are already in scope.
 
     LLMs habitually prepend imports (``from typing import Literal``,
@@ -1656,6 +1628,11 @@ def strip_redundant_imports(code: str, available_names: set[str]) -> tuple[str, 
     present in ``available_names``.  Imports that bring genuinely new names
     are left untouched (and will be caught by the security validator if
     the module is forbidden).
+
+    ``only_unresolvable`` (the owned execution namespace): imports are real
+    writes there, so only an import that could not run at all (its module is
+    not importable, e.g. ``from strategy import PredictStrategy``) is
+    stripped; ``from typing import Literal`` runs and rebinds as written.
 
     Returns:
         Tuple of (cleaned_code, stripped_statements) where stripped_statements
@@ -1674,7 +1651,10 @@ def strip_redundant_imports(code: str, available_names: set[str]) -> tuple[str, 
             all_present = all(
                 (alias.asname or alias.name) in available_names for alias in node.names
             )
-            if all_present:
+            if all_present and (
+                not only_unresolvable
+                or all(_module_is_unresolvable(alias.name) for alias in node.names)
+            ):
                 indices_to_remove.add(i)
 
         elif isinstance(node, ast.ImportFrom):
@@ -1684,7 +1664,9 @@ def strip_redundant_imports(code: str, available_names: set[str]) -> tuple[str, 
             all_present = all(
                 (alias.asname or alias.name) in available_names for alias in node.names
             )
-            if all_present:
+            if all_present and (
+                not only_unresolvable or (node.level == 0 and _module_is_unresolvable(node.module))
+            ):
                 indices_to_remove.add(i)
 
     if not indices_to_remove:

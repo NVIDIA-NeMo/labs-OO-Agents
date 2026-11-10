@@ -27,7 +27,9 @@ from typing import Annotated, Any, ClassVar
 # Subagent work, and Context/strategy/PredictStrategy for skill and method writing.
 from nooa import Context, hidden, strategy
 from nooa.agentdoc import doc, spec
+from nooa.errors import hints as _hints
 from nooa.interactive import Done, NeedInput, Waiting
+from nooa.runtime.execution_namespace import ExecutionNamespace
 from nooa.strategies import CodeActV2, PredictStrategy  # noqa: F401
 from nooa_atom.agent.work_manager import Job, JobEvent, Throttle, WorkManager
 from nooa_atom.agent.work_shell import CommandResult, Shell
@@ -667,23 +669,6 @@ def _progress_parts(job: Job) -> list[str]:
     return parts
 
 
-# Shared repo-tool docs that name the legacy shell; this agent edits through
-# self.files and its repo searches start in the workspace.
-_DOC_FIXES: Annotated[tuple[tuple[str, str], ...], hidden] = (
-    ("self.shell.replace()", "self.files.replace_match()"),
-    ("as ShellTools ``Match`` anchors", "as ``Match`` anchors (edit with ``self.files``)"),
-    ("defaults to the shell's current directory", "defaults to the workspace"),
-)
-
-
-@hidden
-def _tools_doc(text: str) -> str:
-    """The tools block for this agent: the shared docs, with only advertised paths."""
-    for old, new in _DOC_FIXES:
-        text = text.replace(old, new)
-    return text
-
-
 # The one place the work workflows are shown (the tools block, before the work types).
 _WORK_EXAMPLES: Annotated[str, hidden] = """\
 # Work: self.jobs is for background work.
@@ -782,7 +767,7 @@ class AtomAgent(
     _turn_policy: Annotated[str, hidden, nosnapshot]
     _role_instructions: Annotated[str | None, hidden, nosnapshot]
     _namespace_lifetime: Annotated[str, hidden, nosnapshot]
-    _handle_namespace: Annotated[Any, hidden, nosnapshot]
+    _handle_namespace: Annotated[ExecutionNamespace | None, hidden, nosnapshot]
     _done_reflection: Annotated[bool, hidden, nosnapshot]
     # Whether the current turn is a quiet reflection turn: the session sets it
     # for the turn's duration, and require_role relaxes the role's Done rules.
@@ -793,8 +778,6 @@ class AtomAgent(
     _session_namespace_was_live: Annotated[bool, hidden]
     # The session runs every turn with this method, whatever its turn_method.
     turn_entry: ClassVar[str] = "handle"
-    # The fix hint of a blocked subprocess/os.system/network import or call.
-    _shell_run_hint: ClassVar[str] = "use a Shell: `sh = Shell()` then `r = await sh.run(cmd)`"
 
     def __init__(
         self,
@@ -863,14 +846,14 @@ class AtomAgent(
 
     @hidden
     @no_trace
-    def _execution_namespace_for(self, call: Any) -> Any:
+    def execution_namespace_for(self, call: Any) -> ExecutionNamespace:
         """Handle shares this live session's namespace; other agent methods start each call fresh."""
-        from nooa.runtime.execution_namespace import RUNTIME_NAMES, ExecutionNamespace
+        from nooa.runtime.execution_namespace import default_execution_namespace
 
         if call.method_name == "handle":
             if self._handle_namespace is not None:
                 return self._handle_namespace
-        owner = ExecutionNamespace(reserved=RUNTIME_NAMES | frozenset(call.kwargs))
+        owner = default_execution_namespace(call)
         if call.method_name == "handle":
             self._handle_namespace = owner
             self._session_namespace_was_live = True
@@ -902,7 +885,7 @@ class AtomAgent(
         a static copy). The other blocks (a user's own) are left as restored.
         """
         self.context["python_cell_tools"] = Context(
-            _tools_doc(
+            (
                 doc(doc, runtime_pprint, concise=True, inline_depth=0)
                 + "\n"
                 + doc(RepoTools, Files, TodoList, SkillManager, concise=True)
@@ -1260,6 +1243,10 @@ class AtomAgent(
 # "producers" is also core's nemo.producers entry-point skill, which doc() would list.
 for _name in ("shell", "delegates", "producers", "system_messages", "cwd"):
     spec(AtomAgent, _name, hidden=True)
+# The fix hint of a blocked subprocess/os.system/network import or call.
+_hints.register_hint(
+    _hints.RUN_COMMAND, "use a Shell: `sh = Shell()` then `r = await sh.run(cmd)`", owner=AtomAgent
+)
 spec(AtomAgent, "jobs", description="Run and track work: see WorkManager")
 spec(
     AtomAgent,

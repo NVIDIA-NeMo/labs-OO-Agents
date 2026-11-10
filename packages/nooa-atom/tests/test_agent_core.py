@@ -522,7 +522,7 @@ def test_the_repo_tool_docs_offer_cwd():
 
     rendered = str(doc(RepoTools, concise=True))
     assert rendered.count("cwd") >= 2
-    assert "defaults to the shell's current directory" in rendered
+    assert "defaults to the workspace" in rendered
 
 
 async def test_replace_contract_survives_the_default_concise_tool_context(tmp_path):
@@ -544,8 +544,11 @@ async def test_replace_contract_survives_the_default_concise_tool_context(tmp_pa
                 "replace(self, target: Any, old_or_new: str = '', new: str | None = None)"
                 in rendered
             )
-            assert "replace_match" not in rendered
             assert "Anchors are never relocated" not in rendered
+        # The shell tools keep replace(); replace_match is only the Files API that
+        # RepoTools points at.
+        assert "replace_match" not in str(doc(ActivityShellTools, concise=True))
+        assert "self.files.replace_match()" in str(doc(RepoTools, concise=True))
     finally:
         await agent.aclose()
 

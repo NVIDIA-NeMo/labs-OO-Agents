@@ -40,12 +40,9 @@ from nooa.context_blocks import Metadata
 from nooa.context_blocks.roles import Role
 from nooa.runtime.turn_loop import ResultKind
 from nooa.storage.markers import nosnapshot
-from nooa.storage.persistent_vars import PersistentVars
 from nooa.storage.snapshot_vars import SnapshotVars
 
 with hidden:
-    from collections.abc import Callable
-
     from nooa import Agent, no_trace
     from nooa.agents import TokenBudgetSummarizer
     from nooa.config import CodeActConfig, PredictConfig  # noqa: F401
@@ -127,9 +124,9 @@ class Done(BaseModel):
     ``self.message()`` remains for text you want to show before the turn
     ends. ``explanation`` stays a short status line. ``evidence`` is
     optional: short factual lines a reviewer can check, used when you
-    verified something. ``result`` is set only when a delegated objective
-    or benchmark task completes; it is then a ``TaskResult`` (a worker
-    turn, ``handle_work``, requires one; other turns may leave it unset).
+    verified something. ``result`` is set only when a delegated task
+    completes; it is then a ``TaskResult`` (a worker turn, ``handle_work``,
+    requires one; other turns may leave it unset).
     """
 
     model_config = {"extra": "forbid"}
@@ -142,7 +139,7 @@ class Done(BaseModel):
         description='Short checkable facts, e.g. "pytest tests/x.py: 24 passed"',
     )
     result: Any | None = Field(
-        default=None, description="TaskResult when a delegated or bench task completes"
+        default=None, description="TaskResult when a delegated task completes"
     )
 
     _check_explanation = field_validator("explanation")(_non_blank)
@@ -208,7 +205,7 @@ class Waiting(BaseModel):
 
 
 class TaskResult(BaseModel):
-    """Structured result of a delegated objective or a benchmark task.
+    """Structured result of a delegated task.
 
     A worker turn (``handle_work``) ends with a ``Done`` whose ``result`` is
     one. The field descriptions are what the model reads when it builds one.
@@ -267,8 +264,8 @@ ONE_SHOT_QUESTION: Annotated[str, hidden] = (
 class AskPolicy(Protocol):
     """Whether a turn may end with ``NeedInput``: someone is there to answer it.
 
-    A host installs one as ``InteractiveAgent.ask_policy`` (Atom: its session
-    port, ``False`` for a one-shot worker); ``require_task_result`` reads it.
+    A host installs one as ``InteractiveAgent.ask_policy`` (e.g. ``may_ask``
+    False for a one-shot worker); ``require_task_result`` reads it.
     """
 
     @property
@@ -280,7 +277,7 @@ def require_task_result(agent: Any, result: Any, call: Any) -> None:
     """Reject a worker ``Done`` whose ``result`` is not a ``TaskResult``, and a one-shot question.
 
     The postcondition of every worker turn (``handle_work``). A worker's
-    parent reads it as ``ChildResult.result``; ``self.message()`` text reaches it only as
+    parent reads its ``result``; ``self.message()`` text reaches it only as
     progress notes. A dict that validates as a ``TaskResult`` is accepted
     (the parent receives it as one). A worker that may not ask (a one-shot
     worker) says so through its host-installed ``InteractiveAgent.ask_policy``.
@@ -430,27 +427,6 @@ def install_summarizer(config: SummarizationConfig, agent: Agent) -> None:
     summarizer._automatic_context_budget_percent = config.threshold_fraction
 
 
-class AgentVars(PersistentVars):
-    """An agent's persistent ``vars`` dict, also usable as attributes.
-
-    ``self.v.spec = "..."`` and ``self.v["spec"] = "..."`` write the same
-    entry. Reads and writes go straight through to ``self.vars`` so
-    snapshot serialization is unaffected.
-
-    Use for variables that need to survive across turns and across
-    sessions but aren't tied to a specific todo. (For per-todo state,
-    use ``self.todo.get(id).v`` — same shape, narrower scope.)
-
-    Values are snapshot-backed: assigning something that can't be
-    snapshot-serialized (a live client, socket, callable, ...) logs a
-    warning and is **not stored** — it won't survive ``/exit`` + resume.
-    Store serializable data (dict/str/number/Pydantic model) instead.
-    Helper names (``keys``, ``items``, ``get``, ``set``, ``clear``) and
-    ``_``-prefixed names are read with ``get(name)`` and written with
-    ``set(name, value)``.
-    """
-
-
 # The ``queues`` context block. Its expression is shown to the model, so it
 # goes through a hidden method rather than naming ``self.queue_manager``.
 _QUEUES_EXPR: Annotated[str, hidden] = "self._queue_status()"
@@ -458,7 +434,7 @@ _QUEUES_EXPR: Annotated[str, hidden] = "self._queue_status()"
 
 @hidden
 class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
-    """Base class for agents driven by an outer dispatcher (TUI, harness, ...).
+    """Base class for agents driven by an outer dispatcher (an interactive host, a harness...).
 
     Subclass this and implement ``handle()`` to build a custom interactive
     agent. ``message()`` is provided for free.
@@ -478,7 +454,6 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
     state that should survive across turns.
     """
 
-    _render_message: Annotated[Callable[[str], None] | None, hidden, nosnapshot]
     # QueueManager owns the channel registry. Hidden from the LLM by
     # default — the LLM should access individual channels (e.g.
     # ``self.user_messages``) directly, not through a string-keyed
@@ -504,7 +479,6 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
     def __init__(self, llm=None, *, producers: bool = True, **kwargs):  # noqa: F811 (not the module)
         """``producers=False``: no ``self.producers`` (a subclass with its own timers)."""
         super().__init__(llm=llm or _DEFAULT_LLM, **kwargs)
-        self._render_message = None
         self.ask_policy = None
         self.vars = SnapshotVars()
         self.queue_manager = QueueManager(event_manager=self.event_manager)
@@ -567,12 +541,12 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
         )
 
     @property
-    def v(self) -> AgentVars:
+    def v(self) -> SnapshotVars:
         """Durable facts: write ``self.v.key = value``, read ``self.v.key``, delete ``del self.v.key`` (or ``self.v["key"]``). Store serializable values.
 
         Use for state that should survive across turns and sessions
-        but isn't tied to a specific todo. Snapshot-backed via
-        ``self.vars``.
+        but isn't tied to a specific todo. ``self.v`` is ``self.vars``
+        (a :class:`SnapshotVars`), snapshot-backed.
 
         Usage::
 
@@ -584,10 +558,10 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
         Compare:
         - REPL locals → cleared between turns.
         - ``self.v.k = v`` → snapshot-backed, survives turns + sessions.
-        - ``self.todo.<t>.v.k = v`` → same as ``self.v`` but scoped to
+        - ``self.todo.get(id).v.k = v`` → same as ``self.v`` but scoped to
           one todo.
         """
-        return AgentVars(self)
+        return self.vars
 
     def message(self, text: str, *, echo: bool = False) -> None:
         """Send a Markdown message to the user.
@@ -611,14 +585,11 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
 
     @hidden
     def _send_message(self, text: str, *, is_result_text: bool = False) -> None:
-        """Record and render one message; ``is_result_text`` marks a turn result's message."""
-        event = AgentMessage(content=str(text), is_result_text=is_result_text)
-        tag = self.event_manager.add(event)
-        if self._render_message is not None:
-            try:
-                self._render_message(text, event_id=str(event.id), tags={str(tag)})
-            except TypeError:
-                self._render_message(text)
+        """Record one message as an AgentMessage event; hosts render it from the event.
+
+        ``is_result_text`` marks a turn result's message.
+        """
+        self.event_manager.add(AgentMessage(content=str(text), is_result_text=is_result_text))
 
     @hidden
     @strategy(CodeActStrategy())
@@ -735,8 +706,8 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
         reads only your result. The task is in ``notification["user_messages"]``;
         its first line says whether you can ask your parent questions (later
         messages there are follow-ups). Your task is the brief; your
-        ``TaskResult`` is your report; a Todo in your list is your own working
-        copy. Do all the work, verify it, then end with exactly one
+        ``TaskResult`` is your report. Do all the work, verify it, then end
+        with exactly one
         ``return_result(...)``:
 
         - ``Done`` with a ``TaskResult``, when the task is finished or blocked
@@ -761,7 +732,7 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
           is still running.
 
         Your parent reads your result: do not send routine progress notes.
-        Use ``self.message()`` (it reaches your parent as a ``ChildMessage``)
+        Use ``self.message()`` (it reaches your parent as a note)
         only for a short note your parent needs before you finish, never the
         report. The full report goes only in ``TaskResult.report``.
         """

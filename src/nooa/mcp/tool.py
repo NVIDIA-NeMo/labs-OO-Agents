@@ -795,9 +795,12 @@ class MCPTool:
         ):
             # The tool's typed result; its text content is a serialized copy.
             if structured.get("error"):  # failure in the result, not isError
+                from nooa.mcp.metrics import McpHarnessMetrics
                 from nooa.runtime.harness_metrics import get_harness_metrics
 
-                get_harness_metrics().mcp_result_error(f"{self._server_name}.{tool_name}")
+                get_harness_metrics().extension(McpHarnessMetrics).result_error(
+                    f"{self._server_name}.{tool_name}"
+                )
             return structured
 
         if hasattr(result, "content") and result.content:

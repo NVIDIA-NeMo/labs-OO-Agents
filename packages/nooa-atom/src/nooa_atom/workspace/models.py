@@ -7,7 +7,7 @@ the installed ``nooa`` package, not from the workspace a session works in.
 A session in workspace ``W`` also reads ``W/.nooa/llm_config.yaml``, the file
 ``nooa connect`` run in ``W`` writes. Priority, lowest first:
 
-1. bundled defaults, the user file and the package's project file (core's chain);
+1. the user file and the package's project file (core's chain);
 2. ``W/.nooa/llm_config.yaml``;
 3. the files in ``NEMO_OO_LLM_CONFIG`` (an explicit environment variable still wins).
 

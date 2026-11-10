@@ -41,6 +41,7 @@ from pathlib import Path
 from typing import Annotated, Any
 
 from nooa.agentdoc import hidden, spec
+from nooa.errors.hints import RUN_COMMAND, has_own_hint, register_hint
 from nooa.skill import Skill
 from nooa.tools._bash_session import BashSession
 from nooa.tools._bounded_io import (
@@ -815,6 +816,13 @@ _REPLACE_OVERSIZE_HINT = (
 )
 
 
+# The RUN_COMMAND fix hint (nooa.errors.hints) of an agent that holds ShellTools as self.shell.
+SHELL_RUN_HINT = (
+    'run the command with `await self.shell.run("...")` '
+    "(result has .stdout, .stderr and .returncode)"
+)
+
+
 class ShellTools(Skill):
     """
     Persistent shell + file ops, with grep that hands you editable Match objects.
@@ -933,6 +941,13 @@ class ShellTools(Skill):
     async def _get_session(self) -> BashSession:
         await self._session.start()  # returns at once when already started
         return self._session
+
+    @hidden
+    def attach(self, agent: Any) -> None:
+        """Installed on an agent: its class gets :data:`SHELL_RUN_HINT`, unless it has a hint."""
+        super().attach(agent)
+        if agent is not None and not has_own_hint(RUN_COMMAND, agent):
+            register_hint(RUN_COMMAND, SHELL_RUN_HINT, owner=type(agent))
 
     @hidden
     async def close(self) -> None:

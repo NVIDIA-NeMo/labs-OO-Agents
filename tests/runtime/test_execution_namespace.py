@@ -467,3 +467,16 @@ async def test_advertising_and_availability_share_reserved_internal_exclusions(i
             "owner",
             good,
         )
+
+
+def test_the_agent_hook_defaults_to_a_fresh_owned_namespace_per_call():
+    from types import SimpleNamespace
+
+    from nooa.agent import Agent
+    from nooa.runtime.execution_namespace import RUNTIME_NAMES, ExecutionNamespace
+
+    call = SimpleNamespace(kwargs={"question": "q"})
+    first = Agent.execution_namespace_for(object(), call)  # declared hook, no probing
+    second = Agent.execution_namespace_for(object(), call)
+    assert isinstance(first, ExecutionNamespace) and first is not second
+    assert first.reserved == RUNTIME_NAMES | {"question"}

@@ -409,7 +409,7 @@ async def test_reload_reports_registry_failure(tmp_path: Path):
     """A reload that the registry rejects must NOT be reported as loaded."""
 
     class _FailingSkills:
-        def discover_libs(self, path, *, agent_written=False):
+        def discover_libs(self, path):
             pass
 
         def activate(self, patterns):
@@ -439,7 +439,7 @@ async def test_reload_reports_success(tmp_path: Path):
     """A reload the registry accepts is reported as loaded."""
 
     class _OkSkills:
-        def discover_libs(self, path, *, agent_written=False):
+        def discover_libs(self, path):
             pass
 
         def activate(self, patterns):
@@ -632,3 +632,31 @@ def test_a_saved_skill_whose_name_is_taken_is_skipped_with_a_visible_line(tmp_pa
     assert all(line in status for line in expected)
     warned = [r.getMessage() for r in caplog.records if "not loaded" in r.getMessage()]
     assert len(warned) == 2
+
+
+@pytest.mark.asyncio
+async def test_an_older_libs_dir_is_not_loaded_and_the_status_says_so(tmp_path: Path):
+    from nooa.skill_registry import SkillRegistry
+    from nooa.tools.library_writing_lib import LEGACY_LIBS_NOTICE
+
+    (tmp_path / "libs").mkdir()
+    _make_lib_dir(tmp_path / "libs", "old_lib", SIMPLE_SOURCE)
+    agent = _make_agent()
+    agent.skills = SkillRegistry(agent)
+    libs = SkillWriting(agent, path=tmp_path / "skills")
+    assert await libs.list() == []
+    assert "local.old_lib" not in agent.skills.loaded()
+    assert agent.skills.status().splitlines().count(LEGACY_LIBS_NOTICE) == 1
+    assert LEGACY_LIBS_NOTICE == (
+        "Skills in .nooa/libs are no longer loaded; move them to .nooa/skills."
+    )
+
+
+@pytest.mark.asyncio
+async def test_no_libs_notice_without_an_older_libs_dir(tmp_path: Path):
+    from nooa.skill_registry import SkillRegistry
+
+    agent = _make_agent()
+    agent.skills = SkillRegistry(agent)
+    SkillWriting(agent, path=tmp_path / "skills")
+    assert ".nooa/libs" not in agent.skills.status()

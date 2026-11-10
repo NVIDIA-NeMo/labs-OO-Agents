@@ -2872,6 +2872,12 @@ class TestCapabilityAwareFixHints:
         def __init__(self):
             self.shell = TestCapabilityAwareFixHints._Shell()
 
+    from nooa.errors.hints import RUN_COMMAND, register_hint
+    from nooa.tools.shell_tools import SHELL_RUN_HINT
+
+    register_hint(RUN_COMMAND, SHELL_RUN_HINT, owner=_WithShell)
+    del RUN_COMMAND, register_hint, SHELL_RUN_HINT
+
     class _WithoutShell:
         pass
 
@@ -2942,198 +2948,52 @@ class TestCapabilityAwareFixHints:
         else:
             assert "Fix:" not in message
 
-    def test_sync_shell_run_is_not_advertised_as_awaitable(self):
-        class SyncShell:
-            def run(self, command):
-                return command
+    def test_the_hint_comes_from_the_most_derived_registered_class(self):
+        from nooa.errors.hints import RUN_COMMAND, lookup_hint, register_hint
 
+        class Child(self._WithShell):
+            pass
+
+        register_hint(RUN_COMMAND, "use `await self.tool.run(cmd)`", owner=Child)
+        assert lookup_hint(RUN_COMMAND, Child()) == "use `await self.tool.run(cmd)`"
+        assert "Fix: use `await self.tool.run(cmd)`" in self._error("import subprocess", Child())
+        assert "await self.shell.run" in self._error("import subprocess", self._WithShell())
+
+    def test_an_agent_holding_a_shell_without_a_hint_gets_none(self):
         agent = self._WithoutShell()
-        agent.shell = SyncShell()
+        agent.shell = self._Shell()  # no probing: only a registered hint counts
         assert "self.shell" not in self._error("import subprocess", agent)
 
-    @pytest.mark.parametrize("visibility", ["annotation", "class", "instance"])
-    @pytest.mark.parametrize(
-        "code",
-        [
-            "import subprocess",
-            "import socket",
-            "import urllib.request",
-            "os.system('x')",
-            "os.popen('x')",
-        ],
-    )
-    def test_hidden_shell_is_not_recommended(self, visibility, code):
-        from typing import Annotated
-
-        from nooa.agentdoc import hidden, spec
-
-        class Public(self._WithShell):
-            pass
-
-        class Hidden(self._WithShell):
-            shell: Annotated[object, hidden]
-
-        agent = Hidden() if visibility == "annotation" else Public()
-        if visibility == "class":
-            spec(Public, "shell", hidden=True)
-        elif visibility == "instance":
-            spec(agent, "shell", hidden=True)
-        message = self._error(code, agent)
-        assert "self.shell" not in message and "self.jobs" not in message
-        if code.startswith(("import socket", "import urllib")):  # an async client needs no shell
-            assert "Fix: use `httpx.AsyncClient`" in message and "curl" not in message
-        else:
-            assert "Fix:" not in message
-
-    def test_instance_visibility_override_preserves_public_async_shell_hints(self):
-        from nooa.agentdoc import spec
-
-        class Hidden(self._WithShell):
-            pass
-
-        spec(Hidden, "shell", hidden=True)
-        public = Hidden()
-        spec(public, "shell", hidden=False)
-        for code in ("import subprocess", "import socket", "os.system('x')", "os.popen('x')"):
-            assert "await self.shell.run" in self._error(code, public)
-            assert "self.shell" not in self._error(code, Hidden())
-
-    def _shell_descriptor_class(self, kind, inherited=False, *, raises=False):
-        from functools import cached_property
-
-        from nooa.agentdoc import hidden
-
-        descriptor = property if kind == "property" else cached_property
-        shell_type = self._Shell
+    def test_attaching_shell_tools_registers_its_hint(self):
+        from nooa.errors.hints import RUN_COMMAND, lookup_hint
+        from nooa.tools.shell_tools import SHELL_RUN_HINT, ShellTools
 
         class Holder:
-            def __init__(self):
-                self.reads = 0
-
-            @descriptor
-            @hidden
-            def shell(self) -> shell_type:
-                self.reads += 1
-                if raises:
-                    raise AssertionError("hidden getter must not run")
-                return shell_type()
-
-        class Child(Holder):
             pass
 
-        return Child if inherited else Holder
+        agent = Holder()
+        assert lookup_hint(RUN_COMMAND, agent) is None
+        ShellTools(cwd=".").attach(agent)
+        assert lookup_hint(RUN_COMMAND, agent) == SHELL_RUN_HINT
 
-    @pytest.mark.parametrize("kind", ["property", "cached_property"])
-    @pytest.mark.parametrize("inherited", [False, True])
-    @pytest.mark.parametrize(
-        ("class_hidden", "instance_hidden", "exposed"),
-        [
-            (None, None, False),
-            (True, None, False),
-            (False, None, True),
-            (None, True, False),
-            (None, False, True),
-            (True, False, True),
-            (False, True, False),
-        ],
-    )
-    def test_shell_descriptor_visibility_precedence(
-        self, kind, inherited, class_hidden, instance_hidden, exposed
-    ):
-        from nooa.agentdoc import doc, spec
-        from nooa.runtime.code_validator import _has_shell
+    def test_attaching_shell_tools_keeps_an_existing_hint(self):
+        from nooa.errors.hints import RUN_COMMAND, lookup_hint, register_hint
+        from nooa.tools.shell_tools import ShellTools
 
-        cls = self._shell_descriptor_class(kind, inherited)
-        if class_hidden is not None:
-            spec(cls, "shell", hidden=class_hidden)
-        agent = cls()
-        if instance_hidden is not None:
-            spec(agent, "shell", hidden=instance_hidden)
-        assert _has_shell(agent) is exposed
-        assert agent.reads == int(exposed)  # one lookup only after explicit opt-in
-        # Class docs agree for defaults/class overrides. Instance overrides above
-        # test metadata precedence, not rediscovery of properties omitted by doc().
-        if instance_hidden is None:
-            assert ("shell:" in doc(cls)) is exposed
-        for code in (
-            "import subprocess",
-            "import socket",
-            "import urllib.request",
-            "os.system('x')",
-            "os.popen('x')",
-        ):
-            assert ("await self.shell.run" in self._error(code, agent)) is exposed
-        if not exposed:
-            assert agent.reads == 0
-
-    @pytest.mark.parametrize("kind", ["property", "cached_property"])
-    @pytest.mark.parametrize("exposed", [False, True])
-    def test_shell_descriptor_most_derived_class_spec_wins(self, kind, exposed):
-        from nooa.agentdoc import doc, spec
-        from nooa.runtime.code_validator import _has_shell
-
-        base = self._shell_descriptor_class(kind)
-
-        class Child(base):
+        class Own:
             pass
 
-        spec(base, "shell", hidden=exposed)
-        spec(Child, "shell", hidden=not exposed)
-        agent = Child()
-        assert ("shell:" in doc(Child)) is exposed
-        assert _has_shell(agent) is exposed
-        assert agent.reads == int(exposed)
+        register_hint(RUN_COMMAND, "own hint", owner=Own)
+        ShellTools(cwd=".").attach(Own())
+        assert lookup_hint(RUN_COMMAND, Own) == "own hint"
 
-    @pytest.mark.parametrize("kind", ["property", "cached_property"])
-    def test_shell_descriptor_inherits_explicit_class_opt_in(self, kind):
-        from nooa.agentdoc import spec
-        from nooa.runtime.code_validator import _has_shell
+    def test_core_shell_tools_agents_register_the_shell_hint(self):
+        from nooa_cli.coding.agent import CodingAgent
 
-        base = self._shell_descriptor_class(kind)
-        spec(base, "shell", hidden=False)
+        from nooa.errors.hints import RUN_COMMAND, lookup_hint
+        from nooa.tools.shell_tools import SHELL_RUN_HINT
 
-        class Child(base):
-            pass
-
-        # Check inherited metadata precedence independently of doc() discovery.
-        agent = Child()
-        assert _has_shell(agent) and agent.reads == 1
-
-    @pytest.mark.parametrize("kind", ["property", "cached_property"])
-    @pytest.mark.parametrize("inherited", [False, True])
-    def test_hidden_shell_descriptor_getter_is_never_evaluated(self, kind, inherited):
-        from nooa.agentdoc import doc
-        from nooa.runtime.code_validator import _has_shell
-
-        agent = self._shell_descriptor_class(kind, inherited, raises=True)()
-        assert "shell:" not in doc(agent)
-        assert not _has_shell(agent)
-        for code in (
-            "import subprocess",
-            "import socket",
-            "import urllib.request",
-            "os.system('x')",
-            "os.popen('x')",
-        ):
-            assert "self.shell" not in self._error(code, agent)
-        assert agent.reads == 0
-
-    @pytest.mark.parametrize("inherited", [False, True])
-    def test_cached_shell_descriptor_visibility_survives_caching(self, inherited):
-        from nooa.agentdoc import doc, spec
-        from nooa.runtime.code_validator import _has_shell
-
-        agent = self._shell_descriptor_class("cached_property", inherited)()
-        assert not _has_shell(agent) and agent.reads == 0
-        # Explicit test setup populates the cache; hint inspection must not do this itself.
-        cached = agent.shell
-        assert agent.reads == 1
-        assert not _has_shell(agent)
-        assert "shell:" not in doc(type(agent))
-        spec(agent, "shell", hidden=False)
-        assert _has_shell(agent) and agent.shell is cached
-        spec(agent, "shell", hidden=True)
-        assert not _has_shell(agent) and agent.reads == 1
+        assert lookup_hint(RUN_COMMAND, CodingAgent) == SHELL_RUN_HINT
 
     def test_dunder_import_points_to_normal_import(self):
         message = self._error('json = __import__("json")')

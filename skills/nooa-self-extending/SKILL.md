@@ -37,7 +37,7 @@ Helpers defined in cells persist as REPL locals for the rest of the method call 
 
 ## Persistent skills (`SkillWriting` / `self.skill_writing`)
 
-`SkillWriting` (`nooa.tools.library_writing_lib`) is how an agent makes the skills later sessions get, in a managed directory: `<workspace>/.nooa/skills` for Atom (an older `.nooa/libs` still loads; a name in `.nooa/skills` wins; new skills always go to `.nooa/skills`). A skill is either a code skill (a real Python package) or a text skill (a `SKILL.md` with front matter `name`/`description` and instructions). Both load in a later session as `local.<name>` (`self.<name>`, found by `self.skills.search`). Requires the shell skill (`requires = ("nemo.shell",)`) since file I/O goes through `self.shell`.
+`SkillWriting` (`nooa.tools.library_writing_lib`) is how an agent makes the skills later sessions get, in a managed directory: `<workspace>/.nooa/skills` for Atom (an older `.nooa/libs` is no longer loaded: the skills status says to move its skills to `.nooa/skills`). A skill is either a code skill (a real Python package) or a text skill (a `SKILL.md` with front matter `name`/`description` and instructions). Both load in a later session as `local.<name>` (`self.<name>`, found by `self.skills.search`). Requires the shell skill (`requires = ("nemo.shell",)`) since file I/O goes through `self.shell`.
 
 The lifecycle the agent follows (documented to it via `doc(self.skill_writing)`):
 
@@ -54,7 +54,7 @@ await self.skill_writing.list(); await self.skill_writing.repo_tree()   # discov
 
 - **Skill contract:** each code skill's `__init__.py` exports a `Skill` subclass — the registry auto-attaches it as `self.<lib_name>` with full `doc()` discovery. Libraries without one get a `Skill(module)` fallback (docstring + attributes).
 - **Linting on reload** (`LintReport`): hard errors E001 (forbidden builtins) and E003 (star imports) block the write; E002 warns when an import isn't in the agent's allowed set. Report says written/loaded status explicitly.
-- Library code is plain Python — no agent `self`, no `...` bodies, no async requirement. Attachment goes through `SkillRegistry.discover_libs(path, agent_written=True)` + `activate(["local.*"])` when the agent has a skill registry, else `LibraryManager.install(agent, libs_dir=...)`.
+- Library code is plain Python — no agent `self`, no `...` bodies, no async requirement. Attachment goes through `SkillRegistry.discover_libs(path)` + `activate(["local.*"])` when the agent has a skill registry, else `LibraryManager.install(agent, libs_dir=...)`.
 - **Reload ≠ relearn:** after `self.skill_writing.reload(...)`, the new API is live on `self.<lib>`; guide agents to re-read `doc(self.<lib>)` rather than assume.
 
 `LibraryManager` (`nooa.library_manager`) is the low-level loader you can also use directly from Python: `LibraryManager.install(agent, libs_dir=Path("libs"))` scans for subdirectories with a `pyproject.toml`, imports each, attaches as `agent.<lib_name>`; `mgr.reload()` hot-reloads all; `LibraryManager.discover(path)` lists without loading. Modules are attached as attributes only — never injected into exec_globals.

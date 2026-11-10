@@ -78,32 +78,9 @@ _PLAIN_DICT = "plain_dict"
 # Keys that make a dict look like an envelope; plain dicts carrying them are escaped.
 _ENVELOPE_KEYS = ("__type__", "__class__")
 _ENVELOPE_TYPES = frozenset({_PYDANTIC, _DATACLASS, _DICT_CLASS, _TUPLE})
-# Module prefixes of renamed packages: a class path recorded under the old
-# prefix is also tried under the new one. Core holds only its own rename;
-# other packages add theirs with ``register_legacy_module_prefix``.
-_LEGACY_CLASS_PREFIXES: dict[str, str] = {
-    "nemo_oo_agents.": "nooa.",
-}
-
-
-def register_legacy_module_prefix(old: str, new: str) -> None:
-    """Load class paths recorded under module prefix ``old`` from ``new`` instead.
-
-    For a package that was renamed or moved: snapshots that recorded
-    ``old.<rest>`` restore ``new.<rest>`` (the recorded path is tried first).
-    Both prefixes end with ``"."``. When several registered prefixes match,
-    the longest is tried first. Registering the same pair again is a no-op.
-
-    Raises:
-        ValueError: If a prefix does not end with ``"."``, or ``old`` is
-            already registered with a different ``new``.
-    """
-    if not old.endswith(".") or not new.endswith("."):
-        raise ValueError(f"legacy module prefixes must end with '.': {old!r} -> {new!r}")
-    existing = _LEGACY_CLASS_PREFIXES.get(old)
-    if existing is not None and existing != new:
-        raise ValueError(f"legacy module prefix {old!r} is already mapped to {existing!r}")
-    _LEGACY_CLASS_PREFIXES[old] = new
+# Core's own rename: a class path recorded under ``nemo_oo_agents.`` is also
+# tried under ``nooa.``. Other packages' old class paths are not mapped.
+_LEGACY_CORE_PREFIX = ("nemo_oo_agents.", "nooa.")
 
 
 # Maximum nesting depth of a snapshot value, enforced by both ``serialize()``
@@ -730,11 +707,9 @@ def _import_class(fqn: str) -> type:
         DeserializationError: If the module or class cannot be found.
     """
     candidates = [fqn]
-    for old_prefix, new_prefix in sorted(
-        _LEGACY_CLASS_PREFIXES.items(), key=lambda item: len(item[0]), reverse=True
-    ):
-        if fqn.startswith(old_prefix):
-            candidates.append(new_prefix + fqn.removeprefix(old_prefix))
+    old_prefix, new_prefix = _LEGACY_CORE_PREFIX
+    if fqn.startswith(old_prefix):
+        candidates.append(new_prefix + fqn.removeprefix(old_prefix))
 
     for candidate in candidates:
         parts = candidate.split(".")

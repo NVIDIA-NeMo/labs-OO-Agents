@@ -161,9 +161,23 @@ Rules:
   A failing setter fails the batch: nothing is stored, the counters do not move
   and the tags already assigned are reset to `None`.
 - `append_batch` validates the batch once. Backends can be called directly.
+- Both backends use `tagged_batch(events, backend, *, contains_id=None)`: it validates
+  the batch, assigns the tags, yields them, and resets them to `None` on any exception.
 - SQLite allocates tags and inserts events and active tags in one locked transaction.
 - SQLite advances its counters only after success. It does not use the single-row
   reconnect/retry path.
 - SQLite serializes the tagged events. If serialization or the commit fails, it
   resets the tags to `None`, so the same inputs can be retried after a rollback.
 - Ordinary `add()` keeps its existing order: observers run before the event is stored.
+
+# Cell execution
+
+CodeAct's in-process backend runs every cell in an owned
+`ExecutionNamespace` (`nooa.runtime.execution_namespace`): one authoritative
+globals dictionary per call, from `Agent.execution_namespace_for(call)` (a
+fresh namespace per call by default; Atom's `handle` keeps one per live
+session). Runtime names (`self`, `print`, `return_result`...) resolve through
+the builtin fallback; framework names come from the namespace providers
+(`nooa.runtime.namespace_providers`). Caller `_session_locals` seed the
+namespace and are written back when the call ends. The sandbox backend keeps
+its worker's namespace.

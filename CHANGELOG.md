@@ -6,6 +6,30 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- `nooa.runtime.channels.StreamEnd` is removed: `QueueManager.spawn` no longer
+  publishes a runtime event when a job finishes (the job's handle state and
+  result say it ended).
+- `nooa.storage.serialization.register_legacy_module_prefix` is removed, and
+  nooa-atom no longer registers the `nooa_coder.*` prefixes: snapshot class
+  paths recorded under another package's old name (for example `nooa_coder.*`
+  in nooa-coder sessions) no longer restore; such attributes are skipped with
+  a warning. Core's own `nemo_oo_agents.*` → `nooa.*` mapping stays. Agent
+  specs and session item types recorded as `nooa_coder.*` still load.
+- Skills in an older `<project>/.nooa/libs` directory are no longer loaded;
+  only `.nooa/skills` is. When `.nooa/libs` exists the skills status shows
+  "Skills in .nooa/libs are no longer loaded; move them to .nooa/skills."
+  `older_skill_dirs()` and `SkillWriting(also_load=...)` are removed;
+  `SkillRegistry.add_notice()` adds such a line to the status.
+- Bundled config layers are removed: the `nooa.bundled_configs` and
+  `nooa.bundled_settings` entry-point groups are no longer read
+  (`nooa.llm_config.bundled_config_paths`, `nooa.layered_config.bundled_settings_paths`,
+  `BUNDLED_SETTINGS_ENTRY_POINT_GROUP` and `entry_point_paths` are gone), and
+  `nooa config eject`, which copied a bundled `llm_config.yaml`, is removed. The
+  LLM config and settings layers are the user file, the project file and the
+  `NEMO_OO_LLM_CONFIG` / `NEMO_OO_SETTINGS` files.
+- `PersistentVars`, `AgentVars` and `TodoVars` are removed: `self.v` and
+  `todo.v` are the owner's `vars`, a `SnapshotVars` (a dict, also usable as
+  attributes).
 - Core installs now exclude the individually verified LiteLLM releases affected
   by the optional-MCP import regression (1.106.0–1.106.7, 1.108.0–1.108.1, and
   affected prereleases). Future patch and security releases remain eligible;
@@ -30,6 +54,18 @@ to follow semantic versioning.
   `run_tests`): a Python identifier (a text skill may also use `-`), so
   `"../x"`, `"a/b"` or `".."` raise `ValueError` instead of writing outside
   `.nooa/skills`.
+- CodeAct cells run in an owned execution namespace for every agent (in-process
+  backend): `Agent.execution_namespace_for(call)` now returns a fresh
+  `ExecutionNamespace` per call by default (`default_execution_namespace`)
+  instead of `None`, so there is one cell engine; override the hook to share
+  a namespace across calls (Atom's `handle` does). Caller `_session_locals`
+  seed the namespace as user globals and are written back when the call ends
+  (only names the caller seeded or cells bound). A cell sees module globals as
+  they were when its namespace was seeded, not re-read per cell. Redundant
+  imports are stripped only when they could not run (`from strategy import
+  ...`); `from typing import Literal` runs as written. Tracebacks name cells
+  `Cell In[N] [ns:<id>:N]`. The sandbox backend keeps its worker namespace;
+  `PurePythonStrategy` keeps its own session locals.
 - Owned execution namespace (Atom): a cell helper run in a thread that does
   not inherit the cell's context (`loop.run_in_executor`, `threading.Thread`)
   can use `print`, `pprint`, `show` and `self` again; they resolve to the
@@ -37,13 +73,12 @@ to follow semantic versioning.
   they raised `RuntimeError: Runtime name 'print' has no originating call
   context`. Used after the cell has ended, they raise a `RuntimeError` that
   says the output would be lost, instead of losing it silently.
-- `UnifiedLLM`: `_call_once`/`_acall_once` are no longer abstract. A subclass
-  written against the older contract, which overrides `call`/`acall`, can be
-  built again (it raised `TypeError: Can't instantiate abstract class` since
-  the media-recovery change); it keeps working but does not get the new
-  media recovery, which `call`/`acall` wrap around `_call_once`/`_acall_once`.
-  New subclasses should implement `_call_once`/`_acall_once`. A subclass
-  that overrides neither now raises `NotImplementedError` when called.
+- `UnifiedLLM`: `_call_once`/`_acall_once` are abstract: every subclass
+  implements them (one request each); `call`/`acall` wrap them with media
+  recovery. A subclass written against the older contract, which overrides
+  only `call`/`acall`, raises `TypeError: Can't instantiate abstract class`
+  when built; implement `_call_once`/`_acall_once` (a subclass that overrides
+  `call`/`acall` too must still implement them).
 - `nooa-acp` is deprecated, replaced by `nooa-atom` (`nooa atom`), and this is
   its last release. It still works; the `nooa-acp` command (and `nooa acp`)
   now prints a deprecation warning to standard error that points to

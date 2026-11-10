@@ -101,21 +101,43 @@ def _is_tagged(data: Any) -> bool:
 # and fails if this is short.
 CHECKPOINT_VALUE_DEPTH = 5
 
+# Instance attributes that are SnapshotVars' own state, not vars.
+_PRIVATE_ATTRS = frozenset({"_data"})
+
 
 @snapshotable
 class SnapshotVars(MutableMapping):
-    """A dict-like store that silently drops non-snapshot-serializable values.
+    """Durable named state of an agent (``self.v``) or a todo (``todo.v``): a dict, also usable as attributes.
 
-    Behaves like a ``dict`` for all reads/writes/iteration, but a write whose
-    value can't be snapshot-serialized is **not stored** — it logs a warning
-    instead. This keeps the agent's durable ``vars`` always snapshot-clean, so
-    one bad value can't take down the whole snapshot (and with it every other
-    var) on the next resume.
+    ``v.spec = "..."`` and ``v["spec"] = "..."`` write the same entry.
+    Choose the scope deliberately:
 
-    Note for agents: a value that fails this check is *not persisted* — it won't
-    survive ``/exit`` + resume. If you need durability, store something
-    serializable (a dict/str/number/Pydantic model), not a live object
-    (clients, connections, sockets, callables).
+    - ``self.v`` — identity, stable preferences, environment facts, capabilities,
+      and long-running coordination shared across tasks and sessions.
+    - ``todo.v`` (``self.todo.get(id).v``) — plans, findings, artifacts,
+      checkpoints, and verification metadata belonging to one task.
+    - Cell locals — transient scratch data that does not need durable ownership.
+
+    Examples::
+
+        self.v.user_name = "Ada"           # create or update cross-task state
+        todo.v["commit"] = "abc123"         # the same store: v["k"] is v.k
+        print(self.v.user_name)              # read one
+        print(dict(todo.v))                  # inspect all in one scope
+        del todo.v.commit                    # remove one
+        self.v.clear()                       # remove all in one scope
+
+    Values must be snapshot-serializable (dicts, lists, strings, numbers,
+    Pydantic models, ...). A write whose value can't be snapshot-serialized
+    (a live client, socket, callable, ...) is **not stored**: it logs a
+    warning instead and won't survive ``/exit`` + resume. This keeps the
+    durable ``vars`` always snapshot-clean, so one bad value can't take down
+    the whole snapshot (and with it every other var) on the next resume.
+
+    Attribute access (``v.name``) refuses names starting with ``_`` and the
+    names of this class's methods (``keys``, ``items``, ``get``, ``set``,
+    ``clear``, ``pop``, ``update``, ...): read those with ``v.get(name)`` or
+    ``v[name]`` and write them with ``v.set(name, value)`` or ``v[name] = value``.
     """
 
     _data: "dict[str, Any]"
@@ -125,7 +147,7 @@ class SnapshotVars(MutableMapping):
     __snapshot_lenient_dict__ = "_data"
 
     def __init__(self, data: "dict[str, Any] | None" = None) -> None:
-        self._data = {}
+        object.__setattr__(self, "_data", {})
         if data:
             for k, v in data.items():
                 self[k] = v
@@ -180,7 +202,45 @@ class SnapshotVars(MutableMapping):
         return key in self._data
 
     def __repr__(self) -> str:
-        return f"SnapshotVars({self._data!r})"
+        return repr(self._data)
+
+    # ── attribute access: ``v.name`` is ``v["name"]`` ─────────────────────
+
+    def __getattr__(self, key: str) -> Any:
+        # Only called when normal lookup fails. Private and dunder names are
+        # never vars, so probes (copy, pickle, snapshot restore) see a plain
+        # AttributeError, and a missing ``_data`` cannot recurse.
+        if key.startswith("_"):
+            raise AttributeError(key)
+        try:
+            return self._data[key]
+        except KeyError:
+            raise AttributeError(f"No var {key!r}") from None
+
+    def __setattr__(self, key: str, value: Any) -> None:
+        if key in _PRIVATE_ATTRS:
+            object.__setattr__(self, key, value)  # internal state (snapshot restore)
+            return
+        self._check_attr(key, "use set({key!r}, value)")
+        self[key] = value
+
+    def __delattr__(self, key: str) -> None:
+        self._check_attr(key, "use del v[{key!r}]")
+        try:
+            del self._data[key]
+        except KeyError:
+            raise AttributeError(f"No var {key!r}") from None
+
+    def _check_attr(self, key: str, fix: str) -> None:
+        """Refuse ``v.key`` for ``_``-prefixed names and this class's own names."""
+        if key.startswith("_") or any(key in cls.__dict__ for cls in type(self).__mro__):
+            raise AttributeError(
+                f"{key!r} is reserved by {type(self).__name__}; {fix.format(key=key)}"
+            )
+
+    def set(self, key: str, value: Any) -> None:
+        """Store a value by name, including names reserved for attribute access."""
+        self[key] = value
 
     # ── pydantic integration ─────────────────────
 

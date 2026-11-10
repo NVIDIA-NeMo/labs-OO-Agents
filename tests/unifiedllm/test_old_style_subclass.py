@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""UnifiedLLM subclasses written against the older contract (override call/acall) still work."""
+"""UnifiedLLM subclasses implement the abstract _call_once/_acall_once."""
 
 from __future__ import annotations
 
@@ -27,29 +27,16 @@ class NewStyleLLM(UnifiedLLM):
         return LLMResponse(parts=(AssistantText(text="async once"),))
 
 
-class EmptyLLM(UnifiedLLM):
-    pass
-
-
 def _text(response: LLMResponse) -> str:
     return "".join(p.text for p in response.parts if isinstance(p, AssistantText))
 
 
-async def test_an_old_style_subclass_can_be_built_and_called():
-    llm = OldStyleLLM("old-model")
-    assert _text(llm.call([{"role": "user", "content": "hi"}])) == "sync"
-    assert _text(await llm.acall([{"role": "user", "content": "hi"}])) == "async"
+def test_a_subclass_that_only_overrides_call_cannot_be_built():
+    with pytest.raises(TypeError, match="abstract"):
+        OldStyleLLM("old-model")
 
 
-async def test_a_new_style_subclass_goes_through_call_once():
+async def test_a_subclass_goes_through_call_once():
     llm = NewStyleLLM("new-model")
     assert _text(llm.call([{"role": "user", "content": "hi"}])) == "once"
     assert _text(await llm.acall([{"role": "user", "content": "hi"}])) == "async once"
-
-
-async def test_a_subclass_with_neither_fails_clearly_when_called():
-    llm = EmptyLLM("empty-model")  # building it is fine
-    with pytest.raises(NotImplementedError, match=r"must implement _call_once\(\)"):
-        llm.call([{"role": "user", "content": "hi"}])
-    with pytest.raises(NotImplementedError, match=r"must implement _acall_once\(\)"):
-        await llm.acall([{"role": "user", "content": "hi"}])

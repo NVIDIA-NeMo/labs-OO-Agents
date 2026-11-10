@@ -193,6 +193,26 @@ def register_harness_metrics_extension[E: HarnessMetricsExtension](cls: type[E])
     return cls
 
 
+# unifiedllm metric events a package records, by event name (see register_llm_metric_event).
+_LLM_METRIC_EVENTS: dict[str, Callable[[HarnessMetrics, Any], None]] = {}
+
+
+def register_llm_metric_event(event: str, handler: Callable[[HarnessMetrics, Any], None]) -> None:
+    """Record unifiedllm metric event ``event`` with ``handler(metrics, detail)``.
+
+    unifiedllm reports events by name through a callback (it does not import the
+    runtime); the session's bridge passes the core events to :class:`HarnessMetrics`
+    and every other event to the handler registered here, typically one that
+    records on the package's extension. Registering ``event`` again replaces it.
+    """
+    _LLM_METRIC_EVENTS[event] = handler
+
+
+def llm_metric_event_handler(event: str) -> Callable[[HarnessMetrics, Any], None] | None:
+    """The handler registered for unifiedllm metric ``event``, or None."""
+    return _LLM_METRIC_EVENTS.get(event)
+
+
 # ── HarnessMetrics ──────────────────────────────────────────────────
 
 
@@ -273,12 +293,6 @@ class HarnessMetrics(BaseModel):
     llm_queue_max_depth: int = 0
     llm_queue_wait: TimingStat = Field(default_factory=TimingStat)
 
-    # ── Media Recovery (from unifiedllm via callback) ──
-    # A provider rejected an attachment; retried with a note in its place (kind)
-    media_rejected_retries: list[str] = Field(default_factory=list)
-    media_image_limit_collapses: list[int] = Field(default_factory=list)  # limit M per recovery
-    media_image_limit_events_collapsed: int = 0
-
     # ── Code Execution ──
     exec_python_total: int = 0
     exec_python_success: int = 0
@@ -290,7 +304,6 @@ class HarnessMetrics(BaseModel):
     shell_deaths: list[ErrorRecord] = Field(default_factory=list)
     repo_failures: list[ErrorRecord] = Field(default_factory=list)
     tool_avoidance: list[str] = Field(default_factory=list)
-    mcp_result_errors: list[str] = Field(default_factory=list)
     # LLM-facing queue reads that timed out mid-cell (channel name)
     queue_read_timeouts: list[str] = Field(default_factory=list)
 
@@ -523,16 +536,6 @@ class HarnessMetrics(BaseModel):
         if isinstance(wait_s, int | float) and not isinstance(wait_s, bool):
             self.llm_queue_wait.record(float(wait_s))
 
-    # Media recovery (dispatched from unifiedllm callback)
-    def media_image_limit_collapsed(self, limit: int, events: int) -> None:
-        """The request's images exceeded the provider limit ``limit``; ``events`` were collapsed."""
-        self._append_item(self.media_image_limit_collapses, int(limit))
-        self.media_image_limit_events_collapsed += int(events)
-
-    def media_rejected_retry(self, kind: Any) -> None:
-        """The provider rejected an attachment; the request was retried without it."""
-        self._append(self.media_rejected_retries, str(kind or "unknown"))
-
     # Code Execution
     def exec_python(self, *, success: bool) -> None:
         self.exec_python_total += 1
@@ -604,13 +607,6 @@ class HarnessMetrics(BaseModel):
     def return_result_tool_alias(self) -> None:
         """A provider-tool ``return_result(value=...)`` call was taken as the cell builtin."""
         self.return_result_tool_aliases += 1
-
-    def mcp_result_error(self, call: str) -> None:
-        """An MCP tool returned a structured result with an ``error`` field (not isError).
-
-        ``call`` is ``<server>.<tool>``; the tool docs say to check for this.
-        """
-        self._append(self.mcp_result_errors, call)
 
     def infinite_loop(self) -> None:
         self.infinite_loops_detected += 1
@@ -1133,39 +1129,6 @@ _SPAN_SCHEMA: tuple[SchemaEntry, ...] = (
         "LLM Admission",
         lambda m: m.llm_queue_wait,
     ),
-    # Media Recovery
-    SchemaEntry(
-        "harness.media_image_limit_collapsed.count",
-        "Image-limit recoveries (oldest images collapsed)",
-        "Media Recovery",
-        lambda m: len(m.media_image_limit_collapses),
-    ),
-    SchemaEntry(
-        "harness.media_image_limit_collapsed.limits",
-        "Provider image limits hit",
-        "Media Recovery",
-        lambda m: m.media_image_limit_collapses,
-        True,
-    ),
-    SchemaEntry(
-        "harness.media_image_limit_collapsed.events",
-        "Image events collapsed for the image limit",
-        "Media Recovery",
-        lambda m: m.media_image_limit_events_collapsed,
-    ),
-    SchemaEntry(
-        "harness.media_rejected_retry.count",
-        "Rejected attachments retried without them",
-        "Media Recovery",
-        lambda m: len(m.media_rejected_retries),
-    ),
-    SchemaEntry(
-        "harness.media_rejected_retry.kinds",
-        "Rejected attachment kinds",
-        "Media Recovery",
-        lambda m: m.media_rejected_retries,
-        True,
-    ),
     # Code Execution
     SchemaEntry(
         "harness.exec_python.total",
@@ -1281,19 +1244,6 @@ _SPAN_SCHEMA: tuple[SchemaEntry, ...] = (
         "Missing await details",
         "Code Validation",
         lambda m: m.missing_awaits_detected,
-        True,
-    ),
-    SchemaEntry(
-        "harness.mcp_result_error.count",
-        "MCP results reporting failure in an 'error' field",
-        "Tool Usage",
-        lambda m: len(m.mcp_result_errors),
-    ),
-    SchemaEntry(
-        "harness.mcp_result_error.calls",
-        "MCP tools whose result had an 'error' field, as <server>.<tool>",
-        "Tool Usage",
-        lambda m: m.mcp_result_errors,
         True,
     ),
     SchemaEntry(

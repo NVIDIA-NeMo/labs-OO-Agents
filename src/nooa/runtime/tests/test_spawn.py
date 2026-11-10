@@ -15,7 +15,6 @@ from nooa.runtime.channels import (
     JobError,
     JobHandle,
     QueueManager,
-    StreamEnd,
 )
 
 
@@ -55,10 +54,8 @@ async def test_spawn_coroutine_puts_result():
     await asyncio.sleep(0)
     assert handle.state == "done"
 
-    # StreamEnd should be in the event log
-    stream_ends = [e for e in em.events if isinstance(e, StreamEnd)]
-    assert len(stream_ends) == 1
-    assert stream_ends[0].channel_name == "results"
+    # No end-of-stream event is published (StreamEnd was removed)
+    assert em.events == []
 
 
 @pytest.mark.asyncio
@@ -82,9 +79,7 @@ async def test_spawn_async_generator_puts_each_yield():
     await asyncio.sleep(0)
     assert handle.state == "done"
 
-    stream_ends = [e for e in em.events if isinstance(e, StreamEnd)]
-    assert len(stream_ends) == 1
-    assert stream_ends[0].channel_name == "stream"
+    assert em.events == []
 
 
 # ---------------------------------------------------------------------------
@@ -175,15 +170,14 @@ async def test_error_mid_stream_emits_job_error():
     assert isinstance(error_item, JobError)
     assert error_item.error_type == "ValueError"
 
-    # Event channel got JobError + StreamEnd
+    # Event channel got the JobError
     job_errors = [e for e in em.events if isinstance(e, JobError)]
     assert len(job_errors) == 1
     assert job_errors[0].channel_name == "data"
     assert job_errors[0].error_type == "ValueError"
     assert "boom" in job_errors[0].error_message
 
-    stream_ends = [e for e in em.events if isinstance(e, StreamEnd)]
-    assert len(stream_ends) == 1
+    assert len(em.events) == 1
 
 
 @pytest.mark.asyncio
@@ -278,7 +272,6 @@ async def test_spawn_to_event_mode_channel():
     assert handle.state == "done"
 
     # The result went through event_manager (QueueOutput from event channel put)
-    # plus StreamEnd
     from nooa.runtime.channels import QueueOutput
 
     queue_outputs = [e for e in em.events if isinstance(e, QueueOutput)]

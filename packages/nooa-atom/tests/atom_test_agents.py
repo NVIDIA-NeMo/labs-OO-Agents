@@ -159,10 +159,13 @@ def fresh_events() -> tuple[asyncio.Event, asyncio.Event]:
     return STARTED, BLOCK
 
 
+# Read through the module: fresh_events() rebinds the globals mid-test, and a
+# cell's namespace is seeded once (it does not re-read module globals).
 BLOCKING_CELL = """\
+import atom_test_agents as _t
 print("cell started")
-STARTED.set()
-await BLOCK.wait()
+_t.STARTED.set()
+await _t.BLOCK.wait()
 print("cell released")
 """
 
