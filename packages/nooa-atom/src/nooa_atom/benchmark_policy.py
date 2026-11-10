@@ -194,6 +194,8 @@ class BenchmarkPolicyGuard:
             registered_runtime={
                 "namespace": session._agent._namespace_lifetime,
                 "reflection": session._agent._done_reflection,
+                # Reflection turns (session.reflection) are pinned off: they rename sessions.
+                "reflection_turns": getattr(session, "_reflection", None) is not None,
                 "allow_session_titles": session.options.benchmark_allow_session_titles,
             },
         )
@@ -289,6 +291,7 @@ class BenchmarkPolicyGuard:
             validate_benchmark_policy(_config(session.options))
             if (
                 session._agent._done_reflection is not False
+                or getattr(session, "_reflection", None) is not None
                 or session._agent._namespace_lifetime != self.namespace
             ):
                 raise ValueError("runtime drift")

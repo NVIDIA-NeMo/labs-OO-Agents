@@ -233,3 +233,39 @@ async def test_solve_cancels_and_rejects_children_with_unfinished_work_when_the_
         SimpleNamespace(sessions={"root": root}, is_idle=lambda s: s.idle), root
     )
     assert cancelled == []
+
+
+def _enable_reflection_in(workspace):
+    (workspace / ".nooa").mkdir()
+    (workspace / ".nooa" / "settings.yaml").write_text(
+        "atom:\n  reflection:\n    enabled: true\n    children: true\n    every_turns: 1\n"
+    )
+
+
+async def test_a_guarded_episode_pins_reflection_turns_off_despite_workspace_settings(
+    tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    _enable_reflection_in(tmp_path)
+    harness = _harness(
+        CellLLM([python_cell(FINISH, "call-1")]),
+        turn_method="handle_batch",
+        workdir=tmp_path,
+        sessions_dir=tmp_path / "s",
+    )
+    assert harness.options.reflection is False
+    await _solve(harness, "task")
+    receipt = harness.benchmark_policy_receipt()
+    assert receipt["verdict"] == "pass"
+    [session] = receipt["sessions"]
+    assert session["registered_runtime"]["reflection_turns"] is False
+
+
+def test_a_guarded_episode_refuses_reflection_true(tmp_path):
+    harness_kwargs = {"workdir": tmp_path, "reflection": True}
+    with pytest.raises(ValueError, match="forbids reflection turns"):
+        _harness(CellLLM([]), **harness_kwargs)
+    [path] = tmp_path.glob("*.atom-policy.json")
+    receipt = json.loads(path.read_text())
+    assert receipt["verdict"] == "fail"
+    assert "construction_configuration_invalid" in [v["code"] for v in receipt["violations"]]
