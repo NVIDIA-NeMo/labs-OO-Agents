@@ -52,13 +52,15 @@ def truncating_pformat(
     obj: Annotated[Any, "Object to format"],
     *,
     max_chars: Annotated[
-        int | None, "Hard char cap on non-string rendering via TruncatingStringIO"
+        int | None, "Hard char cap on non-string rendering: half head, half tail"
     ] = None,
     **kwargs: Any,
 ) -> str:
     """Format a value, with a hard total-size cap for non-string objects.
 
     Strings pass through unchanged. Other options are forwarded to ``pformat()``.
+    Rendering past ``max_chars`` keeps its first and last halves around
+    ``[... N chars omitted; full output not kept]``.
     """
     if max_chars is not None and max_chars <= 0:
         raise ValueError(f"truncating_pformat max_chars must be > 0 or None, got {max_chars}")
@@ -70,10 +72,15 @@ def truncating_pformat(
         from io import StringIO
 
         stream = StringIO()
-    else:
-        stream = TruncatingStringIO(limit=max_chars)
-    _pformat(obj, stream, **kwargs)
-    return stream.getvalue()
+        _pformat(obj, stream, **kwargs)
+        return stream.getvalue()
+
+    from nooa.snapshot import TextStream, render_output
+
+    # The rendering streams into a bounded TextStream: memory stays within max_chars.
+    bounded = TextStream(unit="chars", head=max_chars - max_chars // 2, tail=max_chars // 2)
+    _pformat(obj, bounded, **kwargs)
+    return render_output(bounded.close())
 
 
 def pformat(

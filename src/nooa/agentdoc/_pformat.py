@@ -154,8 +154,8 @@ def _pformat(
 
     Args:
         _object: Object to format.
-        _stream: Writer with a ``write(str)`` method. May be a
-            ``TruncatingStringIO`` (hard char cap) or plain ``io.StringIO``.
+        _stream: Writer with a ``write(str)`` method: plain ``io.StringIO``,
+            or a chars ``nooa.snapshot.TextStream`` for a hard char cap.
         max_length: Max elements per container (None=unlimited).
         max_string: Max string chars (None=unlimited).
         max_depth: Max nesting depth (None=unlimited).
