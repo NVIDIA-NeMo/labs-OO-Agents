@@ -357,7 +357,8 @@ longer needs in full, delete stale Python names, and tidy `self.todo` and
 the two are independent.
 
 Only root sessions reflect, each through one `Reflection`
-(`nooa_atom.session.reflection`) that the session creates. When a root
+(`nooa_atom.session.reflection`) that the session creates: the mechanics.
+The bullets the message is made of belong to the agent (below). When a root
 session's turn ends with `Done` or `Waiting`, it counts the turn. A reflection
 is due when at least `min_gap_turns` turns passed since the last one, and
 `every_turns` turns or `every_minutes` minutes passed or the context window is
@@ -369,25 +370,26 @@ session is created or loaded. An agent without a `system_messages` queue does
 not reflect, and an error in the check is logged and ignored.
 
 The message is a fixed header line, then the registered bullets numbered in
-registration order, then "Then finish with a short Done." Core registers
-`rename`, `compact`, `variables`, `todo` and `vars`
-(`nooa_atom.session.reflection.DEFAULT_BULLETS`). A skill reaches the
-session's `Reflection` as `agent.reflection` (`None` when the session does not
-reflect) and can add its own bullet in `attach()` and remove it in `detach()`:
+registration order, then "Then finish with a short Done." Every Atom agent
+owns its bullets from construction as `agent.reflection`, a
+`ReflectionBullets` registry with `add(name, text)`, `remove(name)`,
+`bullets` and `message()`. It starts with `rename`, `compact`, `variables`,
+`todo` and `vars` (`nooa_atom.session.reflection.DEFAULT_BULLETS`), then
+`create_session_agent()` applies `atom.reflection.bullets` on top, before
+any skill attaches. A skill can then add its own bullet in `attach()` and
+remove it in `detach()`:
 
 ```python
 def attach(self, agent):
-    if agent.reflection is not None:
-        agent.reflection.add("memory", "Save what you learned to memory.")
+    agent.reflection.add("memory", "Save what you learned to memory.")
 
 def detach(self):
-    if self._agent.reflection is not None:
-        self._agent.reflection.remove("memory")
+    self._agent.reflection.remove("memory")
 ```
 
-The session sets `agent.reflection` when it is created, after
-`create_session_agent()` attaches the workspace's skills: a skill attached
-before that sees `None`.
+When a reflection is due, the session posts `agent.reflection.message()`. A
+session that does not reflect (a child, a host where it is off) still has
+`agent.reflection`; it just never posts.
 
 Settings, in `atom.reflection` (defaults shown; a partial section overrides
 only the keys it sets):

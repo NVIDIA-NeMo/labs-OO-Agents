@@ -16,6 +16,7 @@ from nooa_atom.session.reflection import (
     FOOTER,
     HEADER,
     Reflection,
+    ReflectionBullets,
     ReflectionSettings,
     context_fraction,
     has_queue,
@@ -40,6 +41,7 @@ class Clock:
 def _reflection(clock=None, posted=None, context=lambda: None, **values):
     return Reflection(
         ReflectionSettings(**values),
+        bullets=ReflectionBullets(),
         post=(posted if posted is not None else []).append,
         context=context,
         clock=clock or Clock(),
@@ -100,7 +102,7 @@ def test_posting_resets_the_counters_and_the_gap_applies_again():
         clock, posted, context=lambda: fraction[0], every_turns=3, min_gap_turns=2
     )
     assert [reflection.turn_ended("done") for _ in range(3)] == [None, None, "turns"]
-    assert posted == [reflection.message()]
+    assert posted == [reflection.bullets.message()]
     assert (reflection.turns, reflection.minutes()) == (0, 0)
     clock.now = 3600 * 5  # long overdue by time, and the context is full
     fraction[0] = 0.9
@@ -121,7 +123,10 @@ def test_a_failing_check_is_logged_and_ignored(caplog):
         raise RuntimeError("boom")
 
     reflection = Reflection(
-        ReflectionSettings(every_turns=1, min_gap_turns=0), post=boom, clock=Clock()
+        ReflectionSettings(every_turns=1, min_gap_turns=0),
+        bullets=ReflectionBullets(),
+        post=boom,
+        clock=Clock(),
     )
     with caplog.at_level(logging.ERROR, logger="nooa_atom.session.reflection"):
         assert reflection.turn_ended("done") is None
@@ -132,7 +137,7 @@ def test_a_failing_check_is_logged_and_ignored(caplog):
 
 
 def test_the_default_message():
-    message = Reflection(ReflectionSettings(), post=print).message()
+    message = ReflectionBullets().message()
     lines = message.split("\n")
     assert lines[0] == HEADER
     assert HEADER.startswith("[reflection] A housekeeping message from the session")
@@ -147,7 +152,7 @@ def test_the_default_message():
 
 
 def test_add_and_remove_bullets_by_name():
-    reflection = Reflection(ReflectionSettings(), post=print)
+    reflection = ReflectionBullets()
     reflection.add("memory", "Save what you learned.")
     reflection.remove("compact")
     reflection.remove("unknown")  # ignored
@@ -164,7 +169,7 @@ def test_add_and_remove_bullets_by_name():
 
 def test_settings_add_replace_and_remove_bullets():
     settings = ReflectionSettings(bullets={"todo": "Tidy todos.", "vars": "", "notes": "Notes."})
-    reflection = Reflection(settings, post=print)
+    reflection = ReflectionBullets(settings.bullets)
     assert list(reflection.bullets) == ["rename", "compact", "variables", "todo", "notes"]
     assert reflection.bullets["todo"] == "Tidy todos."
     assert reflection.message().split("\n")[-2] == "5. Notes."
@@ -280,13 +285,16 @@ async def test_a_due_reflection_lands_on_system_messages_and_runs_a_normal_turn(
         tmp_path, [done("one"), done("two"), done("tidied"), done("three"), done("tidied again")]
     )
     try:
-        assert root._agent.reflection is root._reflection  # how skills reach it
+        assert root._reflection.bullets is root._agent.reflection  # the agent's bullets
         root._agent.reflection.add("skill", REFLECT)
         assert (await root.prompt("one")).explanation == "one"
         assert (await root.prompt("two")).explanation == "two"
         await idle(root)
         [admitted] = reflections(updates)
-        assert (admitted.channel, admitted.text) == ("system_messages", root._reflection.message())
+        assert (admitted.channel, admitted.text) == (
+            "system_messages",
+            root._agent.reflection.message(),
+        )
         assert admitted.text.split("\n")[-2] == f"6. {REFLECT}"  # the skill's bullet, last
         assert turn_channels(updates) == [["user_messages"], ["user_messages"], ["system_messages"]]
         assert REFLECT in str(llm.calls[2].messages)
@@ -320,7 +328,8 @@ async def test_headless_sessions_do_not_reflect_unless_told(tmp_path):
         tmp_path, [done("a"), done("b"), done("c")], host="headless"
     )
     try:
-        assert root._reflection is None and root._agent.reflection is None
+        assert root._reflection is None
+        assert isinstance(root._agent.reflection, ReflectionBullets)  # kept, never posted
         for text in "abc":
             await root.prompt(text)
         await idle(root)
@@ -362,7 +371,8 @@ async def test_only_the_root_session_reflects(tmp_path):
             parent_id=root.id,
         )
         assert child.parent_id == root.id
-        assert child._reflection is None and child._agent.reflection is None
+        assert child._reflection is None
+        assert isinstance(child._agent.reflection, ReflectionBullets)
     finally:
         await registry.close_all()
 
@@ -395,3 +405,70 @@ async def test_a_failing_check_is_logged_and_the_turn_is_unaffected(tmp_path, ca
         assert sum("reflection check failed" in r.getMessage() for r in caplog.records) == 2
     finally:
         await registry.close_all()
+
+
+_SKILL_AGENT = """\
+from nooa.skill import Skill
+from nooa_atom.agent.agent import AtomAgent
+
+
+class Memory(Skill):
+    '''Registers a reflection bullet while it is attached.'''
+
+    def attach(self, agent):
+        super().attach(agent)
+        agent.reflection.add("memory", "SAVE MEMORY")
+
+    def detach(self):
+        self._agent.reflection.remove("memory")
+        super().detach()
+
+
+class SkillAgent(AtomAgent):
+    def __init__(self, llm=None, storage=None, **kwargs):
+        super().__init__(llm=llm, storage=storage, **kwargs)
+        self.skills.register("test.memory", Memory())
+"""
+
+
+async def test_a_skill_attached_at_construction_adds_a_bullet_on_top_of_the_settings(tmp_path):
+    (tmp_path / "skill_agent.py").write_text(_SKILL_AGENT)
+    (tmp_path / ".nooa").mkdir()
+    (tmp_path / ".nooa" / "settings.yaml").write_text(
+        "atom:\n  active_skills: [test.memory]\n"
+        "  reflection:\n    every_turns: 2\n    min_gap_turns: 0\n"
+        "    bullets:\n      rename: ''\n      todo: Tidy todos.\n      notes: Tidy notes.\n"
+    )
+    llm = CellLLM([done("one"), done("two"), done("tidied")])
+    registry = SessionRegistry(
+        SessionStore(tmp_path / "sessions"), agent_factory=create_session_agent
+    )
+    root = await registry.create(
+        SessionOptions(
+            workspace=tmp_path, agent_spec="./skill_agent.py:SkillAgent", llm=llm, host="acp"
+        )
+    )
+    updates = []
+    root.subscribe(updates.append)
+    agent = root._agent
+    try:
+        assert "test.memory" in agent.skills.activated()
+        # Defaults, then the settings' overrides, then the skill's bullet.
+        assert list(agent.reflection.bullets) == [
+            "compact",
+            "variables",
+            "todo",
+            "vars",
+            "notes",
+            "memory",
+        ]
+        assert agent.reflection.bullets["todo"] == "Tidy todos."
+        assert (await root.prompt("one")).explanation == "one"
+        assert (await root.prompt("two")).explanation == "two"
+        await idle(root)
+        [admitted] = reflections(updates)
+        assert admitted.text == agent.reflection.message()
+        assert admitted.text.split("\n")[-2] == "6. SAVE MEMORY"
+    finally:
+        await registry.close_all()
+    assert "memory" not in agent.reflection.bullets  # closing detached the skill

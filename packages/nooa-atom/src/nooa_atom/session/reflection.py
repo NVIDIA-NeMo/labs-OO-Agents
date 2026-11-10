@@ -2,18 +2,21 @@
 # SPDX-License-Identifier: Apache-2.0
 """Reflection: now and then, a root session asks its agent to tidy up.
 
-A root session with a ``system_messages`` queue owns one ``Reflection``.
-When a turn ends with ``Done`` or ``Waiting``, the session tells it
-(``Reflection.turn_ended``); when a reflection is due, it posts the message
-on ``system_messages`` as an ordinary item, and the agent handles it in a
-normal turn.
+Two parts. ``ReflectionBullets`` is the registry of bullets the message is
+made of; every Atom agent owns one from construction as ``agent.reflection``.
+``Reflection`` is the mechanics: a root session with a ``system_messages``
+queue owns one; when a turn ends with ``Done`` or ``Waiting``, the session
+tells it (``Reflection.turn_ended``), and when a reflection is due it posts
+``agent.reflection.message()`` on ``system_messages`` as an ordinary item.
+The agent handles it in a normal turn.
 
 The message is a fixed header, the registered bullets numbered in
-registration order, and a fixed last line. Core registers
-``DEFAULT_BULLETS``; the workspace's ``atom.reflection.bullets`` adds,
-replaces or removes them by name, and a skill can ``add`` one in
-``attach()`` and ``remove`` it in ``detach()`` through ``agent.reflection``
-(``None`` when the session does not reflect).
+registration order, and a fixed last line. The registry starts with
+``DEFAULT_BULLETS``; ``create_session_agent()`` applies the workspace's
+``atom.reflection.bullets`` (add, replace, or remove with an empty string)
+before any skill attaches, and a skill can ``add`` its own bullet in
+``attach()`` and ``remove`` it in ``detach()``. A session that does not
+reflect still has ``agent.reflection``; it just never posts.
 
 Settings live in the workspace's ``atom.reflection`` settings
 (``ReflectionSettings``); ``SessionOptions.reflection`` overrides ``enabled``
@@ -24,7 +27,7 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -131,36 +134,25 @@ def context_fraction(agent: object) -> float | None:
     return value if isinstance(value, int | float) else None
 
 
-class Reflection:
-    """One root session's reflection: when it is due, its bullets, and posting the message.
+class ReflectionBullets:
+    """The bullets of the reflection message, by name: an agent's ``agent.reflection``.
 
-    ``post`` puts the message on the agent's ``system_messages`` queue;
-    ``context`` returns the used share of the context window (or ``None``).
-    The counters are in memory only: a restarted session starts a fresh
-    window. ``clock`` (monotonic seconds) can be injected for tests.
+    It starts with ``DEFAULT_BULLETS``; ``overrides`` (the settings'
+    ``bullets``) then adds or replaces bullets, and an empty string removes one.
     """
 
-    def __init__(
-        self,
-        settings: ReflectionSettings,
-        *,
-        post: Callable[[str], object],
-        context: Callable[[], float | None] = lambda: None,
-        clock: Callable[[], float] | None = None,
-    ) -> None:
-        """Register the default bullets, apply ``settings.bullets`` and start a fresh window."""
-        self.settings = settings
-        self._post = post
-        self._context = context
-        self._clock = clock or time.monotonic
+    def __init__(self, overrides: Mapping[str, str] | None = None) -> None:
+        """Register the default bullets, then apply ``overrides``."""
         self._bullets: dict[str, str] = dict(DEFAULT_BULLETS)
-        for name, text in settings.bullets.items():
+        self.apply(overrides or {})
+
+    def apply(self, overrides: Mapping[str, str]) -> None:
+        """Add or replace each named bullet; an empty string removes it."""
+        for name, text in overrides.items():
             if text:
                 self.add(name, text)
             else:
                 self.remove(name)
-        self.turns = 0
-        self.anchor = self._clock()
 
     def add(self, name: str, text: str) -> None:
         """Register bullet ``name``; a new name goes last, a known one keeps its place."""
@@ -183,6 +175,36 @@ class Reflection:
         lines += [f"{i}. {text}" for i, text in enumerate(self._bullets.values(), 1)]
         lines.append(FOOTER)
         return "\n".join(lines)
+
+
+class Reflection:
+    """One root session's reflection mechanics: when it is due, and posting the message.
+
+    ``bullets`` is the agent's ``ReflectionBullets`` (read when a reflection
+    is due, so later changes count); ``post`` puts the message on the agent's
+    ``system_messages`` queue; ``context`` returns the used share of the
+    context window (or ``None``). The counters are in memory only: a
+    restarted session starts a fresh window. ``clock`` (monotonic seconds)
+    can be injected for tests.
+    """
+
+    def __init__(
+        self,
+        settings: ReflectionSettings,
+        *,
+        bullets: ReflectionBullets,
+        post: Callable[[str], object],
+        context: Callable[[], float | None] = lambda: None,
+        clock: Callable[[], float] | None = None,
+    ) -> None:
+        """Start a fresh window."""
+        self.settings = settings
+        self.bullets = bullets
+        self._post = post
+        self._context = context
+        self._clock = clock or time.monotonic
+        self.turns = 0
+        self.anchor = self._clock()
 
     def minutes(self) -> float:
         """Minutes since the window's anchor."""
@@ -217,7 +239,7 @@ class Reflection:
         try:
             reason = self.due(kind, context_fraction=self._context())
             if reason is not None:
-                self._post(self.message())
+                self._post(self.bullets.message())
                 self.turns = 0
                 self.anchor = self._clock()
             return reason

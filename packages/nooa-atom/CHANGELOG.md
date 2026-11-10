@@ -13,9 +13,12 @@ based on [Keep a Changelog](https://keepachangelog.com/).
   `Reflection` puts a housekeeping message on the agent's `system_messages`
   queue as an ordinary item. The agent handles it in a normal turn. The
   message is made of bullets registered by name: core registers rename the
-  session, compact history, delete stale names, tidy todos and tidy `self.v`;
-  skills add and remove their own through `agent.reflection`, and
-  `atom.reflection.bullets` adds, replaces or removes them. On by default for
+  session, compact history, delete stale names, tidy todos and tidy `self.v`.
+  The agent owns the bullets from construction as `agent.reflection` (a
+  `ReflectionBullets` registry): `atom.reflection.bullets` adds, replaces or
+  removes them before any skill attaches, and skills add and remove their own
+  in `attach()`/`detach()`. A session that does not reflect keeps the
+  registry and never posts. On by default for
   ACP hosts, off elsewhere (benchmarks, Gym, `nooa-bench`); configure it in
   `atom.reflection`, or override with `SessionOptions(reflection=...)`. Child
   sessions never reflect.

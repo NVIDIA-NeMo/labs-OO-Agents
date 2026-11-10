@@ -80,6 +80,7 @@ from nooa_atom.session.reflection import (
     REFLECTION_CHANNEL,
     REFLECTION_SOURCE,
     Reflection,
+    ReflectionBullets,
     ReflectionSettings,
     context_fraction,
     has_queue,
@@ -293,8 +294,9 @@ class Session:
             gate.start_session()  # creation/load anchor, not time spent constructing the agent
         self.handle = handle
         # Reflection (nooa_atom.session.reflection): one per root session that
-        # reflects and whose agent has a system_messages queue, else None. The
-        # agent's ``reflection`` attribute lets skills add and remove bullets.
+        # reflects and whose agent has a system_messages queue, else None. It
+        # posts the bullets the agent owns (``agent.reflection``); an agent
+        # without them gets the defaults plus the settings' overrides.
         settings = getattr(agent, "_reflection_settings", None)
         self._reflection: Reflection | None = None
         if reflection_enabled(
@@ -303,15 +305,18 @@ class Session:
             host=options.host,
             is_root=self.parent_id is None,
         ) and has_queue(agent, REFLECTION_CHANNEL):
+            settings = settings or ReflectionSettings()
+            bullets = getattr(agent, "reflection", None)
+            if not isinstance(bullets, ReflectionBullets):
+                bullets = ReflectionBullets(settings.bullets)
             self._reflection = Reflection(
-                settings or ReflectionSettings(),
+                settings,
+                bullets=bullets,
                 post=lambda text: self._admit(
                     text, channel=REFLECTION_CHANNEL, source=REFLECTION_SOURCE
                 ),
                 context=lambda: context_fraction(agent),
             )
-        if hasattr(agent, "reflection"):
-            agent.reflection = self._reflection
         # A deep copy: the Session owns its usage totals and pushes them to
         # the handle, whose metadata other threads read under its lock.
         self.info: SessionInfo = info.model_copy(

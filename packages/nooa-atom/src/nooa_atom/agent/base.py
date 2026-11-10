@@ -10,6 +10,7 @@ It is not offered as a separate agent and has no spec in ``LEGACY_AGENT_SPECS``.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar
 
@@ -49,6 +50,7 @@ from nooa_atom.session.items import (
     PlanEntry,
     TaskResult,
 )
+from nooa_atom.session.reflection import ReflectionBullets
 from nooa_atom.session.registry import DepthLimitError
 from nooa_atom.skills.manager import SkillManager
 from nooa_atom.tools.repo_tools import RepoTools
@@ -176,9 +178,9 @@ class AtomAgentBase(InteractiveAgent):
     # The workspace's atom.reflection settings; the Session reads them
     # (nooa_atom.session.reflection). create_session_agent() sets them.
     _reflection_settings: Annotated[Any, hidden, nosnapshot]
-    # The root session's Reflection (nooa_atom.session.reflection), set by the
-    # Session; None when it does not reflect. Skills add and remove bullets.
-    reflection: Annotated[Any, hidden, nosnapshot]
+    # The reflection message's bullets (nooa_atom.session.reflection), owned by
+    # the agent from construction; skills add and remove their own here.
+    reflection: Annotated[ReflectionBullets, hidden, nosnapshot]
     shell: Annotated[ActivityShellTools, nosnapshot]
     repo: Annotated[RepoTools, nosnapshot]
     todo: TodoManager
@@ -212,6 +214,7 @@ class AtomAgentBase(InteractiveAgent):
         summarization: SummarizationConfig | None = None,
         skills_dirs: list[Path] | None = None,
         libs_dir: Path | None = None,
+        reflection_bullets: Mapping[str, str] | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(llm=llm, **kwargs)
@@ -232,6 +235,9 @@ class AtomAgentBase(InteractiveAgent):
         self._jobs_running = {}
         self.jobs = JobsApi(self)
         self.todo = TodoManager()
+        # Before any skill attaches, so every skill can register a bullet on
+        # top of the defaults and the settings' overrides (reflection_bullets).
+        self.reflection = ReflectionBullets(reflection_bullets)
         self.skills = SkillManager(self)
         self.skills.register("nemo.shell", self.shell)
         self.skills.register("nemo.repo", self.repo)
@@ -296,7 +302,6 @@ class AtomAgentBase(InteractiveAgent):
 
         self._summarization = summarization or SummarizationConfig()
         self._reflection_settings = None
-        self.reflection = None
         install_summarizer(self._summarization, self)
 
     @no_trace
