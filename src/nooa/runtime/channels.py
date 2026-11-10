@@ -1066,12 +1066,20 @@ class QueueManager:
                 and (self._event_wakes or any(ch.qsize() for ch in self._channels.values()))
             )
 
-    async def wait_ready(self) -> None:
-        """Wait without taking ownership. Registry changes also wake this wait."""
+    async def wait_ready(self, *, changed: bool = False) -> None:
+        """Wait without taking ownership. Registry changes also wake this wait.
+
+        ``changed=True`` first waits for the next put or registry change even
+        when ``ready()`` already holds: a caller that just found nothing to
+        claim despite ``ready()`` must not poll it again at once.
+        """
         loop = asyncio.get_running_loop()
         if self._notify_pair is None or self._notify_pair[1] is not loop:
             self._notify_pair = (asyncio.Event(), loop)
         event = self._notify_pair[0]
+        if changed:
+            event.clear()
+            await event.wait()
         while True:
             event.clear()
             if not self._channels:

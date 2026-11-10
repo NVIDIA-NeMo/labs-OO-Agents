@@ -271,13 +271,17 @@ class TurnLoop:
 
     async def _run(self) -> None:
         queues = self._agent.queue_manager
+        # A turn that found nothing to claim while ready() still held (they
+        # disagree, e.g. a registry whose ready() counts what claim does not
+        # take): wait for a change instead of spinning on ready().
+        idle_while_ready = False
         try:
             while not self._stopping:
                 await self._gate.wait()
                 if self._stopping:
                     return
                 try:
-                    await queues.wait_ready()
+                    await queues.wait_ready(changed=idle_while_ready)
                 except Exception as exc:
                     self._publish(TurnLoopEnded(error=exc, message=f"{type(exc).__name__}: {exc}"))
                     return
@@ -304,6 +308,7 @@ class TurnLoop:
                         )
                 finally:
                     self._turn = None
+                    idle_while_ready = settled is None and queues.ready()
                     try:
                         if settled is not None:
                             self._publish(settled)
