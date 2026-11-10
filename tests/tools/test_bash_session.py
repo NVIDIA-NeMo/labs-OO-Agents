@@ -78,27 +78,34 @@ class TestBashSession:
         out, err, code = await session.run(f'python3 -c "{script}"')
         assert code == 0
         for text, head, middle, tail in ((out, "H", "M", "T"), (err, "h", "m", "t")):
-            # The standard notice of TruncatingStringIO, then the head, then the tail.
-            assert text.startswith("<truncated-output>\nOutput too large (")
-            assert head * 14000 in text
-            assert tail * 14000 in text
-            assert text.index(head * 14000) < text.index(tail * 14000)
-            assert middle * 1000 not in text
-            assert len(text) <= 31000
+            # nooa.snapshot's render_output: 15,000 head chars, one cut line, 15,000 tail chars.
+            whole = head * 20000 + middle * 20000 + tail * 20000 + ("\n" if head == "H" else "")
+            expected = (
+                whole[:15_000]
+                + f"\n[... {len(whole) - 30_000:,} chars omitted; full output not kept]\n"
+                + whole[-15_000:]
+            )
+            assert text == expected.removesuffix("\n")  # run() strips stdout's last newline
 
     def test_bounded_matches_one_write_and_keeps_both_ends(self):
         """Chunked feeding gives the same text as one write, for every size around the limit."""
-        from nooa.agentdoc import TruncatingStringIO
+        from nooa.snapshot import TextStream, render_output
         from nooa.tools._bash_session import MAX_OUTPUT_CHARS, _bounded
 
+        assert MAX_OUTPUT_CHARS == 30_000  # the limit is unchanged
         for size in (MAX_OUTPUT_CHARS, MAX_OUTPUT_CHARS + 1, 65_536, 65_537, 300_000):
             text = "".join(chr(ord("a") + i % 26) for i in range(size))
-            reference = TruncatingStringIO(limit=MAX_OUTPUT_CHARS)
+            reference = TextStream(unit="chars", head=15_000, tail=15_000)
             reference.write(text)
-            assert _bounded(text) == reference.getvalue()
+            assert _bounded(text) == render_output(reference.close())
             if size > MAX_OUTPUT_CHARS:
-                assert text[: MAX_OUTPUT_CHARS // 2] in _bounded(text)
-                assert text[-(MAX_OUTPUT_CHARS // 2) :] in _bounded(text)
+                assert _bounded(text) == (
+                    text[:15_000]
+                    + f"\n[... {size - 30_000:,} chars omitted; full output not kept]\n"
+                    + text[-15_000:]
+                )
+            else:
+                assert _bounded(text) == text
 
     async def test_close_and_restart(self, tmp_path):
         """Session should be closeable and re-startable."""
