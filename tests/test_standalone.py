@@ -965,3 +965,70 @@ class TestStandaloneAgentIdSharding:
         assert key.startswith("nooa-")
         assert len(key) <= 64
         assert observed_keys == [key]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("with_middleware", [False, True])
+    async def test_explicit_cache_key_is_preserved(self, with_middleware: bool) -> None:
+        """Explicit request keys survive both runtime call paths unchanged."""
+        explicit_key = "caller-selected-cache-key"
+
+        class ExplicitKeyStrategy(PredictStrategy):
+            def _build_sampling_kwargs(self) -> dict[str, Any]:
+                return {**super()._build_sampling_kwargs(), "prompt_cache_key": explicit_key}
+
+        fake_llm = _CaptureKwargsLLM(scripted_responses=[_resp('{"value": "ok"}')])
+
+        class Summarizer(Agent, llm=fake_llm):
+            @strategy(ExplicitKeyStrategy())
+            async def summarise(self, text: str) -> str:
+                """Summarise the input."""
+                ...
+
+        async def passthrough(ctx, call_next):
+            return await call_next(ctx)
+
+        agent = Summarizer()
+        if with_middleware:
+            agent.event_manager.intercept("llm_call", passthrough)
+        await agent.summarise("input")
+
+        assert fake_llm.prompt_cache_keys == [explicit_key]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("with_middleware", [False, True])
+    async def test_same_agent_different_strategies_get_different_keys(
+        self, with_middleware: bool
+    ) -> None:
+        """Strategy identity separates default keys within the same agent."""
+
+        class AlternatePredictStrategy(PredictStrategy):
+            pass
+
+        fake_llm = _CaptureKwargsLLM(scripted_responses=[_resp('{"value": "ok"}')] * 3)
+
+        class Summarizer(Agent, llm=fake_llm):
+            @strategy(PredictStrategy())
+            async def summarise(self, text: str) -> str:
+                """Summarise the input."""
+                ...
+
+            @strategy(AlternatePredictStrategy())
+            async def alternate(self, text: str) -> str:
+                """Summarise the input."""
+                ...
+
+        async def passthrough(ctx, call_next):
+            return await call_next(ctx)
+
+        agent = Summarizer()
+        if with_middleware:
+            agent.event_manager.intercept("llm_call", passthrough)
+        await agent.summarise("input")
+        await agent.alternate("input")
+        await agent.summarise("input")
+
+        first, alternate, repeated = fake_llm.prompt_cache_keys
+        assert first is not None
+        assert alternate is not None
+        assert first == repeated
+        assert first != alternate
