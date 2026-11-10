@@ -72,10 +72,13 @@ async def tail(path: str, *, poll_interval: float = 0.5, max_line_bytes: int = 1
                         yield text
                     continued = False
                 elif len(partial) >= max_line_bytes:
+                    # A cut between the \r and \n of a CRLF keeps the \r for
+                    # the next piece: it may end this line, not belong to it.
+                    held = b"\r" if partial.endswith(b"\r") and len(partial) > 1 else b""
                     # A piece cut inside a character decodes to "" until the
                     # rest arrives (the decoder keeps those bytes): skip it.
-                    text = decoder.decode(partial)
-                    partial = b""
+                    text = decoder.decode(partial[: len(partial) - len(held)])
+                    partial = held
                     if text:
                         continued = True
                         yield text
