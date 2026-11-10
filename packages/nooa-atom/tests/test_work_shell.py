@@ -124,10 +124,9 @@ async def test_direct_run_keeps_long_output_until_aclose(tmp_path):
         assert Path(path).read_text() == out
     short = await sh.run("echo hi")
     assert (short.stdout, short.stdout_path, short.stderr_path) == ("hi\n", None, None)
-    assert sorted(p.name for p in Path(r.stdout_path).parent.iterdir()) == [
-        "cmd-1.stderr",
-        "cmd-1.stdout",
-    ]  # short output keeps no file
+    assert sorted(Path(r.stdout_path).parent.iterdir()) == sorted(
+        [Path(r.stdout_path), Path(r.stderr_path)]
+    )  # short output keeps no file
     await sh.aclose()
     assert not Path(r.stdout_path).exists() and not Path(r.stderr_path).exists()
 
@@ -136,10 +135,7 @@ async def test_direct_run_output_limit_marker():
     sh = Shell(max_output=1000)
     r = await sh.run("head -c 2000000 /dev/zero | tr '\\0' a")
     assert r.stdout_path and Path(r.stdout_path).stat().st_size == 1000
-    assert (
-        f"over the 1,000-byte output limit: {r.stdout_path} holds only the first 1,000 of "
-        "2,000,000 bytes]"
-    ) in r.stdout
+    assert f"; {r.stdout_path} holds the first 1,000 of 2,000,000 bytes]" in r.stdout
     await sh.aclose()
     assert not Path(r.stdout_path).exists()
 
@@ -148,11 +144,14 @@ async def test_output_limit_under_the_summary_size_is_reported():
     sh = Shell(max_output=1000)
     small = await sh.run("head -c 2000 /dev/zero | tr '\\0' a")
     assert small.stdout == "a" * 2000  # whole from memory although the file stops at 1,000
-    big = await sh.run("head -c 900000 /dev/zero | tr '\\0' a")
-    omitted = 900_000 - 1000 - (1_048_576 - 262_144)
-    assert f"[... {omitted:,} bytes omitted; over the 1,000-byte output limit" in big.stdout
-    assert big.stdout_path and big.stdout.startswith("a" * 1000 + "\n[... ")
-    assert big.stdout.endswith("]\n" + "a" * (900_000 - 1000 - omitted))
+    big = await sh.run("head -c 1100000 /dev/zero | tr '\\0' a")
+    omitted = 1_100_000 - 1_048_576  # the head and tail stay in memory: 256 KiB + 768 KiB
+    assert big.stdout == (
+        "a"
+        * 262_144
+        + f"\n[... {omitted:,} bytes omitted; {big.stdout_path} holds the first 1,000 of "
+        "1,100,000 bytes]\n" + "a" * 786_432
+    )
     await sh.aclose()
 
 
@@ -377,7 +376,7 @@ async def test_output_limit_is_enforced_while_writing(manager, tmp_path):
     cmd = "head -c 2000000 /dev/zero | tr '\\0' a"
     r = await manager.launch(Shell(max_output=1000).run(cmd))
     assert Path(r.stdout_path).stat().st_size == 1000
-    assert "holds only the first 1,000 of 2,000,000 bytes]" in r.stdout
+    assert "holds the first 1,000 of 2,000,000 bytes]" in r.stdout
     assert r.stdout.endswith("a" * 100)  # the tail is still shown
     sh = manager.launch(Shell(tmp_path, max_output=1000), name="sh")
     r = await sh.send("head -c 2000000 /dev/zero | tr '\\0' b; echo done >&2")
@@ -1341,3 +1340,60 @@ async def test_the_cell_deadline_names_the_shell_command_it_stopped(tmp_path):
         assert "self.jobs.launch(sh.run(cmd), name=...)" in message
         r = await sh.run("echo alive", timeout=10)
         assert (r.returncode, r.stdout) == (0, "alive\n")
+
+
+# ---- nooa.snapshot: the notation, the limits and the spill folder (PR 2b) ----------
+
+
+async def test_cut_output_is_render_output_of_the_stream(tmp_path):
+    """Head 256 KiB, tail 768 KiB (bytes), one render_output line naming the file."""
+    from nooa_atom.agent import work_shell
+
+    assert (work_shell._SUMMARY_BYTES, work_shell._HEAD_BYTES, work_shell._TAIL_BYTES) == (
+        1_048_576,
+        262_144,
+        786_432,
+    )
+    assert work_shell._MAX_OUTPUT_BYTES == 64 * 1024 * 1024
+    data = "".join(f"{i:07d}\n" for i in range(150_000))  # 1,200,000 bytes
+    (tmp_path / "o").write_text(data)
+    sh = Shell(tmp_path)
+    try:
+        r = await sh.run(f"cat {tmp_path / 'o'}")
+        assert r.stdout == (
+            data[:262_144]
+            + f"\n[... {1_200_000 - 1_048_576:,} bytes omitted; full output: {r.stdout_path}]\n"
+            + data[-786_432:]
+        )
+        assert Path(r.stdout_path).read_text() == data
+        assert Path(r.stdout_path).name.startswith("nooa-output-")
+    finally:
+        await sh.aclose()
+
+
+async def test_direct_runs_share_one_spill_folder_that_keeps_the_newest(tmp_path):
+    """One SpillDir per bash session (20 files, 64 MiB): older paths may stop existing."""
+    sh = Shell(tmp_path)
+    try:
+        big = "head -c 1100000 /dev/zero | tr '\\0' a; head -c 1100000 /dev/zero | tr '\\0' b >&2"
+        first = await sh.run(big)
+        spills = sh._spills
+        assert spills is not None and (spills.max_files, spills.max_bytes) == (20, 64 * 2**20)
+        assert Path(first.stdout_path).parent == Path(first.stderr_path).parent
+        paths = [first.stdout_path, first.stderr_path]
+        for _ in range(10):  # 20 more cut streams: the oldest closed files go first
+            r = await sh.run(big)
+            paths += [r.stdout_path, r.stderr_path]
+            assert sh._spills is spills
+        with pytest.raises(FileNotFoundError):
+            open(first.stdout_path, "rb")  # noqa: SIM115
+        assert all(Path(p).exists() for p in paths[-18:])
+    finally:
+        await sh.aclose()
+    assert not any(Path(p).exists() for p in paths)
+
+
+async def test_launched_command_spills_into_its_job_directory(manager, tmp_path):
+    r = await manager.launch(Shell().run("seq 1 200000"))
+    assert r.stdout_path is not None
+    assert Path(r.stdout_path).is_relative_to(tmp_path / "scratch")  # the job's scratch dir

@@ -21,19 +21,25 @@ the Shells started under it; a launched Shell closes with its job. Inside a
 harness's ``preserve_background_services()`` scope, closing ends bash only:
 that external harness owns (and must clean up) the background processes.
 
-A command's stdout and stderr are read through pipes into files, each up to
-an output limit (past it, bytes are counted but not kept, and the summary says
-so): in the job's scratch directory when launched, else in the Shell's own
-output directory. A ``CommandResult`` carries a bounded summary of each stream
-and the file path when the summary was cut (short output keeps no file).
+A command's stdout and stderr are each read through a pipe into a bounded
+``nooa.snapshot.TextStream`` (bytes): the first 256 KiB and the last 768 KiB
+stay in memory, and the whole stream is spilled to a file, up to the output
+limit. A ``CommandResult`` carries each stream in ``render_output``'s notation
+(whole up to 1 MiB, else ``HEAD``, one ``[... N bytes omitted; ...]`` line
+that names the file, ``TAIL``) and the file path when the text was cut (short
+output keeps no file).
 
-Retention of those files: a job's are removed when the job is pruned or its
-manager closes. A direct ``run``'s are removed when that Shell closes
-(``aclose``, ``async with`` exit) or, for a Shell started under an owner, when
-the owner closes: under an owner they outlive a dropped Shell (``r = await
-Shell().run(...)`` in a cell keeps ``r.stdout_path`` until the session ends).
-A Shell with no owner that is dropped unclosed keeps them while any result
-naming them is alive.
+Retention of those files: one ``SpillDir`` (at most 20 files, 64 MiB) per
+bash session holds a direct run's files; it keeps the newest and deletes the
+oldest closed files when it needs room, so a path in an earlier result may no
+longer exist (opening it raises ``FileNotFoundError``). A launched command's
+files are in its job's scratch directory and are removed when the job is
+pruned or its manager closes. A direct ``run``'s are removed when that Shell
+closes (``aclose``, ``async with`` exit) or, for a Shell started under an
+owner, when the owner closes: under an owner they outlive a dropped Shell
+(``r = await Shell().run(...)`` in a cell keeps ``r.stdout_path`` until the
+session ends). A Shell with no owner that is dropped unclosed keeps them while
+any result naming them is alive.
 """
 
 from __future__ import annotations
@@ -52,11 +58,12 @@ import tempfile
 import weakref
 from dataclasses import dataclass
 from pathlib import Path
-from typing import IO, Annotated, Any, Literal
+from typing import Annotated, Any, Literal
 
 from nooa import hidden
 from nooa.agentdoc import spec
 from nooa.runtime.cell_deadline import deadline_cancel
+from nooa.snapshot import SpillDir, SpillTarget, Text, TextStream, render_output
 from nooa.tools import BashSession
 from nooa_atom.agent.metrics import atom_metrics
 from nooa_atom.agent.work_manager import _progress_sink, current_name, describe, job_dir
@@ -129,9 +136,10 @@ _CLOSED_DURING = "the shell was closed while this command ran; the command was s
 class CommandResult:
     """One command's outcome: exit code, output, and bash's directory after it.
 
-    ``stdout``/``stderr``: whole up to 1 MiB, else head+tail around a marker;
-    ``*_path`` then names the capture (up to ``max_output``, default 64 MiB),
-    kept while the job is listed (direct ``run``: until its Shell/session closes).
+    ``stdout``/``stderr``: whole up to 1 MiB, else head+tail around a
+    ``[... N bytes omitted; ...]`` line; ``*_path``: that file (to 3.2 MiB),
+    kept while the job is listed (direct ``run``: until its Shell/session
+    closes) or evicted.
     """
 
     returncode: int
@@ -146,26 +154,19 @@ class CommandResult:
 
 
 class _Capture:
-    """One stream into a file, up to ``limit`` bytes; the last bytes also in memory."""
+    """One stream as a bounded ``TextStream`` (bytes): head and tail in memory, the rest spilled.
 
-    def __init__(self, path: str | None, limit: int) -> None:
-        self.path = path
-        self.limit = limit
-        self.file: IO[bytes] = open(path, "w+b") if path else tempfile.TemporaryFile()  # noqa: SIM115
-        self.written = 0
-        self.total = 0
-        self.tail = bytearray()
+    ``target``: the stream's spill file (a ``SpillDir`` target), or ``None``
+    to keep memory only.
+    """
+
+    def __init__(self, target: SpillTarget | None) -> None:
+        self.stream = TextStream(unit="bytes", head=_HEAD_BYTES, tail=_TAIL_BYTES, spill=target)
         self.progress: Any = None  # a managed job's preview stream (work_progress)
 
     def feed(self, chunk: bytes) -> None:
-        self.total += len(chunk)
-        room = self.limit - self.written
-        if room > 0:
-            part = chunk[:room]
-            self.file.write(part)
-            self.written += len(part)
-        self.tail += chunk
-        del self.tail[:-_TAIL_BYTES]
+        with contextlib.suppress(ValueError):  # closed: late output has no reader
+            self.stream.write(chunk)
 
     async def pump(self, stream: asyncio.StreamReader) -> None:
         with contextlib.suppress(Exception):
@@ -176,50 +177,38 @@ class _Capture:
             if self.progress is not None:
                 self.progress.feed(b"", final=True)
 
-    def summary(self) -> tuple[str, str | None]:
-        """The stream's text, or its head and tail around a marker; and the path if cut."""
-        self.file.flush()
-        self.file.seek(0)
-        if self.total <= _SUMMARY_BYTES and self.total <= self.written:
-            return self.file.read(self.total).decode("utf-8", errors="replace"), None
-        # The file holds the first ``written`` bytes (maybe fewer than a head, under a
-        # small max_output) and memory the last ones; the marker counts what neither kept.
-        head_bytes = self.file.read(_HEAD_BYTES)
-        kept_tail = min(len(self.tail), self.total - len(head_bytes))
-        tail_bytes = bytes(self.tail[len(self.tail) - kept_tail :])
-        omitted = self.total - len(head_bytes) - kept_tail
-        if omitted == 0:  # head and tail meet: the text is whole even though the file is cut
-            return (head_bytes + tail_bytes).decode("utf-8", errors="replace"), None
-        head = head_bytes.decode("utf-8", errors="replace")
-        tail = tail_bytes.decode("utf-8", errors="replace")
-        if self.total > self.written:
-            where = (
-                f"over the {self.limit:,}-byte output limit: {self.path} holds only the "
-                f"first {self.written:,} of {self.total:,} bytes"
-                if self.path
-                else f"over the output limit; output not kept ({self.total:,} bytes)"
-            )
-        else:
-            where = f"full output: {self.path}" if self.path else "full output not kept"
-        return f"{head}\n[... {omitted:,} bytes omitted; {where}]\n{tail}", self.path
+    def text(self, *, final: bool) -> Text:
+        """The stream so far (``final``: closed, its spill file kept only if cut)."""
+        return self.stream.close() if final else self.stream.snapshot()
 
     def close(self) -> None:
         with contextlib.suppress(Exception):
-            self.file.close()
+            self.stream.close()
 
 
-def _captures(directory: Path | None, stem: str, limit: int) -> tuple[_Capture, _Capture]:
-    if directory is None:
-        return _Capture(None, limit), _Capture(None, limit)
-    return (
-        _Capture(str(directory / f"{stem}.stdout"), limit),
-        _Capture(str(directory / f"{stem}.stderr"), limit),
-    )
+def _summary(text: Text) -> tuple[str, str | None]:
+    """A stream's text in ``render_output``'s notation, and its spill path if it was cut."""
+    full = text.full
+    return render_output(text), (full.path if full is not None and not text.complete else None)
 
 
-def _result(code: int, timed_out: bool, out: _Capture, err: _Capture, cwd: str) -> CommandResult:
-    stdout, stdout_path = out.summary()
-    stderr, stderr_path = err.summary()
+def _captures(spills: SpillDir | None, limit: int) -> tuple[_Capture, _Capture]:
+    """stdout's and stderr's captures, each spilling into ``spills`` up to ``limit`` bytes."""
+
+    def target() -> SpillTarget | None:
+        if spills is None or limit <= 0:
+            return None
+        share = spills.max_bytes // spills.max_files if spills.max_files else 0
+        return spills.target(max_bytes=min(limit, share))
+
+    return _Capture(target()), _Capture(target())
+
+
+def _result(
+    code: int, timed_out: bool, out: _Capture, err: _Capture, cwd: str, *, final: tuple[bool, bool]
+) -> CommandResult:
+    stdout, stdout_path = _summary(out.text(final=final[0]))
+    stderr, stderr_path = _summary(err.text(final=final[1]))
     return CommandResult(code, timed_out, stdout, stderr, cwd, stdout_path, stderr_path)
 
 
@@ -444,6 +433,8 @@ class Shell:
         # aclose or the owner), else the Shell's own (aclose, or garbage once
         # neither the Shell nor a result naming it is alive).
         self._output: Path | tempfile.TemporaryDirectory[str] | None = None
+        # Direct runs' spill folder, inside ``_output``: one per bash session (aclose ends it).
+        self._spills: SpillDir | None = None
         self._lingering: set[asyncio.Task[None]] = set()
         self._count = itertools.count(1)
         self._note = ""
@@ -635,8 +626,9 @@ class Shell:
             pumps, self._lingering = self._lingering, set()
             own_dir, self._own_dir = self._own_dir, None
             output, self._output = self._output, None
+            spills, self._spills = self._spills, None
             closing = self._closing = asyncio.ensure_future(
-                self._cleanup(start, session, pumps, own_dir, output)
+                self._cleanup(start, session, pumps, own_dir, output, spills)
             )
         await asyncio.shield(closing)
 
@@ -647,10 +639,13 @@ class Shell:
         pumps: set[asyncio.Task[None]],
         own_dir: tempfile.TemporaryDirectory[str] | None,
         output: Path | tempfile.TemporaryDirectory[str] | None = None,
+        spills: SpillDir | None = None,
     ) -> None:
         for pump in pumps:
             pump.cancel()
         await asyncio.gather(*pumps, return_exceptions=True)
+        if spills is not None:
+            spills.close()  # its files; the folder itself goes with ``output``
         if start is not None:
             await asyncio.gather(start, return_exceptions=True)  # it closes what it started
         if session is not None:
@@ -685,12 +680,21 @@ class Shell:
         output = self._output
         return output if isinstance(output, Path) else Path(output.name)
 
-    def _retain(self, result: CommandResult, out: _Capture, err: _Capture) -> None:
-        """Keep a direct run's cut captures; remove the files of uncut streams."""
-        for capture, path in ((out, result.stdout_path), (err, result.stderr_path)):
-            if path is None and capture.path:
-                with contextlib.suppress(OSError):
-                    os.unlink(capture.path)  # short: whole in the summary
+    def _spill_dir(self, job_directory: Path | None) -> SpillDir:
+        """The spill folder of a command's captures (the defaults: 20 files, 64 MiB).
+
+        A launched command's files go in its job's directory (kept while the
+        job is listed); a direct run's in this Shell's one folder, in its
+        output directory (see ``_output``), until the Shell or its owner closes.
+        """
+        if job_directory is not None:
+            return SpillDir(str(job_directory))
+        if self._spills is None:
+            self._spills = SpillDir(str(self._output_path()))
+        return self._spills
+
+    def _retain(self, result: CommandResult) -> None:
+        """Keep a direct run's cut captures (a stream's close deletes an uncut one's file)."""
         output = self._output
         if isinstance(output, tempfile.TemporaryDirectory) and (
             result.stdout_path or result.stderr_path
@@ -713,7 +717,7 @@ class Shell:
                 self._own_dir = tempfile.TemporaryDirectory(prefix="nooa-shell-")
             directory = Path(self._own_dir.name)
         stem = f"cmd-{next(self._count)}"
-        out, err = _captures(kept or self._output_path(), stem, self._max_output)
+        out, err = _captures(self._spill_dir(kept), self._max_output)
         fifos = [directory / f"{stem}.out.fifo", directory / f"{stem}.err.fifo"]
         source = "/dev/null"
         if stdin is not None:  # a file, written before the command starts
@@ -801,9 +805,12 @@ class Shell:
                 notes.insert(0, cwd_note)
             if timed_out:
                 notes.append(_timeout_note(timeout))
-            result = _result(code, timed_out, out, err, str(session.cwd))
+            # A stream whose writer is gone is final (closed); one a background
+            # job still writes to is read as it is now, and closed when it ends.
+            final = (pumps[0][0].done(), pumps[1][0].done())
+            result = _result(code, timed_out, out, err, str(session.cwd), final=final)
             if kept is None:
-                self._retain(result, out, err)
+                self._retain(result)
         finally:
             if progress is not None:
                 progress.close()
@@ -812,7 +819,7 @@ class Shell:
                 if pump.done():
                     transport.close()
                     capture.close()
-                else:  # a background job still writes: bounded by the output limit
+                else:  # a background job still writes: bounded by head, tail and the spill cap
                     self._lingering.add(pump)
                     pump.add_done_callback(
                         lambda _t, tr=transport, cap=capture: (tr.close(), cap.close())
