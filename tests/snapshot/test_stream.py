@@ -369,6 +369,26 @@ def test_chars_stream_rejects_bytes(data: object) -> None:
     assert stream.close() == Text(head="ok", tail="", length=2, unit="chars", reason=None)
 
 
+@pytest.mark.parametrize("data", [10, [1, 2], 1.5, None, object()])
+def test_bytes_stream_rejects_non_bytes(data: object) -> None:
+    # Severin's repro (#515): write(10) used to record ten NUL bytes.
+    stream = _stream("bytes", head=100, tail=10)
+
+    with pytest.raises(TypeError, match="bytes TextStream"):
+        stream.write(data)  # type: ignore[arg-type]
+
+    assert stream.close() == Text(head=b"", length=0, unit="bytes")
+
+
+def test_bytes_stream_accepts_bytes_like_values() -> None:
+    stream = _stream("bytes", head=100, tail=10)
+    stream.write(b"ab")
+    stream.write(bytearray(b"cd"))
+    stream.write(memoryview(b"xefx")[1:3])
+
+    assert stream.close().head == b"abcdef"
+
+
 def test_bytes_stream_still_accepts_str() -> None:
     stream = TextStream(unit="bytes", head=8, tail=8)
     stream.write("é")

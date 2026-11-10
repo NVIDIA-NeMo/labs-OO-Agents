@@ -78,8 +78,8 @@ class TextStream:
     ``TextStream(*, unit, head, tail, spill=None)``, all keyword-only:
 
     - ``unit``: ``"chars"`` (``write`` takes ``str``) or ``"bytes"``
-      (``write`` takes ``bytes``, ``bytearray`` or ``str``, which is encoded
-      as UTF-8).
+      (``write`` takes ``bytes``, ``bytearray``, ``memoryview`` or ``str``,
+      which is encoded as UTF-8).
     - ``head``: the units kept from the start.
     - ``tail``: the units kept from the end (a rolling window).
     - ``spill`` (default ``None``): a ``SpillTarget`` to also write the
@@ -234,14 +234,15 @@ class TextStream:
 
     # --- writing ----------------------------------------------------------
 
-    def write(self, data: str | bytes | bytearray) -> None:
+    def write(self, data: str | bytes | bytearray | memoryview) -> None:
         """Append ``data`` to the stream: O(len(data)), memory bounded by ``head + tail``.
 
         A chars stream takes ``str`` only and raises ``TypeError`` for
         anything else (write raw output to a bytes stream, which keeps it as
-        written). A bytes stream takes ``bytes`` or ``bytearray``; a ``str``
-        is encoded as UTF-8 (surrogate escapes as their raw bytes, a lone
-        surrogate as ``\\udXXXX`` text). While a spill file is active,
+        written). A bytes stream takes ``bytes``, ``bytearray`` or
+        ``memoryview`` (its raw bytes) and raises ``TypeError`` for anything
+        else but ``str``; a ``str`` is encoded as UTF-8 (surrogate escapes as
+        their raw bytes, a lone surrogate as ``\\udXXXX`` text). While a spill file is active,
         ``data`` is also written to it, up to ``SpillTarget.max_bytes``
         (a chars stream encodes it as a bytes stream would). Raises
         ``ValueError`` after ``close()``.
@@ -249,7 +250,15 @@ class TextStream:
         if self._closed is not None:
             raise ValueError("write to a closed TextStream")
         if self.unit == "bytes":
-            data = _encode(data) if isinstance(data, str) else bytes(data)
+            if isinstance(data, str):
+                data = _encode(data)
+            elif isinstance(data, (bytes, bytearray, memoryview)):
+                data = bytes(data)
+            else:  # ``bytes(10)`` would be ten NUL bytes, ``bytes([1])`` a made-up byte
+                raise TypeError(
+                    f"a bytes TextStream takes bytes, bytearray, memoryview or str, "
+                    f"not {type(data).__name__}"
+                )
             self._spill(data)
             self._last = (self._last + data[-4:])[-4:]
         elif not isinstance(data, str):
