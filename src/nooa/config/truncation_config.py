@@ -7,9 +7,9 @@ Two layers of bounds:
 1. **Whole-context token budget** (optional, applied at assembly):
    ``max_context_tokens``.
 2. **Sub-configs by mechanism**:
-   - ``capture`` (head/tail truncation of raw text streams via
-     ``TruncatingStringIO`` — used for execute_python's stdout / stderr /
-     error fields).
+   - ``capture`` (head/tail truncation of raw text streams: execute_python's
+     stdout / stderr through ``nooa.snapshot.TextStream``, the error field
+     through ``TruncatingStringIO``).
    - ``media_capture`` (``MediaCaptureConfig``): cap on multimodal content
      blocks (images, audio, files) captured by ``show()`` per
      ``execute_python`` cell.
@@ -40,13 +40,16 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class CaptureConfig(BaseModel):
-    """Char budgets for raw text streams captured via ``TruncatingStringIO``.
+    """Char budgets for raw text streams captured at execution time.
 
     These apply at *capture time* (when execute_python writes to stdout / stderr
-    or formats an exception). The captured text is head/tail-truncated to fit
-    the budget, inside a ``<truncated-output>`` ... ``</truncated-output>``
-    wrapper that says how much was cut and where the full text is, if kept.
-    Error text past its hard cap ends in ``...<truncated>``.
+    or formats an exception). stdout / stderr keep their head and tail
+    (``nooa.runtime.output_capture.CaptureBuffer``, a ``nooa.snapshot.TextStream``)
+    around ``render_output``'s cut line, ``[... N chars omitted; full output:
+    PATH]`` or ``[... N chars omitted; full output not kept]``. Error text is
+    head/tail-truncated inside a ``<truncated-output>`` ... ``</truncated-output>``
+    wrapper that says how much was cut; past its hard cap it ends in
+    ``...<truncated>``.
 
     Field naming: ``max_<stream>`` — char count, no ``_chars`` suffix needed
     inside the capture config since every field here is char-based.
@@ -72,10 +75,12 @@ class CaptureConfig(BaseModel):
         bool,
         Field(
             description=(
-                "When True, stdout/stderr capture uses FileBackedTruncatingStringIO "
-                "which streams full output to a temp file on disk while still "
-                "truncating the in-memory representation. The temp file path is "
-                "included in the truncation notice so the LLM can reference it."
+                "When True, stdout/stderr capture also spills the full output to a "
+                "file (up to 64 MiB) while still truncating the in-memory "
+                "representation; the path is in the cut line so the LLM can read it. "
+                "The file comes from the session's SpillDir "
+                "(nooa.runtime.output_capture.capture_spill) when one is set, else a "
+                "temp file kept when the output was cut."
             ),
         ),
     ] = False
@@ -83,7 +88,7 @@ class CaptureConfig(BaseModel):
         str | None,
         Field(
             description=(
-                "A sentence appended to the notice's 'not recoverable' line when a "
+                "A sentence put after the cut line when a "
                 "stream is cut and no file keeps the full output (None: nothing)."
             ),
         ),

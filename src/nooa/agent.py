@@ -94,7 +94,7 @@ class Agent(metaclass=AgentMeta):
     - Structured instances (dataclasses, Pydantic, custom classes) render as `ClassName(field=value, ...)`; a trailing `...` means fields were elided:
         Config(name='foo', enabled=True, ...)
     - The variable itself is **not** truncated — index/iterate it directly to operate on the full data.
-    - Output cut to fit is wrapped in `<truncated-output>`...`</truncated-output>`: it says the cut part is **not recoverable**, or, when file-backed capture is on, names the file with the full output.
+    - Cut output keeps its head and tail around one `[... N chars omitted; full output: PATH]` line (or `full output not kept]`; a PATH may be gone later). A cut error is wrapped in `<truncated-output>`.
     """
 
     # Agent instances should never be serialized as nested values inside other objects.

@@ -346,6 +346,7 @@ class ShellOwner:
         # Direct runs' output files of its Shells: they outlive a dropped Shell
         # and go when the owner closes.
         self._output: tempfile.TemporaryDirectory[str] | None = None
+        self._spills: SpillDir | None = None  # cell output (``spill_dir``)
 
     def _output_dir(self) -> Path | None:
         """A new directory for one Shell's direct-run output (None once closed)."""
@@ -354,6 +355,19 @@ class ShellOwner:
         if self._output is None:
             self._output = tempfile.TemporaryDirectory(prefix="nooa-shells-")
         return Path(tempfile.mkdtemp(prefix="shell-", dir=self._output.name))
+
+    def spill_dir(self) -> SpillDir | None:
+        """The session's spill folder for cell output (20 files, 64 MiB); None once closed.
+
+        Its files go when the owner closes; the folder keeps the newest, so an
+        older cell's path may no longer exist.
+        """
+        if self._spills is None:
+            directory = self._output_dir()
+            if directory is None:
+                return None
+            self._spills = SpillDir(str(directory))
+        return self._spills
 
     def adopt(self, shell: Shell) -> None:
         if self._closed:  # closing is terminal: no bash starts under a closed owner
@@ -369,6 +383,9 @@ class ShellOwner:
         shells = list(self._shells)
         self._shells.clear()
         results = await asyncio.gather(*(s.aclose() for s in shells), return_exceptions=True)
+        spills, self._spills = self._spills, None
+        if spills is not None:
+            spills.close()
         output, self._output = self._output, None
         if output is not None:  # also the output of Shells dropped unclosed
             output.cleanup()

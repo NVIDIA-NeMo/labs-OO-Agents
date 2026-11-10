@@ -196,7 +196,7 @@ class TestL2ToL3Interaction:
 
         assert result.success
         # L2 should have truncated
-        assert "Output too large" in result.stdout or len(result.stdout) <= 1_000
+        assert "chars omitted; full output" in result.stdout or len(result.stdout) <= 1_000
 
         # Now render as L3 would
         event = _make_python_output(stdout=result.stdout)
@@ -598,7 +598,7 @@ class TestCrossLayerPipeline:
         # Execute code that produces large stdout
         result = await agent.runtime.execute_code('print("Z" * 5000)')
         assert result.success
-        assert "Output too large" in result.stdout
+        assert "chars omitted; full output" in result.stdout
 
         # Add as event (simulating what codeact does)
         event = PythonOutput(
@@ -621,7 +621,7 @@ class TestCrossLayerPipeline:
 
         # The L2 truncation wrapper must be present in final context
         full_context = str(messages)
-        assert "Output too large" in full_context
+        assert "chars omitted; full output" in full_context
 
     @pytest.mark.asyncio
     async def test_l2_small_output_survives_full_pipeline(self):
