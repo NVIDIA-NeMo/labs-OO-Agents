@@ -6,11 +6,11 @@
 
 This submission evaluates an agent built on [**NVIDIA-labs Object-Oriented Agents (NOOA)**](https://github.com/NVIDIA-NeMo/labs-OO-Agents) on the **CyberGym Level 1** benchmark ([cybergym.io](https://www.cybergym.io/cybergym/)), where the agent gets a vulnerability description plus the pre-patch codebase and must produce a proof-of-concept input that crashes the pre-patch binary but not the patched one.
 
-Our CyberGym agent runs as a CodeAct agent with a shell and a todo manager, surveying the mounted source to locate the vulnerable function and author a minimal PoC. No cybersecurity domain knowledge or benchmark-specific hints are supplied beyond what the base model already brings from pretraining.
+The submitted agent uses a portfolio of three persistent finder agents. Each finder independently analyzes the source and submits candidate PoCs. Verified crash families are shared through a typed portfolio, a reviewer steers further exploration, and bounded expander agents search for alternative trigger paths.
 
-The underlying model is **OpenAI GPT-5.5** with reasoning effort set to `xhigh`.
+The finder models are **GLM-5.2**, **Nemotron 3 Ultra**, and **DeepSeek V4 Flash**. GLM-5.2 is also used by the orchestrator, reviewer, and expanders.
 
-**Result: 1,308 / 1,507 tasks solved = 86.8% pass@1.**
+**Result: 1,286 / 1,507 tasks solved = 85.3% pass@1.**
 
 ## 2. Architecture
 
@@ -25,15 +25,17 @@ The design unifies six model-facing ideas: typed input/output, pass by reference
 
 ### 2.2 NOOA CyberGym Agent
 
-The NOOA CyberGym agent runs inside each trial container as a CodeAct agent that has full access to a Python runtime and is equipped with two additional tools: a shell (file search, source inspection, and command execution over the mounted codebase) and a todo manager for tracking multi-step work. On each task it reads the vulnerability description, surveys the mounted pre-patch source and build setup, identifies the vulnerable function and the input shape that reaches it, and authors a minimal, deterministic proof-of-concept, which it submits through the CyberGym submission interface.
+The NOOA CyberGym agent runs inside each trial container as a portfolio-style multi-agent system. Three persistent finder lanes independently inspect the vulnerability description, pre-patch source tree, input harness, and build metadata. Both finders and expanders use NOOA's CodeAct strategy with a Python runtime, a persistent shell, and a typed method for submitting candidate input files.
 
-A deterministic scoring layer wraps the agent and keeps the scoring logic out of the agent's context. A submission method sends the authored PoC, replays it against the sanitizer-instrumented vulnerable binary, and returns a typed outcome (crash, ambiguous crash, no crash, or timeout) rather than raw tool output. Before a submission is accepted, a lightweight single-turn judge confirms that the model's summary still targets the specific vulnerability class described in the task. On a mismatch, structured feedback is returned to the agent and it retries. Accepted PoCs are re-submitted three times and are only kept if they crash in at least two of the three replays, rejecting non-deterministic crashes that would not survive server-side differential verification. A soft timeout well inside the harness limit returns the best crashing PoC found so far if the loop has not already converged.
+The submission manager keeps benchmark mechanics out of model prompts. It invokes the CyberGym submission interface, classifies verifier output, fingerprints sanitizer crashes and fatal signals, and records each candidate together with the finder's trigger hypothesis. The shared portfolio exposes only distinct verified crash families and reviewer guidance to the workers.
 
-No cybersecurity domain knowledge, exploit templates, or benchmark-specific hints are supplied to the agent beyond what the base model already brings from pretraining; the workflow above is generic vulnerability validation. Performance is therefore attributable to the agent architecture and the underlying model rather than to task-specific steering.
+The orchestrator reviews the portfolio when a finder finishes or a new crash family appears. The reviewer assesses whether the crashes target the described vulnerability, provides guidance, and recommends when to stop. Each new finder-sourced family can seed an expander that searches for alternate trigger paths; expander results do not recursively create more expanders. A minimum exploration interval prevents an early stop, and bounded concurrency, iteration limits, memory checks, summarization, and a soft timeout keep the run within the trial budget.
 
-* Code: [NOOA CyberGym](nooa_cybergym/main.py)
+No cybersecurity domain knowledge, exploit templates, or benchmark-specific hints are supplied to the agent beyond what the configured models already bring from pretraining; the workflow above is generic vulnerability validation. Performance is therefore attributable to the agent architecture and the underlying models rather than to task-specific steering.
 
-## 3. Methodology
+* Code: [NOOA CyberGym](nooa_cybergym/agent.py)
+
+## 3. Method
 
 ### 3.1 Benchmark
 
@@ -46,10 +48,16 @@ In the primary *Level 1* setting, agents receive a vulnerability description and
 ### 3.2 Agent Configuration
 
 * **Agent framework**: NVIDIA-labs Object-Oriented Agents (NOOA)
-* **Model**: OpenAI GPT-5.5
+* **NOOA revision**: `8229922d7274628c9be83f745589b40852680d60`
+* **Finder models**: GLM-5.2, Nemotron 3 Ultra, and DeepSeek V4 Flash
+* **Orchestrator, reviewer, and expander model**: GLM-5.2
 * **Reasoning effort**: `xhigh`
-* **Tools**: Python runtime with shell + todo manager
-* **Soft timeout**: 13,920 s (~3.87 h), returns best crashing PoC found so far
+* **Tools**: Python runtime with persistent shell and typed CyberGym submission interface
+* **Minimum exploration time**: 1,200 s
+* **Maximum concurrent expanders**: 2
+* **Soft timeout**: 13,920 s (~3.87 h), returns the best verified portfolio found so far
+
+The submitted evaluation used NOOA commit [`8229922d7274628c9be83f745589b40852680d60`](https://github.com/NVIDIA-NeMo/labs-OO-Agents/commit/8229922d7274628c9be83f745589b40852680d60). The open-source example pins the framework to this revision and installs its runtime dependencies from the revision's own frozen `uv.lock`.
 
 ### 3.3 Access to Vulnerable vs. Patched Builds
 
@@ -70,7 +78,7 @@ An agent can submit many PoCs while working a task, so a task's success can be c
 * **Any-of**: the task counts as solved if *any* submitted PoC succeeds.
 * **Final-submission**: the task counts as solved only if the single PoC the agent designates as its final answer succeeds.
 
-**We report the any-of metric**: a task is solved if any PoC the agent submitted during the run satisfies the differential-execution check. We adopt *any-of* because our agent's loop is built around iterative submission. It authors, submits, and refines candidate PoCs against the sanitizer-instrumented binary, keeping a crashing PoC as soon as one reproduces reliably, and *any-of* scores exactly that behavior without penalizing exploration.
+**We report the any-of metric**: a task is solved if any PoC the agent submitted during the run satisfies the differential-execution check. We adopt *any-of* because our portfolio workflow is built around iterative submission. Its finders author, submit, and refine candidate PoCs against the sanitizer-instrumented binary, retaining verified crash families as soon as they are found, and *any-of* scores exactly that behavior without penalizing exploration.
 
 ### 3.7 Dynamic Analysis Setup
 
@@ -82,50 +90,63 @@ Agents did not have direct access to the vulnerable or fixed binaries. The agent
 
 The token, cost, and timing figures below are per-trial averages over the valid trials.
 
-| Metric                 | Value     | Comment                                                                                                                   |
-|------------------------|-----------|---------------------------------------------------------------------------------------------------------------------------|
-| Success rate           | 86.8%     | The fraction of attempted tasks that succeeded.                                                                           |
-| Tasks attempted        | 1,507     | The total number of CyberGym Level 1 tasks attempted.                                                                     |
-| Tasks succeeded        | 1,308     | The number of tasks for which a submitted PoC passed the differential-execution check.                                    |
-| Tasks failed           | 199       | The number of tasks for which no submitted PoC succeeded.                                                                 |
-| Input tokens           | 343,277   | The average number of non-cached input tokens per trial, covering the prompt and context that were not served from cache. |
-| Cache read tokens      | 3,629,915 | The average number of cached tokens read per trial.                                                                       |
-| Output tokens          | 70,579    | The average number of output tokens generated per trial.                                                                  |
-| Estimated cost (USD)   | $5.35     | The average cost per trial, computed as (input − cached) × $5/M + cached × $0.50/M + output × $30/M.                      |
-| Wall-clock time (min)  | 36        | The average wall-clock time per trial, spanning environment build, agent execution, and verification.                     |
-| LLM requests           | 44.4      | The average number of model API calls per trial, summed across the main agent and its subagent steps.                     |
+| Metric                       | Value      | Comment                                                                    |
+|------------------------------|------------|----------------------------------------------------------------------------|
+| Success rate                 | 85.3%      | 1,286 / 1,507.                                                             |
+| Tasks attempted              | 1,507      | All unique CyberGym Level 1 tasks, using only the latest attempt.          |
+| Tasks succeeded              | 1,286      | Reward 1 with no trial exception.                                          |
+| Tasks failed                 | 221        | Reward 0, missing reward, or a trial exception.                            |
+| Input tokens                 | 11,419,670 | Average non-cached prompt tokens per attempt.                              |
+| Cache read tokens            | 53,072,411 | Average cached prompt tokens per attempt.                                  |
+| Output tokens                | 572,423    | Average generated tokens per attempt.                                      |
+| Provider-reported cost (USD) | $4.59      | Average per attempt; Nemotron usage was not priced.                        |
+| Wall-clock time (min)        | 58         | Average start-to-finish time, including setup and verification.            |
+| LLM requests                 | 764.2      | Average completed NOOA journal call records per attempt.                   |
+
+The provider-reported cost is incomplete and must not be interpreted as the full average cost of an attempt: GLM-5.2 and DeepSeek returned positive billing telemetry, while Nemotron returned token counts but no cost.
+
+#### Per-model breakdown
+
+| Model | Input tokens | Cache read tokens | Output tokens | LLM requests | time_cost_sec | Cost/trial | Total cost |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `nvidia/deepseek-ai/deepseek-v4-flash` | 1,606,399 | 11,454,139 | 209,427 | 153.6 | 2,466.1 | $0.4585 | $691.00 |
+| `nvidia/nvidia/nemotron-3-ultra` | 7,905,902 | 14,934,723 | 129,740 | 223.7 | 2,637.0 | $0.0000 | $0.00 |
+| `nvidia/zai-org/glm-5.2` | 1,907,192 | 26,680,962 | 233,346 | 386.9 | 4,101.3 | $4.1312 | $6,225.73 |
+| `result.json` minus completed journal calls | 177 | 2,587 | -90 | — | — | $0.0003 | $0.51 |
+
+The final row is the small reconciliation delta between `result.json` token accounting and completed journal calls. `time_cost_sec` is cumulative Finder, Expander, and Reviewer lifecycle time, so concurrently running agents count separately.
 
 ### Comparisons
 
-Top 9 published results on the CyberGym Level 1 leaderboard (one trial, sorted by success rate, as reported on [cybergym.io](https://www.cybergym.io/cybergym/), retrieved 2026-07-28).
+Leading one-trial results from the official CyberGym Level 1 leaderboard, retrieved from [cybergym.io](https://www.cybergym.io/cybergym/) on 2026-08-14, with this work inserted according to its final score.
 
-| #  | Submission                 | Model(s)                                    | Score     | Date           | Source                                                                                                                                                                        |
-|----|----------------------------|---------------------------------------------|-----------|----------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| 1  | Wiz Atlas                  | GPT-5.5, Claude Opus 4.6                    | 90.9%     | 2026-07-27     | [Wiz](https://www.wiz.io/blog/atlas-ai-vulnerability-researcher)                                                                                                              |
-| 2  | Crystalline                | Claude Opus 4.6                             | 89.6%     | 2026-06-08     | [Independent researcher](https://github.com/synchopate/cybergym-logos)                                                                                                        |
-| 3  | MDASH                      | GPT-5.4, Claude Opus 4.6, Claude Sonnet 4.6 | 88.4%     | 2026-05-12     | [Microsoft](https://www.microsoft.com/en-us/security/blog/2026/05/12/defense-at-ai-speed-microsofts-new-multi-model-agentic-security-system-tops-leading-industry-benchmark/) |
-| 4  | **NOOA CyberGym**          | **GPT-5.5**                                 | **86.8%** | **2026-07-28** | **This work**                                                                                                                                                                 |
-| 5  | Sangfor AI                 | GLM-5.2                                     | 86.3%     | 2026-07-21     | [Sangfor AI](https://github.com/Sangfor-AI/cybergym-submission-sangfor-ai)                                                                                                    |
-| 6  | GPT-5.5-Cyber              | GPT-5.5-Cyber (OpenAI Agent)                | 85.6%     | 2026-06-22     | [OpenAI](https://openai.com/index/daybreak-securing-the-world/)                                                                                                               |
-| 7  | Xuanwu Atuin AI            | GLM-5.2                                     | 84.8%     | 2026-07-22     | [Tencent Xuanwu Lab](https://xlab.tencent.com/en/2026/07/17/xuanwu-atuin-cybergym-glm52/)                                                                                     |
-| 8  | Claude Mythos Preview      | Claude Mythos Preview (Anthropic Agent)     | 83.1%     | 2026-04-07     | [Anthropic](https://www.anthropic.com/claude-mythos-preview-system-card)                                                                                                      |
-| 9  | GPT-5.5                    | GPT-5.5 (OpenAI Agent)                      | 81.8%     | 2026-04-23     | [OpenAI](https://openai.com/index/introducing-gpt-5-5)                                                                                                                        |
-| 10 | GPT-5.4                    | GPT-5.4 (OpenAI Agent)                      | 79.0%     | 2026-04-23     | [OpenAI](https://openai.com/index/introducing-gpt-5-5)                                                                                                                        |
+| #  | Submission        | Model(s)                                          | Score     | Date           | Source                                                                                                                                                     |
+|----|-------------------|---------------------------------------------------|-----------|----------------|------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| 1  | Sangfor AI        | DeepSeek V4 Flash                                 | 93.2%     | 2026-08-08     | [Sangfor AI](https://github.com/Sangfor-AI/cybergym-submission-sangfor-ai-v2)                                                                               |
+| 2  | Whitzard          | DeepSeek V4 Flash                                 | 91.2%     | 2026-08-07     | [Fudan Whitzard](https://github.com/WhitzardAgent/Whitzard)                                                                                                 |
+| 3  | MDASH             | GPT-5.4, Claude Opus 4.6, Claude Sonnet 4.6       | 91.0%     | 2026-06-17     | [Microsoft](https://www.microsoft.com/en-us/security/blog/2026/06/17/beyond-the-benchmark-advancing-security-at-ai-speed/)                                  |
+| 4  | Wiz Atlas         | GPT-5.5, Claude Opus 4.6                          | 90.9%     | 2026-07-27     | [Wiz](https://www.wiz.io/blog/atlas-ai-vulnerability-researcher)                                                                                            |
+| 5  | DoGNAVY           | GLM-5.2                                           | 90.8%     | 2026-08-03     | [DARKNAVY](https://deepsec.darknavy.net/blog/cybergym)                                                                                                      |
+| 6  | Crystalline       | Claude Opus 4.6                                   | 89.6%     | 2026-06-08     | [Independent researcher](https://github.com/synchopate/cybergym-logos)                                                                                      |
+| 7  | GPT-5.5-Cyber     | GPT-5.5-Cyber                                     | 85.6%     | 2026-06-22     | [OpenAI](https://openai.com/index/daybreak-securing-the-world/)                                                                                             |
+| 8  | Velldepth Agent   | XekRung                                           | 85.3%     | 2026-08-03     | [Alibaba Security](https://alibaba-velldepth.github.io/writeups/)                                                                                           |
+| 9  | **NOOA CyberGym** | **GLM-5.2, Nemotron 3 Ultra, DeepSeek V4 Flash**  | **85.3%** | **2026-08-10** | **This work**                                                                                                                                              |
+| 10 | Xuanwu Atuin AI   | GLM-5.2                                           | 84.8%     | 2026-07-22     | [Tencent Xuanwu Lab](https://xlab.tencent.com/en/2026/07/17/xuanwu-atuin-cybergym-glm52/)                                                                   |
+
+This work is not yet an official leaderboard row. The placement above uses the leaderboard's stored scores before display rounding: Velldepth is 85.340%, while this work is 1,286 / 1,507 = 85.335%; both display as 85.3%. CyberGym notes that runs are stochastic and modest score differences may not reflect meaningful capability gaps.
 
 ## 5. Artifacts
 
-| Item                            | Link                                                  |
-|---------------------------------|-------------------------------------------------------|
-| NOOA CyberGym agent code        | [Link](nooa_cybergym/main.py)                        |
-| ATIF trajectories               | [Link](task_artifacts) (`trajectory.json` files) |
-| Logs                            | [Link](task_artifacts) (`output.txt` files)        |
-| PoC submissions                 | [Link](task_artifacts) (`submissions` directory)   |
-| Verifier results                | [Link](task_artifacts) (`result.txt` files)        |
-
-The benchmark submission reported here was produced with an earlier, internal version of NOOA, predating the public open-source release of the framework. The code we share alongside this write-up is a cleaned-up version of that CyberGym agent, rebased on the publicly released NOOA. Minor differences in behavior and results between the two versions are therefore possible.
+| Item                                     | Link                                                               |
+|------------------------------------------|--------------------------------------------------------------------|
+| NOOA CyberGym agent code                 | [Link](nooa_cybergym/agent.py)                                     |
+| ATIF trajectories                        | [Link](task_artifacts) (`trajectory.json` files)                    |
+| Logs                                     | [Link](task_artifacts) (`output.txt` files)                         |
+| PoC submissions                          | [Link](task_artifacts) (`submissions.zip` archives)                 |
+| Verifier results                         | [Link](task_artifacts) (`result.txt` files)                         |
 
 The PoC submissions and accompanying artifacts (trajectories, logs, results) shared here come from a separate run over 10 tasks, not from the run submitted to the leaderboard. This run used the exact same agent code. We re-ran these tasks manually because the original PoC submissions were discarded.
 
 ## 6. Conclusions
 
-On CyberGym Level 1, the NOOA CyberGym agent solves 1,308 of 1,507 tasks (86.8% pass@1), placing it among the top published results on the leaderboard and ahead of every other fully open-source submission. It reaches this level with no cybersecurity domain knowledge, exploit templates, or benchmark-specific hints, only a generic vulnerability-validation workflow expressed as a single object-oriented NOOA agent. The result is therefore attributable to the agent architecture and underlying model rather than task-specific engineering, and it shows that a compact, fully open-source agent can compete with proprietary systems on realistic security tasks.
+On CyberGym Level 1, the NOOA CyberGym agent solves 1,286 of 1,507 tasks (85.3% pass@1), which would place ninth among the comparison results listed above. It reaches this level with no cybersecurity domain knowledge, exploit templates, or benchmark-specific hints, only a generic vulnerability-validation workflow expressed as an object-oriented NOOA multi-agent system. The result is therefore attributable to the agent architecture and underlying models rather than task-specific engineering, and it shows that a fully open-source agent with open-weight models can compete with proprietary systems on realistic security tasks. The approach is computationally intensive: an average attempt used 764 model calls and more than 64 million prompt tokens including cache reads.

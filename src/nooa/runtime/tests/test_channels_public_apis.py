@@ -14,6 +14,7 @@ import asyncio
 import pytest
 
 from nooa.runtime.channels import Channel, QueueManager
+from nooa.runtime.event_manager import EventManager
 
 # ---------------------------------------------------------------------------
 # Channel.drain
@@ -147,3 +148,112 @@ def test_notify_callback_none_clears():
     qm.set_notify_callback(None)
     q.put("x")
     assert calls == []
+
+
+# ---------------------------------------------------------------------------
+# ChannelItemConsumed / ChannelItemsDiscarded, published through event_manager
+# ---------------------------------------------------------------------------
+
+
+def _watched(name: str = "q") -> tuple[QueueManager, Channel[object], list[tuple[str, object]]]:
+    """A queue channel on a real EventManager, and the channel events it publishes."""
+    manager = EventManager()
+    seen: list[tuple[str, object]] = []
+    manager.on("ChannelItemConsumed", lambda e: seen.append(("consumed", e.item)))
+    manager.on("ChannelItemsDiscarded", lambda e: seen.append(("discarded", e.items)))
+    qm = QueueManager(event_manager=manager)
+    return qm, qm.queue(name), seen
+
+
+async def test_consumed_items_are_published_once_each():
+    qm, q, seen = _watched()
+    for item in ("a", "b", "c"):
+        q.put(item)
+    assert await q.get() == "a"
+    assert q.drain() == ["b", "c"]
+    q.put("d")
+    assert await qm.race() == [("q", "d")]
+    assert seen == [("consumed", "a"), ("consumed", "b"), ("consumed", "c"), ("consumed", "d")]
+
+
+def test_items_dropped_without_a_consumer_are_published():
+    qm, q, seen = _watched()
+    for item in ("a", "b", "c"):
+        q.put(item)
+    q.put("e")
+    assert q.flush() == 4
+    q.put("f")
+    q.clear()
+    q.flush()  # nothing left: nothing published
+    q.put("g")
+    qm.remove_channel("q")
+    assert seen == [
+        ("discarded", ["a", "b", "c", "e"]),
+        ("discarded", ["f"]),
+        ("discarded", ["g"]),
+    ]
+
+
+def test_pop_last_publishes_nothing():
+    """``pop_last`` hands the item back to the caller, so nothing was dropped."""
+    _qm, q, seen = _watched()
+    q.put("a")
+    q.put("b")
+    assert q.pop_last() == "b"
+    assert q.snapshot() == ["a"]
+    assert seen == []
+
+
+def test_channel_events_are_never_recorded_and_subscriber_errors_are_contained():
+    qm, q, _seen = _watched()
+    manager = qm._event_manager
+
+    def boom(_event: object) -> None:
+        raise RuntimeError("subscriber failed")
+
+    manager.on("ChannelItemsDiscarded", boom)
+    before = len(manager.all_events())
+    q.put("a")
+    assert q.drain() == ["a"]
+    q.put("b")
+    assert q.flush() == 1
+    assert len(manager.all_events()) == before
+
+
+def test_a_channel_without_an_event_manager_publishes_nothing():
+    q: Channel[str] = Channel("q", "queue")
+    q.put("a")
+    assert q.drain() == ["a"]
+    q.put("b")
+    assert q.flush() == 1
+
+
+# ---------------------------------------------------------------------------
+# Channel.remove
+# ---------------------------------------------------------------------------
+
+
+def test_remove_withdraws_one_item_by_identity_and_publishes_nothing():
+    got: list[object] = []
+    _qm, q, seen = _watched()
+    q.set_on_get(got.append)
+    first, second, equal_not_same = ["a"], ["b"], ["a"]
+    q.put(first)
+    q.put(second)
+    q.put(first)
+
+    assert q.remove(equal_not_same) is False  # equality is not enough
+    assert q.remove(first) is True  # the head occurrence goes first
+    assert q.snapshot() == [second, first]
+    assert q.snapshot()[1] is first
+    assert q.remove(first) is True
+    assert q.remove(first) is False
+    assert q.snapshot() == [second]
+    # A withdraw is neither a consume nor a discard.
+    assert got == []
+    assert seen == []
+
+
+def test_remove_on_event_channel_returns_false():
+    q: Channel[str] = Channel("e", "event")
+    assert q.remove("x") is False

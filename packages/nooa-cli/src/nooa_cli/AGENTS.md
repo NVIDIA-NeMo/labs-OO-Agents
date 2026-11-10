@@ -127,6 +127,11 @@ same contract as an in-repo command module.
 - The **Performance Rule** below applies with extra force: every registered
   entry point is loaded on *every* `nooa` invocation, including `nooa --help`.
   Keep heavy imports inside the handler.
+- **Importing `nooa_cli` must not import `nooa`** (`test_connect_entrypoint.py`
+  checks this). `main()` checks the native-Windows policy itself
+  (`_refuse_unsupported_platform`, kept equal to `nooa._platform` by
+  `packages/nooa-cli/tests/test_cli_platform_check.py`) and switches redirected output to UTF-8
+  on Windows. New console entry points should go through `main()`.
 
 This mirrors the existing `nooa.skills` and `nooa.bundled_configs` groups.
 
@@ -186,6 +191,6 @@ New commands get tab-completion automatically. To enable it:
 nooa completion install   # auto-detects your shell
 
 # Or manually:
-eval "$(_NEMO_COMPLETE=zsh_source nemo)"   # zsh
-eval "$(_NEMO_COMPLETE=bash_source nemo)"  # bash
+eval "$(_NOOA_COMPLETE=zsh_source nooa)"   # zsh
+eval "$(_NOOA_COMPLETE=bash_source nooa)"  # bash
 ```

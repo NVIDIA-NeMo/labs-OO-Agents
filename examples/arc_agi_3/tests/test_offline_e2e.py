@@ -43,11 +43,6 @@ def _have_sdk() -> bool:
         return False
 
 
-@pytest.mark.skipif(not _have_sdk(), reason="ARC-AGI-3 SDK not installed (`uv sync --extra arc`)")
-@pytest.mark.skipif(
-    not os.environ.get("ARC_LLM_API_KEY") or not os.environ.get("ARC_API_KEY"),
-    reason="needs ARC_LLM_API_KEY (gateway) + ARC_API_KEY (offline game download)",
-)
 def _traces_contain(run: Path, needle: str) -> int:
     """Count occurrences of ``needle`` inside llm.input_messages spans (the exact
     bytes sent to the model) across a run's OTLP traces."""
@@ -69,6 +64,11 @@ def _traces_contain(run: Path, needle: str) -> int:
     return hits
 
 
+@pytest.mark.skipif(not _have_sdk(), reason="ARC-AGI-3 SDK not installed (`uv sync --extra arc`)")
+@pytest.mark.skipif(
+    not os.environ.get("ARC_LLM_API_KEY") or not os.environ.get("ARC_API_KEY"),
+    reason="needs ARC_LLM_API_KEY (gateway) + ARC_API_KEY (offline game download)",
+)
 def test_offline_run_makes_progress(tmp_path: Path) -> None:
     results_root = tmp_path / "results" / "arc_agi_3"
     proc = subprocess.run(

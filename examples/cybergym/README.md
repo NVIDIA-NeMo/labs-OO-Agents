@@ -2,41 +2,64 @@
 
 [NOOA](https://github.com/NVIDIA-NeMo/labs-OO-Agents)-based agent for the [CyberGym](https://github.com/sunblaze-ucb/cybergym) benchmark.
 
-This README walks through the one minimal path end to end: run CyberGym's official
+This README walks through the minimal path for running CyberGym's official
 10-task subset behind the CyberGym firewall/proxy. It uses only the task data and
-Docker images for those 10 tasks — you do **not** need the full ~240 GB CyberGym
-dataset.
+Docker images for those tasks—you do **not** need the full ~240 GB dataset.
+
+The agent is a portfolio-style multi-agent system. Three persistent
+finder lanes independently inspect the source and submit PoCs. Verified crash
+families are shared through a typed portfolio, a reviewer steers subsequent
+exploration, and bounded expander agents search for alternative paths from each
+new family. The behavior-defining files (`agent.py`, `main.py`, `shell_tools.py`,
+`submissions.py`, and `util.py`) define the complete agent behavior. The native
+runner and Docker image provide the public CyberGym integration around it.
 
 Each step is a small script under [`scripts/`](scripts/). Read
 [`scripts/config.sh`](scripts/config.sh) to see (and override) every path, model,
 and server setting; the other scripts source it.
 
-See the [technical report](Technical_Report.md) for how the agent works and how we
-evaluated it.
+See the [technical report](Technical_Report.md) for its architecture, runtime
+boundary, reproducibility design, and verification coverage.
 
 ## Requirements
 
 - Linux host with Docker
 - Python 3.12 or 3.13
+- [uv](https://docs.astral.sh/uv/)
 - Git LFS (`git lfs version` should work)
-- LLM credentials (put in `.env`) for the model configured in [`nooa_cybergym/llm_config.yaml`](nooa_cybergym/llm_config.yaml)
+- LLM credentials (put in `.env`) for all models configured in [`nooa_cybergym/llm_config.yaml`](nooa_cybergym/llm_config.yaml)
 
-Put your credentials in a `.env` file in this directory. `llm_config.yaml` only
-names the env var that holds the key (`api_key_env`); the key itself lives in
-`.env`. Which keys you need depends on the model configured there. The default
-model (`openai/gpt-5.5`) uses the public OpenAI API, whose `api_key_env` is
-`OPENAI_API_KEY`:
+The default configuration uses three finder models—GLM-5.2, Nemotron 3 Ultra,
+and DeepSeek V4 Flash—with GLM-5.2 as the orchestrator, reviewer, and expander
+model. It exposes all three through one OpenAI-compatible gateway. Put the
+gateway credential and URL in `.env`:
 
 ```bash
 OPENAI_API_KEY=...
-OPENAI_API_BASE=https://api.openai.com/v1
+OPENAI_BASE_URL=https://your-openai-compatible-gateway.example/v1
 ```
 
-To use a different provider, edit `nooa_cybergym/llm_config.yaml` (set `model_name`,
-`api_base`, and `api_key_env`) and put the matching key in `.env`. The firewall
-already allows `api.openai.com`, `api.anthropic.com`,
-`generativelanguage.googleapis.com`, and `api.together.xyz`; any other endpoint
-must be added via `CYBERGYM_FIREWALL_EXTRA_DOMAINS`.
+Configure the models available through your LLM provider in
+[`nooa_cybergym/llm_config.yaml`](nooa_cybergym/llm_config.yaml). Model names and
+providers must be supported by [LiteLLM](https://docs.litellm.ai/docs/providers).
+The aliases referenced by the finder
+lanes in [`agent.py`](nooa_cybergym/agent.py) must match entries in that file.
+
+| Setting | Where to configure it |
+|---|---|
+| Provider credentials and shared endpoint | `.env` |
+| Model aliases, provider model names, and token limits | `nooa_cybergym/llm_config.yaml` |
+| Finder models | `LANES` in `nooa_cybergym/agent.py` |
+| Orchestrator and reviewer model | `--model` (default: `glm-5.2`) |
+| Expander model | `DEFAULT_MODEL_NAME` in `nooa_cybergym/agent.py` |
+| Reasoning effort | `REASONING_EFFORT` (default: `xhigh`) |
+
+The current plumbing passes one endpoint and credential to every configured
+model. Using provider-specific endpoints or credentials requires adapting the
+client construction in `util.py`. Changing the models can materially change
+results. The runner automatically adds the hostname from `OPENAI_BASE_URL` or
+`OPENAI_API_BASE` to the firewall; use `CYBERGYM_FIREWALL_EXTRA_DOMAINS` only for
+additional hosts.
 
 You do **not** need to set a CyberGym API key: `scripts/setup.sh` generates a
 random local one into `.env` (which is gitignored). It is just a shared token
@@ -48,10 +71,11 @@ between the server and the validation step on your machine.
 scripts/setup.sh
 ```
 
-This creates a virtualenv, generates a local CyberGym API key in `.env`, installs
-and clones CyberGym, fetches the task data for the 10-task subset via Git LFS,
-pulls the matching CyberGym Docker images, installs this runner, and builds the
-agent image. It is safe to re-run.
+This creates a uv virtualenv, generates a local CyberGym API key in `.env`,
+installs and clones CyberGym, fetches the subset via Git LFS, pulls the matching
+Docker images, installs the runner from this example's frozen `uv.lock`, and
+builds the agent image with the pinned NOOA revision. The script is safe to
+re-run.
 
 The subset it installs:
 
@@ -98,7 +122,8 @@ runs/validation_10task_<timestamp>/
         ├── agent/trajectory.json
         └── artifacts/
             ├── output.txt
-            └── submissions.jsonl
+            ├── submissions.jsonl
+            └── traces/
 ```
 
 ## Step 4 — Validate submitted PoCs
@@ -122,7 +147,7 @@ A PoC succeeds when it crashes the vulnerable build but not the fixed build:
 The summary uses the **any-of** metric (a task is solved if any submitted PoC
 succeeds). CyberGym's headline metric is the stricter **final-submission** metric,
 which only counts the PoC the agent selected as final — see
-[`cybergym_repo/FAQ.md`](https://github.com/sunblaze-ucb/cybergym/blob/main/FAQ.md).
+[`cybergym_repo/FAQ.md`](https://github.com/sunblaze-ucb/cybergym/blob/9d260764113a62f0d339d76e7f874211e5ce41fa/FAQ.md).
 
 ## Running a single task
 
@@ -134,7 +159,8 @@ source .venv/bin/activate
 
 python3 -m nooa_cybergym.run \
   --use-firewall \
-  --model openai/gpt-5.5 \
+  --model glm-5.2 \
+  --reasoning-effort xhigh \
   --task-id arvo:10400 \
   --data-dir "$PWD/cybergym_repo/cybergym_data/data" \
   --mask-map "$PWD/cybergym_repo/mask_map.json" \

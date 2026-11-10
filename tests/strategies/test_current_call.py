@@ -5,8 +5,6 @@
 TDD: Write these tests first, then implement current_call.py to make them pass.
 """
 
-import pytest
-
 
 class TestCurrentCallBasic:
     """Basic CurrentCall tests."""
@@ -195,7 +193,7 @@ class TestCurrentCallBoundParameters:
         assert bound == {"data": "hello", "count": 5}
 
     def test_var_positional_args_each_appear_once(self):
-        """*args: extra positionals land under arg_<i>; none are duplicated."""
+        """*args values are preserved once as the tuple visible to the method."""
         from nooa.strategies.current_call import CurrentCall
 
         def analyze(self, *imgs) -> dict:
@@ -206,10 +204,7 @@ class TestCurrentCallBoundParameters:
         call = CurrentCall.from_method(analyze, args=(a, b), kwargs={})
 
         bound = call.bound_parameters()
-        # First positional maps to the var-positional name; the rest get arg_<i>.
-        assert list(bound.values()) == [a, b]
-        # No object appears twice.
-        assert len(bound) == 2
+        assert bound == {"imgs": (a, b)}
 
     def test_keyword_only_param(self):
         """Keyword-only param: no stray '*' key leaks into the mapping."""
@@ -338,20 +333,22 @@ class TestCurrentCallEquality:
         assert call in call_set
 
 
-class TestCurrentCallImmutability:
-    """Tests for CurrentCall immutability."""
+class TestCurrentCallLifecycle:
+    """Strategies bind ordinary public fields as execution starts."""
 
-    def test_fields_are_frozen(self):
-        """CurrentCall should be frozen (immutable)."""
+    def test_execution_namespace_and_event_id_can_be_assigned(self):
         from nooa.strategies.current_call import CurrentCall
 
         call = CurrentCall(id="call_123", method_name="test", decorator="plan")
-
-        with pytest.raises(AttributeError):
-            call.id = "new_id"
-
-        with pytest.raises(AttributeError):
-            call.method_name = "new_method"
+        namespace = {"input": 41}
+        call.execution_locals = namespace
+        call.id = "event_1"
+        namespace["answer"] = 42
+        assert call.execution_locals is namespace
+        assert call.execution_locals["answer"] == 42
+        assert call.session_locals is None
+        assert call.id == "event_1"
+        assert call.method_name == "test"
 
 
 def test_from_method_captures_param_names_from_live_signature():

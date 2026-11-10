@@ -1,3 +1,4 @@
+import { assertOk } from './http';
 export interface PlaygroundModel {
   id: string;
   name: string;
@@ -44,7 +45,7 @@ export interface InferenceResponse {
 
 export async function fetchPlaygroundModels(): Promise<ModelsResponse> {
   const res = await fetch('/api/playground/models');
-  if (!res.ok) throw new Error(`Failed to fetch models: ${res.statusText}`);
+  assertOk(res, 'Failed to fetch models');
   return res.json();
 }
 
@@ -65,6 +66,7 @@ export async function runInference(params: {
     }),
   });
   if (!res.ok) {
+    assertOk(res, 'Inference failed'); // tags 401/403; falls through otherwise
     const text = await res.text();
     throw new Error(text || `Inference failed: ${res.statusText}`);
   }
@@ -77,12 +79,12 @@ export async function addCustomModel(model: CustomModel): Promise<void> {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(model),
   });
-  if (!res.ok) throw new Error(`Failed to add model: ${res.statusText}`);
+  assertOk(res, 'Failed to add model');
 }
 
 export async function deleteCustomModel(modelId: string): Promise<void> {
   const res = await fetch(`/api/playground/models/${encodeURIComponent(modelId)}`, {
     method: 'DELETE',
   });
-  if (!res.ok) throw new Error(`Failed to delete model: ${res.statusText}`);
+  assertOk(res, 'Failed to delete model');
 }

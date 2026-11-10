@@ -95,7 +95,8 @@ def resolved_config() -> ResolvedConfig:
     ``resolved_config().secrets.env["KEY"].get_secret_value()``.
     """
     from nooa.layered_config import layered_paths, load_layered_yaml
-    from nooa.llm_config import bundled_config_paths, llm_config_chain
+    from nooa.llm_config import llm_config_chain
+    from nooa.unifiedllm.registry import load_model_entries
 
     settings = load_layered_yaml(*_SETTINGS)
 
@@ -105,8 +106,7 @@ def resolved_config() -> ResolvedConfig:
         {str(k): SecretStr(str(v)) for k, v in env_raw.items()} if isinstance(env_raw, dict) else {}
     )
 
-    llm_merged = load_layered_yaml(*_LLM, prepend=bundled_config_paths())
-    models_raw = llm_merged.get("models")
+    models_raw = load_model_entries(*llm_config_chain())
     models: dict[str, ModelConfig] = {}
     if isinstance(models_raw, dict):
         for name, cfg in models_raw.items():

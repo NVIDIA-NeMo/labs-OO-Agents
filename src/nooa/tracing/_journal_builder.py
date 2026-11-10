@@ -66,6 +66,10 @@ def build_journal_payload(messages: list[Any]) -> JournalPayload:
             continue
 
         entry: dict[str, Any] = {"role": role_s}
+        if reasoning := getattr(msg, "reasoning", None):
+            h = _hash(reasoning)
+            blocks[h] = reasoning
+            entry["reasoning_content_hash"] = h
 
         if msg.parts:
             parts_repr: list[dict[str, Any]] = []
@@ -88,18 +92,19 @@ def build_journal_payload(messages: list[Any]) -> JournalPayload:
             blocks[h] = content_s
             entry["parts"] = [{"block_hash": h}]
 
-        if msg.tool_call is not None:
-            tc = msg.tool_call
-            args = tc.arguments if isinstance(tc.arguments, str) else json.dumps(tc.arguments)
-            ah = _hash(args)
-            blocks[ah] = args
-            entry["tool_calls"] = [
-                {
-                    "id": tc.id,
-                    "type": "function",
-                    "function": {"name": tc.name, "arguments_hash": ah},
-                }
-            ]
+        if msg.tool_calls:
+            entry["tool_calls"] = []
+            for tc in msg.tool_calls:
+                args = tc.arguments if isinstance(tc.arguments, str) else json.dumps(tc.arguments)
+                ah = _hash(args)
+                blocks[ah] = args
+                entry["tool_calls"].append(
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {"name": tc.name, "arguments_hash": ah},
+                    }
+                )
         if msg.tool_call_id is not None:
             entry["tool_call_id"] = msg.tool_call_id
         if msg.images:
@@ -120,7 +125,7 @@ def set_journal_payload_from_messages(messages: list[Any]) -> None:
     """Public entry point for the runtime: build + publish in one call.
 
     Pass an iterable of ``RenderedMessage``-shaped objects (anything with
-    ``role``, ``parts`` / ``content``, ``tool_call``, ``tool_call_id``,
+    ``role``, ``parts`` / ``content``, ``tool_calls``, ``tool_call_id``,
     ``images``).  The resulting :class:`JournalPayload` is written into
     the tracing sideband ``ContextVar``; the journal callback consumes
     it on the next ``log_pre_api_call``.

@@ -26,6 +26,15 @@ def test_events_api_has_library_docstring():
 
 def test_method_writing_lib_has_library_docstring():
     _check_library_docstring(MethodWriting)
+    docstring = MethodWriting.__doc__ or ""
+    assert "@strategy(PredictStrategy())" in docstring
+    assert "asyncio.gather" in docstring
+    assert "@strategy(CodeActStrategy())" in docstring
+    assert "Arguments are passed" in docstring
+    assert "rendered automatically" in docstring
+    assert "{{" not in docstring
+    assert "}}" not in docstring
+    assert "Never use" not in docstring
 
 
 def test_method_writing_lib_is_instantiable():
@@ -46,15 +55,15 @@ def test_codeact_strategy_instructions_no_longer_has_decomposition():
     assert "Task decomposition" not in src
 
 
-def test_context_api_not_in_protected_blocks():
-    """context_api and events_api should not be registered as protected blocks."""
+def test_events_api_guidance_is_a_protected_block():
+    """Events guidance is registered independently of the selected strategy."""
     from unittest.mock import MagicMock
 
     from nooa.agent import Agent
 
     agent = Agent(llm=MagicMock())
     assert "context_api" not in agent.context_manager.protected_keys
-    assert "events_api" not in agent.context_manager.protected_keys
+    assert "events_api" in agent.context_manager.protected_keys
 
 
 def test_codeact_block_order_no_api_keys():

@@ -1,3 +1,5 @@
+import { assertOk } from './http';
+
 // Typed fetchers for the Memory tab endpoints (/api/memory/*).
 
 export interface MemoryDbInfo {
@@ -149,6 +151,7 @@ export interface MemoryExplainRow {
 async function getJson<T>(url: string): Promise<T> {
   const res = await fetch(url);
   if (!res.ok) {
+    assertOk(res, 'Memory request failed'); // tags 401/403; falls through otherwise
     let detail = res.statusText;
     try {
       const body = await res.json();

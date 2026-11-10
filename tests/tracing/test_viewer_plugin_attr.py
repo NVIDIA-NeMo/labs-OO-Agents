@@ -94,6 +94,74 @@ class TestViewerPluginAttribute:
             assert len(gen_spans) == 1
             assert gen_spans[0]["attributes"][VIEWER_PLUGIN_ATTR] == ViewerPlugin.GENERATION
 
+    def test_generation_routing_metadata_is_written_to_span_attributes(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            hooks, provider = self._make_hooks(tmpdir)
+            agent = self._make_agent()
+
+            ctx = hooks.before_generation(
+                agent=agent,
+                method_name="solve",
+                strategy="PREDICT",
+                generation_id="gen-001",
+                parent_generation_id=None,
+                **{
+                    "llm.model_name": "override-model",
+                    "llm.selection_source": "call_site",
+                },
+            )
+            hooks.after_generation(
+                agent=agent,
+                method_name="solve",
+                result="output",
+                exception=None,
+                context=ctx,
+                generation_id="gen-001",
+            )
+            provider.force_flush()
+
+            spans = self._read_spans(tmpdir)
+            gen_spans = [s for s in spans if s["name"] == "generation"]
+            assert len(gen_spans) == 1
+            attrs = gen_spans[0]["attributes"]
+            assert attrs["generation.llm.model_name"] == "override-model"
+            assert attrs["generation.llm.selection_source"] == "call_site"
+
+    def test_generation_completion_metadata_is_written_to_span_attributes(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            hooks, provider = self._make_hooks(tmpdir)
+            agent = self._make_agent()
+
+            ctx = hooks.before_generation(
+                agent=agent,
+                method_name="urgent",
+                strategy="DecideStrategy",
+                generation_id="gen-001",
+                parent_generation_id=None,
+            )
+            hooks.after_generation(
+                agent=agent,
+                method_name="urgent",
+                result=True,
+                exception=None,
+                context=ctx,
+                generation_id="gen-001",
+                **{
+                    "decision.source": "native",
+                    "decision.question_digest": "sha256:abc",
+                    "decision.resolved_model": None,
+                },
+            )
+            provider.force_flush()
+
+            spans = self._read_spans(tmpdir)
+            gen_spans = [s for s in spans if s["name"] == "generation"]
+            assert len(gen_spans) == 1
+            attrs = gen_spans[0]["attributes"]
+            assert attrs["generation.decision.source"] == "native"
+            assert attrs["generation.decision.question_digest"] == "sha256:abc"
+            assert "generation.decision.resolved_model" not in attrs
+
     def test_code_execution_sets_code_execution_plugin(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             hooks, provider = self._make_hooks(tmpdir)

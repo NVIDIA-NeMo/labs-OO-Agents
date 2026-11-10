@@ -35,6 +35,18 @@ class TestCodeActConfig:
         assert merged.temperature == 0.7
         assert merged.max_retries == 3  # not overridden
 
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("text_only_stop_behavior", "return_result"),
+            ("text_only_correction", "custom"),
+            ("text_only_correction_fn", lambda text: text),
+        ],
+    )
+    def test_removed_text_only_options_fail_with_migration_help(self, field, value):
+        with pytest.raises(ValidationError, match=rf"{field}.*on_text_only"):
+            CodeActConfig(**{field: value})
+
 
 class TestPredictConfig:
     """Tests for PredictConfig defaults and merging."""

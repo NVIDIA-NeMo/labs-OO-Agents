@@ -46,36 +46,29 @@ def doc(
     *objs: Any,
     concise: Annotated[bool, "Show first-line docstrings only"] = False,
     inline_depth: Annotated[
-        int | None,
-        "Levels of referenced types to expand inline; 0 = none, 1 = direct (default), 2+ = transitive; None = auto",
-    ] = None,
+        int,
+        "Levels of referenced types to expand inline; 0 = none, 1 = direct (default), 2+ = transitive",
+    ] = 1,
 ) -> str:
-    """Get the documentation for one or more objects — step 2: render the API contract.
+    """Render prompt-ready API documentation for one or more Python objects.
 
-    Renders the API contract of a class, function, module, or instance as a
-    prompt-ready string. Referenced types are expanded inline and deduplicated
-    across all objects passed.
+    Types show their declared API and defaults. Instances show that same contract
+    enriched with current values and public runtime fields. Visibility rules are
+    honored, properties stay unevaluated, and custom ``__repr__`` methods never
+    hide the API.
 
-    Passing a **type** shows default field values::
-
-        doc(MyAgent)          # label: str = "agent"
-
-    Passing an **instance** shows the current field values in place of defaults::
-
-        agent = MyAgent(label="prod")
-        doc(agent)            # label: str = "prod"
-
-    Respects ``@spec(expand=False)`` on field types — those are collapsed to a
-    one-liner instead of being expanded inline.
+    Referenced types are expanded inline and deduplicated across the result.
 
     Args:
-        *objs: One or more objects: doc(MyClass), doc(Class, fn), doc([A, B])
-        concise: Show first-line docstrings only.
-        inline_depth: Levels of referenced types to expand inline (default 1).
-            0 = none, 1 = direct references, 2+ = transitive. None = auto.
+        *objs: Objects to document: ``doc(MyClass)``, ``doc(Class, fn)``, or
+            ``doc([A, B])``.
+        concise: Show only the first line of each docstring.
+        inline_depth: Referenced-type depth. ``0`` disables expansion, ``1``
+            includes direct references (the default), and ``2+`` includes
+            transitive references to that depth.
 
     Returns:
-        Formatted documentation string with each type appearing exactly once.
+        The formatted API documentation.
     """
     # Flatten input: handle lists/tuples passed as single argument
     # Only flatten if the list/tuple contains documentable objects (types, callables, modules)
@@ -89,9 +82,10 @@ def doc(
     if not flat_objs:
         raise ValueError("doc() requires at least one object")
 
-    # Resolve inline_depth default based on concise
-    if inline_depth is None:
-        inline_depth = 0 if concise else 1
+    if not isinstance(inline_depth, int) or isinstance(inline_depth, bool):
+        raise TypeError("inline_depth must be a non-negative integer")
+    if inline_depth < 0:
+        raise ValueError("inline_depth must be a non-negative integer")
 
     # Single object: use optimized path
     if len(flat_objs) == 1:
@@ -130,10 +124,15 @@ def _doc_multiple(
     sections: list[str] = []
     seen_types: set[type] = set()
 
-    # Track which objects are types for deduplication
+    # Track primary contract types for deduplication. Instances document their
+    # type API, so their types must not reappear under Referenced Types.
     for obj in objs:
         if isinstance(obj, type):
             seen_types.add(obj)
+        elif not (inspect.isfunction(obj) or inspect.ismethod(obj) or inspect.ismodule(obj)):
+            obj_type = type(obj)
+            if obj_type.__module__ != "builtins":
+                seen_types.add(obj_type)
 
     # 1. Format each primary object (without their own referenced types section)
     for obj in objs:
@@ -370,7 +369,7 @@ def variables(
             # For classes, use doc(concise=True) to get a nice summary
             if inspect.isclass(attr):
                 class_name = attr.__name__
-                value_str = doc(attr, concise=True)
+                value_str = doc(attr, concise=True, inline_depth=0)
                 line = f"{name}: type[{class_name}] = {value_str}"
 
                 # Append hint within the existing comment if present

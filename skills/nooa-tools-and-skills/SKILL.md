@@ -1,10 +1,14 @@
 ---
 name: nooa-tools-and-skills
-description: Give a NVIDIA OO agent capabilities — methods as tools, built-in tools (ShellTools, TodoManager), MCP servers, agent skills (Skill/TextSkill/SkillRegistry), and multimodal media. Use when adding tools or external integrations to an agent, wiring MCP, or packaging reusable guidance as an agent skill.
+description: Give a NOOA agent capabilities — methods as tools, built-in tools (ShellTools, TodoManager), MCP servers, agent skills (Skill/TextSkill/SkillRegistry), and multimodal media. Use when adding tools or external integrations to an agent, wiring MCP, or packaging reusable guidance as an agent skill.
 compatibility: nooa package; [mcp] extra for MCP
 ---
 
 # Tools, Skills, and Integrations
+
+For model onboarding or diagnostics, use
+[nooa-connect](../nooa-connect/SKILL.md), the canonical permission-first headless
+guide. Adding tools/skills does not authorize model checks or registry writes.
 
 ## Methods are the tools
 
@@ -71,7 +75,12 @@ class MyAgent(Agent, llm=llm):
 - Agents see a `# Skills` block (one-liner per skill) in their execution context and call `doc(self.<skill>)` for the full guide.
 - `TextSkill` exposes `read_file(path)` and `await run_script(name, *args)` for files/scripts bundled with the SKILL.md.
 - SKILL.md frontmatter: required `name`, `description`; optional `compatibility`, `metadata`, `user-invocable`, `allowed-tools` — Claude-Code-compatible format.
-- Bulk discovery/activation is `SkillRegistry(agent)` + `discover_skills_dirs([...])` / `activate([...])`. **`SkillManager` does not exist** — `README`/`examples/quickstart/10_skills.py` referencing `SkillManager.install(...)` are stale.
+- `SkillRegistry(agent)` supports explicit `register(...)` / `activate(...)`
+  and bulk `discover_skills_dirs(...)`. Register model-facing `TextSkill`
+  objects under a non-`cmd.*` name so the active Skills block advertises their
+  descriptions. Discovered SKILL.md directories use the `cmd.*` namespace for
+  host/user commands and are intentionally omitted from that model-facing
+  summary. **`SkillManager` does not exist.**
 - `@slash_command` on a `Skill` method marks it user-invocable via a host that reads the agent's `slash_commands` queue (see `InteractiveAgent`).
 - Docstring conventions: see `skills/nooa-agent-authoring/SKILL.md` and `AGENTS.md`.
 
@@ -80,13 +89,17 @@ class MyAgent(Agent, llm=llm):
 Core library keeps MCP optional: `uv sync --extra mcp` (or `uv add 'nooa[mcp]'`).
 
 ```python
-from nooa.mcp import MCPManager
+from nooa.mcp import MCPManager, MCPTool
 
 class ConfluenceAgent(Agent, llm=llm):
-    confluence = MCPManager.create_from_server("my-mcp-server")   # from .mcp.json
-    # or inline, no .mcp.json:
-    # confluence = MCPManager.create_from_server("name", url="https://.../mcp",
-    #                                            transport="streamable-http", headers={...})
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.confluence: MCPTool = MCPManager.create_from_server("my-mcp-server")
+        # Or inline, no .mcp.json:
+        # self.confluence: MCPTool = MCPManager.create_from_server(
+        #     "name", url="https://.../mcp",
+        #     transport="streamable-http", headers={...},
+        # )
 
     async def respond(self, prompt: str) -> str:
         """Answer using the Confluence tool."""
@@ -95,6 +108,16 @@ class ConfluenceAgent(Agent, llm=llm):
 
 MCP tools appear alongside regular methods — the LLM calls them like any other attribute. Servers are configured in `.mcp.json` (VS Code/Claude Code format). Transports: stdio, SSE, streamable-http; OAuth supported (`nooa.mcp.OAuthConfig`).
 
+Each returned `MCPTool` owns a client/connection. Treat it as stateful and keep
+it per agent instance, just like `ShellTools`.
+
+Agent documentation parses `__init__` and infers direct constructor assignments
+such as `self.shell = ShellTools(...)` or `self.frontend = TextSkill(...)`.
+Annotate the assignment in place when a factory, injected parameter, or other
+expression obscures the type, as in the MCP example above. Class-level
+annotations are an optional, source-independent alternative. `SkillRegistry`
+activation handles dynamically discovered skills explicitly.
+
 `${VAR}` placeholders in `.mcp.json` and inline `servers` configuration remain
 literal. If a server needs a secret, resolve it in trusted caller code and pass
 the resulting URL, header, argument, or environment value directly to
@@ -102,8 +125,12 @@ the resulting URL, header, argument, or environment value directly to
 
 ## Multimodal media
 
+To configure a route or test its media permissions, get the user's permission
+and follow [nooa-connect](../nooa-connect/SKILL.md). It is the complete headless
+Connect guide for agents; use an existing configured route for the code below.
+
 ```python
-from nooa import Image, Audio, Video, File
+from nooa.media import Image, Audio, Video, File
 
 class MediaAgent(Agent, llm=llm):
     async def describe(self, image: Image) -> str:
@@ -114,12 +141,20 @@ img = Image.from_file("photo.png")     # also .from_bytes(media_type=...), .from
 await MediaAgent().describe(img)
 ```
 
-Only works with multimodal-capable models — text-only models error when handed media. See `examples/quickstart/12_multimodal.py`.
+Set the model's `media_inputs` to the formats your provider accepts, such as
+`[image, pdf]`. Formats left out are replaced with text notices in requests.
+
+Predict and default CodeAct attach direct media arguments. While CodeAct runs,
+use `show(obj)` for media created by generated code or tools. Outside execution,
+`show()` prints a not-captured notice. `File` supports PDFs with MIME type
+`application/pdf`. See [nooa-media](../nooa-media/SKILL.md) for examples and limits.
 
 ## Pitfalls
 
 - A tool attribute assigned as a bare function/lambda isn't introspectable — use class methods or proper objects.
-- Skills/tools on `self` are per-instance; attach them in `__init__` (after `super().__init__()`).
+- Skills/tools attached to `self` are per-instance; create them in `__init__`
+  (after `super().__init__()`). An object assigned on the class is shared by
+  every agent instance.
 - Hide internal-only tools with `Annotated[T, hidden]` so they don't pollute every prompt.
 - External API fragility: wrap flaky calls in a small deterministic method with clear errors, so CodeAct sees a clean failure it can react to.
 

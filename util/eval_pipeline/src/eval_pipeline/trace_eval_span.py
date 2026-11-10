@@ -165,11 +165,13 @@ def post_eval_span_to_otlp(
         ]
     }
     try:
+        from nooa.tracing._viewer_auth import apply_viewer_auth
+
         data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
         req = urllib.request.Request(
             endpoint,
             data=data,
-            headers={"Content-Type": "application/json"},
+            headers=apply_viewer_auth({"Content-Type": "application/json"}),
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=5) as resp:

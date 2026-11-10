@@ -1,7 +1,7 @@
 ---
 name: context-blocks
-description: "How to manage context blocks (system prompt sections) in NVIDIA OO Agents. Use when configuring what appears in an agent's LLM prompt — adding, overriding, suppressing, or positioning blocks. Covers the unified Context API, well-known framework keys, and the declarative/runtime interface."
-compatibility: nooa >= 0.x (context-block-controls branch)
+description: "How to manage context blocks (system prompt sections) in NOOA. Use when configuring what appears in an agent's LLM prompt — adding, overriding, suppressing, or positioning blocks. Covers the unified Context API, well-known framework keys, and the declarative/runtime interface."
+compatibility: nooa >= 0.x
 metadata:
   skill_type: api-reference
 user-invocable: false
@@ -63,7 +63,7 @@ async def write_tests(self, code: str) -> str: ...
     "execution_context": None,
 }, llm=llm)
 async def summarise(text: str) -> str:
-    """Summarise {text} in one sentence."""
+    """Summarise the text in one sentence."""
     ...
 
 # 5. Scoped (with-block, temporary)

@@ -20,6 +20,8 @@ Three classes of leak are covered:
 
 from __future__ import annotations
 
+import linecache
+import re
 import sys
 import types
 from typing import TypedDict
@@ -217,12 +219,24 @@ class FuncAgent(Agent, llm=_llm):
 """
 
 
+@pytest.fixture(autouse=True)
+def _register_module_function_source(monkeypatch):
+    """Provide verifiable source for the synthetic standalone generation function."""
+    filename = "<test_func_agent_module>"
+    monkeypatch.setitem(
+        linecache.cache,
+        filename,
+        (len(_MODULE_WITH_FUNCS), None, _MODULE_WITH_FUNCS.splitlines(True), filename),
+    )
+
+
 def _make_func_agent_in_fresh_module():
+    """Create a source-backed synthetic module without changing visibility assertions."""
     mod = types.ModuleType("_test_func_agent_module")
-    mod.__file__ = "<test>"
+    mod.__file__ = "<test_func_agent_module>"
     sys.modules[mod.__name__] = mod
     mod.__dict__["_llm"] = _LLM
-    exec(compile(_MODULE_WITH_FUNCS, "<test>", "exec"), mod.__dict__)
+    exec(compile(_MODULE_WITH_FUNCS, mod.__file__, "exec"), mod.__dict__)
     agent = mod.FuncAgent()  # type: ignore[attr-defined]
     return agent, mod
 
@@ -319,8 +333,9 @@ class TestModuleLevelFunctionSignatures:
         data = await build_prompt_data(agent.run)
         ec = TestExecutionContextRendering._extract_execution_context(data.system_prompt)
         # Dependencies render as runnable import statements, not a prose list.
-        assert "from nooa import" in ec
-        assert "Agent" in ec
+        # The path is the symbol's declared module, so it never depends on
+        # which re-exports happen to be loaded.
+        assert re.search(r"^from nooa(\.\w+)* import .*\bAgent\b", ec, re.M)
 
     @pytest.mark.asyncio
     async def test_doc_hint_present(self):

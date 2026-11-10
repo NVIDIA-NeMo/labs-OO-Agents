@@ -197,6 +197,13 @@ class OpenInferenceHooks:
         # This pattern prevents potential timing issues with ContextVar inheritance in async contexts
         spans_dict = _get_active_spans()
         parent_span = spans_dict.get(parent_call_id) if parent_call_id else None
+        if parent_span is None and parent_call_id:
+            # A suspended method may resume in another task, whose task-local
+            # registry starts empty. Its wrapper reactivates the lifecycle span,
+            # so native OTel context is the authoritative fallback for children.
+            current_span = trace.get_current_span()
+            if current_span.get_span_context().is_valid:
+                parent_span = current_span
 
         # If this method was invoked directly from an agent's executing code (e.g.
         # self.submit() inside execute_python), nest it under the active code_execution
@@ -228,6 +235,11 @@ class OpenInferenceHooks:
         span.set_attribute("agent.call_id", call_id)
         if parent_call_id:
             span.set_attribute("agent.parent_call_id", parent_call_id)
+
+        span.add_event(
+            "status_update",
+            {"message": f"Running agent method: {agent_name}.{method_name}"},
+        )
 
         # Extract method signature, docstring, and file path
         try:
@@ -284,16 +296,36 @@ class OpenInferenceHooks:
         return {
             "span": span,
             "call_id": call_id,
+            # Keep the registry that owns this lifecycle entry. A generator's
+            # after-hook may run from a different task with another registry.
+            "_span_registry": spans_dict,
             **extra_kwargs,
             "start_time": time.time(),
         }
+
+    @contextlib.contextmanager
+    def activate_agent_call(self, context: Any):
+        """Make an existing agent-call span current without ending it."""
+        span = context.get("span") if isinstance(context, dict) else None
+        if span is None:
+            yield
+            return
+        # Lifecycle completion owns error recording and status. Reactivation
+        # must not treat normal StopIteration/StopAsyncIteration as failures.
+        with trace.use_span(
+            span,
+            end_on_exit=False,
+            record_exception=False,
+            set_status_on_exception=False,
+        ):
+            yield
 
     def after_agent_call(
         self,
         agent: Any,
         method_name: str,
         result: Any,
-        exception: Exception | None,
+        exception: BaseException | None,
         context: Any,
         **kwargs: Any,
     ) -> None:
@@ -328,7 +360,10 @@ class OpenInferenceHooks:
         self._turn_counters.pop(call_id, None)
 
         # Remove from tracking
-        if call_id and call_id in _get_active_spans():
+        registry = context.get("_span_registry")
+        if isinstance(registry, dict):
+            registry.pop(call_id, None)
+        elif call_id and call_id in _get_active_spans():
             del _get_active_spans()[call_id]
 
     def before_generation(
@@ -413,7 +448,7 @@ class OpenInferenceHooks:
         agent: Any,
         method_name: str,
         result: Any,
-        exception: Exception | None,
+        exception: BaseException | None,
         context: Any,
         generation_id: str,
         **kwargs: Any,
@@ -429,6 +464,15 @@ class OpenInferenceHooks:
 
         if not span:
             return
+
+        # Attributes known only after execution, such as decision provenance.
+        for key, value in kwargs.items():
+            if value is not None:
+                with contextlib.suppress(Exception):
+                    span.set_attribute(
+                        f"generation.{key}",
+                        str(value) if not isinstance(value, (str, int, float, bool)) else value,
+                    )
 
         # Set result/error
         if exception:
@@ -556,7 +600,7 @@ class OpenInferenceHooks:
         agent: Any,
         code: str,
         result: Any,
-        exception: Exception | None,
+        exception: BaseException | None,
         context: Any,
         execution_id: str,
         **kwargs: Any,
@@ -686,7 +730,7 @@ class OpenInferenceHooks:
         agent: Any,
         method_name: str,
         result: Any,
-        exception: Exception | None,
+        exception: BaseException | None,
         context: Any,
         invocation_id: str,
         **kwargs: Any,
@@ -809,7 +853,7 @@ class OpenInferenceHooks:
         tool_name: str,
         arguments: dict,
         result: Any,
-        exception: Exception | None,
+        exception: BaseException | None,
         context: Any,
         execution_id: str,
         **kwargs: Any,

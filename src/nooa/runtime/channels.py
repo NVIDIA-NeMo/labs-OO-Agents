@@ -21,11 +21,12 @@ import inspect
 import logging
 from collections import deque
 from collections.abc import AsyncGenerator, Callable, Coroutine
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, ClassVar, Literal
 
 from pydantic import Field
 
 from nooa.context_blocks import EventBase
+from nooa.context_blocks.roles import Role
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,37 @@ class QueueOutput(EventBase):
     value_type: str
     value_preview: str
     value: Annotated[Any, Field(repr=False)] = None
+
+
+class ChannelItemConsumed(EventBase):
+    """Published when a queue-mode channel hands an item to a consumer.
+
+    ``get()``, ``drain()`` and ``QueueManager.race()`` publish it through the
+    channel's ``event_manager``, once per item. A runtime event: subscribers
+    (``event_manager.on("ChannelItemConsumed", ...)``) receive it, but it is
+    never recorded and never shown to the model.
+    """
+
+    _role: ClassVar[Role] = Role.RUNTIME_EVENT
+
+    channel: str
+    item: Annotated[Any, Field(repr=False)] = None
+
+
+class ChannelItemsDiscarded(EventBase):
+    """Published when pending items leave a queue-mode channel unconsumed.
+
+    ``flush()``, ``clear()`` and ``QueueManager.remove_channel()`` publish it
+    once per call with the items they dropped, head to tail, never with an
+    empty list. ``remove()`` and ``pop_last()`` do not: a withdraw is the
+    caller's own decision, and ``pop_last()`` returns the item to the caller.
+    A runtime event, like ``ChannelItemConsumed``.
+    """
+
+    _role: ClassVar[Role] = Role.RUNTIME_EVENT
+
+    channel: str
+    items: Annotated[list[Any], Field(repr=False)] = Field(default_factory=list)
 
 
 class StreamEnd(EventBase):
@@ -120,10 +152,9 @@ class JobHandle:
         if self._task.done():
             return
         self._task.cancel()
-        try:
-            await self._task
-        except (asyncio.CancelledError, Exception):
-            pass
+        # Collect the job's cancellation as a result, while cancellation of
+        # this await still propagates to our caller.
+        await asyncio.gather(self._task, return_exceptions=True)
         if self.state == "running":
             self.state = "cancelled"
 
@@ -368,12 +399,25 @@ class Channel[T]:
         the item is lost. The hook is fire-and-forget UI bookkeeping
         and must never affect item delivery.
         """
-        if self._on_get is None:
+        if self._on_get is not None:
+            try:
+                self._on_get(item)
+            except BaseException:
+                logger.exception("Channel(%s).on_get raised", self.name)
+        self._publish(ChannelItemConsumed(channel=self.name, item=item))
+
+    def _publish(self, event: EventBase) -> None:
+        """Deliver a runtime event to the ``event_manager``'s subscribers, if any.
+
+        Never raises: the item has already left the deque, so a failure here
+        must not affect delivery.
+        """
+        if self._event_manager is None:
             return
         try:
-            self._on_get(item)
+            self._event_manager.add(event, record=False)
         except BaseException:
-            logger.exception("Channel(%s).on_get raised", self.name)
+            logger.exception("Channel(%s) could not publish %s", self.name, event.event_type)
 
     def drain(self) -> list[T]:
         """Pop every buffered item now, firing ``on_get`` for each.
@@ -408,6 +452,10 @@ class Channel[T]:
         """
         self._on_get = callback
 
+    def _fire_on_discard(self, items: list[T]) -> None:
+        if items:
+            self._publish(ChannelItemsDiscarded(channel=self.name, items=list(items)))
+
     # ---- introspection ---------------------------------------------------
 
     def qsize(self) -> int:
@@ -430,14 +478,38 @@ class Channel[T]:
 
         Used by the TUI for "edit what I just queued" UX (Up-arrow):
         the user pulls the queued message back into the input buffer.
-        Returns ``None`` if the channel is empty.
+        Returns ``None`` if the channel is empty. Like ``remove()``, this is
+        a withdraw: nothing fires or is published, since the item goes back
+        to the caller rather than being dropped.
         """
         if not self._items:
             return None
         return self._items.pop()
 
+    def remove(self, item: T) -> bool:
+        """Withdraw one pending item, matched by identity (``is``), not equality.
+
+        Removes the occurrence nearest the head when the same object is
+        queued more than once. Returns ``True`` if an item was removed,
+        ``False`` if ``item`` is not pending (always ``False`` in event
+        mode).
+
+        Nothing fires or is published: the item was not consumed, so
+        ``on_get`` and ``ChannelItemConsumed`` do not apply, and a withdraw
+        is the caller's own decision rather than a drop it needs to be told
+        about, so ``ChannelItemsDiscarded`` is not published either. A caller
+        tracking queued items updates its own record.
+        """
+        for position, queued in enumerate(self._items):
+            if queued is item:
+                del self._items[position]
+                return True
+        return False
+
     def clear(self) -> None:
+        dropped = list(self._items)
         self._items.clear()
+        self._fire_on_discard(dropped)
 
     def flush(self) -> int:
         """Discard all pending items and cancel waiting consumers.
@@ -447,13 +519,14 @@ class Channel[T]:
         ``asyncio.CancelledError`` rather than hanging forever on a
         channel that has been flushed.
         """
-        n = self.qsize()
+        dropped = list(self._items)
         self._items.clear()
         while self._waiters:
             waiter = self._waiters.popleft()
             if not waiter.done():
                 waiter.cancel()
-        return n
+        self._fire_on_discard(dropped)
+        return len(dropped)
 
     def status(self, *, max_items: int = 3, max_chars: int = 80) -> str:
         """Pending-count summary + short preview of waiting items.
@@ -484,7 +557,7 @@ class Channel[T]:
         return f"Channel(name={self.name!r}, mode='event')"
 
     @property
-    def reader(self) -> "_ChannelReader[T]":
+    def reader(self) -> "ChannelReader[T]":
         """Read-only facade for LLM exposure.
 
         Use when attaching to an agent: keep the underlying ``Channel``
@@ -498,12 +571,12 @@ class Channel[T]:
         """
         cached = getattr(self, "_reader_cache", None)
         if cached is None:
-            cached = _ChannelReader(self)
+            cached = ChannelReader(self)
             self._reader_cache = cached
         return cached
 
 
-class _ChannelReader[T]:
+class ChannelReader[T]:
     """LLM-facing read facade for a queue-mode ``Channel``.
 
     Exposes ``get()`` / ``qsize()`` / ``status()`` / ``name``. ``get()``
@@ -534,7 +607,7 @@ class _ChannelReader[T]:
             raise QueueReadTimeoutError(
                 f"Timed out after {timeout}s waiting for queue {self.name!r}. "
                 "Use status() or qsize() to inspect queued items, or return "
-                "WAIT/NEED_INPUT instead of blocking mid-cell. Pass "
+                "Waiting/NeedInput instead of blocking mid-cell. Pass "
                 "timeout=None only when an indefinite wait is intentional."
             ) from exc
 
@@ -682,7 +755,13 @@ class QueueManager:
             if not replace:
                 raise ValueError(f"channel {name!r} already registered")
             self.remove_channel(name)
-        ch: Channel[T] = Channel(name, "queue", on_get=on_get, on_put=self._set_notify)
+        ch: Channel[T] = Channel(
+            name,
+            "queue",
+            event_manager=self._event_manager,
+            on_get=on_get,
+            on_put=self._set_notify,
+        )
         self._channels[name] = ch
         return ch
 
@@ -779,6 +858,7 @@ class QueueManager:
 
         Also shows active spawned jobs so the LLM knows background
         producers are still running even when queues are empty.
+        Returns ``"(nothing queued)"`` when there is no status to show.
         """
         parts = [
             ch.status(max_items=max_items, max_chars=max_chars)
@@ -811,7 +891,7 @@ class QueueManager:
             cheat = f"💡 self.queue_manager{hints} | .shutdown()"
             body = f"{body}\n{cheat}" if body else cheat
 
-        return body
+        return body or "(nothing queued)"
 
     # ---- race ------------------------------------------------------------
 
@@ -903,11 +983,9 @@ class QueueManager:
             done, pending = await asyncio.wait(tasks.keys(), return_when=asyncio.FIRST_COMPLETED)
             for t in pending:
                 t.cancel()
-            for t in pending:
-                try:
-                    await t
-                except BaseException:
-                    pass
+            # A loser's cancellation is a result; our caller's cancellation
+            # must reach the outer handler that restores consumed items.
+            await asyncio.gather(*pending, return_exceptions=True)
 
             # Check if a queue-channel drain won (not the notify sentinel).
             drain_done = [t for t in done if tasks[t] is not None]
@@ -1048,13 +1126,15 @@ class QueueManager:
     async def shutdown(self) -> None:
         """Cancel and await all outstanding spawned jobs.
 
-        Safe to call multiple times. After shutdown, the handles list
-        is cleared.
+        Cancel all jobs concurrently. Completed handles are removed; any
+        unfinished handles remain tracked if shutdown is interrupted.
+        Safe to call multiple times.
         """
         handles = list(self._handles)
-        self._handles.clear()
-        for h in handles:
-            await h.cancel()
+        try:
+            await asyncio.gather(*(h.cancel() for h in handles), return_exceptions=True)
+        finally:
+            self._handles[:] = [h for h in self._handles if h not in handles or not h._task.done()]
 
     # ---- job registry ----------------------------------------------------
 

@@ -1,0 +1,47 @@
+[project]
+name = "nooa-acp"
+dynamic = ["version"]
+description = "Agent Client Protocol adapter for the NOOA coding agent"
+license = {text = "Apache-2.0"}
+readme = "README.md"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "nooa[mcp]",
+    "nooa-cli",
+    # 1.95.0 has no macOS wheels and requires a newer Rust than common toolchains.
+    "litellm!=1.95.0",
+    "agent-client-protocol>=0.11,<0.12",
+    "click>=8.1.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/NVIDIA-NeMo/labs-OO-Agents"
+Repository = "https://github.com/NVIDIA-NeMo/labs-OO-Agents"
+Issues = "https://github.com/NVIDIA-NeMo/labs-OO-Agents/issues"
+
+[project.scripts]
+nooa-acp = "nooa_acp.cli:main"
+
+[project.entry-points."nooa_cli.commands"]
+acp = "nooa_acp.cli:command"
+
+[tool.uv.sources]
+nooa = { workspace = true }
+nooa-cli = { workspace = true }
+
+[build-system]
+requires = ["hatchling>=1.26.0", "uv-dynamic-versioning>=0.14.0"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+source = "uv-dynamic-versioning"
+
+[tool.uv-dynamic-versioning]
+vcs = "git"
+style = "pep440"
+bump = true
+metadata = false
+fallback-version = "0.0.6"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/nooa_acp"]

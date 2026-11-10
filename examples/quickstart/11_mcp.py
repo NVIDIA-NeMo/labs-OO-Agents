@@ -19,9 +19,9 @@ Usage:
 from pathlib import Path
 
 try:
-    from nooa.mcp import MCPManager
+    from nooa.mcp import MCPManager, MCPTool
 except ImportError as e:
-    raise ImportError("mcp-nemo-oo-agents not installed. Run: uv sync --extra mcp") from e
+    raise ImportError("nooa[mcp] not installed. Run: uv sync --extra mcp") from e
 
 from nooa.util.quickstart import *
 
@@ -34,7 +34,12 @@ WIKI_SERVER = str(Path(__file__).resolve().parent.parent / "assets" / "wiki_mcp_
 class WikiAgent(Agent, llm=llm):
     """Agent with MCP tool access to an internal wiki."""
 
-    wiki = MCPManager.create_from_server("wiki", mcp_file=MCP_CONFIG, args=[WIKI_SERVER])
+    wiki: MCPTool
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        # Each MCPTool owns connection state, so keep it per agent instance.
+        self.wiki = MCPManager.create_from_server("wiki", mcp_file=MCP_CONFIG, args=[WIKI_SERVER])
 
     async def respond(self, prompt: str) -> str:
         """Answer the user's question using the wiki search tool.

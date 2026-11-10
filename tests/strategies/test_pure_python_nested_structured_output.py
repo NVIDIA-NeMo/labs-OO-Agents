@@ -45,7 +45,6 @@ for doc in documents:
 return summaries''',
             tool_calls=[],
             finish_reason="stop",
-            assistant_message={"role": "assistant", "content": "code"},
         ),
         # PredictStrategy for basic types wraps in {"value": ...}
         LLMResponse(
@@ -53,7 +52,6 @@ return summaries''',
             content='{"value": "Document summary"}',
             tool_calls=[],
             finish_reason="stop",
-            assistant_message={"role": "assistant", "content": '{"value": "Document summary"}'},
         ),
     ]
 
@@ -97,7 +95,6 @@ for item in items:
 return results''',
             tool_calls=[],
             finish_reason="stop",
-            assistant_message={"role": "assistant", "content": "code"},
         ),
         # Three PredictStrategy responses for the three loop iterations
         LLMResponse(
@@ -105,21 +102,18 @@ return results''',
             content='{"value": "processed_a"}',
             tool_calls=[],
             finish_reason="stop",
-            assistant_message={"role": "assistant", "content": '{"value": "processed_a"}'},
         ),
         LLMResponse(
             raw_response=None,
             content='{"value": "processed_b"}',
             tool_calls=[],
             finish_reason="stop",
-            assistant_message={"role": "assistant", "content": '{"value": "processed_b"}'},
         ),
         LLMResponse(
             raw_response=None,
             content='{"value": "processed_c"}',
             tool_calls=[],
             finish_reason="stop",
-            assistant_message={"role": "assistant", "content": '{"value": "processed_c"}'},
         ),
     ]
 

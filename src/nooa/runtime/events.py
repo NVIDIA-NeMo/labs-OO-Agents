@@ -29,6 +29,7 @@ class EventsApi(Skill):
         events.query(limit=50)                      # recent 50
         events.query(type="Task")                   # all task events
         events.query(type="PythonOutput")           # execution outputs
+        events.query(type="PythonOutput", execution_status="error", limit=1)
         events.query(call_id="abc123")              # events for one call
         events.query(query="error")                 # text search
         events.query(query="error.*db", regex=True) # regex search
@@ -45,8 +46,13 @@ class EventsApi(Skill):
         children = events[summary.children_tags]
 
     Examples:
-        # Find the last error
+        # Find the most recent strategy/retry Error event
         errors = events.query(type="Error", limit=1)
+
+        # Cell failures are PythonOutput events, not standalone Error events
+        failed_outputs = events.query(
+            type="PythonOutput", execution_status="error", limit=1
+        )
 
         # Get all outputs from current call
         outputs = events.query(type="PythonOutput", call_id=call_id)
@@ -55,13 +61,12 @@ class EventsApi(Skill):
         tasks = events.query(type="Task", query="summarise")
 
     Context compaction:
-        When context grows too large, use events to summarize or collapse
-        old history. The summarizer does this automatically at token budget
-        thresholds, but you can also compact manually:
+        Keep context small by collapsing completed work into concise summaries.
+        Preserve key findings, decisions, unresolved issues, and references:
 
         events.query(limit=20)       # inspect what's taking space
-        # Summarization happens at the runtime level — old events get
-        # replaced by summary events with range tags like "1..22".
+        events.collapse("1", "22", "Key findings and remaining work...")
+        # Old events are replaced by summary events with range tags like "1..22".
         # After compaction, access originals via summary.children_tags.
 
     Load this library:
@@ -76,6 +81,7 @@ class EventsApi(Skill):
         *,
         type: str | None = None,
         call_id: str | None = None,
+        execution_status: str | None = None,
         query: str | None = None,
         regex: bool = False,
         limit: int | None = None,
@@ -88,6 +94,7 @@ class EventsApi(Skill):
         Args:
             type: Event type filter (e.g., "Task", "PythonOutput", "ToolCallEvent")
             call_id: Call ID filter (matches metadata.call_id)
+            execution_status: PythonOutput status filter (e.g. "error" or "complete")
             query: Text search (case-insensitive substring, or regex if regex=True)
             regex: If True, treat query as regex pattern
             limit: Maximum results (most recent first when limit < total)
@@ -107,6 +114,7 @@ class EventsApi(Skill):
         return self._manager.filter(
             type=type,
             call_id=call_id,
+            execution_status=execution_status,
             query=query,
             regex=regex,
             limit=limit,
@@ -192,11 +200,16 @@ class EventsApi(Skill):
         """
         return self._manager.get(key) is not None
 
-    def collapse(self, start_tag: str, end_tag: str, summary_text: str | None = None) -> str:
+    def collapse(
+        self, start_tag: str | int, end_tag: str | int, summary_text: str | None = None
+    ) -> str:
         """Archive a range of events into a single Summary marker.
 
         Replaces tags start_tag..end_tag with one summary tag.
         Original events remain accessible by their individual tags.
+        Prefer string tags, including summary tags such as "2..10". Integers
+        are accepted if they identify existing events (including archived ones).
+        Either endpoint may be an integer.
 
         Args:
             start_tag: First tag to collapse (inclusive), e.g. "2".
@@ -211,7 +224,17 @@ class EventsApi(Skill):
             events.collapse("2", "40", "User discussed X")   # summarize
             summary = events[events.collapse("2", "40")]     # get the Summary event
         """
-        return self._manager.collapse(start_tag, end_tag, summary_text)
+        tags: list[str] = []
+        for name, tag in (("start_tag", start_tag), ("end_tag", end_tag)):
+            if type(tag) is int:
+                tag = str(tag)
+                if self._manager.get(tag) is None:
+                    raise ValueError(f"{name} does not identify an existing event: {tag!r}")
+            elif not isinstance(tag, str):
+                raise TypeError(f"{name} must be a string tag or an integer event tag")
+            tags.append(tag)
+
+        return self._manager.collapse(tags[0], tags[1], summary_text)
 
     def keys(self) -> list[str]:
         """Return the list of active event tags in chronological order.

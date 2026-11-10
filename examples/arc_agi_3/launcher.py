@@ -175,16 +175,15 @@ async def _headless_dispatch(agent) -> None:
     """Drive the agent via its queue dispatcher — no TUI session required.
 
     Races all registered queues (game_states, user_messages, system_messages)
-    each turn and calls ``agent.handle(notification)`` — the dispatcher contract
-    described on ``RespondResult``: every stop reason (including DONE) re-enters
-    the race. The loop runs until run_solver terminates this process when the
-    harness finishes; DONE must NOT exit here, or a premature DONE from the
-    agent would tear down a still-running game (run_solver kills the harness
-    when the launcher dies). Errors are logged and retried with backoff — the
+    each turn and calls ``agent.handle(notification)``: every turn result
+    (including ``Done``) re-enters the race. The loop runs until run_solver
+    terminates this process when the harness finishes; ``Done`` must NOT exit
+    here, or a premature ``Done`` from the agent would tear down a
+    still-running game (run_solver kills the harness when the launcher dies). Errors are logged and retried with backoff — the
     harness's nudge/force-advance ladder and the fleet wall-clock cap already
     bound a wedged agent, and a transient LLM outage must not kill the game.
     """
-    from nooa.interactive import RespondReason
+    from nooa.interactive import Done
 
     consecutive_errors = 0
 
@@ -211,7 +210,7 @@ async def _headless_dispatch(agent) -> None:
             )
             await asyncio.sleep(backoff)
             continue
-        if getattr(result, "kind", None) == RespondReason.DONE:
+        if isinstance(result, Done):
             print(f"[launcher] agent returned DONE: {result.explanation}", file=sys.stderr)
 
 

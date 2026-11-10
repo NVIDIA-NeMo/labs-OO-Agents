@@ -91,6 +91,34 @@ function buildCallString(attrs: Record<string, unknown>, truncate = true): strin
   return `${method}(${argParts.join(', ')})`;
 }
 
+/**
+ * Method badge, qualified with the owning agent class when known.
+ *
+ * Span names carry only the method (`method.analyse`), so two agents with the
+ * same method name are indistinguishable in the tree. The class is on the span
+ * as `agent.name` — render it as a dimmer prefix so `Rationalizer.analyse` and
+ * `Verifier.analyse` are tellable apart at a glance.
+ */
+function MethodBadge({
+  agentName,
+  method,
+  className = '',
+}: {
+  agentName: string;
+  method: string;
+  className?: string;
+}) {
+  return (
+    <span
+      className={`px-1.5 py-0.5 rounded bg-purple-900 text-purple-200 text-xs font-semibold ${className}`}
+      title={agentName ? `${agentName}.${method}` : method}
+    >
+      {agentName && <span className="text-purple-400 font-normal">{agentName}.</span>}
+      {method}
+    </span>
+  );
+}
+
 function ExpandedMetadata({
   attrs,
   agentName,
@@ -156,9 +184,7 @@ export function MethodPlugin({ event, viewState, rawJsonOpen, viewControls }: Pl
     return (
       <div className="flex items-center justify-between text-sm">
         <div className="flex-1 min-w-0 text-gray-300 font-mono truncate">
-          <span className="px-1.5 py-0.5 rounded bg-purple-900 text-purple-200 text-xs font-semibold mr-1">
-            {method}
-          </span>
+          <MethodBadge agentName={agentName} method={method} className="mr-1" />
           {summary}
           {durationNs > 0 && (
             <span className="text-gray-500 ml-2">({formatDuration(durationNs)})</span>
@@ -191,9 +217,7 @@ export function MethodPlugin({ event, viewState, rawJsonOpen, viewControls }: Pl
   return (
     <div>
       <div className="flex items-center gap-3 text-xs text-gray-400 mb-2">
-        <span className="px-1.5 py-0.5 rounded bg-purple-900 text-purple-200 text-xs font-semibold">
-          {method}
-        </span>
+        <MethodBadge agentName={agentName} method={method} />
         {durationNs > 0 && <span>{formatDuration(durationNs)}</span>}
         {hasError && <span className="text-red-400">Error</span>}
         <span className="ml-auto opacity-60">{timestamp}</span>

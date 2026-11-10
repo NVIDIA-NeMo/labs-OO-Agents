@@ -1,6 +1,10 @@
-Verifying 4 PoC submission(s) via task-server
+Verifying 209 PoC submission(s) via task-server
 
 --- poc_001 ---
+  vul_exit=1
+  fix_exit=1
+
+--- poc_002 ---
   vul_exit=1
   fix_exit=0
   PASS

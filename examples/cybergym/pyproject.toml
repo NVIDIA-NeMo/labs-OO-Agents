@@ -5,10 +5,14 @@ description = "nooa-based agent runner for the CyberGym benchmark"
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
 dependencies = [
+    "nooa[tracing] @ git+https://github.com/NVIDIA-NeMo/labs-OO-Agents.git@8229922d7274628c9be83f745589b40852680d60",
+    "pydantic>=2.5.0",
+]
+
+[project.optional-dependencies]
+runner = [
     "cybergym[server] @ git+https://github.com/sunblaze-ucb/cybergym.git",
     "docker>=7.1.0",
-    "nooa[tracing] @ git+https://github.com/NVIDIA-NeMo/labs-OO-Agents.git",
-    "pydantic>=2.5.0",
 ]
 
 [project.scripts]
@@ -24,3 +28,14 @@ packages = ["nooa_cybergym"]
 
 [tool.hatch.metadata]
 allow-direct-references = true
+
+[tool.uv]
+# Ignore packages uploaded less than 7 days ago to mitigate supply-chain attacks
+exclude-newer = "2026-10-21T00:00:00Z"
+# Keep the LiteLLM stack this example was locked with; newer releases change
+# tracing behavior (see the root pyproject.toml).
+constraint-dependencies = [
+    "litellm==1.93.0",
+    "openinference-instrumentation==0.1.54",
+    "openinference-instrumentation-litellm==0.1.34",
+]

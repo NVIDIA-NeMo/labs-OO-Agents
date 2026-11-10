@@ -29,7 +29,9 @@ Attach to an agent::
 
 from __future__ import annotations
 
+import difflib
 import json
+import math
 import re
 import shlex
 from collections.abc import AsyncIterator
@@ -39,16 +41,29 @@ from typing import Annotated, Any
 from nooa.agentdoc import hidden, spec
 from nooa.skill import Skill
 from nooa.tools._bash_session import BashSession
+from nooa.tools._bounded_io import (
+    DEFAULT_MAX_FILE_BYTES,
+    read_line_range,
+    read_specific_lines,
+    read_whole_file_checked,
+)
 from nooa.tools._results import StreamDone, StreamEvent
 
 
 class FileWrite:
-    """Result of a write/replace operation."""
+    """Result of a write/replace operation.
 
-    def __init__(self, path: str, message: str, diff: str = ""):
+    ``new_text`` is the text as it was actually written, after any
+    normalization the write applied. Observers report from it so what they
+    record matches what landed on disk. It is deliberately left out of
+    ``__str__`` — the agent already knows the text it asked for.
+    """
+
+    def __init__(self, path: str, message: str, diff: str = "", new_text: str = ""):
         self.path = path
         self.message = message
         self.diff = diff
+        self.new_text = new_text
 
     def __str__(self) -> str:
         parts = [self.message]
@@ -65,11 +80,27 @@ class Match:
 
     Pass any ``Match`` to ``self.shell.replace(match, new_text)``. Print it to
     view numbered lines. Slice with ``match[start:end]`` (1-indexed inclusive
-    line numbers) to narrow the region before replacing.
+    line numbers) to narrow the region before replacing. ``resolved_path`` is
+    required so the anchor remains bound to that file if the shell cwd changes.
     """
 
-    def __init__(self, path: str, start: int, end: int, text: str):
+    def __init__(
+        self,
+        path: str,
+        start: int,
+        end: int,
+        text: str,
+        *,
+        resolved_path: str | Path,
+    ):
         self._path = path
+        anchor = Path(resolved_path)
+        if not anchor.is_absolute():
+            # resolve() on a relative path resolves against the *process* cwd,
+            # which is not the shell cwd — so a relative anchor would silently
+            # point at a different file. Fail loudly instead.
+            raise ValueError(f"Match.resolved_path must be absolute, got {str(resolved_path)!r}")
+        self._resolved_path = str(anchor.resolve())
         self._start = start
         self._end = end
         self._text = text
@@ -78,6 +109,11 @@ class Match:
     def path(self) -> str:
         """File path."""
         return self._path
+
+    @property
+    def resolved_path(self) -> str:
+        """Canonical file path captured when this match was created."""
+        return self._resolved_path
 
     @property
     def start(self) -> int:
@@ -122,9 +158,90 @@ class Match:
             idx_start = start - self._start
             idx_end = stop - self._start + 1
             text = "".join(lines[idx_start:idx_end])
-            return Match(self._path, start, stop, text)
+            return Match(
+                self._path,
+                start,
+                stop,
+                text,
+                resolved_path=self._resolved_path,
+            )
 
         raise TypeError(f"indices must be int or slice, not {type(key).__name__}")
+
+
+class StaleMatchError(ValueError):
+    """Rejected Match edit, with a bounded diagnostic (no stored/current text fields).
+
+    Structured fields are available locally. Existing sandbox error transport
+    carries the type name and rendered message, not custom exception attributes.
+    """
+
+    code = "STALE_MATCH"
+
+    def __init__(self, target: Match, current: str | None, reason: str):
+        self.path = target.path
+        self.resolved_path = target.resolved_path
+        self.start = target.start
+        self.end = target.end
+        self.reason = reason
+        self.diff, self.diff_complete, detail = _stale_match_diff(target.text, current)
+        message = (
+            f"{self.code}: {self.path!r} (resolved path: {self.resolved_path!r}), "
+            f"captured lines {self.start}-{self.end}: {reason}. "
+            "No file was changed. Re-read or re-search the file and recompute the Match "
+            "before retrying; anchors are never relocated."
+        )
+        message += f"\n{detail}"
+        if self.diff:
+            message += f"\n{self.diff}"
+            if not self.diff_complete:
+                # Byte truncation can leave the preview mid-line. Keep the notice
+                # on its own line and outside the bounded structured diff field.
+                if not message.endswith("\n"):
+                    message += "\n"
+                message += (
+                    "Diff preview truncated (capped at 20 lines and 2 KiB); not a complete diff."
+                )
+        super().__init__(message)
+
+
+def _stale_match_diff(expected: str, current: str | None) -> tuple[str, bool, str]:
+    """Bound computation as well as output: <=16 KiB / 400 input lines total.
+
+    A preview is at most 20 lines AND 2 KiB (UTF-8), even for huge single
+    lines. No raw region is retained on the exception or in its args.
+    """
+    if current is None:
+        return "", False, "Diff omitted (incomplete): current region is unavailable."
+    input_limit = 16 * 1024
+    if len(expected) + len(current) > input_limit or (
+        len(expected.encode("utf-8")) + len(current.encode("utf-8")) > input_limit
+    ):
+        return "", False, "Diff omitted (incomplete): input regions exceed 16 KiB."
+    expected_lines = expected.splitlines(keepends=True)
+    current_lines = current.splitlines(keepends=True)
+    if len(expected_lines) + len(current_lines) > 400:
+        return "", False, "Diff omitted (incomplete): input regions exceed 400 lines."
+    # Both sides use the same universal-newline representation as Match producers.
+    chunks = difflib.unified_diff(
+        expected_lines,
+        current_lines,
+        fromfile="stored Match.text (when read)",
+        tofile="current file (same saved line range)",
+    )
+    full = "".join(
+        chunk if chunk.endswith("\n") else chunk + "\n\\ No newline at end of file\n"
+        for chunk in chunks
+    )
+    preview = "".join(full.splitlines(keepends=True)[:20])
+    preview = preview.encode("utf-8")[:2048].decode("utf-8", errors="ignore")
+    complete = preview == full
+    detail = (
+        "stored Match.text (when read) versus current file (same saved line range) diff (complete):"
+        if complete
+        else "Diff preview:"
+    )
+    return preview, complete, detail
 
 
 class ShellResult(str):
@@ -132,9 +249,10 @@ class ShellResult(str):
 
     String operations (``"x" in r``, ``r.splitlines()``, ``r.strip()``) act on
     stdout, so existing code keeps working. But ``repr(r)`` / ``print(r)`` show
-    a structured ``BashOutput(...)`` view that surfaces stderr and a non-zero
-    return code as named fields — so failures can't be missed (a crashing
-    command with empty stdout no longer prints as blank).
+    a structured ``ShellResult(returncode=..., stdout=..., stderr=...)`` view
+    that uses the attribute names and always shows the return code, so
+    failures can't be missed (a crashing command with empty stdout no longer
+    prints as blank) and the printed names work as attributes.
 
     ``.matches`` is a ``list[Match]`` when the command was a pure search and the
     anchors are trustworthy; otherwise ``None``.
@@ -143,6 +261,8 @@ class ShellResult(str):
     stdout: str
     stderr: str
     returncode: int
+    timed_out: bool
+    timeout_seconds: float | None
     success: bool
     matches: list[Match] | None
 
@@ -152,22 +272,30 @@ class ShellResult(str):
         stderr: str = "",
         returncode: int = 0,
         matches: list[Match] | None = None,
+        timed_out: bool = False,
+        *,
+        timeout_seconds: float | None = None,
     ):
         obj = super().__new__(cls, stdout)
         obj.stdout = stdout
         obj.stderr = stderr
         obj.returncode = returncode
+        obj.timed_out = timed_out
+        obj.timeout_seconds = timeout_seconds
         obj.success = returncode == 0
         obj.matches = matches
         return obj
 
     def __repr__(self) -> str:
-        parts = [f"stdout={self.stdout!r}"]
+        parts = [f"returncode={self.returncode}"]
+        if self.timed_out:
+            parts.append("timed_out=True")
+            if self.timeout_seconds is not None:
+                parts.append(f"timeout_seconds={self.timeout_seconds!r}")
+        parts.append(f"stdout={self.stdout!r}")
         if self.stderr:
             parts.append(f"stderr={self.stderr!r}")
-        if self.returncode != 0:
-            parts.append(f"return_code={self.returncode}")
-        return f"BashOutput({', '.join(parts)})"
+        return f"ShellResult({', '.join(parts)})"
 
     def __str__(self) -> str:
         return self.__repr__()
@@ -275,11 +403,30 @@ class ShellTools(Skill):
     """
     Persistent shell + file ops, with grep that hands you editable Match objects.
 
-    Four methods — no new tools to learn:
-        run(command, stdin=, timeout=)  — shell command (cd/env/cwd persist)
+    For shell commands and file operations:
+    Always use these four methods rather than Python builtins:
+        run(command, stdin=, timeout=, cwd=)  — shell command (cd/env persist)
         read(path, lines=)             — view a file/region -> Match
         replace(match_or_path, ...)    — edit at a Match anchor, or by unique string
         write_file(path, content)      — create/overwrite a file
+
+    Commands are asynchronous: use ``await shell.run(...)``. Configure the
+    instance with ``ShellTools(default_timeout=300)``; the library default is
+    30 seconds. Both run() and run_stream() inherit ``default_timeout`` when
+    ``timeout`` is omitted or None. Pass ``timeout=600`` to override one call.
+    A shell command's own ``timeout`` utility does not extend this outer limit.
+
+    Inspect ``result.returncode`` and ``result.timed_out`` before treating output
+    as a completed command. ``result.stdout`` and ``result.stderr`` retain partial
+    output after a timeout; partial output is not evidence of successful completion.
+    Timeouts return a result, not an exception. Printed timeout results include
+    ``timed_out=True`` and the effective ``timeout_seconds``.
+
+    File reads are bounded. A ranged read consumes only that range, however
+    large the file is. Reading or replacing a whole file is capped by
+    ``max_file_bytes`` (8 MiB by default, raise it per instance:
+    ``ShellTools(cwd=..., max_file_bytes=...)``) and raises above the cap
+    rather than loading the file.
 
     Grep that you can edit from directly. When run() executes a plain search
     (grep/rg/egrep), the result still prints the EXACT bytes your command
@@ -310,18 +457,56 @@ class ShellTools(Skill):
 
     """
 
-    def __init__(self, cwd: str = ".", init_command: str | None = None, **kwargs: Any):
+    default_timeout: Annotated[
+        float,
+        spec(
+            description="Default command timeout in seconds; run/run_stream timeout= overrides it."
+        ),
+    ] = 30.0
+
+    def __init__(
+        self,
+        cwd: str = ".",
+        init_command: str | None = None,
+        *,
+        default_timeout: float = 30.0,
+        keep_background_on_close: bool = False,
+        max_file_bytes: int = DEFAULT_MAX_FILE_BYTES,
+        **kwargs: Any,
+    ):
+        if (
+            isinstance(default_timeout, bool)
+            or not math.isfinite(default_timeout)
+            or default_timeout <= 0
+        ):
+            raise ValueError("default_timeout must be a positive finite number of seconds")
+        if (
+            isinstance(max_file_bytes, bool)
+            or not isinstance(max_file_bytes, int)
+            or max_file_bytes <= 0
+        ):
+            raise ValueError("max_file_bytes must be a positive whole number of bytes")
         super().__init__(**kwargs)
+        self.default_timeout = float(default_timeout)
         self.cwd = Path(cwd).resolve()
+        # Ceiling for reads and replacements that need a whole file at once.
+        # Ranged reads and anchor harvesting are bounded by construction and
+        # are not limited by this. Raise it to work on files above the default.
+        self.max_file_bytes: int = max_file_bytes
         # Construct the session eagerly (it starts lazily on first run) so a
         # consumer wired at construction time — e.g. RepoTools(session=shell.session)
         # in the TUI — shares this shell's bash session instead of capturing None.
         # ``init_command`` (if given) runs once on session start, before any user
         # command, to set up the environment (e.g. activate a conda env).
-        self._session: BashSession = BashSession(cwd=str(self.cwd), init_command=init_command)
+        # ``keep_background_on_close`` lets background jobs outlive close().
+        self._session: BashSession = BashSession(
+            cwd=str(self.cwd),
+            init_command=init_command,
+            keep_background_on_close=keep_background_on_close,
+        )
 
     def __repr__(self) -> str:
-        return f"ShellTools(cwd={self.cwd!s})"
+        return f"ShellTools(cwd={self.cwd!s}, default_timeout={self.default_timeout!r})"
 
     @property
     @hidden
@@ -340,14 +525,8 @@ class ShellTools(Skill):
         await self._session.close()
 
     def _resolve_path(self, path: str) -> Path:
-        """Resolve a file-operation path and require it to remain inside cwd."""
-        root = self.cwd.resolve()
-        resolved = (root / path).resolve()
-        try:
-            resolved.relative_to(root)
-        except ValueError as exc:
-            raise ValueError(f"path escapes ShellTools cwd: {path}") from exc
-        return resolved
+        """Resolve a file-operation path relative to cwd when not absolute."""
+        return (self.cwd / path).resolve()
 
     async def run(
         self,
@@ -356,13 +535,26 @@ class ShellTools(Skill):
         stdin: Annotated[
             str | None, spec(description="Text piped to stdin (replaces heredocs)")
         ] = None,
-        timeout: Annotated[float, spec(description="Max seconds")] = 30.0,
+        timeout: Annotated[
+            float | None,
+            spec(description="Max seconds; None inherits this shell's default_timeout."),
+        ] = None,
+        cwd: Annotated[
+            str | Path | None,
+            spec(
+                description=(
+                    "Run this one command in this directory (relative to the shell's "
+                    "directory, or absolute) without changing the shell's directory"
+                )
+            ),
+        ] = None,
     ) -> ShellResult:
         """
         Run a shell command in the persistent session (cd/env/cwd survive).
 
         Pass a payload as stdin= instead of heredocs. Result is a str subclass
-        with .stdout / .stderr / .returncode / .success.
+        with .stdout / .stderr / .returncode / .success / .timed_out.
+        A timeout preserves partial output and reports the effective .timeout_seconds.
 
         If the command is a pure search (grep/rg/egrep, no mangling pipe or
         anchor-dropping flag), the result also carries .matches — a list of
@@ -372,54 +564,91 @@ class ShellTools(Skill):
         Args:
             command: Shell command to execute.
             stdin: Text piped to stdin (no quoting needed).
-            timeout: Max seconds before timeout.
+            timeout: Max seconds before timeout; None uses this instance's default_timeout.
+            cwd: Directory for this command only; the shell returns to its own.
         """
+        timeout = self.default_timeout if timeout is None else timeout
         session = await self._get_session()
-        run_cmd = self._with_stdin(command, stdin)
-        stdout, stderr, code, _timed = await session.run_with_timeout_flag(run_cmd, timeout=timeout)
+        run_cmd = self._with_stdin(self._in_directory(command, cwd), stdin)
+        stdout, stderr, code, timed_out = await session.run_with_timeout_flag(
+            run_cmd, timeout=timeout
+        )
         # Track cwd changes for read/replace/write_file path resolution
         pwd_out, _, _, _ = await session.run_with_timeout_flag("pwd", timeout=5.0)
         if pwd_out.strip():
             self.cwd = Path(pwd_out.strip())
 
         matches: list[Match] | None = None
-        _is_search = stdin is None and is_pure_search_command(command)
+        # Match anchors are harvested from the shell's directory, so a search run
+        # elsewhere gets none rather than anchors that could point at wrong files.
+        _is_search = stdin is None and cwd is None and is_pure_search_command(command)
         if _is_search:
             matches = await self._harvest_matches(command, stdout)
 
         if matches:
             print(
                 f"# self.shell.run({command!r:.60}) found {len(matches)} match(es).\n"
-                f"# Edit directly: m = <result>.matches[0]; await self.shell.replace(m, new_text)"
+                "# Edit directly: m = <result>.matches[0]; "
+                "await self.shell.replace(m, new_text)"
             )
 
         return ShellResult(
             stdout=stdout,
             stderr=stderr,
             returncode=code,
+            timed_out=timed_out,
+            timeout_seconds=timeout,
             matches=matches,
         )
 
     async def run_stream(
         self,
         command: Annotated[str, spec(description="Shell command to execute")],
-        timeout: Annotated[float, spec(description="Max seconds to wait before timeout")] = 30.0,
+        *,
+        stdin: Annotated[
+            str | None, spec(description="Text piped to stdin (replaces heredocs)")
+        ] = None,
+        timeout: Annotated[
+            float | None,
+            spec(description="Max seconds; None inherits this shell's default_timeout."),
+        ] = None,
+        cwd: Annotated[
+            str | Path | None,
+            spec(
+                description=(
+                    "Run this one command in this directory (relative to the shell's "
+                    "directory, or absolute) without changing the shell's directory"
+                )
+            ),
+        ] = None,
     ) -> AsyncIterator[StreamEvent | StreamDone]:
         """Stream command output line-by-line as it arrives, ending with a done event.
 
         Yields ``StreamEvent`` chunks (``.kind`` is "stdout"/"stderr", ``.text``
         the chunk) incrementally, then a final ``StreamDone`` (``.returncode``,
         ``.timed_out``) once the command completes. Runs in the persistent
-        session, like ``run``.
+        session, like ``run``. Pass a payload as ``stdin=`` instead of heredocs.
 
-        This is what ``pyp.arun(self.shell, ...)`` consumes to stream output::
+        Consume output directly and check the final exit status::
 
-            fails = await self.pyp.arun(self.shell, "make test").grep("FAIL").collect()
+            async for event in self.shell.run_stream("make test"):
+                if event.kind == "done":
+                    print("exit:", event.returncode, "timed out:", event.timed_out)
+                else:
+                    print(event.text, end="")
+
+        Args:
+            command: Shell command to execute.
+            stdin: Text piped to stdin (no quoting needed).
+            timeout: Max seconds before timeout; None uses this instance's default_timeout.
+            cwd: As for run().
         """
+        timeout = self.default_timeout if timeout is None else timeout
         session = await self._get_session()
+        run_cmd = self._with_stdin(self._in_directory(command, cwd), stdin)
         timed_out = False
         exit_code = 0
-        async for stream_name, chunk in session.run_stream(command, timeout=timeout):
+        async for stream_name, chunk in session.run_stream(run_cmd, timeout=timeout):
             if stream_name == "__done__":
                 parts = chunk.split(",")
                 exit_code = int(parts[0])
@@ -429,16 +658,43 @@ class ShellTools(Skill):
         yield StreamDone(kind="done", returncode=exit_code, timed_out=timed_out)
 
     @staticmethod
+    def _in_directory(command: str, cwd: str | Path | None) -> str:
+        """Run ``command`` in ``cwd`` in the session's own shell, then return.
+
+        Not a subshell, so exported variables and other shell state persist as
+        for any command; only the directory goes back to where it was. ``CDPATH``
+        is cleared for the ``cd`` so a relative ``cwd`` is the shell directory's
+        child. If the ``cd`` fails, its error text and status are the result and
+        the command does not run. The newline before ``}`` keeps a trailing
+        comment in ``command`` from swallowing the closing brace.
+        """
+        if cwd is None:
+            return command
+        return (
+            "__nooa_back=$PWD; "
+            f"if CDPATH= cd -- {shlex.quote(str(cwd))}; then {{ {command}\n}}; "
+            '__nooa_rc=$?; cd -- "$__nooa_back"; else __nooa_rc=$?; fi; '
+            "( exit $__nooa_rc )"
+        )
+
+    @staticmethod
     def _with_stdin(command: str, stdin: str | None) -> str:
-        """Wrap a command so ``stdin`` is fed via a base64'd tempfile (no quoting)."""
+        """Wrap a command so ``stdin`` is fed via a base64'd tempfile (no quoting).
+
+        The command runs in a ``{ ...; }`` group, not a subshell, so ``cd``,
+        exports and other shell state persist as for any command. The
+        redirection lasts for the group only; the session then reads its own
+        commands again. The newline before ``}`` keeps a trailing comment in
+        ``command`` from swallowing the closing brace.
+        """
         if stdin is None:
             return command
         import base64
 
         b64 = base64.b64encode(stdin.encode()).decode()
         return (
-            f"__nemo_in=$(mktemp); base64 -d <<<{b64} > $__nemo_in; "
-            f"({command}) < $__nemo_in; __nemo_rc=$?; rm -f $__nemo_in; "
+            f"__nemo_in=$(mktemp); base64 -d <<<'{b64}' > $__nemo_in; "
+            f"{{ {command}\n}} < $__nemo_in; __nemo_rc=$?; rm -f $__nemo_in; "
             f"( exit $__nemo_rc )"
         )
 
@@ -487,7 +743,10 @@ class ShellTools(Skill):
             return None
 
         anchors: list[tuple[str, int]] = []
-        file_cache: dict[str, list[str]] = {}
+        # path -> (resolved path, {line number: line text}), holding only the
+        # anchored lines. The resolved path is carried so each Match stays
+        # bound to the file the hit came from even if the shell cwd moves.
+        file_cache: dict[str, tuple[Path, dict[int, str]]] = {}
         for raw in rg_out.splitlines():
             raw = raw.strip()
             if not raw:
@@ -545,18 +804,44 @@ class ShellTools(Skill):
         else:
             keep = anchors
 
+        # Fetch only the anchored lines. A search hit near the end of a very
+        # large file used to pull that whole file into memory to quote one
+        # line of it, and the agent never asked for a read — any grep could
+        # trigger it. Cost now scales with the number of anchors instead.
+        wanted: dict[str, set[int]] = {}
+        for mpath, line_no in keep:
+            wanted.setdefault(mpath, set()).add(line_no)
+
+        for mpath, line_nos in wanted.items():
+            try:
+                resolved = self._resolve_path(mpath)
+                file_cache[mpath] = (
+                    resolved,
+                    read_specific_lines(resolved, line_nos, max_line_chars=self.max_file_bytes),
+                )
+            except (OSError, ValueError):
+                # Includes FileTooLargeError. Harvesting is fail-closed by
+                # design: no anchors is a supported outcome, a wrong anchor
+                # is not.
+                return None
+
         out: list[Match] = []
         for mpath, line_no in keep:
-            if mpath not in file_cache:
-                try:
-                    resolved = self._resolve_path(mpath)
-                    file_cache[mpath] = resolved.read_text().splitlines(keepends=True)
-                except (OSError, ValueError):
-                    return None
-            lines = file_cache[mpath]
-            if not (1 <= line_no <= len(lines)):
+            resolved, lines = file_cache[mpath]
+            line = lines.get(line_no)
+            if line is None:
+                # Anchor points past the end of the file — same distrust of
+                # the rg output as before.
                 return None
-            out.append(Match(mpath, line_no, line_no, lines[line_no - 1]))
+            out.append(
+                Match(
+                    mpath,
+                    line_no,
+                    line_no,
+                    line,
+                    resolved_path=resolved,
+                )
+            )
         return out
 
     @staticmethod
@@ -647,7 +932,7 @@ class ShellTools(Skill):
 
     async def read(
         self,
-        path: Annotated[str, spec(description="File path (relative to cwd)")],
+        path: Annotated[str, spec(description="File path (relative to cwd or absolute)")],
         lines: Annotated[
             tuple[int, int] | None,
             spec(description="(start, end) 1-indexed inclusive, or None for whole file"),
@@ -660,25 +945,36 @@ class ShellTools(Skill):
         Slice with match[start:end] to narrow the region.
 
         Args:
-            path: File path (relative to cwd).
+            path: File path (relative to cwd or absolute).
             lines: Optional (start, end) range, 1-indexed inclusive.
 
         Returns:
             Match with .text, .numbered, .path, .start, .end.
+
+        Raises:
+            FileTooLargeError: Whole-file read over ``max_file_bytes``.
         """
         resolved = self._resolve_path(path)
-        content = resolved.read_text()
-        all_lines = content.splitlines(keepends=True)
-        total = len(all_lines)
 
         if lines is not None:
             start, end = lines
             start = max(1, start)
-            end = min(total, end)
-            text = "".join(all_lines[start - 1 : end])
-            return Match(str(path), start, end, text)
+            text, clamped_end = read_line_range(
+                resolved, start, end, max_line_chars=self.max_file_bytes
+            )
+            return Match(str(path), start, clamped_end, text, resolved_path=resolved)
 
-        return Match(str(path), 1, total, content)
+        content = read_whole_file_checked(
+            resolved,
+            self.max_file_bytes,
+            hint=(
+                "Read a region instead: read(path, lines=(start, end)). To allow "
+                "whole-file reads this large, construct "
+                "ShellTools(max_file_bytes=...)."
+            ),
+        )
+        total = len(content.splitlines(keepends=True))
+        return Match(str(path), 1, total, content, resolved_path=resolved)
 
     async def replace(
         self,
@@ -701,20 +997,77 @@ class ShellTools(Skill):
         1. replace(match, new_text) — replace the Match's line region.
         2. replace(path, old, new)  — old must match exactly once. new="" deletes.
 
+        Both forms rebuild the file, so both are capped at ``max_file_bytes``
+        (8 MiB by default) and raise above it instead of loading the file.
+
+        A Match replaces its entire line region, not a substring within it.
+        Stale or invalid anchors raise StaleMatchError without writing; re-read or
+        re-search and recompute the Match. Anchors are never relocated. This is
+        a pre-write check, not a lock against concurrent external writers.
+        Supplying new with a Match is an error; use the path form for old -> new.
+
         Args:
             target: A Match or file path string.
             old_or_new: For Match: the new text. For path: old text to find.
             new: Only for path form: the replacement text.
+
+        Raises:
+            FileTooLargeError: The file is over ``max_file_bytes``.
         """
+        oversize_hint = (
+            "Replacing text requires rebuilding the file. To edit a file this "
+            "large, construct ShellTools(max_file_bytes=...)."
+        )
         if isinstance(target, Match):
+            if new is not None:
+                raise ValueError(
+                    "replace(match, old, new) is ambiguous and no file was changed. "
+                    "A Match takes only the full replacement text for its entire line region: "
+                    "replace(match, new_text). For an old -> new substring replacement, use "
+                    "the path-string form replace(path, old, new); use match.resolved_path "
+                    "to keep the original file even if the shell directory changed. "
+                    "This guard prevents silently overwriting the whole matched region "
+                    "(possibly the entire file) with the old text."
+                )
             new_text = old_or_new
-            resolved = self._resolve_path(target.path)
-            content = resolved.read_text()
+            resolved = Path(target.resolved_path)
+            try:
+                content = read_whole_file_checked(resolved, self.max_file_bytes, hint=oversize_hint)
+            except FileNotFoundError:
+                raise StaleMatchError(target, None, "file no longer exists") from None
             all_lines = content.splitlines(keepends=True)
+            # Compare at the captured range only; never find/relocate matching text.
+            # read(), search harvesting and Match slicing use this same normalized
+            # text representation, including line terminators and missing EOF newline.
+            integer_range = type(target.start) is int and type(target.end) is int
+            empty_file_anchor = (
+                integer_range
+                and target.start == 1
+                and target.end == 0
+                and target.text == ""
+                and content == ""
+            )
+            if not empty_file_anchor:
+                if not integer_range or target.start < 1 or target.end < target.start:
+                    raise StaleMatchError(target, None, "invalid captured line range")
+                current = "".join(all_lines[target.start - 1 : target.end])
+                if target.end > len(all_lines):
+                    raise StaleMatchError(target, current, "captured line range is out of bounds")
+                if current != target.text:
+                    raise StaleMatchError(target, current, "captured text no longer matches")
 
             before = all_lines[: target.start - 1]
             after = all_lines[target.end :]
-            if new_text and not new_text.endswith("\n") and after:
+            # Keep the file newline-terminated when the replaced region
+            # reaches end-of-file and the original content ended with a
+            # newline — otherwise the edit silently strips the final byte.
+            reaches_end = target.end >= len(all_lines)
+            ended_with_newline = content.endswith("\n")
+            if (
+                new_text
+                and not new_text.endswith("\n")
+                and (after or (reaches_end and ended_with_newline))
+            ):
                 new_text += "\n"
             new_content = "".join(before) + new_text + "".join(after)
             resolved.write_text(new_content)
@@ -725,6 +1078,7 @@ class ShellTools(Skill):
                 path=target.path,
                 message=f"Edited {target.path} (replaced lines {target.start}-{target.end})",
                 diff=diff,
+                new_text=new_text,
             )
 
         elif isinstance(target, str):
@@ -735,7 +1089,7 @@ class ShellTools(Skill):
                 )
             old_text = old_or_new
             resolved = self._resolve_path(target)
-            content = resolved.read_text()
+            content = read_whole_file_checked(resolved, self.max_file_bytes, hint=oversize_hint)
 
             count = content.count(old_text)
             if count == 0:
@@ -756,20 +1110,21 @@ class ShellTools(Skill):
                 path=target,
                 message=f"Edited {target}",
                 diff=f"--- a/{target}\n+++ b/{target}",
+                new_text=new,
             )
         else:
             raise TypeError(f"target must be a Match or file path str, got {type(target).__name__}")
 
     async def write_file(
         self,
-        path: Annotated[str, spec(description="File path (relative to cwd)")],
+        path: Annotated[str, spec(description="File path (relative to cwd or absolute)")],
         content: Annotated[str, spec(description="Full file content")],
     ) -> FileWrite:
         """
         Create or overwrite a file with content (no shell quoting needed).
 
         Args:
-            path: File path (relative to cwd).
+            path: File path (relative to cwd or absolute).
             content: Full file content.
         """
         resolved = self._resolve_path(path)
@@ -779,4 +1134,5 @@ class ShellTools(Skill):
         return FileWrite(
             path=path,
             message=f"Created {path} ({line_count} lines)",
+            new_text=content,
         )

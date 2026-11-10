@@ -10,14 +10,18 @@ the serialization boundary, and each guardrail enforced *inside a real cell*
 
 from __future__ import annotations
 
+import enum
 import os
+import sys
 import tempfile
 from typing import Any
 
 import pytest
+from pydantic import BaseModel
 
 from nooa import Agent
 from nooa.runtime.sandbox.config import FileRule, SandboxConfig
+from nooa.runtime.sandbox.errors import CellSerializationError
 from nooa.runtime.sandbox.executor import SandboxedExecutor
 from nooa.runtime.sandbox.guards import probe_capabilities
 from nooa.unifiedllm.fake import FakeLLMClient
@@ -27,6 +31,22 @@ pytestmark = pytest.mark.sandbox
 CAPS = probe_capabilities()
 
 _side_effects: list[str] = []
+
+
+class ReportKind(enum.Enum):
+    INFO = "info"
+    WARN = "warn"
+
+
+class ReportLine(BaseModel):
+    text: str
+
+
+class Report(BaseModel):
+    """A data type the agent declares, so cells may construct and hand it back."""
+
+    lines: list[ReportLine]
+    kind: ReportKind = ReportKind.INFO
 
 
 class _LiveSkill:
@@ -62,6 +82,12 @@ class _ToolAgent(Agent, llm=FakeLLMClient()):
     def add_one(self, n: int) -> int:
         return n + 1
 
+    def accept_report(self, report: Report) -> str:
+        return f"{report.kind.value}:{len(report.lines)}"
+
+    def sum_array(self, arr: Any) -> float:
+        return float(arr.sum())
+
     def record(self, tag: str) -> str:
         _side_effects.append(tag)
         return f"recorded:{tag}"
@@ -74,6 +100,18 @@ class _ToolAgent(Agent, llm=FakeLLMClient()):
         from nooa.strategies.codeact import _ReturnResultSignal
 
         raise _ReturnResultSignal(result={"result": payload})
+
+    def finish_unpicklable(self) -> None:
+        """Raise a completion signal whose result cannot cross the process boundary."""
+        from nooa.strategies.codeact import _ReturnResultSignal
+
+        raise _ReturnResultSignal(result={"result": lambda: None})
+
+    def finish_none(self) -> None:
+        """Raise a completion signal carrying a legitimate ``None`` payload."""
+        from nooa.strategies.codeact import _ReturnResultSignal
+
+        raise _ReturnResultSignal(result=None)  # type: ignore[arg-type]
 
 
 def _return_result_builtins() -> dict:
@@ -128,7 +166,10 @@ async def test_persistent_namespace_keeps_assignments_from_failed_cell():
     try:
         failed = await _run(ex, "answer = 41\nraise ValueError('boom')", 1)
         assert not failed.success
-        assert isinstance(failed.error, ValueError)
+        from nooa.runtime.sandbox.errors import SandboxExecutionError
+
+        assert isinstance(failed.error, SandboxExecutionError)
+        assert isinstance(failed.error.original_error, ValueError)
 
         resumed = await _run(ex, "answer + 1", 2)
         assert resumed.success, resumed.error
@@ -165,6 +206,30 @@ async def test_sync_tool_brokering_hits_live_agent():
     try:
         res = await _run(ex, "self.add_one(41)")
         assert res.returned_value == 42
+    finally:
+        await ex.aclose()
+
+
+async def test_brokered_bad_call_preserves_parent_signature_hint():
+    """A proxy TypeError keeps source context plus the real parent callable API."""
+    from nooa.errors.formatting import format_error_for_llm
+
+    ex = _executor()
+    try:
+        code = "self.add_one(value=41)"
+        res = await _run(ex, code, 88)
+        from nooa.runtime.sandbox.errors import SandboxExecutionError
+
+        assert isinstance(res.error, SandboxExecutionError)
+        assert isinstance(res.error.original_error, TypeError)
+
+        diagnostic = format_error_for_llm(res.error, code)
+        assert "Cell In[88], line 1" in diagnostic
+        assert code in diagnostic
+        assert "unexpected keyword argument 'value'" in diagnostic
+        assert "The callable you called has this signature:" in diagnostic
+        assert "_ToolAgent.add_one" in diagnostic
+        assert "n: int" in diagnostic
     finally:
         await ex.aclose()
 
@@ -225,7 +290,7 @@ async def test_unpicklable_return_result_payload_is_clean_error():
     try:
         res = await _run(ex, "return_result(lambda: 1)")
         assert not res.success
-        assert "picklable" in str(res.error).lower()
+        assert "sandbox boundary" in str(res.error)
         # Worker survived (namespace intact): next cell still runs.
         ok = await _run(ex, "1 + 1", 2)
         assert ok.returned_value == 2
@@ -271,12 +336,134 @@ async def test_brokered_tool_raising_signal_flows_as_signal():
         await ex.aclose()
 
 
+async def test_brokered_signal_with_none_payload_is_preserved():
+    ex = _executor()
+    try:
+        res = await _run(ex, "self.finish_none()")
+        assert res.error is None
+        assert res.signal is not None
+        assert res.signal.result is None
+    finally:
+        await ex.aclose()
+
+
+async def test_brokered_signal_with_unpicklable_payload_is_clear_error():
+    ex = _executor()
+    try:
+        res = await _run(ex, "self.finish_unpicklable()")
+        assert res.signal is None
+        assert not res.success
+        assert "could not cross the sandbox boundary" in str(res.error)
+        assert "JSON/pickle-safe value" in str(res.error)
+
+        recovered = await _run(ex, "40 + 2", 2)
+        assert recovered.success
+        assert recovered.returned_value == 42
+    finally:
+        await ex.aclose()
+
+
 async def test_unpicklable_return_is_clear_error():
     ex = _executor()
     try:
         res = await _run(ex, "lambda x: x")
         assert not res.success
-        assert "picklable" in str(res.error).lower()
+        assert "sandbox boundary" in str(res.error)
+    finally:
+        await ex.aclose()
+
+
+# --- the pipe is not an escape hatch -----------------------------------------
+_ESCAPE_MARKER = "NOOA_SANDBOX_ESCAPE"
+_BOMB_CELL = (
+    "class Bomb:\n"
+    "    def __reduce__(self):\n"
+    f"        return (eval, (\"__import__('os').environ.__setitem__({_ESCAPE_MARKER!r}, 'pwned')\",))\n"
+    "marker = 5\n"
+)
+
+
+async def _assert_worker_survived(ex: SandboxedExecutor) -> None:
+    """The failed cell's earlier assignments are still there: no restart happened."""
+    resumed = await _run(ex, "marker + 1", 2)
+    assert resumed.success, resumed.error
+    assert resumed.returned_value == 6
+
+
+@pytest.mark.parametrize(
+    "cell",
+    ["self.value = Bomb()", "self.add_one(Bomb())", "Bomb()", "return_result(Bomb())"],
+    ids=["setattr", "tool-arg", "return", "return_result"],
+)
+async def test_hostile_reduce_payload_never_executes_in_parent(monkeypatch, cell):
+    """A ``__reduce__`` gadget is just an unserializable value: refused, parent untouched."""
+    monkeypatch.delenv(_ESCAPE_MARKER, raising=False)
+    agent = _ToolAgent()
+    ex = SandboxedExecutor(
+        agent,
+        SandboxConfig(require=False),
+        cell_timeout=10.0,
+        framework_builtins=_return_result_builtins(),
+    )
+    try:
+        res = await _run(ex, _BOMB_CELL + cell)
+        assert not res.success
+        error = getattr(res.error, "original_error", res.error)
+        assert isinstance(error, CellSerializationError)
+        assert "sandbox boundary" in str(res.error)
+        assert res.signal is None and agent.value == 41
+        assert os.environ.get(_ESCAPE_MARKER) is None
+        await _assert_worker_survived(ex)
+    finally:
+        await ex.aclose()
+
+
+async def test_undeclared_type_argument_is_clear_error_and_worker_survives():
+    ex = _executor()
+    try:
+        res = await _run(ex, "import types\nmarker = 5\nself.add_one(types.SimpleNamespace(a=1))")
+        assert not res.success
+        assert "SimpleNamespace" in str(res.error) and "sandbox boundary" in str(res.error)
+        await _assert_worker_survived(ex)
+    finally:
+        await ex.aclose()
+
+
+async def test_declared_data_types_cross_the_boundary_both_ways():
+    ex = _executor()
+    try:
+        arg = await _run(
+            ex,
+            "self.accept_report(Report(lines=[ReportLine(text='a')], kind=ReportKind.WARN))",
+            1,
+        )
+        assert arg.success, arg.error
+        assert arg.returned_value == "warn:1"
+
+        returned = await _run(ex, "Report(lines=[ReportLine(text='b')])", 2)
+        assert returned.success, returned.error
+        assert returned.returned_value == Report(lines=[ReportLine(text="b")])
+
+        signaled = await _run(ex, "return_result(Report(lines=[]))", 3)
+        assert signaled.error is None
+        assert signaled.signal is not None
+        assert signaled.signal.result == {"result": Report(lines=[])}
+    finally:
+        await ex.aclose()
+
+
+async def test_numpy_values_cross_the_boundary_both_ways():
+    np = pytest.importorskip("numpy")
+    ex = _executor()
+    try:
+        arg = await _run(ex, "import numpy as np\nself.sum_array(np.arange(4.0))", 1)
+        assert arg.success, arg.error
+        assert arg.returned_value == 6.0
+
+        returned = await _run(ex, "np.arange(3)", 2)
+        assert returned.success, returned.error
+        assert isinstance(returned.returned_value, np.ndarray)
+        assert returned.returned_value.tolist() == [0, 1, 2]
     finally:
         await ex.aclose()
 
@@ -339,8 +526,112 @@ async def test_cell_error_is_reported_not_raised():
         res = await _run(ex, "raise ValueError('boom')")
         assert not res.success
         assert "boom" in str(res.error)
-        # The real exception type is reconstructed (not a generic surrogate).
-        assert isinstance(res.error, ValueError)
+        # The typed boundary retains the reconstructed worker exception.
+        from nooa.runtime.sandbox.errors import SandboxExecutionError
+
+        assert isinstance(res.error, SandboxExecutionError)
+        assert isinstance(res.error.original_error, ValueError)
+    finally:
+        await ex.aclose()
+
+
+async def test_broken_exception_string_crosses_real_worker_and_worker_recovers():
+    ex = _executor()
+    try:
+        res = await _run(
+            ex,
+            "class BrokenStringError(Exception):\n"
+            "    def __str__(self):\n"
+            "        raise KeyboardInterrupt('hostile')\n"
+            "raise BrokenStringError()",
+            73,
+        )
+        assert not res.success
+        assert res.error.diagnostic.endswith("BrokenStringError: <exception str() failed>")
+
+        recovered = await _run(ex, "40 + 2", 74)
+        assert recovered.success
+        assert recovered.returned_value == 42
+    finally:
+        await ex.aclose()
+
+
+async def test_explicit_exception_chain_crosses_real_worker():
+    ex = _executor()
+    try:
+        code = (
+            "try:\n"
+            "    raise KeyError('inner')\n"
+            "except KeyError as exc:\n"
+            "    raise RuntimeError('outer') from exc"
+        )
+        res = await _run(ex, code, 74)
+
+        assert not res.success
+        assert "KeyError: 'inner'" in res.error.diagnostic
+        assert "The above exception was the direct cause" in res.error.diagnostic
+        assert res.error.diagnostic.endswith("RuntimeError: outer")
+    finally:
+        await ex.aclose()
+
+
+async def test_exception_group_crosses_real_worker():
+    ex = _executor()
+    try:
+        res = await _run(
+            ex,
+            "raise ExceptionGroup('many', [ValueError('one'), TypeError('two')])",
+            75,
+        )
+
+        assert not res.success
+        assert "ExceptionGroup: many (2 sub-exceptions)" in res.error.diagnostic
+        assert "ValueError: one" in res.error.diagnostic
+        assert "TypeError: two" in res.error.diagnostic
+    finally:
+        await ex.aclose()
+
+
+async def test_syntax_error_preserves_cell_filename_across_process():
+    """Parser diagnostics retain the generated-cell identity across IPC."""
+    from nooa.errors.formatting import format_error_for_llm
+
+    ex = _executor()
+    try:
+        code = "value = (1 + )"
+        res = await _run(ex, code, 76)
+        from nooa.runtime.sandbox.errors import SandboxExecutionError
+
+        assert isinstance(res.error, SandboxExecutionError)
+        assert isinstance(res.error.original_error, SyntaxError)
+
+        formatted = format_error_for_llm(res.error, code)
+        assert "Cell In[76], line 1" in formatted
+        assert "<unknown>" not in formatted
+        assert formatted.endswith("SyntaxError: invalid syntax")
+    finally:
+        await ex.aclose()
+
+
+async def test_cell_error_preserves_source_location_across_process():
+    """The sandbox transports its source-aware diagnostic, not a bare exception."""
+    from nooa.errors.formatting import format_error_for_llm
+
+    ex = _executor()
+    try:
+        code = "first = 'ok'\nsecond = 'still ok'\ntext = 'abc'\nstart = text.index('missing')"
+        res = await _run(ex, code, 75)
+        assert res.error is not None
+
+        formatted = format_error_for_llm(
+            res.error,
+            code,
+            line_offset=res.wrapper_line_offset,
+        )
+
+        assert "Cell In[75], line 4" in formatted
+        assert "start = text.index('missing')" in formatted
+        assert formatted.endswith("ValueError: substring not found")
     finally:
         await ex.aclose()
 
@@ -403,7 +694,9 @@ async def test_workspace_is_created_if_missing():
 
 
 # --- guardrails enforced inside a real cell ---------------------------------
-@pytest.mark.skipif(not CAPS.rlimit, reason="RLIMIT unavailable")
+@pytest.mark.skipif(
+    sys.platform != "linux" or not CAPS.rlimit, reason="Linux RLIMIT_AS unavailable"
+)
 async def test_memory_guard_inside_cell():
     ex = _executor(SandboxConfig(require=False, network=True, filesystem=False, max_memory_mb=128))
     try:
@@ -485,6 +778,39 @@ async def test_wallclock_timeout_kills_cpu_bound_cell():
         # Worker recovered: the next cell runs.
         res2 = await _run(ex, "40 + 2", 2)
         assert res2.returned_value == 42
+    finally:
+        await ex.aclose()
+
+
+@pytest.mark.parametrize("invalid_limit", [0, -1, True])
+def test_executor_invalid_error_budget_uses_default(invalid_limit):
+    ex = SandboxedExecutor(
+        _ToolAgent(),
+        SandboxConfig(require=False),
+        cell_timeout=10.0,
+        max_error=invalid_limit,
+    )
+    try:
+        from nooa.config.truncation_config import DEFAULT_TRUNCATION_CONFIG
+
+        assert ex._max_error == DEFAULT_TRUNCATION_CONFIG.capture.max_error
+    finally:
+        ex.close_sync()
+
+
+async def test_worker_error_uses_executor_error_budget():
+    ex = SandboxedExecutor(
+        _ToolAgent(),
+        SandboxConfig(require=False),
+        cell_timeout=10.0,
+        framework_builtins=_return_result_builtins(),
+        max_error=100,
+    )
+    try:
+        result = await _run(ex, "raise RuntimeError('x' * 1_000)")
+
+        assert result.error is not None
+        assert "Showing first 50 and last 50 chars" in result.error.diagnostic
     finally:
         await ex.aclose()
 

@@ -22,8 +22,8 @@ from __future__ import annotations
 import asyncio
 import importlib
 import os
+import runpy
 import sys
-import types
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -726,6 +726,7 @@ class TestSQLiteSessionLocking:
         mislead diagnostics.
         """
         import fcntl
+        import socket
 
         from nooa.storage.sqlite import _acquire_session_lock
 
@@ -735,7 +736,9 @@ class TestSQLiteSessionLocking:
 
         fd = _acquire_session_lock(str(lock_path))
         try:
-            assert lock_path.read_bytes() == str(os.getpid()).encode()
+            # The record is "<pid> <hostname>" (the host lets another machine
+            # sharing the directory tell the session is in use).
+            assert lock_path.read_bytes() == f"{os.getpid()} {socket.gethostname()}".encode()
         finally:
             fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
@@ -758,12 +761,23 @@ class TestSQLiteSessionLocking:
 class TestSQLiteModuleLevelAssertions:
     """Lines 48, 72: module-level assertions during import verify Event union structure."""
 
+    @staticmethod
+    def _execute_sqlite_module() -> None:
+        """Execute sqlite.py without reloading the canonical imported module.
+
+        Reloading ``nooa.storage.sqlite`` replaces exception classes in the
+        module globals while already-imported callers retain the old class
+        objects. That contaminates later tests whose exception handlers were
+        established during collection. A private run-path exercises the same
+        module-level assertions without changing process-wide import state.
+        """
+        import nooa.storage.sqlite as sqlite_mod
+
+        runpy.run_path(sqlite_mod.__file__, run_name="_nooa_sqlite_assertion_probe")
+
     def test_event_union_unwrap_assertion(self):
         """Line 48: _CONTEXT_BLOCKS_TYPES has >= 3 types from Event union."""
-        import importlib
         import typing
-
-        import nooa.storage.sqlite as sqlite_mod
 
         original_get_args = typing.get_args
 
@@ -774,20 +788,12 @@ class TestSQLiteModuleLevelAssertions:
                 return result[:2]  # Force < 3 to trigger assertion
             return result
 
-        try:
-            with patch.object(typing, "get_args", side_effect=fake_get_args):
-                with pytest.raises(
-                    AssertionError, match="Failed to unwrap context_blocks Event union"
-                ):
-                    importlib.reload(sqlite_mod)
-        finally:
-            # Always restore module even if assertion doesn't match
-            importlib.reload(sqlite_mod)
+        with patch.object(typing, "get_args", side_effect=fake_get_args):
+            with pytest.raises(AssertionError, match="Failed to unwrap context_blocks Event union"):
+                self._execute_sqlite_module()
 
     def test_duplicate_event_type_assertion(self):
         """Line 72: duplicate event_type key in _CORE_TYPES raises AssertionError."""
-        import importlib
-
         from nooa.events import Task
 
         # Patch Task's event_type default to collide with Message's "Message" key.
@@ -797,15 +803,9 @@ class TestSQLiteModuleLevelAssertions:
         Task.model_fields["event_type"].default = "Message"  # collides with Message
         try:
             with pytest.raises(AssertionError, match="Duplicate event_type key"):
-                import nooa.storage.sqlite as sqlite_mod
-
-                importlib.reload(sqlite_mod)
+                self._execute_sqlite_module()
         finally:
             Task.model_fields["event_type"].default = original_default
-            # Reload to restore clean state
-            import nooa.storage.sqlite as sqlite_mod
-
-            importlib.reload(sqlite_mod)
 
 
 # =============================================================================
@@ -851,50 +851,6 @@ class TestNemoRelayMiddlewareModelExtraction:
                 await nm.nemo_relay_llm_middleware(ctx, mock_nxt)
                 call_args = fake_nemo_relay.llm.execute.call_args
                 assert call_args[0][0] == "gpt-4-test"  # first positional arg is model_name
-            finally:
-                importlib.reload(nm)
-
-
-class TestNemoRelayWrapperFallbackReturn:
-    """Line 169: _wrapper returns {} when resp has no recognized attributes."""
-
-    @pytest.mark.asyncio
-    async def test_wrapper_fallback_empty_dict(self):
-        """When resp has no model_dump, raw_response, or assistant_message, return {}."""
-        fake_nemo_relay, _ = _make_fake_nemo_relay_for_test()
-
-        import nooa.nemo_relay_middleware as _nm_ensure  # noqa: F401
-
-        captured_wrapper_result = {}
-
-        async def llm_execute_capturing(*args, **kwargs):
-            """Call the wrapper and capture its return value."""
-            wrapper = args[2]
-            request = args[1]
-            result = await wrapper(request)
-            captured_wrapper_result["result"] = result
-
-        fake_nemo_relay.llm.execute = AsyncMock(side_effect=llm_execute_capturing)
-
-        with patch.dict(sys.modules, {"nemo_relay": fake_nemo_relay}):
-            nm = sys.modules["nooa.nemo_relay_middleware"]
-            importlib.reload(nm)
-            try:
-                ctx = MagicMock()
-                ctx.agent = None
-                ctx.params = {}
-                ctx.messages = []
-
-                # The response object has none of the expected attributes
-                plain_resp = types.SimpleNamespace()
-                # no model_dump, no raw_response, no assistant_message
-
-                async def mock_nxt(c):
-                    c.response = plain_resp
-                    return c
-
-                await nm.nemo_relay_llm_middleware(ctx, mock_nxt)
-                assert captured_wrapper_result["result"] == {}
             finally:
                 importlib.reload(nm)
 

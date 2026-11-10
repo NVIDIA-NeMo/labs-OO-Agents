@@ -210,6 +210,29 @@ class TestCallableInstanceAnnotatedParams:
         else:
             raise AssertionError("spec() function not found in doc(agentdoc)")
 
+    def test_agentdoc_module_presents_type_and_value_views(self):
+        """doc(agentdoc) gives a concise, runnable mental model."""
+        from nooa import agentdoc
+
+        result = doc(agentdoc)
+        assert "Show an agent what an object can do" in result
+        assert "doc(Assistant)" in result
+        assert "doc(assistant)" in result
+        assert "pformat(assistant)" in result
+        assert 40 <= len(result.splitlines()) <= 60
+
+    def test_doc_explains_instance_contract(self):
+        """doc(doc) captures the essential instance-rendering guarantees."""
+        result = doc(doc)
+        assert "same contract" in result
+        assert "current values and public runtime fields" in result
+        assert "properties stay unevaluated" in result
+        assert "custom ``__repr__`` methods never" in result
+        assert "inline_depth: int = 1" in result
+        assert "``2+`` includes" in result
+        assert "inline_depth: int | None" not in result
+        assert len(result.splitlines()) <= 25
+
 
 # ---------------------------------------------------------------------------
 # _extract_dataclass_fields directly

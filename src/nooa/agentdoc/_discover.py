@@ -54,6 +54,7 @@ def discover_referenced_types(
     obj: type | Any,
     *,
     seen: set[type] | None = None,
+    field_names: set[str] | None = None,
 ) -> list[type]:
     """Discover all custom types referenced in a class or callable's interface.
 
@@ -70,6 +71,8 @@ def discover_referenced_types(
         seen: Optional set of already-seen types to exclude from results.
             Used for deduplication when documenting multiple types together.
             Types in this set will not be included in the returned list.
+        field_names: Optional names of visible fields to scan. Methods are
+            always scanned. ``None`` scans every extracted field.
 
     Returns:
         List of unique custom type objects not in `seen`, sorted by name
@@ -86,21 +89,63 @@ def discover_referenced_types(
         ]
         return sorted(custom_types, key=lambda t: t.__name__)
 
-    # Handle class type
-    if not isinstance(obj, type):
-        return []  # Not a class or callable
+    # Instances use their type-level contract, with per-instance visibility.
+    # Built-in values are not documentable API objects.
+    visibility_obj = None
+    if isinstance(obj, type):
+        type_obj = obj
+    else:
+        type_obj = type(obj)
+        if type_obj.__module__ == "builtins":
+            return []
+        visibility_obj = obj
 
-    type_obj = obj
-
-    # 1. Discover from ALL fields (class-level annotations, __init__, non-annotated attrs)
+    # 1. Discover from visible fields (class-level annotations, __init__,
+    # non-annotated attrs).
     # Use the same extraction that extract_type_info uses for consistency
     from nooa.agentdoc._structured import extract_type_info
 
     type_info = extract_type_info(type_obj)
+    if visibility_obj is not None:
+        from nooa.agentdoc._visibility import is_hidden_field
+
     for field in type_info.fields:
+        if field_names is not None and field.name not in field_names:
+            continue
+        if visibility_obj is not None and is_hidden_field(visibility_obj, field.name):
+            continue
         # Parse the type string back to extract types
         # For fields, we need to look at the original type hints where possible
         _extract_types_from_field(type_obj, field.name, field.type, discovered)
+
+    # Instance-only public fields can introduce referenced types that are not
+    # present in the class contract. Read storage directly so discovery does
+    # not invoke arbitrary descriptors or __getattr__ hooks.
+    if visibility_obj is not None:
+        try:
+            obj_dict = object.__getattribute__(visibility_obj, "__dict__")
+        except AttributeError:
+            obj_dict = None
+        runtime_values = dict(obj_dict or {})
+        if hasattr(type_obj, "model_fields"):
+            try:
+                pydantic_extra = object.__getattribute__(visibility_obj, "__pydantic_extra__")
+            except AttributeError:
+                pydantic_extra = None
+            if isinstance(pydantic_extra, dict):
+                runtime_values.update(pydantic_extra)
+
+        declared_names = {field.name for field in type_info.fields}
+        for name, value in runtime_values.items():
+            if (
+                name in declared_names
+                or name.startswith("_")
+                or is_hidden_field(visibility_obj, name)
+            ):
+                continue
+            if callable(value) and not isinstance(value, type):
+                continue
+            _extract_types_from_hint(value if isinstance(value, type) else type(value), discovered)
 
     # 2. Discover from method signatures
     for method_info in type_info.methods:

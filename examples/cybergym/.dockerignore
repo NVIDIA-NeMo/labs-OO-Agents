@@ -1,11 +1,4 @@
-.git
-.nooa
-.vscode
-__pycache__
-*.pyc
-.env
-runs
-cybergym_data
-cybergym-server-data
-server_poc
-.venv
+**
+!Dockerfile
+!nooa_cybergym/
+!nooa_cybergym/**

@@ -6,6 +6,7 @@ from typing import NewType
 
 from pydantic import BaseModel
 
+from nooa.agentdoc import doc
 from nooa.agentdoc._discover import discover_referenced_types
 
 # ---------------------------------------------------------------------------
@@ -44,6 +45,39 @@ def test_direct_ref_pydantic_field_discovered():
     refs = discover_referenced_types(ParentWithDirectRef)
     ref_names = [t.__name__ for t in refs]
     assert "ChildModel" in ref_names, f"Expected ChildModel in referenced types, got: {ref_names}"
+
+
+class ColdParent(BaseModel):
+    child: "ColdChild"
+
+    def zebra(self) -> str:
+        return "zebra"
+
+    @classmethod
+    def alpha(cls) -> str:
+        return "alpha"
+
+
+class ColdChild(BaseModel):
+    value: int
+
+
+def test_doc_cold_forward_ref_preserves_fields_and_method_order():
+    # No construction or schema generation before the first inspection.
+    assert not ColdParent.__pydantic_complete__
+
+    result = doc(ColdParent)
+
+    child_field = next(line for line in result.splitlines() if "child:" in line)
+    assert "ColdChild" in child_field
+    assert "class ColdChild(BaseModel):" in result
+    assert "value: int" in result
+    assert result.index("def zebra(self) -> str:") < result.index("def alpha(cls) -> str:")
+    assert "@classmethod" in result
+    # Rebuilding during inspection must not lose or reorder user methods.
+    assert [line for line in result.splitlines() if "def " in line] == [
+        line for line in doc(ColdParent).splitlines() if "def " in line
+    ]
 
 
 # ---------------------------------------------------------------------------

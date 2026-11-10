@@ -130,23 +130,165 @@ def client(tmp_path, monkeypatch):
         del otlp_store._write_tls.conn
 
 
-def test_api_routes_require_configured_bearer_token(client, monkeypatch):
+def _remote_client() -> TestClient:
+    """A client whose requests arrive from a non-loopback address."""
+    return TestClient(app, client=("10.9.9.9", 54321))
+
+
+def test_loopback_is_allowed_without_a_token(client, monkeypatch):
+    monkeypatch.delenv("NOOA_VIEWER_AUTH_TOKEN", raising=False)
+    assert client.get("/api/version").status_code == 200
+
+
+def test_loopback_still_allowed_when_a_token_is_configured(client, monkeypatch):
+    """Regression: the token must supplement the loopback allowance, not replace it.
+
+    When it replaced it, local agents and the local UI both broke the moment a
+    token was set for remote access — leaving no working configuration.
+    """
     monkeypatch.setenv("NOOA_VIEWER_AUTH_TOKEN", "test-viewer-token")
+    assert client.get("/api/version").status_code == 200
 
-    read_response = client.get("/api/version")
-    write_response = client.post("/api/refresh")
-    assert read_response.status_code == 401
-    assert write_response.status_code == 401
-    assert read_response.headers["www-authenticate"] == "Bearer"
 
-    authorized = client.get("/api/version", headers={"Authorization": "Bearer test-viewer-token"})
-    assert authorized.status_code == 200
+def test_remote_without_token_configured_is_refused(client, monkeypatch):
+    monkeypatch.delenv("NOOA_VIEWER_AUTH_TOKEN", raising=False)
+    with _remote_client() as remote:
+        assert remote.get("/api/version").status_code == 403
+
+
+def test_remote_requires_credentials_when_token_configured(client, monkeypatch):
+    monkeypatch.setenv("NOOA_VIEWER_AUTH_TOKEN", "test-viewer-token")
+    with _remote_client() as remote:
+        unauthorized = remote.get("/api/version")
+        assert unauthorized.status_code == 401
+        assert unauthorized.headers["www-authenticate"] == "Bearer"
+
+        assert remote.post("/api/refresh").status_code == 401
+
+        by_header = remote.get(
+            "/api/version", headers={"Authorization": "Bearer test-viewer-token"}
+        )
+        assert by_header.status_code == 200
+
+
+def test_remote_authenticates_with_session_cookie(client, monkeypatch):
+    """The browser path: the SPA cannot set an Authorization header."""
+    monkeypatch.setenv("NOOA_VIEWER_AUTH_TOKEN", "test-viewer-token")
+    with _remote_client() as remote:
+        remote.cookies.set(main_module.SESSION_COOKIE, "test-viewer-token")
+        assert remote.get("/api/version").status_code == 200
+
+    with _remote_client() as remote:
+        remote.cookies.set(main_module.SESSION_COOKIE, "wrong-token")
+        assert remote.get("/api/version").status_code == 401
+
+
+def test_token_query_param_is_exchanged_for_a_cookie_and_stripped(client, monkeypatch):
+    monkeypatch.setenv("NOOA_VIEWER_AUTH_TOKEN", "test-viewer-token")
+    with _remote_client() as remote:
+        resp = remote.get(
+            "/trace/abc123",
+            params={"token": "test-viewer-token", "tab": "spans"},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+        # The token must not survive into the URL the browser ends up on, so
+        # deep links shared afterwards carry no secret.
+        assert resp.headers["location"] == "/trace/abc123?tab=spans"
+
+        cookie = resp.headers["set-cookie"]
+        assert "nooa_viewer_session=test-viewer-token" in cookie
+        assert "HttpOnly" in cookie
+        assert "samesite=lax" in cookie.lower()
+
+
+def test_wrong_token_query_param_issues_no_cookie(client, monkeypatch):
+    monkeypatch.setenv("NOOA_VIEWER_AUTH_TOKEN", "test-viewer-token")
+    with _remote_client() as remote:
+        resp = remote.get("/", params={"token": "guessed"}, follow_redirects=False)
+        assert resp.status_code == 200
+        assert "set-cookie" not in resp.headers
+
+
+# ---------------------------------------------------------------------------
+# DNS-rebinding guard
+#
+# A rebound request arrives from loopback and so passes the loopback allowance
+# with no credential, and same-origin policy lets the attacker's script read
+# the response. Binding to localhost does not help — loopback is the target.
+# ---------------------------------------------------------------------------
+
+# What a browser sends and urllib/requests do not.
+_BROWSER = {"Sec-Fetch-Site": "same-origin", "Sec-Fetch-Mode": "cors"}
+
+
+def test_rebinding_shaped_request_is_rejected(client, monkeypatch):
+    monkeypatch.delenv("NOOA_VIEWER_ALLOWED_HOSTS", raising=False)
+    resp = client.get("/api/version", headers={"Host": "evil.example", **_BROWSER})
+    assert resp.status_code == 400
+    assert "NOOA_VIEWER_ALLOWED_HOSTS" in resp.json()["detail"]
+
+
+def test_exporter_shaped_request_is_never_rejected(client, monkeypatch):
+    """Span ingest must not be reachable by this check.
+
+    An earlier version applied it to every request and silently broke trace
+    ingest. Rebinding is inherently a browser attack, so exempting clients that
+    send no browser headers costs nothing and removes that failure mode.
+    """
+    monkeypatch.delenv("NOOA_VIEWER_ALLOWED_HOSTS", raising=False)
+    assert client.get("/api/version", headers={"Host": "anything.example"}).status_code == 200
+
+
+def test_dns_search_domain_qualified_name_is_accepted(client, monkeypatch):
+    """The case that broke real traffic.
+
+    gethostname() returns only the leading label when the qualified name comes
+    from a DNS search domain, so `<host>.<domain>` must match on the prefix.
+    """
+    monkeypatch.delenv("NOOA_VIEWER_ALLOWED_HOSTS", raising=False)
+    qualified = f"{main_module._OWN_HOSTNAME}.corp.example.com"
+    assert client.get("/api/version", headers={"Host": qualified, **_BROWSER}).status_code == 200
+    assert (
+        client.get(
+            "/api/version", headers={"Host": main_module._OWN_HOSTNAME, **_BROWSER}
+        ).status_code
+        == 200
+    )
+
+
+@pytest.mark.parametrize("host", ["localhost", "127.0.0.1", "10.21.85.96", "[::1]"])
+def test_local_names_and_ip_literals_are_accepted(client, monkeypatch, host):
+    """IP literals are safe: rebinding needs a name whose DNS the attacker
+    controls, and nobody can make a bare address their page's origin."""
+    monkeypatch.delenv("NOOA_VIEWER_ALLOWED_HOSTS", raising=False)
+    assert client.get("/api/version", headers={"Host": host, **_BROWSER}).status_code == 200
+
+
+def test_extra_hosts_can_be_allowed_and_check_disabled(client, monkeypatch):
+    monkeypatch.setenv("NOOA_VIEWER_ALLOWED_HOSTS", "traces.internal")
+    assert (
+        client.get("/api/version", headers={"Host": "traces.internal", **_BROWSER}).status_code
+        == 200
+    )
+    assert (
+        client.get("/api/version", headers={"Host": "evil.example", **_BROWSER}).status_code == 400
+    )
+
+    monkeypatch.setenv("NOOA_VIEWER_ALLOWED_HOSTS", "*")
+    assert (
+        client.get("/api/version", headers={"Host": "evil.example", **_BROWSER}).status_code == 200
+    )
 
 
 def test_cors_rejects_unconfigured_origin(client):
     response = client.options(
         "/api/version",
         headers={
+            # A local Host, so the rebinding guard passes and CORS is what
+            # rejects this — otherwise the assertion below would hold for the
+            # wrong reason and stop testing CORS at all.
+            "Host": "localhost",
             "Origin": "https://attacker.example",
             "Access-Control-Request-Method": "GET",
         },

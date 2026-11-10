@@ -5,10 +5,11 @@ import copy
 import inspect
 import json
 import logging
+import math
 import re
 import warnings
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Coroutine, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -17,9 +18,42 @@ from typing import Any, Literal, cast
 import litellm
 from pydantic import BaseModel, RootModel
 
+from nooa.llm_types import (
+    AssistantReasoning,
+    AssistantText,
+    CacheBoundary,
+    LLMResponse,
+    LLMUsage,
+    ToolCall,
+)
+from nooa.unifiedllm.cache_policy import (
+    add_session_affinity_header,
+    apply_cache_policy,
+    enable_openai_explicit_cache,
+    reject_boundary_dict,
+    reject_legacy_cache_config,
+    wrap_responses_text,
+)
+from nooa.unifiedllm.media_inputs import (
+    MediaInput,
+    attachment_kind,
+    filter_media_messages,
+    validate_media_inputs,
+)
+
+from . import replay_state, response_parts
+from .admission import _current_admission_controller, _run_admitted_attempt
+from .errors import EmptyContentError
 from .http_config import HttpConfig
-from .retry import EmptyContentError, sync_retry, with_retry
+from .limits import REPLY_CAP_KEYS, ContextLimits
+from .reasoning import ReasoningConfig, apply_reasoning_level
+from .retry import sync_retry, with_retry
 from .retry_config import RetryConfig
+from .structured_output import (
+    StructuredOutputMode,
+    anthropic_output_format,
+    validate_structured_output_mode,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +99,19 @@ def _record_llm_metric(event: str, detail: Any = None) -> None:
             cb(event, detail)
         except Exception as e:  # noqa: BLE001
             logger.debug("Metric callback failed for event %r: %s", event, e)
+
+
+def _record_admission_observation(detail: dict[str, Any]) -> None:
+    """Record one admission outcome on the generation span and harness metrics."""
+    _record_llm_metric("llm_queue", detail)
+    try:
+        from opentelemetry import trace as otel_trace
+
+        span = otel_trace.get_current_span()
+        if span and span.is_recording():
+            span.add_event("llm.queue", attributes=detail)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("Could not record LLM admission event: %s", e)
 
 
 @contextmanager
@@ -211,7 +258,8 @@ class _ClientHttp:
             _, provider, dynamic_api_key, dynamic_api_base = litellm.get_llm_provider(
                 model,
                 api_key=config.get("api_key"),
-                api_base=config.get("api_base"),
+                api_base=config.get("api_base") or config.get("base_url"),
+                custom_llm_provider=config.get("custom_llm_provider"),
             )
         except Exception as e:  # noqa: BLE001
             # Unknown/ambiguous model — don't risk handing an incompatible client
@@ -234,8 +282,9 @@ class _ClientHttp:
 
         # OpenAI SDK path: client= must be an AsyncOpenAI / OpenAI wrapping httpx.
         api_key = config.get("api_key") or dynamic_api_key
-        api_base = config.get("api_base") or dynamic_api_base
-        common: dict[str, Any] = {"timeout": self._timeout}
+        api_base = config.get("api_base") or config.get("base_url") or dynamic_api_base
+        # CompletionClient's RetryConfig owns retries; calls set their own value.
+        common: dict[str, Any] = {"timeout": self._timeout, "max_retries": 0}
         if api_key:
             common["api_key"] = api_key
         if api_base:
@@ -343,8 +392,8 @@ def extract_and_parse_json(text: str) -> dict[str, Any]:
     original_text = text
     text = text.strip()
 
-    markdown_pattern = r"```(?:json)?\s*\n?(.*?)\n?```"
-    markdown_match = re.search(markdown_pattern, text, re.DOTALL)
+    markdown_pattern = r"```(?:json)?[ \t]*\r?\n(.*?)\r?\n?```"
+    markdown_match = re.fullmatch(markdown_pattern, text, re.DOTALL)
     if markdown_match:
         _record_llm_metric("json_fence_removed")
         text = markdown_match.group(1).strip()
@@ -659,33 +708,6 @@ def create_tool_from_callable(tool_callable: Callable) -> Tool:
         callable=tool_callable,
         parameters_model=None,  # Will auto-generate from signature
     )
-
-
-@dataclass
-class ToolCall:
-    """Standardized tool call representation across all LLM APIs"""
-
-    id: str
-    name: str
-    arguments: str
-
-
-@dataclass
-class LLMResponse:
-    """Standardized response from any LLM API"""
-
-    raw_response: Any
-    content: str | BaseModel
-    tool_calls: list[ToolCall]
-    finish_reason: Literal["stop", "tool_calls", "length", "error"]
-    assistant_message: dict[str, Any]
-    reasoning: str | None = None  # o1-style or DeepSeek/QwQ reasoning
-    usage: dict[str, int] | None = None  # Token usage stats
-
-    @property
-    def message(self) -> str | BaseModel | None:
-        """Backward-compatible alias for content."""
-        return self.content
 
 
 # --- Bedrock JSON schema sanitization (gl-134) ---
@@ -1013,7 +1035,9 @@ def _needs_dummy_tool(model: str) -> bool:
     return model_lower.startswith(("anthropic/", "anthropic."))
 
 
-def _messages_have_tool_calls(messages: list[dict[str, Any]]) -> bool:
+def _messages_have_tool_calls(
+    messages: Sequence[dict[str, Any] | LLMResponse | CacheBoundary],
+) -> bool:
     """Return True if any message contains tool_call blocks."""
     for msg in messages:
         if msg.get("role") == "assistant":
@@ -1092,11 +1116,82 @@ class TokenCalibration:
 _token_calibration = TokenCalibration()
 
 
+def _wrapped_block_text(value: Any) -> str | None:
+    """Join text from a list of input_text/output_text/text blocks, if any."""
+    if not isinstance(value, list):
+        return None
+    texts = [
+        block["text"]
+        for block in value
+        if isinstance(block, dict) and isinstance(block.get("text"), str)
+    ]
+    return "\n".join(texts) if texts else None
+
+
+def _token_counter_block(block: Any) -> Any:
+    """Retag one Responses content block into a shape litellm's token_counter
+    recognizes (text/image_url/tool_use/tool_result/thinking/tool_reference).
+    Anything else (e.g. an already-portable block) passes through unchanged."""
+    if not isinstance(block, dict):
+        return block
+    if block.get("type") in {"input_text", "output_text"}:
+        return {**block, "type": "text"}
+    if block.get("type") == "input_image":
+        return {"type": "image_url", "image_url": block.get("image_url")}
+    return block
+
+
+def _token_counter_messages(
+    messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
+) -> list[Any]:
+    """Build a calibration-only view litellm.token_counter can actually count.
+
+    litellm's token_counter only recognizes text/image_url/tool_use/
+    tool_result/thinking/tool_reference block types and raises on
+    ResponsesClient's input_text/output_text/input_image blocks (see
+    _transform_messages), which would otherwise always fall through to the
+    per-message fallback below and silently drop that content from the
+    estimate -- collapsing it toward zero and inflating the calibration
+    ratio by whatever multiple was missed. The fallback itself only sums
+    "text" blocks, so an image billed real tokens by the API still counted
+    as zero even after falling back.
+
+    A native function_call_output item's wrapped `output` (see
+    _transform_messages) is invisible to token_counter entirely -- confirmed
+    against the real counter, a short and a very long tool result count
+    identically -- so it never raises and never falls back to the
+    per-message loop either; the text is just silently worth zero tokens.
+    Representing it as an ordinary role/content message gives it the same
+    real chat-template accounting every other message gets.
+    """
+    view = []
+    for msg in messages:
+        if not isinstance(msg, dict):
+            view.append(msg)
+            continue
+        content = msg.get("content")
+        if isinstance(content, list):
+            msg = {
+                **msg,
+                "content": [_token_counter_block(block) for block in content],
+            }
+        elif msg.get("type") == "function_call_output":
+            text = _wrapped_block_text(msg.get("output"))
+            if text is None and isinstance(msg.get("output"), str):
+                text = msg["output"]
+            if text:
+                msg = {"role": "tool", "content": text}
+        view.append(msg)
+    return view
+
+
 def _update_token_calibration(
     model: str,
-    messages: list[dict[str, Any]],
-    usage: dict[str, int],
+    messages: Sequence[dict[str, Any] | LLMResponse | CacheBoundary],
+    usage: LLMUsage,
     tools: list[dict[str, Any]] | None = None,
+    *,
+    instructions: str | None = None,
 ) -> None:
     """Update token calibration from an API response's usage data.
 
@@ -1114,28 +1209,34 @@ def _update_token_calibration(
       and inflated the ratio (observed ~2.7x), which then scaled every
       displayed/triggering token count up by that bogus factor.
     """
-    actual = usage.get("prompt_tokens") or usage.get("input_tokens") or 0
+    actual = usage.input_tokens
     if actual <= 0:
         return
+    # Responses lifts the leading system prompt out of input. It is still
+    # billed input, so include it in the estimate without copying history.
+    message_list = list(messages)
+    if instructions:
+        message_list = [{"role": "system", "content": instructions}, *message_list]
     # Calibration is best-effort: it must NEVER raise out of the (already paid)
     # response path. The whole estimate — primary AND fallback — is guarded.
     try:
+        counted = _token_counter_messages(message_list)
         try:
-            estimated = litellm.token_counter(model=model, messages=messages)
+            estimated = litellm.token_counter(model=model, messages=counted)
             if tools:
                 # Count the full messages+tools payload the way the API bills it,
                 # then take the larger of the bare and with-tools counts
                 # (with_tools is normally >= bare; max only guards a tokenizer
                 # that returns less with tools attached).
                 with_tools = litellm.token_counter(
-                    model=model, messages=messages, tools=cast(Any, tools)
+                    model=model, messages=counted, tools=cast(Any, tools)
                 )
                 estimated = max(estimated, with_tools)
         except Exception:
             # token_counter can reject some message/tool shapes; fall back to the
             # per-message text sum rather than skip calibration entirely.
             estimated = 0
-            for msg in messages:
+            for msg in counted:
                 content = msg.get("content")
                 if isinstance(content, str):
                     estimated += litellm.token_counter(model=model, text=content)
@@ -1152,18 +1253,231 @@ def _update_token_calibration(
 
 class UnifiedLLM(ABC):
     _registry_config: dict[str, Any] | None
+    cache_breakpoint: Literal["auto", "openai", "anthropic"] | None
 
-    def __init__(self, model: str, **config):
+    def __init__(
+        self,
+        model: str,
+        *,
+        structured_output_mode: StructuredOutputMode = None,
+        reasoning_levels: dict[str, dict[str, Any]] | None = None,
+        reasoning_default: str | None = None,
+        reasoning_level: str | None = None,
+        media_inputs: list[MediaInput] | tuple[MediaInput, ...] | None = None,
+        context_window: int | None = None,
+        **config,
+    ):
+        self.structured_output_mode = validate_structured_output_mode(structured_output_mode)
+        if self.structured_output_mode == "anthropic" and not isinstance(self, CompletionClient):
+            raise ValueError(
+                "structured_output_mode='anthropic' requires CompletionClient, not Responses"
+            )
+        reject_legacy_cache_config(config)
+        # Freeze prevents field assignment, not mutations inside nested Any
+        # settings. Detach this small configuration once, never the history.
+        self._reasoning_config = ReasoningConfig(
+            levels=reasoning_levels, default=reasoning_default
+        ).model_copy(deep=True)
+        if reasoning_level is not None:
+            self._reasoning_config.settings(reasoning_level)
+        self.reasoning_level = reasoning_level
+        self.media_inputs = validate_media_inputs(media_inputs)
         self.model = model
         self.config = config
+        self._context_window = context_window
         self._registry_config = None
-        # Cache control injection — shared by CompletionClient and ResponsesClient
-        self.cache_control_injection_points: list[dict[str, Any]] = (
-            DEFAULT_CACHE_CONTROL_INJECTION_POINTS
-        )
+        self.cache_breakpoint = None
         # Per-client HTTP transport (httpx clients + litellm wrappers). Set by
         # concrete subclasses; guarded here so base helpers stay safe.
         self._http: _ClientHttp | None = None
+
+    @property
+    def reasoning_levels(self) -> tuple[str, ...] | None:
+        """Selectable levels; None means unknown, () means unsupported."""
+        levels = self._reasoning_config.levels
+        return None if levels is None else tuple(levels)
+
+    @property
+    def reasoning_default(self) -> str | None:
+        """Documented route default; not a request override."""
+        return self._reasoning_config.default
+
+    def _prepare_call_config(self, overrides: dict[str, Any]) -> dict[str, Any]:
+        """Merge the client configuration with per-call ``overrides`` for one request.
+
+        ``api_base`` and ``base_url`` are two spellings of the same endpoint:
+
+        - An endpoint override of ``None``, ``""`` or only whitespace counts as no
+          override. Clearing the
+          configured endpoint would send the request, with its credentials, to
+          the provider's default endpoint instead of the configured gateway.
+        - A non-None override of one spelling also replaces the other spelling if
+          the client configuration sets it. Leaving the old value would give
+          LiteLLM two different endpoints, and Responses requests copy
+          ``base_url`` over ``api_base``. Both spellings are kept (rather than
+          dropping one) because LiteLLM's async provider detection reads
+          ``base_url``, and because an override equal to the configured URL must
+          leave the route, and therefore the media permissions, unchanged.
+        """
+        from nooa.unifiedllm.route_identity import no_endpoint_override
+
+        overrides = {
+            key: value
+            for key, value in overrides.items()
+            if not (key in ("api_base", "base_url") and no_endpoint_override(value))
+        }
+        params = apply_reasoning_level(
+            self._reasoning_config, self.model, self.config, overrides, self.reasoning_level
+        )
+        for alias, other in (("api_base", "base_url"), ("base_url", "api_base")):
+            if alias in overrides and other not in overrides and other in params:
+                params[other] = overrides[alias]
+        return params
+
+    def _request_media_inputs(self, call_config: dict[str, Any]) -> tuple[MediaInput, ...]:
+        """A replacement route never inherits permissions from this connection.
+
+        ``api_base`` and ``base_url`` are compared as one endpoint, so the
+        configured URL under the other spelling keeps the permissions. URLs are
+        normalized by route_identity.endpoint_changed, like context windows.
+        """
+        from nooa.unifiedllm.route_identity import endpoint_changed
+
+        if (
+            self._effective_model(call_config) != self.model
+            or endpoint_changed(self.config, call_config)
+            # A request with no endpoint goes to the provider default.
+            or (
+                any(self.config.get(key) for key in ("api_base", "base_url"))
+                and not any(call_config.get(key) for key in ("api_base", "base_url"))
+            )
+            or any(
+                call_config.get(key) != self.config.get(key)
+                for key in ("custom_llm_provider", "client")
+            )
+        ):
+            return ()
+        return validate_media_inputs(self.media_inputs)
+
+    def _prepare_media_messages(self, messages, call_config):
+        enabled = self._request_media_inputs(call_config)
+        # Media the interface cannot send is rejected after projection, by
+        # _validate_implemented_media: only the projected request also shows the
+        # native content of replayed assistant turns.
+        return filter_media_messages(messages, enabled)
+
+    def _validate_implemented_media(self, messages, call_config):
+        from nooa.media_policy import reject_unsupported_media
+        from nooa.request_interface import resolved_input_interface
+
+        interface = resolved_input_interface(
+            self._effective_model(call_config),
+            call_config,
+            client_type="responses" if isinstance(self, ResponsesClient) else "completion",
+        )
+        reject_unsupported_media(messages, interface)
+
+    def get_context_limits(
+        self, overrides: dict[str, Any] | None = None, *, fallback_reserve: int = 0
+    ) -> ContextLimits:
+        """Resolve context limits using the same settings as the next request.
+
+        Includes selected reasoning levels, per-call caps and extra_body. Does
+        not infer a reply cap from model metadata. ``fallback_reserve`` is only
+        a planning allowance when no cap is configured. For a per-call route
+        switch, never reuse the original endpoint's window; pass an explicit
+        context_window or use a separately configured client for that model.
+        """
+        params = self._prepare_call_config(overrides or {})
+        body = {**params, **(params.get("extra_body") or {})}
+        caps = [body[k] for k in REPLY_CAP_KEYS if body.get(k) is not None]
+        if len(caps) > 1:
+            raise ValueError("Use only one reply token limit field")
+        cap = caps[0] if caps else None
+        if cap is not None and (type(cap) is not int or cap <= 0):
+            raise ValueError("Reply token limit must be a positive integer")
+        from nooa.unifiedllm.route_identity import same_context_route
+
+        client_type = "responses" if isinstance(self, ResponsesClient) else "completion"
+        same_route = same_context_route(
+            self.model,
+            self.config,
+            client_type,
+            self._effective_model(params),
+            params,
+            client_type,
+        )
+        window = (overrides or {}).get("context_window")
+        if window is None and same_route:
+            window = self.context_window
+        if not isinstance(window, int) or window <= 0:
+            window = None
+        return ContextLimits(window, cap if cap is not None else fallback_reserve, cap is None)
+
+    def _with_reduced_reply_limit(self, overrides: dict[str, Any], limit: int) -> dict[str, Any]:
+        """Recovery keeps resolved effort settings, but lowers its reply cap."""
+        params = self._prepare_call_config(overrides)
+        extra = params.get("extra_body") or {}
+        key = next((k for k in REPLY_CAP_KEYS if k in extra or k in params), "max_tokens")
+        for alias in REPLY_CAP_KEYS:
+            params.pop(alias, None)
+        if extra:
+            params["extra_body"] = {k: v for k, v in extra.items() if k not in REPLY_CAP_KEYS}
+        params[key] = limit
+        # Do not re-apply a selected level's original cap on the retry.
+        params["reasoning_level"] = None
+        return params
+
+    def _effective_model(self, call_config: dict[str, Any]) -> str:
+        """Return the model this individual request will actually dispatch."""
+        model = call_config.get("model", self.model)
+        if not isinstance(model, str) or not model:
+            raise ValueError("model must be a non-empty string")
+        return model
+
+    def _validate_cache_breakpoint_model(self, effective_model: str) -> None:
+        """Reject applying a model-declared cache mapping to a call override."""
+        if self.cache_breakpoint not in {None, "auto"} and effective_model != self.model:
+            raise ValueError(
+                "cache_breakpoint is declared for the client model and cannot be used "
+                "with a per-call model override"
+            )
+
+    @staticmethod
+    def _validate_request_config(name: str, call_config: dict[str, Any]) -> None:
+        """Keep provider payloads and routing on their validated top-level paths."""
+        reject_legacy_cache_config(call_config)
+        if "structured_output_mode" in call_config or (
+            isinstance(call_config.get("extra_body"), Mapping)
+            and "structured_output_mode" in call_config["extra_body"]
+        ):
+            raise ValueError("structured_output_mode is a framework-only profile setting")
+        if "media_inputs" in call_config or (
+            isinstance(call_config.get("extra_body"), Mapping)
+            and "media_inputs" in call_config["extra_body"]
+        ):
+            raise ValueError("media_inputs is a client setting, not a provider request parameter")
+        if name in call_config:
+            raise ValueError(
+                f"{name!r} is managed by UnifiedLLM; pass conversation data through "
+                "the messages argument"
+            )
+        extra_body = call_config.get("extra_body")
+        if extra_body is not None and not isinstance(extra_body, Mapping):
+            raise ValueError("extra_body must be a mapping")
+        if "cache_breakpoint" in call_config or (
+            isinstance(extra_body, Mapping) and "cache_breakpoint" in extra_body
+        ):
+            raise ValueError(
+                "cache_breakpoint is a client setting; pass it to the client constructor, "
+                "not call/acall or extra_body"
+            )
+        if isinstance(extra_body, Mapping) and (reserved := {name, "model"} & set(extra_body)):
+            fields = ", ".join(repr(field) for field in sorted(reserved))
+            raise ValueError(
+                f"extra_body may not override reserved field(s) {fields}; pass model at "
+                "the top level and conversation data through the messages argument"
+            )
 
     def close(self) -> None:
         """Release this client's sync HTTP resources (its own httpx clients)."""
@@ -1187,114 +1501,23 @@ class UnifiedLLM(ABC):
     async def __aexit__(self, *exc_info):
         await self.aclose()
 
-    @staticmethod
-    def _inject_cache_control_on_content(msg: dict) -> None:
-        """Add cache_control to the last content block of a message.
+    def _resolve_cache_mapping(self, model: str | None = None, *, responses: bool) -> str | None:
+        """The single source of truth for which cache_control mapping applies.
 
-        Anthropic's API requires cache_control on content blocks (not message level)
-        for non-system messages.  When content is a plain string, converts it to
-        the array-of-blocks format so cache_control can be attached.
-
-        Mutates ``msg`` in place.
+        Both the marking decision here and the rendering decision in
+        call()/acall() (whether content is pre-wrapped so marking doesn't
+        change a message's wire shape) must agree, or the exact class of bug
+        this stability fix exists to prevent reappears -- silently desynced
+        between two copies of the same logic.
         """
-        content = msg.get("content")
-        if content is None:
-            msg["cache_control"] = {"type": "ephemeral"}
-        elif isinstance(content, str):
-            msg["content"] = [
-                {"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}
-            ]
-        elif isinstance(content, list) and len(content) > 0:
-            last_block = content[-1]
-            if isinstance(last_block, dict):
-                last_block["cache_control"] = {"type": "ephemeral"}
-        else:
-            msg["cache_control"] = {"type": "ephemeral"}
+        mapping = self.cache_breakpoint
+        if mapping == "auto" and not responses:
+            mapping = "anthropic" if _is_anthropic_model(model or self.model) else None
+        return mapping
 
-    def _inject_cache_control(
-        self, messages: list[dict[str, Any]], injection_points: list[dict[str, Any]]
-    ) -> list[dict[str, Any]]:
-        """Add cache_control to designated messages for prompt caching.
-
-        Adds cache_control at the message level (sibling of role/content), which
-        is the format expected by NVIDIA's OpenAI-compatible gateway endpoints.
-        This format also survives OpenAI SDK validation since the SDK only strips
-        extra fields from content blocks, not from messages themselves.
-
-        Supports two injection modes:
-
-        1. **Role-based** (existing): marks ALL messages of a given role.
-           ``{"role": "system"}``
-
-        2. **Position-based** (new): marks only the last message of a given role.
-           ``{"role": "assistant", "position": "last"}``
-
-        Anthropic supports up to 4 cache breakpoints. Using both modes together
-        caches both the stable system prompt and the conversation history prefix::
-
-            [
-                {"role": "system"},                        # breakpoint 1
-                {"role": "tool", "position": "last"},      # breakpoint 2
-            ]
-
-        Args:
-            messages: The message list to process.
-            injection_points: List of dicts specifying where to add cache_control.
-                Each dict must have a "role" key. Optional "position" key with
-                value "last" restricts marking to only the last message of that role.
-
-        Returns:
-            A deep copy of messages with cache_control injected at breakpoints.
-        """
-        if not injection_points:
-            return messages
-
-        roles_to_cache_all: set[str] = set()
-        roles_to_cache_last: set[str] = set()
-        for p in injection_points:
-            role = p.get("role")
-            if not role:
-                continue
-            if p.get("position") == "last":
-                roles_to_cache_last.add(role)
-            else:
-                roles_to_cache_all.add(role)
-
-        if not roles_to_cache_all and not roles_to_cache_last:
-            return messages
-
-        messages = [copy.deepcopy(msg) for msg in messages]
-
-        # Map role names to native Responses API type equivalents
-        _ROLE_TO_TYPE = {"tool": "function_call_output"}
-
-        for msg in messages:
-            role = msg.get("role")
-            if role and role in roles_to_cache_all:
-                msg["cache_control"] = {"type": "ephemeral"}
-            elif not role:
-                # Native Responses format: match by type equivalent
-                msg_type = msg.get("type")
-                for r, t in _ROLE_TO_TYPE.items():
-                    if t == msg_type and r in roles_to_cache_all:
-                        msg["cache_control"] = {"type": "ephemeral"}
-                        break
-
-        # Anthropic needs cache_control on a content block (parts form); other providers
-        # reject a content list on non-user roles, so mark at the message level instead.
-        anthropic = _is_anthropic_model(self.model)
-        for role in roles_to_cache_last:
-            # Search for matching messages by role OR by equivalent native type
-            native_type = _ROLE_TO_TYPE.get(role)
-            for msg in reversed(messages):
-                if msg.get("role") == role or (native_type and msg.get("type") == native_type):
-                    if anthropic:
-                        self._inject_cache_control_on_content(msg)
-                    else:
-                        msg["cache_control"] = {"type": "ephemeral"}
-                    break
-
-        return messages
+    def _prepare_cache_boundary(self, messages, *, responses, model=None, instructions=None):
+        mapping = self._resolve_cache_mapping(model, responses=responses)
+        return apply_cache_policy(messages, mapping, responses=responses, instructions=instructions)
 
     def count_tokens(self, text: str) -> int:
         """Count tokens using model-appropriate tokenizer.
@@ -1329,26 +1552,35 @@ class UnifiedLLM(ABC):
         """Get context window size (max input tokens).
 
         Resolution order:
-        1. Explicit ``context_window`` config passed to the client constructor
+        1. Explicit ``context_window`` passed to the client constructor
         2. Registry config (if created via get_llm_client())
-        3. Registry lookup by model name or model_name field
+        3. Unambiguous registry lookup by compatible route (direct clients only)
         4. litellm model info (for known models)
         5. None (unknown model)
 
         Returns:
             Maximum input tokens for this model, or None if unknown.
         """
-        # First, honor explicit direct-client config.
-        cw = self.config.get("context_window")
-        if cw is not None:
-            return cw
+        # Keep local context-budget metadata out of provider API requests.
+        if self._context_window is not None:
+            return self._context_window
 
-        # Then check registry config (set by get_llm_client()).
+        from nooa.unifiedllm.route_identity import same_context_route
+
+        client_type = "responses" if isinstance(self, ResponsesClient) else "completion"
+        # Clients built by the registry carry their entry's settings. Use only
+        # that entry; if it declares no context_window, do not borrow one from
+        # another alias that happens to use the same model.
         if self._registry_config is not None:
-            cw = self._registry_config.get("context_window")
-            if cw is not None:
-                return cw
-            # Registry entry exists but lacks context_window — fall through
+            route = getattr(self, "_registry_context_route", None)
+            if route is None or same_context_route(
+                self.model, self.config, client_type, route[0], route[1], route[2]
+            ):
+                cw = self._registry_config.get("context_window")
+                if cw is not None:
+                    return cw
+            info = self.get_model_info()
+            return info.get("max_input_tokens") if info else None
 
         # Try registry lookup by model string. The property is reachable
         # from any UnifiedLLM instance — including ones constructed
@@ -1357,6 +1589,7 @@ class UnifiedLLM(ABC):
         # import-time side effect.
         from nooa.unifiedllm.registry import (
             MODELS,
+            _lookup_api_key_env,
             _registry_lock,
             ensure_loaded,
         )
@@ -1370,18 +1603,57 @@ class UnifiedLLM(ABC):
         with _registry_lock:
             models_snapshot = dict(MODELS)
 
-        # Direct key match
-        if model_str in models_snapshot:
-            cw = models_snapshot[model_str].get("context_window")
-            if cw is not None:
-                return cw
-
-        # Reverse lookup: check if any registry entry's model_name matches
-        for _key, cfg in models_snapshot.items():
-            if cfg.get("model_name") == model_str:
+        # A directly built client has no entry of its own. Use a registry
+        # context_window only if every alias with the same route declares the
+        # same positive value. If they disagree, or one of them declares none,
+        # the result would depend on YAML order, so fall back instead.
+        #
+        # A direct client never has ``api_key_env``, so credentials are compared
+        # here rather than in same_context_route: a client without an api_key
+        # matches regardless of credentials; a client with one matches only an
+        # entry whose resolved key (api_key, else the value of api_key_env) is
+        # equal. Keys are compared in memory only and never logged.
+        client_key = self.config.get("api_key")
+        own_route = {
+            name: value
+            for name, value in self.config.items()
+            if name not in ("api_key", "api_key_env")
+        }
+        windows = set()
+        undeclared = False
+        for key, cfg in models_snapshot.items():
+            entry_client_type = cfg.get("client_type", "completion")
+            if client_key is not None:
+                # Resolve the entry key as the registry does (validated name,
+                # NVIDIA synonyms, empty means unset), but without its warnings:
+                # this loop visits every entry. A malformed api_key_env gives None.
+                entry_key = cfg.get("api_key")
+                if entry_key is None:
+                    entry_key, _ = _lookup_api_key_env(cfg)
+                if entry_key != client_key:
+                    continue
+            # Completion and Responses clients are never sent the registry-only
+            # ``endpoint`` key (the decision-route spelling), so leave it out of
+            # the comparison, as client_from_config does. Decision entries keep it.
+            skipped = ("api_key", "api_key_env") + (
+                () if entry_client_type == "decision" else ("endpoint",)
+            )
+            route = {name: value for name, value in cfg.items() if name not in skipped}
+            if same_context_route(
+                model_str,
+                own_route,
+                client_type,
+                cfg.get("model_name", key),
+                route,
+                entry_client_type,
+            ):
                 cw = cfg.get("context_window")
-                if cw is not None:
-                    return cw
+                if type(cw) is int and cw > 0:
+                    windows.add(cw)
+                else:
+                    undeclared = True
+        if len(windows) == 1 and not undeclared:
+            return windows.pop()
 
         # Fallback to litellm
         info = self.get_model_info()
@@ -1390,7 +1662,7 @@ class UnifiedLLM(ABC):
     @abstractmethod
     def call(
         self,
-        messages: list[dict[str, Any]],
+        messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
         tools: list[Tool] | None = None,
         output_model: type[BaseModel] | None = None,
         **kwargs,
@@ -1403,6 +1675,8 @@ class UnifiedLLM(ABC):
         4. If no tool calls, parses structured output (if requested)
         5. Returns everything in standardized LLMResponse
 
+        Pass prior LLMResponse objects directly in messages to retain compatible state.
+
         Raises:
         - ValidationError: if output_model validation fails
         - json.JSONDecodeError: if JSON parsing fails
@@ -1413,7 +1687,7 @@ class UnifiedLLM(ABC):
     @abstractmethod
     async def acall(
         self,
-        messages: list[dict[str, Any]],
+        messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
         tools: list[Tool] | None = None,
         output_model: type[BaseModel] | None = None,
         **kwargs,
@@ -1437,6 +1711,17 @@ def _collect_sync(raw: Any) -> "litellm.ModelResponse":
     return raw
 
 
+def _with_sdk_retries(client: Any, max_retries: int) -> Any:
+    """Return a per-call copy of an OpenAI SDK client with its own retry setting.
+
+    LiteLLM writes ``max_retries`` onto the SDK client it is given, so a shared
+    client would let concurrent calls change each other's retry budget. The
+    copy keeps the same HTTP pool. Other client types are returned unchanged.
+    """
+    with_options = getattr(client, "with_options", None)
+    return with_options(max_retries=max_retries) if callable(with_options) else client
+
+
 async def _collect_async(raw: Any) -> "litellm.ModelResponse":
     """Consume an async streaming or non-streaming litellm response, returning ModelResponse."""
     if isinstance(raw, litellm.CustomStreamWrapper):
@@ -1452,29 +1737,70 @@ async def _collect_async(raw: Any) -> "litellm.ModelResponse":
     return raw
 
 
-async def _litellm_acompletion(api_params: dict[str, Any]) -> Any:
-    """Await LiteLLM without cancelling its nested provider coroutine.
+async def _run_async_provider_call[T](
+    call: Callable[[], Coroutine[Any, Any, T]],
+    *,
+    request_timeout: float | None,
+) -> T:
+    """Run one provider attempt, holding admission through its actual exit.
 
-    LiteLLM runs sync ``completion()`` in an executor for async chat calls.
-    OpenAI-compatible providers return ``OpenAIChatCompletion.acompletion``
-    from that sync frame, then LiteLLM awaits it on the event loop. If a TUI
-    soft-cancel lands in that handoff window, Python can garbage-collect the
-    provider coroutine before it is awaited and print::
+    Acquisition happens before the provider task is created, so cancelling a
+    queued caller cannot dispatch abandoned work.  Once dispatched, the
+    provider task owns the permit and releases it in ``finally``.  Shielding
+    keeps that accounting correct when the caller is cancelled while remote
+    work or a stream is still active.
 
-        RuntimeWarning: coroutine 'OpenAIChatCompletion.acompletion' was never awaited
-
-    Shielding lets LiteLLM finish consuming that provider coroutine while the
-    caller still receives ``CancelledError`` immediately.
+    ``request_timeout`` bounds the whole attempt, stream included. On expiry it
+    cancels the task and raises TimeoutError. None disables it.
     """
-    task = asyncio.create_task(litellm.acompletion(**api_params))
+    admission_controller = _current_admission_controller()
+    if admission_controller is None:
+        return await _await_provider_task(asyncio.create_task(call()), request_timeout)
+
+    permit = await admission_controller.acquire(_record_admission_observation)
+    if permit is None:
+        return await _await_provider_task(asyncio.create_task(call()), request_timeout)
+
+    try:
+        task = asyncio.create_task(_run_admitted_attempt(call, permit))
+    except BaseException:
+        permit.release()
+        raise
+
+    return await _await_provider_task(task, request_timeout)
+
+
+async def _await_provider_task[T](task: asyncio.Task[T], request_timeout: float | None) -> T:
+    """Await a shielded provider task, bounded by ``request_timeout`` if set.
+
+    The deadline is armed on the task, not on this await, so it still fires
+    after the caller cancels. A caller cancel raises CancelledError, even when
+    it lands with the deadline.
+    """
+    task.add_done_callback(_consume_async_provider_result)
+    if request_timeout is None:
+        return await asyncio.shield(task)
+
+    timed_out = False
+
+    def _on_deadline() -> None:
+        nonlocal timed_out
+        if not task.done():
+            timed_out = True
+            task.cancel()
+
+    handle = asyncio.get_running_loop().call_later(request_timeout, _on_deadline)
+    task.add_done_callback(lambda _done: handle.cancel())
     try:
         return await asyncio.shield(task)
     except asyncio.CancelledError:
-        task.add_done_callback(_consume_litellm_acompletion_result)
+        current = asyncio.current_task()
+        if timed_out and (current is None or not current.cancelling()):
+            raise TimeoutError from None
         raise
 
 
-def _consume_litellm_acompletion_result(task: asyncio.Task[Any]) -> None:
+def _consume_async_provider_result(task: asyncio.Task[Any]) -> None:
     try:
         task.result()
     except BaseException:
@@ -1489,9 +1815,7 @@ def _map_completion_finish_reason(
     litellm/OpenAI report the provider's stop condition on
     ``raw_response.choices[0].finish_reason``. We surface ``"length"`` (output
     tokens exhausted) and ``"error"`` (e.g. ``content_filter``) so downstream
-    logic (e.g. CodeAct's max-tokens abort) can react. Callers that have already
-    detected tool calls should keep ``finish_reason="tool_calls"`` rather than
-    calling this.
+    logic (e.g. CodeAct's max-tokens abort) can react.
     """
     raw = None
     try:
@@ -1516,8 +1840,7 @@ def _map_responses_finish_reason(
     The Responses API reports truncation via ``status == "incomplete"`` with
     ``incomplete_details.reason == "max_output_tokens"`` (rather than a
     per-choice finish_reason). A ``status == "failed"`` response is surfaced as
-    ``"error"``. Callers that have already detected tool calls should keep
-    ``finish_reason="tool_calls"`` rather than calling this.
+    ``"error"``.
     """
     status = getattr(raw_response, "status", None)
 
@@ -1534,34 +1857,50 @@ def _map_responses_finish_reason(
     return "stop"
 
 
-def _extract_reasoning_and_usage(raw_response: Any) -> tuple[str | None, dict[str, int] | None]:
-    """Extract reasoning and usage from raw LLM response."""
+def _finish_reason_for_tool_calls(
+    provider_finish_reason: Literal["stop", "tool_calls", "length", "error"],
+) -> Literal["tool_calls", "length", "error"]:
+    """Keep provider failure/truncation authoritative over parsed tool calls."""
+    if provider_finish_reason in ("length", "error"):
+        return provider_finish_reason
+    return "tool_calls"
+
+
+def _extract_usage(raw_response: Any) -> LLMUsage | None:
+    """Normalize provider usage plus LiteLLM's per-response cost metadata."""
+    usage = LLMUsage.from_provider(getattr(raw_response, "usage", None))
+    if usage is None:
+        return None
+
+    hidden = getattr(raw_response, "_hidden_params", None)
+    response_cost = hidden.get("response_cost") if isinstance(hidden, Mapping) else None
+    if response_cost is None:
+        return usage
+    if (
+        isinstance(response_cost, bool)
+        or not isinstance(response_cost, (int, float))
+        or not math.isfinite(response_cost)
+        or response_cost < 0
+    ):
+        logger.warning("Ignoring malformed LiteLLM response_cost metadata: %r", response_cost)
+        return usage
+    return usage.model_copy(update={"cost_usd": float(response_cost)})
+
+
+def _extract_reasoning_and_usage(raw_response: Any) -> tuple[str | None, LLMUsage | None]:
+    """Extract reasoning and normalized usage from a raw LLM response."""
     reasoning = None
-    usage = None
 
     # Extract reasoning (o1-style or DeepSeek/QwQ)
     if hasattr(raw_response, "choices") and raw_response.choices:
         msg = raw_response.choices[0].message
         reasoning = getattr(msg, "reasoning", None) or getattr(msg, "reasoning_content", None)
 
-    # Extract usage
-    if hasattr(raw_response, "usage") and raw_response.usage:
-        usage_obj = raw_response.usage
-        if hasattr(usage_obj, "_asdict"):
-            usage = usage_obj._asdict()
-        elif hasattr(usage_obj, "model_dump"):
-            usage = usage_obj.model_dump()
-        elif isinstance(usage_obj, dict):
-            usage = usage_obj
-        else:
-            # Try to extract common fields
-            usage = {
-                "prompt_tokens": getattr(usage_obj, "prompt_tokens", 0),
-                "completion_tokens": getattr(usage_obj, "completion_tokens", 0),
-                "total_tokens": getattr(usage_obj, "total_tokens", 0),
-            }
+    return reasoning, _extract_usage(raw_response)
 
-    return reasoning, usage
+
+def _item_field(item: Any, name: str) -> Any:
+    return item.get(name) if isinstance(item, dict) else getattr(item, name, None)
 
 
 def _extract_xml_tool_calls(content: str) -> list["ToolCall"]:
@@ -1651,12 +1990,6 @@ def _extract_think_tags(content: str) -> tuple[str, str | None]:
     return content, None
 
 
-DEFAULT_CACHE_CONTROL_INJECTION_POINTS = [
-    {"role": "system"},
-    {"role": "tool", "position": "last"},
-]
-
-
 # ============================================================================
 # PATCH: Prevent litellm from stripping cache_control for Anthropic models
 # ============================================================================
@@ -1693,14 +2026,365 @@ def _apply_cache_control_preserve_patch():
 _apply_cache_control_preserve_patch()
 
 
+# The output schema of the native-output call running in this context, read by
+# the request hooks below. A ContextVar keeps concurrent calls separate.
+_NATIVE_OUTPUT_CONTRACT: ContextVar[dict[str, Any] | None] = ContextVar(
+    "nooa_native_output_contract", default=None
+)
+
+
+def _check_native_output_request(request):
+    """httpx request hook: verify the outgoing body still has the expected schema.
+
+    Raises ``ValueError`` (which stops the request) if
+    ``output_config.format`` is missing or differs from the schema built for
+    this call, or if another output format or tools were added. Requests
+    outside a native-output call are not checked. This is one module-level
+    function, so a shared httpx client gets a single hook that keeps no NOOA
+    client alive; the expected schema comes from the ContextVar set by the
+    active call's ``_native_output_request_scope``.
+    """
+    expected = _NATIVE_OUTPUT_CONTRACT.get()
+    if expected is None:
+        return
+    wire = json.loads(request.content)
+    output = wire.get("output_config")
+    if (
+        not isinstance(output, dict)
+        or output.get("format") != expected
+        or any(
+            key in wire
+            for key in (
+                "response_format",
+                "output_format",
+                "text_format",
+                "text.format",
+                "tools",
+                "tool_choice",
+            )
+        )
+        or isinstance(wire.get("text"), dict)
+        and "format" in wire["text"]
+    ):
+        raise ValueError(
+            "Native output_config.format schema was changed or dropped before send; "
+            "generic structured-output carriers are not permitted"
+        )
+
+
+async def _acheck_native_output_request(request):
+    """Async version of ``_check_native_output_request`` for ``httpx.AsyncClient``."""
+    _check_native_output_request(request)
+
+
 class CompletionClient(UnifiedLLM):
+    def _prepare_call_config(self, overrides: dict[str, Any]) -> dict[str, Any]:
+        """Validate and remove a per-call ``structured_output_mode`` before the base logic.
+
+        The mode is NOOA's own setting, so it must not reach the provider
+        parameters; ``_native_output_for_call`` reads it from the overrides.
+        """
+        overrides = dict(overrides)
+        if "structured_output_mode" in overrides:
+            validate_structured_output_mode(overrides.pop("structured_output_mode"))
+        return super()._prepare_call_config(overrides)
+
+    def _with_reduced_reply_limit(self, overrides: dict[str, Any], limit: int) -> dict[str, Any]:
+        params = super()._with_reduced_reply_limit(overrides, limit)
+        # _prepare_call_config removed structured_output_mode because it is a
+        # NOOA setting, not a provider parameter. Put an explicit per-call value
+        # (including None) back so the retry with a smaller reply limit uses it.
+        if "structured_output_mode" in overrides:
+            params["structured_output_mode"] = validate_structured_output_mode(
+                overrides["structured_output_mode"]
+            )
+        return params
+
+    def _call_endpoint_changed(self, call_config) -> bool:
+        """Whether this call sends to a different endpoint than the constructor's.
+
+        ``api_base`` and ``base_url`` are two spellings of one endpoint (the
+        same comparison as ``_request_media_inputs``); a call with no endpoint
+        while one is configured goes to the provider default, a change.
+        """
+        from nooa.unifiedllm.route_identity import endpoint_changed
+
+        return endpoint_changed(self.config, call_config) or (
+            any(self.config.get(key) for key in ("api_base", "base_url"))
+            and not any(call_config.get(key) for key in ("api_base", "base_url"))
+        )
+
+    def _native_output_for_call(self, overrides, call_config) -> bool:
+        """Return whether this call sends its output schema as ``output_config.format``.
+
+        The per-call ``structured_output_mode`` wins over the client's. The
+        client's ``"anthropic"`` mode is not applied when the call overrides the
+        model, base URL, provider or client: the endpoint is then different,
+        and the call must set ``structured_output_mode`` itself (else
+        ``ValueError``).
+        """
+        mode = validate_structured_output_mode(
+            overrides.get("structured_output_mode", self.structured_output_mode)
+        )
+        route_changed = (
+            self._effective_model(call_config) != self.model
+            or self._call_endpoint_changed(call_config)
+            or any(
+                call_config.get(key) != self.config.get(key)
+                for key in ("custom_llm_provider", "client")
+            )
+        )
+        if mode == "anthropic" and route_changed and "structured_output_mode" not in overrides:
+            raise ValueError(
+                "Route override cannot inherit structured_output_mode='anthropic'; "
+                "declare the replacement route's profile explicitly"
+            )
+        return mode == "anthropic"
+
+    @staticmethod
+    def _normalize_chat_extensions(api_params, effective_model):
+        """Move ``thinking`` and ``output_config`` into ``extra_body`` for OpenAI-SDK requests.
+
+        LiteLLM sends OpenAI and OpenAI-compatible providers through the OpenAI
+        Python SDK, which does not accept these fields as keyword arguments but
+        copies ``extra_body`` into the request JSON. Providers that LiteLLM
+        handles with its own HTTP code (such as Anthropic's Messages API) read
+        these fields as top-level parameters, so they are left unchanged.
+
+        This applies to any model and does not depend on ``output_model``. The
+        provider is resolved the same way LiteLLM resolves it, because a call
+        that overrides the endpoint may not use the SDK client NOOA created.
+
+        Raises:
+            ValueError: If a field is set both top-level and in ``extra_body``
+                with different values.
+        """
+        fields = ("thinking", "output_config")
+        if not any(key in api_params for key in fields):
+            return
+        _, provider, _, _ = litellm.get_llm_provider(
+            model=effective_model,
+            custom_llm_provider=api_params.get("custom_llm_provider"),
+            api_base=api_params.get("api_base") or api_params.get("base_url"),
+        )
+        if provider != "openai" and provider not in getattr(
+            litellm, "openai_compatible_providers", []
+        ):
+            return
+        # These OpenAI-compatible providers have their own LiteLLM HTTP
+        # handlers and do not go through the OpenAI SDK, so leave them alone.
+        if (
+            provider
+            in {
+                "deepseek",
+                "azure_ai",
+                "fireworks_ai",
+                "ragflow",
+                "xai",
+                "groq",
+                "cometapi",
+                "hosted_vllm",
+            }
+            or api_params.get("text_completion") is True
+        ):
+            return
+        from litellm.secret_managers.main import get_secret_bool
+
+        # With this LiteLLM setting, OpenAI requests use LiteLLM's own HTTP
+        # handler instead of the SDK; check it the same way LiteLLM does.
+        if get_secret_bool("EXPERIMENTAL_OPENAI_BASE_LLM_HTTP_HANDLER"):
+            return
+        extra = copy.deepcopy(dict(api_params.get("extra_body") or {}))
+        # Check every field for conflicts before moving any of them. Each
+        # field is moved as a whole; a conflicting extra_body value is an
+        # error rather than being merged or overwritten.
+        for key in fields:
+            if key in api_params and key in extra and api_params[key] != extra[key]:
+                raise ValueError(f"Conflicting {key} settings in extra_body")
+        for key in fields:
+            if key in api_params:
+                extra[key] = copy.deepcopy(api_params.pop(key))
+        api_params["extra_body"] = extra
+
+    @staticmethod
+    def _set_output_format(api_params, output_model, effective_model, native_output):
+        """Add the output schema of ``output_model`` to the request parameters.
+
+        Without native output this sets ``response_format``. With native
+        output (``structured_output_mode="anthropic"``) it sets
+        ``output_config.format``, merged with any other ``output_config``
+        settings, either as a top-level parameter (Anthropic provider) or in
+        ``extra_body`` (OpenAI-compatible gateways).
+
+        Raises:
+            ValueError: If native output is combined with another output
+                format, tools or a conflicting ``output_config``, or the
+                provider is neither Anthropic nor OpenAI-compatible.
+        """
+        if output_model is None:
+            return
+        if not native_output:
+            api_params["response_format"] = _maybe_sanitize_response_format(
+                effective_model, output_model
+            )
+            return
+        extra = dict(api_params.get("extra_body") or {})
+        for settings in (api_params, extra):
+            if any(
+                key in settings
+                for key in (
+                    "response_format",
+                    "text_format",
+                    "text",
+                    "output_format",
+                    "tools",
+                    "tool_choice",
+                )
+            ):
+                raise ValueError(
+                    "Native output_model conflicts with explicit structured format settings"
+                )
+            output_config = settings.get("output_config")
+            if output_config is not None and not isinstance(output_config, Mapping):
+                raise ValueError("output_config must be a mapping")
+            if isinstance(output_config, Mapping) and "format" in output_config:
+                raise ValueError("output_model conflicts with explicit output_config.format")
+        output_config = dict(api_params.pop("output_config", {}) or {})
+        for key, value in (extra.get("output_config") or {}).items():
+            if key in output_config and output_config[key] != value:
+                raise ValueError("Conflicting output_config settings")
+            output_config[key] = value
+        output_config["format"] = anthropic_output_format(output_model)
+        # The mode decides that output_config.format is sent; the provider
+        # only decides where it goes. The OpenAI SDK copies extra_body into
+        # the request JSON, while LiteLLM's Anthropic Messages handler expects
+        # a top-level parameter (it would nest an extra_body value).
+        _, provider, _, _ = litellm.get_llm_provider(
+            model=effective_model,
+            custom_llm_provider=api_params.get("custom_llm_provider"),
+            api_base=api_params.get("api_base") or api_params.get("base_url"),
+        )
+        if provider == "anthropic":
+            extra.pop("output_config", None)
+            api_params["output_config"] = output_config
+            if extra:
+                api_params["extra_body"] = extra
+            else:
+                api_params.pop("extra_body", None)
+        elif provider in {"openai", "azure"} or provider in getattr(
+            litellm, "openai_compatible_providers", []
+        ):
+            extra["output_config"] = output_config
+            api_params["extra_body"] = extra
+        else:
+            raise ValueError(
+                "Native Anthropic carrier requires Anthropic Messages or a Chat-compatible gateway"
+            )
+
+    @contextmanager
+    def _native_output_request_scope(self, api_params, output_model, native_output, *, is_async):
+        """Check the HTTP request LiteLLM sends during a native-output call.
+
+        Installs the request hook on the httpx client of this call's SDK client
+        and records the expected schema for the duration of the ``with``
+        block. Does nothing when the call does not use native output.
+
+        Raises:
+            ValueError: If the call has no per-client httpx client to hook.
+        """
+        if not native_output or output_model is None:
+            yield
+            return
+        import httpx
+
+        # Check the request body that is actually sent, not only the
+        # parameters given to LiteLLM, which could still drop or rewrite the
+        # schema. The hook is added to this call's httpx client, never to a
+        # global one. It is a module-level function, added once per httpx
+        # client, so a caller-owned client shared by several CompletionClients
+        # holds no reference to them; concurrent calls each see their own
+        # expected schema through the ContextVar.
+        client = api_params.get("client")
+        http = getattr(client, "_client", None)
+        if http is None:
+            http = getattr(client, "client", None)
+        expected_type = httpx.AsyncClient if is_async else httpx.Client
+        if not isinstance(http, expected_type):
+            raise ValueError(
+                "Native structured output requires a verifiable per-client HTTP transport; "
+                "construct a separate CompletionClient for a replacement route"
+            )
+        hook = _acheck_native_output_request if is_async else _check_native_output_request
+        hooks = http.event_hooks.setdefault("request", [])
+        if hook not in hooks:
+            hooks.append(hook)
+        # Build the expected schema again from output_model instead of reusing
+        # the dict in api_params, which LiteLLM could modify in place.
+        token = _NATIVE_OUTPUT_CONTRACT.set(anthropic_output_format(output_model))
+        try:
+            yield
+        finally:
+            _NATIVE_OUTPUT_CONTRACT.reset(token)
+
+    @staticmethod
+    def _response_from_chat(raw_response, scope, tools, output_model, *, native_output=False):
+        from .chat_parts import capture_chat_parts
+
+        reasoning, usage = _extract_reasoning_and_usage(raw_response)
+        turn = LLMResponse(
+            raw_response=raw_response,
+            parts=capture_chat_parts(raw_response.choices[0].message, scope),
+            replay_scope=scope,
+            finish_reason=_map_completion_finish_reason(raw_response),
+            usage=usage,
+        )
+        if native_output and output_model is not None:
+            if turn.finish_reason != "stop" or turn.tool_calls or not turn.content.strip():
+                raise ValueError(
+                    "Native structured output requires a complete final stop with JSON text, not tools or reasoning alone"
+                )
+            # Parse the whole reply as JSON for output_model; unlike the default
+            # path, there is no fallback that extracts JSON from fenced or
+            # surrounding text.
+            turn.parsed = output_model.model_validate_json(turn.content)
+            return turn
+        if turn.tool_calls:
+            turn.finish_reason = _finish_reason_for_tool_calls(turn.finish_reason)
+            return turn
+
+        # A parsed XML fallback is an edit of the model turn, so native state
+        # is deliberately discarded through the same replacement API.
+        if tools and "<tool_call>" in turn.content:
+            if calls := _extract_xml_tool_calls(turn.content):
+                from nooa.llm_types import AssistantReasoning
+
+                turn = turn.replace_parts(
+                    (
+                        *(part for part in turn.parts if isinstance(part, AssistantReasoning)),
+                        *calls,
+                    )
+                )
+                turn.finish_reason = _finish_reason_for_tool_calls(turn.finish_reason)
+                return turn
+        if output_model:
+            parseable_content = turn.content or reasoning or ""
+            if not turn.content and reasoning:
+                _record_llm_metric("reasoning_as_structured_output")
+            turn.parsed = _instantiate_output_model(
+                output_model, extract_and_parse_json(parseable_content)
+            )
+        return turn
+
     def __init__(
         self,
         model: str,
         retry_config: RetryConfig | None = None,
         http_config: HttpConfig | None = None,
-        # use system as default for cache_control_injection_points
-        cache_control_injection_points: list[dict[str, Any]] | None = None,
+        cache_breakpoint: Literal["auto", "anthropic"] | None = "auto",
+        *,
+        structured_output_mode: StructuredOutputMode = None,
+        media_inputs: list[MediaInput] | tuple[MediaInput, ...] | None = None,
+        context_window: int | None = None,
         **config,
     ):
         """
@@ -1714,28 +2398,47 @@ class CompletionClient(UnifiedLLM):
                          disconnects, and unreachable endpoints. Pass
                          RetryConfig(max_retries=0, rate_limit_extra_retries=0) to disable endpoint retries. Set
                          retry_on_empty_content=True to also retry when reasoning
-                         models return empty content.
+                         models return empty content. The OpenAI SDK's own
+                         retries are disabled unless ``max_retries`` is passed
+                         in ``**config``.
             http_config: Optional per-client HTTP connection-pool and timeout
                          settings. Applied only to THIS client's requests: the
                          client builds its own httpx client from these values and
                          passes it to litellm per call. No global state and no
                          monkey-patching of httpx — two clients with different
                          http_configs are fully independent.
-            cache_control_injection_points: Optional list of role/position rules to
-                enable prompt caching (for example: {"role": "system"} or
-                {"role": "tool", "position": "last"}). Applied to all calls.
-                Note: Do NOT manually add cache_control to message content when using this.
+            cache_breakpoint: Set to ``"anthropic"`` to map the cached
+                renderer's stable-prefix boundary to native ``cache_control``.
+                Default ``"auto"`` enables this for recognized Anthropic routes;
+                other routes use provider-default caching. ``None`` disables
+                NOOA markers. Without a boundary, only leading instructions
+                are marked.
+            structured_output_mode: Request field that carries the output
+                schema of ``output_model`` calls. ``'anthropic'`` sends
+                ``output_config.format``; ``None`` and ``'auto'`` send the
+                default ``response_format``. Applies only to this client's own
+                model and endpoint and is never chosen from the model name.
+            media_inputs: Explicit allowed inputs: image, audio, video, pdf.
+                Absent/empty is text-only. PDF means application/pdf only.
+            context_window: Optional model context-window metadata used for local
+                context budgeting. It is never sent to the inference API.
             **config: Additional configuration passed to litellm (api_key, api_base, etc.)
         """
-        super().__init__(model, **config)
+        if cache_breakpoint not in {None, "auto", "anthropic"}:
+            raise ValueError(
+                "CompletionClient cache_breakpoint must be 'auto', 'anthropic', or None"
+            )
+        super().__init__(
+            model,
+            structured_output_mode=structured_output_mode,
+            media_inputs=media_inputs,
+            context_window=context_window,
+            **config,
+        )
         self.retry_config = retry_config or RetryConfig()
+        self.cache_breakpoint = cache_breakpoint
         self._http_config = http_config or HttpConfig()
         self._http = _ClientHttp.for_completion(self.model, self.config, self._http_config)
-        # Only set default if explicitly None (not if empty list is passed)
-        if cache_control_injection_points is not None:
-            self.cache_control_injection_points = cache_control_injection_points
-        else:
-            self.cache_control_injection_points = DEFAULT_CACHE_CONTROL_INJECTION_POINTS
 
     def _convert_tool_to_schema(self, tool: Tool) -> dict[str, Any]:
         """Convert Tool object to Completion API schema format"""
@@ -1748,12 +2451,39 @@ class CompletionClient(UnifiedLLM):
             },
         }
 
+    def _completion_http_client(
+        self, call_config: dict[str, Any], *, is_async: bool, max_retries: int
+    ) -> Any:
+        """Reuse the owned transport only while its constructor routing still applies.
+
+        The endpoint is compared with route_identity.endpoint_changed, like media
+        permissions, reasoning levels and context windows: the configured URL
+        under the other spelling, with a trailing slash or a different host case
+        is the same route and keeps the owned transport.
+        """
+        from nooa.unifiedllm.route_identity import endpoint_changed
+
+        if (
+            self._effective_model(call_config) != self.model
+            or endpoint_changed(self.config, call_config)
+            or any(
+                call_config.get(key) != self.config.get(key)
+                for key in ("api_key", "custom_llm_provider")
+            )
+        ):
+            # LiteLLM uses a supplied OpenAI SDK client's bound URL/key, ignoring
+            # the corresponding call parameters. Let it build the correct client
+            # for overrides; these calls use LiteLLM's default HTTP pool settings.
+            return None
+        assert self._http is not None
+        client = self._http.async_client if is_async else self._http.sync_client
+        return _with_sdk_retries(client, max_retries)
+
     def call(
         self,
-        messages: list[dict[str, Any]],
+        messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
         tools: list[Tool] | None = None,
         output_model: type[BaseModel] | None = None,
-        cache_control_injection_points: list[dict[str, Any]] | None = None,
         **kwargs,
     ) -> LLMResponse:
         """
@@ -1763,34 +2493,48 @@ class CompletionClient(UnifiedLLM):
         If retry_config.retry_on_empty_content is True, will retry when the model
         returns empty content but has reasoning_content (common with some reasoning models).
         """
-        # Inject cache_control at the message level for prompt caching
-        cache_points = (
-            self.cache_control_injection_points
-            if cache_control_injection_points is None
-            else cache_control_injection_points
+        call_config = self._prepare_call_config(kwargs)
+        self._validate_request_config("messages", call_config)
+        native_output = self._native_output_for_call(kwargs, call_config)
+        effective_model = self._effective_model(call_config)
+        self._validate_cache_breakpoint_model(effective_model)
+        state_scope = replay_state.replay_scope(effective_model, "chat", call_config)
+        # Scope's resolved provider (from litellm) and _resolve_cache_mapping
+        # can disagree for gateway-routed models; the latter -- not scope --
+        # decides whether Anthropic-style cache_control marking is applied.
+        cache_mapping = self._resolve_cache_mapping(effective_model, responses=False)
+        prepared_messages = replay_state.prepare_chat_messages(
+            self._prepare_media_messages(messages, call_config),
+            state_scope,
+            anthropic_cache_marking=cache_mapping == "anthropic",
+            media_inputs=self._request_media_inputs(call_config),
         )
-        prepared_messages = self._inject_cache_control(messages, cache_points)
+
+        self._validate_implemented_media(prepared_messages, call_config)
+
+        # Choose the stable-prefix breakpoint on projected provider messages.
+        prepared_messages, _, _ = self._prepare_cache_boundary(
+            prepared_messages, responses=False, model=effective_model
+        )
 
         api_params = {
             "model": self.model,
+            **call_config,
             "messages": prepared_messages,
-            **self.config,
-            **kwargs,
         }
 
         if tools:
             api_params["tools"] = [self._convert_tool_to_schema(tool) for tool in tools]
             api_params["parallel_tool_calls"] = False
 
-        if output_model is not None:
-            api_params["response_format"] = _maybe_sanitize_response_format(
-                self.model, output_model
-            )
+        self._normalize_chat_extensions(api_params, effective_model)
+        self._set_output_format(api_params, output_model, effective_model, native_output)
 
         # Bedrock/Anthropic reject messages with tool_call blocks when tools= is absent.
         if (
             "tools" not in api_params
-            and _needs_dummy_tool(self.model)
+            and not (native_output and output_model is not None)
+            and _needs_dummy_tool(effective_model)
             and _messages_have_tool_calls(prepared_messages)
         ):
             api_params["tools"] = [_DUMMY_TOOL_SCHEMA]
@@ -1800,16 +2544,35 @@ class CompletionClient(UnifiedLLM):
         if "tools" not in api_params:
             api_params.pop("tool_choice", None)
             api_params.pop("parallel_tool_calls", None)
+        elif api_params.get("tool_choice") == "auto":
+            # Auto is the default with tools; sending it alongside parallel=False
+            # can create conflicting tool-choice settings in compatible servers.
+            api_params.pop("tool_choice")
+
+        add_session_affinity_header(api_params)
+        # RetryConfig owns endpoint retries. LiteLLM otherwise has the OpenAI SDK
+        # retry each attempt twice more, tripling the configured budget. An
+        # explicit max_retries passthrough still opts into SDK retries.
+        api_params.setdefault("max_retries", 0)
 
         retry_on_empty = self.retry_config.retry_on_empty_content if self.retry_config else False
 
-        http_client = self._http
-        assert http_client is not None
-        if http_client.sync_client is not None:
-            api_params.setdefault("client", http_client.sync_client)
+        if "client" in api_params:
+            api_params["client"] = _with_sdk_retries(
+                api_params["client"], api_params["max_retries"]
+            )
+        else:
+            http_client = self._completion_http_client(
+                call_config, is_async=False, max_retries=api_params["max_retries"]
+            )
+            if http_client is not None:
+                api_params["client"] = http_client
 
         def _make_call():
-            raw_response = _collect_sync(litellm.completion(**api_params))
+            with self._native_output_request_scope(
+                api_params, output_model, native_output, is_async=False
+            ):
+                raw_response = _collect_sync(litellm.completion(**api_params))
             reasoning, _ = _extract_reasoning_and_usage(raw_response)
             text_content = raw_response.choices[0].message.content or ""  # type: ignore[union-attr]
 
@@ -1820,7 +2583,7 @@ class CompletionClient(UnifiedLLM):
             return raw_response
 
         # Track LLM call for debugging (visible via SIGUSR2 if nooa debug handler installed)
-        with _track_llm_call(model=self.model, endpoint=self.config.get("api_base")):
+        with _track_llm_call(model=effective_model, endpoint=self.config.get("api_base")):
             raw_response = (
                 sync_retry(_make_call, config=self.retry_config)
                 if self.retry_config
@@ -1831,105 +2594,17 @@ class CompletionClient(UnifiedLLM):
         if usage:
             _record_llm_metric("token_usage", usage)
             _update_token_calibration(
-                self.model, prepared_messages, usage, tools=api_params.get("tools")
+                effective_model, prepared_messages, usage, tools=api_params.get("tools")
             )
-        raw_tool_calls = raw_response.choices[0].message.tool_calls  # type: ignore[union-attr]
-
-        if raw_tool_calls:
-            tool_calls = [
-                ToolCall(id=tc.id, name=tc.function.name or "", arguments=tc.function.arguments)
-                for tc in raw_tool_calls
-            ]
-
-            return LLMResponse(
-                raw_response=raw_response,
-                content="",
-                tool_calls=tool_calls,
-                finish_reason="tool_calls",
-                assistant_message={
-                    "role": "assistant",
-                    "content": raw_response.choices[0].message.content or "",  # type: ignore[union-attr]
-                    "tool_calls": [
-                        {
-                            "id": tc.id,
-                            "type": "function",
-                            "function": {
-                                "name": tc.function.name,
-                                "arguments": tc.function.arguments,
-                            },
-                        }
-                        for tc in raw_tool_calls
-                    ],
-                },
-                reasoning=reasoning,
-                usage=usage,
-            )
-
-        text_content = raw_response.choices[0].message.content or ""  # type: ignore[union-attr]
-
-        # Fallback: vLLM's hermes parser fails on Nemotron's XML tool call format.
-        # Extract <tool_call><function=name><parameter=...> from content.
-        if not raw_tool_calls and tools and "<tool_call>" in text_content:
-            xml_tool_calls = _extract_xml_tool_calls(text_content)
-            if xml_tool_calls:
-                return LLMResponse(
-                    raw_response=raw_response,
-                    content="",
-                    tool_calls=xml_tool_calls,
-                    finish_reason="tool_calls",
-                    assistant_message={
-                        "role": "assistant",
-                        "content": text_content,
-                        "tool_calls": [
-                            {
-                                "id": tc.id,
-                                "type": "function",
-                                "function": {"name": tc.name, "arguments": tc.arguments},
-                            }
-                            for tc in xml_tool_calls
-                        ],
-                    },
-                    reasoning=reasoning,
-                    usage=usage,
-                )
-
-        if output_model:
-            # ── Response cleanup: reasoning-as-content fallback ───────
-            # Intercept point: some reasoning models (e.g. Nemotron) put
-            # structured output JSON in reasoning_content instead of content.
-            # Consider making this an extensible transform in the future.
-            parseable_content = text_content if text_content else (reasoning or "")
-            if not text_content and reasoning:
-                _record_llm_metric("reasoning_as_structured_output")
-            json_data = extract_and_parse_json(parseable_content)
-            parsed_content = _instantiate_output_model(output_model, json_data)
-
-            return LLMResponse(
-                raw_response=raw_response,
-                content=parsed_content,
-                tool_calls=[],
-                finish_reason=_map_completion_finish_reason(raw_response),
-                assistant_message={"role": "assistant", "content": text_content},
-                reasoning=reasoning if text_content else None,
-                usage=usage,
-            )
-
-        return LLMResponse(
-            raw_response=raw_response,
-            content=text_content,
-            tool_calls=[],
-            finish_reason=_map_completion_finish_reason(raw_response),
-            assistant_message={"role": "assistant", "content": text_content},
-            reasoning=reasoning,
-            usage=usage,
+        return self._response_from_chat(
+            raw_response, state_scope, tools, output_model, native_output=native_output
         )
 
     async def acall(
         self,
-        messages: list[dict[str, Any]],
+        messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
         tools: list[Tool] | None = None,
         output_model: type[BaseModel] | None = None,
-        cache_control_injection_points: list[dict[str, Any]] | None = None,
         **kwargs,
     ) -> LLMResponse:
         """
@@ -1939,34 +2614,48 @@ class CompletionClient(UnifiedLLM):
         If retry_config.retry_on_empty_content is True, will retry when the model
         returns empty content but has reasoning_content (common with some reasoning models).
         """
-        # Inject cache_control at the message level for prompt caching
-        cache_points = (
-            self.cache_control_injection_points
-            if cache_control_injection_points is None
-            else cache_control_injection_points
+        call_config = self._prepare_call_config(kwargs)
+        self._validate_request_config("messages", call_config)
+        native_output = self._native_output_for_call(kwargs, call_config)
+        effective_model = self._effective_model(call_config)
+        self._validate_cache_breakpoint_model(effective_model)
+        state_scope = replay_state.replay_scope(effective_model, "chat", call_config)
+        # Scope's resolved provider (from litellm) and _resolve_cache_mapping
+        # can disagree for gateway-routed models; the latter -- not scope --
+        # decides whether Anthropic-style cache_control marking is applied.
+        cache_mapping = self._resolve_cache_mapping(effective_model, responses=False)
+        prepared_messages = replay_state.prepare_chat_messages(
+            self._prepare_media_messages(messages, call_config),
+            state_scope,
+            anthropic_cache_marking=cache_mapping == "anthropic",
+            media_inputs=self._request_media_inputs(call_config),
         )
-        prepared_messages = self._inject_cache_control(messages, cache_points)
+
+        self._validate_implemented_media(prepared_messages, call_config)
+
+        # Choose the stable-prefix breakpoint on projected provider messages.
+        prepared_messages, _, _ = self._prepare_cache_boundary(
+            prepared_messages, responses=False, model=effective_model
+        )
 
         api_params = {
             "model": self.model,
+            **call_config,
             "messages": prepared_messages,
-            **self.config,
-            **kwargs,
         }
 
         if tools:
             api_params["tools"] = [self._convert_tool_to_schema(tool) for tool in tools]
             api_params["parallel_tool_calls"] = False
 
-        if output_model is not None:
-            api_params["response_format"] = _maybe_sanitize_response_format(
-                self.model, output_model
-            )
+        self._normalize_chat_extensions(api_params, effective_model)
+        self._set_output_format(api_params, output_model, effective_model, native_output)
 
         # Bedrock/Anthropic reject messages with tool_call blocks when tools= is absent.
         if (
             "tools" not in api_params
-            and _needs_dummy_tool(self.model)
+            and not (native_output and output_model is not None)
+            and _needs_dummy_tool(effective_model)
             and _messages_have_tool_calls(prepared_messages)
         ):
             api_params["tools"] = [_DUMMY_TOOL_SCHEMA]
@@ -1976,16 +2665,41 @@ class CompletionClient(UnifiedLLM):
         if "tools" not in api_params:
             api_params.pop("tool_choice", None)
             api_params.pop("parallel_tool_calls", None)
+        elif api_params.get("tool_choice") == "auto":
+            # Auto is the default with tools; sending it alongside parallel=False
+            # can create conflicting tool-choice settings in compatible servers.
+            api_params.pop("tool_choice")
+
+        add_session_affinity_header(api_params)
+        # RetryConfig owns endpoint retries. LiteLLM otherwise has the OpenAI SDK
+        # retry each attempt twice more, tripling the configured budget. An
+        # explicit max_retries passthrough still opts into SDK retries.
+        api_params.setdefault("max_retries", 0)
 
         retry_on_empty = self.retry_config.retry_on_empty_content if self.retry_config else False
 
-        http_client = self._http
-        assert http_client is not None
-        if http_client.async_client is not None:
-            api_params.setdefault("client", http_client.async_client)
+        if "client" in api_params:
+            api_params["client"] = _with_sdk_retries(
+                api_params["client"], api_params["max_retries"]
+            )
+        else:
+            http_client = self._completion_http_client(
+                call_config, is_async=True, max_retries=api_params["max_retries"]
+            )
+            if http_client is not None:
+                api_params["client"] = http_client
 
         async def _make_call():
-            raw_response = await _collect_async(await _litellm_acompletion(api_params))
+            async def provider_call():
+                with self._native_output_request_scope(
+                    api_params, output_model, native_output, is_async=True
+                ):
+                    return await _collect_async(await litellm.acompletion(**api_params))
+
+            raw_response = await _run_async_provider_call(
+                provider_call,
+                request_timeout=self._http_config.request_timeout,
+            )
             reasoning, _ = _extract_reasoning_and_usage(raw_response)
             text_content = raw_response.choices[0].message.content or ""  # type: ignore[union-attr]
 
@@ -1996,7 +2710,7 @@ class CompletionClient(UnifiedLLM):
             return raw_response
 
         # Track LLM call for debugging (visible via SIGUSR2 if nooa debug handler installed)
-        with _track_llm_call(model=self.model, endpoint=self.config.get("api_base")):
+        with _track_llm_call(model=effective_model, endpoint=self.config.get("api_base")):
             raw_response = (
                 await with_retry(_make_call, config=self.retry_config)
                 if self.retry_config
@@ -2007,99 +2721,10 @@ class CompletionClient(UnifiedLLM):
         if usage:
             _record_llm_metric("token_usage", usage)
             _update_token_calibration(
-                self.model, prepared_messages, usage, tools=api_params.get("tools")
+                effective_model, prepared_messages, usage, tools=api_params.get("tools")
             )
-        raw_tool_calls = raw_response.choices[0].message.tool_calls  # type: ignore[union-attr]
-
-        if raw_tool_calls:
-            tool_calls = [
-                ToolCall(
-                    id=tc.id, name=tc.function.name or "", arguments=tc.function.arguments or ""
-                )  # type: ignore[union-attr]
-                for tc in raw_tool_calls
-            ]
-
-            return LLMResponse(
-                raw_response=raw_response,
-                content="",
-                tool_calls=tool_calls,
-                finish_reason="tool_calls",
-                assistant_message={
-                    "role": "assistant",
-                    "content": raw_response.choices[0].message.content or "",  # type: ignore[union-attr]
-                    "tool_calls": [
-                        {
-                            "id": tc.id,
-                            "type": "function",
-                            "function": {
-                                "name": tc.function.name,
-                                "arguments": tc.function.arguments,
-                            },
-                        }
-                        for tc in raw_tool_calls
-                    ],
-                },
-                reasoning=reasoning,
-                usage=usage,
-            )
-
-        text_content = raw_response.choices[0].message.content or ""  # type: ignore[union-attr]
-
-        # Fallback: vLLM's hermes parser fails on Nemotron's XML tool call format.
-        # Extract <tool_call><function=name><parameter=...> from content.
-        if not raw_tool_calls and tools and "<tool_call>" in text_content:
-            xml_tool_calls = _extract_xml_tool_calls(text_content)
-            if xml_tool_calls:
-                return LLMResponse(
-                    raw_response=raw_response,
-                    content="",
-                    tool_calls=xml_tool_calls,
-                    finish_reason="tool_calls",
-                    assistant_message={
-                        "role": "assistant",
-                        "content": text_content,
-                        "tool_calls": [
-                            {
-                                "id": tc.id,
-                                "type": "function",
-                                "function": {"name": tc.name, "arguments": tc.arguments},
-                            }
-                            for tc in xml_tool_calls
-                        ],
-                    },
-                    reasoning=reasoning,
-                    usage=usage,
-                )
-
-        if output_model:
-            # ── Response cleanup: reasoning-as-content fallback ───────
-            # Intercept point: some reasoning models (e.g. Nemotron) put
-            # structured output JSON in reasoning_content instead of content.
-            # Consider making this an extensible transform in the future.
-            parseable_content = text_content if text_content else (reasoning or "")
-            if not text_content and reasoning:
-                _record_llm_metric("reasoning_as_structured_output")
-            json_data = extract_and_parse_json(parseable_content)
-            parsed_content = _instantiate_output_model(output_model, json_data)
-
-            return LLMResponse(
-                raw_response=raw_response,
-                content=parsed_content,
-                tool_calls=[],
-                finish_reason=_map_completion_finish_reason(raw_response),
-                assistant_message={"role": "assistant", "content": text_content},
-                reasoning=reasoning if text_content else None,
-                usage=usage,
-            )
-
-        return LLMResponse(
-            raw_response=raw_response,
-            content=text_content,
-            tool_calls=[],
-            finish_reason=_map_completion_finish_reason(raw_response),
-            assistant_message={"role": "assistant", "content": text_content},
-            reasoning=reasoning,
-            usage=usage,
+        return self._response_from_chat(
+            raw_response, state_scope, tools, output_model, native_output=native_output
         )
 
 
@@ -2132,16 +2757,13 @@ class ReasoningCompletionClient(CompletionClient):
 
     def call(
         self,
-        messages: list[dict[str, Any]],
+        messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
         tools: list[Tool] | None = None,
         output_model: type[BaseModel] | None = None,
-        cache_control_injection_points: list[dict[str, Any]] | None = None,
         **kwargs,
     ) -> LLMResponse:
         """Call with <think> tag extraction."""
-        response = super().call(
-            messages, tools, output_model, cache_control_injection_points, **kwargs
-        )
+        response = super().call(messages, tools, output_model, **kwargs)
 
         # Extract think tags from content
         if isinstance(response.content, str) and response.content:
@@ -2156,33 +2778,28 @@ class ReasoningCompletionClient(CompletionClient):
                     else think_reasoning
                 )
 
-                return LLMResponse(
-                    raw_response=response.raw_response,
-                    content=cleaned_content,
-                    tool_calls=response.tool_calls,
-                    finish_reason=response.finish_reason,
-                    assistant_message={
-                        "role": "assistant",
-                        "content": cleaned_content,
-                    },
-                    reasoning=combined_reasoning,
-                    usage=response.usage,
+                parsed = response.parsed
+                response = response.replace_parts(
+                    (
+                        AssistantReasoning(text=combined_reasoning),
+                        AssistantText(text=cleaned_content),
+                        *response.tool_calls,
+                    )
                 )
+                # Separating think tags does not change the validated answer.
+                response.parsed = parsed
 
         return response
 
     async def acall(
         self,
-        messages: list[dict[str, Any]],
+        messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
         tools: list[Tool] | None = None,
         output_model: type[BaseModel] | None = None,
-        cache_control_injection_points: list[dict[str, Any]] | None = None,
         **kwargs,
     ) -> LLMResponse:
         """Async call with <think> tag extraction."""
-        response = await super().acall(
-            messages, tools, output_model, cache_control_injection_points, **kwargs
-        )
+        response = await super().acall(messages, tools, output_model, **kwargs)
 
         # Extract think tags from content
         if isinstance(response.content, str) and response.content:
@@ -2197,18 +2814,16 @@ class ReasoningCompletionClient(CompletionClient):
                     else think_reasoning
                 )
 
-                return LLMResponse(
-                    raw_response=response.raw_response,
-                    content=cleaned_content,
-                    tool_calls=response.tool_calls,
-                    finish_reason=response.finish_reason,
-                    assistant_message={
-                        "role": "assistant",
-                        "content": cleaned_content,
-                    },
-                    reasoning=combined_reasoning,
-                    usage=response.usage,
+                parsed = response.parsed
+                response = response.replace_parts(
+                    (
+                        AssistantReasoning(text=combined_reasoning),
+                        AssistantText(text=cleaned_content),
+                        *response.tool_calls,
+                    )
                 )
+                # Separating think tags does not change the validated answer.
+                response.parsed = parsed
 
         return response
 
@@ -2219,7 +2834,10 @@ class ResponsesClient(UnifiedLLM):
         model: str,
         retry_config: RetryConfig | None = None,
         http_config: HttpConfig | None = None,
-        cache_control_injection_points: list[dict[str, Any]] | None = None,
+        cache_breakpoint: Literal["auto", "openai"] | None = "auto",
+        *,
+        media_inputs: list[MediaInput] | tuple[MediaInput, ...] | None = None,
+        context_window: int | None = None,
         **config,
     ):
         """
@@ -2242,20 +2860,33 @@ class ResponsesClient(UnifiedLLM):
                          settings. Applied only to THIS client's requests (its
                          own httpx client is passed to litellm per call). No
                          global state and no monkey-patching of httpx.
-            cache_control_injection_points: Optional list of role/position rules to
-                enable prompt caching (for example: {"role": "system"} or
-                {"role": "tool", "position": "last"}). Applied to all calls.
+            cache_breakpoint: Default ``"auto"`` maps a rendered boundary with
+                eligible stable input to a Responses explicit breakpoint.
+                Without a usable boundary, leaves provider-default caching unchanged.
+                ``None`` disables NOOA markers, not the provider's implicit cache.
+                Anthropic cache mapping is supported by CompletionClient only.
+                With ``"openai"`` and no eligible stable block, warns and keeps
+                explicit mode without a breakpoint, avoiding all cache writes.
+            media_inputs: Explicit allowed inputs: image, audio, video, pdf.
+                Absent/empty is text-only. PDF means application/pdf only.
+            context_window: Optional model context-window metadata used for local
+                context budgeting. It is never sent to the inference API.
             **config: Additional configuration passed to litellm (api_key, api_base, etc.)
         """
-        super().__init__(model, **config)
+        if cache_breakpoint not in {None, "auto", "openai"}:
+            raise ValueError("ResponsesClient cache_breakpoint must be 'auto', 'openai', or None")
+        super().__init__(model, media_inputs=media_inputs, context_window=context_window, **config)
         self.retry_config = retry_config or RetryConfig()
+        self.cache_breakpoint = cache_breakpoint
         self._http_config = http_config or HttpConfig()
         self._http = _ClientHttp.for_responses(self.model, self.config, self._http_config)
-        # Only set default if explicitly None (not if empty list is passed)
-        if cache_control_injection_points is not None:
-            self.cache_control_injection_points = cache_control_injection_points
-        else:
-            self.cache_control_injection_points = DEFAULT_CACHE_CONTROL_INJECTION_POINTS
+
+    def _prepare_call_config(self, overrides: dict[str, Any]) -> dict[str, Any]:
+        params = super()._prepare_call_config(overrides)
+        caps = REPLY_CAP_KEYS & params.keys()
+        if caps:
+            params["max_output_tokens"] = params.pop(next(iter(caps)))
+        return params
 
     def _convert_tool_to_schema(self, tool: Tool) -> dict[str, Any]:
         """Convert Tool object to Responses API schema format."""
@@ -2288,41 +2919,43 @@ class ResponsesClient(UnifiedLLM):
 
     def call(
         self,
-        messages: list[dict[str, Any]],
+        messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
         tools: list[Tool] | None = None,
         output_model: type[BaseModel] | None = None,
-        cache_control_injection_points: list[dict[str, Any]] | None = None,
         **kwargs,
     ) -> LLMResponse:
         """
         Sync version: Call LLM and parse response.
 
-        Handles both native Responses format (from ResponsesProviderFormatter) and
-        legacy OpenAI Chat format. System messages are extracted to the `instructions` param.
+        Accepts public message dictionaries and LLMResponse objects. Stored turns
+        are projected here; only leading system messages become `instructions`.
         """
-        # Inject cache_control only for Anthropic-served models. litellm.responses
-        # passes input[] through verbatim — no equivalent of the Chat Completions
-        # OpenAIGPTConfig.remove_cache_control_flag strip — so leaving the marker
-        # on OpenAI/Azure/NIM Responses calls triggers a 400 "Unknown parameter:
-        # input[N].cache_control" at the gateway.
-        if _is_anthropic_model(self.model):
-            cache_points = (
-                self.cache_control_injection_points
-                if cache_control_injection_points is None
-                else cache_control_injection_points
-            )
-            prepared_messages = self._inject_cache_control(messages, cache_points)
-        else:
-            prepared_messages = messages
-        input_messages, instructions = self._transform_messages(prepared_messages)
+        call_config = self._prepare_call_config(kwargs)
+        self._validate_request_config("input", call_config)
+        effective_model = self._effective_model(call_config)
+        self._validate_cache_breakpoint_model(effective_model)
+        state_scope = replay_state.replay_scope(effective_model, "responses", call_config)
+        native_encrypted_reasoning = replay_state.native_encrypted_reasoning_expected(
+            call_config, state_scope
+        )
+        input_messages, instructions, openai_explicit = self._prepare_input(
+            self._prepare_media_messages(messages, call_config),
+            state_scope,
+            effective_model,
+            native_encrypted_reasoning,
+            media_inputs=self._request_media_inputs(call_config),
+        )
+
+        self._validate_implemented_media(input_messages, call_config)
 
         api_params = {
             "model": self.model,
-            "input": input_messages,
             "truncation": "disabled",
-            **self.config,
-            **kwargs,
+            **call_config,
+            "input": input_messages,
         }
+        if openai_explicit:
+            enable_openai_explicit_cache(api_params)
 
         if instructions:
             api_params["instructions"] = instructions
@@ -2338,8 +2971,10 @@ class ResponsesClient(UnifiedLLM):
         if output_model is not None:
             api_params.update(_responses_output_params(output_model))
 
-        if reasoning := self.config.get("reasoning"):
-            api_params["reasoning"] = reasoning
+        replay_state.add_encrypted_reasoning_include(
+            api_params, state_scope, native_encrypted_reasoning=native_encrypted_reasoning
+        )
+        add_session_affinity_header(api_params)
 
         http_client = self._http
         assert http_client is not None
@@ -2350,110 +2985,66 @@ class ResponsesClient(UnifiedLLM):
             return cast("litellm.ResponsesAPIResponse", litellm.responses(**api_params))
 
         # Track LLM call for debugging (visible via SIGUSR2 if nooa debug handler installed)
-        with _track_llm_call(model=self.model, endpoint=self.config.get("api_base")):
+        with _track_llm_call(model=effective_model, endpoint=self.config.get("api_base")):
             raw_response = (
                 sync_retry(_make_call, config=self.retry_config)
                 if self.retry_config
                 else _make_call()
             )
 
-        # Extract usage if available (Responses API may have different structure)
-        usage = None
-        if hasattr(raw_response, "usage") and raw_response.usage:
-            usage_obj = raw_response.usage
-            if hasattr(usage_obj, "model_dump"):
-                usage = usage_obj.model_dump()
-            elif isinstance(usage_obj, dict):
-                usage = usage_obj
+        usage = _extract_usage(raw_response)
         if usage:
-            _update_token_calibration(self.model, messages, usage, tools=api_params.get("tools"))
-
-        output: list[Any] = raw_response.output  # type: ignore[assignment]
-        raw_tool_calls = [item for item in output if item.type == "function_call"]
-
-        if raw_tool_calls:
-            tool_calls = [
-                ToolCall(id=tc.call_id or "", name=tc.name or "", arguments=tc.arguments or "")
-                for tc in raw_tool_calls
-            ]
-
-            assistant_messages = []
-            for item in output:
-                if hasattr(item, "model_dump"):
-                    assistant_messages.append(item.model_dump())
-                else:
-                    assistant_messages.append(item)
-
-            return LLMResponse(
-                raw_response=raw_response,
-                content="",
-                tool_calls=tool_calls,
-                finish_reason="tool_calls",
-                assistant_message={"_batch": assistant_messages},
-                reasoning=None,  # Responses API doesn't have reasoning
-                usage=usage,
+            _update_token_calibration(
+                effective_model,
+                input_messages,
+                usage,
+                tools=api_params.get("tools"),
+                instructions=api_params.get("instructions"),
             )
 
-        text_content = self._extract_text_from_output(raw_response)
-
-        if output_model:
-            json_data = extract_and_parse_json(text_content)
-            parsed_content = _instantiate_output_model(output_model, json_data)
-
-            return LLMResponse(
-                raw_response=raw_response,
-                content=parsed_content,
-                tool_calls=[],
-                finish_reason=_map_responses_finish_reason(raw_response),
-                assistant_message={"role": "assistant", "content": text_content},
-                reasoning=None,
-                usage=usage,
-            )
-
-        return LLMResponse(
-            raw_response=raw_response,
-            content=text_content,
-            tool_calls=[],
-            finish_reason=_map_responses_finish_reason(raw_response),
-            assistant_message={"role": "assistant", "content": text_content},
-            reasoning=None,
-            usage=usage,
+        return self._response_from_output(
+            raw_response, state_scope, usage, output_model, native_encrypted_reasoning
         )
 
     async def acall(
         self,
-        messages: list[dict[str, Any]],
+        messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
         tools: list[Tool] | None = None,
         output_model: type[BaseModel] | None = None,
-        cache_control_injection_points: list[dict[str, Any]] | None = None,
         **kwargs,
     ) -> LLMResponse:
         """
         Async version: Call LLM and parse response.
 
-        Handles both native Responses format (from ResponsesProviderFormatter) and
-        legacy OpenAI Chat format. System messages are extracted to the `instructions` param.
+        Accepts public message dictionaries and LLMResponse objects. Stored turns
+        are projected here; only leading system messages become `instructions`.
         """
-        # See ResponsesClient.call for why cache_control injection is gated on
-        # Anthropic models only.
-        if _is_anthropic_model(self.model):
-            cache_points = (
-                self.cache_control_injection_points
-                if cache_control_injection_points is None
-                else cache_control_injection_points
-            )
-            prepared_messages = self._inject_cache_control(messages, cache_points)
-        else:
-            prepared_messages = messages
-        input_messages, instructions = self._transform_messages(prepared_messages)
+        call_config = self._prepare_call_config(kwargs)
+        self._validate_request_config("input", call_config)
+        effective_model = self._effective_model(call_config)
+        self._validate_cache_breakpoint_model(effective_model)
+        state_scope = replay_state.replay_scope(effective_model, "responses", call_config)
+        native_encrypted_reasoning = replay_state.native_encrypted_reasoning_expected(
+            call_config, state_scope
+        )
+        input_messages, instructions, openai_explicit = self._prepare_input(
+            self._prepare_media_messages(messages, call_config),
+            state_scope,
+            effective_model,
+            native_encrypted_reasoning,
+            media_inputs=self._request_media_inputs(call_config),
+        )
+
+        self._validate_implemented_media(input_messages, call_config)
 
         api_params = {
             "model": self.model,
-            "input": input_messages,
             "truncation": "disabled",
-            **self.config,
-            **kwargs,
+            **call_config,
+            "input": input_messages,
         }
+        if openai_explicit:
+            enable_openai_explicit_cache(api_params)
 
         if instructions:
             api_params["instructions"] = instructions
@@ -2469,8 +3060,10 @@ class ResponsesClient(UnifiedLLM):
         if output_model is not None:
             api_params.update(_responses_output_params(output_model))
 
-        if reasoning := self.config.get("reasoning"):
-            api_params["reasoning"] = reasoning
+        replay_state.add_encrypted_reasoning_include(
+            api_params, state_scope, native_encrypted_reasoning=native_encrypted_reasoning
+        )
+        add_session_affinity_header(api_params)
 
         http_client = self._http
         assert http_client is not None
@@ -2478,185 +3071,276 @@ class ResponsesClient(UnifiedLLM):
             api_params.setdefault("client", http_client.async_client)
 
         async def _make_call():
-            return cast("litellm.ResponsesAPIResponse", await litellm.aresponses(**api_params))
+            async def call_provider():
+                return cast("litellm.ResponsesAPIResponse", await litellm.aresponses(**api_params))
+
+            return await _run_async_provider_call(
+                call_provider,
+                request_timeout=self._http_config.request_timeout,
+            )
 
         # Track LLM call for debugging (visible via SIGUSR2 if nooa debug handler installed)
-        with _track_llm_call(model=self.model, endpoint=self.config.get("api_base")):
+        with _track_llm_call(model=effective_model, endpoint=self.config.get("api_base")):
             raw_response = (
                 await with_retry(_make_call, config=self.retry_config)
                 if self.retry_config
                 else await _make_call()
             )
 
-        # Extract usage if available (Responses API may have different structure)
-        usage = None
-        if hasattr(raw_response, "usage") and raw_response.usage:
-            usage_obj = raw_response.usage
-            if hasattr(usage_obj, "model_dump"):
-                usage = usage_obj.model_dump()
-            elif isinstance(usage_obj, dict):
-                usage = usage_obj
+        usage = _extract_usage(raw_response)
         if usage:
-            _update_token_calibration(self.model, messages, usage, tools=api_params.get("tools"))
-
-        output: list[Any] = raw_response.output  # type: ignore[assignment]
-        raw_tool_calls = [item for item in output if item.type == "function_call"]
-
-        if raw_tool_calls:
-            tool_calls = [
-                ToolCall(id=tc.call_id or "", name=tc.name or "", arguments=tc.arguments or "")
-                for tc in raw_tool_calls
-            ]
-
-            assistant_messages = []
-            for item in output:
-                if hasattr(item, "model_dump"):
-                    assistant_messages.append(item.model_dump())
-                else:
-                    assistant_messages.append(item)
-
-            return LLMResponse(
-                raw_response=raw_response,
-                content="",
-                tool_calls=tool_calls,
-                finish_reason="tool_calls",
-                assistant_message={"_batch": assistant_messages},
-                reasoning=None,
-                usage=usage,
+            _update_token_calibration(
+                effective_model,
+                input_messages,
+                usage,
+                tools=api_params.get("tools"),
+                instructions=api_params.get("instructions"),
             )
 
-        text_content = self._extract_text_from_output(raw_response)
-
-        if output_model:
-            json_data = extract_and_parse_json(text_content)
-            parsed_content = _instantiate_output_model(output_model, json_data)
-
-            return LLMResponse(
-                raw_response=raw_response,
-                content=parsed_content,
-                tool_calls=[],
-                finish_reason=_map_responses_finish_reason(raw_response),
-                assistant_message={"role": "assistant", "content": text_content},
-                reasoning=None,
-                usage=usage,
-            )
-
-        return LLMResponse(
-            raw_response=raw_response,
-            content=text_content,
-            tool_calls=[],
-            finish_reason=_map_responses_finish_reason(raw_response),
-            assistant_message={"role": "assistant", "content": text_content},
-            reasoning=None,
-            usage=usage,
+        return self._response_from_output(
+            raw_response, state_scope, usage, output_model, native_encrypted_reasoning
         )
 
+    def _prepare_input(
+        self, messages, state_scope, model, native_encrypted_reasoning=False, *, media_inputs=None
+    ):
+        """Choose cache markers only after canonical turn projection."""
+        input_messages, instructions = self._transform_messages(
+            messages, state_scope, native_encrypted_reasoning, media_inputs=media_inputs
+        )
+        return self._prepare_cache_boundary(
+            input_messages, responses=True, model=model, instructions=instructions
+        )
+
+    def _response_from_output(
+        self, raw_response, scope, usage, output_model, native_encrypted_reasoning=False
+    ):
+        parts = response_parts.capture_parts(
+            raw_response.output, scope, native_encrypted_reasoning=native_encrypted_reasoning
+        )
+        response = LLMResponse(
+            raw_response=raw_response,
+            parts=parts,
+            replay_scope=scope if any(part.native for part in parts) else None,
+            usage=usage,
+            finish_reason=_map_responses_finish_reason(raw_response),
+        )
+        if response.tool_calls:
+            response.finish_reason = _finish_reason_for_tool_calls(response.finish_reason)
+        elif output_model:
+            response.parsed = _instantiate_output_model(
+                output_model, extract_and_parse_json(response.content)
+            )
+        return response
+
+    @staticmethod
+    def _transform_content_blocks(blocks, text_kind="input_text"):
+        """Project documented public slots, preserving request-owned metadata."""
+        result = copy.deepcopy(blocks)
+        for block in result:
+            if block.get("type") == "text":
+                block["type"] = text_kind
+            elif block.get("type") == "image_url":
+                image = block["image_url"]
+                if isinstance(image, dict):
+                    if not image.get("url"):
+                        raise ValueError("image_url dict has no 'url'")
+                    block["image_url"] = image["url"]
+                    if image.get("detail"):
+                        block["detail"] = image["detail"]
+                block["type"] = "input_image"
+            elif block.get("type") == "file":
+                file = block.get("file")
+                if not isinstance(file, Mapping):
+                    raise ValueError(
+                        "Responses file content requires a nested 'file' mapping; "
+                        "use {'type': 'file', 'file': {...}} or a native "
+                        "{'type': 'input_file', ...} block."
+                    )
+                if not any(file.get(key) for key in ("file_data", "file_id", "file_url")):
+                    raise ValueError(
+                        "Responses file mapping requires file_data, file_id or file_url."
+                    )
+                block.pop("file")
+                block.update(
+                    {
+                        key: value
+                        for key, value in file.items()
+                        if key in {"detail", "file_data", "file_id", "file_url", "filename"}
+                    }
+                )
+                block["type"] = "input_file"
+            elif block.get("type") == "input_file":
+                # A MIME hint only tells the media check that a file_id is a PDF;
+                # input_file has no such field, so strict endpoints reject it.
+                for key in ("mime_type", "media_type", "format"):
+                    block.pop(key, None)
+        return result
+
     def _transform_messages(
-        self, messages: list[dict[str, Any]]
-    ) -> tuple[list[dict[str, Any]], str | None]:
-        """Transform messages to Responses API format and extract instructions.
-
-        Handles two input formats:
-        1. Native Responses format (from ResponsesProviderFormatter): messages contain
-           "type": "function_call" / "function_call_output" items alongside role-based messages.
-           System messages have {"role": "system", ...} and are extracted to instructions.
-        2. Legacy OpenAI Chat format: messages use {"role": "tool", "tool_call_id": ...} and
-           {"role": "assistant", "tool_calls": [...]}. These are converted to native format.
-
-        Returns (input_messages, instructions) where instructions is the concatenated
-        system message content (or None if no system messages).
-        """
-        instructions_parts: list[str] = []
-        transformed: list[dict[str, Any]] = []
-
-        for msg in messages:
-            # System messages → extract to instructions
-            if msg.get("role") == "system":
-                content = msg.get("content", "")
-                if content:
-                    instructions_parts.append(content)
+        self,
+        messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
+        state_scope: str | None = None,
+        native_encrypted_reasoning: bool = False,
+        *,
+        media_inputs=None,
+    ) -> tuple[list[dict[str, Any] | CacheBoundary], str | None]:
+        """Expand turns at dispatch; only leading system messages become instructions."""
+        instructions: list[str] = []
+        transformed: list[dict[str, Any] | CacheBoundary] = []
+        leading_system = True
+        for original in messages:
+            if not isinstance(original, Mapping):
+                raise TypeError("Each message must be a mapping or LLMResponse.")
+            # Moving a later system message to instructions would reorder history.
+            leading_system = leading_system and original.get("role") == "system"
+            if isinstance(original, LLMResponse):
+                transformed.extend(
+                    response_parts.project_turn(
+                        original,
+                        state_scope,
+                        native_encrypted_reasoning=native_encrypted_reasoning,
+                        media_inputs=media_inputs,
+                    )
+                )
                 continue
-
-            # Already in native Responses format (from ResponsesProviderFormatter)
-            if "type" in msg:
-                transformed.append(msg)
+            if isinstance(original, CacheBoundary):
+                transformed.append(original)
                 continue
-
-            # Legacy OpenAI format: tool result messages
-            if msg.get("role") == "tool":
-                # Extract output text: content may be a string OR a list of blocks
-                # (position-based cache injection converts strings to block arrays)
-                content = msg.get("content", "")
+            msg = dict(original)
+            reject_boundary_dict(msg)
+            replay_state.reject_native_message(msg, state_scope)
+            if isinstance(msg.get("content"), list) and any(
+                not isinstance(block, dict) for block in msg["content"]
+            ):
+                raise TypeError("Message content blocks must be dictionaries.")
+            if leading_system:
+                content = msg.get("content")
                 if isinstance(content, list):
-                    # Extract text from content blocks and cache_control from the last block
-                    text_parts = []
-                    for block in content:
-                        if isinstance(block, dict):
-                            if block.get("text"):
-                                text_parts.append(block["text"])
-                    output_str = "".join(text_parts)
+                    if any(
+                        block.get("type") not in {"text", "input_text"}
+                        or not isinstance(block.get("text"), str)
+                        for block in content
+                    ):
+                        raise ValueError(
+                            "Leading system content requires text blocks with string text."
+                        )
+                    content = "".join(block["text"] for block in content)
+                if content:
+                    instructions.append(content)
+            elif msg.get("role") == "tool":
+                if not isinstance(msg.get("tool_call_id"), str):
+                    raise ValueError("Tool result requires a string 'tool_call_id'.")
+                content = msg.get("content", "")
+                cache_control = msg.get("cache_control")
+                if isinstance(content, list):
+                    cache_control = next(
+                        (block["cache_control"] for block in content if "cache_control" in block),
+                        cache_control,
+                    )
+                    if any(attachment_kind(block) for block in content):
+                        output = self._transform_content_blocks(content)
+                    else:
+                        output = [
+                            wrap_responses_text("".join(block.get("text", "") for block in content))
+                        ]
                 else:
-                    output_str = content
-
-                item: dict[str, Any] = {
+                    output = [wrap_responses_text(content)]
+                # Same stability rationale as the input_text wrapping below --
+                # a plain string here (including "") would render differently
+                # than its cache-marked list form once this tool result
+                # becomes history; apply_cache_policy's marker wraps a string
+                # unconditionally, so this must too.
+                item = {
                     "type": "function_call_output",
                     "call_id": msg["tool_call_id"],
-                    "output": output_str,
+                    "output": output,
                 }
-                # Preserve cache_control for prompt caching
-                if "cache_control" in msg:
-                    item["cache_control"] = msg["cache_control"]
-                elif isinstance(content, list):
-                    for block in content:
-                        if isinstance(block, dict) and "cache_control" in block:
-                            item["cache_control"] = block["cache_control"]
-                            break
+                if cache_control:
+                    # This is caller-owned mutable metadata, not retained native
+                    # state. Keep request mutations isolated from future sends.
+                    item["cache_control"] = copy.deepcopy(cache_control)
                 transformed.append(item)
-                continue
-
-            # Legacy OpenAI format: assistant messages with tool_calls
-            if msg.get("role") == "assistant" and msg.get("tool_calls"):
-                # Preserve assistant text that precedes tool calls (matches native formatter)
-                if msg.get("content"):
-                    transformed.append({"role": "assistant", "content": msg["content"]})
-                for tc in msg["tool_calls"]:
-                    fn = tc.get("function", {})
+            elif msg.get("role") == "assistant" and (
+                msg.get("tool_calls") or msg.get("reasoning_content")
+            ):
+                # Public input accepts content blocks, unlike normalized Chat
+                # output. Preserve those blocks directly rather than passing
+                # them through the provider-response capture contract.
+                reasoning = msg.get("reasoning_content")
+                if reasoning is not None and not isinstance(reasoning, str):
+                    raise ValueError("Assistant reasoning_content must be a string.")
+                if reasoning:
+                    transformed.append({"role": "assistant", "content": reasoning})
+                content = msg.get("content")
+                if content is not None and not isinstance(content, (str, list)):
+                    raise ValueError("Assistant content must be a string or list of blocks.")
+                if content:
+                    content = copy.deepcopy(content)
+                    if isinstance(content, list):
+                        for block in content:
+                            if block.get("type") == "text":
+                                block["type"] = "output_text"
+                    transformed.append({"role": "assistant", "content": content})
+                for call in msg.get("tool_calls") or []:
+                    function = call["function"]  # Shape checked by reject_native_message.
+                    if not all(
+                        isinstance(value, str)
+                        for value in (
+                            call.get("id"),
+                            function.get("name"),
+                            function.get("arguments"),
+                        )
+                    ):
+                        raise ValueError("Tool call id, name and arguments must be strings.")
                     transformed.append(
                         {
                             "type": "function_call",
-                            "call_id": tc["id"],
-                            "name": fn.get("name", ""),
-                            "arguments": fn.get("arguments", ""),
+                            "call_id": call["id"],
+                            "name": function["name"],
+                            "arguments": function["arguments"],
                         }
                     )
-                continue
-
-            # User/Assistant text messages → passthrough with cache_control preservation
-            if msg.get("role") in ["user", "assistant"]:
-                content = msg.get("content", "")
-                if content is None:
-                    content = ""
-                item = {"role": msg["role"], "content": content}
-                if "cache_control" in msg:
-                    item["cache_control"] = msg["cache_control"]
+            else:
+                # Raw dictionaries are mutable caller input. We rewrite nested
+                # block types here and the SDK may mutate them again; detach the
+                # containers once. deepcopy shares immutable strings (including
+                # encoded images). LLMResponse took the projection path above,
+                # so this does not copy its retained reasoning blobs.
+                item = copy.deepcopy(msg)
+                if isinstance(item.get("content"), str):
+                    # Always emit input_text/output_text blocks in list form so a
+                    # message's wire shape is stable whether or not it happens to
+                    # be the one apply_cache_policy marks with a cache breakpoint
+                    # this turn. A plain string (including "") would flip to a
+                    # marked block on the turn it's cached and back to a bare
+                    # string the next turn, breaking the provider's
+                    # stable-prefix cache match -- apply_cache_policy's marker
+                    # wraps a string unconditionally, so this must too.
+                    kind = "output_text" if item.get("role") == "assistant" else "input_text"
+                    item["content"] = [wrap_responses_text(item["content"], kind)]
+                for slot in ("content", "output"):
+                    if isinstance(item.get(slot), list):
+                        item[slot] = self._transform_content_blocks(
+                            item[slot],
+                            "output_text" if item.get("role") == "assistant" else "input_text",
+                        )
+                if item.get("type") == "function_call_output" and isinstance(
+                    item.get("output"), str
+                ):
+                    # Same stability rationale as the tool-message conversion
+                    # branch above -- an already-native function_call_output
+                    # (not converted from a role="tool" message) took this
+                    # generic path unwrapped, so it still flipped shape
+                    # (including "", per apply_cache_policy's unconditional
+                    # string wrap) whenever apply_cache_policy marked it.
+                    item["output"] = [wrap_responses_text(item["output"])]
                 transformed.append(item)
-                continue
-
-            # Unknown format → passthrough
-            transformed.append(msg)
-
-        instructions = "\n\n".join(instructions_parts) if instructions_parts else None
-        return transformed, instructions
+        return transformed, "\n\n".join(instructions) or None
 
     def _extract_text_from_output(self, response: Any) -> str:
         if hasattr(response, "output_text") and response.output_text:
             return response.output_text
         if hasattr(response, "output"):
-            for item in response.output:
-                if item.type == "message":
-                    texts = []
-                    for content_item in item.content:
-                        if hasattr(content_item, "text"):
-                            texts.append(content_item.text)  # type: ignore
-                    return "\n".join(texts)
+            return replay_state.responses_output_text(response.output)
         return ""

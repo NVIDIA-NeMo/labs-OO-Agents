@@ -34,7 +34,7 @@ from nooa.context_blocks.models import (
 )
 from nooa.errors import GenerationError
 from nooa.events import ResultStatus
-from nooa.strategies.codeact import CodeActStrategy
+from nooa.strategies.codeact import CodeActStrategy, return_text_as_result
 from nooa.unifiedllm import FakeLLMClient, LLMResponse, ToolCall
 
 # ---------------------------------------------------------------------------
@@ -50,7 +50,6 @@ def _resp(content: str, tool_calls: list | None = None) -> LLMResponse:
         content=content,
         tool_calls=tool_calls or [],
         finish_reason=finish_reason,
-        assistant_message={"role": "assistant", "content": content},
     )
 
 
@@ -225,8 +224,7 @@ class TestFormatterSafetyNet:
 
         tool_call_msg = messages[0]
         assert tool_call_msg.role == Role.ASSISTANT
-        assert tool_call_msg.tool_call is not None
-        assert tool_call_msg.tool_call.id == "tc_orphan"
+        assert [call.id for call in tool_call_msg.tool_calls] == ["tc_orphan"]
 
         result_msg = messages[1]
         assert result_msg.role == Role.TOOL
@@ -331,8 +329,7 @@ class TestEndToEndRenderedMessageIntegrity:
                 )
                 messages = _event_block_to_messages(block, wrap_content=None)
                 for msg in messages:
-                    if msg.tool_call is not None:
-                        tool_use_ids.add(msg.tool_call.id)
+                    tool_use_ids.update(call.id for call in msg.tool_calls)
                     if msg.role == Role.TOOL and msg.tool_call_id:
                         tool_result_ids.add(msg.tool_call_id)
 
@@ -479,7 +476,6 @@ class TestTranslatedToolCallPath:
                         )
                     ],
                     finish_reason="tool_calls",
-                    assistant_message={"role": "assistant", "content": ""},
                 ),
                 # Then return the result
                 _resp("", tool_calls=[_return_result(call_id="call_ret", result=3)]),
@@ -526,7 +522,6 @@ class TestTranslatedToolCallPath:
                         )
                     ],
                     finish_reason="tool_calls",
-                    assistant_message={"role": "assistant", "content": ""},
                 ),
                 # Then return valid result
                 _resp("", tool_calls=[_return_result(call_id="call_ok", result=42)]),
@@ -550,32 +545,36 @@ class TestTranslatedToolCallPath:
 
 
 # ---------------------------------------------------------------------------
-# 8. stop_to_return_result path — synthetic return_result fails → exhausted
+# 8. stop_to_return_result path — append-only validation at exhaustion
 # ---------------------------------------------------------------------------
 
 
 class TestStopToReturnResultPath:
-    """When a text-only stop response is converted to synthetic return_result
-    and validation fails with session exhausted, ToolCallEvent must be safe."""
+    """Text-only validation does not persist a tool call the model did not make."""
 
     @pytest.mark.asyncio
-    async def test_stop_to_synthetic_return_result_exhausted(self):
-        """stop + text content → synthetic return_result → validation fails → exhausted.
+    async def test_stop_to_return_result_exhausted_is_append_only(self):
+        """stop + text content → direct return validation → failure at exhaustion.
 
         For a method returning int, a text-only stop with "hello" should be
-        routed through return_result("hello") → validation fails → exhausted.
-        The synthetic ToolCallEvent must have result != None.
+        validated as return_result("hello") and fail without fabricating a
+        provider-visible ToolCallEvent.
         """
 
         class TestAgent(Agent, llm=_TEST_LLM):
-            @strategy(CodeActStrategy(config=CodeActConfig(max_retries=1)))
+            @strategy(
+                CodeActStrategy(
+                    config=CodeActConfig(max_retries=1),
+                    on_text_only=return_text_as_result,
+                )
+            )
             async def get_number(self) -> int:
                 """Return an integer."""
                 ...
 
         fake_llm = FakeLLMClient(
             scripted_responses=[
-                # LLM returns text with stop (will be converted to synthetic return_result)
+                # LLM returns text with stop (validated as the result)
                 _resp("hello world"),  # finish_reason="stop"
             ]
         )
@@ -586,34 +585,34 @@ class TestStopToReturnResultPath:
             await agent_instance.get_number()
 
         events = agent_instance.event_manager.values()
-        # Find the synthetic return_result ToolCallEvent
+        llm_responses = [e for e in events if e.event_type == "LLMResponse"]
+        assert [e.content for e in llm_responses] == ["hello world"]
         tool_call_events = [e for e in events if e.event_type == "ToolCallEvent"]
-
-        for tc_event in tool_call_events:
-            assert tc_event.result is not None, (
-                f"Synthetic return_result ToolCallEvent {tc_event.tool_call_id!r} has "
-                f"result=None — would corrupt the next session."
-            )
+        assert tool_call_events == []
 
     @pytest.mark.asyncio
     async def test_stop_empty_content_none_return_type(self):
         """stop + no content for -> None method should succeed without corruption."""
 
         class TestAgent(Agent, llm=_TEST_LLM):
-            @strategy(CodeActStrategy(config=CodeActConfig(max_retries=1)))
+            @strategy(
+                CodeActStrategy(
+                    config=CodeActConfig(max_retries=1),
+                    on_text_only=return_text_as_result,
+                )
+            )
             async def do_something(self) -> None:
                 """Do something."""
                 ...
 
         fake_llm = FakeLLMClient(
             scripted_responses=[
-                # Empty stop → synthetic return_result(None) → should succeed for -> None
+                # Empty stop → validate None directly → should succeed for -> None
                 LLMResponse(
                     raw_response=None,
                     content="",
                     tool_calls=[],
                     finish_reason="stop",
-                    assistant_message={"role": "assistant", "content": ""},
                 ),
             ]
         )
@@ -623,9 +622,10 @@ class TestStopToReturnResultPath:
         assert result is None
 
         events = agent_instance.event_manager.values()
+        llm_responses = [e for e in events if e.event_type == "LLMResponse"]
+        assert [e.content for e in llm_responses] == [""]
         tool_call_events = [e for e in events if e.event_type == "ToolCallEvent"]
-        for tc_event in tool_call_events:
-            assert tc_event.result is not None
+        assert tool_call_events == []
 
 
 # ---------------------------------------------------------------------------
@@ -680,7 +680,7 @@ class TestFormatterFullPipeline:
         formatter = XMLBlockFormatter()
         messages = formatter.format([normal_block, none_block])
 
-        tool_use_ids = {m.tool_call.id for m in messages if m.tool_call is not None}
+        tool_use_ids = {call.id for message in messages for call in message.tool_calls}
         tool_result_ids = {
             m.tool_call_id for m in messages if m.role == Role.TOOL and m.tool_call_id
         }

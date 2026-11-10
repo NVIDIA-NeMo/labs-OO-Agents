@@ -6,23 +6,23 @@
 dispatcher — a terminal UI, a harness, or any host that feeds input
 queues and re-enters ``handle()`` once per notification. It provides:
 
-* ``self.user_messages`` (plus ``slash_commands`` / ``system_messages``)
-  input queues via ``QueueManager``,
+* ``self.user_messages`` via ``QueueManager``; hosts declare whatever further
+  queues they need (``self.queue_manager.queue("name")``),
 * ``self.v`` — snapshot-backed persistent variables that survive turns
   and sessions,
 * ``message()`` — send a Markdown message to the user,
-* the ``handle()`` → ``RespondResult`` turn protocol,
+* the turn protocol: ``handle()`` returns ``Done``, ``NeedInput`` or
+  ``Waiting``; ``handle_batch()`` runs unattended turns and returns ``Done`` or ``Waiting``,
 * token-budget history summarization (``install_summarizer`` /
   ``apply_model_limits``).
 
-The TUI's ``BaseTUIAgent`` (packages/nooa-tui) is a thin subclass that
-adds TUI-specific tooling and event types on top of this class.
+``nooa_cli.coding.CodingAgent`` adds the shared coding tools used by
+interactive hosts such as the TUI and ACP.
 """
 
-from enum import StrEnum
 from typing import Annotated, Any, ClassVar, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_serializer, field_validator, model_validator
 
 from nooa import hidden, strategy
 from nooa.agentdoc import doc
@@ -37,9 +37,10 @@ with hidden:
     from nooa import Agent
     from nooa.agents import TokenBudgetSummarizer
     from nooa.config import CodeActConfig, PredictConfig  # noqa: F401
-    from nooa.runtime.channels import Channel, QueueManager, _ChannelReader
+    from nooa.events import _json_safe
+    from nooa.runtime.channels import Channel, ChannelReader, QueueManager
     from nooa.runtime.producers_skill import ProducersSkill
-    from nooa.strategies import CodeActStrategy, PredictStrategy
+    from nooa.strategies import CodeActStrategy
     from nooa.tools.web_publisher import WebPublisher
 
 # Standard library — all visible in REPL
@@ -88,80 +89,123 @@ with hidden:
     from nooa.unifiedllm import UnifiedLLM
 
 
-class RespondReason(StrEnum):
-    """Reason/action returned by ``handle()`` at the end of a turn."""
-
-    DONE = "DONE"
-    NEED_INPUT = "NEED_INPUT"
-    WAIT = "WAIT"
-    GET_USER_INPUT = "GET_USER_INPUT"
+def _non_blank(value: str) -> str:
+    value = value.strip()
+    if not value:
+        raise ValueError("must not be blank")
+    return value
 
 
-RespondKind = Literal["DONE", "NEED_INPUT", "WAIT", "GET_USER_INPUT"]
+def _blank_to_none(value: str | None) -> str | None:
+    return None if value is None else (value.strip() or None)
 
 
-class RespondResult(BaseModel):
-    """Return value for ``handle()`` — signals what the outer loop should do next.
+class Done(BaseModel):
+    """Turn result: the work for this turn is finished.
 
-    Fields:
-
-    - ``kind`` — reason/action enum:
-        * ``RespondReason.DONE`` — the current request is complete.
-        * ``RespondReason.NEED_INPUT`` — the agent asked a question or needs
-          human input before continuing the current request.
-        * ``RespondReason.WAIT`` — the agent is waiting for a background job or
-          non-user queue/event before it can continue.
-        * ``RespondReason.GET_USER_INPUT`` — legacy spelling for waiting on
-          human input; prefer ``DONE`` or ``NEED_INPUT``.
-
-      All stop reasons use the same dispatcher wake path: race every declared
-      queue/event channel and re-enter ``handle()`` with the first arrival.
-      ``kind`` records why the agent stopped; it does not choose a different
-      queue primitive.
-    - ``explanation`` — required non-empty short reason why the agent is ending this
-      turn, or what external input/background event it is waiting for. The host
-      records and renders this line, so make it concrete: name the job/queue
-      being waited on, why it matters, or what user input is needed and why.
-
-
-    Use ``self.v.<name> = value`` for state that should survive across
-    turns (snapshot-backed).
-
-    Build from within the LLM's ``execute_python`` code::
-
-        return_result(
-            RespondReason.DONE,
-            explanation="answered the request; waiting for the next user message",
-        )
-
-    The older explicit model form is still valid::
-
-        return_result(RespondResult(kind="DONE", explanation="answered the request"))
+    ``message`` is the preferred way to answer the user on a turn that
+    handled a user message: put the reply here and the host shows it.
+    ``self.message()`` remains for text you want to show before the turn
+    ends. ``explanation`` stays a short status line. ``evidence`` is
+    optional: short factual lines a reviewer can check, used when you
+    verified something. ``result`` is set only when a delegated objective
+    or benchmark task completes; it is then a ``TaskResult`` (defined with
+    the bench and session code, so it is typed ``Any`` here).
     """
 
-    kind: RespondReason = Field(description="What the outer dispatcher should do next")
-    explanation: str = Field(
-        min_length=1,
-        description=("Required: why handle() returned, or what the dispatcher is waiting for."),
+    explanation: str = Field(description="Status line saying what was finished; not the reply")
+    message: str | None = Field(default=None, description="The reply to show the user")
+    evidence: list[str] = Field(
+        default_factory=list,
+        description='Short checkable facts, e.g. "pytest tests/x.py: 24 passed"',
+    )
+    result: Any | None = Field(
+        default=None, description="TaskResult when a delegated or bench task completes"
     )
 
-    @field_validator("explanation")
-    @classmethod
-    def _explanation_must_not_be_blank(cls, value: str) -> str:
-        value = value.strip()
-        if not value:
-            raise ValueError("explanation is required")
-        return value
+    _check_explanation = field_validator("explanation")(_non_blank)
+    _check_message = field_validator("message")(_blank_to_none)
 
-    model_config = {"arbitrary_types_allowed": True}
+    @field_serializer("result", when_used="json")
+    def _serialize_result(self, value: Any) -> Any:
+        """Keep JSON dumps (the event store) from raising on an arbitrary object."""
+        return _json_safe(value)
+
+
+class NeedInput(BaseModel):
+    """Turn result: a question the agent cannot continue without.
+
+    ``question`` is the question itself; the host shows it to the person,
+    so do not also send it with ``self.message()``. Set ``options`` for a
+    single choice, or ``answer_type`` (a pydantic model class whose fields
+    are simple values: str, int, float, bool, or a list of str) for a typed
+    answer, or neither for free text. The host turns ``answer_type`` into a
+    form and the answer arrives in the next notification as an instance of
+    it. ``reason`` optionally says in one sentence why progress is not
+    possible or not desirable without the answer.
+    """
+
+    question: str = Field(description="The question to show the person")
+    reason: str | None = Field(
+        default=None, description="Why progress is not possible or not desirable without it"
+    )
+    options: list[str] | None = Field(
+        default=None, min_length=1, description="Choices for a single choice"
+    )
+    answer_type: type[BaseModel] | None = Field(
+        default=None,
+        description="Pydantic model class with simple fields; the answer comes back as an instance",
+    )
+
+    _check_question = field_validator("question")(_non_blank)
+
+    @field_validator("options")
+    @classmethod
+    def _options_not_blank(cls, value: list[str] | None) -> list[str] | None:
+        return None if value is None else [_non_blank(option) for option in value]
+
+    @field_serializer("answer_type", when_used="json")
+    def _serialize_answer_type(self, value: type[BaseModel] | None) -> str | None:
+        """A class cannot be JSON-encoded; record it as ``module:qualname``."""
+        return None if value is None else f"{value.__module__}:{value.__qualname__}"
+
+    @model_validator(mode="after")
+    def _one_answer_shape(self) -> "NeedInput":
+        if self.options is not None and self.answer_type is not None:
+            raise ValueError("set options or answer_type, not both")
+        return self
+
+
+class Waiting(BaseModel):
+    """Turn result: waiting on a background job or queue, not on a person.
+
+    ``on`` lists what is being waited on by name: a queue channel
+    (``"delegates"``, ``"jobs"``), a spawned job's label, a subagent's name.
+    ``explanation`` says why, for the host. ``message`` is an optional line
+    the host shows the user. The host keeps the request open and runs the
+    next turn when one of them delivers.
+    """
+
+    explanation: str = Field(description="Why the turn is waiting")
+    message: str | None = Field(default=None, description="Line to show the user while waiting")
+    on: list[str] = Field(
+        min_length=1, description="Names of the channels, jobs or subagents being waited on"
+    )
+
+    _check_explanation = field_validator("explanation")(_non_blank)
+    _check_message = field_validator("message")(_blank_to_none)
+
+    @field_validator("on")
+    @classmethod
+    def _names_not_blank(cls, value: list[str]) -> list[str]:
+        return [_non_blank(name) for name in value]
 
 
 class AgentMessage(Metadata):
     """A Markdown message sent by the agent to the user via ``self.message()``.
 
-    The TUI emits its own ``TUIAgentMessage`` subtype (its explorers and
-    session store match on that exact type name); this is the host-neutral
-    event used by ``InteractiveAgent`` outside the TUI.
+    Interactive hosts share this event so durable sessions can be replayed
+    without knowing which frontend produced the response.
     """
 
     _role: ClassVar[Role] = Role.METADATA
@@ -172,15 +216,14 @@ class AgentMessage(Metadata):
 class SummarizationConfig(BaseModel):
     """Configuration for history summarization.
 
-    ``max_tokens`` defaults to ``None`` meaning "80% of the LLM's context
-    window, resolved at install time." The old 100K absolute was fine when
-    models had ~200K context but fired at ~10% usage on 1M-context models
-    like Opus 4.8, making summarization feel constant. Set an explicit
-    integer to pin a specific threshold.
+    ``max_tokens=None`` uses ``threshold_fraction`` of the usable input window
+    (model window minus the effective reply reserve), resolved for each completed
+    request. Set an explicit integer to pin a threshold across model switches.
     """
 
     policy: Literal["token_budget", "none"] = "token_budget"
     max_tokens: int | None = None
+    threshold_fraction: float = Field(default=0.75, gt=0, lt=1)
     preserve_recent: int = 10
     target_chars: int = 4000
 
@@ -204,45 +247,50 @@ with hidden:
 # ONLY budget managed here — event-pile truncation is enforced at the
 # runtime level (see ActorRuntime._build_messages) and adapts to whichever
 # LLM is actually resolved for each call (including per-call overrides).
-_SUMMARIZER_BUDGET_PCT = 0.8
+_SUMMARIZER_BUDGET_PCT = 0.75
 
 
-def _summarizer_budget(llm: "UnifiedLLM") -> int:
-    """Resolve the summarizer trigger from the LLM's context window.
+def _summarizer_budget(
+    llm: "UnifiedLLM",
+    fallback_reserve: int = 0,
+    *,
+    threshold_fraction: float = _SUMMARIZER_BUDGET_PCT,
+) -> int:
+    """Resolve the summarizer trigger from the LLM's usable input window.
 
     Falls back to 100K when the LLM doesn't expose ``context_window`` so
     we still have a functional threshold.
     """
-    cw = getattr(llm, "context_window", None)
-    return int(cw * _SUMMARIZER_BUDGET_PCT) if cw else 100_000
+    from nooa.agents.summarization import context_budget
+
+    return context_budget(llm, threshold_fraction, fallback_reserve=fallback_reserve)
 
 
 def apply_model_limits(agent: Agent) -> None:
-    """Sync the summarizer trigger against ``agent.llm.context_window``.
+    """Sync automatic summarizers against the selected model's usable window.
 
     Call after a model switch so the summarizer threshold moves with the
     new context window. Runtime-level event truncation picks up the new
     window automatically on the next ``_build_messages`` call.
     """
-    from nooa.config.summarizer_config import TokenBudgetConfig
-
-    summarizer_max = _summarizer_budget(agent.llm)
     for summarizer in getattr(agent, "_summarizers", []):
-        current = summarizer.config
-        summarizer.config = TokenBudgetConfig(
-            max_tokens=summarizer_max,
-            preserve_recent=current.preserve_recent,
-            target_chars=current.target_chars,
+        if not getattr(summarizer, "_automatic_context_budget", False):
+            continue
+        summarizer_max = _summarizer_budget(
+            agent.llm,
+            agent._truncation.response_reserve_tokens,
+            threshold_fraction=summarizer._automatic_context_budget_percent,
         )
+        current = summarizer.config
+        summarizer.config = current.model_copy(update={"max_tokens": summarizer_max})
 
 
 def install_summarizer(config: SummarizationConfig, agent: Agent) -> None:
     """Install a summarizer on the agent based on configuration.
 
     Args:
-        config: Summarization configuration. ``config.max_tokens=None`` (the
-            default) resolves to 80% of the agent LLM's context window at
-            install time, so the trigger scales with model capability.
+        config: Summarization configuration. ``config.max_tokens=None`` follows
+            ``threshold_fraction`` (75% by default) of each request's usable input window.
         agent: Agent to install summarizer on (inherits LLM, attaches to history)
     """
     if config.policy == "none":
@@ -251,10 +299,16 @@ def install_summarizer(config: SummarizationConfig, agent: Agent) -> None:
     from nooa.config.summarizer_config import TokenBudgetConfig
 
     summarizer_max = (
-        config.max_tokens if config.max_tokens is not None else _summarizer_budget(agent.llm)
+        config.max_tokens
+        if config.max_tokens is not None
+        else _summarizer_budget(
+            agent.llm,
+            agent._truncation.response_reserve_tokens,
+            threshold_fraction=config.threshold_fraction,
+        )
     )
 
-    TokenBudgetSummarizer.install(
+    summarizer = TokenBudgetSummarizer.install(
         agent,
         config=TokenBudgetConfig(
             max_tokens=summarizer_max,
@@ -262,6 +316,8 @@ def install_summarizer(config: SummarizationConfig, agent: Agent) -> None:
             target_chars=config.target_chars,
         ),
     )
+    summarizer._automatic_context_budget = config.max_tokens is None
+    summarizer._automatic_context_budget_percent = config.threshold_fraction
 
 
 class AgentVars:
@@ -311,7 +367,7 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
     """Base class for agents driven by an outer dispatcher (TUI, harness, ...).
 
     Subclass this and implement ``handle()`` to build a custom interactive
-    agent. ``message()`` and ``name_session()`` are provided for free.
+    agent. ``message()`` is provided for free.
 
     **Input queues.** Every ``InteractiveAgent`` has a ``self.user_messages``
     queue (``InputQueue``) that the host feeds when the human types.
@@ -338,17 +394,9 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
     # Producer-side Channel (full put / pop_last / snapshot / etc.)
     # — hidden, since the LLM has no business calling those.
     _user_messages_in: Annotated[Channel, hidden, nosnapshot]
-    # Slash command results — posted by the host when a @slash_command returns.
-    _slash_commands_in: Annotated[Channel, hidden, nosnapshot]
-    # Host-owned system/internal prompts, e.g. keep-going continuations.
-    _system_messages_in: Annotated[Channel, hidden, nosnapshot]
     # Read-only facade (just .get() / .status() / .name) is what the
     # LLM sees as ``self.user_messages``.
-    user_messages: Annotated[_ChannelReader, nosnapshot]
-    # Slash command results — the agent receives SlashCommandResult objects here.
-    slash_commands: Annotated[_ChannelReader, nosnapshot]
-    # System/internal prompts generated by the host.
-    system_messages: Annotated[_ChannelReader, nosnapshot]
+    user_messages: Annotated[ChannelReader, nosnapshot]
     # Persistent variables for the LLM — survives across turns AND
     # across sessions (snapshot-backed). Accessed via the ``self.v``
     # proxy for dot-attribute reads/writes (``self.v.spec = "..."``).
@@ -361,10 +409,6 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
         self.queue_manager = QueueManager(event_manager=self.event_manager)
         self._user_messages_in = self.queue_manager.queue("user_messages")
         self.user_messages = self._user_messages_in.reader
-        self._slash_commands_in = self.queue_manager.queue("slash_commands")
-        self.slash_commands = self._slash_commands_in.reader
-        self._system_messages_in = self.queue_manager.queue("system_messages")
-        self.system_messages = self._system_messages_in.reader
         self.producers = ProducersSkill()
         # Surface pending-queue counts (and a short preview of each item)
         # to the LLM every turn — the agent reads queue depth straight
@@ -437,27 +481,16 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
             print(text)
 
     @hidden
-    @strategy(PredictStrategy(PredictConfig(output_serialization="tool_call")))
-    async def name_session(self, user_message: str) -> str:
-        """Generate an ultra-short 2-5 word session title.
-
-        Conversation starts with: {user_message}
-        """
-        ...
-
-    @hidden
     @strategy(CodeActStrategy())
     async def handle(
         self,
         notification: dict[str, list],
-    ) -> "RespondResult":
-        """Handle a single turn of the conversation.
+    ) -> Done | NeedInput | Waiting:
+        """Handle one interactive turn.
 
         Called once per inbound notification (or batch). Unpack
-        ``notification`` and do the work, then return a
-        ``RespondResult`` telling the outer dispatcher what to do next.
-
-        Use ``self.v.<name> = value`` for state that should survive
+        ``notification``, do the work, then end the turn with one typed
+        result. Use ``self.v.<name> = value`` for state that must survive
         across turns (snapshot-backed via ``self.vars``).
 
         ## Turn anatomy
@@ -473,38 +506,40 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
         Do ALL the work before returning. Use as many ``execute_python``
         calls as needed — explore, implement, test, iterate. A turn that
         returns after one or two cells when the task clearly needs more
-        is a bug. The only reasons to call ``return_result`` are:
-
-        1. You have genuinely completed everything the user asked for.
-        2. You need user input to proceed (ambiguity, confirmation).
-        3. You are waiting on a background job.
+        is a bug. End the turn only when the request is complete, when you
+        need an answer from the person, or when you are waiting on a
+        background job.
 
         ## Returning
 
-        End the turn with exactly one ``return_result(REASON_ENUM, explanation="...")``.
-        ``explanation`` is required and must be non-empty. The host records and renders it as the
-        visible stop reason, so be specific and user-facing: if waiting on a
-        job/queue, name which job and why; if asking for input, say what input
-        is needed and why.
+        A turn has exactly one terminal result: the value you return.
+        Everything else is intermediate. End the turn with one
+        ``return_result(...)`` of one of these:
 
-        - Request complete; wait for the next user message::
+        - ``Done(message=..., explanation=...)`` — the request is complete.
+          ``message`` is the reply the host shows the user; ``explanation``
+          is a short status line. Add ``evidence=[...]`` for checks you ran::
 
-              return_result(RespondReason.DONE, explanation="implemented the feature and verified focused tests")
+              return_result(Done(message="Added the flag and its test.", explanation="added flag"))
 
-        - Need human input before proceeding::
+          Use ``self.message()`` only for text to show before the turn ends.
 
-              return_result(RespondReason.NEED_INPUT, explanation="need the target branch before pushing the MR")
+        - ``NeedInput(question=...)`` — you cannot continue without an
+          answer. ``question`` is the question; the host shows it, so do
+          not also send it with ``message()``. Add ``options=[...]`` for a
+          single choice, or ``answer_type=SomeModel`` (a pydantic class you
+          define with simple fields) for a typed answer. The answer arrives
+          in the next notification. ``reason`` optionally says why you
+          need it::
 
-        - Waiting for a background job or producer queue::
+              return_result(NeedInput(question="Which branch should I push to?", options=["main", "dev"]))
 
-              return_result(RespondReason.WAIT, explanation="waiting for pytest job ci-42 to finish before reporting results")
+        - ``Waiting(message=..., explanation=..., on=[...])`` — waiting on a
+          background job or queue, not on a person. ``message`` is shown to
+          the user; ``on`` names what you wait for: a channel, a job label,
+          a subagent::
 
-        All stop reasons use the same dispatcher wake path: the host races every
-        declared queue/event channel and re-enters ``handle()`` with the first
-        arrival. Use ``kind`` to say why you are stopping, not to select a
-        different queue primitive.
-
-
+              return_result(Waiting(message="Tests are running; I will report when they finish.", explanation="tests running", on=["jobs:ci-42"]))
 
         ## Available queues
 
@@ -517,15 +552,37 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
         Recognized ``queue_name`` values:
 
         - ``"user_messages"`` — text from the human; ``item`` is a str.
-        - ``"slash_commands"`` — results from slash commands; ``item`` is a
-          ``SlashCommandResult(command, args, value, text)``. Access the
-          raw return value via ``item.value``; ``str(item)`` gives the text.
-        - ``"system_messages"`` — host-owned system/internal prompts,
-          such as keep-going continuations.
 
-        Subclasses may add more (e.g. ``"job_outputs"``); the
+        Hosts declare the rest. ``CodingAgent`` adds ``"slash_commands"``
+        (``SlashCommandResult``) and ``"system_messages"`` (host-owned
+        prompts such as keep-going continuations); a harness might add
+        ``"job_outputs"``. The
         ``<queue_status>`` context block lists the pending count per
-        queue each turn. After any stop reason, the dispatcher races every
+        queue each turn. After any result, the dispatcher races every
         declared queue/event and re-enters with the first arrival.
+        """
+        ...
+
+    @hidden
+    @strategy(CodeActStrategy())
+    async def handle_batch(
+        self,
+        notification: dict[str, list],
+    ) -> Done | Waiting:
+        """Handle one unattended turn.
+
+        No person is watching this turn and nobody can answer a question,
+        so ``NeedInput`` is not allowed here and is rejected as a type
+        error. Unpack ``notification`` (channel name → list of items) and
+        do all the work.
+
+        A turn has exactly one terminal result: the value you return.
+        Everything else is intermediate. End with one ``return_result(...)``:
+
+        - ``Done(explanation=...)`` — the work is finished, or cannot go
+          further. If something blocks you, say what in ``explanation``.
+          Set ``result`` when the task asks for a structured result.
+        - ``Waiting(message=..., explanation=..., on=[...])`` — waiting on a
+          background job or queue you started. ``on`` names it.
         """
         ...

@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
 import sys
 from collections.abc import Sequence
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 
 import pytest
@@ -248,3 +250,840 @@ def test_markdown_report_has_the_expected_sections(mr, tmp_path):
     for section in ("Per-tier breakdown", "Per-test breakdown", "| Tests Passed |", "Total Tokens"):
         assert section in md
     assert md.rstrip().endswith("*2 models × 3 runs* | *both arms run fresh*")
+
+
+@pytest.mark.parametrize(
+    "tag",
+    ["0.0.10", "v1.2", "v01.2.3", "v1.02.3", "v1.2.03", "v1.2.3-rc1", "v1.2.3;bad"],
+)
+def test_release_tag_validation_fails_closed(mr, tag):
+    with pytest.raises(mr.ReleaseError):
+        mr.validate_tag(tag)
+
+
+def test_exact_sha_validation(mr):
+    sha = "a" * 40
+    assert mr.validate_candidate_sha(sha) == sha
+    for invalid in ("a" * 39, "A" * 40, "g" * 40, "a" * 40 + ";echo"):
+        with pytest.raises(mr.ReleaseError):
+            mr.validate_candidate_sha(invalid)
+
+
+def test_git_returns_empty_when_an_allowed_failure_echoes_the_unresolved_ref(mr, monkeypatch):
+    unresolved = "refs/tags/v0.0.10^{commit}"
+    monkeypatch.setattr(
+        mr,
+        "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess([], 128, unresolved + "\n", ""),
+    )
+
+    assert mr.git("rev-parse", unresolved, check=False) == ""
+
+
+def test_tool_versions_records_missing_diagnostic_tools(mr, monkeypatch):
+    monkeypatch.setattr(mr.shutil, "which", lambda _executable: None)
+    monkeypatch.setattr(
+        mr,
+        "run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("missing diagnostic tool was executed")
+        ),
+    )
+
+    versions = mr.tool_versions("release-image@sha256:digest")
+
+    assert versions["runner_image"] == "release-image@sha256:digest"
+    for tool in ("uv", "git", "rg", "sha256sum", "base64", "curl", "gcc", "make", "gh"):
+        assert versions[tool] == "unavailable"
+
+
+@pytest.mark.parametrize(
+    "candidate_ref",
+    ["refs/heads/topic", "refs/pull/0/head", "refs/pull/163/merge", "refs/pull/1/head:evil"],
+)
+def test_candidate_ref_validation_is_limited_to_pull_heads(mr, candidate_ref):
+    with pytest.raises(mr.ReleaseError):
+        mr.validate_candidate_ref(candidate_ref)
+
+
+def test_ci_candidate_remains_valid_when_main_advances(mr, monkeypatch):
+    candidate = "1" * 40
+    advanced_main = "2" * 40
+    previous = "3" * 40
+
+    def fake_git(*args, **_kwargs):
+        if args == ("rev-parse", "--abbrev-ref", "HEAD"):
+            return "HEAD"
+        if args == ("status", "--porcelain"):
+            return ""
+        if args == ("rev-parse", "HEAD"):
+            return candidate
+        if args == ("rev-parse", "origin/main"):
+            return advanced_main
+        if args[0] == "describe":
+            return "v0.0.9"
+        if args == ("rev-parse", "v0.0.9^{commit}"):
+            return previous
+        raise AssertionError(args)
+
+    commands = []
+
+    def fake_run(cmd, **_kwargs):
+        commands.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(mr, "git", fake_git)
+    monkeypatch.setattr(mr, "run", fake_run)
+    monkeypatch.setattr(mr, "validate_existing_release", lambda *_args: None)
+
+    head, _tag, _prev, _release = mr.preflight("v0.0.10", False, candidate_sha=candidate, ci=True)
+
+    assert head == candidate
+    assert ["git", "merge-base", "--is-ancestor", candidate, advanced_main] in commands
+
+
+def test_ci_unmerged_rehearsal_skips_only_main_reachability(mr, monkeypatch):
+    candidate = "1" * 40
+    advanced_main = "2" * 40
+    previous = "3" * 40
+
+    def fake_git(*args, **_kwargs):
+        if args == ("rev-parse", "--abbrev-ref", "HEAD"):
+            return "HEAD"
+        if args == ("status", "--porcelain"):
+            return ""
+        if args == ("rev-parse", "HEAD"):
+            return candidate
+        if args == ("rev-parse", "origin/main"):
+            return advanced_main
+        if args[0] == "describe":
+            return "v0.0.9"
+        if args == ("rev-parse", "v0.0.9^{commit}"):
+            return previous
+        raise AssertionError(args)
+
+    commands = []
+
+    def fake_run(cmd, **_kwargs):
+        commands.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(mr, "git", fake_git)
+    monkeypatch.setattr(mr, "run", fake_run)
+    monkeypatch.setattr(
+        mr,
+        "validate_existing_release",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("release state is production-only")),
+    )
+
+    head, _tag, _prev, existing = mr.preflight(
+        "v0.0.10",
+        False,
+        candidate_sha=candidate,
+        ci=True,
+        allow_unmerged_candidate=True,
+    )
+
+    assert head == candidate
+    assert existing is None
+    assert not any("merge-base" in command for command in commands)
+
+
+def test_existing_release_must_be_matching_unpublished_draft(mr, monkeypatch):
+    sha = "a" * 40
+    monkeypatch.setattr(
+        mr, "run", lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0, "", "")
+    )
+    monkeypatch.setattr(
+        mr, "release_for_tag", lambda _tag: {"draft": True, "target_commitish": sha}
+    )
+    assert mr.validate_existing_release("v1.2.3", sha)["draft"]
+
+    monkeypatch.setattr(
+        mr, "release_for_tag", lambda _tag: {"draft": False, "target_commitish": sha}
+    )
+    with pytest.raises(mr.ReleaseError, match="already published"):
+        mr.validate_existing_release("v1.2.3", sha)
+
+    monkeypatch.setattr(
+        mr, "release_for_tag", lambda _tag: {"draft": True, "target_commitish": "b" * 40}
+    )
+    with pytest.raises(mr.ReleaseError, match="not frozen candidate"):
+        mr.validate_existing_release("v1.2.3", sha)
+
+
+def test_release_lookup_uses_draft_aware_gh_command(mr, monkeypatch):
+    metadata = {
+        "apiUrl": f"https://api.github.com/repos/{mr.GITHUB_REPO}/releases/7",
+        "isDraft": True,
+        "targetCommitish": "a" * 40,
+        "url": "https://draft",
+    }
+    commands = []
+
+    def fake_run(cmd, **_kwargs):
+        commands.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, json.dumps(metadata), "")
+
+    monkeypatch.setattr(mr, "run", fake_run)
+
+    assert mr.release_for_tag("v1.2.3") == {
+        "id": 7,
+        "draft": True,
+        "target_commitish": "a" * 40,
+        "html_url": "https://draft",
+    }
+    assert commands == [
+        [
+            "gh",
+            "release",
+            "view",
+            "v1.2.3",
+            "--repo",
+            mr.GITHUB_REPO,
+            "--json",
+            "apiUrl,isDraft,targetCommitish,url",
+        ]
+    ]
+
+
+def test_release_lookup_returns_none_when_cli_reports_not_found(mr, monkeypatch):
+    monkeypatch.setattr(
+        mr,
+        "run",
+        lambda cmd, **_kwargs: subprocess.CompletedProcess(cmd, 1, "", "release not found"),
+    )
+
+    assert mr.release_for_tag("v1.2.3") is None
+
+
+def test_release_lookup_fails_closed_on_api_error_or_invalid_metadata(mr, monkeypatch):
+    monkeypatch.setattr(
+        mr,
+        "run",
+        lambda cmd, **_kwargs: subprocess.CompletedProcess(cmd, 1, "", "HTTP 403"),
+    )
+    with pytest.raises(mr.ReleaseError, match="HTTP 403"):
+        mr.release_for_tag("v1.2.3")
+
+    monkeypatch.setattr(
+        mr,
+        "run",
+        lambda cmd, **_kwargs: subprocess.CompletedProcess(cmd, 0, "not-json", ""),
+    )
+    with pytest.raises(mr.ReleaseError, match="invalid release metadata"):
+        mr.release_for_tag("v1.2.3")
+
+
+def test_release_lookup_rejects_string_draft_state(mr, monkeypatch):
+    metadata = {
+        "apiUrl": f"https://api.github.com/repos/{mr.GITHUB_REPO}/releases/7",
+        "isDraft": "false",
+        "targetCommitish": "a" * 40,
+        "url": "https://release",
+    }
+    monkeypatch.setattr(
+        mr,
+        "run",
+        lambda cmd, **_kwargs: subprocess.CompletedProcess(cmd, 0, json.dumps(metadata), ""),
+    )
+
+    with pytest.raises(mr.ReleaseError, match="invalid release metadata"):
+        mr.release_for_tag("v1.2.3")
+
+
+@pytest.mark.parametrize(
+    "api_url",
+    [
+        "https://api.github.com/repos/NVIDIA-NeMo/labs-OO-Agents/releases/0",
+        "https://api.github.com/repos/NVIDIA-NeMo/labs-OO-Agents/releases/not-an-id",
+        "https://api.github.com/repos/other/repo/releases/7",
+        "https://example.com/repos/NVIDIA-NeMo/labs-OO-Agents/releases/7",
+        f"https://api.github.com/repos/NVIDIA-NeMo/labs-OO-Agents/releases/1{'0' * 5000}",
+    ],
+)
+def test_release_lookup_rejects_invalid_api_url(mr, monkeypatch, api_url):
+    metadata = {
+        "apiUrl": api_url,
+        "isDraft": True,
+        "targetCommitish": "a" * 40,
+        "url": "https://release",
+    }
+    monkeypatch.setattr(
+        mr,
+        "run",
+        lambda cmd, **_kwargs: subprocess.CompletedProcess(cmd, 0, json.dumps(metadata), ""),
+    )
+
+    with pytest.raises(mr.ReleaseError, match="invalid release metadata"):
+        mr.release_for_tag("v1.2.3")
+
+
+def test_strict_fast_checks_sync_all_public_ci_dependencies_first(mr, monkeypatch):
+    commands = []
+
+    def fake_run(cmd, **_kwargs):
+        commands.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(mr, "run", fake_run)
+
+    mr.fast_checks(verify_containment=True)
+
+    assert commands[0] == [
+        "uv",
+        "sync",
+        "--frozen",
+        "--all-extras",
+        "--no-extra",
+        "sandbox",
+    ]
+    assert commands.index(["uv", "run", "ruff", "check", "."]) < commands.index(
+        ["uv", "run", "pytest", "-q", "-m", "not integration and not stress"]
+    )
+
+
+def test_strict_arm_uses_explicit_wheel_without_env_or_ambient_extras(mr, tmp_path, monkeypatch):
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    (tree / "uv.lock").write_text("locked")
+    wheel = tmp_path / "nemo_oo_agents_nvidia-0.1.0-py3-none-any.whl"
+    wheel.write_bytes(b"wheel")
+    output_root = tmp_path / "evidence"
+    commands = []
+    eval_env = None
+
+    def forbidden_extras():
+        raise AssertionError("strict CI must not inspect the ambient environment")
+
+    def fake_run(cmd, **kwargs):
+        nonlocal eval_env
+        commands.append(cmd)
+        if "eval_pipeline" in cmd:
+            eval_env = kwargs["env"]
+            result_dir = output_root / "candidate" / "run"
+            result_dir.mkdir(parents=True)
+            write_eval(
+                result_dir / "result.noo-eval.jsonl",
+                [("model-a", "test-a", "case-a", "stable", True, None)],
+            )
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(mr, "run", fake_run)
+    monkeypatch.setattr(mr, "env_extras", forbidden_extras)
+    monkeypatch.setenv("OTLP_ENDPOINT", "https://viewer.invalid/v1/traces")
+
+    arm = mr.run_capability_arm(
+        tree,
+        "candidate",
+        "candidate",
+        ["model-a"],
+        1,
+        1,
+        strict_ci=True,
+        internal_wheel=wheel,
+        output_root=output_root,
+        sample_timeout=10,
+        hang_timeout=20,
+        overall_timeout=30,
+    )
+
+    assert arm.counts() == (1, 1)
+    assert ["uv", "sync", "--frozen", "--all-extras", "--no-extra", "sandbox"] in commands
+    assert any(str(wheel) in cmd and "pip" in cmd for cmd in commands)
+    eval_cmd = next(cmd for cmd in commands if "eval_pipeline" in cmd)
+    assert "--no-cache" in eval_cmd and "--trace-files" in eval_cmd
+    assert "--timeout" in eval_cmd and "--hang-timeout" in eval_cmd
+    assert "OTLP_ENDPOINT" not in eval_env
+    assert not (tree / ".env").exists()
+
+
+def test_strict_capability_installs_same_wheel_in_both_fresh_arms(mr, tmp_path, monkeypatch):
+    wheel = tmp_path / "nemo_oo_agents_nvidia-0.1.0-py3-none-any.whl"
+    wheel.write_bytes(b"wheel")
+    calls = []
+
+    @contextmanager
+    def fake_worktree(ref):
+        tree = tmp_path / ref.replace("/", "_")
+        tree.mkdir(exist_ok=True)
+        yield tree
+
+    def fake_arm(tree, label, cache_key, models, runs, limit, **kwargs):
+        calls.append((tree, kwargs["internal_wheel"], kwargs["strict_ci"]))
+        arm = mr.ArmResults(label)
+        arm.by_case["case"] = [True]
+        arm.case_tier["case"] = "stable"
+        arm.by_test[(models[0], "test")] = [True]
+        arm.lock_sha256 = "f" * 64
+        return arm
+
+    monkeypatch.setattr(mr, "worktree_at", fake_worktree)
+    monkeypatch.setattr(mr, "run_capability_arm", fake_arm)
+    diff, _base, _head = mr.capability_diff(
+        "v0.0.9",
+        "a" * 40,
+        ["model-a"],
+        1,
+        1,
+        strict_ci=True,
+        internal_wheel=wheel,
+        artifact_dir=tmp_path / "artifacts",
+    )
+
+    assert diff.hard_gate_passed
+    assert len(calls) == 2
+    assert all(call[1:] == (wheel, True) for call in calls)
+    assert calls[0][0] != calls[1][0]
+
+
+def test_advisories_do_not_become_hard_gate_failures(mr):
+    diff = mr.Diff(regressions=["collapse"], beyond_noise=["overall -6 pts"])
+    assert not diff.clean
+    assert diff.hard_gate_passed
+    diff.floor_breach = "stable floor"
+    assert not diff.hard_gate_passed
+
+
+@pytest.mark.parametrize("existing", [None, {"id": 7, "draft": True}])
+def test_draft_command_targets_full_sha_and_is_idempotent(mr, tmp_path, monkeypatch, existing):
+    sha = "a" * 40
+    notes = tmp_path / "notes.md"
+    notes.write_text("safe")
+    commands = []
+
+    def fake_run(cmd, **_kwargs):
+        commands.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(mr, "run", fake_run)
+    release = {
+        "id": 7,
+        "draft": True,
+        "target_commitish": sha,
+        "html_url": "https://draft",
+    }
+    responses = iter([existing, release])
+    monkeypatch.setattr(mr, "validate_existing_release", lambda *_args: next(responses))
+    url, release_id = mr.create_or_update_draft("v1.2.3", sha, notes)
+
+    cmd = commands[0]
+    assert cmd[:3] == ["gh", "release", "edit" if existing else "create"]
+    assert cmd[cmd.index("--target") + 1] == sha
+    assert "--draft" in cmd
+    assert not any("draft=false" in part for part in cmd)
+    assert (url, release_id) == ("https://draft", 7)
+
+
+def test_draft_is_rechecked_before_mutation(mr, tmp_path, monkeypatch):
+    notes = tmp_path / "notes.md"
+    notes.write_text("safe")
+    commands = []
+    monkeypatch.setattr(
+        mr,
+        "validate_existing_release",
+        lambda *_args: (_ for _ in ()).throw(mr.ReleaseError("already published")),
+    )
+    monkeypatch.setattr(mr, "run", lambda cmd, **_kwargs: commands.append(cmd))
+    with pytest.raises(mr.ReleaseError, match="already published"):
+        mr.create_or_update_draft("v1.2.3", "a" * 40, notes)
+    assert commands == []
+
+
+def test_public_report_sanitization(mr):
+    unsafe = (
+        "api_key=supersecret\nAuthorization: Bearer-token\n"
+        "https://alice:password@internal.example/path\n/home/alice/private/trace.jsonl\n"
+    )
+    safe = mr.sanitize_public_text(unsafe)
+    assert "supersecret" not in safe
+    assert "Bearer-token" not in safe
+    assert "alice:password" not in safe
+    assert "/home/alice" not in safe
+    assert "[REDACTED]" in safe and "[private-path]" in safe
+
+
+def test_public_notes_put_github_changes_before_capability_report(mr):
+    changes = "## What's Changed\n* Added a feature"
+    capability = (
+        "## 🧪 Capability Test Results\n\n"
+        "✅ Release OK — [full results](https://example.com/results)"
+    )
+    notes = mr.build_public_notes(
+        diff=mr.Diff(markdown=capability),
+        change_notes=changes,
+    )
+
+    assert notes == f"{changes}\n\n---\n\n{capability}\n"
+    assert "Unpublished NOOA release candidate" not in notes
+    assert "Reviewer checklist" not in notes
+
+
+def test_public_notes_have_a_fallback_when_github_returns_no_changes(mr):
+    notes = mr.build_public_notes(
+        diff=mr.Diff(markdown="capability report"),
+        change_notes="",
+    )
+
+    assert notes == "No generated change notes were returned.\n\n---\n\ncapability report\n"
+
+
+def _ci_args(mr, tmp_path):
+    wheel = tmp_path / "nemo_oo_agents_nvidia-0.1.0-py3-none-any.whl"
+    wheel.write_bytes(b"wheel")
+    return mr._parser().parse_args(
+        [
+            "v1.2.3",
+            "--ci",
+            "--candidate-sha",
+            "a" * 40,
+            "--controller-sha",
+            "b" * 40,
+            "--internal-wheel",
+            str(wheel),
+            "--artifact-dir",
+            str(tmp_path / "artifacts"),
+            "--pipeline-url",
+            "https://gitlab.example/pipelines/1",
+            "--job-url",
+            "https://gitlab.example/jobs/2",
+            "--image-digest",
+            "registry.example/release@sha256:" + "c" * 64,
+            "--create-draft",
+        ]
+    )
+
+
+def test_unmerged_candidate_requires_reduced_scope_and_never_drafts(mr, tmp_path, monkeypatch):
+    args = _ci_args(mr, tmp_path)
+    args.candidate_ref = "refs/pull/163/head"
+    args.create_draft = False
+    monkeypatch.setenv("NVIDIA_INTERNAL_API_KEY", "disposable-test-key")
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+
+    with pytest.raises(mr.ReleaseError, match="requires a reduced rehearsal"):
+        mr.ci_main(args)
+
+    args.models = "claude-haiku"
+    args.runs = 1
+    args.limit = 1
+    args.create_draft = True
+    with pytest.raises(mr.ReleaseError, match="can never create a draft"):
+        mr.ci_main(args)
+
+
+def test_unmerged_rehearsal_does_not_require_github_token(mr, tmp_path, monkeypatch):
+    args = _ci_args(mr, tmp_path)
+    args.candidate_ref = "refs/pull/163/head"
+    args.create_draft = False
+    args.models = "claude-haiku"
+    args.runs = 1
+    args.limit = 1
+    monkeypatch.setenv("NVIDIA_INTERNAL_API_KEY", "disposable-test-key")
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.setattr(mr, "tool_versions", lambda _image: {})
+    monkeypatch.setattr(mr, "sha256", lambda _path: "e" * 64)
+    monkeypatch.setattr(
+        mr,
+        "preflight",
+        lambda *_args, **_kwargs: ("a" * 40, "v1.2.2", "d" * 40, None),
+    )
+    monkeypatch.setattr(mr, "fast_checks", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(mr, "build_and_smoke", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(mr, "_copy_distributions", lambda _path: [])
+    base = mr.ArmResults("base")
+    head = mr.ArmResults("head")
+    for arm in (base, head):
+        arm.by_case["case"] = [True]
+        arm.case_tier["case"] = "stable"
+        arm.by_test[("model", "test")] = [True]
+        arm.lock_sha256 = "f" * 64
+    clean = mr.Diff(markdown="clean")
+    monkeypatch.setattr(mr, "capability_diff", lambda *_args, **_kwargs: (clean, base, head))
+    monkeypatch.setattr(mr, "local_change_notes", lambda *_args: "local changes")
+    monkeypatch.setattr(
+        mr,
+        "generated_change_notes",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("unmerged rehearsal called GitHub")),
+    )
+
+    assert mr.ci_main(args) == 0
+    manifest = json.loads((tmp_path / "artifacts" / "release-manifest.json").read_text())
+    assert manifest["status"] == "passed"
+    assert manifest["unmerged_candidate"] is True
+
+
+@pytest.mark.parametrize(
+    "failure_point", ["deterministic", "quickstarts", "infrastructure", "hard-gate"]
+)
+def test_ci_never_creates_draft_after_gate_failure(mr, tmp_path, monkeypatch, failure_point):
+    """Any hard gate failure must prevent draft creation."""
+    args = _ci_args(mr, tmp_path)
+    monkeypatch.setenv("NVIDIA_INTERNAL_API_KEY", "masked")
+    monkeypatch.setenv("GH_TOKEN", "masked")
+    monkeypatch.setattr(mr, "tool_versions", lambda _image: {})
+    monkeypatch.setattr(
+        mr,
+        "preflight",
+        lambda *_args, **_kwargs: ("a" * 40, "v1.2.2", "d" * 40, None),
+    )
+    monkeypatch.setattr(mr, "sha256", lambda _path: "e" * 64)
+    monkeypatch.setattr(mr, "build_and_smoke", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(mr, "_copy_distributions", lambda _path: [])
+    draft_calls = []
+    monkeypatch.setattr(mr, "create_or_update_draft", lambda *_args: draft_calls.append(True))
+
+    if failure_point == "deterministic":
+        monkeypatch.setattr(
+            mr,
+            "fast_checks",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(mr.ReleaseError("lint")),
+        )
+    else:
+        monkeypatch.setattr(mr, "fast_checks", lambda *_args, **_kwargs: None)
+        if failure_point == "quickstarts":
+            monkeypatch.setattr(
+                mr,
+                "build_and_smoke",
+                lambda *_args, **_kwargs: (_ for _ in ()).throw(mr.ReleaseError("quickstart")),
+            )
+        elif failure_point == "infrastructure":
+            monkeypatch.setattr(
+                mr,
+                "capability_diff",
+                lambda *_args, **_kwargs: (_ for _ in ()).throw(mr.ReleaseError("endpoint")),
+            )
+        else:
+            base = mr.ArmResults("base")
+            head = mr.ArmResults("head")
+            blocked = mr.Diff(floor_breach="stable floor", markdown="blocked")
+            monkeypatch.setattr(
+                mr, "capability_diff", lambda *_args, **_kwargs: (blocked, base, head)
+            )
+
+    with pytest.raises(mr.ReleaseError):
+        mr.ci_main(args)
+    assert draft_calls == []
+    manifest = json.loads((tmp_path / "artifacts" / "release-manifest.json").read_text())
+    assert manifest["status"] == "failed"
+
+
+def test_noninteractive_ci_drafts_when_only_advisories_exist(mr, tmp_path, monkeypatch):
+    args = _ci_args(mr, tmp_path)
+    monkeypatch.setenv("NVIDIA_INTERNAL_API_KEY", "masked")
+    monkeypatch.setenv("GH_TOKEN", "masked")
+    monkeypatch.setattr(mr, "tool_versions", lambda _image: {})
+    monkeypatch.setattr(
+        mr,
+        "preflight",
+        lambda *_args, **_kwargs: ("a" * 40, "v1.2.2", "d" * 40, None),
+    )
+    monkeypatch.setattr(mr, "sha256", lambda _path: "e" * 64)
+    monkeypatch.setattr(mr, "fast_checks", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(mr, "build_and_smoke", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(mr, "_copy_distributions", lambda _path: [])
+    base = mr.ArmResults("base")
+    head = mr.ArmResults("head")
+    for arm in (base, head):
+        arm.by_case["case"] = [True]
+        arm.case_tier["case"] = "stable"
+        arm.by_test[("model", "test")] = [True]
+        arm.lock_sha256 = "f" * 64
+    advisory = mr.Diff(regressions=["collapse"], markdown="advisory report")
+    monkeypatch.setattr(mr, "capability_diff", lambda *_args, **_kwargs: (advisory, base, head))
+    monkeypatch.setattr(mr, "generated_change_notes", lambda *_args: "changes")
+    draft_calls = []
+
+    def fake_draft(*call_args):
+        draft_calls.append(call_args)
+        return "https://github.example/draft", 42
+
+    monkeypatch.setattr(mr, "create_or_update_draft", fake_draft)
+
+    assert mr.ci_main(args) == 0
+    assert len(draft_calls) == 1
+    manifest = json.loads((tmp_path / "artifacts" / "release-manifest.json").read_text())
+    assert manifest["status"] == "passed"
+    assert manifest["capability"]["hard_gate_outcome"] == "passed"
+    assert manifest["capability"]["advisory"]["collapses"] == ["collapse"]
+    assert manifest["github_release_database_id"] == 42
+
+
+def test_release_runner_contains_no_publish_operation(mr):
+    source = (REPO / "scripts/make_release.py").read_text()
+    assert "--draft=false" not in source
+    assert "def publish(" not in source
+
+
+def test_existing_publication_workflow_still_uses_published_release_trigger():
+    workflow = (REPO / ".github/workflows/publish.yml").read_text()
+    assert "release:" in workflow
+    assert "types: [published]" in workflow
+    assert "workflow_dispatch:" in workflow
+    assert "if: github.event_name == 'release'" in workflow
+
+
+@pytest.mark.parametrize("failure", [None, "install", "example", "timeout", "unexpected"])
+def test_fresh_wheel_quickstarts_isolate_customer_install_and_record_failures(
+    mr, tmp_path, monkeypatch, failure
+):
+    """Verify environment isolation and durable evidence across smoke failures."""
+    wheel = tmp_path / "nooa-1.2.3-py3-none-any.whl"
+    wheel.touch()
+    manifest = mr.ReleaseManifest(tmp_path / "evidence" / "release-manifest.json", {})
+    monkeypatch.setenv("NVIDIA_INTERNAL_API_KEY", "test-inference-key")
+    monkeypatch.delenv("NVIDIA_INFERENCE_API_KEY", raising=False)
+    monkeypatch.setenv("GH_TOKEN", "release-token-must-not-leak")
+    monkeypatch.setenv("OPENAI_API_KEY", "different-provider-must-not-win")
+    monkeypatch.setenv("PYTHONPATH", str(REPO / "src"))
+    monkeypatch.setenv("UV_CONSTRAINT", "ambient-constraints.txt")
+    monkeypatch.setenv("NEMO_OO_LLM_CONFIG", "ambient-registry.yaml")
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        """Simulate subprocess outcomes without running external services."""
+        calls.append((cmd, kwargs))
+        assert kwargs["cwd"] != REPO
+        assert kwargs["timeout"] > 0
+        env = kwargs["env"]
+        live = cmd[-1].endswith(tuple(mr.QUICKSTART_EXAMPLES))
+        assert env.get("NVIDIA_INFERENCE_API_KEY") == ("test-inference-key" if live else None)
+        for name in (
+            "GH_TOKEN",
+            "OPENAI_API_KEY",
+            "PYTHONPATH",
+            "UV_CONSTRAINT",
+            "NEMO_OO_LLM_CONFIG",
+        ):
+            assert name not in env
+        assert env["PYTHON_DOTENV_DISABLED"] == "1"
+        if "install" in cmd and failure == "install":
+            return subprocess.CompletedProcess(cmd, 1, "", "resolver failed")
+        if "-c" in cmd:
+            Path(cmd[-1]).write_text(
+                json.dumps({"packages": {"nooa": "1.2.3", "example-dependency": "4.5.6"}})
+            )
+            return subprocess.CompletedProcess(
+                cmd,
+                0,
+                "import banner on stdout",
+                "",
+            )
+        if cmd[-1].endswith(mr.QUICKSTART_EXAMPLES[0]):
+            copied = Path(cmd[-1])
+            assert copied.parent == kwargs["cwd"]
+            assert copied.read_bytes() == (REPO / "examples/quickstart" / copied.name).read_bytes()
+            assert cmd[1:3] == ["-I", "-u"]
+            assert Path(cmd[-2]).name == "quickstart_smoke.py"
+            assert Path(cmd[-2]).read_bytes() == (REPO / "scripts/quickstart_smoke.py").read_bytes()
+            if failure == "timeout":
+                raise mr.ReleaseError("command timed out\npartial output test-inference-key")
+            if failure == "example":
+                return subprocess.CompletedProcess(cmd, 1, "", "error test-inference-key")
+            if failure == "unexpected":
+                raise TypeError("unexpected failure test-inference-key")
+        return subprocess.CompletedProcess(cmd, 0, "OK", "")
+
+    monkeypatch.setattr(mr, "run", fake_run)
+    if failure:
+        with pytest.raises(mr.ReleaseError):
+            mr.fresh_wheel_quickstarts(wheel, manifest)
+    else:
+        mr.fresh_wheel_quickstarts(wheel, manifest)
+    report = json.loads((manifest.path.parent / "quickstart-smoke/result.json").read_text())
+    assert report == json.loads(manifest.path.read_text())["quickstart_smoke"]
+    assert report["outcome"] == ("failed" if failure else "passed")
+    install = next(cmd for cmd, _ in calls if "install" in cmd)
+    assert install[:4] == ["uv", "--no-config", "pip", "install"]
+    assert install[-3:] == ["--index-url", "https://pypi.org/simple", str(wheel)]
+    if failure in ("example", "timeout", "unexpected"):
+        assert report["examples"][0]["outcome"] == "failed"
+        assert [case["outcome"] for case in report["examples"][1:]] == ["not_run", "not_run"]
+    if failure == "timeout":
+        log = manifest.path.parent / "quickstart-smoke" / f"{mr.QUICKSTART_EXAMPLES[0]}.log"
+        assert "partial output [REDACTED]" in log.read_text()
+    if failure is None:
+        assert [case["example"] for case in report["examples"]] == mr.QUICKSTART_EXAMPLES
+        assert all(case["outcome"] == "passed" for case in report["examples"])
+        assert report["validator_sha256"] == mr.sha256(REPO / "scripts/quickstart_smoke.py")
+    for log in (manifest.path.parent / "quickstart-smoke").iterdir():
+        assert "test-inference-key" not in log.read_text()
+
+
+def test_fresh_wheel_quickstarts_require_credentials(mr, tmp_path, monkeypatch):
+    """Missing credentials must produce explicit failed smoke evidence."""
+    monkeypatch.delenv("NVIDIA_INTERNAL_API_KEY", raising=False)
+    monkeypatch.delenv("NVIDIA_INFERENCE_API_KEY", raising=False)
+    manifest = mr.ReleaseManifest(tmp_path / "release-manifest.json", {})
+    with pytest.raises(mr.ReleaseError, match="require NVIDIA"):
+        mr.fresh_wheel_quickstarts(tmp_path / "nooa.whl", manifest)
+    assert manifest.data["quickstart_smoke"]["outcome"] == "failed"
+
+
+@pytest.mark.parametrize("flags", [[], ["--skip-capability"], ["--checks-only"], ["--dry-run"]])
+def test_local_release_requires_credentials_before_checks(mr, monkeypatch, flags):
+    """Local release modes must reject missing credentials before expensive checks."""
+    monkeypatch.delenv("NVIDIA_INTERNAL_API_KEY", raising=False)
+    monkeypatch.delenv("NVIDIA_INFERENCE_API_KEY", raising=False)
+    monkeypatch.setattr(
+        mr, "preflight", lambda *_args: pytest.fail("preflight ran before checking credentials")
+    )
+    with pytest.raises(mr.ReleaseError, match="require NVIDIA"):
+        mr.local_main(mr._parser().parse_args(["v1.2.3", *flags]))
+
+
+@pytest.mark.parametrize("partial", ["partial output", b"partial output"])
+def test_timeout_preserves_partial_output(mr, monkeypatch, partial):
+    """Timeout diagnostics must retain both byte and text subprocess output."""
+
+    def timed_out(*_args, **_kwargs):
+        """Model a timeout that retains partial stdout and stderr."""
+        raise subprocess.TimeoutExpired(["python"], 1, output=partial, stderr=b"partial stderr")
+
+    monkeypatch.setattr(mr.subprocess, "run", timed_out)
+    with pytest.raises(mr.ReleaseError, match="partial output\\s*partial stderr"):
+        mr.run(["python"], timeout=1)
+
+
+@pytest.mark.parametrize("fail_quickstart", [False, True])
+def test_built_core_wheel_must_pass_quickstarts_before_combined_smoke(
+    mr, tmp_path, monkeypatch, fail_quickstart
+):
+    """Fresh core-wheel failures must stop the combined-package smoke checks."""
+    monkeypatch.setattr(mr, "REPO", tmp_path)
+    monkeypatch.setattr(mr, "temporary_tag", lambda *_args: nullcontext())
+    manifest = mr.ReleaseManifest(tmp_path / "release-manifest.json", {})
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        """Simulate subprocess outcomes without running external services."""
+        calls.append(cmd)
+        if "build" in cmd:
+            dist = tmp_path / "dist"
+            dist.mkdir(exist_ok=True)
+            package = cmd[cmd.index("--package") + 1].replace("-", "_")
+            (dist / f"{package}-1.2.3-py3-none-any.whl").touch()
+        return subprocess.CompletedProcess(cmd, 0, "1.2.3", "")
+
+    def quickstarts(wheel, received_manifest):
+        """Check that the core-only gate runs before combined-package installation."""
+        assert wheel.name == "nooa-1.2.3-py3-none-any.whl"
+        assert received_manifest is manifest
+        assert not any("install" in cmd for cmd in calls)
+        calls.append(["quickstarts"])
+        if fail_quickstart:
+            raise mr.ReleaseError("live quickstart failed")
+
+    monkeypatch.setattr(mr, "run", fake_run)
+    monkeypatch.setattr(mr, "fresh_wheel_quickstarts", quickstarts)
+    monkeypatch.setattr(
+        mr.subprocess, "run", lambda *args, **kwargs: subprocess.CompletedProcess([], 0, "OK", "")
+    )
+    if fail_quickstart:
+        with pytest.raises(mr.ReleaseError, match="live quickstart failed"):
+            mr.build_and_smoke("v1.2.3", "a" * 40, manifest)
+        assert not any("install" in cmd for cmd in calls)
+    else:
+        mr.build_and_smoke("v1.2.3", "a" * 40, manifest)
+        assert any("install" in cmd for cmd in calls)
+    assert calls.count(["quickstarts"]) == 1

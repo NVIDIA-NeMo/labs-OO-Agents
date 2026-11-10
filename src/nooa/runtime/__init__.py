@@ -16,7 +16,14 @@ from nooa.runtime.actor import ActorRuntime
 from nooa.runtime.event_manager import EventManager
 from nooa.runtime.event_query import EventQuery
 from nooa.runtime.events import EventsApi
-from nooa.runtime.hooks import InstrumentationHooks, get_hooks, set_hooks
+from nooa.runtime.hooks import (
+    CompositeInstrumentationHooks,
+    InstrumentationHooks,
+    compose_hooks,
+    get_hooks,
+    hooks_scope,
+    set_hooks,
+)
 from nooa.runtime.media_capture import show
 from nooa.runtime.pprint import pprint
 
@@ -28,6 +35,9 @@ __all__ = [
     "EventsApi",
     # Hook-based instrumentation protocol
     "InstrumentationHooks",
+    "CompositeInstrumentationHooks",
+    "compose_hooks",
+    "hooks_scope",
     "set_hooks",
     "get_hooks",
     # Truncation system

@@ -5,6 +5,7 @@
 import ast
 import asyncio
 import contextvars
+import copy
 import hashlib
 import inspect
 import io
@@ -17,11 +18,10 @@ import types
 import warnings
 from collections.abc import Callable
 from contextlib import contextmanager
+from dataclasses import asdict
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, cast, get_type_hints
+from typing import TYPE_CHECKING, Any, Literal, cast, get_type_hints
 from uuid import uuid4
-
-from pydantic import BaseModel
 
 from nooa.agentdoc import FileBackedTruncatingStringIO, TruncatingStringIO
 from nooa.agentdoc.introspect import methods, variables
@@ -35,18 +35,25 @@ from nooa.context_blocks.scoped import _scoped_blocks_var, _scoped_events_var
 if TYPE_CHECKING:
     from nooa.config.truncation_config import TruncationConfig
     from nooa.context_blocks.models import ContextWindowStats
+    from nooa.decisions import (
+        DecisionRequest,
+        DecisionResponse,
+        UnifiedDecisionModel,
+    )
     from nooa.runtime.event_query import EventQuery
     from nooa.runtime.restrictions import RestrictionsConfig
 
 from nooa.events import (
+    DecisionCallEnd,
+    DecisionCallStart,
+    DecisionRecord,
     ExecutionResult,
     ExecutionSignal,
     LLMCallEnd,
     LLMCallStart,
-    LLMComplete,
-    LLMOutput,
     SystemPrompt,
 )
+from nooa.llm_types import LLMUsage
 from nooa.runtime.context_vars import (
     _current_event_format_var,
     _in_exec_middleware,
@@ -63,9 +70,11 @@ from nooa.runtime.hooks import call_after_hook, call_before_hook
 
 logger = logging.getLogger(__name__)
 
+_MISSING = object()
+
 
 def _derive_prompt_cache_key(agent_id: str, strategy_tag: str) -> str:
-    """Return a stable cache shard key within providers' 64-character limit."""
+    """Return a stable cache shard key within the OpenAI 64-character limit."""
     digest = hashlib.blake2s(
         f"{agent_id}-{strategy_tag}".encode(),
         digest_size=16,
@@ -111,10 +120,11 @@ def _make_llm_metrics_bridge(hm: "HarnessMetrics") -> Callable[[str, Any], None]
     from nooa.runtime.token_usage import accumulate_tokens
 
     def _handle_token_usage(usage: Any) -> None:
-        if isinstance(usage, dict):
+        normalized = LLMUsage.from_provider(usage)
+        if normalized is not None:
             accumulate_tokens(
-                input_tokens=usage.get("prompt_tokens", 0) or 0,
-                output_tokens=usage.get("completion_tokens", 0) or 0,
+                input_tokens=normalized.input_tokens,
+                output_tokens=normalized.output_tokens,
             )
 
     _dispatch: dict[str, Callable[[Any], None]] = {
@@ -127,6 +137,7 @@ def _make_llm_metrics_bridge(hm: "HarnessMetrics") -> Callable[[str, Any], None]
         "json_double_decoded": lambda _: hm.record_json_double_decoded(),
         "reasoning_as_structured_output": lambda _: hm.record_reasoning_as_structured_output(),
         "token_usage": _handle_token_usage,
+        "llm_queue": lambda detail: hm.record_llm_queue(detail),
     }
 
     def bridge(event: str, detail: Any = None) -> None:
@@ -188,7 +199,7 @@ def _snapshot_llm_request(
     and returns the trailing ``<context>…</context>`` envelope from the
     same list. Called right after ``_build_messages`` so both reflect the
     exact bytes about to be sent to the LLM; the returned envelope is
-    stamped onto the matching :class:`LLMComplete`. ``record=False`` keeps
+    stamped onto the matching :class:`LLMResponse`. ``record=False`` keeps
     the snapshot out of the LLM-visible event timeline.
     """
     if messages and isinstance(messages[0], dict) and messages[0].get("role") == "system":
@@ -200,27 +211,6 @@ def _snapshot_llm_request(
             record=False,
         )
     return _extract_trailing_context_envelope(messages)
-
-
-def _resolve_provider_formatter(llm_client: Any, default_formatter: Any) -> Any:
-    """Auto-select provider formatter based on LLM client type.
-
-    ResponsesClient needs ResponsesProviderFormatter to emit native Responses
-    API wire format.  All other clients (including Anthropic via LiteLLM) use
-    the agent's configured formatter.
-
-    This is intentionally runtime-dispatched rather than config-driven:
-    Anthropic formatting is handled by LiteLLM (so OpenAIProviderFormatter
-    works), but the Responses API has a fundamentally different wire shape
-    that LiteLLM does not translate, requiring its own formatter.
-    """
-    from nooa.unifiedllm import ResponsesClient
-
-    if isinstance(llm_client, ResponsesClient):
-        from nooa.context_blocks.formatter import ResponsesProviderFormatter
-
-        return ResponsesProviderFormatter()
-    return default_formatter
 
 
 # ---------------------------------------------------------------------------
@@ -349,11 +339,17 @@ def _parse_context_window_tokens(exc: BaseException) -> int | None:
     return None
 
 
-def _context_window_for_error(llm_client: Any, exc: BaseException) -> int | None:
+def _context_window_for_error(
+    llm_client: Any, exc: BaseException, params: dict[str, Any] | None = None
+) -> int | None:
     """Return the provider-reported context window, falling back to the client."""
     reported = _parse_context_window_tokens(exc)
     if reported:
         return reported
+    if params is not None:
+        from nooa.unifiedllm.limits import context_limits_for
+
+        return context_limits_for(llm_client, params).context_window
     return getattr(llm_client, "context_window", None)
 
 
@@ -374,6 +370,8 @@ def _compute_reduced_max_tokens(
         reduced = original_max_tokens // 2
     else:
         return None
+    if original_max_tokens:
+        reduced = min(reduced, original_max_tokens)
     if reduced < _MIN_RECOVERY_OUTPUT_TOKENS:
         return None
     return reduced
@@ -411,6 +409,15 @@ _current_method_var: contextvars.ContextVar[Any] = contextvars.ContextVar(
     "current_method", default=None
 )
 _current_llm_var: contextvars.ContextVar[Any] = contextvars.ContextVar("current_llm", default=None)
+_current_decision_model_var: contextvars.ContextVar[Any] = contextvars.ContextVar(
+    "current_decision_model", default=None
+)
+_current_llm_model_name_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "current_llm_model_name", default=None
+)
+_current_llm_selection_source_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "current_llm_selection_source", default=None
+)
 
 # Context variable for the resolved truncation config for the current generation call.
 # Set by _execute_with_generation() so that method-level @strategy(truncation=...)
@@ -603,7 +610,7 @@ class ActorRuntime:
 
         For callbacks on LLM output, use:
             agent.event_manager.on("Message", handler)
-            agent.event_manager.on("LLMOutput", handler)
+            agent.event_manager.on("LLMResponse", handler)
         """
         # Agent instance
         self.agent: Any = agent
@@ -635,6 +642,9 @@ class ActorRuntime:
         # chars × this ratio, anchored to the real provider count. Defaults to
         # the ~4-chars-per-token heuristic before the first response.
         self._tokens_per_char: float = _DEFAULT_TOKENS_PER_CHAR
+        # Compact decision provenance keyed by generation_id, added to the
+        # generation span when that generation ends.
+        self._decision_trace_attributes: dict[str, dict[str, Any]] = {}
 
     def _event_format_for_event(self, event: Any) -> Any:
         """Return the FormatConfig to use when serializing an event.
@@ -865,6 +875,194 @@ class ActorRuntime:
             return override
         return self.agent._truncation
 
+    async def decision_state_inputs(
+        self,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]] | None]:
+        """Resolve context and events explicitly selected for a decision call.
+
+        Decision models receive a compact state object rather than the complete
+        chat prompt. Context is included only when supplied through decorator or
+        active ``ScopedContext`` overrides. Events are included only when an
+        effective ``EventQuery`` exists. Metadata and runtime-only events remain
+        excluded, matching their normal model-visibility contract.
+        """
+        from nooa.decisions.state import resolve_decision_context, select_decision_events
+
+        call = self._current_call
+        extra_context = {
+            "method": self._current_method,
+            "call_args": call.args if call is not None else (),
+            "call_kwargs": call.kwargs if call is not None else {},
+            "strategy": _current_strategy_var.get(),
+            "datetime": datetime,
+            "runtime": self,
+        }
+
+        async def _resolve_dynamic(key: str, value: DynamicContext) -> Any:
+            """Evaluate one dynamic decision context block with call state."""
+            try:
+                return await self.evaluate_expression(
+                    value.expr,
+                    extra_context=extra_context,
+                    error_mode="raise",
+                )
+            except Exception as exc:
+                raise ValueError(
+                    f"Failed to resolve decision context block {key!r} "
+                    f"from expression {value.expr!r}: {type(exc).__name__}: {exc}"
+                ) from exc
+
+        resolved_context = await resolve_decision_context(
+            decorator_context=_decorator_context_var.get(),
+            scoped_context=_scoped_blocks_var.get(),
+            disabled_keys=self.agent.context_manager.disabled(),
+            resolve_dynamic=_resolve_dynamic,
+        )
+        events = select_decision_events(
+            self.agent.event_manager.values(),
+            runtime_query=self.agent.event_manager.get_event_query(),
+            scoped_query=_scoped_events_var.get(),
+            decorator_query=_decorator_events_var.get(),
+            agent_query=getattr(self.agent, "event_query", None),
+            current_call_id=self._agent_call_id,
+        )
+        return resolved_context, events
+
+    async def decide(
+        self, request: "DecisionRequest", *, include_raw_response: bool = False
+    ) -> "DecisionResponse":
+        """Run a decision request through middleware and persist its outcome.
+
+        ``include_raw_response`` stores the response's raw body in the
+        ``DecisionRecord``. It is never added to trace attributes.
+        """
+        if self._current_method is None:
+            raise RuntimeError("decide() called with no current method context")
+        client = cast("UnifiedDecisionModel | None", _current_decision_model_var.get())
+        if client is None:
+            raise RuntimeError("decide() called with no decision model in context")
+
+        from nooa.decisions.provenance import question_digest
+        from nooa.runtime.middleware import DecisionCallContext
+
+        generation_id = self._generation_id_stack[-1] if self._generation_id_stack else ""
+        requested_model = getattr(client, "model", "") or ""
+        # DecisionModel subclasses declare their source; other clients are native.
+        decision_source: Literal["native", "llm"] = (
+            "llm" if getattr(client, "decision_source", "native") == "llm" else "native"
+        )
+        decision_call_id = str(uuid4())
+        event_meta = {
+            "method_name": self._current_method.__name__,
+            "generation_id": generation_id,
+            "question_count": len(request.questions),
+            "model": requested_model,
+        }
+        self.event_manager.add(DecisionCallStart(**event_meta), record=False)
+        ctx = DecisionCallContext(
+            request=request,
+            agent=self.agent,
+            runtime=self,
+            client=client,
+        )
+        success = False
+        exception_type: str | None = None
+        try:
+
+            async def _core_decision(core_ctx: DecisionCallContext) -> DecisionCallContext:
+                core_ctx.response = await client.adecide(core_ctx.request)
+                return core_ctx
+
+            ctx = cast(
+                "DecisionCallContext",
+                await self.event_manager.run_middleware("decision_call", ctx, _core_decision),
+            )
+            response = ctx.response
+            if response is None:
+                raise RuntimeError(
+                    "decision_call middleware returned without setting ctx.response. "
+                    "Short-circuiting middleware must set ctx.response before returning."
+                )
+            success = True
+            return response
+        except BaseException as exc:
+            exception_type = type(exc).__name__
+            raise
+        finally:
+            self.event_manager.add(
+                DecisionCallEnd(
+                    **event_meta,
+                    success=success,
+                    exception_type=exception_type,
+                ),
+                record=False,
+            )
+            response = ctx.response
+            # Digest the effective request so middleware rewrites are reflected.
+            digest = question_digest(ctx.request.questions)
+            resolved_model = response.model if response is not None else None
+            self._set_decision_trace_attributes(
+                generation_id,
+                source=decision_source,
+                digest=digest,
+                requested_model=requested_model,
+                resolved_model=resolved_model,
+            )
+            self.event_manager.add(
+                DecisionRecord(
+                    decision_call_id=decision_call_id,
+                    method_name=event_meta["method_name"],
+                    generation_id=generation_id,
+                    state=copy.deepcopy(ctx.request.state),
+                    questions={
+                        name: asdict(question) for name, question in ctx.request.questions.items()
+                    },
+                    answers={name: asdict(answer) for name, answer in response.answers.items()}
+                    if response is not None
+                    else None,
+                    decision_source=decision_source,
+                    question_digest=digest,
+                    requested_model=requested_model,
+                    resolved_model=resolved_model,
+                    response_id=response.id if response is not None else None,
+                    usage=LLMUsage.from_provider(response.usage) if response is not None else None,
+                    raw_response=response.raw
+                    if include_raw_response and response is not None
+                    else None,
+                    success=success,
+                    exception_type=exception_type,
+                )
+            )
+
+    @property
+    def decision_model(self) -> "UnifiedDecisionModel":
+        """Return the decision model resolved for the current call."""
+        client = _current_decision_model_var.get()
+        if client is None:
+            raise RuntimeError("decision_model accessed with no decision model in context")
+        return cast("UnifiedDecisionModel", client)
+
+    def _set_decision_trace_attributes(
+        self,
+        generation_id: str,
+        *,
+        source: str,
+        digest: str,
+        requested_model: str,
+        resolved_model: str | None = None,
+    ) -> None:
+        """Stage compact decision provenance for the generation span."""
+        if not generation_id:
+            return
+        attributes: dict[str, Any] = {
+            "decision.source": source,
+            "decision.question_digest": digest,
+            "decision.requested_model": requested_model,
+        }
+        if resolved_model is not None:
+            attributes["decision.resolved_model"] = resolved_model
+        self._decision_trace_attributes[generation_id] = attributes
+
     async def generate(
         self,
         *,
@@ -878,7 +1076,7 @@ class ActorRuntime:
         - System message: context blocks + strategy.strategy_prompt
         - Events: conversation events
 
-        Creates an LLMOutput event and adds it to event manager.
+        Creates an LLMResponse event and adds it to event manager.
 
         Args:
             tools: Optional list of tool definitions.
@@ -888,10 +1086,12 @@ class ActorRuntime:
         Returns:
             Tuple of (LLMResponse, event_id) where:
             - LLMResponse from unifiedllm with content, reasoning, usage
-            - event_id can be used for event_manager.update() or event_manager.get()
+            - event_id identifies the canonical provider turn for inspection or linking
         """
         if self._current_method is None:
             raise RuntimeError("generate() called with no current method context")
+
+        from nooa.unifiedllm.limits import context_limits_for, reduced_reply_params
 
         # Build messages from context + events (timers inside _build_messages).
         # No proactive clamping — recovery is error-driven. If the API rejects
@@ -902,7 +1102,7 @@ class ActorRuntime:
             call_args=self._current_call.args if self._current_call else (),
             call_kwargs=self._current_call.kwargs if self._current_call else {},
             tools=tools,
-            max_output_tokens=kwargs.get("max_tokens"),
+            request_params=kwargs,
         )
         _gen_hm = get_harness_metrics()
 
@@ -959,9 +1159,20 @@ class ActorRuntime:
                     params=params,
                     agent=self.agent,
                     runtime=self,
+                    client=llm_client,
+                    filtered_history=any(
+                        query is not None
+                        for query in (
+                            self.agent.event_manager.get_event_query(),
+                            _scoped_events_var.get(),
+                            _decorator_events_var.get(),
+                            self.agent.event_query,
+                        )
+                    ),
                 )
 
                 async def _core_llm(ctx: LLMCallContext) -> LLMCallContext:
+                    self._update_context_limits(ctx.client, ctx.params)
                     # Tracing hook fires AFTER middleware pre-processing,
                     # so it sees the final (possibly modified) messages.
                     call_before_hook(
@@ -978,10 +1189,11 @@ class ActorRuntime:
                     _mw_strategy_tag = (
                         type(_mw_strategy).__name__ if _mw_strategy is not None else "default"
                     )
-                    call_params.setdefault(
+                    ctx.params.setdefault(
                         "prompt_cache_key",
                         _derive_prompt_cache_key(self.agent._agent_id, _mw_strategy_tag),
                     )
+                    call_params["prompt_cache_key"] = ctx.params["prompt_cache_key"]
                     ctx.response = await llm_client.acall(
                         ctx.messages,
                         output_model=om,
@@ -998,7 +1210,7 @@ class ActorRuntime:
                             raise
                         # Always archive first — even if we can't reduce max_tokens,
                         # shedding events lets the retry (or caller's next attempt) succeed.
-                        _ctx_window = _context_window_for_error(llm_client, _cw_exc)
+                        _ctx_window = _context_window_for_error(ctx.client, _cw_exc, ctx.params)
                         self._archive_on_context_error(
                             _ctx_window,
                             exc=_cw_exc,
@@ -1006,7 +1218,7 @@ class ActorRuntime:
                         _reduced = _compute_reduced_max_tokens(
                             _cw_exc,
                             _ctx_window,
-                            ctx.params.get("max_tokens"),
+                            context_limits_for(ctx.client, ctx.params).reserved_output_tokens,
                         )
                         if _reduced is None:
                             raise
@@ -1017,17 +1229,18 @@ class ActorRuntime:
                         )
                         # Re-build messages after archival so the retry sees the
                         # reduced event store.
+                        ctx.params = reduced_reply_params(ctx.client, ctx.params, _reduced)
                         ctx.messages = await self._build_messages(
                             self._current_method,
                             call_args=self._current_call.args if self._current_call else (),
                             call_kwargs=self._current_call.kwargs if self._current_call else {},
                             tools=ctx.params.get("tools"),
-                            max_output_tokens=_reduced,
+                            request_params=ctx.params,
+                            llm_client=ctx.client,
                         )
                         _dynamic_context = _snapshot_llm_request(
                             self.event_manager, ctx.messages, current_generation_id or ""
                         )
-                        ctx.params["max_tokens"] = _reduced
                         ctx = await em.run_middleware("llm_call", ctx, _core_llm)
                 except Exception as _exc:
                     _emit_llm_end(success=False, exception_type=type(_exc).__name__)
@@ -1052,7 +1265,8 @@ class ActorRuntime:
                 # Default prompt_cache_key to per-(agent, strategy) so:
                 #   - Parallel agents (same prefix) get distinct shards by
                 #     agent_id, avoiding the cybergym multi-trial collision
-                #     above the ~15 req/min per-shard ceiling.
+                #     above the ~15 req/min per-key routing guidance for
+                #     OpenAI models before GPT-5.6.
                 #   - Within one agent, calls that use different strategies
                 #     (e.g. CodeAct vs Predict) get separate shards because
                 #     their cacheable prefixes diverge anyway — preventing
@@ -1083,7 +1297,7 @@ class ActorRuntime:
                             raise
                         # Always archive first — even if we can't reduce max_tokens,
                         # shedding events lets the retry (or caller's next attempt) succeed.
-                        _ctx_window = _context_window_for_error(llm_client, _cw_exc)
+                        _ctx_window = _context_window_for_error(llm_client, _cw_exc, _kwargs)
                         self._archive_on_context_error(
                             _ctx_window,
                             exc=_cw_exc,
@@ -1091,7 +1305,7 @@ class ActorRuntime:
                         _reduced = _compute_reduced_max_tokens(
                             _cw_exc,
                             _ctx_window,
-                            kwargs.get("max_tokens"),
+                            context_limits_for(llm_client, _kwargs).reserved_output_tokens,
                         )
                         if _reduced is None:
                             # Can't compute a reduced max_tokens, but archival already ran.
@@ -1108,19 +1322,19 @@ class ActorRuntime:
                         # Re-build messages after archival so the retry sees the
                         # reduced event store. Retrying with the same messages would
                         # fail again when input tokens exceed the context window.
+                        _recovery_kw = reduced_reply_params(llm_client, _kwargs, _reduced)
                         messages = await self._build_messages(
                             self._current_method,
                             call_args=self._current_call.args if self._current_call else (),
                             call_kwargs=self._current_call.kwargs if self._current_call else {},
                             tools=tools,
-                            max_output_tokens=_reduced,
+                            request_params=_recovery_kw,
                         )
                         _dynamic_context = _snapshot_llm_request(
                             self.event_manager, messages, current_generation_id or ""
                         )
                         # Reuse _kwargs (already has the per-(agent, strategy) key set)
                         # so recovery lands on the same shard as the original attempt.
-                        _recovery_kw = {**_kwargs, "max_tokens": _reduced}
                         response = await llm_client.acall(
                             messages,
                             tools=tools,
@@ -1132,59 +1346,20 @@ class ActorRuntime:
                     raise
                 _emit_llm_end(success=True)
 
-        # Emit LLMComplete BEFORE LLMOutput so subscribers that build per-turn
-        # records (e.g. the ATIF exporter) populate metrics/tool_calls before
-        # the assistant-message content arrives. record=False keeps this off
-        # the LLM-visible event timeline (Role.RUNTIME_EVENT) but on()
-        # subscribers still receive it.
-        _model_name = getattr(llm_client, "model", "") or ""
-        usage = getattr(response, "usage", None)
-        # Normalize usage to a dict regardless of whether the provider returned
-        # a dict, a Pydantic model with attributes, or nothing at all. The
-        # token-calibration logic above already grovels through both shapes;
-        # mirror that here so LLMComplete metrics don't silently zero out.
-        _usage_raw = usage if usage is not None else getattr(response, "usage", None)
-        _usage_dict: dict[str, Any] = {}
-        if isinstance(_usage_raw, dict):
-            _usage_dict = _usage_raw
-        elif _usage_raw is not None:
-            for _key in (
-                "prompt_tokens",
-                "input_tokens",
-                "completion_tokens",
-                "output_tokens",
-                "cached_tokens",
-                "cache_read_input_tokens",
-                "reasoning_tokens",
-                "cost",
-                "cost_usd",
-            ):
-                _val = getattr(_usage_raw, _key, None)
-                if _val is not None:
-                    _usage_dict[_key] = _val
-            _prompt_details = getattr(_usage_raw, "prompt_tokens_details", None)
-            if _prompt_details is not None:
-                _usage_dict["prompt_tokens_details"] = (
-                    _prompt_details
-                    if isinstance(_prompt_details, dict)
-                    else {
-                        "cached_tokens": getattr(_prompt_details, "cached_tokens", None),
-                    }
-                )
-            _completion_details = getattr(_usage_raw, "completion_tokens_details", None)
-            if _completion_details is not None:
-                _usage_dict["completion_tokens_details"] = (
-                    _completion_details
-                    if isinstance(_completion_details, dict)
-                    else {
-                        "reasoning_tokens": getattr(_completion_details, "reasoning_tokens", None),
-                    }
-                )
-        _prompt_tokens = int(
-            _usage_dict.get("prompt_tokens") or _usage_dict.get("input_tokens") or 0
-        )
-        if _prompt_tokens > 0:
-            self._last_prompt_tokens_actual = _prompt_tokens
+        # UnifiedLLM creates the canonical response. Enrich that same object
+        # with runtime correlation data and persist it once as the assistant
+        # turn; there is no second output or completion event to synchronize.
+        if response.tag is not None:
+            raise RuntimeError(
+                "LLM middleware returned an already-recorded LLMResponse; "
+                "each call must return a fresh response object"
+            )
+        response.model_name = getattr(llm_client, "model", "") or response.model_name
+        response.generation_id = current_generation_id or ""
+        response.dynamic_context = _dynamic_context
+        usage = response.usage
+        if usage is not None and usage.input_tokens > 0:
+            self._last_prompt_tokens_actual = usage.input_tokens
             if self._last_context_stats is not None:
                 # The provider's exact prompt-token count is the single source of
                 # truth for ctx% display, summarization triggers, and archive
@@ -1192,7 +1367,7 @@ class ActorRuntime:
                 # estimate); we write the authoritative value back here.
                 stats = self._last_context_stats
                 self._last_context_stats = stats.model_copy(
-                    update={"prompt_tokens": _prompt_tokens}
+                    update={"prompt_tokens": usage.input_tokens}
                 )
                 # Recalibrate the chars→tokens ratio from this real response:
                 # tokens_per_char = prompt_tokens / total_chars. The next
@@ -1200,56 +1375,8 @@ class ActorRuntime:
                 # or the litellm tokenizer.
                 total_chars = stats.context_blocks_chars + stats.events_chars
                 if total_chars > 0:
-                    self._tokens_per_char = _prompt_tokens / total_chars
-        _completion_tokens = int(
-            _usage_dict.get("completion_tokens") or _usage_dict.get("output_tokens") or 0
-        )
-        _cached_tokens = int(
-            _usage_dict.get("cached_tokens")
-            or _usage_dict.get("cache_read_input_tokens")
-            or (_usage_dict.get("prompt_tokens_details") or {}).get("cached_tokens")
-            or 0
-        )
-        _reasoning_tokens = int(
-            (_usage_dict.get("completion_tokens_details") or {}).get("reasoning_tokens")
-            or _usage_dict.get("reasoning_tokens")
-            or 0
-        )
-        _cost_usd = float(_usage_dict.get("cost") or _usage_dict.get("cost_usd") or 0.0)
-        _tool_calls_payload = [
-            {"tool_call_id": tc.id, "function_name": tc.name, "arguments": tc.arguments}
-            for tc in (getattr(response, "tool_calls", None) or [])
-        ]
-        # _dynamic_context was captured at render time alongside the
-        # SystemPrompt snapshot (see _snapshot_llm_request), so it reflects
-        # the exact messages sent to the LLM even across context-window retry.
-        self.event_manager.add(
-            LLMComplete(
-                model_name=_model_name,
-                prompt_tokens=_prompt_tokens,
-                completion_tokens=_completion_tokens,
-                cached_tokens=_cached_tokens,
-                reasoning_tokens=_reasoning_tokens,
-                cost_usd=_cost_usd,
-                tool_calls=_tool_calls_payload,
-                reasoning_content=getattr(response, "reasoning", None) or "",
-                generation_id=current_generation_id or "",
-                dynamic_context=_dynamic_context,
-            ),
-            record=False,
-        )
-
-        # Create and record LLMOutput
-        # Serialize Pydantic models to JSON for proper event storage
-        content = response.content or ""
-        if isinstance(content, BaseModel):
-            # Pydantic model - serialize to JSON string
-            content = content.model_dump_json()
-        elif not isinstance(content, str):
-            # Other non-string types - convert to string representation
-            content = str(content)
-        event = LLMOutput(content=content)
-        event_id = self.event_manager.add(event)
+                    self._tokens_per_char = usage.input_tokens / total_chars
+        event_id = self.event_manager.add(response)
 
         return response, event_id
 
@@ -1356,6 +1483,7 @@ class ActorRuntime:
         )
 
         result: ExecutionResult | None = None
+        execution_exception: BaseException | None = None
         stdout_token: contextvars.Token[Any] | None = None  # Track for cleanup in finally
         stderr_token: contextvars.Token[Any] | None = None
         stdin_token: contextvars.Token[Any] | None = None
@@ -1365,6 +1493,7 @@ class ActorRuntime:
         # exited before they were assigned (caught by NameError previously).
         stdout_buffer: Any = None
         stderr_buffer: Any = None
+        media_buffer: Any = None
         # Set parent agent context for LLM inheritance by subagents
         parent_token = _parent_agent_var.set(self.agent)
         try:
@@ -1519,8 +1648,15 @@ class ActorRuntime:
             # still wrap the cell on the parent. The worker owns the namespace,
             # stdout capture and wrapper, so we skip the in-process exec below.
             if sandbox_executor is not None:
-                result = await sandbox_executor.run_cell(code, execution_count=execution_count)
-                return cast(ExecutionResult, result)
+                sandbox_result = cast(
+                    ExecutionResult,
+                    await sandbox_executor.run_cell(code, execution_count=execution_count),
+                )
+                from nooa.agentdoc._format_observation import record_truncation
+
+                for reason in sandbox_result.truncation_reasons:
+                    record_truncation(reason)
+                return sandbox_result
 
             # Set up stdout/stderr capture BEFORE ast.parse/compile so that
             # SyntaxWarnings (e.g. invalid escape sequences in LLM-generated code)
@@ -1565,9 +1701,14 @@ class ActorRuntime:
             if not isinstance(sys.stdin, BlockedStdinWrapper):
                 sys.stdin = BlockedStdinWrapper(sys.stdin)
 
+            # Use the execution-cell filename for parser diagnostics as well as
+            # compiled runtime tracebacks.
+            cell_filename = f"Cell In[{execution_count}]"
+
             # Parse AST to find method definitions
+            source_code = code
             try:
-                tree = ast.parse(code)
+                tree = ast.parse(code, filename=cell_filename)
             except SyntaxError as e:
                 result = ExecutionResult(stdout="", error=e, defined_methods={})
                 return result
@@ -1616,8 +1757,6 @@ class ActorRuntime:
             captured_locals: dict[str, Any] = {}
             wrapper_line_offset = 0  # Lines of wrapper before user code (for error adjustment)
 
-            # Use Jupyter-style "Cell In[N]" as filename for better error messages
-            cell_filename = f"Cell In[{execution_count}]"
             try:
                 if wrap_in_function:
                     # REPL mode: wrap entire code in async function to capture return
@@ -1711,7 +1850,23 @@ class ActorRuntime:
                     ]
                     if func_defs:
                         func_tree = ast.Module(body=func_defs, type_ignores=[])
+                        # Persisted helpers are compiled directly from the cell
+                        # AST, not through the async wrapper. Keep their source
+                        # cache aligned before decorators inspect their bodies.
+                        linecache.cache[cell_filename] = (
+                            len(source_code),
+                            None,
+                            source_code.splitlines(keepends=True),
+                            cell_filename,
+                        )
                         exec(compile(func_tree, cell_filename, "exec"), exec_globals)
+                        # The wrapper's finally block captured the wrapped
+                        # function objects. Persist the direct-compiled versions
+                        # instead so later calls use source-relative line numbers.
+                        for node in func_defs:
+                            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+                                if node.name in exec_globals:
+                                    captured_locals[node.name] = exec_globals[node.name]
 
                     # Attach source code to defined functions for has_ellipsis_body() detection
                     for method_name, method_code in method_sources.items():
@@ -1885,10 +2040,39 @@ class ActorRuntime:
                 )
                 return result
 
+        except asyncio.CancelledError as error:
+            execution_exception = error
+            # A cancelled cell still produced output up to the cancel point. Build
+            # a partial result from the buffers captured so far and append it to
+            # the exception's ``execution_results`` list, so the strategy can show
+            # the model what ran. The buffers are still open here (they close in
+            # the finally below). The cancellation itself is re-raised unchanged.
+            # Nested execute_code calls see the same exception and each appends
+            # its own result, innermost first, so the frame that just unwound is
+            # always the last entry.
+            if stdout_buffer is not None and stderr_buffer is not None:
+                results = getattr(error, "execution_results", None)
+                if results is None:
+                    results = []
+                    error.execution_results = results  # type: ignore[attr-defined]
+                results.append(
+                    ExecutionResult(
+                        stdout=stdout_buffer.getvalue(),
+                        stderr=stderr_buffer.getvalue(),
+                        cancelled=True,
+                        images=media_buffer.blocks if media_buffer is not None else [],
+                    )
+                )
+            raise
         finally:
             # NOTE: We do NOT restore sys.stdout/sys.stderr here.
             # The ContextVarStream wrappers are transparent (fall through to original
             # when no buffer is set) and must persist for parallel async executions.
+
+            if isinstance(stdout_buffer, TruncatingStringIO) and stdout_buffer.was_truncated:
+                from nooa.agentdoc._format_observation import record_truncation
+
+                record_truncation("capture.max_stdout")
 
             # Reset task-local stdout/stderr buffers and stdin blocking (only if they were set)
             if stdout_token is not None:
@@ -1919,7 +2103,7 @@ class ActorRuntime:
                 agent=self.agent,
                 code=code,
                 result=result,
-                exception=result.error if result else None,
+                exception=result.error if result else execution_exception,
                 execution_id=execution_id,
                 tool_call_id=tool_call_id,  # LLM's tool call ID for trace correlation
             )
@@ -1967,6 +2151,14 @@ class ActorRuntime:
         if hasattr(strategy, "prefill") and getattr(strategy, "prefill") is not None:  # noqa: B009
             strategy_kwargs["has_prefill"] = True
 
+        llm_model_name = _current_llm_model_name_var.get()
+        llm_selection_source = _current_llm_selection_source_var.get()
+        llm_kwargs = {}
+        if llm_model_name is not None:
+            llm_kwargs["llm.model_name"] = llm_model_name
+        if llm_selection_source is not None:
+            llm_kwargs["llm.selection_source"] = llm_selection_source
+
         # Call generation hooks (skip for non-traceable strategies like TemplateStrategy)
         should_trace = strategy.traceable
         hook_context = None
@@ -1979,6 +2171,7 @@ class ActorRuntime:
                 generation_id=generation_id,
                 parent_generation_id=parent_generation_id,
                 agent_call_id=self._agent_call_id,
+                **llm_kwargs,
                 **strategy_kwargs,  # Add strategy config parameters
             )
 
@@ -1993,7 +2186,7 @@ class ActorRuntime:
             # Execute nested strategy directly (we're already in a generation session)
             result = await strategy.execute(self, call)
             return result
-        except Exception as e:
+        except BaseException as e:
             exception_caught = e
             raise
         finally:
@@ -2544,13 +2737,25 @@ class ActorRuntime:
         method_name: str,
     ) -> Any:
         """Execute a method that needs LLM generation."""
+        base_method = getattr(method, "__func__", method)
+        try:
+            method_params = inspect.signature(method).parameters
+        except (TypeError, ValueError):
+            method_params = {}
+        has_user_llm_param = "llm" in method_params
+        has_user_decision_model_param = "decision_model" in method_params
+
         # Extract framework parameters (don't pass to generated method)
         call_strategy = kwargs.pop("_strategy", None)
-        call_llm = kwargs.pop("llm", None)
+        call_llm = kwargs.pop("llm", _MISSING) if not has_user_llm_param else _MISSING
+        call_decision_model = (
+            kwargs.pop("decision_model", _MISSING)
+            if not has_user_decision_model_param
+            else _MISSING
+        )
         call_session_locals = kwargs.pop("_session_locals", None)
 
         # Get strategy with priority: call-level > decorator > default
-        base_method = getattr(method, "__func__", method)
         decorator_strategy = getattr(base_method, "_plan_strategy", None)
 
         # DEBUG: Log strategy retrieval for nested method debugging
@@ -2570,22 +2775,110 @@ class ActorRuntime:
         from nooa.strategies import get_default_strategy
 
         strategy = call_strategy or decorator_strategy or get_default_strategy()
+        uses_decision_model = bool(
+            isinstance(strategy, GenerationStrategyABC) and strategy.uses_decision_model
+        )
 
         # Resolve LLM client with priority: call-level > @strategy decorator > agent's default.
-        # A @strategy(llm=...) value may be a callable resolved against the agent
-        # instance; only invoke it when it would actually be used, so a call-level
-        # override doesn't trigger someone else's resolver side effects.
-        if call_llm is not None:
-            llm_client = call_llm
-        else:
-            plan_llm = getattr(base_method, "_plan_llm", None)
-            if plan_llm is not None:
-                from nooa.method_llm import resolve_method_llm
+        # A call-level or @strategy(llm=...) value may be a callable resolved against
+        # the agent instance; only invoke it when it would actually be used, so a
+        # call-level override doesn't trigger someone else's resolver side effects.
+        plan_llm = getattr(base_method, "_plan_llm", None)
+        plan_decision_model = getattr(base_method, "_plan_decision_model", None)
+        decision_model = None
+        decision_model_selection_source: str | None = None
+        if call_decision_model is not _MISSING and call_decision_model is not None:
+            if not uses_decision_model:
+                raise TypeError(
+                    f"decision_model= applies only to DecideStrategy methods; "
+                    f"'{method_name}' uses {type(strategy).__name__}."
+                )
+        if uses_decision_model:
+            # Same precedence as llm=: call site, then decorator, then agent.
+            if call_decision_model is not _MISSING and call_decision_model is not None:
+                from nooa.decisions.resolution import resolve_method_decision_model
 
-                plan_llm = resolve_method_llm(plan_llm, self.agent, method_name)
-            llm_client = plan_llm or getattr(self.agent, "_llm", None)
-        if llm_client is None:
-            raise RuntimeError(f"No LLM client available for {method_name}")
+                decision_model = resolve_method_decision_model(
+                    call_decision_model,
+                    self.agent,
+                    method_name,
+                    origin="call argument decision_model=",
+                )
+                decision_model_selection_source = "call_site"
+            elif plan_decision_model is not None:
+                from nooa.decisions.resolution import resolve_method_decision_model
+
+                decision_model = resolve_method_decision_model(
+                    plan_decision_model,
+                    self.agent,
+                    method_name,
+                )
+                decision_model_selection_source = "method_decision_model"
+            else:
+                decision_model = getattr(self.agent, "_decision_model", None)
+                if decision_model is not None:
+                    decision_model_selection_source = "agent_decision_model"
+            if decision_model is None:
+                from nooa.decisions.types import DecisionModelRequiredError
+
+                raise DecisionModelRequiredError(
+                    f"'{method_name}' uses DecideStrategy but no decision model is "
+                    "configured. Pass decision_model= on the agent, the @strategy "
+                    "decorator, or the call."
+                )
+        if decision_model is not None:
+            if not callable(getattr(decision_model, "adecide", None)):
+                raise TypeError(
+                    f"The decision_model for '{method_name}' must implement adecide(), got "
+                    f"{type(decision_model).__name__}."
+                )
+            llm_client = getattr(self.agent, "_llm", None)
+            llm_selection_source = "agent_default"
+            decision_mode = "native"
+            active_model_name = getattr(decision_model, "model", "") or ""
+        elif call_llm is not _MISSING and call_llm is not None:
+            from nooa.method_llm import resolve_method_llm
+
+            # Call-site overrides accept the same spellings as the decorator
+            # (client, alias string cached per instance, or callable resolved
+            # against the agent), resolved by the same shared path. The origin
+            # names the call site so a typo'd alias or a raising resolver
+            # points at the caller's line, not the decorator's.
+            llm_client = resolve_method_llm(
+                call_llm,
+                self.agent,
+                method_name,
+                origin="call argument llm=",
+            )
+            llm_selection_source = "call_site"
+            decision_mode = None
+            active_model_name = getattr(llm_client, "model", "") or ""
+        elif plan_llm is not None:
+            from nooa.method_llm import resolve_method_llm
+
+            llm_client = resolve_method_llm(plan_llm, self.agent, method_name)
+            llm_selection_source = "decorator"
+            decision_mode = None
+            active_model_name = getattr(llm_client, "model", "") or ""
+        else:
+            llm_client = getattr(self.agent, "_llm", None)
+            llm_selection_source = "agent_default"
+            decision_mode = None
+            active_model_name = getattr(llm_client, "model", "") or ""
+        if llm_client is None and decision_model is None:
+            raise RuntimeError(
+                f"No LLM client available for {method_name}. A decision-only agent "
+                "can run only DecideStrategy methods; pass llm=... for other strategies."
+                if getattr(self.agent, "_decision_model", None) is not None
+                else f"No LLM client available for {method_name}"
+            )
+        if llm_client is not None and not callable(getattr(llm_client, "acall", None)):
+            raise TypeError(
+                f"The effective LLM for '{method_name}' is incompatible with "
+                f"{type(strategy).__name__}: expected acall(), got "
+                f"{type(llm_client).__name__}."
+            )
+        llm_model_name = getattr(llm_client, "model", "") or ""
 
         # Resolve truncation config: method-level @strategy(truncation=...) > agent-level
         method_truncation = getattr(base_method, "_strategy_truncation", None)
@@ -2620,6 +2913,27 @@ class ActorRuntime:
         # Call generation hooks (skip for non-traceable strategies like TemplateStrategy)
         should_trace = strategy.traceable if isinstance(strategy, GenerationStrategyABC) else True
         hook_context = None
+        if uses_decision_model:
+            model_attributes: dict[str, Any] = {"decision.mode": decision_mode}
+            if decision_model is not None:
+                model_attributes.update(
+                    {
+                        "decision.model_name": active_model_name,
+                        "decision.selection_source": decision_model_selection_source,
+                    }
+                )
+            else:
+                model_attributes.update(
+                    {
+                        "llm.model_name": active_model_name,
+                        "llm.selection_source": llm_selection_source,
+                    }
+                )
+        else:
+            model_attributes = {
+                "llm.model_name": active_model_name,
+                "llm.selection_source": llm_selection_source,
+            }
         if should_trace:
             hook_context = call_before_hook(
                 "before_generation",
@@ -2629,6 +2943,7 @@ class ActorRuntime:
                 generation_id=generation_id,
                 parent_generation_id=parent_generation_id,
                 agent_call_id=self._agent_call_id,
+                **model_attributes,
                 **strategy_kwargs,  # Add strategy config parameters
             )
 
@@ -2647,32 +2962,24 @@ class ActorRuntime:
             # Strategy must be a GenerationStrategy instance
             if isinstance(strategy, GenerationStrategyABC):
                 # Use strategy's execute() method directly
-                from nooa.strategies.current_call import CurrentCall
+                from nooa.strategies.current_call import (
+                    CurrentCall,
+                    merge_call_arguments,
+                    signature_parameter_names,
+                )
+
+                sig = inspect.signature(method)
+                merged_kwargs = merge_call_arguments(sig, args, kwargs)
 
                 # Expand {placeholders} in method docstring using call arguments
                 raw_docstring = getattr(method, "__doc__", None)
                 expanded_docstring = None
                 if raw_docstring:
-                    # Build context: map parameter names to argument values
-                    sig = inspect.signature(method)
-                    param_names = list(sig.parameters.keys())[1:]  # Skip 'self'
-                    arg_context = dict(zip(param_names, args, strict=False))
-                    arg_context.update(kwargs)
                     expanded_docstring = await self.expand_variables(
-                        raw_docstring, extra_context=arg_context, error_mode="silent"
+                        raw_docstring, extra_context=merged_kwargs, error_mode="silent"
                     )
 
                 # Build CurrentCall for the strategy
-                # Map positional args to parameter names for kwargs (like from_method does)
-                sig = inspect.signature(method)
-                param_names = [p for p in sig.parameters.keys() if p != "self"]
-                merged_kwargs = dict(kwargs)
-                for i, value in enumerate(args):
-                    if i < len(param_names):
-                        param_name = param_names[i]
-                        if param_name not in merged_kwargs:
-                            merged_kwargs[param_name] = value
-
                 # Extract return type annotation — use get_type_hints to
                 # resolve PEP 563 stringified annotations.
                 return_type = None
@@ -2693,10 +3000,8 @@ class ActorRuntime:
 
                 # Use the call_id already pushed by the wrapper so events added
                 # during this call have metadata["call_id"] matching the agent
-                # call stack.  NOTE: strategies may later mutate call.id (e.g.
-                # CodeActStrategy sets it to the task event tag), so
-                # _prepare_context uses _agent_call_id (the stack value) for
-                # EventQuery.current_call() filtering, not current_call.id.
+                # call stack and runtime.current_call.id. CodeAct stores its
+                # display-only Task event tag separately on call.task_tag.
                 call_id = self._agent_call_id or str(uuid4())
                 call = CurrentCall(
                     id=call_id,
@@ -2713,9 +3018,12 @@ class ActorRuntime:
                     return_type=return_type,
                     pre_ellipsis_code=pre_ellipsis_code,
                     session_locals=call_session_locals,
-                    # Authoritative ordered names from the live signature (excludes
-                    # 'self') so format_parameters_as_code never re-parses the string.
-                    param_names=[p for p in sig.parameters if p != "self"],
+                    # Preserve Annotated parameter overrides on top-level calls,
+                    # just as the nested method wrapper does.
+                    param_specs=CurrentCall.from_method(method).param_specs,
+                    # Same live-signature names as from_method (excludes 'self'), so
+                    # format_parameters_as_code never re-parses the string.
+                    **signature_parameter_names(sig),
                 )
 
                 # Store current call context in context vars for RuntimeServices.generate()
@@ -2723,6 +3031,11 @@ class ActorRuntime:
                 call_token = _current_call_var.set(call)
                 method_token = _current_method_var.set(method)
                 llm_token = _current_llm_var.set(llm_client)
+                decision_model_token = _current_decision_model_var.set(decision_model)
+                llm_model_name_token = _current_llm_model_name_var.set(llm_model_name)
+                llm_selection_source_token = _current_llm_selection_source_var.set(
+                    llm_selection_source
+                )
                 truncation_token = _current_truncation_config_var.set(resolved_truncation)
                 event_format_token = _current_event_format_var.set(
                     resolved_truncation.event_format.model_dump()
@@ -2763,13 +3076,16 @@ class ActorRuntime:
                     _current_call_var.reset(call_token)
                     _current_method_var.reset(method_token)
                     _current_llm_var.reset(llm_token)
+                    _current_decision_model_var.reset(decision_model_token)
+                    _current_llm_model_name_var.reset(llm_model_name_token)
+                    _current_llm_selection_source_var.reset(llm_selection_source_token)
                     _current_truncation_config_var.reset(truncation_token)
                     _current_event_format_var.reset(event_format_token)
                     _decorator_context_var.reset(decorator_ctx_token)
                     _decorator_events_var.reset(decorator_evt_token)
             else:
                 raise TypeError(f"Expected GenerationStrategy instance, got {type(strategy)}")
-        except Exception as e:
+        except BaseException as e:
             exception_caught = e
             raise
         finally:
@@ -2794,6 +3110,7 @@ class ActorRuntime:
                 _hm_ctx.__exit__(None, None, None)
 
             # Call after generation hook
+            decision_trace_attributes = self._decision_trace_attributes.pop(generation_id, {})
             if should_trace:
                 call_after_hook(
                     "after_generation",
@@ -2803,6 +3120,7 @@ class ActorRuntime:
                     result=result,
                     exception=exception_caught,
                     generation_id=generation_id,
+                    **decision_trace_attributes,
                 )
 
             # Restore previous context variable value
@@ -2947,7 +3265,30 @@ class ActorRuntime:
         # Apply the resolved cache (the only side effect)
         self.agent.context_manager._update_resolved(build_result.resolved_cache)
 
+        # Hidden APIs must not leave even an empty guidance tag in the prompt.
+        # Filter the resolved blocks without mutating persistent registration,
+        # so a later visibility change can expose the guidance again.
+        from nooa.agentdoc.visibility import is_hidden_field
+
+        if is_hidden_field(self.agent, "events"):
+            return [block for block in build_result.blocks if block.key != "events_api"]
         return build_result.blocks
+
+    def _update_context_limits(self, llm_client: Any, params: dict[str, Any]):
+        """Refresh budgets before dynamic context is rendered or a call is sent."""
+        from nooa.unifiedllm.limits import context_limits_for
+
+        fallback = self.truncation_config.response_reserve_tokens
+        limits = context_limits_for(llm_client, params, fallback_reserve=fallback)
+        if self._last_context_stats is not None:
+            self._last_context_stats = self._last_context_stats.model_copy(
+                update={
+                    "model_context_window": limits.context_window,
+                    "reserved_output_tokens": limits.reserved_output_tokens,
+                    "output_reserve_is_fallback": limits.reserve_is_fallback,
+                }
+            )
+        return limits
 
     async def _build_messages(
         self,
@@ -2957,6 +3298,8 @@ class ActorRuntime:
         *,
         tools: list[Any] | None = None,
         max_output_tokens: int | None = None,
+        request_params: dict[str, Any] | None = None,
+        llm_client: Any = None,
     ) -> list[dict[str, Any]]:
         """Build messages for LLM API.
 
@@ -2969,32 +3312,29 @@ class ActorRuntime:
         stay as render_context fallback until provider usage is written after a
         successful call.
 
-        ``max_output_tokens`` is the completion budget of the upcoming call
-        (``kwargs["max_tokens"]`` at the generate() call site, or the reduced
-        value during context-window recovery). It is reserved out of the model
-        window for budgeting and utilization: the provider rejects any request
-        where prompt + completion budget exceeds the window, so the usable
-        input window is ``context_window - reserve``. When the call does not
-        set ``max_tokens`` explicitly, providers shrink the completion budget
-        to fit and no hard reserve applies — we then fall back to the
-        configured ``TruncationConfig.response_reserve_tokens`` as a planning
-        reserve (0 disables).
+        UnifiedLLM resolves the effective output allowance from client settings,
+        the selected reasoning level and ``request_params``. The usable window
+        is ``context_window - reserve``. Only an unknown cap falls back to the
+        truncation configuration's explicitly labelled planning reserve.
+        ``max_output_tokens`` is retained for direct callers of this helper.
         """
+        llm_client = llm_client if llm_client is not None else _current_llm_var.get()
+        params = dict(request_params or {})
+        if max_output_tokens is not None:
+            params["max_tokens"] = max_output_tokens
+        limits = self._update_context_limits(llm_client, params)
         hm = get_harness_metrics()
         with hm.timer("time_prepare_context"):
             blocks = await self._prepare_context(method, call_args, call_kwargs)
         tc = self.agent._truncation
-        llm_client = _current_llm_var.get()
 
         effective_context_limit = tc.max_context_tokens
-        ctx_window = getattr(llm_client, "context_window", None)
+        ctx_window = limits.context_window
 
         # Output-token reserve (see docstring). Per-call max_tokens is the
         # binding constraint when set; otherwise the configured planning
         # reserve.
-        reserved_output = max_output_tokens
-        if not reserved_output:
-            reserved_output = tc.response_reserve_tokens or None
+        reserved_output = limits.reserved_output_tokens
 
         # Default (unconfigured) context budget: up to half the USABLE window
         # (model window minus the output reserve).
@@ -3020,18 +3360,15 @@ class ActorRuntime:
             return round(len(text) * ratio)
 
         with hm.timer("time_render_context"):
-            provider_formatter = _resolve_provider_formatter(
-                llm_client, self.agent.render_config.provider_formatter
-            )
             result = render_context(
                 blocks,
                 block_formatter=self.agent.render_config.block_formatter,
-                provider_formatter=provider_formatter,
+                provider_formatter=self.agent.render_config.provider_formatter,
                 context_limit=effective_context_limit,
                 count_tokens=count_tokens,
                 event_format=tc.event_format,
                 event_format_resolver=self._event_format_for_event,
-                model_context_window=getattr(llm_client, "context_window", None),
+                model_context_window=ctx_window,
                 reserved_output_tokens=reserved_output,
             )
 
@@ -3060,6 +3397,8 @@ class ActorRuntime:
         # the call. Until then, keep render_context's local estimate as a fallback
         # for diagnostics and context-window error recovery.
         messages = result.output
-        self._last_context_stats = result.stats
+        self._last_context_stats = result.stats.model_copy(
+            update={"output_reserve_is_fallback": limits.reserve_is_fallback}
+        )
         self._last_prompt_tokens_actual = None
         return messages

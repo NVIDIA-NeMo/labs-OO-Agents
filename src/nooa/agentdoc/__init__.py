@@ -1,24 +1,29 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""agentdoc — runtime Python documentation for Python objects.
+"""Turn live Python objects into prompt-ready API documentation.
 
-Two-step mental model:
+Show an agent what an object can do—not just what it contains::
 
-  1. spec() — specify how the type renders: descriptions, visibility, hints.
-  2. doc()  — get the documentation: the API contract, ready for a prompt.
+    from typing import Annotated
 
-Quick start:
+    from nooa.agentdoc import doc, hidden, pformat, spec
 
-    from nooa.agentdoc import spec, hidden, doc, pformat, truncating_pformat
+    class Assistant:
+        api_key: Annotated[str, hidden] = ""
+        name: Annotated[str, spec(description="Display name")] = "Ada"
 
-    class MyAgent:
-        api_key: Annotated[str, hidden] = ""          # excluded from documentation
-        label: Annotated[str, spec(description="Display name")] = "agent"
+        def greet(self, person: str) -> str:
+            \"""Greet a person by name.\"""
 
-    agent = MyAgent()
-    doc(MyAgent)   # → API contract (type view)
-    doc(agent)     # → API contract with current values substituted
-    pformat(agent) # → compact repr: MyAgent(label='agent')
+    assistant = Assistant()
+    assistant.locale = "en-US"
+
+    doc(Assistant)      # declared API and defaults
+    doc(assistant)      # the same API, enriched with live state
+    pformat(assistant)  # compact value view
+
+Use ``spec()`` and ``hidden`` to shape the contract, ``doc()`` to reveal it,
+and ``pformat()`` when values alone are enough.
 """
 
 import io
@@ -37,6 +42,8 @@ from nooa.agentdoc.core import doc
 from nooa.agentdoc.doc_config import DocConfig
 
 __submodules__ = ["ext", "introspect", "visibility", "adapters"]
+# Keep doc(agentdoc) as a capability map; individual callables provide details on demand.
+__agentdoc_concise_members__ = True
 
 
 def truncating_pformat(
@@ -47,15 +54,9 @@ def truncating_pformat(
     ] = None,
     **kwargs: Any,
 ) -> str:
-    """Format *obj* as a string. Strings pass through verbatim; non-strings go
-    through :func:`pformat` with the supplied structural kwargs.
+    """Format a value, with a hard total-size cap for non-string objects.
 
-    Per-value bounds (``max_string``, ``max_length``, ``max_depth``) come from
-    ``kwargs``.  ``max_chars`` is an independent hard cap on the total rendered
-    output for non-string objects via :class:`TruncatingStringIO`.
-
-    Raises:
-        ValueError: if ``max_chars`` is set and <= 0.
+    Strings pass through unchanged. Other options are forwarded to ``pformat()``.
     """
     if max_chars is not None and max_chars <= 0:
         raise ValueError(f"truncating_pformat max_chars must be > 0 or None, got {max_chars}")
@@ -88,16 +89,10 @@ def pformat(
     ] = "repr",
     unquote_strings: Annotated[bool, "Untruncated strings rendered verbatim"] = False,
 ) -> str:
-    """Format an object as a string with smart truncation.
+    """Render a compact, value-focused representation.
 
-    Drop-in replacement for ``rich.pretty.pformat()``.
-    For user-defined instances, ``hidden`` fields are automatically excluded.
-    Respects ``@spec(expand=False)`` on field types — shown as ``ClassName()`` rather than expanded.
-
-    ``console`` and ``indent_guides`` are accepted for Rich API compatibility but have no effect.
-
-    To cap total output size (preventing OOM on huge objects), use :func:`truncating_pformat`
-    which applies a hard ``max_chars`` limit via :class:`TruncatingStringIO`.
+    Hidden fields are omitted and custom ``__repr__`` methods are honored. Use
+    ``doc()`` for an object's API, or ``truncating_pformat()`` for a hard size cap.
     """
     # console and indent_guides are intentionally ignored for Rich compatibility
     del console, indent_guides
@@ -146,14 +141,7 @@ def pprint(
         str, "Instance format: 'repr' for repr-style, 'type' for type structure"
     ] = "repr",
 ) -> None:
-    """Pretty-print an object with smart truncation. Prints to stdout.
-
-    Drop-in replacement for ``rich.pretty.pprint()``.
-    Writes directly to ``sys.stdout`` via stream-based formatting so that
-    stdout capture (via ``ContextVarStream``) bounds output during formatting.
-
-    ``console`` and ``indent_guides`` are accepted for Rich API compatibility but have no effect.
-    """
+    """Print the compact, value-focused representation produced by ``pformat()``."""
     # console and indent_guides are intentionally ignored for Rich compatibility
     del console, indent_guides
 

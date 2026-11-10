@@ -82,9 +82,10 @@ class TestResponsesClientBasic:
         )
 
         assert isinstance(response, LLMResponse)
-        assert isinstance(response.content, SimpleResponse)
-        assert "Paris" in response.content.answer or "paris" in response.content.answer.lower()
-        assert 0 <= response.content.confidence <= 1
+        assert isinstance(response.content, str)
+        assert isinstance(response.parsed, SimpleResponse)
+        assert "Paris" in response.parsed.answer or "paris" in response.parsed.answer.lower()
+        assert 0 <= response.parsed.confidence <= 1
 
     def test_tool_calling(self, client):
         """Test that the model can call tools."""
@@ -143,8 +144,9 @@ class TestResponsesClientAsync:
         )
 
         assert isinstance(response, LLMResponse)
-        assert isinstance(response.content, SimpleResponse)
+        assert isinstance(response.content, str)
+        assert isinstance(response.parsed, SimpleResponse)
         # Check that we got a valid structured response with non-empty answer
         # (LLM responses can be flaky, so we just verify structure, not exact content)
-        assert response.content.answer is not None
-        assert len(response.content.answer) > 0
+        assert response.parsed.answer is not None
+        assert len(response.parsed.answer) > 0
