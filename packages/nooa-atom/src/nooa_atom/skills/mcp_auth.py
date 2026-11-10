@@ -21,7 +21,6 @@ answers 401. This module supplies the three pieces it asks for:
 from __future__ import annotations
 
 import asyncio
-import fcntl
 import inspect
 import json
 import os
@@ -56,6 +55,7 @@ from mcp.shared.auth import OAuthClientInformationFull, OAuthClientMetadata, OAu
 from mcp.types import ErrorData
 from pydantic import AnyHttpUrl
 
+from nooa._platform import require_posix
 from nooa.mcp import MCPBaseClient
 from nooa.paths import get_user_dir
 
@@ -162,6 +162,9 @@ class FileTokenStorage:
 
     @contextmanager
     def _transaction(self):
+        import fcntl
+
+        require_posix("The MCP sign-in token cache")
         fd = self._open_lock()
         try:
             fcntl.flock(fd, fcntl.LOCK_EX)
@@ -173,6 +176,9 @@ class FileTokenStorage:
     async def _async_transaction(self):
         # No blocking executor waiter survives cancellation. Locks cover only
         # local read/derive/replace, never network I/O or the human callback.
+        import fcntl
+
+        require_posix("The MCP sign-in token cache")
         fd = self._open_lock()
         try:
             while True:

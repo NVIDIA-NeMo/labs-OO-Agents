@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import fcntl
 import json
 import logging
 import os
@@ -17,6 +16,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import RLock
 
+from nooa._platform import require_posix
 from nooa.runtime.event_manager import EventManager
 from nooa.storage import read_lock_owner
 from nooa.storage.sqlite import (
@@ -89,6 +89,9 @@ def _lock_is_held(lock_path: Path) -> bool:
     in the file; a probe must not, or the other side of a shared mount would
     read the prober as the owner.
     """
+    import fcntl
+
+    require_posix("Session locks")
     try:
         fd = os.open(lock_path, os.O_RDONLY)
     except OSError:

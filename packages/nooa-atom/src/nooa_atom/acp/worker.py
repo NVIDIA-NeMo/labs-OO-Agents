@@ -28,6 +28,7 @@ from collections.abc import Callable
 from contextlib import suppress
 from typing import Any
 
+from nooa._platform import require_posix
 from nooa_atom.acp.framing import FRAME_LIMIT
 from nooa_atom.acp.server import serve_connection
 
@@ -78,7 +79,7 @@ def start_parent_watchdog(
     *,
     interval: float = 0.5,
     getppid: Callable[[], int] = os.getppid,
-    killpg: Callable[[int, int], None] = os.killpg,
+    killpg: Callable[[int, int], None] | None = None,
 ) -> threading.Thread:
     """Kill this process group when the parent process changes (the router died).
 
@@ -89,6 +90,9 @@ def start_parent_watchdog(
     (the router starts it with ``start_new_session=True``), so group 0 is
     the worker and anything it started.
     """
+    require_posix("The ACP worker's parent watchdog")
+    # ``os.killpg`` is looked up here, not as a default: native Windows lacks it.
+    killpg = killpg or os.killpg
     parent = getppid()
 
     def watch() -> None:
