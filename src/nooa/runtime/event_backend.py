@@ -11,10 +11,13 @@ The EventManager uses a backend for storage while handling:
 - Query convenience methods (search, since, for_call, etc.)
 """
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from typing import Any, Protocol, runtime_checkable
 
 from nooa.context_blocks import EventBase, EventStatus
+from nooa.context_blocks.roles import Role
+from nooa.events import Summary
 
 
 def _tag_max_num(tag: str) -> int:
@@ -30,6 +33,58 @@ def _tag_max_num(tag: str) -> int:
         return int(tag)
     except ValueError:
         return 0
+
+
+@contextmanager
+def tagged_batch(
+    events: list[EventBase], backend: Any, *, contains_id: Callable[[str], bool] | None = None
+) -> Iterator[list[str]]:
+    """Validate a fresh batch, tag it, yield the tags; reset the tags if anything fails.
+
+    Validation covers the whole batch before tags, storage or counters change:
+    only fresh, durable, non-summary events, no object twice, no duplicate ID and
+    no ID already stored (``contains_id(id)``, else ``backend.get_by_id``). The
+    tags continue ``backend._next_tag_num`` and are assigned with each model's
+    own setter. If a setter or the ``with`` body raises, every tag assigned is
+    set back to None (best effort) and the error propagates, so the same inputs
+    can be retried. The caller stores the events and advances its counters
+    inside the block, after the writes succeed.
+    """
+    objects: set[int] = set()
+    identities: set[str] = set()
+    for event in events:
+        if not isinstance(event, EventBase):
+            raise ValueError("record_batch requires fresh durable events")
+        if (
+            event._role == Role.RUNTIME_EVENT
+            or isinstance(event, Summary)
+            or event.status != EventStatus.ACTIVE
+            or event.tag is not None
+            or id(event) in objects
+            or event.id in identities
+            or (
+                contains_id(event.id)
+                if contains_id is not None
+                else backend.get_by_id(event.id) is not None
+            )
+        ):
+            raise ValueError("record_batch requires fresh events with unique objects and event IDs")
+        objects.add(id(event))
+        identities.add(event.id)
+    tags = [str(backend._next_tag_num + i) for i in range(len(events))]
+    assigned: list[EventBase] = []
+    try:
+        for tag, event in zip(tags, events, strict=True):
+            assigned.append(event)
+            event.tag = tag
+        yield tags
+    except BaseException:
+        for event in assigned:
+            try:
+                event.tag = None
+            except Exception:  # noqa: BLE001 - best effort; the original error propagates
+                pass
+        raise
 
 
 @runtime_checkable
@@ -239,6 +294,18 @@ class InMemoryBackend:
         self._tag_to_event[tag] = event
         self._active_tags.append(tag)
         self._next_tag_num = max(self._next_tag_num, _tag_max_num(tag) + 1)
+
+    def append_batch(self, events: list[EventBase]) -> list[str]:
+        """Append fresh events without observers (single-loop memory backend)."""
+        # Tagged with the model's own setter first; a failing setter stores nothing.
+        with tagged_batch(events, self) as tags:
+            # Publish all containers at once rather than incrementally calling store().
+            stored = [*self._events, *events]
+            mapping = {**self._tag_to_event, **dict(zip(tags, events, strict=True))}
+            active = [*self._active_tags, *tags]
+            self._events, self._tag_to_event, self._active_tags = stored, mapping, active
+            self._next_tag_num += len(events)
+        return tags
 
     def get(self, tag: str) -> EventBase | None:
         return self._tag_to_event.get(tag)

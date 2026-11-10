@@ -211,3 +211,19 @@ def strategy(
         return wrapper
 
     return decorator
+
+
+def _cell_names() -> dict[str, Any]:
+    """The strategy decorator and the strategy classes a generated method can pick."""
+    from nooa.strategies import cell_namespace_names
+
+    return {"strategy": strategy, **cell_namespace_names()}
+
+
+def _register_cell_names() -> None:
+    from nooa.runtime.namespace_providers import register_namespace_provider
+
+    register_namespace_provider("strategies", _cell_names)
+
+
+_register_cell_names()

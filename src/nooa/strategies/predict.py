@@ -89,6 +89,9 @@ class PredictStrategy(GenerationStrategy):
     def get_block_overrides(self) -> dict[str, str | DynamicContext | None]:
         return {
             "strategy_prompt": DynamicContext("strategy.strategy_instructions(runtime)"),
+            # One structured response, no REPL: the events guidance tells the
+            # model to run print(doc(self.events)), which it cannot do here.
+            "events_api": None,
         }
 
     @strategy(TemplateStrategy())

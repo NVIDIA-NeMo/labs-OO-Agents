@@ -236,3 +236,65 @@ def test_query_filters_execution_status_and_limit():
 
     assert len(failures) == 1
     assert failures[0].execution_count == 3
+
+
+def _agent_with_tasks(count: int = 4):
+    agent = _TestAgent()
+    tags = [agent.event_manager.add(Task(prompt=f"task {n}")) for n in range(count)]
+    return agent, tags
+
+
+@pytest.mark.parametrize(
+    "bad",
+    ["python_cell:0#188d", "prefill_37e22754", 'sys tag="1"', '<sys tag="1">', "", "abc"],
+)
+def test_collapse_invalid_tag_explains_valid_tags_without_changing_history(bad):
+    agent, tags = _agent_with_tasks()
+    before = agent.events.keys()
+    with pytest.raises(ValueError) as error:
+        agent.events.collapse(bad, tags[-1], "must not be written")
+    message = str(error.value)
+    assert '<sys tag="N">' in message
+    assert '"2..40"' in message
+    assert "self.events.keys()" in message
+    assert agent.events.keys() == before
+
+
+def test_collapse_doc_says_synchronous_and_tag_format():
+    import inspect
+
+    from nooa.runtime.events import EventsApi
+
+    doc = inspect.getdoc(EventsApi.collapse)
+    assert doc.splitlines()[0].endswith("Synchronous: do not await.")
+    assert '<sys tag="N">' in doc
+    assert not inspect.iscoroutinefunction(EventsApi.collapse)
+
+
+def test_collapse_hint_names_the_real_parameters():
+    """The context_usage compaction hint (shown on every turn) names collapse()'s
+    real parameters, and filled in with tags it runs."""
+    import inspect
+
+    from nooa.context_blocks.models import ContextWindowStats
+    from nooa.runtime.events import EventsApi
+
+    rendered = ContextWindowStats(
+        context_blocks_count=1,
+        events_count=1,
+        context_blocks_chars=1,
+        events_chars=1,
+        prompt_tokens=1_000,
+        model_context_window=100_000,
+    ).format()
+    hint = "self.events.collapse(start_tag, end_tag, summary_text=...)"
+    assert f"Compact history: {hint}" in rendered
+    params = list(inspect.signature(EventsApi.collapse).parameters)
+    assert params[1:4] == ["start_tag", "end_tag", "summary_text"]
+
+    agent = _TestAgent()
+    for n in range(45):
+        agent.event_manager.add(Task(prompt=f"task {n}"))
+    call = hint.replace("start_tag", '"2"').replace("end_tag", '"40"').replace("...", '"recap"')
+    result = eval(call, {"self": agent})  # noqa: S307 - fixed, test-owned string
+    assert result == "2..40"

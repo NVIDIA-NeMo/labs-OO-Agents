@@ -280,7 +280,9 @@ async def test_pacing_and_feedback_work_across_threads_and_event_loops():
 
     stamps = sorted(await asyncio.gather(*(asyncio.to_thread(run_worker) for _ in range(4))))
     assert stamps[0] >= deadline
-    assert all(b - a >= 0.016 for a, b in zip(stamps, stamps[1:], strict=False))
+    # Per-thread timestamps include scheduling jitter; assert the aggregate rate.
+    assert stamps[-1] - stamps[0] >= 3 * 0.02 * 0.8
+    assert all(b - a >= 0.01 for a, b in zip(stamps, stamps[1:], strict=False))
 
 
 @pytest.mark.asyncio

@@ -3194,7 +3194,9 @@ async def run_steps(
                     record["outcome"] = "not_confirmed"
                 record.setdefault("reason", "Text baseline did not return a validated integer")
             if probe.name.startswith("media:"):
-                from ._media import exception_reason, explicitly_rejected
+                from nooa.unifiedllm.media_inputs import explicitly_rejected
+
+                from ._media import exception_reason
 
                 record.update(getattr(exc, "_connect_evidence", {}))
                 if record.get("timeout_kind"):

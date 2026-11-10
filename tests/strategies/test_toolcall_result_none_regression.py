@@ -142,6 +142,40 @@ class TestReturnResultToolCallPath:
             or "validation failed" in tc_event.result.content.lower()
         )
 
+    @pytest.mark.asyncio
+    async def test_calls_after_an_exhausted_return_result_get_a_result(self):
+        """The calls after the failing one are marked "Not executed" before the error."""
+
+        class TestAgent(Agent, llm=_TEST_LLM):
+            @strategy(CodeActStrategy(config=CodeActConfig(max_retries=1)))
+            async def get_number(self) -> int:
+                """Return an integer."""
+                ...
+
+        fake_llm = FakeLLMClient(
+            scripted_responses=[
+                _resp(
+                    "",
+                    tool_calls=[
+                        _return_result(call_id="call_bad", result="not_an_int"),
+                        _tool_call("x = 1", call_id="call_after"),
+                    ],
+                ),
+            ]
+        )
+        agent_instance = TestAgent(llm=fake_llm)
+        with pytest.raises(GenerationError):
+            await agent_instance.get_number()
+
+        after = [
+            e
+            for e in agent_instance.event_manager.values()
+            if e.event_type == "ToolCallEvent" and e.tool_call_id == "call_after"
+        ]
+        assert len(after) == 1 and after[0].result is not None
+        assert after[0].result.result_status == ResultStatus.ERROR
+        assert after[0].result.content.startswith("Not executed")
+
 
 # ---------------------------------------------------------------------------
 # 2. Inline return_result path (from within execute_python)

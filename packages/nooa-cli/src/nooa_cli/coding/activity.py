@@ -23,7 +23,12 @@ from nooa.runtime.event_manager import EventManager
 from nooa.skill import Skill
 from nooa.tools._bash_session import BashSession
 from nooa.tools._results import StreamDone, StreamEvent
-from nooa.tools.shell_tools import FileWrite, Match, ShellResult, ShellTools
+from nooa.tools.shell_tools import (
+    FileWrite,
+    Match,
+    ShellResult,
+    ShellTools,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -437,33 +442,43 @@ class ActivityShellTools(Skill):
     ) -> FileWrite:
         path = target.path if isinstance(target, Match) else target
         if not isinstance(path, str):
+            # Let ShellTools raise its wrong-argument TypeError.
             return await self._shell.replace(target, old_or_new, new)
 
-        resolved = (
-            Path(target.resolved_path) if isinstance(target, Match) else self._resolve_path(path)
-        )
         if isinstance(target, Match):
-            old_text = target.text
-            start_line = target.start
-            end_line = target.end
-        else:
-            old_text = old_or_new
-            start_line = None
-            end_line = None
-            try:
-                with resolved.open("r") as stream:
-                    content = stream.read(_MAX_EVENT_TEXT_CHARS + 1)
-                if len(content) <= _MAX_EVENT_TEXT_CHARS:
-                    offset = content.index(old_text)
-                    start_line = content.count("\n", 0, offset) + 1
-                    end_line = start_line + max(1, _line_count(old_text)) - 1
-            except (OSError, UnicodeError, ValueError):
-                pass
+            # ShellTools rejects replace(match, old, new) before anything is reported.
+            result = await self._shell.replace(target, old_or_new, new)
+            return await self._report_edit(
+                Path(target.resolved_path), target.text, result, target.start, target.end
+            )
 
+        resolved = self._resolve_path(path)
+        start_line = None
+        end_line = None
+        try:
+            with resolved.open("r") as stream:
+                content = stream.read(_MAX_EVENT_TEXT_CHARS + 1)
+            if len(content) <= _MAX_EVENT_TEXT_CHARS:
+                offset = content.index(old_or_new)
+                start_line = content.count("\n", 0, offset) + 1
+                end_line = start_line + max(1, _line_count(old_or_new)) - 1
+        except (OSError, UnicodeError, ValueError):
+            pass
+        result = await self._shell.replace(target, old_or_new, new)
+        return await self._report_edit(resolved, old_or_new, result, start_line, end_line)
+
+    async def _report_edit(
+        self,
+        resolved: Path,
+        old_text: str,
+        result: FileWrite,
+        start_line: int | None,
+        end_line: int | None,
+    ) -> FileWrite:
+        """Emit the FileEdit event for a finished replace()."""
         bounded_old = pformat(old_text, max_string=_MAX_EVENT_TEXT_CHARS, unquote_strings=True)
         old_truncated = len(old_text) > _MAX_EVENT_TEXT_CHARS
-        result = await self._shell.replace(target, old_or_new, new)
-        # replace() may re-terminate the region, so report what it wrote rather
+        # The edit may re-terminate the region, so report what it wrote rather
         # than what it was handed.
         written_text = result.new_text
         bounded_new = pformat(written_text, max_string=_MAX_EVENT_TEXT_CHARS, unquote_strings=True)
