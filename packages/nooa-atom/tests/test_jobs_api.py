@@ -877,14 +877,18 @@ async def test_a_big_run_result_keeps_the_last_20000_chars_of_each_stream(agent)
     result = item
     out = "".join(f"line {i:05d}\n" for i in range(5000))  # 55,000 chars
     err = "".join(f"err {i:05d}\n" for i in range(3000))  # 30,000 chars
-    # Each stream keeps exactly its own last 20,000 chars, after a one-line
-    # notice that names no file (there is none).
-    assert result.stdout == f"[... {55_000 - 20_000:,} chars omitted]\n" + out[-20_000:]
-    assert result.stderr == f"[... {30_000 - 20_000:,} chars omitted]\n" + err[-20_000:]
+    # Each stream keeps exactly its own last 20,000 chars (a chars TextStream
+    # with no head), after render_output's cut line: no file keeps the rest.
+    assert result.stdout == (
+        f"[... {55_000 - 20_000:,} chars omitted; full output not kept]\n" + out[-20_000:]
+    )
+    assert result.stderr == (
+        f"[... {30_000 - 20_000:,} chars omitted; full output not kept]\n" + err[-20_000:]
+    )
     for stream in (result.stdout, result.stderr):
         notice, _, kept = stream.partition("\n")
         assert len(kept) == 20_000
-        assert "full output" not in notice and "/" not in notice and ".log" not in notice
+        assert "/" not in notice and ".log" not in notice
 
 
 async def test_a_run_under_the_cap_is_not_truncated(agent):
