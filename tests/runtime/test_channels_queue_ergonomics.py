@@ -425,3 +425,181 @@ class TestIntegrationSpawnFlushReplaceRespawn:
         assert h.state == "cancelled"
 
         await qm.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# Cancellation propagation
+# ---------------------------------------------------------------------------
+
+
+async def test_shutdown_does_not_swallow_the_callers_own_cancellation():
+    """A caller cancelled inside shutdown() must stay cancelled.
+
+    ``Task.cancel()`` delegates to the future the task is awaiting, so the
+    caller's own CancelledError arrives at the same ``await self._task`` that
+    JobHandle.cancel() uses to reap the job it just cancelled.
+    """
+    qm = QueueManager()
+    qm.queue("slow")
+
+    started = asyncio.Event()
+    cleaning = asyncio.Event()
+
+    async def slow_job():
+        started.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            cleaning.set()
+            await asyncio.Future()
+            raise
+
+    qm.spawn(slow_job(), channel="slow")
+    await started.wait()
+
+    reached_end = False
+
+    async def caller():
+        nonlocal reached_end
+        await qm.shutdown()
+        reached_end = True
+
+    task = asyncio.create_task(caller())
+    await cleaning.wait()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert not reached_end
+
+
+async def test_shutdown_in_cancelled_callers_finally_finishes_all_jobs():
+    """An existing cancellation must not interrupt the caller's cleanup."""
+    qm = QueueManager()
+    handles = []
+
+    async def parked(started):
+        started.set()
+        await asyncio.Future()
+
+    for name in ("first", "second"):
+        qm.queue(name)
+        started = asyncio.Event()
+        handles.append(qm.spawn(parked(started), channel=name))
+        await started.wait()
+
+    ready = asyncio.Event()
+    cleanup_finished = False
+
+    async def caller():
+        nonlocal cleanup_finished
+        try:
+            ready.set()
+            await asyncio.Future()
+        finally:
+            await qm.shutdown()
+            cleanup_finished = True
+
+    task = asyncio.create_task(caller())
+    await ready.wait()
+    task.cancel()
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert cleanup_finished
+        assert all(h._task.done() for h in handles)
+        assert qm.jobs() == {}
+    finally:
+        for h in handles:
+            h._task.cancel()
+        await asyncio.gather(*(h._task for h in handles), return_exceptions=True)
+
+
+async def test_interrupted_shutdown_cancels_all_jobs():
+    """Slow cleanup in the first job must not prevent cancelling later jobs."""
+    qm = QueueManager()
+    qm.queue("first")
+    qm.queue("second")
+    cleaning = asyncio.Event()
+    first_started = asyncio.Event()
+    second_started = asyncio.Event()
+
+    async def slow_cleanup():
+        first_started.set()
+        try:
+            await asyncio.Future()
+        finally:
+            cleaning.set()
+            await asyncio.Future()
+
+    async def parked():
+        second_started.set()
+        await asyncio.Future()
+
+    first = qm.spawn(slow_cleanup(), channel="first")
+    second = qm.spawn(parked(), channel="second")
+    await first_started.wait()
+    await second_started.wait()
+    task = asyncio.create_task(qm.shutdown())
+    await cleaning.wait()
+    task.cancel()
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert first._task.done()
+        assert second._task.cancelled()
+        assert qm.jobs() == {}
+        await qm.shutdown()
+    finally:
+        for h in (first, second):
+            h._task.cancel()
+        await asyncio.gather(first._task, second._task, return_exceptions=True)
+
+
+async def test_race_does_not_swallow_the_callers_own_cancellation():
+    """A caller cancelled inside race() must stay cancelled.
+
+    race() cancels the losing drain tasks and awaits each one to reap it. That
+    ``await`` is where a cancellation aimed at the *caller* is delivered too, so
+    a blanket handler there cannot tell the two apart and drops the caller's.
+    """
+    qm = QueueManager()
+    fast = qm.queue("fast")
+    slow = qm.queue("slow")
+
+    started = asyncio.Event()
+    cleaning = asyncio.Event()
+
+    async def slow_to_cancel():
+        started.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            cleaning.set()
+            await asyncio.Future()
+            raise
+
+    # race() drains losers through the internal _drain_one; make the loser's
+    # cancellation slow so the caller is provably inside that await.
+    slow._drain_one = slow_to_cancel  # type: ignore[method-assign]
+
+    reached_end = False
+
+    async def caller():
+        nonlocal reached_end
+        await qm.race()
+        reached_end = True
+
+    task = asyncio.create_task(caller())
+    await started.wait()
+    fast.put("winner")  # fast wins; slow becomes a pending loser
+    await cleaning.wait()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert not reached_end
+
+    assert not fast.is_empty()
+    assert await fast.get() == "winner"
+    assert fast.is_empty()
