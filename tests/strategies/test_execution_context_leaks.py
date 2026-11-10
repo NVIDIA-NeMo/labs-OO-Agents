@@ -20,6 +20,7 @@ Three classes of leak are covered:
 
 from __future__ import annotations
 
+import linecache
 import re
 import sys
 import types
@@ -218,12 +219,24 @@ class FuncAgent(Agent, llm=_llm):
 """
 
 
+@pytest.fixture(autouse=True)
+def _register_module_function_source(monkeypatch):
+    """Provide verifiable source for the synthetic standalone generation function."""
+    filename = "<test_func_agent_module>"
+    monkeypatch.setitem(
+        linecache.cache,
+        filename,
+        (len(_MODULE_WITH_FUNCS), None, _MODULE_WITH_FUNCS.splitlines(True), filename),
+    )
+
+
 def _make_func_agent_in_fresh_module():
+    """Create a source-backed synthetic module without changing visibility assertions."""
     mod = types.ModuleType("_test_func_agent_module")
-    mod.__file__ = "<test>"
+    mod.__file__ = "<test_func_agent_module>"
     sys.modules[mod.__name__] = mod
     mod.__dict__["_llm"] = _LLM
-    exec(compile(_MODULE_WITH_FUNCS, "<test>", "exec"), mod.__dict__)
+    exec(compile(_MODULE_WITH_FUNCS, mod.__file__, "exec"), mod.__dict__)
     agent = mod.FuncAgent()  # type: ignore[attr-defined]
     return agent, mod
 
