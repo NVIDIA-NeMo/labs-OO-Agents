@@ -16,8 +16,10 @@ See: https://docs.litellm.ai/docs/completion/vision
 """
 
 import base64
+import contextlib
 import contextvars
 import io
+from collections.abc import Iterator
 from typing import Any
 
 
@@ -49,6 +51,23 @@ class _MediaBuffer:
 _media_buffer_var: contextvars.ContextVar[_MediaBuffer | None] = contextvars.ContextVar(
     "media_buffer", default=None
 )
+
+
+@contextlib.contextmanager
+def capture_media(
+    buffer: _MediaBuffer | None = None, *, max_attachments: int = 100
+) -> Iterator[_MediaBuffer]:
+    """Context manager to capture media blocks produced by show() calls.
+
+    Sets the task-local media buffer for the duration of the block and resets
+    it upon exit.
+    """
+    buf = buffer if buffer is not None else _MediaBuffer(max_attachments=max_attachments)
+    token = _media_buffer_var.set(buf)
+    try:
+        yield buf
+    finally:
+        _media_buffer_var.reset(token)
 
 
 def media_to_content_block(media: Any) -> dict[str, Any]:
