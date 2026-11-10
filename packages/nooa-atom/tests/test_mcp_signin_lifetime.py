@@ -122,6 +122,30 @@ async def test_the_response_budget_resumes_after_the_pasted_callback():
             await asyncio.sleep(1)
 
 
+async def test_each_sign_in_flow_waits_for_its_own_pasted_address():
+    # One PastedSignIn lives as long as its MCP client; a later 401 starts a
+    # second flow, which must not reuse the first flow's code and state.
+    signin = PastedSignIn(timeout=1)
+    await signin.redirect("https://auth.example/authorize?state=one")
+    assert signin.url_ready.is_set()
+    first = asyncio.create_task(signin.callback())
+    await asyncio.sleep(0)
+    signin.complete("http://localhost/callback?code=c1&state=one")
+    assert await first == ("c1", "one")
+    assert not signin.url_ready.is_set()
+    with pytest.raises(ValueError, match="no longer waiting"):
+        signin.complete("http://localhost/callback?code=between&state=x")
+
+    await signin.redirect("https://auth.example/authorize?state=two")
+    assert signin.url_ready.is_set()
+    assert signin.url == "https://auth.example/authorize?state=two"
+    second = asyncio.create_task(signin.callback())
+    await asyncio.sleep(0.02)
+    assert not second.done()  # waits for the new paste, not the old result
+    signin.complete("http://localhost/callback?code=c2&state=two")
+    assert await second == ("c2", "two")
+
+
 async def test_an_expired_callback_is_invalidated():
     signin = PastedSignIn(timeout=0.01)
     with pytest.raises(SignInTimeoutError):
