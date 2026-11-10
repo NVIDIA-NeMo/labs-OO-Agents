@@ -1,0 +1,110 @@
+{
+  "async": {
+    "calls": [
+      {
+        "api": "acompletion",
+        "kwargs": {
+          "api_base": "https://gateway.test/v1",
+          "api_key": "sk-test",
+          "client": {
+            "__client__": "AsyncOpenAI",
+            "max_retries": 0
+          },
+          "extra_headers": {
+            "x-session-affinity": "conv-1"
+          },
+          "max_retries": 0,
+          "messages": [
+            {
+              "content": "You are terse.",
+              "role": "system"
+            },
+            {
+              "content": "Hello",
+              "role": "user"
+            }
+          ],
+          "model": "openai/gpt-4o-mini",
+          "prompt_cache_key": "conv-1",
+          "temperature": 0.2
+        }
+      }
+    ],
+    "responses": [
+      {
+        "content": "Hi",
+        "finish_reason": "stop",
+        "parsed": null,
+        "parts": [
+          "AssistantText"
+        ],
+        "reasoning": null,
+        "replay_scope": "chat:openai:sha256:8a43428062692d369599bd00272fd529aa5949ba715361e20f54e63c444ccea1",
+        "tool_calls": [],
+        "usage": {
+          "cache_write_input_tokens": 0,
+          "cached_input_tokens": 0,
+          "cost_usd": 0.0,
+          "input_tokens": 11,
+          "output_tokens": 7,
+          "reasoning_tokens": 0,
+          "total_tokens": 18
+        }
+      }
+    ]
+  },
+  "sync": {
+    "calls": [
+      {
+        "api": "completion",
+        "kwargs": {
+          "api_base": "https://gateway.test/v1",
+          "api_key": "sk-test",
+          "client": {
+            "__client__": "OpenAI",
+            "max_retries": 0
+          },
+          "extra_headers": {
+            "x-session-affinity": "conv-1"
+          },
+          "max_retries": 0,
+          "messages": [
+            {
+              "content": "You are terse.",
+              "role": "system"
+            },
+            {
+              "content": "Hello",
+              "role": "user"
+            }
+          ],
+          "model": "openai/gpt-4o-mini",
+          "prompt_cache_key": "conv-1",
+          "temperature": 0.2
+        }
+      }
+    ],
+    "responses": [
+      {
+        "content": "Hi",
+        "finish_reason": "stop",
+        "parsed": null,
+        "parts": [
+          "AssistantText"
+        ],
+        "reasoning": null,
+        "replay_scope": "chat:openai:sha256:8a43428062692d369599bd00272fd529aa5949ba715361e20f54e63c444ccea1",
+        "tool_calls": [],
+        "usage": {
+          "cache_write_input_tokens": 0,
+          "cached_input_tokens": 0,
+          "cost_usd": 0.0,
+          "input_tokens": 11,
+          "output_tokens": 7,
+          "reasoning_tokens": 0,
+          "total_tokens": 18
+        }
+      }
+    ]
+  }
+}
