@@ -174,6 +174,38 @@ def test_chars_stream_spills_utf8(tmp_path: Path) -> None:
     assert text.length == 3 and text.omitted == 1
 
 
+def test_chars_spill_cut_lands_on_a_code_point(tmp_path: Path) -> None:
+    # Severin's repro (#515): max_bytes=3 used to keep b"\xc3\xa9\xc3".
+    path = tmp_path / "s2.txt"
+    stream = _stream("chars", 1, 1, spill=SpillTarget(path=str(path), max_bytes=3, always=True))
+    stream.write("ééé")
+    stream.write("x")  # fits the byte left, but the file is a prefix: not written
+
+    text = stream.close()
+
+    assert path.read_bytes() == "é".encode()
+    assert path.read_text(encoding="utf-8") == "é"
+    assert text.full == Spill(str(path), 2, 7)
+    assert text.full.cut
+
+
+@pytest.mark.parametrize("max_bytes", range(10))
+def test_chars_spill_file_is_valid_utf8_for_any_max_bytes(tmp_path: Path, max_bytes: int) -> None:
+    path = tmp_path / "out.txt"
+    stream = _stream(
+        "chars", 1, 1, spill=SpillTarget(path=str(path), max_bytes=max_bytes, always=True)
+    )
+    for part in ("a", "é€", "😀", "b"):
+        stream.write(part)
+
+    text = stream.close()
+
+    written = path.read_bytes()
+    assert "aé€😀b".encode().startswith(written)
+    written.decode("utf-8")
+    assert text.full is not None and text.full.kept == len(written) <= max_bytes
+
+
 def test_uncut_stream_deletes_its_spill_file(tmp_path: Path) -> None:
     path = tmp_path / "out.log"
     stream = TextStream(unit="bytes", head=10, tail=10, spill=SpillTarget(path=str(path)))

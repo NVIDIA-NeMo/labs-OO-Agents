@@ -62,7 +62,7 @@ Everything is importable from `nooa.snapshot`; see each docstring for arguments,
 - **Bounded size, time and memory.** `Limits` bounds a capture: `max_chars` (canonical JSON), `max_nodes` (work), `max_depth`, `max_items`, `max_string`. A `TextStream` holds at most `head + tail` units; its spill file at most `SpillTarget.max_bytes` bytes.
 - **Shared spill budget.** A `SpillDir` holds at most `max_files` files and `max_bytes` bytes at once (an open stream counts its target's `max_bytes`, a closed file its size), evicting the oldest closed files for room, and deletes what it created on `close()`; a `Text.full` in it may name a file deleted since.
 - **Exact accounting.** `Text.length == len(head) + len(tail) + omitted`, in the text's own unit. `render_json(capture(v, limits), max_chars=limits.max_chars)` cuts nothing further.
-- **UTF-8-safe cuts.** Bytes stay bytes until rendered, and every bytes cut lands on a code point boundary.
+- **UTF-8-safe cuts.** Bytes stay bytes until rendered, and every bytes cut lands on a code point boundary. A chars stream's spill file is cut on a code point boundary too, so it is always valid UTF-8, and `Spill.kept` counts the bytes written.
 - **#342 parity.** On #342's domain, `render_json` and `render_trace` give #342's text, incomplete paths and attribute names.
 - **Rendering never fails** because of a hook. Only `render_json` bounds its output; the text renderers format what capture bounded.
 

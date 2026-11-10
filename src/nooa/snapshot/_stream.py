@@ -46,7 +46,11 @@ class SpillTarget:
       truncated. ``None``: a new temporary file (``nooa-output-*.txt`` in
       the system temporary directory).
     - ``max_bytes`` (default 64 MiB): only the first ``max_bytes`` bytes are
-      written; ``Spill.cut`` then says the file is cut. Non-negative.
+      written; ``Spill.cut`` then says the file is cut. Non-negative. A
+      chars stream cuts its file on a code point boundary, so the file is
+      always valid UTF-8 and may hold up to 3 bytes less; ``Spill.kept``
+      counts the bytes actually written. A bytes stream's file holds the
+      raw bytes as written.
     - ``always`` (default ``False``): keep the file even when nothing was
       cut. ``False``: ``close()`` deletes it when the final ``Text`` is
       complete (the snapshot then holds everything).
@@ -94,7 +98,8 @@ class TextStream:
       ``Text`` of it starts and ends on code point boundaries. Bytes are
       never decoded here; a chars stream keeps its ``str`` as written.
     - The spill file holds the first ``SpillTarget.max_bytes`` bytes of the
-      output (``Text.full``); a file error never raises (see
+      output (``Text.full``; a chars stream's file is cut on a code point
+      boundary, so it is valid UTF-8); a file error never raises (see
       ``SpillTarget``).
 
     Threads: one writer. ``snapshot()`` and ``since()`` only read memory
@@ -201,7 +206,13 @@ class TextStream:
         room = self._spill_max - self._kept
         if room <= 0:
             return
-        part = data if len(data) <= room else data[:room]
+        part = data
+        if len(data) > room:
+            # A chars stream's file stays valid UTF-8: it ends before a code
+            # point that does not fit whole, and takes nothing after it (the
+            # file is a prefix of the output).
+            part = data[: safe_end(data, room)] if self.unit == "chars" else data[:room]
+            self._spill_max = self._kept + len(part)
         try:
             file.write(part)
         except OSError:
