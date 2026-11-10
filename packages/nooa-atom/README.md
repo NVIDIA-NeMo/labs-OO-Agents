@@ -291,9 +291,13 @@ Cancelling a final-result wait does not cancel the job; owner cancellation does
 stop the command. Timeout returns a `CommandResult` with return code 124 and
 `timed_out=True`.
 
-A cell's printed stdout over 50,000 characters (stderr over 2,000) is cut in
-memory around a `<truncated-output>` marker, with no file; the marker says to
-write large output to a file and read it with `self.files.read(path)`.
+A cell's printed stdout over 50,000 characters (stderr over 2,000) keeps its
+head and tail around one `[... N chars omitted; full output: <path>]` line; the
+whole output is in the session's spill folder until the session closes (the
+folder keeps the newest files, so an older path may be gone). When no file could
+be kept the line ends `full output not kept]`, followed by a hint to write large
+output to a file and read it with `self.files.read(path)`. A cell error over
+10,000 characters is cut the same way, with `full output not kept]`.
 
 Final `stdout` and `stderr` summaries are whole up to 1 MiB per stream, otherwise
 head (256 KiB) and tail (768 KiB) around a `[... N bytes omitted; full output: <path>]`

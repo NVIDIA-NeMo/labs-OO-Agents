@@ -15,8 +15,11 @@ to follow semantic versioning.
   (`nooa.runtime.output_capture.CaptureBuffer`: `[... N chars omitted; ...]`
   instead of the `<truncated-output>` envelope; Atom spills them to the
   session's folder), job output tails and the core bash tool. Prefill string
-  cuts render through `render_python` (same text). Cell errors keep
-  `<truncated-output>`.
+  cuts render through `render_python` (same text). Cell errors (and the
+  sandbox's error messages), pyp's stderr and `truncating_pformat(max_chars=)`
+  keep their head and tail around `[... N chars omitted; full output not
+  kept]` instead of `<truncated-output>`; past the sandbox's transport ceiling an
+  error keeps its head before that line instead of ending in `...<truncated>`.
 
 - `nooa.runtime.channels.StreamEnd` is removed: `QueueManager.spawn` no longer
   publishes a runtime event when a job finishes (the job's handle state and

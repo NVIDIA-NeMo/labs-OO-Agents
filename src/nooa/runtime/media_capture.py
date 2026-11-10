@@ -27,7 +27,7 @@ from typing import Any
 class _MediaBuffer:
     """Bounded collector of media content blocks captured by ``show()``.
 
-    Same self-enforcing principle as :class:`TruncatingStringIO` (the cap
+    Same self-enforcing principle as ``CaptureBuffer`` (the cap
     lives with the buffer), but signals overflow via a ``bool`` return from
     :meth:`append` rather than by silently truncating the payload —
     media blocks are atomic and cannot be partially kept.
