@@ -375,3 +375,103 @@ def test_decoded_call_payload_reaches_the_agent():
         thread.join(timeout=5)
         loop.close()
     assert conn.sent[0]["ok"] is True and conn.sent[0]["result"] == 42
+
+
+def test_media_objects_round_trip():
+    from nooa.media import Audio, File, Image, Media, Video
+
+    img = Image.from_bytes(b"image-data", media_type="image/png", detail="high")
+    restored_img = CODEC.loads(CODEC.dumps(img))
+    assert isinstance(restored_img, Image)
+    assert restored_img.media_type == "image/png"
+    assert restored_img.data_url == img.data_url
+    assert restored_img.vendor_metadata == {"detail": "high"}
+    assert restored_img.modality == "image"
+
+    audio = Audio.from_bytes(b"audio-data", media_type="audio/wav")
+    restored_audio = CODEC.loads(CODEC.dumps(audio))
+    assert isinstance(restored_audio, Audio)
+    assert restored_audio.media_type == "audio/wav"
+    assert restored_audio.data_url == audio.data_url
+
+    video = Video.from_url("https://example.com/video.mp4")
+    restored_video = CODEC.loads(CODEC.dumps(video))
+    assert isinstance(restored_video, Video)
+    assert restored_video.media_type == "video/mp4"
+    assert restored_video.data_url == "https://example.com/video.mp4"
+
+    pdf = File.from_bytes(b"%PDF-1.4", media_type="application/pdf")
+    restored_pdf = CODEC.loads(CODEC.dumps(pdf))
+    assert isinstance(restored_pdf, File)
+    assert restored_pdf.media_type == "application/pdf"
+
+    generic = Media("data:text/plain;base64,aGVsbG8=", "text/plain")
+    restored_generic = CODEC.loads(CODEC.dumps(generic))
+    assert type(restored_generic) is Media
+    assert restored_generic.data_url == generic.data_url
+
+
+def test_media_serialization_reproduction():
+    from nooa.media import Image
+    from nooa.runtime.sandbox.wire import Codec
+
+    codec = Codec()
+    dumped = codec.dumps(Image.from_bytes(b"probe", media_type="image/png"))
+    loaded = codec.loads(dumped)
+    assert isinstance(loaded, Image)
+    assert loaded.media_type == "image/png"
+    assert loaded.data_url.startswith("data:image/png;base64,")
+
+
+def test_unsupported_or_malformed_media_raises_serialization_error():
+    from nooa.runtime.sandbox.wire import _MEDIA
+
+    with pytest.raises(CellSerializationError, match="unsupported media type"):
+        CODEC.loads(_forged(_MEDIA, ["EvilClass", "data:...", "image/png", {}]))
+
+    with pytest.raises(CellSerializationError, match="malformed media"):
+        CODEC.loads(_forged(_MEDIA, ["Image", 123, "image/png", {}]))
+
+    with pytest.raises(CellSerializationError, match="malformed media"):
+        CODEC.loads(_forged(_MEDIA, ["Image", "data:..."]))
+
+
+def test_media_argument_in_broker_tool_call():
+    from nooa.media import Image
+
+    class _MediaAgent:
+        received: Image | None = None
+
+        def inspect_image(self, img: Image) -> str:
+            self.received = img
+            return f"type:{img.media_type}"
+
+    conn = _FakeConn()
+    ex = _bare_executor(conn)
+    agent = _MediaAgent()
+    ex._agent = agent
+
+    test_img = Image.from_bytes(b"pixel-bytes", media_type="image/png")
+    msg = {
+        "type": "tool_call",
+        "kind": "call",
+        "path": ["inspect_image"],
+        "tool_call_id": 3,
+        "payload": CODEC.dumps(((test_img,), {})),
+    }
+
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    try:
+        ex._service_tool_call(msg, loop)
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=5)
+        loop.close()
+
+    assert conn.sent[0]["ok"] is True
+    assert conn.sent[0]["result"] == "type:image/png"
+    assert agent.received is not None
+    assert agent.received.media_type == "image/png"
+    assert agent.received.data_url == test_img.data_url
