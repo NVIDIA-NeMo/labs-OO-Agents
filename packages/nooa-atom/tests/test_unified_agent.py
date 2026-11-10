@@ -809,6 +809,33 @@ async def test_lost_notice_shows_the_cell_code_and_the_names_now_gone(tmp_path):
         await agent.aclose()
 
 
+async def test_lost_notice_keeps_turn_parameters_but_lists_earlier_cell_names(tmp_path):
+    from nooa.context_blocks.events import ToolCallEvent
+    from nooa.strategies import codeact
+
+    # ``notification`` is passed in fresh every turn, so it is not gone; ``helper``
+    # and ``np`` came from an earlier cell, whose namespace a restart did lose.
+    code = "job = self.jobs.launch(helper(notification, np), name='tests')"
+    agent = await _agent(tmp_path)
+    try:
+        tag = agent.event_manager.add(
+            ToolCallEvent(tool_call_id="c1", name="python_cell", arguments={"code": code})
+        )
+        token = codeact._current_cell.set((agent, tag))
+        try:
+            job = agent.jobs.launch(asyncio.sleep(30), name="tests")
+        finally:
+            codeact._current_cell.reset(token)
+        records = list(agent._work_records)
+        await job.cancel()
+        agent._work_records = records
+        agent.after_restore()
+        [event] = agent._jobs_in.snapshot()
+        assert event.value.endswith("\nNames it used that are gone now: helper, np")
+    finally:
+        await agent.aclose()
+
+
 def test_lost_notice_cell_bounds_and_free_names():
     from nooa_atom.agent.agent import _bounded_cell, _free_names, _lost_notice
 

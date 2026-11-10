@@ -1007,10 +1007,12 @@ class AtomAgent(
         """A lost job's launching cell code, and the names it used that a fresh namespace lacks.
 
         Called after a restart, before the new namespace exists: a name is gone
-        unless the cell binds it, or it is a builtin, a runtime facility or a
-        name the agent's modules provide to every cell.
+        unless the cell binds it, or it is a builtin, a runtime facility, a
+        name the agent's modules provide to every cell or a turn method's
+        parameter (``notification``), which every turn passes in fresh.
         """
         import builtins
+        import inspect
 
         from nooa.agentdoc.visibility import filter_mro_module_globals
         from nooa.runtime.execution_namespace import RUNTIME_NAMES
@@ -1024,6 +1026,19 @@ class AtomAgent(
             available |= set(filter_mro_module_globals(type(self)))
         except Exception:
             pass
+        # The overrides here take ``*args, **kwargs``: the MRO's explicit
+        # signatures (``AtomAgentBase``) carry the real parameter names.
+        variadic = (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+        for cls in type(self).__mro__:
+            for method in ("handle", "handle_batch", "handle_work", "handle_orchestrate"):
+                func = cls.__dict__.get(method)
+                if func is None:
+                    continue
+                try:
+                    params = inspect.signature(func).parameters.values()
+                except Exception:
+                    continue
+                available |= {p.name for p in params if p.kind not in variadic} - {"self"}
         return code, [name for name in _free_names(code) if name not in available]
 
     @hidden
