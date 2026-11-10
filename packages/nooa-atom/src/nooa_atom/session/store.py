@@ -83,28 +83,20 @@ def _normalise_workspace(workspace: str | Path) -> str:
 
 
 def _lock_is_held(lock_path: Path) -> bool:
-    """Whether another process holds the kernel lock on ``lock_path``, without writing to it.
+    """Whether a live process on this machine holds the session lock at ``lock_path``.
 
-    Acquiring the lock the normal way records the acquirer's own pid and host
-    in the file; a probe must not, or the other side of a shared mount would
-    read the prober as the owner.
+    Reads the owner record (``<pid> <host>``) and checks that pid, taking no
+    lock: a probe that briefly took the kernel lock would make a concurrent,
+    legitimate open of the session fail with ``SessionAlreadyActiveError``,
+    and taking it the normal way would also overwrite the record. A clean
+    close blanks the record; a crash leaves a dead pid, so a stale record is
+    free. A record naming another machine is ``foreign_owner``'s to judge.
     """
-    import fcntl
-
     require_posix("Session locks")
-    try:
-        fd = os.open(lock_path, os.O_RDONLY)
-    except OSError:
+    pid, host = read_lock_owner(str(lock_path))
+    if pid is None or pid <= 0 or (host is not None and host != socket.gethostname()):
         return False
-    try:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            return True
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        return False
-    finally:
-        os.close(fd)
+    return _pid_alive(pid)
 
 
 def _pid_alive(pid: int) -> bool:
