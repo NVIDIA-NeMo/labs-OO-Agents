@@ -91,6 +91,10 @@ class BashSession:
     and execute one at a time.  This is safe but sequential; for true
     parallelism, create multiple BashSession instances.
 
+    A session can be reused after its previous event loop has stopped and
+    all commands on that loop have finished. Sharing a session concurrently
+    across threads or event loops is not supported.
+
     Usage::
 
         session = BashSession(cwd="/my/project")
@@ -107,6 +111,7 @@ class BashSession:
         *,
         keep_background_on_close: bool = False,
     ) -> None:
+        """Configure the working directory and optional command to run on each start."""
         self._cwd = Path(cwd).resolve()
         self._keep_background_on_close = keep_background_on_close
         # PIDs of background jobs as of the last completed command.
@@ -362,10 +367,16 @@ class BashSession:
 
         Keyed on the loop the locks belong to (not the loop bash was started
         on), so concurrent callers on a new loop share one fresh lock instead of
-        each creating their own while a reset is in progress.
+        each creating their own while a reset is in progress. Tracked separately
+        from the shell lifecycle so reset() cannot replace a lock a caller still
+        holds. The first call adopts the current loop without replacing them.
+
+        The previous loop's commands must have finished before switching loops.
         """
         loop = asyncio.get_running_loop()
-        if self._lock_loop is not loop:
+        if self._lock_loop is None:
+            self._lock_loop = loop
+        elif self._lock_loop is not loop:
             self._lock = asyncio.Lock()
             self._start_lock = asyncio.Lock()
             self._lock_loop = loop
@@ -374,7 +385,7 @@ class BashSession:
         """Run a command and return (stdout, stderr, exit_code).
 
         The session persists state: cd, export, etc. carry over.
-        Concurrent calls are serialized via an internal lock.
+        Concurrent calls on the same event loop are serialized via an internal lock.
 
         On timeout, exit_code is 124 — same as the ``timeout(1)`` command.
         Use ``run_with_timeout_flag()`` if you need to distinguish a real
@@ -499,7 +510,7 @@ class BashSession:
         yields ('__done__', 'exit_code,timed_out_flag') where timed_out_flag
         is '1' if the command timed out, '0' otherwise.
 
-        Concurrent calls are serialized via an internal lock.
+        Concurrent calls on the same event loop are serialized via an internal lock.
         """
         self._ensure_lock_on_current_loop()
         async with self._lock:
