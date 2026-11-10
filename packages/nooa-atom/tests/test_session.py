@@ -113,7 +113,7 @@ async def test_prompt_for_an_item_taken_mid_turn_resolves_with_that_turn(make_se
     started, block = agents.fresh_events()
     session, _ = make_session(
         cell(
-            "STARTED.set()\nawait BLOCK.wait()\n"
+            "import atom_test_agents as _t\n_t.STARTED.set()\nawait _t.BLOCK.wait()\n"
             "extra = await self.user_messages.get()\n"
             "return_result(Done(explanation=f'read {extra}'))"
         )

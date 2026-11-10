@@ -537,16 +537,18 @@ class Agent(metaclass=AgentMeta):
 
     @no_trace
     @hidden
-    def execution_namespace_for(self, call: Any) -> "ExecutionNamespace | None":
-        """Hook: the namespace this method call's cells run in, or None (the default).
+    def execution_namespace_for(self, call: Any) -> "ExecutionNamespace":
+        """Hook: the owned namespace this method call's cells run in.
 
-        CodeAct calls it once per call (``call`` is the
-        :class:`~nooa.strategies.current_call.CurrentCall`). Override it to
-        return an :class:`~nooa.runtime.execution_namespace.ExecutionNamespace`:
-        the call's cells then run in that owned globals dictionary (in-process
-        backend only). ``None`` keeps the default cell execution.
+        CodeAct's in-process backend calls it once per call (``call`` is the
+        :class:`~nooa.strategies.current_call.CurrentCall`). The default is a
+        fresh :class:`~nooa.runtime.execution_namespace.ExecutionNamespace` per
+        call (the call's arguments and the runtime names are reserved); override
+        it to share one namespace across calls.
         """
-        return None
+        from nooa.runtime.execution_namespace import default_execution_namespace
+
+        return default_execution_namespace(call)
 
     @no_trace
     @hidden

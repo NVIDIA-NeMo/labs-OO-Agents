@@ -1635,11 +1635,18 @@ class ActorRuntime:
             from nooa.runtime.code_validator import strip_redundant_imports
 
             # Imports are real writes in the owned engine; removing one based on
-            # a prior binding would silently change rebinding/del semantics.
-            if execution_namespace is None:
-                code, stripped_imports = strip_redundant_imports(code, set(exec_globals.keys()))
-            else:
-                stripped_imports = []
+            # a prior binding would silently change rebinding/del semantics, so
+            # only imports that could not run (no such module) are stripped.
+            code, stripped_imports = strip_redundant_imports(
+                code,
+                set(exec_globals.keys())
+                | (
+                    set(execution_namespace.reserved) | set(execution_namespace.framework)
+                    if execution_namespace is not None
+                    else set()
+                ),
+                only_unresolvable=execution_namespace is not None,
+            )
             for stmt in stripped_imports:
                 hm.import_stripped(stmt)
 

@@ -54,6 +54,18 @@ to follow semantic versioning.
   `run_tests`): a Python identifier (a text skill may also use `-`), so
   `"../x"`, `"a/b"` or `".."` raise `ValueError` instead of writing outside
   `.nooa/skills`.
+- CodeAct cells run in an owned execution namespace for every agent (in-process
+  backend): `Agent.execution_namespace_for(call)` now returns a fresh
+  `ExecutionNamespace` per call by default (`default_execution_namespace`)
+  instead of `None`, so there is one cell engine; override the hook to share
+  a namespace across calls (Atom's `handle` does). Caller `_session_locals`
+  seed the namespace as user globals and are written back when the call ends
+  (only names the caller seeded or cells bound). A cell sees module globals as
+  they were when its namespace was seeded, not re-read per cell. Redundant
+  imports are stripped only when they could not run (`from strategy import
+  ...`); `from typing import Literal` runs as written. Tracebacks name cells
+  `Cell In[N] [ns:<id>:N]`. The sandbox backend keeps its worker namespace;
+  `PurePythonStrategy` keeps its own session locals.
 - Owned execution namespace (Atom): a cell helper run in a thread that does
   not inherit the cell's context (`loop.run_in_executor`, `threading.Thread`)
   can use `print`, `pprint`, `show` and `self` again; they resolve to the

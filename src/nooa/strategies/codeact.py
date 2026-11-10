@@ -1029,13 +1029,22 @@ Standard Python builtins and agent instance (`self`) are available."""
     @staticmethod
     def _sync_session_locals(call: "CurrentCall", session: "CodeActSession") -> None:
         """Write back session_locals to caller's dict, filtering session internals."""
-        if call.session_locals is None or session.execution_namespace is not None:
+        if call.session_locals is None:
             return
-        filtered = {
-            k: v
-            for k, v in session.session_locals.items()
-            if k not in CodeActStrategy._SESSION_INTERNAL_KEYS
-        }
+        namespace = session.execution_namespace
+        if namespace is not None:
+            # Only names cells (or the caller's seed) bound, not the seeded runtime.
+            filtered = {
+                k: namespace.globals[k]
+                for k in namespace.user_names
+                if k in namespace.globals and k not in CodeActStrategy._SESSION_INTERNAL_KEYS
+            }
+        else:
+            filtered = {
+                k: v
+                for k, v in session.session_locals.items()
+                if k not in CodeActStrategy._SESSION_INTERNAL_KEYS
+            }
         call.session_locals.clear()
         call.session_locals.update(filtered)
 
@@ -1092,23 +1101,28 @@ Standard Python builtins and agent instance (`self`) are available."""
         Raises:
             GenerationError: If generation fails after max retries/iterations.
 
-        Execution namespace: :meth:`Agent.execution_namespace_for(call)
-        <nooa.agent.Agent.execution_namespace_for>` is called once per call. A
-        returned :class:`~nooa.runtime.execution_namespace.ExecutionNamespace`
-        runs this call's cells in that namespace (in-process backend only);
-        ``None`` (the default) keeps the default cell execution.
+        Execution namespace: the in-process backend runs every cell in an
+        owned :class:`~nooa.runtime.execution_namespace.ExecutionNamespace`
+        from :meth:`Agent.execution_namespace_for(call)
+        <nooa.agent.Agent.execution_namespace_for>` (called once per call; a
+        fresh namespace per call by default). The sandbox backend keeps its
+        worker's namespace.
         """
         # Guarantee the sandbox worker is torn down on EVERY exit — including the
         # GenerationError paths inside the loop — not just the success returns.
         session_holder: dict[str, Any] = {}
-        selector = getattr(runtime.agent, "execution_namespace_for", None)  # None: not an Agent
-        namespace = selector(call) if selector is not None else None
+        namespace = None  # The sandbox backend keeps its worker's namespace.
+        if self.config.execution_backend == "inprocess":
+            from nooa.runtime.execution_namespace import default_execution_namespace
+
+            selector = getattr(runtime.agent, "execution_namespace_for", None)  # None: not an Agent
+            namespace = selector(call) if selector is not None else None
+            if namespace is None:
+                namespace = default_execution_namespace(call)
         call.execution_namespace = namespace
         try:
             if namespace is None:
                 return await self._run_generation(runtime, call, session_holder)
-            if self.config.execution_backend != "inprocess":
-                raise ValueError("Experimental namespaces support only inprocess execution")
             with namespace.enter({}):
                 return await self._run_generation(runtime, call, session_holder)
         finally:
@@ -1146,12 +1160,17 @@ Standard Python builtins and agent instance (`self`) are available."""
 
         session.execution_namespace = call.execution_namespace
         if session.execution_namespace is not None:
+            namespace = session.execution_namespace
+            session.session_locals = namespace.globals
+            # Caller-provided locals (persistent stack) seed the owned namespace
+            # as user globals; _sync_session_locals writes them back.
             if call.session_locals is not None:
-                raise ValueError("Owned namespaces cannot be combined with legacy session_locals")
-            session.session_locals = session.execution_namespace.globals
-
-        # Seed session_locals from caller-provided dict (persistent stack)
-        if call.session_locals is not None:
+                for name, value in call.session_locals.items():
+                    if name not in namespace.reserved:
+                        namespace.globals[name] = value
+                        namespace.user_names.add(name)
+        elif call.session_locals is not None:
+            # Seed session_locals from caller-provided dict (persistent stack)
             session.session_locals.update(call.session_locals)
         # Expose this live dictionary to dynamic context renderers. Unlike
         # call.session_locals, this also receives names defined by model cells.

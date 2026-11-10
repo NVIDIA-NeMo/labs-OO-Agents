@@ -169,3 +169,15 @@ Rules:
 - SQLite serializes the tagged events. If serialization or the commit fails, it
   resets the tags to `None`, so the same inputs can be retried after a rollback.
 - Ordinary `add()` keeps its existing order: observers run before the event is stored.
+
+# Cell execution
+
+CodeAct's in-process backend runs every cell in an owned
+`ExecutionNamespace` (`nooa.runtime.execution_namespace`): one authoritative
+globals dictionary per call, from `Agent.execution_namespace_for(call)` (a
+fresh namespace per call by default; Atom's `handle` keeps one per live
+session). Runtime names (`self`, `print`, `return_result`...) resolve through
+the builtin fallback; framework names come from the namespace providers
+(`nooa.runtime.namespace_providers`). Caller `_session_locals` seed the
+namespace and are written back when the call ends. The sandbox backend keeps
+its worker's namespace.

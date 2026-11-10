@@ -751,12 +751,12 @@ class AtomAgent(
     @no_trace
     def execution_namespace_for(self, call: Any) -> ExecutionNamespace:
         """Handle shares this live session's namespace; other agent methods start each call fresh."""
-        from nooa.runtime.execution_namespace import RUNTIME_NAMES
+        from nooa.runtime.execution_namespace import default_execution_namespace
 
         if call.method_name == "handle":
             if self._handle_namespace is not None:
                 return self._handle_namespace
-        owner = ExecutionNamespace(reserved=RUNTIME_NAMES | frozenset(call.kwargs))
+        owner = default_execution_namespace(call)
         if call.method_name == "handle":
             self._handle_namespace = owner
             self._session_namespace_was_live = True

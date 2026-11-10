@@ -1602,7 +1602,21 @@ class UnifiedCodeValidator:
 # =============================================================================
 # Import Pre-processing
 # =============================================================================
-def strip_redundant_imports(code: str, available_names: set[str]) -> tuple[str, list[str]]:
+def _module_is_unresolvable(module: str | None) -> bool:
+    """True when ``module`` names no importable module (e.g. the habitual ``strategy``)."""
+    if not module:
+        return False
+    import importlib.util
+
+    try:
+        return importlib.util.find_spec(module) is None
+    except (ImportError, ValueError):
+        return True
+
+
+def strip_redundant_imports(
+    code: str, available_names: set[str], *, only_unresolvable: bool = False
+) -> tuple[str, list[str]]:
     """Remove import statements where all imported names are already in scope.
 
     LLMs habitually prepend imports (``from typing import Literal``,
@@ -1614,6 +1628,11 @@ def strip_redundant_imports(code: str, available_names: set[str]) -> tuple[str, 
     present in ``available_names``.  Imports that bring genuinely new names
     are left untouched (and will be caught by the security validator if
     the module is forbidden).
+
+    ``only_unresolvable`` (the owned execution namespace): imports are real
+    writes there, so only an import that could not run at all (its module is
+    not importable, e.g. ``from strategy import PredictStrategy``) is
+    stripped; ``from typing import Literal`` runs and rebinds as written.
 
     Returns:
         Tuple of (cleaned_code, stripped_statements) where stripped_statements
@@ -1632,7 +1651,10 @@ def strip_redundant_imports(code: str, available_names: set[str]) -> tuple[str, 
             all_present = all(
                 (alias.asname or alias.name) in available_names for alias in node.names
             )
-            if all_present:
+            if all_present and (
+                not only_unresolvable
+                or all(_module_is_unresolvable(alias.name) for alias in node.names)
+            ):
                 indices_to_remove.add(i)
 
         elif isinstance(node, ast.ImportFrom):
@@ -1642,7 +1664,9 @@ def strip_redundant_imports(code: str, available_names: set[str]) -> tuple[str, 
             all_present = all(
                 (alias.asname or alias.name) in available_names for alias in node.names
             )
-            if all_present:
+            if all_present and (
+                not only_unresolvable or (node.level == 0 and _module_is_unresolvable(node.module))
+            ):
                 indices_to_remove.add(i)
 
     if not indices_to_remove:

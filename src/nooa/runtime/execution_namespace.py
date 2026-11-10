@@ -1,11 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Opt-in cell engine: one owned globals dictionary per session.
+"""The cell engine: one owned globals dictionary per call or session.
 
-CodeAct uses it when the agent's ``Agent.execution_namespace_for(call)`` hook
-returns an :class:`ExecutionNamespace` (see ``CodeActStrategy.execute``); the
-default hook returns None, which keeps the default cell execution. An agent
-can override the hook to use this engine on every call.
+CodeAct's in-process backend runs every cell in an :class:`ExecutionNamespace`
+(see ``CodeActStrategy.execute``). ``Agent.execution_namespace_for(call)``
+supplies it: the default is a fresh namespace per call
+(:func:`default_execution_namespace`); an agent overrides the hook to share
+one across calls (Atom's ``handle`` keeps one per live session). Caller
+``_session_locals`` seed the namespace as user globals and are written back
+when the call ends. The sandbox backend keeps its worker's namespace.
 
 The async wrapper preserves Python's return/await/finally semantics. Only its
 bindings are lifted into one authoritative globals dictionary. Runtime names
@@ -417,6 +420,11 @@ def _discard_sources(entries: dict[str, tuple]) -> None:
     for filename, entry in entries.items():
         if linecache.cache.get(filename) is entry:
             del linecache.cache[filename]
+
+
+def default_execution_namespace(call: Any) -> ExecutionNamespace:
+    """A fresh namespace for one call: its arguments and the runtime names are reserved."""
+    return ExecutionNamespace(reserved=RUNTIME_NAMES | frozenset(call.kwargs))
 
 
 class ExecutionNamespace:

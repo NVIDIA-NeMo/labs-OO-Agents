@@ -229,9 +229,9 @@ class CurrentCall:
     positional_param_names: list[str] | None = None
     var_positional_param_name: str | None = None
     var_keyword_param_name: str | None = None
-    # The namespace this call's cells run in, when the agent's
-    # ``execution_namespace_for`` hook supplies one (else None: default cell
-    # execution); never copied into snapshot/user state. Last so main's
+    # The owned namespace this call's cells run in (CodeAct in-process: from the
+    # agent's ``execution_namespace_for`` hook; None for the sandbox backend and
+    # strategies without one); never copied into snapshot/user state. Last so main's
     # positional constructor order above stays unchanged.
     execution_namespace: ExecutionNamespace | None = None
 
