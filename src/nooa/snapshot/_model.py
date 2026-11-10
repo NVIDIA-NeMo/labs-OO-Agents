@@ -227,7 +227,8 @@ class Mapping:
       exact ``str``, ``int``, ``float``, ``bool`` or ``None``.
     - ``reason``: ``None`` when every entry is kept, else ``"max_items"``,
       ``"max_length"``, ``"max_nodes"``, ``"max_depth"`` (no entries kept),
-      ``"key"`` (it stopped at a key with no JSON form) or ``"error"`` (a
+      ``"key"`` (it stopped at a key with no JSON form, or one whose JSON
+      form an earlier kept key has, like ``1`` after ``"1"``) or ``"error"`` (a
       shape's ``items`` raised, or yielded something other than a pair).
     - ``tail``: the entries kept from the end, when ``Limits.tail_share``
       keeps both ends.

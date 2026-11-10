@@ -346,9 +346,13 @@ def _container(
     ``entries`` and, when every one of them fit, the last ``tail_n`` from
     ``tail()``, under the shared budget. Entries may be private ``_Part``
     builders (see ``_build_slot``), or ``_Omitted`` notes. A mapping entry
-    also costs one node for its key, checked before the pair is pulled.
+    also costs one node for its key, checked before the pair is pulled. A
+    mapping stops with ``"key"`` at a key with no JSON form or one whose
+    JSON form an earlier kept key has (``1`` and ``"1"``), so the snapshot
+    renders as it was sized.
     """
     box = Container(max_size)
+    seen: set[str] = set()  # the JSON keys kept so far (our own exact ``str``)
 
     def add(entry: Any, index: int, kept: list[Any]) -> bool:
         if state.nodes_left <= 0:
@@ -359,9 +363,12 @@ def _container(
             key, child = entry
             state.take_node()
             segment = json_key(key, live=True)
-            if segment is None:
+            if segment is None or segment in seen:
+                # No JSON key, or one that collides in JSON (``1`` and ``"1"``):
+                # stop here, as ``render_json`` would, keeping the first.
                 box.stop("key")
                 return False
+            seen.add(segment)
         else:
             child, segment = entry, str(index)
         slot = box.slot(segment if keyed else None)

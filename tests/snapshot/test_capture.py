@@ -1020,6 +1020,40 @@ class _CollidingKey:
         raise RuntimeError("untrusted __eq__ executed")
 
 
+@pytest.mark.parametrize(
+    "value",
+    [{1: "a", "1": "b"}, {"1": "a", 1: "b"}, {True: "a", "true": "b"}, {None: 1, "null": 2}],
+)
+def test_mapping_keys_that_collide_in_json_stop_the_mapping_at_capture(value: dict) -> None:
+    # Severin's repro (#515): capture was complete, render_json silently kept one.
+    limits = Limits()
+    snapshot = capture(value, limits)
+
+    assert isinstance(snapshot, Mapping)
+    assert snapshot.reason == "key" and snapshot.length == 2
+    assert len(snapshot.items) == 1 and snapshot.items[0][0] == next(iter(value))
+    rendered = render_json(snapshot, max_chars=limits.max_chars)
+    first = dict([next(iter(value.items()))])
+    assert json.loads(rendered) == json.loads(json.dumps(first))
+    assert render_json(snapshot, max_chars=limits.max_chars) == render_json(
+        capture(value, limits), max_chars=limits.max_chars
+    )
+    attributes = _attributes("output", snapshot)
+    assert attributes["nooa.output.preview.paths"] == ("",)
+    assert attributes["nooa.output.preview.reasons"] == ("key",)
+
+
+def test_mapping_key_collision_between_head_and_tail_stops_the_tail() -> None:
+    value = {"1": "a", **{f"k{i}": i for i in range(5)}, 1: "b"}
+
+    snapshot = capture(value, Limits(max_items=4, tail_share=0.5))
+
+    assert isinstance(snapshot, Mapping)
+    assert snapshot.reason == "key"
+    assert [key for key, _ in snapshot.items] == ["1", "k0"]
+    assert [key for key, _ in snapshot.tail] == ["k4"]
+
+
 def test_class_namespace_foreign_key_is_never_compared() -> None:
     _CollidingKey.calls.clear()
     # Python 3.13 warns about the non-str namespace key and 3.12 does not;
