@@ -192,6 +192,15 @@ def _summary(text: Text) -> tuple[str, str | None]:
     return render_output(text), (full.path if full is not None and not text.complete else None)
 
 
+_SPILL_FILES = 20
+"""How many spill files one folder keeps (the newest)."""
+
+
+def _spill_folder(path: str, per_file: int) -> SpillDir:
+    """A spill folder of ``_SPILL_FILES`` files, each up to ``per_file`` bytes (today's per-capture cap)."""
+    return SpillDir(path, max_files=_SPILL_FILES, max_bytes=_SPILL_FILES * max(per_file, 1))
+
+
 def _captures(spills: SpillDir | None, limit: int) -> tuple[_Capture, _Capture]:
     """stdout's and stderr's captures, each spilling into ``spills`` up to ``limit`` bytes."""
 
@@ -357,7 +366,7 @@ class ShellOwner:
         return Path(tempfile.mkdtemp(prefix="shell-", dir=self._output.name))
 
     def spill_dir(self) -> SpillDir | None:
-        """The session's spill folder for cell output (20 files, 64 MiB); None once closed.
+        """The session's spill folder for cell output (20 files, up to 64 MiB each); None once closed.
 
         Its files go when the owner closes; the folder keeps the newest, so an
         older cell's path may no longer exist.
@@ -366,7 +375,7 @@ class ShellOwner:
             directory = self._output_dir()
             if directory is None:
                 return None
-            self._spills = SpillDir(str(directory))
+            self._spills = _spill_folder(str(directory), _MAX_OUTPUT_BYTES)
         return self._spills
 
     def adopt(self, shell: Shell) -> None:
@@ -698,16 +707,16 @@ class Shell:
         return output if isinstance(output, Path) else Path(output.name)
 
     def _spill_dir(self, job_directory: Path | None) -> SpillDir:
-        """The spill folder of a command's captures (the defaults: 20 files, 64 MiB).
+        """The spill folder of a command's captures (20 files, each up to ``max_output`` bytes).
 
         A launched command's files go in its job's directory (kept while the
         job is listed); a direct run's in this Shell's one folder, in its
         output directory (see ``_output``), until the Shell or its owner closes.
         """
         if job_directory is not None:
-            return SpillDir(str(job_directory))
+            return _spill_folder(str(job_directory), self._max_output)
         if self._spills is None:
-            self._spills = SpillDir(str(self._output_path()))
+            self._spills = _spill_folder(str(self._output_path()), self._max_output)
         return self._spills
 
     def _retain(self, result: CommandResult) -> None:

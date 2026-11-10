@@ -1372,13 +1372,16 @@ async def test_cut_output_is_render_output_of_the_stream(tmp_path):
 
 
 async def test_direct_runs_share_one_spill_folder_that_keeps_the_newest(tmp_path):
-    """One SpillDir per bash session (20 files, 64 MiB): older paths may stop existing."""
+    """One SpillDir per bash session (20 files, up to 64 MiB each): older paths may stop existing."""
     sh = Shell(tmp_path)
     try:
         big = "head -c 1100000 /dev/zero | tr '\\0' a; head -c 1100000 /dev/zero | tr '\\0' b >&2"
         first = await sh.run(big)
         spills = sh._spills
-        assert spills is not None and (spills.max_files, spills.max_bytes) == (20, 64 * 2**20)
+        assert spills is not None and (spills.max_files, spills.max_bytes) == (20, 20 * 64 * 2**20)
+        assert (
+            spills.max_bytes // spills.max_files == 64 * 2**20
+        )  # each file keeps today's 64 MiB cap
         assert Path(first.stdout_path).parent == Path(first.stderr_path).parent
         paths = [first.stdout_path, first.stderr_path]
         for _ in range(10):  # 20 more cut streams: the oldest closed files go first
