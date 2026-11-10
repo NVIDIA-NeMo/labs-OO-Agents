@@ -21,10 +21,10 @@ JOURNAL_KEY = "nooaJournal"
 class FakeGymLLM(UnifiedLLM):
     """Talks to its own server (no LiteLLM), like Gym's GymResponsesLLM."""
 
-    def call(self, messages, tools=None, output_model=None, **kwargs):
+    def _call_once(self, messages, tools=None, output_model=None, **kwargs):
         raise NotImplementedError
 
-    async def acall(self, messages, tools=None, output_model=None, **kwargs):
+    async def _acall_once(self, messages, tools=None, output_model=None, **kwargs):
         from nooa.tracing import journal_llm_call
 
         response = LLMResponse(

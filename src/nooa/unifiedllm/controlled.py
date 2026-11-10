@@ -38,6 +38,11 @@ class AdmissionControl(UnifiedLLM):
         return getattr(self.base_llm, "context_window", None)
 
     @property
+    def retry_config(self) -> Any:
+        """Return the wrapped client's retry configuration (the base declares None)."""
+        return getattr(self.base_llm, "retry_config", None)
+
+    @property
     def reasoning_levels(self) -> tuple[str, ...] | None:
         """Return the wrapped client's selectable reasoning levels."""
         return getattr(self.base_llm, "reasoning_levels", None)
@@ -55,6 +60,11 @@ class AdmissionControl(UnifiedLLM):
         """Delegate one logical async call under this wrapper's controller."""
         with _admission_controller_scope(self.controller):
             return await self.base_llm.acall(*args, **kwargs)
+
+    # A delegating wrapper: call/acall forward whole calls (the wrapped
+    # client does its own media recovery), so the one-request hooks do too.
+    _call_once = call
+    _acall_once = acall
 
     def _prepare_call_config(self, overrides: dict[str, Any]) -> dict[str, Any]:
         """Delegate per-call configuration to the wrapped client."""

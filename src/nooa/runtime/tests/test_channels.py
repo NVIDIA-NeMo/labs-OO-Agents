@@ -13,6 +13,7 @@ events. Event-mode channels are tested separately where they need an
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 import pytest
 
@@ -313,46 +314,26 @@ def test_status_empty_queue_returns_empty_string():
     assert q.status() == ""
 
 
-def test_status_includes_name_count_and_numbered_previews():
-    q: Channel[str] = Channel("user_messages", "queue")
-    q.put("first")
-    q.put("second")
-    status = q.status()
-    lines = status.splitlines()
-    assert lines[0] == "user_messages: 2 pending"
-    assert lines[1] == "  1. first"
-    assert lines[2] == "  2. second"
+def test_status_is_the_unread_count_without_content():
+    q: Channel[Any] = Channel("user_messages", "queue")
+    q.put("first\nsecret")
+    q.put({"id": 42})
+    assert q.status() == "user_messages: 2 unread"
 
 
-def test_status_flattens_newlines_and_clips_overlong_items():
-    q: Channel[str] = Channel("user_messages", "queue")
-    q.put("line1\nline2\nline3")
-    q.put("x" * 200)
-    status = q.status(max_items=3, max_chars=30)
-    # No raw newline inside preview content (only between lines).
-    preview_lines = status.splitlines()[1:]
-    for line in preview_lines:
-        # Strip "  N. " prefix; remaining content has no embedded \n.
-        assert "\n" not in line
-        assert len(line) <= len("  N. ") + 30
-    assert "↵" in status
+def test_status_names_distinct_senders_capped_at_max_items():
+    class From:
+        def __init__(self, sender: str) -> None:
+            self.sender = sender
 
+        def status_source(self) -> str:
+            return self.sender
 
-def test_status_overflow_summary_when_more_than_max_items():
-    q: Channel[int] = Channel("jobs", "queue")
-    for i in range(7):
-        q.put(i)
-    status = q.status(max_items=3)
-    assert "jobs: 7 pending" in status
-    assert "… 4 more" in status
-
-
-def test_status_previews_non_string_items_via_pformat():
-    q: Channel[dict] = Channel("jobs", "queue")
-    q.put({"id": 42, "kind": "build"})
-    status = q.status()
-    assert "jobs: 1 pending" in status
-    assert "'id': 42" in status
+    q: Channel[Any] = Channel("jobs", "queue")
+    for i in (1, 2, 1, 3, 4):
+        q.put(From(f"/root/j{i}"))
+    assert q.status(max_items=2) == "jobs: 5 unread (from /root/j1, /root/j2, +2 more)"
+    assert q.status(max_chars=5) == "jobs: 5 unread (from /roo…, /roo…, /roo…, +1 more)"
 
 
 def test_output_queue_status_delegates_to_input_queue():

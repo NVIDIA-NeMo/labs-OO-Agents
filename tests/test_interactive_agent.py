@@ -17,7 +17,6 @@ from nooa.context_blocks import ToolCallEvent
 from nooa.events import PythonOutput, ResultStatus
 from nooa.interactive import (
     AgentMessage,
-    AgentVars,
     Done,
     InteractiveAgent,
     NeedInput,
@@ -39,7 +38,7 @@ def agent():
 
 
 def test_declares_only_the_user_channel(agent):
-    """Being dispatcher-driven implies a human feeding it, and nothing more.
+    """Being dispatcher-driven implies a human feeding it.
 
     Hosts declare whatever else they need. slash_commands and system_messages
     are coding-host concepts and live on CodingAgent — see
@@ -63,14 +62,32 @@ def test_persistent_vars_proxy(agent):
     del agent.v.cursor
     with pytest.raises(AttributeError):
         _ = agent.v.cursor
-    assert isinstance(agent.v, AgentVars)
+    assert agent.v is agent.vars
 
 
-def test_message_records_event_and_renders(agent):
-    rendered: list[str] = []
-    agent._render_message = lambda text, **kw: rendered.append(text)
+def test_vars_property_documents_supported_attribute_usage(agent):
+    from nooa.agentdoc import doc
+
+    text = doc(type(agent), concise=True)
+    assert "write ``self.v.key = value``" in text
+    assert "read ``self.v.key``" in text
+    assert "delete ``del self.v.key``" in text
+    assert "Store serializable values" in text
+
+
+def test_vars_proxy_item_access_is_the_attribute_store(agent):
+    agent.v["cursor"] = 3
+    assert agent.v.cursor == 3 and agent.v["cursor"] == 3 and agent.vars["cursor"] == 3
+    del agent.v["cursor"]
+    assert "cursor" not in agent.vars
+    with pytest.raises(KeyError):
+        _ = agent.v["cursor"]
+    agent.v[1] = 3  # a non-str key is not stored (SnapshotVars logs a warning)
+    assert 1 not in agent.vars
+
+
+def test_message_records_an_agent_message_event(agent):
     agent.message("**hi**")
-    assert rendered == ["**hi**"]
     events = [e for e in agent.event_manager.values() if isinstance(e, AgentMessage)]
     assert len(events) == 1
     assert events[0].content == "**hi**"
@@ -78,8 +95,8 @@ def test_message_records_event_and_renders(agent):
 
 def test_turn_results_require_their_text():
     assert Done(explanation=" finished ").explanation == "finished"
-    assert Waiting(explanation="job ci-42", on=["jobs:ci-42"]).on == ["jobs:ci-42"]
-    assert NeedInput(question="Which branch?", options=["main", "dev"]).options == ["main", "dev"]
+    assert Waiting(explanation="job ci-42", on=["ci"]).on == ["ci"]
+    assert NeedInput(question=" Which branch? ").question == "Which branch?"
     with pytest.raises(ValidationError):
         Done(explanation="  ")
     with pytest.raises(ValidationError):
@@ -104,16 +121,23 @@ def test_done_carries_an_optional_reply_and_evidence():
 
 
 def test_waiting_carries_an_optional_user_line():
-    waiting = Waiting(message="  Tests are running.  ", explanation="ci", on=["jobs:ci-42"])
+    waiting = Waiting(message="  Tests are running.  ", explanation="ci", on=["ci"])
     assert waiting.message == "Tests are running."
-    assert Waiting(message=" ", explanation="ci", on=["jobs:ci-42"]).message is None
-    assert Waiting(explanation="ci", on=["jobs:ci-42"]).message is None
+    assert Waiting(message=" ", explanation="ci", on=["ci"]).message is None
+    assert Waiting(explanation="ci", on=["ci"]).message is None
 
 
 def test_need_input_reason_is_optional():
     assert NeedInput(question="Which branch?").reason is None
     asked = NeedInput(question="Which branch?", reason="Pushing to the wrong one is hard to undo.")
     assert asked.reason == "Pushing to the wrong one is hard to undo."
+
+
+def test_need_input_accepts_an_explanation_like_done_and_waiting():
+    asked = NeedInput(question="Which branch?", explanation="blocked on the branch")
+    assert asked.explanation == "blocked on the branch"
+    assert NeedInput(question="Which branch?", explanation=" ").explanation is None
+    assert NeedInput(question="Which branch?").explanation is None
 
 
 @pytest.mark.parametrize(
@@ -126,17 +150,6 @@ def test_need_input_reason_is_optional():
 def test_blank_text_is_rejected_with_one_message(build):
     with pytest.raises(ValidationError, match="Value error, must not be blank"):
         build()
-
-
-def test_need_input_takes_options_or_answer_type_not_both():
-    class HowMany(BaseModel):
-        n: int
-
-    assert NeedInput(question="How many?", answer_type=HowMany).answer_type is HowMany
-    with pytest.raises(ValidationError):
-        NeedInput(question="How many?", options=["1", "2"], answer_type=HowMany)
-    with pytest.raises(ValidationError):
-        NeedInput(question="How many?", answer_type=int)  # type: ignore[arg-type]
 
 
 class _Opaque:
@@ -156,31 +169,9 @@ def test_done_result_serialises_when_it_holds_an_arbitrary_object():
     }
 
 
-def test_need_input_answer_type_serialises_as_a_class_name():
-    class HowMany(BaseModel):
-        n: int
-
-    event = ToolCallEvent(
-        tool_call_id="c1",
-        name="return_result",
-        arguments={"result": NeedInput(question="How many?", answer_type=HowMany)},
-    )
-    dumped = json.loads(event.model_dump_json())
-    answer_type = dumped["arguments"]["result"]["answer_type"]
-    assert answer_type == f"{__name__}:{HowMany.__qualname__}"
-    assert json.loads(NeedInput(question="Why?").model_dump_json())["answer_type"] is None
-
-
-def test_need_input_options_must_not_be_empty():
-    assert NeedInput(question="Anything else?").options is None
+def test_need_input_has_no_options():
     with pytest.raises(ValidationError):
-        NeedInput(question="Which branch?", options=[])
-
-
-def test_need_input_options_must_not_be_blank():
-    assert NeedInput(question="Which branch?", options=[" main "]).options == ["main"]
-    with pytest.raises(ValidationError):
-        NeedInput(question="Which branch?", options=["main", "  "])
+        NeedInput(question="Which branch?", options=["main", "dev"])
 
 
 def _cell(code: str, call_id: str) -> LLMResponse:
@@ -210,7 +201,7 @@ _NOTIFICATION = {"user_messages": ["hi"]}
     [
         ('return_result(Done(explanation="finished"))', Done),
         ('return_result(NeedInput(question="Which branch?"))', NeedInput),
-        ('return_result(Waiting(explanation="waiting for job ci-42", on=["jobs:ci-42"]))', Waiting),
+        ('return_result(Waiting(explanation="waiting for job ci-42", on=["ci"]))', Waiting),
     ],
 )
 async def test_handle_accepts_each_turn_result(code, expected):
@@ -228,10 +219,10 @@ async def test_handle_returns_the_reply_in_done():
 
 
 async def test_handle_returns_the_user_line_in_waiting():
-    code = 'return_result(Waiting(message="Tests are running.", explanation="ci", on=["jobs:ci"]))'
+    code = 'return_result(Waiting(message="Tests are running.", explanation="ci", on=["ci"]))'
     agent = _Host(llm=FakeLLMClient([_cell(code, "c1")]))
     result = await agent.handle(_NOTIFICATION)
-    assert result == Waiting(message="Tests are running.", explanation="ci", on=["jobs:ci"])
+    assert result == Waiting(message="Tests are running.", explanation="ci", on=["ci"])
     assert result.message == "Tests are running."
 
 
@@ -324,3 +315,72 @@ def test_install_summarizer_attaches(agent):
 def test_summarization_threshold_fraction_must_be_between_zero_and_one(fraction):
     with pytest.raises(ValidationError):
         SummarizationConfig(threshold_fraction=fraction)
+
+
+def test_interactive_agent_has_no_web_attribute(monkeypatch):
+    """self.web was removed: no attribute, no doc(self) entry, no "web" context block,
+    whether or not NEMO_OO_RICH_URL is set."""
+    from nooa.agentdoc import doc
+    from nooa.interactive import InteractiveAgent
+
+    for url in (None, "http://localhost:1234/rich"):
+        if url is None:
+            monkeypatch.delenv("NEMO_OO_RICH_URL", raising=False)
+        else:
+            monkeypatch.setenv("NEMO_OO_RICH_URL", url)
+        agent = InteractiveAgent()
+        assert not hasattr(agent, "web")
+        rendered = doc(agent)
+        assert "WebPublisher" not in rendered
+        assert "web:" not in rendered
+        assert "web" not in agent.context
+
+
+def test_need_input_roundtrip_and_extra_rejection():
+    need = NeedInput(question="Which?", reason="Safety.")
+    assert NeedInput.model_validate_json(need.model_dump_json()) == need
+    with pytest.raises(ValidationError):
+        NeedInput.model_validate({**need.model_dump(), "presentation": "auto"})
+
+
+def test_need_input_rejects_a_typed_answer():
+    with pytest.raises(ValidationError):
+        NeedInput(question="How many?", answer_type=BaseModel)
+
+
+def test_require_task_result_reads_the_typed_ask_policy():
+    from types import SimpleNamespace
+
+    from nooa.interactive import AskPolicy, require_task_result
+    from nooa.strategy_validation import InvariantError
+
+    question = NeedInput(question="Which branch?")
+    host = _Host(llm=FakeLLMClient())
+    assert host.ask_policy is None
+    require_task_result(host, question, None)  # no host policy: may ask
+    host.ask_policy = SimpleNamespace(may_ask=True)
+    require_task_result(host, question, None)
+    host.ask_policy = SimpleNamespace(may_ask=False)
+    assert isinstance(host.ask_policy, AskPolicy)
+    with pytest.raises(InvariantError, match="can't answer a one-shot worker"):
+        require_task_result(host, question, None)
+
+
+def test_ask_policy_is_not_snapshotted():
+    from types import SimpleNamespace
+
+    from nooa.storage.json_snapshot import snapshot_to_json
+
+    host = _Host(llm=FakeLLMClient())
+    host.ask_policy = SimpleNamespace(may_ask=False)
+    assert "ask_policy" not in snapshot_to_json(host)["attributes"]
+
+
+def test_require_task_result_no_longer_duck_types_a_session_attribute():
+    """Only the InteractiveAgent contract counts, not an arbitrary ``session.may_ask``."""
+    from types import SimpleNamespace
+
+    from nooa.interactive import require_task_result
+
+    stranger = SimpleNamespace(session=SimpleNamespace(may_ask=False))
+    require_task_result(stranger, NeedInput(question="Which branch?"), None)

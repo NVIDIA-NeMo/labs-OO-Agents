@@ -49,7 +49,7 @@ async def main():
 asyncio.run(main())
 ```
 
-Run with: `uv run python3 << 'EOF' ... EOF`
+Run it with the script on standard input: `uv run python3 - < script.py`, or from an agent's shell, `sh.run("uv run python3 -", stdin=script)`.
 
 To render a specific sub-method (e.g. `answer_question`, `brainstorm`, `implement_step`):
 
@@ -202,11 +202,6 @@ Check:
   to use it correctly in one shot, without needing follow-up calls?
 - Is any skill API already fully replicated in the task prompt? If so, that's waste —
   the skill docstring is the canonical source.
-
-**For `WebPublisher` / `self.web`**: the agent should be able to produce a working
-Plotly call on the first try. If it takes multiple LLM iterations, check whether the
-skill examples cover the user's data shape (long-form vs wide-form DataFrames,
-the right `px.*` function, axis mapping). Add more targeted examples to the skill docstring.
 
 ---
 
