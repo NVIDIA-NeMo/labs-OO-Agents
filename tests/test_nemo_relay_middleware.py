@@ -25,6 +25,7 @@ from unittest.mock import MagicMock
 
 from nooa.llm_types import LLMResponse
 from nooa.nemo_relay_middleware import (
+    export_nemo_relay_atif,
     install_nemo_relay,
     nemo_relay_agent_call_middleware,
     nemo_relay_llm_middleware,
@@ -351,7 +352,7 @@ class TestLLMSanitizeResponse:
             assert len(subscriber_saw) > 0, "Subscriber should have received at least one event"
             last_output = subscriber_saw[-1]
             assert isinstance(last_output, dict), f"Expected dict output, got {type(last_output)}"
-            msg = last_output.get("assistant_message")
+            msg = last_output.get("message")
             assert isinstance(msg, dict), f"Expected 'message' to be a dict, got {type(msg)}"
             assert msg.get("content") == "[REDACTED] world"
         finally:
@@ -744,7 +745,7 @@ class TestATIFExport:
             assert (await nemo_relay_tool_middleware(exec_ctx, execute)).result is execution
             assert ctx.response is response
             await nemo_relay.subscribers.flush_async()
-            trajectory = json.loads(exporter.export_json())
+            trajectory = await export_nemo_relay_atif(exporter)
             assert trajectory["schema_version"] == "ATIF-v1.7"
             step = next(s for s in trajectory["steps"] if s.get("tool_calls"))
             assert step["message"] == "Computing the answer"
@@ -997,7 +998,7 @@ class TestToolMiddlewareEdgeCases:
             # NeMo Relay subscriber should see the extracted value (99)
             await nemo_relay.subscribers.flush_async()  # event dispatch is async in nemo_relay
             assert len(subscriber_saw) > 0
-            assert any(o["result"] == 99 and o["content"] == "99" for o in subscriber_saw)
+            assert 99 in subscriber_saw
         finally:
             nemo_relay.subscribers.deregister("signal-spy")
 
@@ -1282,8 +1283,8 @@ class TestConcurrentAgentCallScopes:
     ``asyncio.gather(self.a(), self.b())`` in generated code) used to interleave
     their pushes on that shared stack; whichever finished first could not pop,
     leaving the stack permanently desynchronised and raising out of
-    ``nemo_relay_scope``.  ``nemo_relay_agent_call_middleware`` now isolates a
-    concurrently-dispatched call onto its own stack.
+    ``nemo_relay_scope``. With explicit isolation enabled, middleware gives a
+    concurrently dispatched call its own stack. Default scopes reject fanout.
     """
 
     @pytest.mark.asyncio
@@ -1295,7 +1296,7 @@ class TestConcurrentAgentCallScopes:
         nemo_relay.subscribers.register("cancel-scope-spy", events.append)
         agent = _make_real_agent()
         try:
-            async with nemo_relay_scope(agent, "cancel-parent") as root:
+            async with nemo_relay_scope(agent, "cancel-parent", isolate=True) as root:
                 original_stack = nemo_relay.get_scope_stack()
 
                 async def body(c):
@@ -1339,6 +1340,7 @@ class TestConcurrentAgentCallScopes:
             import nooa.nemo_relay_middleware as nm
 
             token = nm._current_relay_scope.set((root, asyncio.current_task()))
+            isolation_token = nm._ALLOW_ISOLATION.set(True)
             try:
                 # "first" finishes before "second", so a shared stack would pop
                 # out of order and raise.
@@ -1348,6 +1350,7 @@ class TestConcurrentAgentCallScopes:
                 assert nemo_relay.scope.get_handle().uuid == root.uuid
             finally:
                 nm._current_relay_scope.reset(token)
+                nm._ALLOW_ISOLATION.reset(isolation_token)
 
     @pytest.mark.asyncio
     async def test_overlapping_siblings_share_the_same_parent(self):
@@ -1373,10 +1376,12 @@ class TestConcurrentAgentCallScopes:
             import nooa.nemo_relay_middleware as nm
 
             token = nm._current_relay_scope.set((root, asyncio.current_task()))
+            isolation_token = nm._ALLOW_ISOLATION.set(True)
             try:
                 await asyncio.gather(one("left", 0.01), one("right", 0.03))
             finally:
                 nm._current_relay_scope.reset(token)
+                nm._ALLOW_ISOLATION.reset(isolation_token)
 
         assert len(handles) == 2
         # Both siblings parent off the shared root, not off each other.

@@ -6,16 +6,21 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
-- The optional NeMo Relay integration now supports `>=0.11.1,<0.12`, using an
-  explicit reviewed exception to the frozen dependency cutoff. ATIF-v1.7 exports
-  now contain actual answer text, explicit tool-call correlation and readable,
-  bounded tool observations. Legacy LLM/tool response-sanitizer payloads are
-  preserved; only sanitized output is projected into `assistant_message` and
-  `nemo.relay.tool_result@1` events. Scope cleanup cannot replace a method result
-  or exception, nested callback continuations retain per-run policies, and
-  concurrent run roots use isolated stacks. The example offers opt-in Relay
-  diagnostics and CPU/memory measurements. See [the migration guide](docs/nemo-relay.md)
-  for exported event-shape changes and remaining upstream ATIF attribution limits.
+- The optional NeMo Relay integration now supports and checks `>=0.11.1,<0.12`,
+  using an explicit reviewed exception to the frozen dependency cutoff. The new
+  `export_nemo_relay_atif()` helper formats already-sanitized ATIF-v1.7 exports
+  with actual answer text, bounded readable observations and unique tool-call
+  ID correlation. Legacy sanitizer/event payload shapes stay intact. Runtime
+  projection callbacks were removed to avoid sanitizer-order bypasses, leaks and
+  shutdown crashes. Callback cleanup completes before cancellation closes scopes;
+  JSON-safe inspection copies preserve original Python results, and callback
+  exception text stays out of native error metadata. Scopes preserve enclosing
+  local policies by default and reject
+  unsafe concurrent sharing. Explicit `isolate=True` enables independent stacks
+  but **does not inherit enclosing scope-local policies or subscribers**, including
+  in concurrent method branches. The example offers opt-in diagnostics and
+  CPU/memory measurements in private temporary files. See the
+  [migration guide](docs/nemo-relay.md) for usage and upstream ATIF limits.
 - Core installs now exclude the individually verified LiteLLM releases affected
   by the optional-MCP import regression (1.106.0–1.106.7, 1.108.0–1.108.1, and
   affected prereleases). Future patch and security releases remain eligible;

@@ -826,6 +826,8 @@ class TestNemoRelayMiddlewareModelExtraction:
         # real-Relay tests when the fake sys.modules entry is restored.
         with (
             patch.object(nm, "nemo_relay", fake_nemo_relay),
+            patch.object(nm, "_HAS_NEMO_RELAY", True),
+            patch.object(nm, "version", return_value="0.11.1"),
             patch.object(nm, "LLMRequest", fake_nemo_relay.LLMRequest),
         ):
             mock_agent = MagicMock()

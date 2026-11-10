@@ -108,12 +108,14 @@ async def test_live_relay_nested_concurrent_atif(tmp_path):
     relay.subscribers.register("nooa-live-events", events.append)
     try:
         agent = LiveRelayAgent()
-        async with nemo_relay_scope(agent, "nooa-live") as root:
+        async with nemo_relay_scope(agent, "nooa-live", isolate=True) as root:
             results = await asyncio.gather(agent.workflow(21), agent.workflow(7))
             assert results == [42, 14]
             assert relay.scope.get_handle().uuid == root.uuid
         await relay.subscribers.flush_async()
-        trajectory = json.loads(exporter.export_json())
+        from nooa.nemo_relay_middleware import export_nemo_relay_atif
+
+        trajectory = await export_nemo_relay_atif(exporter)
         output = tmp_path / "relay-live-atif.json"
         output.write_text(json.dumps(trajectory, indent=2))
         print(f"Live ATIF: {output}")
@@ -133,9 +135,7 @@ async def test_live_relay_nested_concurrent_atif(tmp_path):
             calls = {c["tool_call_id"] for c in step.get("tool_calls", [])}
             if step.get("metrics"):
                 response = step["extra"]["llm_response"]
-                issued = {
-                    c["id"] for c in response.get("assistant_message", {}).get("tool_calls", [])
-                }
+                issued = {c["id"] for c in response.get("message", {}).get("tool_calls", [])}
                 # Relay may attach host-generated prefills to a preceding model
                 # step. They are not provider-issued calls; do not count them as
                 # evidence that the model chose to execute this code.

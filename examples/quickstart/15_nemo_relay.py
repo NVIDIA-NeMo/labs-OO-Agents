@@ -33,6 +33,7 @@ Diagnostics can contain private runtime details; keep the local output private.
 
 import json
 import os
+import tempfile
 from dataclasses import asdict
 from pathlib import Path
 from typing import Literal
@@ -47,8 +48,29 @@ except ModuleNotFoundError:
 from pydantic import BaseModel
 
 from nooa import hidden
-from nooa.nemo_relay_middleware import nemo_relay_scope
+from nooa.nemo_relay_middleware import export_nemo_relay_atif, nemo_relay_scope
 from nooa.util.quickstart import *
+
+_artifact_directory: Path | None = None
+
+
+@hidden
+def _write_artifact(name: str, value: dict) -> Path:
+    """Create owner-only files in a private, unpredictable temporary directory."""
+    global _artifact_directory
+    if _artifact_directory is None:
+        _artifact_directory = Path(tempfile.mkdtemp(prefix="nooa-relay-"))
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        prefix=f"{name}-",
+        suffix=".json",
+        dir=_artifact_directory,
+        delete=False,
+    ) as output:
+        json.dump(value, output, indent=2, default=str)
+        return Path(output.name)
+
 
 # ---------------------------------------------------------------------------
 # Agent definitions
@@ -249,7 +271,7 @@ nemo_relay.subscribers.register("tool-output-capture", _capture_tool_output)
 
 @hidden
 async def run_demo():
-    # 4. ATIF exporter — set up here so its lifetime is explicit and scoped to main()
+    # 4. Native exporter collects sanitized events; the helper formats its output.
     exporter = nemo_relay.AtifExporter(
         session_id="qs-15-session",
         agent_name="research-agent",
@@ -273,13 +295,9 @@ async def run_demo():
     # Note: steps[] is a flat array, but the scope hierarchy is not lost —
     # each step carries it in extra.ancestry.parent_name (e.g. the nested
     # fact_check turns report parent_name="ResearchAgent.fact_check").
-    # Event dispatch is async in nemo_relay; flush before reading the export.
-    await nemo_relay.subscribers.flush_async()
-    trajectory_json = exporter.export_json()
-    trajectory = json.loads(trajectory_json)
-    trajectory_path = "/tmp/nemo_relay_trajectory_research.json"
-    with open(trajectory_path, "w") as f:
-        json.dump(trajectory, f, indent=2, default=str)
+    # The helper flushes events, then formats only sanitized native export data.
+    trajectory = await export_nemo_relay_atif(exporter)
+    trajectory_path = _write_artifact("research", trajectory)
     print(f"\n--- Research trajectory → {trajectory_path} ---")
 
     # -----------------------------------------------------------------------
@@ -322,8 +340,7 @@ async def run_demo():
         async with nemo_relay_scope(demo_agent, f"demo-{method_name}"):
             value = await method()
 
-        await nemo_relay.subscribers.flush_async()
-        traj = json.loads(exporter.export_json())
+        traj = await export_nemo_relay_atif(exporter)
 
         # Tool outputs are captured by _capture_tool_output subscriber
         tool_outputs = [o for o in _captured_tool_outputs if o["tool"] == "execute_python"]
@@ -342,9 +359,7 @@ async def run_demo():
         else:
             print("  NeMo Relay sees: (no tool output captured)")
 
-    demo_traj_path = "/tmp/nemo_relay_trajectory_demo.json"
-    with open(demo_traj_path, "w") as f:
-        json.dump(traj, f, indent=2, default=str)
+    demo_traj_path = _write_artifact("demo", traj)
     print(f"\n--- Last demo trajectory → {demo_traj_path} ---")
 
     # Cleanup
@@ -370,7 +385,7 @@ async def run_demo():
     print("          str / int / dict / list  → native JSON (inspectable)")
     print("          Pydantic model           → __nv_pydantic__ envelope (inspectable)")
     print("          DataFrame / complex obj  → pickle blob (opaque)")
-    print("  - ATIF exporter collected all events into trajectory JSON files")
+    print("  - ATIF export formatted sanitized data into private trajectory JSON files")
     print("=" * 70)
 
 
@@ -404,8 +419,5 @@ async def main():
         await nemo_relay.subscribers.flush_async()
         snapshot = nemo_relay.diagnostics.reader().snapshot()
         metrics = asdict(await nemo_relay.resource_metrics.collect())
-        output = Path("/tmp/nooa-relay-diagnostics.json")
-        output.write_text(
-            json.dumps({"diagnostics": snapshot, "resources": metrics}, default=str, indent=2)
-        )
+        output = _write_artifact("diagnostics", {"diagnostics": snapshot, "resources": metrics})
         print(f"\n--- Relay diagnostics and CPU/memory snapshot → {output} ---")

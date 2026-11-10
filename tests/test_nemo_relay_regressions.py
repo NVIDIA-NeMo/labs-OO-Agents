@@ -7,6 +7,7 @@ import asyncio
 import json
 from collections import deque
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 import pytest
@@ -42,7 +43,19 @@ async def flush_events_before_loop_closes():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("value", [{1, 2}, frozenset({1, 2}), range(3), deque([1, 2])])
+@pytest.mark.parametrize(
+    "value",
+    [
+        {1, 2},
+        frozenset({1, 2}),
+        range(3),
+        deque([1, 2]),
+        datetime(2026, 1, 2),
+        2**64,
+        -(2**63) - 1,
+        "bad\ud800",
+    ],
+)
 async def test_dataclass_collection_does_not_fail_after_execution(value):
     result = ExecutionResult(returned_value=CollectionResult(value))
     events = []
@@ -62,8 +75,8 @@ async def test_dataclass_collection_does_not_fail_after_execution(value):
             for e in events
             if getattr(e, "category", None) == "tool" and e.scope_category == "end"
         )
-        assert data["schema"] == "nemo.relay.tool_result@1"
-        assert "1" in data["content"] and "2" in data["content"]
+        assert data is not None
+        json.dumps(data).encode("utf-8")
     finally:
         relay.subscribers.deregister("review-collections")
 
@@ -98,7 +111,7 @@ async def test_scope_cleanup_does_not_replace_method_outcome(monkeypatch, body_e
 
 
 @pytest.mark.asyncio
-async def test_legacy_sanitizers_redact_before_projection():
+async def test_legacy_sanitizers_keep_payload_contract():
     events = []
     relay.subscribers.register("review-redaction", events.append)
 
@@ -140,9 +153,8 @@ async def test_legacy_sanitizers_redact_before_projection():
             for e in events
             if getattr(e, "category", None) == "llm" and e.scope_category == "end"
         )
-        assert llm["assistant_message"]["content"] == "REDACTED answer"
-        assert llm["reasoning"] == "REDACTED rationale"
-        assert "reasoning_content" not in llm["assistant_message"]
+        assert llm["message"]["content"] == "REDACTED answer"
+        assert llm["message"]["reasoning_content"] == "REDACTED rationale"
     finally:
         relay.guardrails.deregister_llm_sanitize_response("review-legacy")
         relay.guardrails.deregister_tool_sanitize_response("review-legacy")
@@ -150,7 +162,7 @@ async def test_legacy_sanitizers_redact_before_projection():
 
 
 @pytest.mark.asyncio
-async def test_legacy_event_sanitizer_redacts_before_projection():
+async def test_max_priority_legacy_event_sanitizer_keeps_payload_contract():
     events = []
     relay.subscribers.register("review-event-redaction", events.append)
     try:
@@ -166,7 +178,9 @@ async def test_legacy_event_sanitizer_redacts_before_projection():
                     data = data.replace("SECRET", "REDACTED")
                 return {**fields, "data": data, "metadata": None}
 
-            relay.scope_local.register_scope_sanitize_end(root, "legacy-event", 1, sanitize)
+            relay.scope_local.register_scope_sanitize_end(
+                root, "zzzz-late-legacy-event", 2**31 - 1, sanitize
+            )
 
             async def model(ctx):
                 ctx.response = LLMResponse(content="SECRET answer")
@@ -183,11 +197,8 @@ async def test_legacy_event_sanitizer_redacts_before_projection():
         assert "SECRET" not in json.dumps(outputs)
         assert "REDACTED answer" in json.dumps(outputs)
         assert "REDACTED tool" in json.dumps(outputs)
-        assert any(isinstance(value, dict) and "assistant_message" in value for value in outputs)
-        assert any(
-            isinstance(value, dict) and value.get("schema") == "nemo.relay.tool_result@1"
-            for value in outputs
-        )
+        assert any(isinstance(value, dict) and "message" in value for value in outputs)
+        assert "REDACTED tool" in outputs
         assert all(
             e.metadata is None
             for e in events
@@ -226,13 +237,13 @@ async def test_concurrent_roots_do_not_share_mutable_stack():
             release = asyncio.Event()
 
             async def first():
-                async with nemo_relay_scope(ReviewAgent(), "first"):
+                async with nemo_relay_scope(ReviewAgent(), "first", isolate=True):
                     entered.set()
                     await release.wait()
 
             async def second():
                 await entered.wait()
-                async with nemo_relay_scope(ReviewAgent(), "second"):
+                async with nemo_relay_scope(ReviewAgent(), "second", isolate=True):
                     release.set()
                     await asyncio.sleep(0.01)
 
@@ -277,15 +288,18 @@ async def test_tool_display_is_bounded_and_does_not_print_pickle(value):
             for e in events
             if getattr(e, "category", None) == "tool" and e.scope_category == "end"
         )
+        from nooa.nemo_relay_middleware import _tool_display
+
         if value is None:
             assert data is None
         else:
-            assert len(data["content"]) < 4200
+            display = _tool_display(data)
+            assert len(display) < 4200
             if isinstance(value, str):
-                assert data["content"].endswith("… [truncated]")
-                assert data["result"] == value
+                assert display.endswith("… [truncated]")
+                assert data == value
             else:
-                assert data["content"] == "[opaque Python value]"
+                assert display == "[opaque Python value]"
     finally:
         relay.subscribers.deregister("review-display")
 
@@ -400,3 +414,138 @@ async def test_overlapping_scope_installations_do_not_duplicate_tool_calls():
         assert len(calls) == 1
     finally:
         relay.subscribers.deregister("review-installation")
+
+
+@pytest.mark.asyncio
+async def test_enclosing_local_policy_and_subscriber_survive_default_root():
+    seen = []
+    with relay.scope.scope("policy-owner", relay.ScopeType.Agent) as parent:
+        relay.scope_local.register_subscriber(parent, "policy-owner-events", seen.append)
+        relay.scope_local.register_tool_conditional_execution(
+            parent, "policy-owner-deny", 1, lambda name, args: "denied by enclosing policy"
+        )
+        ran = False
+
+        async def execute(ctx):
+            nonlocal ran
+            ran = True
+            return ctx
+
+        async with nemo_relay_scope(ReviewAgent(), "default-child"):
+            with pytest.raises(Exception, match="denied"):
+                await nemo_relay_tool_middleware(ExecutePythonContext(code="pass"), execute)
+        await relay.subscribers.flush_async()
+        assert not ran
+        assert any(event.name == "default-child" for event in seen)
+
+
+@pytest.mark.asyncio
+async def test_child_task_cannot_silently_discard_local_policy():
+    ran = False
+    async with nemo_relay_scope(ReviewAgent(), "safe-default"):
+
+        async def body(ctx):
+            nonlocal ran
+            ran = True
+            return ctx
+
+        with pytest.raises(RuntimeError, match="explicit.*isolate=True"):
+            await asyncio.create_task(
+                nemo_relay_agent_call_middleware(AgentCallContext(method_name="child"), body)
+            )
+        assert not ran
+
+
+@pytest.mark.asyncio
+async def test_independent_roots_cannot_share_ambient_stack_concurrently():
+    relay.get_scope_stack()  # Both tasks inherit this same mutable ambient stack.
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def first():
+        async with nemo_relay_scope(ReviewAgent(), "first-default"):
+            entered.set()
+            await release.wait()
+
+    child = asyncio.create_task(first())
+    try:
+        await entered.wait()
+        with pytest.raises(RuntimeError, match="Concurrent Relay roots"):
+            async with nemo_relay_scope(ReviewAgent(), "second-default"):
+                pytest.fail("unsafe root entered")
+    finally:
+        release.set()
+        await child
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["llm", "tool"])
+async def test_callback_exception_preserves_original_without_exporting_text(kind):
+    events = []
+    relay.subscribers.register("review-callback-error", events.append)
+    original = ValueError("PRIVATE_CALLBACK_ERROR")
+    try:
+        async with nemo_relay_scope(ReviewAgent(), "callback-error"):
+
+            async def fail(ctx):
+                raise original
+
+            with pytest.raises(ValueError) as caught:
+                if kind == "llm":
+                    await nemo_relay_llm_middleware(LLMCallContext(messages=[]), fail)
+                else:
+                    await nemo_relay_tool_middleware(ExecutePythonContext(code="pass"), fail)
+            assert caught.value is original
+        await relay.subscribers.flush_async()
+        assert "PRIVATE_CALLBACK_ERROR" not in json.dumps(
+            [{"data": e.data, "metadata": e.metadata} for e in events]
+        )
+    finally:
+        relay.subscribers.deregister("review-callback-error")
+
+
+@pytest.mark.parametrize("installed", ["0.0.6", "0.10.0", "0.11.0", "0.12.0", "0.11.1rc1"])
+def test_incompatible_relay_version_fails_before_install(monkeypatch, installed):
+    import nooa.nemo_relay_middleware as middleware
+
+    monkeypatch.setattr(middleware, "version", lambda name: installed)
+    with pytest.raises(ImportError, match="requires nemo-relay"):
+        middleware.install_nemo_relay(ReviewAgent().event_manager)
+
+
+def test_unflushed_interpreter_exit_has_no_native_callback_crash():
+    """Exercise actual process teardown, where an in-process test cannot detect SIGSEGV."""
+    import subprocess
+    import sys
+    import textwrap
+
+    script = textwrap.dedent(
+        """
+        import asyncio
+        from nooa import Agent
+        from nooa.events import ExecutionResult
+        from nooa.nemo_relay_middleware import nemo_relay_scope, nemo_relay_tool_middleware
+        from nooa.runtime.middleware import ExecutePythonContext
+        from nooa.unifiedllm import FakeLLMClient
+
+        class TestAgent(Agent, llm=FakeLLMClient()):
+            pass
+
+        async def execute(ctx):
+            ctx.result = ExecutionResult(returned_value={'value': 42})
+            return ctx
+
+        async def main():
+            async with nemo_relay_scope(TestAgent(), 'unflushed-exit'):
+                for _ in range(5):
+                    await nemo_relay_tool_middleware(ExecutePythonContext(code='pass'), execute)
+            # Deliberately leave pending telemetry to test native interpreter teardown.
+
+        asyncio.run(main())
+        """
+    )
+    for _ in range(10):
+        child = subprocess.run(
+            [sys.executable, "-c", script], capture_output=True, text=True, timeout=30
+        )
+        assert child.returncode == 0, child.stderr
+        assert "Fatal Python error" not in child.stderr

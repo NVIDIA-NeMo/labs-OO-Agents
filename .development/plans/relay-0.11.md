@@ -108,3 +108,33 @@ The independent reviewer approved the fixes after reproducing the original
 issues and independently passing 73 targeted tests. Final live verification
 passed in 19.73 seconds. GitHub CI must complete before reporting this follow-up
 as finished.
+
+## Re-review: policy boundaries and native lifecycle
+
+The previous triage's runtime projection and automatic isolation solutions are
+superseded by the fixes below. Reproductions used installed native Relay 0.11.1,
+not substitute Relay implementations.
+
+| Current finding | Confirmed resolution |
+| --- | --- |
+| Cancellation leaves scopes open | Wait for this call's own Python callback cleanup before enclosing scopes pop, including repeated cancellation; no global flush or unrelated-call wait. |
+| Datetime, oversized integers, lone surrogates abort completed calls | Convert inspection copies to Rust-compatible JSON; original caller values remain intact. Add real-Relay regressions. |
+| LLM/tool exception metadata exposes text | Native callbacks receive fixed generic failure text; original exceptions/cancellation still reach NOOA callers. |
+| Missing runtime version check | Install and all three directly callable middleware functions reject unsupported versions before execution. |
+| ATIF prefill misattribution | Keep upstream limitation explicit. Export helper repairs only uniquely identified provider calls/observations and their execution metadata; host prefills remain upstream evidence. |
+| Root isolation silently drops enclosing local policies | Default roots preserve the ambient stack and policies. Unsafe concurrent sharing fails before work; explicit isolate=True opts into a documented independent policy boundary. |
+| Concurrent projector deregistration leaks | Remove runtime projectors entirely, including their registration/deregistration lifecycle. |
+| Unflushed exit crashes | Baseline reproduced 7 native crashes in 60 subprocesses; final source passes 100/100 unflushed exits. Add process-teardown regression coverage. |
+| Maximum-priority tie bypasses legacy redactor | Keep legacy payload shapes throughout all runtime sanitizers; format only final sanitized exports. A late maximum-priority redactor is covered against real Relay. |
+| Quickstart mislabels pickle | Inspect raw encoded event values; opaque pickle is correctly identified. |
+| Anonymous cleanup warnings | Identify cleanup phase and scope name/UUID or stack identifier without copying exception text. |
+| Predictable diagnostics path | Use private unpredictable temporary directories and owner-only files for every example artifact. |
+| Stale comments and untested behavior | Update migration/changelog/comments; add native policy inheritance, fail-closed concurrency, JSON bridge, exception privacy, repeated cancellation and shutdown cases. |
+| Unreadable/duplicated ATIF results | Bound exported human text, remove raw duplicate tool values and summarize opaque pickle. Preserve sanitizer omissions. |
+| ATIF schema edge cases | Preserve malformed provider arguments as evidence while emitting an argument object; retain native ATIF-v1.7 rather than relabeling as v1.8. |
+| Previously fixed CI/credentials/cache/install issues | Retain fixes and include their tests in targeted/full validation. |
+
+Independent lifecycle and boundary audits reproduced the reported failures;
+a third agent reviewed the entire final change and approved it. No reviewer
+found a remaining blocking issue. Native prefill ownership remains an upstream
+limitation, documented rather than inferred from tool names or completion order.
