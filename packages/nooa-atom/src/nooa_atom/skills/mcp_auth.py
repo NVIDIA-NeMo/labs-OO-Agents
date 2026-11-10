@@ -21,7 +21,6 @@ answers 401. This module supplies the three pieces it asks for:
 from __future__ import annotations
 
 import asyncio
-import fcntl
 import inspect
 import json
 import os
@@ -56,6 +55,7 @@ from mcp.shared.auth import OAuthClientInformationFull, OAuthClientMetadata, OAu
 from mcp.types import ErrorData
 from pydantic import AnyHttpUrl
 
+from nooa._platform import require_posix
 from nooa.mcp import MCPBaseClient
 from nooa.paths import get_user_dir
 
@@ -162,6 +162,9 @@ class FileTokenStorage:
 
     @contextmanager
     def _transaction(self):
+        import fcntl
+
+        require_posix("The MCP sign-in token cache")
         fd = self._open_lock()
         try:
             fcntl.flock(fd, fcntl.LOCK_EX)
@@ -173,6 +176,9 @@ class FileTokenStorage:
     async def _async_transaction(self):
         # No blocking executor waiter survives cancellation. Locks cover only
         # local read/derive/replace, never network I/O or the human callback.
+        import fcntl
+
+        require_posix("The MCP sign-in token cache")
         fd = self._open_lock()
         try:
             while True:
@@ -358,8 +364,9 @@ class SignInTimeoutError(TimeoutError):
 class PastedSignIn:
     """Redirect and callback handlers for a sign-in the person completes by pasting.
 
-    ``redirect`` keeps the sign-in link in ``url`` and sets ``url_ready``;
-    the host shows the link. ``complete`` takes the address the browser
+    ``redirect`` starts a flow: it keeps the sign-in link in ``url`` and
+    sets ``url_ready`` (cleared when that flow's ``callback`` ends); the host
+    shows the link. ``complete`` takes the address the browser
     ended on and hands its ``code`` and ``state`` to ``callback``, which the
     SDK awaits. ``callback`` gives up after ``timeout`` seconds.
     """
@@ -375,6 +382,11 @@ class PastedSignIn:
         )
 
     async def redirect(self, url: str) -> None:
+        # One handler pair serves every sign-in of the client's lifetime (a
+        # 401 after the first one starts another flow): each flow waits for
+        # its own pasted address, never the previous flow's code and state.
+        if self._pasted.done():
+            self._pasted = asyncio.get_running_loop().create_future()
         self.url = url
         self.url_ready.set()
 
@@ -401,6 +413,7 @@ class PastedSignIn:
             raise
         finally:
             self._waiting = False
+            self.url_ready.clear()
             for budget, remaining in self._budgets.items():
                 if not budget.expired():
                     budget.reschedule(loop.time() + remaining)

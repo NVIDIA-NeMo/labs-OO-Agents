@@ -143,6 +143,52 @@ async def test_the_loop_ends_when_no_channel_is_left(agent):
     assert isinstance(seen[0].error, ValueError)
 
 
+async def test_readiness_gone_during_prepare_waits_idle(agent):
+    """Nothing to claim after prepare: the loop waits for the next put, no spinning."""
+    calls = []
+    channel = agent.queue_manager.get_channel("user_messages")
+
+    async def prepare():
+        calls.append(None)
+        if len(calls) == 1:
+            channel.clear()  # another consumer took the input meanwhile
+
+    seen = record(agent, "TurnSettled")
+    agent.turns.start(prepare=prepare)
+    channel.put("taken")
+    await asyncio.sleep(0.2)
+    assert len(calls) == 1 and seen == []
+    channel.put("next")
+    await settled(seen, 1)
+    assert seen[0].result == Done(explanation="next")
+
+
+async def test_ready_without_anything_to_claim_does_not_spin(agent, monkeypatch):
+    """ready() true but claim_batch finds nothing (review #8): wait for a change."""
+    queues = agent.queue_manager
+    calls = []
+    disagree = True
+    real_claim = queues.claim_batch
+
+    def claim(recorder=None):
+        calls.append(None)
+        if disagree:
+            return None  # ready() holds, yet nothing is claimed
+        return real_claim(recorder)
+
+    monkeypatch.setattr(queues, "claim_batch", claim)
+    seen = record(agent, "TurnSettled")
+    agent.turns.start()
+    channel = queues.get_channel("user_messages")
+    channel.put("first")
+    await asyncio.sleep(0.2)
+    assert len(calls) == 1 and seen == []  # before: a claim per loop iteration, spinning
+    disagree = False
+    channel.put("second")
+    await settled(seen, 1)
+    assert seen[0].result == Done(explanation="first")
+
+
 async def test_a_failing_prepare_blocks_dispatch_without_consuming(agent):
     seen = record(agent, "TurnBegan", "TurnSettled")
     calls = []

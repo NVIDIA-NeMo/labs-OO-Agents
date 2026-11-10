@@ -96,6 +96,22 @@ class TestTail:
         )
         assert lines == ["abcd", "efgh", "next"]
 
+    async def test_piece_cut_inside_a_crlf_leaves_no_stray_cr(self, tmp_path):
+        """A cut between \r and \n: the \r ends the line, it is not content (review #6)."""
+        f = tmp_path / "app.log"
+        f.write_bytes(b"")
+        lines = await self._tail_while_writing(
+            f, [b"abc\r\n", b"defg", b"h\r", b"\nnext\n"], 4, max_line_bytes=4
+        )
+        assert lines == ["abc", "defg", "h", "next"]
+
+    async def test_a_cr_inside_a_long_line_stays_content(self, tmp_path):
+        """A held-back \r that no \n follows is part of the line's next piece."""
+        f = tmp_path / "app.log"
+        f.write_bytes(b"")
+        lines = await self._tail_while_writing(f, [b"ab\rcd\n", b"ok\n"], 3, max_line_bytes=3)
+        assert lines == ["ab", "\rcd", "ok"]
+
     async def test_piece_cut_inside_a_character_yields_no_empty_fragment(self, tmp_path):
         """A cut through a multi-byte character waits for the rest of it."""
         f = tmp_path / "app.log"

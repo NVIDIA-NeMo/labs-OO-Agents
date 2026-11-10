@@ -193,7 +193,7 @@ async def test_a_real_return_result_tool_error_gets_the_tool_form_and_no_old_tip
         'JSON arguments: {"result": {"explanation": ...}} or {"result": {"question": ...}}.'
     ) in bad
     assert bad.endswith(
-        "The turn goes on: fix the value and call return_result again (attempt 1 of 3)."
+        "The turn goes on: fix the value and call return_result again (retry 1 of 2)."
     )
     assert "Tip:" not in bad and "Please call return_result again" not in bad
 
@@ -231,7 +231,7 @@ async def test_invalid_results_have_their_own_budget_and_say_the_attempt():
         rendered = str(llm.last_messages)
     finally:
         await agent.aclose()
-    attempt = "The turn goes on: fix the value and call return_result again (attempt {} of 3)."
+    attempt = "The turn goes on: fix the value and call return_result again (retry {} of 2)."
     assert attempt.format(1) in rendered and attempt.format(2) in rendered
 
 
@@ -374,8 +374,9 @@ async def test_aliased_return_result_says_how_it_was_taken_and_shows_the_cell_fo
     assert bad.splitlines()[-2:] == [
         "To finish, call python_cell with one of: "
         "return_result(Done(explanation=...)), return_result(NeedInput(question=...)).",
-        # One budget for every agent (H3): max_retries (3) when max_result_retries is unset.
-        "The turn goes on (attempt 1 of 3).",
+        # One budget for every agent (H3): max_retries (3 errors, so 2 retries) when
+        # max_result_retries is unset.
+        "The turn goes on (retry 1 of 2).",
     ]
     # Done and NeedInput are not bound in this cell namespace: no doc() line.
     assert "Fields: print(doc(" not in bad
@@ -1265,5 +1266,39 @@ async def test_max_result_retries_zero_fails_on_the_first_invalid_result():
     try:
         with pytest.raises(GenerationError, match="after 1 attempts"):
             await agent.answer()
+    finally:
+        await agent.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("invalid", "succeeds"),
+    [(1, True), (2, False)],
+)
+async def test_max_result_retries_counts_retries_after_the_first(invalid, succeeds):
+    """max_result_retries=1 is one retry: one invalid value is recoverable, two are not."""
+    from nooa.errors import GenerationError
+
+    llm = FakeLLMClient(
+        scripted_responses=[
+            *[_response(f'return_result("bad {i}")', f"bad{i}") for i in range(invalid)],
+            _response("return_result(42)", "ok"),
+        ]
+    )
+
+    class TestAgent(Agent, llm=llm):
+        @strategy(CodeActV2(config=CodeActConfig(prefill=None, max_result_retries=1)))
+        async def answer(self) -> int:
+            """Return the answer."""
+            ...
+
+    agent = TestAgent()
+    try:
+        if succeeds:
+            assert await agent.answer() == 42
+            assert "(retry 1 of 1)" in str(llm.last_messages)
+        else:
+            with pytest.raises(GenerationError, match=r"after 2 attempts \(1 retries allowed\)"):
+                await agent.answer()
     finally:
         await agent.aclose()

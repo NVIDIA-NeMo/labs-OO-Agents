@@ -144,9 +144,45 @@ def test_the_watchdog_kills_the_process_group_when_the_parent_changes():
         interval=0.01,
         getppid=lambda: next(parents, 1),
         killpg=lambda group, sig: killed.append((group, sig)),
+        leads_group=lambda: True,
     )
     thread.join(TIMEOUT)
     assert not thread.is_alive()
     assert killed == [(0, signal.SIGKILL)]
     assert thread.daemon
     assert os.getpid()  # the test process itself was not touched
+
+
+def test_the_watchdog_spares_a_group_the_worker_does_not_lead():
+    # Started without its own session (the test runner's group), the worker
+    # must not kill the whole group: only itself.
+    parents = iter([100, 1])
+    groups: list[tuple[int, int]] = []
+    processes: list[tuple[int, int]] = []
+    thread = start_parent_watchdog(
+        interval=0.01,
+        getppid=lambda: next(parents, 1),
+        killpg=lambda group, sig: groups.append((group, sig)),
+        kill=lambda pid, sig: processes.append((pid, sig)),
+        leads_group=lambda: False,
+    )
+    thread.join(TIMEOUT)
+    assert not thread.is_alive()
+    assert groups == []
+    assert processes == [(os.getpid(), signal.SIGKILL)]
+
+
+def test_the_watchdog_checks_group_leadership_by_default(monkeypatch):
+    # The default check: the worker leads its group iff its pgid is its pid.
+    monkeypatch.setattr(os, "getpgrp", lambda: os.getpid() + 1)
+    parents = iter([100, 1])
+    groups: list[tuple[int, int]] = []
+    processes: list[tuple[int, int]] = []
+    thread = start_parent_watchdog(
+        interval=0.01,
+        getppid=lambda: next(parents, 1),
+        killpg=lambda group, sig: groups.append((group, sig)),
+        kill=lambda pid, sig: processes.append((pid, sig)),
+    )
+    thread.join(TIMEOUT)
+    assert (groups, processes) == ([], [(os.getpid(), signal.SIGKILL)])

@@ -6,6 +6,7 @@ import ast
 import asyncio
 import contextvars
 import copy
+import hashlib
 import inspect
 import io
 import linecache
@@ -76,6 +77,15 @@ from nooa.runtime.request_recovery import RequestRecovery, request_recoveries_fo
 logger = logging.getLogger(__name__)
 
 _MISSING = object()
+
+
+def _derive_prompt_cache_key(agent_id: str, strategy_tag: str) -> str:
+    """Return a stable cache shard key within the OpenAI 64-character limit."""
+    digest = hashlib.blake2s(
+        f"{agent_id}-{strategy_tag}".encode(),
+        digest_size=16,
+    ).hexdigest()
+    return f"nooa-{digest}"
 
 
 @contextmanager
@@ -1267,7 +1277,8 @@ class ActorRuntime:
                         type(_mw_strategy).__name__ if _mw_strategy is not None else "default"
                     )
                     ctx.params.setdefault(
-                        "prompt_cache_key", f"{self.agent._agent_id}-{_mw_strategy_tag}"
+                        "prompt_cache_key",
+                        _derive_prompt_cache_key(self.agent._agent_id, _mw_strategy_tag),
                     )
                     call_params["prompt_cache_key"] = ctx.params["prompt_cache_key"]
                     ctx.response = await llm_client.acall(
@@ -1343,7 +1354,8 @@ class ActorRuntime:
                 # Default prompt_cache_key to per-(agent, strategy) so:
                 #   - Parallel agents (same prefix) get distinct shards by
                 #     agent_id, avoiding the cybergym multi-trial collision
-                #     above the ~15 req/min per-shard ceiling.
+                #     above the ~15 req/min per-key routing guidance for
+                #     OpenAI models before GPT-5.6.
                 #   - Within one agent, calls that use different strategies
                 #     (e.g. CodeAct vs Predict) get separate shards because
                 #     their cacheable prefixes diverge anyway — preventing
@@ -1356,7 +1368,10 @@ class ActorRuntime:
                 _strategy_tag = (
                     type(_current_strategy).__name__ if _current_strategy is not None else "default"
                 )
-                _kwargs.setdefault("prompt_cache_key", f"{self.agent._agent_id}-{_strategy_tag}")
+                _kwargs.setdefault(
+                    "prompt_cache_key",
+                    _derive_prompt_cache_key(self.agent._agent_id, _strategy_tag),
+                )
                 _emit_llm_start()
 
                 async def _rebuild_messages() -> None:
@@ -1954,16 +1969,16 @@ class ActorRuntime:
                     ]
                     if func_defs:
                         func_tree = ast.Module(body=func_defs, type_ignores=[])
-                        exec(compile(func_tree, cell_filename, "exec"), exec_globals)
                         # Persisted helpers are compiled directly from the cell
                         # AST, not through the async wrapper. Keep their source
-                        # cache aligned with those original line numbers.
+                        # cache aligned before decorators inspect their bodies.
                         linecache.cache[cell_filename] = (
                             len(source_code),
                             None,
                             source_code.splitlines(keepends=True),
                             cell_filename,
                         )
+                        exec(compile(func_tree, cell_filename, "exec"), exec_globals)
                         # The wrapper's finally block captured the wrapped
                         # function objects. Persist the direct-compiled versions
                         # instead so later calls use source-relative line numbers.
