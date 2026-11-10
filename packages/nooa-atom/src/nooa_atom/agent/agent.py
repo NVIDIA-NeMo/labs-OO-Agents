@@ -601,7 +601,8 @@ _CONTEXT: Annotated[dict[str, Any], hidden] = {
 }
 _NOTIFICATION: Annotated[Any, hidden] = spec(max_string=50_000, max_length=100, max_depth=10)
 # An invalid return_result value is a cell error the model retries on; the
-# turn fails only after this many in one turn (other errors keep max_retries).
+# turn fails only when retries beyond this many are needed in one turn (other
+# errors keep max_retries).
 _MAX_RESULT_RETRIES: Annotated[int, hidden] = 10
 _REMOVED: Annotated[str, hidden] = (
     "{} is not part of this agent: run a child with Subagent "

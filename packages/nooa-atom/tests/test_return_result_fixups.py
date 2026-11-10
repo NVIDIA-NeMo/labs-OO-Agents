@@ -109,8 +109,8 @@ async def test_invalid_values_are_retryable_cell_errors(registry, options, model
     ) in error
     # The next line names the fields' doc; the cell has Done, NeedInput and Waiting.
     assert "...)).\\nFields: print(doc(Done, NeedInput, Waiting))\\n" in error
-    assert f"(attempt 1 of {_MAX_RESULT_RETRIES})" in error
-    assert f"(attempt 3 of {_MAX_RESULT_RETRIES})" in _cell_output(models, 3)
+    assert f"(retry 1 of {_MAX_RESULT_RETRIES})" in error
+    assert f"(retry 3 of {_MAX_RESULT_RETRIES})" in _cell_output(models, 3)
     attrs = _merged(span_attributes)
     assert attrs["harness.return_result_invalid.count"] == 3
     assert attrs["harness.return_result_invalid.types"] == ["ValidationError"] * 3
@@ -143,7 +143,7 @@ async def test_an_invalid_provider_return_result_names_the_fields_doc(registry, 
         "To finish, call python_cell with one of: return_result(Done(explanation=...)), "
         "return_result(NeedInput(question=...)), return_result(Waiting(explanation=..., on=...)).",
         "Fields: print(doc(Done, NeedInput, Waiting))",
-        f"The turn goes on (attempt 1 of {_MAX_RESULT_RETRIES}).",
+        f"The turn goes on (retry 1 of {_MAX_RESULT_RETRIES}).",
     ]
     assert "taken as" not in seen and "Invalid result:" not in seen
 
@@ -166,8 +166,10 @@ async def test_one_aliased_provider_call_counts_once(registry, options, models, 
 async def test_invalid_values_stay_bounded(registry, options, models):
     from nooa_atom.session.session import TurnFailedError
 
-    models.scripts[None] = [cell(f"return_result({i})") for i in range(_MAX_RESULT_RETRIES)]
+    # The first invalid value, then _MAX_RESULT_RETRIES retries: the last one fails.
+    attempts = _MAX_RESULT_RETRIES + 1
+    models.scripts[None] = [cell(f"return_result({i})") for i in range(attempts)]
     root = await registry.create(options)
-    with pytest.raises(TurnFailedError, match=f"failed after {_MAX_RESULT_RETRIES} attempts"):
+    with pytest.raises(TurnFailedError, match=f"failed after {attempts} attempts"):
         await asyncio.wait_for(root.prompt("hi"), TIMEOUT)
-    assert len(models.llms[None].calls) == _MAX_RESULT_RETRIES
+    assert len(models.llms[None].calls) == attempts

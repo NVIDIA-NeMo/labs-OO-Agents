@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from nooa._platform import require_posix
 from nooa.agentdoc import (
     LineSplitter,
     TruncatingStringIO,
@@ -636,6 +637,7 @@ class JobsApi(Skill):
         job: _Job,
     ) -> AsyncIterator[StreamEvent | StreamDone]:
         """Run one command in its own process; yield its lines, then a ``StreamDone``."""
+        require_posix("Background shell jobs")
         base, env = context
         directory = Path(base) if cwd is None else (Path(base) / Path(cwd)).resolve()
         proc = job.proc = await asyncio.create_subprocess_exec(

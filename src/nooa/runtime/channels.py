@@ -183,10 +183,9 @@ class JobHandle:
         if self._task.done():
             return
         self._task.cancel()
-        try:
-            await self._task
-        except (asyncio.CancelledError, Exception):
-            pass
+        # Collect the job's cancellation as a result, while cancellation of
+        # this await still propagates to our caller.
+        await asyncio.gather(self._task, return_exceptions=True)
         if self.state == "running":
             self.state = "cancelled"
 
@@ -1066,12 +1065,20 @@ class QueueManager:
                 and (self._event_wakes or any(ch.qsize() for ch in self._channels.values()))
             )
 
-    async def wait_ready(self) -> None:
-        """Wait without taking ownership. Registry changes also wake this wait."""
+    async def wait_ready(self, *, changed: bool = False) -> None:
+        """Wait without taking ownership. Registry changes also wake this wait.
+
+        ``changed=True`` first waits for the next put or registry change even
+        when ``ready()`` already holds: a caller that just found nothing to
+        claim despite ``ready()`` must not poll it again at once.
+        """
         loop = asyncio.get_running_loop()
         if self._notify_pair is None or self._notify_pair[1] is not loop:
             self._notify_pair = (asyncio.Event(), loop)
         event = self._notify_pair[0]
+        if changed:
+            event.clear()
+            await event.wait()
         while True:
             event.clear()
             if not self._channels:
@@ -1212,11 +1219,9 @@ class QueueManager:
             done, pending = await asyncio.wait(tasks.keys(), return_when=asyncio.FIRST_COMPLETED)
             for t in pending:
                 t.cancel()
-            for t in pending:
-                try:
-                    await t
-                except BaseException:
-                    pass
+            # A loser's cancellation is a result; our caller's cancellation
+            # must reach the outer handler that restores consumed items.
+            await asyncio.gather(*pending, return_exceptions=True)
 
             # Check if a queue-channel drain won (not the notify sentinel).
             drain_done = [t for t in done if tasks[t] is not None]
@@ -1355,13 +1360,15 @@ class QueueManager:
     async def shutdown(self) -> None:
         """Cancel and await all outstanding spawned jobs.
 
-        Safe to call multiple times. After shutdown, the handles list
-        is cleared.
+        Cancel all jobs concurrently. Completed handles are removed; any
+        unfinished handles remain tracked if shutdown is interrupted.
+        Safe to call multiple times.
         """
         handles = list(self._handles)
-        self._handles.clear()
-        for h in handles:
-            await h.cancel()
+        try:
+            await asyncio.gather(*(h.cancel() for h in handles), return_exceptions=True)
+        finally:
+            self._handles[:] = [h for h in self._handles if h not in handles or not h._task.done()]
 
     # ---- job registry ----------------------------------------------------
 

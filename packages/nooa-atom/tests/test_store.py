@@ -452,3 +452,43 @@ def test_a_file_in_use_on_another_machine_is_not_read_when_listing(tmp_path, mon
 
     monkeypatch.setattr(SessionStore, "_read_info", guard)
     assert store.list() == []
+
+
+def test_probing_a_held_session_takes_no_lock(tmp_path, monkeypatch):
+    """A probe never takes the kernel lock: a concurrent open must not see it as held."""
+    import fcntl
+    import os
+
+    from nooa_atom.session import store as store_module
+    from nooa_atom.session.store import SessionStore
+
+    store = SessionStore(tmp_path / "sessions")
+    handle = store.create(workspace=str(tmp_path))
+    try:
+        calls = []
+        real_flock = fcntl.flock
+        monkeypatch.setattr(fcntl, "flock", lambda *a: (calls.append(a), real_flock(*a))[1])
+        assert store.is_active(handle.id) is True
+        assert [info.id for info in store.in_use()] == [handle.id]
+        assert store._owner(handle.id) == f"local process (pid {os.getpid()})"
+        assert calls == []
+        lock = store.path_for(handle.id).with_suffix(".lock")
+        assert store_module._lock_is_held(lock) is True
+        assert calls == []
+    finally:
+        handle.close()
+    assert store.is_active(handle.id) is False
+
+
+def test_a_dead_local_owner_record_is_not_held(tmp_path):
+    import socket
+
+    from nooa_atom.session.store import SessionStore, _lock_is_held
+
+    store = SessionStore(tmp_path / "sessions")
+    with store.create(workspace=str(tmp_path)) as handle:
+        pass
+    lock = store.path_for(handle.id).with_suffix(".lock")
+    lock.write_text(f"{_dead_pid()} {socket.gethostname()}")
+    assert _lock_is_held(lock) is False
+    assert store.is_active(handle.id) is False

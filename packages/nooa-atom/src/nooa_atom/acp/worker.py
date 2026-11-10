@@ -28,6 +28,7 @@ from collections.abc import Callable
 from contextlib import suppress
 from typing import Any
 
+from nooa._platform import require_posix
 from nooa_atom.acp.framing import FRAME_LIMIT
 from nooa_atom.acp.server import serve_connection
 
@@ -78,23 +79,37 @@ def start_parent_watchdog(
     *,
     interval: float = 0.5,
     getppid: Callable[[], int] = os.getppid,
-    killpg: Callable[[int, int], None] = os.killpg,
+    killpg: Callable[[int, int], None] | None = None,
+    kill: Callable[[int, int], None] = os.kill,
+    leads_group: Callable[[], bool] | None = None,
 ) -> threading.Thread:
     """Kill this process group when the parent process changes (the router died).
 
     A worker normally exits on end of stream, but only if its event loop
     runs; a cell that blocks the loop would outlive a router killed with
     SIGKILL. The check is ``os.getppid()`` every ``interval`` seconds, which
-    works on Linux and macOS. The worker leads its own process group
-    (the router starts it with ``start_new_session=True``), so group 0 is
-    the worker and anything it started.
+    works on Linux and macOS. The router starts the worker with
+    ``start_new_session=True``, so it leads its own group and group 0 is the
+    worker and anything it started. A worker started some other way shares
+    its starter's group: it then kills only itself, never that group.
     """
+    require_posix("The ACP worker's parent watchdog")
+    # ``os.killpg`` is looked up here, not as a default: native Windows lacks it.
+    killpg = killpg or os.killpg
+    if leads_group is None:
+
+        def leads_group() -> bool:
+            return os.getpgrp() == os.getpid()
+
     parent = getppid()
 
     def watch() -> None:
         while getppid() == parent:
             time.sleep(interval)
-        killpg(0, signal.SIGKILL)
+        if leads_group():
+            killpg(0, signal.SIGKILL)
+        else:
+            kill(os.getpid(), signal.SIGKILL)
 
     thread = threading.Thread(target=watch, name="nooa-worker-watchdog", daemon=True)
     thread.start()

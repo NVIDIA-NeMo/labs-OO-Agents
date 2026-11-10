@@ -33,6 +33,8 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
 
+from nooa.runtime import cells
+
 _INTERNAL = "_nooa_ns_"
 _SOURCE = _INTERNAL + "source"
 _DELETE = _INTERNAL + "delete"
@@ -445,6 +447,10 @@ class ExecutionNamespace:
         weakref.finalize(self, _discard_sources, self._source_entries)
         self.globals = {k: v for k, v in dict(initial or {}).items() if k not in reserved}
         self.globals["__builtins__"] = _RuntimeBuiltins(self)
+        # A module name for what cells define (``__module__``), so their
+        # instances snapshot under a stable, importable name (not builtins).
+        self.globals.setdefault("__name__", cells.__name__)
+        cells.register(self)
         self.globals[_SOURCE] = _source_decorator
         self.globals[_DELETE] = self.delete_global
         self.framework: dict[str, Any] = {}
