@@ -41,6 +41,7 @@ from nooa.unifiedllm.registry import (
     get_decision_model,
     get_llm_client,
     get_registry_config,
+    load_llm,
     reload_registry,
     resolve_api_key_from_config,
 )
@@ -69,6 +70,7 @@ __all__ = [
     "ResponsesClient",
     # Model registry
     "get_llm_client",
+    "load_llm",
     "get_decision_model",
     "get_registry_config",
     "reload_registry",
