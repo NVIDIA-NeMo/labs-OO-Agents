@@ -172,7 +172,7 @@ class TextStream:
         try:
             if self._owner is not None and spill.path is not None:
                 try:
-                    self._file, granted = self._owner._open(spill.path)
+                    self._file, granted = self._owner._open(spill.path, always=spill.always)
                 except _NotYours:
                     self._owner = None  # never tell the folder about a file that isn't ours
                     raise
@@ -411,6 +411,7 @@ class _Entry:
     reserved: int  # bytes: the target's ``max_bytes`` while open, the size on disk once closed
     open: bool = True
     claimed: bool = False  # a stream opened it (one stream per target)
+    keep: bool = False  # ``always=True``: never evicted (deleted only by ``close()``)
 
 
 class SpillDir:
@@ -431,7 +432,8 @@ class SpillDir:
     target's ``max_bytes`` (a stream never writes more), a closed one its
     size on disk. To make room for a new target, ``target()`` deletes
     closed files, oldest first, until the new one fits both limits; it
-    never deletes the file of a stream still open. The new target's
+    never deletes the file of a stream still open, nor a file its stream
+    was told to keep (``always=True``: only ``close()`` deletes it). The new target's
     ``max_bytes`` is the one asked for (default: an equal share,
     ``max_bytes // max_files``, so ``max_files`` default-size streams fit
     at once), cut to what is left. With no file or byte left,
@@ -501,8 +503,9 @@ class SpillDir:
           ``max_bytes // max_files``): the most the stream may write; cut to
           what the folder has left.
 
-        Deletes the oldest closed files to make room (see ``SpillDir``).
-        Returns ``None`` when no file or byte is left, or when the file
+        Deletes the oldest closed files to make room (see ``SpillDir``),
+        never an open stream's file nor an ``always=True`` one. Returns
+        ``None`` when no file or byte is left even so, or when the file
         cannot be created (logged). Raises ``ValueError`` after ``close()``
         or for a negative ``max_bytes``.
         """
@@ -516,7 +519,8 @@ class SpillDir:
         with self._lock:
             if self._closed:
                 raise ValueError("target() on a closed SpillDir")
-            for path in [path for path, entry in self._files.items() if not entry.open]:
+            evictable = [p for p, entry in self._files.items() if not entry.open and not entry.keep]
+            for path in evictable:
                 if self._fits(want):
                     break
                 self._delete(path, self._files.pop(path))
@@ -532,7 +536,7 @@ class SpillDir:
             except OSError:
                 _log.warning("could not create a spill file; keeping memory only", exc_info=True)
                 return None
-            self._files[path] = _Entry((info.st_dev, info.st_ino), room)
+            self._files[path] = _Entry((info.st_dev, info.st_ino), room, keep=always)
         return SpillTarget(path=path, max_bytes=room, always=always, _dir=self)
 
     def _used(self) -> int:
@@ -541,7 +545,7 @@ class SpillDir:
     def _fits(self, want: int) -> bool:
         return len(self._files) < self.max_files and self._used() + want <= self.max_bytes
 
-    def _open(self, path: str) -> tuple[IO[bytes], int]:
+    def _open(self, path: str, *, always: bool) -> tuple[IO[bytes], int]:
         """Open a file this folder created for writing, without following a symlink.
 
         Returns the file and the bytes the folder granted it (a target changed
@@ -555,6 +559,7 @@ class SpillDir:
             if entry.claimed:
                 raise _NotYours(f"spill file {path!r} already has a stream")
             entry.claimed = True
+            entry.keep = always  # the stream's target decides (``replace`` may change it)
         flags = os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
         fd = os.open(path, flags)
         try:

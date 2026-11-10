@@ -107,6 +107,33 @@ def test_one_target_opens_one_stream(tmp_path: Path) -> None:
         assert Path(target.path).read_bytes() == b"first"
 
 
+def test_always_file_is_never_evicted(tmp_path: Path) -> None:
+    # Severin's repro (#515): a second target used to evict the closed always=True file.
+    with SpillDir(str(tmp_path), max_files=1, max_bytes=1000) as spills:
+        first = TextStream(unit="chars", head=1, tail=1, spill=spills.target(always=True))
+        first.write("hello world")
+        full = first.close().full
+        assert full is not None and os.path.exists(full.path)
+
+        assert spills.target(always=True) is None  # the budget can't be met: memory only
+        assert spills.target() is None
+        assert os.path.exists(full.path)
+    assert not os.path.exists(full.path)  # close() still deletes it
+
+
+def test_always_set_by_replace_is_never_evicted(tmp_path: Path) -> None:
+    with SpillDir(str(tmp_path), max_files=2, max_bytes=1000) as spills:
+        target = spills.target()
+        assert target is not None
+        stream = _stream(dataclasses.replace(target, always=True))
+        stream.write(b"kept")
+        kept = stream.close().full
+        evictable = _cut(spills)
+        assert kept is not None
+        assert spills.target() is not None  # evicts the other closed file, not the kept one
+        assert not os.path.exists(evictable) and os.path.exists(kept.path)
+
+
 def test_budget_by_count_evicts_the_oldest_closed_file(tmp_path: Path) -> None:
     with SpillDir(str(tmp_path), max_files=2, max_bytes=1000) as spills:
         first = _cut(spills)
