@@ -6,6 +6,9 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- `nooa.runtime.channels.StreamEnd` is removed: `QueueManager.spawn` no longer
+  publishes a runtime event when a job finishes (the job's handle state and
+  result say it ended).
 - `nooa.storage.serialization.register_legacy_module_prefix` is removed, and
   nooa-atom no longer registers the `nooa_coder.*` prefixes: snapshot class
   paths recorded under another package's old name (for example `nooa_coder.*`

@@ -87,21 +87,6 @@ class ChannelItemsDiscarded(EventBase):
     items: Annotated[list[Any], Field(repr=False)] = Field(default_factory=list)
 
 
-class StreamEnd(EventBase):
-    """Published through the agent's event manager when a spawned job finishes.
-
-    Signals that no more values will arrive on ``channel_name``. A runtime
-    event, like ``ChannelItemConsumed``: subscribers
-    (``event_manager.on("StreamEnd", ...)``) receive it, but it is never
-    recorded and never shown to the model (the job's own result says it
-    ended). Lives here (not in events.py) per the additive-only constraint.
-    """
-
-    _role: ClassVar[Role] = Role.RUNTIME_EVENT
-
-    channel_name: str
-
-
 class QueueReadTimeoutError(TimeoutError):
     """Raised when an LLM-facing queue reader times out waiting for an item."""
 
@@ -1296,11 +1281,11 @@ class QueueManager:
 
         Coroutine input
             ``await`` once; ``put(result)`` to the named channel on
-            completion; publish a runtime ``StreamEnd`` (never shown to the model).
+            completion.
 
         Async generator input
             Iterate; ``put(value)`` per yield until exhaustion or
-            cancellation; emit ``StreamEnd`` on close.
+            cancellation; close the generator at the end.
 
         Errors mid-job emit ``JobError`` on both the event channel
         (for context rendering) and the data channel (so race() wakes
@@ -1354,8 +1339,6 @@ class QueueManager:
             finally:
                 if is_agen:
                     await job.aclose()  # type: ignore[union-attr]
-                if self._event_manager is not None:
-                    self._event_manager.add(StreamEnd(channel_name=channel))
 
         # Dict created before create_task so the closure can find the
         # handle even if the task runs immediately (single-threaded
