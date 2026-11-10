@@ -1025,28 +1025,15 @@ class TestEnvelopeShapedPlainDicts:
         assert restored["plain"] == {"a": [1, {"b": None}]}
 
 
-def test_register_legacy_module_prefix_maps_old_class_paths(monkeypatch):
-    """A package registers its rename; class paths recorded under the old prefix restore."""
+def test_another_package_old_class_path_does_not_restore():
+    """Only core's own rename is mapped; another package's old class path fails to restore."""
     from nooa.storage import serialization
-    from nooa.storage.serialization import register_legacy_module_prefix
-    from nooa.storage.snapshot_vars import SnapshotVars
 
-    monkeypatch.setattr(
-        serialization, "_LEGACY_CLASS_PREFIXES", dict(serialization._LEGACY_CLASS_PREFIXES)
-    )
-    fqn = "old_pkg.deep.snapshot_vars.SnapshotVars"
+    assert not hasattr(serialization, "register_legacy_module_prefix")
+    fqn = "nooa_coder.storage.snapshot_vars.SnapshotVars"
     blob = {"__type__": "dict_class", "__class__": fqn, "data": {"_data": {"answer": 42}}}
     with pytest.raises(DeserializationError, match="Cannot import class"):
         deserialize(blob, {fqn})
-    register_legacy_module_prefix("old_pkg.", "nowhere.")
-    register_legacy_module_prefix("old_pkg.deep.", "nooa.storage.")  # longer prefix wins
-    register_legacy_module_prefix("old_pkg.deep.", "nooa.storage.")  # same pair: no-op
-    restored = deserialize(blob, {fqn})
-    assert isinstance(restored, SnapshotVars) and restored["answer"] == 42
-    with pytest.raises(ValueError, match="already mapped"):
-        register_legacy_module_prefix("old_pkg.deep.", "other.")
-    with pytest.raises(ValueError, match="must end with"):
-        register_legacy_module_prefix("old_pkg", "nooa.")
 
 
 def test_core_serializer_holds_no_atom_legacy_prefixes():

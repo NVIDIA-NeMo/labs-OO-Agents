@@ -6,6 +6,12 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- `nooa.storage.serialization.register_legacy_module_prefix` is removed, and
+  nooa-atom no longer registers the `nooa_coder.*` prefixes: snapshot class
+  paths recorded under another package's old name (for example `nooa_coder.*`
+  in nooa-coder sessions) no longer restore; such attributes are skipped with
+  a warning. Core's own `nemo_oo_agents.*` → `nooa.*` mapping stays. Agent
+  specs and session item types recorded as `nooa_coder.*` still load.
 - Skills in an older `<project>/.nooa/libs` directory are no longer loaded;
   only `.nooa/skills` is. When `.nooa/libs` exists the skills status shows
   "Skills in .nooa/libs are no longer loaded; move them to .nooa/skills."

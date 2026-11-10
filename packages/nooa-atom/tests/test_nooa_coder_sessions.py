@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 from nooa_atom.agent.agent import AtomAgent
 from nooa_atom.agent.factory import create_session_agent
-from nooa_atom.session.items import ChildRef, ChildResult, TaskResult
+from nooa_atom.session.items import TaskResult
 from nooa_atom.session.loader import canonical_module, load_agent_class, load_typed
 from nooa_atom.session.registry import SessionRegistry
 from nooa_atom.session.store import SessionStore, sessions_root
@@ -56,27 +56,19 @@ async def test_the_session_tree_is_listed_with_its_children(workspace):
         assert (infos[child_id].parent_id, infos[child_id].name) == (ROOT, name)
 
 
-async def test_the_root_loads_as_an_atom_agent_with_its_saved_state(workspace, caplog):
+async def test_the_root_loads_as_an_atom_agent_without_its_nooa_coder_typed_vars(workspace, caplog):
     registry = SessionRegistry(
         SessionStore(sessions_root(workspace)), agent_factory=create_session_agent
     )
     try:
         with caplog.at_level(logging.WARNING):
             session = await registry.load(ROOT, llm=FakeLLMClient([]))
-        assert "could not restore" not in caplog.text
-        assert "Cannot import" not in caplog.text
+        # Snapshot class paths recorded as nooa_coder.* are no longer mapped:
+        # the vars that hold them are skipped (accepted); the rest restores.
+        assert "Cannot import class 'nooa_coder." in caplog.text
         agent = session._agent
         assert type(agent) is AtomAgent
         assert "carry the plan over" in agent.todo.status()
-        assert agent.v.result == TaskResult(
-            solution_description="patched parse()",
-            evidence="tests pass",
-            how_to_verify="pytest",
-            report="REPORT: off-by-one fixed",
-        )
-        assert isinstance(agent.v.child, ChildRef)
-        assert isinstance(agent.v.review, ChildResult)
-        assert agent.v.review.result.report == "REPORT: off-by-one fixed"
         # Older children were named by their description: one that is not an
         # identifier gets child_<n> (its place among the children), by load.
         names = {ref.name for ref in agent.children()}
@@ -139,29 +131,9 @@ def test_an_item_recorded_under_a_nooa_coder_type_loads_typed():
     assert load_typed("nooa_coder.session.items:TaskResult", data) == TaskResult(**data)
 
 
-def test_nooa_coder_snapshot_class_paths_resolve_through_the_core_hook():
-    """nooa-atom registers its legacy prefixes with the core serializer on import."""
-    from nooa_atom.agent.jobs import JobInfo
-    from nooa_atom.session import loader
+def test_nooa_coder_snapshot_class_paths_no_longer_restore():
+    """Snapshot class paths recorded under nooa_coder.* are not mapped (accepted break)."""
+    from nooa.storage.serialization import DeserializationError, _import_class
 
-    from nooa.storage import serialization
-    from nooa.storage.serialization import _import_class
-
-    for old, new in loader.LEGACY_MODULE_PREFIXES.items():
-        assert serialization._LEGACY_CLASS_PREFIXES[old] == new
-    assert _import_class("nooa_coder.session.items.TaskResult") is TaskResult
-    assert _import_class("nooa_coder.coding.jobs.JobInfo") is JobInfo
-
-
-def test_importing_the_atom_agent_registers_the_prefixes():
-    """A fresh interpreter that imports only the Atom agent can restore nooa_coder paths."""
-    import subprocess
-    import sys
-
-    code = (
-        "from nooa_atom.agent.agent import AtomAgent\n"
-        "from nooa.storage.serialization import _import_class\n"
-        "from nooa_atom.session.items import TaskResult\n"
-        "assert _import_class('nooa_coder.session.items.TaskResult') is TaskResult\n"
-    )
-    subprocess.run([sys.executable, "-c", code], check=True, timeout=120)
+    with pytest.raises(DeserializationError, match="Cannot import class"):
+        _import_class("nooa_coder.session.items.TaskResult")
