@@ -130,7 +130,7 @@ def test_max_nodes_is_shared_by_the_whole_tree() -> None:
 
     # root + first list + 3 items + second list = 6 inspections; then nothing more.
     assert isinstance(snapshot, Sequence)
-    first, second = snapshot.items
+    first, second = snapshot.head
     assert first == Sequence("list", 3, (Scalar(1), Scalar(2), Scalar(3)))
     assert second == Sequence("list", 3, (), "max_nodes")
     assert snapshot.length == 3 and snapshot.reason == "max_nodes"
@@ -163,12 +163,12 @@ def test_max_items_keeps_head_and_tail() -> None:
     snapshot = capture(list(range(10)), limits)
 
     assert isinstance(snapshot, Sequence)
-    assert [item.value for item in snapshot.items] == [0, 1]  # type: ignore[union-attr]
+    assert [item.value for item in snapshot.head] == [0, 1]  # type: ignore[union-attr]
     assert [item.value for item in snapshot.tail] == [8, 9]  # type: ignore[union-attr]
     assert snapshot.length == 10 and snapshot.reason == "max_items"
     dict_snapshot = capture({str(i): i for i in range(10)}, limits)
     assert isinstance(dict_snapshot, Mapping)
-    assert [key for key, _ in dict_snapshot.items] == ["0", "1"]
+    assert [key for key, _ in dict_snapshot.head] == ["0", "1"]
     assert [key for key, _ in dict_snapshot.tail] == ["8", "9"]
 
 
@@ -190,7 +190,7 @@ def test_tail_items_are_charged_to_the_budget() -> None:
 
     assert isinstance(snapshot, Sequence)
     assert len(render_json(snapshot, max_chars=40)) <= 40
-    assert snapshot.tail == () or len(snapshot.items) == 2
+    assert snapshot.tail == () or len(snapshot.head) == 2
 
 
 def test_bytes_are_cut_on_code_points() -> None:
@@ -232,7 +232,7 @@ def test_unknown_types_run_no_user_code() -> None:
     snapshot = capture({"x": value, "y": [value]})
 
     assert isinstance(snapshot, Mapping)
-    assert snapshot.items[0][1] == Unavailable("opaque", "Recorder")
+    assert snapshot.head[0][1] == Unavailable("opaque", "Recorder")
     assert Recorder.calls == []
     assert render_python(snapshot) == "{'x': <opaque: Recorder>, 'y': [<opaque: Recorder>]}"
     assert json.loads(render_json(snapshot, max_chars=1000)) == {
@@ -576,7 +576,7 @@ def test_dataclass_hints_that_fail_are_retried_by_the_next_capture(monkeypatch) 
     assert [call for call in calls if call is later] == [later]
     assert len(calls) == 3
     assert id(later) not in _visibility._HINTS  # and not cached for the process
-    assert all(item.reason == "unreadable" for item in first.items)
+    assert all(item.reason == "unreadable" for item in first.head)
     assert "s3cret" not in render_python(first)
 
     module.Missing = str
@@ -696,9 +696,9 @@ def test_cycles_become_refs_to_the_ancestor() -> None:
     snapshot = capture(outer)
 
     assert isinstance(snapshot, Mapping)
-    inner_node = snapshot.items[0][1]
+    inner_node = snapshot.head[0][1]
     assert isinstance(inner_node, Mapping)
-    assert inner_node.items[0][1] == Ref("", "mapping")
+    assert inner_node.head[0][1] == Ref("", "mapping")
     assert render_python(snapshot) == "{'inner': {'back': <cycle>}}"
     assert _attributes("output", snapshot)["nooa.output.preview.paths"] == ("/inner/back",)
 
@@ -848,7 +848,7 @@ def test_exception_in_an_accessor_is_unavailable(registry) -> None:
 
     snapshot = capture({"a": Animal("x")})
     assert isinstance(snapshot, Mapping)
-    assert snapshot.items[0][1] == Unavailable("error", "Animal")
+    assert snapshot.head[0][1] == Unavailable("error", "Animal")
     attributes = _attributes("output", snapshot)
     assert attributes["nooa.output.preview.reasons"] == ("error",)
 
@@ -871,7 +871,7 @@ def test_budget_is_enforced_on_shape_items(registry) -> None:
     assert len(text) <= 100
     assert isinstance(snapshot, Sequence) and not snapshot.complete
     assert snapshot.length == 10**12 and snapshot.reason == "max_length"
-    assert len(pulled) == len(snapshot.items) + 1  # stopped at the budget
+    assert len(pulled) == len(snapshot.head) + 1  # stopped at the budget
 
 
 def test_array_like_obeys_max_items_and_nodes(registry) -> None:
@@ -950,7 +950,7 @@ def test_registered_items_in_sequences_and_mappings_get_their_slot(registry) -> 
     assert isinstance(snapshot, Object)
     assert [name for name, _node in snapshot.fields] == ["by_key", "items"]
     items = snapshot.fields[1][1]
-    assert isinstance(items, Sequence) and isinstance(items.items[0], Object)
+    assert isinstance(items, Sequence) and isinstance(items.head[0], Object)
 
 
 def test_registered_cycle_ref_ids_use_field_paths(registry) -> None:
@@ -1031,7 +1031,7 @@ def test_mapping_keys_that_collide_in_json_stop_the_mapping_at_capture(value: di
 
     assert isinstance(snapshot, Mapping)
     assert snapshot.reason == "key" and snapshot.length == 2
-    assert len(snapshot.items) == 1 and snapshot.items[0][0] == next(iter(value))
+    assert len(snapshot.head) == 1 and snapshot.head[0][0] == next(iter(value))
     rendered = render_json(snapshot, max_chars=limits.max_chars)
     first = dict([next(iter(value.items()))])
     assert json.loads(rendered) == json.loads(json.dumps(first))
@@ -1050,7 +1050,7 @@ def test_mapping_key_collision_between_head_and_tail_stops_the_tail() -> None:
 
     assert isinstance(snapshot, Mapping)
     assert snapshot.reason == "key"
-    assert [key for key, _ in snapshot.items] == ["1", "k0"]
+    assert [key for key, _ in snapshot.head] == ["1", "k0"]
     assert [key for key, _ in snapshot.tail] == ["k4"]
 
 

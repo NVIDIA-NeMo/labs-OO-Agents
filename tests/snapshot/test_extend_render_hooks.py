@@ -227,9 +227,9 @@ def _every_spill(node: Snapshot) -> list[str]:
             if current.full is not None and current.full.path not in found:
                 found.append(current.full.path)
         elif isinstance(current, Sequence):
-            stack.extend(reversed(current.items + current.tail))
+            stack.extend(reversed(current.head + current.tail))
         elif isinstance(current, Mapping):
-            stack.extend(child for _key, child in reversed(current.items + current.tail))
+            stack.extend(child for _key, child in reversed(current.head + current.tail))
         elif isinstance(current, Object):
             stack.extend(child for _name, child in reversed(current.fields))
     return found

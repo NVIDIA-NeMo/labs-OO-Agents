@@ -16,14 +16,14 @@ NOOA cuts large values and large output in many places: shell results, progress,
 
 ## The model
 
-A snapshot is a frozen tree of nodes. It holds no live objects. Every node has `complete` and `reason` (`Reason`); `complete` is `reason is None`.
+A snapshot is a frozen tree of nodes. It holds no live objects. Every node has `complete` and `reason` (`Reason`); `complete` is `reason is None`. `Text`, `Sequence` and `Mapping` read the same: `head` is the kept start, `tail` the kept end, `length` the original count.
 
 | Node | Stands for |
 |---|---|
 | `Scalar` | a complete `None`, `bool`, `int`, finite `float` or short `bytes` |
 | `Text` | a string, bytes or a stream: kept head and tail in their own unit, `length`, `omitted`, and `full` (a `Spill`) |
-| `Sequence` | a list, tuple or `array_like` value: kept head and tail items, original `length` |
-| `Mapping` | a dict, `mapping_like` value or `capture_fields` wrapper: kept entries, original `length` |
+| `Sequence` | a list, tuple or `array_like` value: kept `head` and `tail` items, original `length` |
+| `Mapping` | a dict, `mapping_like` value or `capture_fields` wrapper: kept `head` and `tail` entries, original `length` |
 | `Object` | a Pydantic model, dataclass or shape with fields: kept fields in order, optional `kind` |
 | `Unavailable` | a value with no content kept: `opaque`, `error` or a limit |
 | `Ref` | a cycle: the JSON Pointer of the enclosing container |

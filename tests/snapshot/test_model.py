@@ -13,6 +13,7 @@ import pytest
 
 import nooa.snapshot
 from nooa.snapshot import (
+    Limits,
     Mapping,
     Object,
     Reason,
@@ -22,6 +23,7 @@ from nooa.snapshot import (
     Spill,
     Text,
     Unavailable,
+    capture,
 )
 from tests.snapshot._random_trees import random_tree
 
@@ -98,6 +100,28 @@ def test_nodes_are_frozen_and_hashable() -> None:
     )
 
 
+def test_containers_read_like_text_head_tail_length() -> None:
+    # Paul and Severin (#515): all three node types say ``head``, ``tail`` and ``length``.
+    assert [f.name for f in dataclasses.fields(Sequence)] == [
+        "type_name",
+        "length",
+        "head",
+        "reason",
+        "tail",
+    ]
+    assert [f.name for f in dataclasses.fields(Mapping)][:5] == [
+        "type_name",
+        "length",
+        "head",
+        "reason",
+        "tail",
+    ]
+    cut = capture(list(range(10)), Limits(max_items=4, tail_share=0.5))
+    assert isinstance(cut, Sequence)
+    assert (cut.head, cut.tail, cut.length) == ((Scalar(0), Scalar(1)), (Scalar(8), Scalar(9)), 10)
+    assert not hasattr(cut, "items")
+
+
 def test_text_fields_are_keyword_only() -> None:
     with pytest.raises(TypeError):
         Text("a", "", 1, "chars")  # type: ignore[misc]
@@ -134,9 +158,9 @@ def test_random_trees_are_consistent() -> None:
             if isinstance(node, Text):
                 assert node.omitted >= 0
             elif isinstance(node, Sequence):
-                stack += [*node.items, *node.tail]
+                stack += [*node.head, *node.tail]
             elif isinstance(node, Mapping):
-                stack += [child for _key, child in (*node.items, *node.tail)]
+                stack += [child for _key, child in (*node.head, *node.tail)]
             elif isinstance(node, Object):
                 stack += [child for _name, child in node.fields]
 

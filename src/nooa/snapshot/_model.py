@@ -184,7 +184,7 @@ class Text:
 
 @dataclass(frozen=True)
 class Sequence:
-    """A list, a tuple or an ``array_like`` value: the kept items and the original count.
+    """A list, a tuple or an ``array_like`` value: the kept ``head`` and ``tail`` items, the original count.
 
     Fields:
 
@@ -192,19 +192,20 @@ class Sequence:
       registered as ``array_like`` without fields; ``"list"`` for the
       ``items``, ``data`` and ``labels`` parts of a shape.
     - ``length``: the number of items in the original.
-    - ``items``: the items kept from the start, as nodes.
+    - ``head``: the items kept from the start, as nodes.
     - ``reason``: ``None`` when every item is kept, else ``"max_items"``,
       ``"max_length"``, ``"max_nodes"``, ``"max_depth"`` (no items kept) or
       ``"error"`` (a shape's ``items`` raised while being read).
     - ``tail``: the items kept from the end, when ``Limits.tail_share``
       keeps both ends (empty otherwise).
 
-    ``complete`` is ``reason is None``.
+    As in ``Text``: ``head`` is the kept start, ``tail`` the kept end and
+    ``length`` the original count. ``complete`` is ``reason is None``.
     """
 
     type_name: str
     length: int
-    items: tuple[Snapshot, ...]
+    head: tuple[Snapshot, ...]
     reason: Reason | None = None
     tail: tuple[Snapshot, ...] = ()
 
@@ -216,14 +217,14 @@ class Sequence:
 
 @dataclass(frozen=True)
 class Mapping:
-    """A dict, a ``mapping_like`` value or a ``capture_fields`` wrapper: kept entries and the count.
+    """A dict, a ``mapping_like`` value or a ``capture_fields`` wrapper: kept ``head`` and ``tail`` entries, the count.
 
     Fields:
 
     - ``type_name``: ``"dict"``, or the class name of a value registered as
       ``mapping_like`` without fields.
     - ``length``: the number of entries in the original.
-    - ``items``: the ``(key, node)`` entries kept from the start. Keys are
+    - ``head``: the ``(key, node)`` entries kept from the start. Keys are
       exact ``str``, ``int``, ``float``, ``bool`` or ``None``.
     - ``reason``: ``None`` when every entry is kept, else ``"max_items"``,
       ``"max_length"``, ``"max_nodes"``, ``"max_depth"`` (no entries kept),
@@ -231,16 +232,17 @@ class Mapping:
       form an earlier kept key has, like ``1`` after ``"1"``) or ``"error"`` (a
       shape's ``items`` raised, or yielded something other than a pair).
     - ``tail``: the entries kept from the end, when ``Limits.tail_share``
-      keeps both ends.
+      keeps both ends (empty otherwise).
     - ``wrapper``: true for the root of ``capture_fields``; ``render_json``
       then keeps every entry with at least a minimal value of its own type.
 
-    ``complete`` is ``reason is None``.
+    As in ``Text``: ``head`` is the kept start, ``tail`` the kept end and
+    ``length`` the original count. ``complete`` is ``reason is None``.
     """
 
     type_name: str
     length: int
-    items: tuple[tuple[Key, Snapshot], ...]
+    head: tuple[tuple[Key, Snapshot], ...]
     reason: Reason | None = None
     tail: tuple[tuple[Key, Snapshot], ...] = ()
     wrapper: bool = False

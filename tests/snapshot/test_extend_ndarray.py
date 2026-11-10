@@ -102,10 +102,10 @@ def test_ndarray_like_summarises_the_ends_of_every_axis(registered) -> None:
     assert isinstance(snapshot, Object)
     data = snapshot.field("data")
     assert isinstance(data, Sequence) and data.length == 1000 and data.reason == "max_items"
-    assert len(data.items) == 2 and len(data.tail) == 2
-    first, last = data.items[0], data.tail[-1]
+    assert len(data.head) == 2 and len(data.tail) == 2
+    first, last = data.head[0], data.tail[-1]
     assert isinstance(first, Sequence) and isinstance(last, Sequence)
-    assert first.items == (Scalar(0.0), Scalar(1.0)) and first.tail == (
+    assert first.head == (Scalar(0.0), Scalar(1.0)) and first.tail == (
         Scalar(998.0),
         Scalar(999.0),
     )
@@ -143,9 +143,9 @@ def test_ndarray_like_budget_picks_the_count(registered, limits, size) -> None:
     assert [name for name, _node in snapshot.fields] == ["dtype", "shape", "data"]
     assert snapshot.field("shape") == Sequence("tuple", 2, (Scalar(size // 1000), Scalar(1000)))
     data = snapshot.field("data")
-    assert isinstance(data, Sequence) and not data.complete and data.items and data.tail
-    rows = [*data.items, *data.tail]
-    shown = sum(len(row.items) + len(row.tail) for row in rows if isinstance(row, Sequence))
+    assert isinstance(data, Sequence) and not data.complete and data.head and data.tail
+    rows = [*data.head, *data.tail]
+    shown = sum(len(row.head) + len(row.tail) for row in rows if isinstance(row, Sequence))
     assert len(array.read) == shown  # never an element that is not shown
     assert len(array.read) <= limits.max_nodes
     text = render_json(snapshot, max_chars=limits.max_chars)
@@ -244,12 +244,12 @@ def test_ndarray_like_errors(registered) -> None:
     )
     labels = snapshot.field("labels")
     assert isinstance(labels, Mapping)
-    assert labels.items == ((0, Unavailable("error")), (5, Unavailable("error")))  # 5: no such axis
+    assert labels.head == ((0, Unavailable("error")), (5, Unavailable("error")))  # 5: no such axis
 
     # A missing axis is an error at every budget, also when a limit cuts it.
     shallow = capture(Broken(), Limits(max_depth=2)).field("labels")  # type: ignore[union-attr]
     assert isinstance(shallow, Mapping)
-    assert shallow.items[1] == (5, Unavailable("error"))
+    assert shallow.head[1] == (5, Unavailable("error"))
 
     for bad_shape in (fail, lambda v: [3], lambda v: (-1,), lambda v: (True, 2.0)):
         registered(Broken, ndarray_like(bad_shape, element))  # type: ignore[arg-type]

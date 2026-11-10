@@ -117,7 +117,7 @@ def test_key_policies_capture_refuses_what_rendering_converts() -> None:
     for key in (huge, math.inf, math.nan):
         snapshot = capture({"a": 1, key: 2})
         assert isinstance(snapshot, Mapping) and snapshot.reason == "key"
-        assert snapshot.items == (("a", Scalar(1)),)
+        assert snapshot.head == (("a", Scalar(1)),)
     # Rendering reads detached keys: they convert as they are.
     detached = Mapping("dict", 2, ((huge, Scalar(1)), (1.5, Scalar(2))))
     assert json.loads(render_json(detached, max_chars=200)) == {str(huge): 1, "1.5": 2}

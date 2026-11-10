@@ -206,11 +206,11 @@ class PythonRenderer:
     def _sequence(self, node: Sequence) -> str:
         left, right = _brackets(node.type_name)
         if node.complete:
-            return self._items(node.type_name, node.items)
-        if node.reason == "max_depth" and not node.items:
+            return self._items(node.type_name, node.head)
+        if node.reason == "max_depth" and not node.head:
             return f"{left}{node.type_name}: {node.length} items{right}"
         parts = [f"{node.type_name}(len={node.length}"]
-        parts.append(f"[:{len(node.items)}]={self._items(node.type_name, node.items)}")
+        parts.append(f"[:{len(node.head)}]={self._items(node.type_name, node.head)}")
         if node.tail:
             parts.append(f"[-{len(node.tail)}:]={self._items(node.type_name, node.tail)}")
         return ", ".join(parts) + ")"
@@ -220,10 +220,10 @@ class PythonRenderer:
 
     def _mapping(self, node: Mapping) -> str:
         if node.complete:
-            return "{" + ", ".join(self._entries(node.items)) + "}"
-        if node.reason == "max_depth" and not node.items:
+            return "{" + ", ".join(self._entries(node.head)) + "}"
+        if node.reason == "max_depth" and not node.head:
             return f"{{{node.type_name}: {node.length} items}}"
-        parts = self._entries(node.items)
+        parts = self._entries(node.head)
         if node.tail:
             parts.append("...")
             parts.extend(self._entries(node.tail))
@@ -383,10 +383,10 @@ def _spill_paths(node: Snapshot, found: list[str]) -> list[str]:
         if node.full is not None and node.full.path not in found:
             found.append(node.full.path)
     elif type(node) is Sequence:
-        for child in node.items + node.tail:
+        for child in node.head + node.tail:
             _spill_paths(child, found)
     elif type(node) is Mapping:
-        for _key, child in node.items + node.tail:
+        for _key, child in node.head + node.tail:
             _spill_paths(child, found)
     elif type(node) is Object:
         for _name, child in node.fields:
@@ -507,7 +507,7 @@ def _json_scalar(node: Scalar, max_size: int, path: str, report: _Report) -> tup
 def _json_sequence(node: Sequence, max_size: int, path: str, report: _Report) -> tuple[Any, int]:
     output: list[Any] = []
     box = Container(max_size)
-    for index, child in enumerate(node.items):
+    for index, child in enumerate(node.head):
         slot = box.slot()
         if slot is None:
             report.incomplete(path, box.reason)
@@ -557,8 +557,8 @@ def _json(node: Snapshot, max_size: int, path: str, report: _Report) -> tuple[An
     if type(node) is Sequence:
         return _json_sequence(node, max_size, path, report)
     if type(node) is Mapping:
-        wrapped = _json_wrapper(node.items, max_size, path, report) if node.wrapper else None
-        return wrapped or _json_entries(node.items, reason, max_size, path, report)
+        wrapped = _json_wrapper(node.head, max_size, path, report) if node.wrapper else None
+        return wrapped or _json_entries(node.head, reason, max_size, path, report)
     return _json_entries(cast(Object, node).fields, reason, max_size, path, report)
 
 

@@ -112,7 +112,7 @@ def test_array_like_pulls_at_most_the_kept_items_plus_one(registered, limits) ->
 
     assert isinstance(snapshot, Sequence) and snapshot.length == 10**9 and not snapshot.complete
     assert value.length_calls == 1
-    assert value.pulled <= len(snapshot.items) + 1
+    assert value.pulled <= len(snapshot.head) + 1
     assert len(render_json(snapshot, max_chars=limits.max_chars)) <= limits.max_chars
 
 
@@ -173,7 +173,7 @@ def test_mapping_like_nodes_and_bounded_pulls(registered) -> None:
     for limits in (Limits(max_chars=60), Limits(max_nodes=20), Limits()):
         value = _Counted(10**9)
         cut = capture(value, limits)
-        assert isinstance(cut, Mapping) and value.pulled <= len(cut.items) + 1
+        assert isinstance(cut, Mapping) and value.pulled <= len(cut.head) + 1
 
 
 def test_mapping_like_with_fields_and_errors(registered) -> None:
@@ -196,7 +196,7 @@ def test_mapping_like_with_fields_and_errors(registered) -> None:
     # A key that is not an exact built-in scalar stops the mapping, as for a dict.
     registered(Table, mapping_like(lambda v: 2, lambda v: [("a", 1), (object(), 2)]))
     stopped = capture(Table())
-    assert isinstance(stopped, Mapping) and stopped.reason == "key" and len(stopped.items) == 1
+    assert isinstance(stopped, Mapping) and stopped.reason == "key" and len(stopped.head) == 1
 
 
 # --- object_like -----------------------------------------------------------------------
@@ -245,7 +245,7 @@ def test_object_like_greedy_field_leaves_room_for_later_fields(registered) -> No
         assert isinstance(snapshot, Object)
         assert [name for name, _node in snapshot.fields] == ["sample", "name", "count", "plain"]
         sample = snapshot.field("sample")
-        assert isinstance(sample, Sequence) and not sample.complete and sample.items
+        assert isinstance(sample, Sequence) and not sample.complete and sample.head
         text = render_json(snapshot, max_chars=limits.max_chars)
         assert len(text) <= limits.max_chars
         assert set(json.loads(text)) == {"sample", "name", "count", "plain"}
@@ -521,7 +521,7 @@ def test_pydantic_and_dataclasses_are_internal_object_shapes() -> None:
 
     snapshot = capture([Model(), Data(Model())], Limits(max_items=1))
     assert repr(snapshot) == (
-        "Sequence(type_name='list', length=2, items=(Object(type_name='Model', fields=(('a', "
+        "Sequence(type_name='list', length=2, head=(Object(type_name='Model', fields=(('a', "
         "Scalar(value=1)),), reason='max_items', kind=None),), reason='max_items', tail=())"
     )
     assert render_python(capture(Data(Model()))) == "Data(x=Model(a=1, b=[1, 2]))"
