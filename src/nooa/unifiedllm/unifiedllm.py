@@ -8,7 +8,7 @@ import logging
 import math
 import re
 import warnings
-from abc import ABC
+from abc import ABC, abstractmethod
 from collections.abc import Callable, Coroutine, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -1795,9 +1795,7 @@ class UnifiedLLM(ABC):
             self._unstage_media(staged)
             raise
 
-    # Not abstract: a subclass written against the older contract overrides
-    # ``call``/``acall`` instead (and gets no media recovery); one that
-    # overrides neither fails when it is called, not when it is built.
+    @abstractmethod
     def _call_once(
         self,
         messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
@@ -1805,14 +1803,9 @@ class UnifiedLLM(ABC):
         output_model: type[BaseModel] | None = None,
         **kwargs,
     ) -> LLMResponse:
-        """One request; ``call`` adds media recovery around it.
+        """One request; ``call`` adds media recovery around it. Subclasses implement it."""
 
-        Subclasses implement this (or override ``call`` itself).
-        """
-        raise NotImplementedError(
-            f"{type(self).__name__} must implement _call_once() (or override call())"
-        )
-
+    @abstractmethod
     async def _acall_once(
         self,
         messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
@@ -1820,10 +1813,7 @@ class UnifiedLLM(ABC):
         output_model: type[BaseModel] | None = None,
         **kwargs,
     ) -> LLMResponse:
-        """Async ``_call_once``; subclasses implement this (or override ``acall``)."""
-        raise NotImplementedError(
-            f"{type(self).__name__} must implement _acall_once() (or override acall())"
-        )
+        """Async ``_call_once``; ``acall`` adds media recovery around it. Subclasses implement it."""
 
 
 def _collect_sync(raw: Any) -> "litellm.ModelResponse":
