@@ -442,15 +442,20 @@ async def test_shutdown_does_not_swallow_the_callers_own_cancellation():
     qm = QueueManager()
     qm.queue("slow")
 
+    started = asyncio.Event()
+    cleaning = asyncio.Event()
+
     async def slow_job():
+        started.set()
         try:
-            await asyncio.sleep(100)
+            await asyncio.Future()
         except asyncio.CancelledError:
-            await asyncio.sleep(0.2)  # cleanup holds the caller inside cancel()
+            cleaning.set()
+            await asyncio.Future()
             raise
 
     qm.spawn(slow_job(), channel="slow")
-    await asyncio.sleep(0)  # let the job task start
+    await started.wait()
 
     reached_end = False
 
@@ -460,7 +465,7 @@ async def test_shutdown_does_not_swallow_the_callers_own_cancellation():
         reached_end = True
 
     task = asyncio.create_task(caller())
-    await asyncio.sleep(0.05)
+    await cleaning.wait()
     task.cancel()
 
     with pytest.raises(asyncio.CancelledError):
@@ -562,11 +567,16 @@ async def test_race_does_not_swallow_the_callers_own_cancellation():
     fast = qm.queue("fast")
     slow = qm.queue("slow")
 
+    started = asyncio.Event()
+    cleaning = asyncio.Event()
+
     async def slow_to_cancel():
+        started.set()
         try:
-            await asyncio.sleep(100)
+            await asyncio.Future()
         except asyncio.CancelledError:
-            await asyncio.sleep(0.2)  # unwinding holds the caller inside `await t`
+            cleaning.set()
+            await asyncio.Future()
             raise
 
     # race() drains losers through the internal _drain_one; make the loser's
@@ -581,11 +591,15 @@ async def test_race_does_not_swallow_the_callers_own_cancellation():
         reached_end = True
 
     task = asyncio.create_task(caller())
-    await asyncio.sleep(0)  # let race() reach asyncio.wait
+    await started.wait()
     fast.put("winner")  # fast wins; slow becomes a pending loser
-    await asyncio.sleep(0.05)  # race() is now reaping the loser
+    await cleaning.wait()
     task.cancel()
 
     with pytest.raises(asyncio.CancelledError):
         await task
     assert not reached_end
+
+    assert not fast.is_empty()
+    assert await fast.get() == "winner"
+    assert fast.is_empty()
