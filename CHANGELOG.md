@@ -6,6 +6,18 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- The output the model reads goes through `nooa.snapshot` (limits unchanged;
+  only the cut markers change, to `render_output`'s one line): `Shell`
+  results (`[... N bytes omitted; full output: PATH]`, spill files from one
+  `SpillDir` per bash session, 20 files / 64 MiB, newest kept), `ShellProgress`
+  merges (`[... N bytes omitted; full output not kept]` instead of
+  `[... progress omitted ...]`), cell stdout/stderr
+  (`nooa.runtime.output_capture.CaptureBuffer`: `[... N chars omitted; ...]`
+  instead of the `<truncated-output>` envelope; Atom spills them to the
+  session's folder), job output tails and the core bash tool. Prefill string
+  cuts render through `render_python` (same text). Cell errors keep
+  `<truncated-output>`.
+
 - `nooa.runtime.channels.StreamEnd` is removed: `QueueManager.spawn` no longer
   publishes a runtime event when a job finishes (the job's handle state and
   result say it ended).
