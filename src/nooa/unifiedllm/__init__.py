@@ -44,6 +44,7 @@ from nooa.unifiedllm.registry import (
     reload_registry,
     resolve_api_key_from_config,
 )
+from nooa.unifiedllm.request import LLMRequest
 from nooa.unifiedllm.retry import (
     RetryingWrapper,
     sync_retry,
@@ -79,6 +80,7 @@ __all__ = [
     "ToolCall",
     "create_tool_from_callable",
     # Response types
+    "LLMRequest",
     "LLMResponse",
     "CacheBoundary",
     "LLMUsage",
