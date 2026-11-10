@@ -1090,6 +1090,8 @@ _ATOM_ONLY_FIELDS = (
     "shell_queued_behind_running",
     "shell_busy_rejected",
     "child_detached_at_deadline",
+    "shell_detached_at_deadline",
+    "shell_long_awaits",
     "waiting_on_person_rejections",
     "shell_exit_hints",
     "shell_cwd_fallbacks",

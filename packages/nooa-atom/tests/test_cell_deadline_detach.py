@@ -242,3 +242,73 @@ async def test_an_awaited_plain_job_at_the_deadline_is_not_a_detached_child(
     assert "job nap is still running" in _prompt(models, None, 1)
     attrs = root_metrics[0].to_span_attributes()
     assert "harness.atom.child_detached_at_deadline.count" not in attrs
+
+
+# ---- a Shell command awaited at the deadline ----
+
+SHELL_DETACHED = "`sleep 2; echo done` is still running as job sh"
+
+
+async def test_a_shell_command_awaited_at_the_deadline_runs_on_as_a_job(
+    registry, options, models, root_metrics
+):
+    models.scripts[None] = [
+        cell("sh = Shell()\nr = await sh.run('sleep 2; echo done')"),
+        cell(
+            "try:\n"
+            "    await sh.run('echo hi')\n"
+            "except RuntimeError as e:\n"
+            "    self.v.busy = str(e)\n"
+            "return_result(Waiting(explanation='sh runs', on=['sh']))"
+        ),
+        cell(
+            "[event] = notification['jobs']\n"
+            "assert (event.name, event.kind) == ('sh', 'done'), event\n"
+            "r = event.value\n"
+            "assert (r.returncode, r.stdout, r.timed_out) == (0, 'done\\n', False), r\n"
+            "assert (await sh.run('echo again')).stdout == 'again\\n'\n"
+            "return_result(Done(explanation=r.stdout))"
+        ),
+    ]
+    root = await registry.create(options)
+    outcome = await asyncio.wait_for(root.prompt("go"), TIMEOUT)
+    assert outcome == Done(explanation="done\n")
+    feedback = _prompt(models, None, 1)
+    assert "timed out after 0.5 seconds" in feedback
+    assert SHELL_DETACHED in feedback
+    assert 'await self.jobs.get(\\"sh\\").cancel()' in feedback or (
+        'await self.jobs.get("sh").cancel()' in feedback
+    )
+    # The Shell stayed busy while the job ran; the refusal names the job.
+    assert "(job sh)" in root._agent.v.busy, root._agent.v.busy
+    attrs = root_metrics[0].to_span_attributes()
+    assert attrs["harness.atom.shell_detached_at_deadline.count"] == 1
+    assert "harness.atom.child_detached_at_deadline.count" not in attrs
+
+
+async def test_a_user_cancel_still_stops_an_awaited_shell_command(registry, options, models):
+    models.scripts[None] = [
+        cell("await Shell().run('(echo $BASHPID > pid; exec sleep 30)')"),
+    ]
+    root = await registry.create(options)
+    turn = asyncio.ensure_future(root.prompt("go"))
+    pidfile = options.workspace / "pid"
+    async with asyncio.timeout(TIMEOUT):
+        while not (pidfile.exists() and pidfile.read_text().strip()):
+            await asyncio.sleep(0.05)
+    pid = int(pidfile.read_text())
+    assert await root.cancel(by="user")
+    outcome = await asyncio.wait_for(turn, TIMEOUT)
+    assert type(outcome).__name__ == "TurnCancelledOutcome", outcome
+    assert root._agent.jobs.get("sh") is None  # nothing was handed over
+    async with asyncio.timeout(TIMEOUT):
+        while _alive(pid):
+            await asyncio.sleep(0.05)
+
+
+def _alive(pid):
+    try:
+        with open(f"/proc/{pid}/stat") as stat:
+            return stat.read().rsplit(")", 1)[1].split()[0] != "Z"
+    except OSError:
+        return False

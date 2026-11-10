@@ -30,6 +30,8 @@ ATOM_KEYS = {
     "harness.atom.shell_queued_behind_running.count": ("Tool Usage", False),
     "harness.atom.shell_busy_rejected.count": ("Tool Usage", False),
     "harness.atom.child_detached_at_deadline.count": ("Tool Usage", False),
+    "harness.atom.shell_detached_at_deadline.count": ("Tool Usage", False),
+    "harness.atom.shell_long_await.count": ("Tool Usage", False),
     "harness.atom.waiting_on_person_rejected.count": ("Tool Usage", False),
     "harness.atom.waiting_on_person_rejected.roles": ("Tool Usage", True),
     "harness.atom.shell_exit_hint.count": ("Tool Usage", False),
@@ -48,6 +50,7 @@ RECORD_ALL = (
     "from nooa_atom.agent.metrics import atom_metrics\n"
     "m = atom_metrics()\n"
     "m.shell_queued(); m.shell_busy(); m.child_detached()\n"
+    "m.shell_detached(); m.shell_long_await()\n"
     "m.waiting_on_person_rejected('child'); m.shell_exit_hint(5)\n"
     "m.shell_cwd_fallback('/gone -> /ws'); m.name_error_hint('sh')\n"
     "m.mcp_tool_name_hint('srv.tool'); m.module_not_found_hint('cv2')"
@@ -57,6 +60,8 @@ EXPECTED = {
     "harness.atom.shell_queued_behind_running.count": 1,
     "harness.atom.shell_busy_rejected.count": 1,
     "harness.atom.child_detached_at_deadline.count": 1,
+    "harness.atom.shell_detached_at_deadline.count": 1,
+    "harness.atom.shell_long_await.count": 1,
     "harness.atom.waiting_on_person_rejected.count": 1,
     "harness.atom.waiting_on_person_rejected.roles": ["child"],
     "harness.atom.shell_exit_hint.count": 1,
@@ -96,6 +101,8 @@ def test_recorders_emit_the_same_attributes():
         atom_metrics().shell_queued()
         atom_metrics().shell_busy()
         atom_metrics().child_detached()
+        atom_metrics().shell_detached()
+        atom_metrics().shell_long_await()
         atom_metrics().waiting_on_person_rejected("child")
         atom_metrics().shell_exit_hint(5)
         atom_metrics().shell_cwd_fallback("/gone -> /ws")
@@ -119,6 +126,17 @@ def test_atom_counters_live_in_the_atom_namespace():
     assert metrics.atom.shell_queued_behind_running == 1
     assert all(k.startswith("harness.atom.") for k in metrics.to_span_attributes())
     assert metrics.model_dump()["atom"]["shell_busy_rejected"] == 1
+
+
+async def test_an_awaited_shell_command_over_the_limit_counts_as_a_long_await(monkeypatch):
+    from nooa_atom.agent import work_shell
+
+    monkeypatch.setattr(work_shell, "_LONG_AWAIT_SECONDS", 0.2)
+    with harness_metrics_session() as metrics:
+        async with work_shell.Shell() as sh:
+            await sh.run("true")
+            await sh.run("sleep 0.4")
+    assert metrics.atom.shell_long_awaits == 1
 
 
 def test_outside_a_session_recording_is_a_no_op():
