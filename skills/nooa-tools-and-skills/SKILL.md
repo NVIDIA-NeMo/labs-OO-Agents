@@ -6,6 +6,10 @@ compatibility: nooa package; [mcp] extra for MCP
 
 # Tools, Skills, and Integrations
 
+For model onboarding or diagnostics, use
+[nooa-connect](../nooa-connect/SKILL.md), the canonical permission-first headless
+guide. Adding tools/skills does not authorize model checks or registry writes.
+
 ## Methods are the tools
 
 There is no tool-registration abstraction: **any visible method or attribute on `self` is callable from CodeAct-generated code**, with `doc(self)` telling the LLM what exists. Mix deterministic helpers (SW1) with generation methods (SW3):
@@ -120,6 +124,10 @@ the resulting URL, header, argument, or environment value directly to
 `MCPManager.create_from_server()`.
 
 ## Multimodal media
+
+To configure a route or test its media permissions, get the user's permission
+and follow [nooa-connect](../nooa-connect/SKILL.md). It is the complete headless
+Connect guide for agents; use an existing configured route for the code below.
 
 ```python
 from nooa.media import Image, Audio, Video, File

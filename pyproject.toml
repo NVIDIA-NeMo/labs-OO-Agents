@@ -22,12 +22,21 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
-    "pydantic>=2.5.0",
+    "pydantic>=2.14",
     # context_blocks + unifiedllm now ship as nooa.context_blocks /
     # nooa.unifiedllm subpackages — pull their formerly-external deps in.
     # >=1.97.0: routes GPT-5.4 tool calls through Responses and replays reasoning_items;
     # also stays past CVE-2026-49468 and the yanked 1.82.7/1.82.8 backdoor.
-    "litellm>=1.97.0",
+    # These released versions import optional MCP dependencies for ordinary tool calls.
+    # Exclude reproduced failures individually so future patch/security fixes stay eligible.
+    # Fixed upstream by https://github.com/BerriAI/litellm/pull/45961.
+    """litellm>=1.97.0,\
+        !=1.106.0.dev2,!=1.106.0.dev3,!=1.106.0rc1,!=1.106.0rc2,\
+        !=1.106.0rc3,!=1.106.0rc4,!=1.106.0,!=1.106.1,\
+        !=1.106.2,!=1.106.3,!=1.106.4,!=1.106.5,\
+        !=1.106.6,!=1.106.7,!=1.107.0.dev1,!=1.107.0.dev2,\
+        !=1.107.0.dev3,!=1.107.0rc1,!=1.107.0rc2,!=1.107.0rc3,\
+        !=1.108.0rc1,!=1.108.0,!=1.108.1""",
     # from mcp-nemo-oo-agents (now internal)
     "httpx>=0.27.0",
     "openinference-instrumentation-litellm>=0.1.30",
@@ -36,6 +45,12 @@ dependencies = [
     # native Windows (no fcntl there). Only filelock's Windows lock is used, so
     # CVE-2026-112940 (ReadWriteLock) and CVE-2026-112909 (UnixFileLock) do not apply.
     "filelock>=3.29.4; sys_platform == 'win32'",
+    # Security floors for transitive runtime deps (via httpx/openai and
+    # requests), so installs that don't use our uv.lock skip the versions
+    # nSpect flags: anyio<4.15.1 (CVE-2026-63374) and urllib3<2.8.0
+    # (CVE-2026-97687, CVE-2026-97689).
+    "anyio>=4.15.1",
+    "urllib3>=2.8.0",
 ]
 
 [project.urls]
@@ -91,7 +106,7 @@ members = [
 
 
 [project.optional-dependencies]
-# Convenience aliases for the sibling distributions, so `pip install
+# Convenience aliases for the sibling distributions, so `uv add
 # nooa[cli]` does what a user reasonably expects. Without these, that command
 # *succeeds* with only a warning and silently installs no CLI.
 #
@@ -105,7 +120,7 @@ memory = ["nooa-memory"]
 bench = ["nooa-bench"]
 acp = ["nooa-acp"]
 # ARC-AGI-3 example agent (examples/arc_agi_3): the public ARC-AGI-3 SDK + deps.
-# Install with `pip install "nooa[arc]"` (or `uv sync --extra arc`).
+# Install from the repo root with `uv sync --extra arc`.
 arc = [
     "arc-agi>=0.9.8",
     "arcengine>=0.9.3",
@@ -133,7 +148,16 @@ sandbox = [
 # (kept optional so glibc<2.28 hosts can `uv sync` without pulling
 # pydantic-core wheels that only target manylinux_2_28). See issue 189.
 mcp = [
-    "mcp>=1.0.0",
+    # 1.30 carries the 1.x security fix (and has the cursor-based discovery
+    # and streamable_http_client API nooa.mcp needs, added in 1.24). mcp 2.x
+    # stops raising tool-level errors, so stay on 1.x until NOOA is adapted;
+    # this matches the workspace constraint in [tool.uv].
+    "mcp>=1.30,<2",
+    # mcp pulls in PyJWT[crypto]; floor it and cryptography past the versions
+    # nSpect flags (PyJWT<2.15.1, e.g. CVE-2026-102268; cryptography<50.0.2,
+    # CVE-2026-69247) without adding crypto to bare core.
+    "PyJWT[crypto]>=2.15.1",
+    "cryptography>=50.0.2",
 ]
 # NeMo Relay integration (guardrails, intercepts, event subscribers, ATIF
 # export).

@@ -6,6 +6,43 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- Core installs now exclude the individually verified LiteLLM releases affected
+  by the optional-MCP import regression (1.106.0–1.106.7, 1.108.0–1.108.1, and
+  affected prereleases). Future patch and security releases remain eligible;
+  there is no upper version bound.
+  The release gate now runs quickstarts 01–03 with real LLM calls against the
+  built core wheel in a fresh environment with freshly resolved dependencies.
+  A separate harness validates their results without editing the examples;
+  failures and timeouts block draft creation.
+- Snapshot save and restore now detect cycles explicitly and cap nesting at 200
+  levels (`MAX_SNAPSHOT_DEPTH`), whatever the caller's stack depth. Errors for
+  cycles, too-deep values, unsupported types and non-string dict keys name the
+  path to the offending value (e.g. `<root>['a'][0]`) and set
+  `SerializationError.reason` / `DeserializationError.reason`. Restoring a
+  too-deep blob raises `DeserializationError`, not `RecursionError`. An agent
+  attribute that can't be saved or restored is skipped with a warning, on save
+  and now also on restore; checkpoints saved before this change with an
+  attribute nested more than 200 levels deep restore without that attribute.
+  `SnapshotVars` (agent and todo vars) rejects values too deep to checkpoint at
+  write time, and a stored var that later becomes unserializable (e.g. a list
+  that now contains itself) is skipped at checkpoint with a warning instead of
+  dropping every var.
+- Registry entries' `base_url`, `timeout` and `custom_llm_provider` settings
+  are now passed to the clients built from them. They were ignored before, so
+  configs that set them may now send requests to a different endpoint or
+  provider, or use a different timeout.
+- Native Anthropic Messages and OpenAI Responses clients now raise `ValueError`
+  locally, before any HTTP request, when a request carries an enabled audio or
+  video attachment. These interfaces can only send images and PDFs; before, the
+  attachment reached the provider. Chat routes are unchanged.
+- A `context_window` now belongs to the route it was declared for. Clients
+  built from a registry entry no longer reuse the entry's `context_window` when
+  an override changes the route (model, endpoint, client type, provider, client
+  object or credentials), and the registry logs one warning per alias naming
+  the settings it dropped. A client built directly borrows a registry
+  `context_window` only when an entry's route matches its own, including the
+  resolved key when the client passes `api_key`; otherwise it falls back to
+  LiteLLM model metadata.
 - Windows: WSL 2 is the supported way to run nooa on Windows. Native Windows is
   unsupported: `import nooa` raises `UnsupportedPlatformError` (an
   `ImportError`) and the `nooa` command exits with one line pointing to WSL 2,
@@ -23,6 +60,10 @@ to follow semantic versioning.
   invalid tool calls and failed result validation, still add up across the
   call. Previously a few scattered transient endpoint errors could end a long
   turn even though every retry succeeded.
+- Published minimum versions now exclude the vulnerable releases of
+  dependencies installed through nooa, so `pip install -U nooa` gets the fixes
+  too: `anyio>=4.15.1` and `urllib3>=2.8.0` in core, and `mcp>=1.30,<2`,
+  `PyJWT[crypto]>=2.15.1` and `cryptography>=50.0.2` in the `mcp` extra.
 - Dependency security update: the locked versions of Pillow, PyJWT,
   cryptography, aiohttp, urllib3, AnyIO, filelock, multidict, Werkzeug,
   setuptools, certifi, OpenTelemetry, and mcp now include their published

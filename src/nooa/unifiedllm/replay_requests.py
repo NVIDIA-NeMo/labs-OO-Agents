@@ -42,7 +42,8 @@ async def replay_request(
         import httpx
     except ImportError as e:
         raise ImportError(
-            "httpx is required for request replay. Install it with: pip install httpx"
+            "httpx is required for request replay. "
+            "Install it in the environment running NOOA with: uv pip install httpx"
         ) from e
 
     request_data = error_entry["request"]
