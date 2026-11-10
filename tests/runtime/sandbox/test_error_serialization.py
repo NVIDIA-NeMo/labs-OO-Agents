@@ -422,8 +422,11 @@ def test_worker_formatted_envelope_is_not_nested() -> None:
     )
 
     assert dto.error is not None
-    assert dto.error.diagnostic.count("<truncated-output>") == 1
-    assert dto.error.diagnostic.count("</truncated-output>") == 1
+    whole = "RuntimeError: " + "X" * 1_000
+    # The worker formatter's one render_output cut; transport adds none.
+    assert dto.error.diagnostic == (
+        whole[:50] + "\n[... 914 chars omitted; full output not kept]\n" + whole[-50:]
+    )
 
 
 def test_formatter_owned_envelope_is_not_rebounded_by_transport() -> None:

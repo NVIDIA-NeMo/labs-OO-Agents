@@ -37,8 +37,8 @@ import traceback
 from pathlib import Path, PurePath
 from typing import Any, Protocol
 
-from nooa.agentdoc import TruncatingStringIO
 from nooa.config.truncation_config import DEFAULT_TRUNCATION_CONFIG
+from nooa.snapshot import TextStream, render_output
 
 # ---------------------------------------------------------------------------
 # Traceback selection and IPython normalization policy
@@ -788,9 +788,19 @@ def _bound_diagnostic(
 ) -> str:
     """Apply the caller's error budget, falling back to framework defaults."""
     limit, tail = _diagnostic_budget(max_error, tail_chars)
-    stream = TruncatingStringIO(limit=limit, tail_chars=tail)
+    return _cut_text(text, limit, tail)
+
+
+def _cut_text(text: str, limit: int, tail: int | None) -> str:
+    """``text`` within ``limit`` chars: ``HEAD``, ``render_output``'s cut line, ``TAIL``.
+
+    ``tail`` chars come from the end (``None``: half of ``limit``), the rest from
+    the start; no file keeps the whole text, so the line ends ``full output not kept]``.
+    """
+    tail_chars = limit // 2 if tail is None else tail
+    stream = TextStream(unit="chars", head=limit - tail_chars, tail=tail_chars)
     stream.write(text)
-    return stream.getvalue()
+    return render_output(stream.close())
 
 
 def _hard_bound_text(text: str, limit: int, *, closing: str = "") -> str:

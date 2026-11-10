@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import enum
 import os
+import re
 import sys
 import tempfile
 from typing import Any
@@ -810,7 +811,11 @@ async def test_worker_error_uses_executor_error_budget():
         result = await _run(ex, "raise RuntimeError('x' * 1_000)")
 
         assert result.error is not None
-        assert "Showing first 50 and last 50 chars" in result.error.diagnostic
+        # render_output's cut: 50 head chars, the cut line, 50 tail chars.
+        head, cut, tail = result.error.diagnostic.split("\n")[-3:]
+        assert tail == "x" * 50
+        assert re.fullmatch(r"\[\.\.\. [\d,]+ chars omitted; full output not kept\]", cut)
+        assert len(result.error.diagnostic.rpartition("\n[... ")[0]) == 50
     finally:
         await ex.aclose()
 
