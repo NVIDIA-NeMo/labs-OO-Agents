@@ -16,7 +16,6 @@ the only extension code that runs, and only here (see ``_raw``).
 from __future__ import annotations
 
 import functools
-import itertools
 import math
 import operator
 import typing
@@ -292,7 +291,7 @@ def _build_sequence(
             state,
             head_n,
             tail_n,
-            lambda: (get(cast(Any, value), index) for index in range(length - tail_n, length)),
+            lambda: (get(cast(Any, value), index) for index in range(length - 1, -1, -1)),
         ),
     )
 
@@ -322,7 +321,7 @@ def _build_dict(
             state,
             head_n,
             tail_n,
-            lambda: list(itertools.islice(reversed(dict.items(value)), tail_n))[::-1],
+            lambda: reversed(dict.items(value)),
         ),
     )
 
@@ -338,18 +337,28 @@ def _container(
     state: _State,
     head_n: int,
     tail_n: int = 0,
-    tail: Callable[[], Iterable[Any]] = tuple,
+    backwards: Callable[[], Iterable[Any]] | None = None,
+    budget_tail: bool = True,
 ) -> _Built:
     """A ``Sequence`` of ``length`` items, or (``keyed``) a ``Mapping`` of ``(key, value)`` entries.
 
     Keeps the first ``head_n`` (at most ``length``) entries pulled from
     ``entries`` and, when every one of them fit, the last ``tail_n`` from
-    ``tail()``, under the shared budget. Entries may be private ``_Part``
-    builders (see ``_build_slot``), or ``_Omitted`` notes. A mapping entry
-    also costs one node for its key, checked before the pair is pulled. A
-    mapping stops with ``"key"`` at a key with no JSON form or one whose
-    JSON form an earlier kept key has (``1`` and ``"1"``), so the snapshot
-    renders as it was sized.
+    ``backwards()`` (the entries from the last one back), under the shared
+    budget. Entries may be private ``_Part`` builders (see ``_build_slot``),
+    or ``_Omitted`` notes. A mapping entry also costs one node for its key,
+    checked before the pair is pulled. A mapping stops with ``"key"`` at a
+    key with no JSON form or one whose JSON form an earlier kept key has
+    (``1`` and ``"1"``), so the snapshot renders as it was sized.
+
+    With ``Limits.tail_share`` above 0, a ``backwards`` source and
+    ``budget_tail`` (not for an ndarray's planned selection), a budget cut
+    keeps both ends too. The head is filled as without it; when the budget
+    stops it, its last entries are dropped until it fits the budget less
+    ``tail_share`` of it, and the tail is filled from the end with what is
+    left (``tail_n``, when ``max_items`` cut, also bounds it). So a
+    container that fits is kept as it is, and every entry is built once.
+    ``tail_share`` 0 keeps a head only, as #342 does.
     """
     box = Container(max_size)
     seen: set[str] = set()  # the JSON keys kept so far (our own exact ``str``)
@@ -377,10 +386,14 @@ def _container(
         overhead, available = slot
         built = _build_slot(child, available, depth + 1, pointer_child(path, segment), state)
         kept.append((cast(Key, key), built.node) if keyed else built.node)
+        cost = (2 if box.count else 0) + overhead + built.size
         box.commit(overhead, built.size)
+        if kept is head:
+            head_costs.append((cost, segment if keyed else None))
         return True
 
     head: list[Any] = []
+    head_costs: list[tuple[int, str | None]] = []  # each head entry's share of ``box.size``
     omitted: Reason | None = None
     iterator = iter(entries)
     while len(head) < head_n:
@@ -396,11 +409,29 @@ def _container(
             continue
         if not add(entry, len(head), head):
             break
+    share = state.limits.tail_share
+    if budget_tail and backwards is not None and share > 0 and box.reason == "max_length":
+        # The budget cut the head: give the end its share of the budget.
+        head_limit = max_size - int((max_size - 2) * share)
+        while head and box.size > head_limit:
+            head.pop()
+            cost, segment = head_costs.pop()
+            box.size -= cost
+            box.count -= 1
+            if segment is not None:
+                seen.discard(segment)
+        box.reason = None
+        tail_n = length - len(head) if tail_n == 0 else tail_n
+    tail_n = min(tail_n, length - len(head))
     kept_tail: list[Any] = []
-    if box.reason is None and tail_n:
-        for offset, entry in enumerate(tail()):
-            if not add(entry, length - tail_n + offset, kept_tail):
+    if box.reason is None and tail_n and backwards is not None:
+        for offset, entry in enumerate(backwards()):
+            if offset >= tail_n or not add(entry, length - 1 - offset, kept_tail):
                 break
+        kept_tail.reverse()
+    if omitted is None and len(head) + len(kept_tail) == length:
+        head += kept_tail  # the two ends met: everything is kept
+        kept_tail = []
     reason = box.reason or omitted
     if reason is None and len(head) + len(kept_tail) < length:
         reason = "max_items"
@@ -783,7 +814,8 @@ def _indexed(
         state,
         head_n,
         tail_n,
-        lambda: (child(i) for i in range(length - tail_n, length)),
+        lambda: (child(i) for i in range(length - 1, length - tail_n - 1, -1)),
+        budget_tail=False,  # the selection already fits both ends to the budget
     )
 
 

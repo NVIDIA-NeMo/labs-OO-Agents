@@ -1051,7 +1051,58 @@ def test_mapping_key_collision_between_head_and_tail_stops_the_tail() -> None:
     assert isinstance(snapshot, Mapping)
     assert snapshot.reason == "key"
     assert [key for key, _ in snapshot.head] == ["1", "k0"]
-    assert [key for key, _ in snapshot.tail] == ["k4"]
+    assert snapshot.tail == ()  # the tail is read from the end: 1 collides with "1" at once
+
+
+def test_tail_share_keeps_both_ends_when_the_budget_cuts_a_list() -> None:
+    # Paul's probe (#515): a 400-char string keeps 99 + 99, a 200-item list kept 0-51 and no tail.
+    limits = Limits(max_chars=200, tail_share=0.5)
+    text = capture("x" * 400, limits)
+    assert isinstance(text, Text) and (len(text.head), len(text.tail)) == (99, 99)
+
+    snapshot = capture(list(range(200)), limits)
+
+    assert isinstance(snapshot, Sequence) and snapshot.reason == "max_length"
+    assert snapshot.head and snapshot.tail
+    assert [item.value for item in snapshot.head] == list(range(len(snapshot.head)))  # type: ignore[union-attr]
+    assert [item.value for item in snapshot.tail] == list(range(200 - len(snapshot.tail), 200))  # type: ignore[union-attr]
+    head_chars = len(json.dumps([item.value for item in snapshot.head]))  # type: ignore[union-attr]
+    tail_chars = len(json.dumps([item.value for item in snapshot.tail]))  # type: ignore[union-attr]
+    assert abs(head_chars - tail_chars) <= 10  # about the 0.5 share of the budget
+    assert head_chars + tail_chars <= 200
+    assert render_python(snapshot).startswith(f"list(len=200, [:{len(snapshot.head)}]=[0, 1, ")
+
+
+def test_tail_share_keeps_both_ends_when_the_budget_cuts_a_dict() -> None:
+    value = {f"key{index}": index for index in range(100)}
+
+    snapshot = capture(value, Limits(max_chars=200, tail_share=0.25))
+
+    assert isinstance(snapshot, Mapping) and snapshot.reason == "max_length"
+    assert snapshot.head[0][0] == "key0" and snapshot.tail[-1] == ("key99", Scalar(99))
+    assert len(snapshot.head) > len(snapshot.tail) > 0  # about 3 to 1
+
+
+def test_tail_share_joins_the_ends_when_everything_fits() -> None:
+    for value in ([1, 2, 3], ["a" * 60, "b" * 60, "c" * 60], {"a": 1, "b": 2}):
+        limits = Limits(max_chars=200, tail_share=0.5)
+        snapshot = capture(value, limits)
+        assert snapshot == capture(value, Limits(max_chars=200))  # whole: as without tail_share
+        assert snapshot.complete
+
+
+def test_tail_share_gives_a_single_last_item_the_whole_budget() -> None:
+    snapshot = capture(["x" * 400], Limits(max_chars=200, tail_share=0.5))
+
+    assert isinstance(snapshot, Sequence) and snapshot.tail == ()
+    assert snapshot.head == (capture("x" * 400, Limits(max_chars=198, tail_share=0.5)),)
+
+
+def test_default_limits_keep_a_head_only_when_the_budget_cuts() -> None:
+    snapshot = capture(list(range(200)), Limits(max_chars=200))
+
+    assert isinstance(snapshot, Sequence) and snapshot.tail == ()
+    assert [item.value for item in snapshot.head] == list(range(52))  # type: ignore[union-attr]
 
 
 def test_class_namespace_foreign_key_is_never_compared() -> None:

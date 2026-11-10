@@ -37,8 +37,13 @@ class Limits:
       value, an upper bound (a cut byte value keeps only whole UTF-8 code
       points). ``None``: only the shared budget limits it. Non-negative.
     - ``tail_share`` (default 0.0): the part of a cut string or container
-      kept from its end. 0.0 keeps a prefix (trace previews); 0.5 keeps both
-      ends (agentdoc's split; the head takes the odd unit). From 0 to 1.
+      kept from its end, whether ``max_items``, ``max_string`` or the shared
+      ``max_chars`` budget cuts it. 0.0 keeps a prefix (trace previews);
+      0.5 keeps both ends (agentdoc's split; the head takes the odd unit).
+      A container the budget cuts keeps its head within the budget less
+      ``tail_share`` of it, and its tail from the end with the rest; one
+      that fits is kept whole. A shape read only forwards (``array_like``,
+      ``mapping_like``) keeps a head only. From 0 to 1.
 
     ``Limits`` does not check itself: ``capture`` and ``capture_fields``
     raise ``ValueError`` for values outside these ranges.
