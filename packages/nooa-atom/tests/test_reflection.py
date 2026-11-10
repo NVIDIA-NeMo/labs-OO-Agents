@@ -402,3 +402,41 @@ async def test_a_reflection_queued_before_a_restart_is_not_replayed(tmp_path):
         assert root._agent.queue_manager.channels()["slash_commands"].qsize() == 1
     finally:
         await registry.close_all()
+
+
+async def test_a_steer_during_a_reflection_waits_for_the_next_ordinary_turn(tmp_path):
+    registry, root, llm, updates = await make_root(
+        tmp_path,
+        [
+            done("one"),
+            done("two"),
+            cell("await asyncio.sleep(0.3)"),  # the reflection's first cell
+            done("tidied"),
+            done("steered reply"),
+        ],
+    )
+    try:
+        await root.prompt("one")
+        await root.prompt("two")
+        while not (root._agent.turns.running and root._reflection_turn):
+            await asyncio.sleep(0.005)
+        receipt = await root.steer("STEER TEXT")
+        assert (await root.outcome(receipt.item_id)).explanation == "steered reply"
+        await idle(root)
+        # The reflection's model calls never saw the steer; the next turn did.
+        assert "STEER TEXT" not in str(llm.calls[3].messages)
+        assert "STEER TEXT" in str(llm.calls[4].messages)
+        started = turns(updates)
+        assert started[2:] == [(True, ["slash_commands"]), (False, ["user_messages"])]
+        ended = [u for u in updates if isinstance(u, TurnEndedUpdate)]
+        assert [u.outcome["explanation"] for u in ended[2:]] == ["tidied", "steered reply"]
+        # The steer got a reply as an agent message, from its own turn.
+        events = root._agent.events
+        messages = [
+            event.content
+            for event in (events[tag] for tag in events.keys())
+            if isinstance(event, AgentMessage)
+        ]
+        assert messages == ["one", "two", "steered reply"]
+    finally:
+        await registry.close_all()

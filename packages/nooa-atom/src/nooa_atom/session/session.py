@@ -642,8 +642,13 @@ class Session:
         )
 
     def _flush_steers(self, _event: Any) -> None:
-        """``BeforeTurn`` handler: hand buffered steers to the coming model call."""
-        if not self._pending_steers or not self._agent.turns.running:
+        """``BeforeTurn`` handler: hand buffered steers to the coming model call.
+
+        A reflection turn takes none: it is quiet and its outcome is no reply,
+        so its steers stay buffered and ``_settle`` admits them on
+        ``user_messages`` for the next ordinary turn.
+        """
+        if self._reflection_turn or not self._pending_steers or not self._agent.turns.running:
             return
         while self._pending_steers:
             item_id, text, source = self._pending_steers[0]
