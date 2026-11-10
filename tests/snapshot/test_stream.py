@@ -206,6 +206,41 @@ def test_chars_spill_file_is_valid_utf8_for_any_max_bytes(tmp_path: Path, max_by
     assert text.full is not None and text.full.kept == len(written) <= max_bytes
 
 
+def test_existing_spill_path_is_refused_not_truncated(tmp_path: Path) -> None:
+    # Severin's repro (#515): an existing file used to be truncated, then kept.
+    path = tmp_path / "precious.txt"
+    path.write_text("precious")
+
+    with pytest.raises(FileExistsError):
+        _stream("chars", 10, 10, spill=SpillTarget(path=str(path), max_bytes=100, always=True))
+
+    assert path.read_text() == "precious"
+
+
+def test_existing_symlink_spill_path_is_refused(tmp_path: Path) -> None:
+    target = tmp_path / "elsewhere.txt"
+    target.write_text("kept")
+    link = tmp_path / "out.txt"
+    link.symlink_to(target)
+
+    with pytest.raises(FileExistsError):
+        _stream("bytes", spill=SpillTarget(path=str(link)))
+
+    assert target.read_text() == "kept" and link.is_symlink()
+
+
+def test_stream_deletes_only_the_spill_file_it_created(tmp_path: Path) -> None:
+    path = tmp_path / "out.txt"
+    stream = _stream("bytes", 10, 10, spill=SpillTarget(path=str(path)))
+    stream.write(b"small")
+    path.unlink()
+    path.write_text("someone else's")  # replaced while the stream ran
+
+    assert stream.close().complete
+
+    assert path.read_text() == "someone else's"  # not the stream's file: left alone
+
+
 def test_uncut_stream_deletes_its_spill_file(tmp_path: Path) -> None:
     path = tmp_path / "out.log"
     stream = TextStream(unit="bytes", head=10, tail=10, spill=SpillTarget(path=str(path)))

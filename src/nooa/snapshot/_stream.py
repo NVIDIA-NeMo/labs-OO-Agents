@@ -42,9 +42,10 @@ class SpillTarget:
 
     Fields:
 
-    - ``path`` (default ``None``): the file to write; an existing file is
-      truncated. ``None``: a new temporary file (``nooa-output-*.txt`` in
-      the system temporary directory).
+    - ``path`` (default ``None``): a new file to write. An existing path
+      (a file, a symlink) is refused: ``TextStream`` raises
+      ``FileExistsError`` and never truncates it. ``None``: a new temporary
+      file (``nooa-output-*.txt`` in the system temporary directory).
     - ``max_bytes`` (default 64 MiB): only the first ``max_bytes`` bytes are
       written; ``Spill.cut`` then says the file is cut. Non-negative. A
       chars stream cuts its file on a code point boundary, so the file is
@@ -55,10 +56,12 @@ class SpillTarget:
       cut. ``False``: ``close()`` deletes it when the final ``Text`` is
       complete (the snapshot then holds everything).
 
-    The stream owns the file: it never raises for a file error. When the
+    The stream owns the file it creates: apart from ``FileExistsError``
+    for an existing ``path``, it never raises for a file error. When the
     file cannot be created, written or flushed, the stream logs a warning,
     removes the partial file and keeps memory only (``Text.full`` is
-    ``None``).
+    ``None``). It deletes only the file it created, checked by
+    ``(st_dev, st_ino)``: a file replaced since is left alone, logged.
 
     ``SpillDir.target()`` hands out targets inside a shared folder; such a
     target also tells its folder when its stream closes, and keeps its
@@ -112,7 +115,8 @@ class TextStream:
     There is no lock.
 
     Raises ``ValueError`` for an unknown ``unit``, a negative ``head`` or
-    ``tail``, or a negative ``spill.max_bytes``.
+    ``tail``, or a negative ``spill.max_bytes``, and ``FileExistsError``
+    when ``spill.path`` (outside a ``SpillDir``) already exists.
 
     >>> from nooa.snapshot import TextStream, render_output
     >>> stream = TextStream(unit="bytes", head=4, tail=4)
@@ -157,6 +161,7 @@ class TextStream:
         self._closed: Text | None = None
         self._file: IO[bytes] | None = None
         self._path: str | None = None
+        self._created: tuple[int, int] | None = None  # (st_dev, st_ino) of a file it created
         self._spill_failed = False
         self._kept = 0  # bytes written to the file
         self._produced = 0  # bytes produced
@@ -179,15 +184,45 @@ class TextStream:
                 self._spill_max = min(self._spill_max, granted)
                 self._path = spill.path
             elif spill.path is not None:
-                self._file = open(spill.path, "wb")  # noqa: SIM115 - closed in close()
-                self._path = spill.path
+                # A new file only: an existing one (or a symlink) is refused,
+                # never truncated, so the stream deletes only what it created.
+                flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
+                self._adopt(os.open(spill.path, flags, 0o666), spill.path)
             else:
                 fd, path = tempfile.mkstemp(prefix="nooa-output-", suffix=".txt")
-                self._file = os.fdopen(fd, "wb")
-                self._path = path
+                self._adopt(fd, path)
+        except FileExistsError:
+            raise  # a usage error, not a file error: the caller named an existing file
         except OSError:
             _log.warning("could not create the spill file; keeping memory only", exc_info=True)
             self._fail()
+
+    def _adopt(self, fd: int, path: str) -> None:
+        """Write the file this stream just created at ``path``, remembering its identity."""
+        self._path = path
+        try:
+            info = os.fstat(fd)
+            self._created = (info.st_dev, info.st_ino)
+            self._file = os.fdopen(fd, "wb")
+        except BaseException:
+            os.close(fd)
+            raise
+
+    def _delete_own(self) -> None:
+        """Delete the file at ``_path`` if it is still the regular file this stream created."""
+        path, ident = self._path, self._created
+        if path is None or ident is None:
+            return
+        try:
+            info = os.lstat(path)
+            if (info.st_dev, info.st_ino) != ident or not stat.S_ISREG(info.st_mode):
+                _log.warning("spill file %r was replaced; leaving it alone", path)
+                return
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            _log.warning("could not delete spill file %r", path, exc_info=True)
 
     def _fail(self) -> None:
         self._spill_failed = True
@@ -197,9 +232,8 @@ class TextStream:
                 file.close()
         if self._owner is not None:
             self._release(delete=True)
-        elif self._path is not None:
-            with contextlib.suppress(OSError):
-                os.unlink(self._path)
+        else:
+            self._delete_own()
 
     def _release(self, *, delete: bool) -> None:
         """Tell the ``SpillDir`` the file is done (``delete``: remove it), once."""
@@ -383,9 +417,8 @@ class TextStream:
         )
         if self._owner is not None:
             self._release(delete=delete)
-        elif delete and self._path is not None:
-            with contextlib.suppress(OSError):
-                os.unlink(self._path)
+        elif delete:
+            self._delete_own()
         self._closed = text
         return text
 
