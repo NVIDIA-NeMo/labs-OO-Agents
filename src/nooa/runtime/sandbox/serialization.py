@@ -21,17 +21,16 @@ import pickle
 from dataclasses import asdict, dataclass, field
 from typing import Any, Protocol
 
-from nooa.agentdoc import TruncatingStringIO
 from nooa.config.truncation_config import DEFAULT_TRUNCATION_CONFIG
-from nooa.errors.formatting import _diagnostic_budget, _hard_bound_text
+from nooa.errors.formatting import _cut_text, _diagnostic_budget, _hard_bound_text
 from nooa.runtime.sandbox.errors import CellSerializationError, SandboxExecutionError
 from nooa.runtime.sandbox.wire import HINT, Codec
 
 _CODEC = Codec()  # encode-only; decoding needs the agent's types (see executor)
 
-# ``TruncatingStringIO`` adds a human-readable envelope around retained
-# head/tail content. Sandbox IPC has a fixed safety ceiling independent of a
-# caller's configured capture budget.
+# A cut keeps its head and tail around ``render_output``'s one-line notice,
+# which adds a few dozen chars. Sandbox IPC has a fixed safety ceiling
+# independent of a caller's configured capture budget.
 _MAX_ERROR_CONTENT = DEFAULT_TRUNCATION_CONFIG.capture.max_error
 _MAX_ERROR_TRANSPORT = _MAX_ERROR_CONTENT + 1_024
 
@@ -71,9 +70,7 @@ def _bounded_error_message(
     _, effective_tail = _diagnostic_budget(content_limit, tail_chars)
     if len(value) <= content_limit:
         return value
-    stream = TruncatingStringIO(limit=content_limit, tail_chars=effective_tail)
-    stream.write(value)
-    return _hard_bound_text(stream.getvalue(), _MAX_ERROR_TRANSPORT)
+    return _hard_bound_text(_cut_text(value, content_limit, effective_tail), _MAX_ERROR_TRANSPORT)
 
 
 def _bounded_diagnostic(value: str, *, max_error: int | None = None) -> str:

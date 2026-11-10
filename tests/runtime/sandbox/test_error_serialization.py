@@ -352,7 +352,9 @@ def test_invalid_error_limit_falls_back_to_default(invalid_limit: object) -> Non
     )
 
     assert dto.error is not None
-    assert "Showing first 5,000 and last 5,000 chars" in dto.error.message
+    assert dto.error.message == (
+        "x" * 5_000 + "\n[... 10,000 chars omitted; full output not kept]\n" + "x" * 5_000
+    )
 
 
 @pytest.mark.parametrize("invalid_tail", [-1, True])
@@ -364,8 +366,9 @@ def test_invalid_error_tail_falls_back_to_valid_split(invalid_tail: object) -> N
     )
 
     assert dto.error is not None
-    assert "Showing first 50 and last 50 chars" in dto.error.message
-    assert dto.error.message.endswith("x" * 50 + "\n</truncated-output>")
+    assert dto.error.message == (
+        "x" * 50 + "\n[... 900 chars omitted; full output not kept]\n" + "x" * 50
+    )
 
 
 def test_error_dto_text_respects_configured_capture_limit_before_transport_limit() -> None:
@@ -377,7 +380,9 @@ def test_error_dto_text_respects_configured_capture_limit_before_transport_limit
     )
 
     assert dto.error is not None
-    assert "Showing first 50 and last 50 chars" in dto.error.message
+    assert dto.error.message == (
+        "x" * 50 + "\n[... 1 chars omitted; full output not kept]\n" + "x" * 50
+    )
     assert len(dto.error.message) <= max_error + 1_024
 
 
@@ -467,8 +472,11 @@ def test_error_dto_text_is_bounded_before_ipc() -> None:
     max_transport = max_error + 1_024
     assert len(dto.error.message) <= max_transport
     assert len(dto.error.diagnostic) <= max_transport
-    assert "<truncated-output>" in dto.error.message
-    assert dto.error.message.endswith("x" * tail + "\n</truncated-output>")
+    assert dto.error.message == (
+        "x" * (max_error - tail)
+        + f"\n[... {100_000 - max_error:,} chars omitted; full output not kept]\n"
+        + "x" * tail
+    )
 
 
 @pytest.mark.parametrize("raised", [KeyboardInterrupt("interrupt"), SystemExit("exit")])
