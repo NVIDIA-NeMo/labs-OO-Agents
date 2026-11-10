@@ -141,6 +141,12 @@ async def test_create_generates_dynamic_tool_class_with_methods():
     docstring = instance.find_references.__doc__  # type: ignore[attr-defined]
     assert docstring is not None
     assert "Find references" in docstring
+    # The server class's failure line, repeated where models read: each tool's doc.
+    failure = (
+        "A tool can also report failure in its result (e.g. an 'error' field): "
+        "check the value before going on."
+    )
+    assert failure in docstring and failure in instance.definition.__doc__  # type: ignore[attr-defined]
     assert "filepath (str): The path to the file to find references in" in docstring
     assert "line (int): The line number to find references in" in docstring
     assert "min=0" in docstring

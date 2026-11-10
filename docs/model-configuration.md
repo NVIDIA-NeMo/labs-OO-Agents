@@ -100,12 +100,11 @@ This does not test the key or the endpoint. Use Connect to check the route.
 
 Automatic discovery reads existing files in this order (later aliases win):
 
-1. Bundled defaults from installed packages.
-2. User configuration: normally `~/.config/nooa/llm_config.yaml`; honors
+1. User configuration: normally `~/.config/nooa/llm_config.yaml`; honors
    `XDG_CONFIG_HOME` or the explicit `NEMO_OO_USER_DIR` directory override.
-3. Project configuration: normally `<project-root>/.nooa/llm_config.yaml`;
+2. Project configuration: normally `<project-root>/.nooa/llm_config.yaml`;
    `NEMO_OO_PROJECT_DIR` overrides the directory containing this file.
-4. Comma-separated paths in `NEMO_OO_LLM_CONFIG`, in the order supplied.
+3. Comma-separated paths in `NEMO_OO_LLM_CONFIG`, in the order supplied.
 
 Later files replace the **whole model entry**. Call
 `nooa.llm_config.llm_config_chain()` to see which files your application reads.

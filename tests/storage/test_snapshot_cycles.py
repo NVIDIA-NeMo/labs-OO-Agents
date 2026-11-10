@@ -336,8 +336,14 @@ def test_snapshot_data_over_limit_fails_on_save():
 @pytest.mark.parametrize("outer", [0, 3])
 def test_snapshot_data_saves_iff_it_restores(kind, outer):
     """Save applies restore's accounting to ``__snapshot_data__`` output exactly."""
+    # A hand-built tuple envelope in ``__snapshot_data__`` is data, not a type:
+    # it is escaped as a plain dict (holding a list), so each level is two
+    # containers on save and on restore.
+    per_level = 2 if kind == "tuple-envelope" else 1
+    # Exactly the levels that fit: the envelope plus ``outer`` lists sit above.
+    limit = (MAX_SNAPSHOT_DEPTH - outer - 1) // per_level
     results = {}
-    for levels in range(MAX_SNAPSHOT_DEPTH - outer - 3, MAX_SNAPSHOT_DEPTH - outer + 2):
+    for levels in range(limit - 2, limit + 3):
         value: Any = _Durable(payload=_json_chain(kind, levels))
         for _ in range(outer):
             value = [value]
@@ -347,10 +353,11 @@ def test_snapshot_data_saves_iff_it_restores(kind, outer):
             saved = False
         else:
             saved = True
-            deserialize(blob, allowlist)  # must not raise
+            restored = deserialize(blob, allowlist)  # must not raise
+            for _ in range(outer):
+                restored = restored[0]
+            assert restored.payload == _json_chain(kind, levels)
         results[levels] = saved
-    # Exactly the levels that fit: the envelope plus ``outer`` lists sit above.
-    limit = MAX_SNAPSHOT_DEPTH - outer - 1
     assert results == {n: n <= limit for n in results}
 
 
@@ -412,3 +419,73 @@ def test_primitive_subclass_is_stored_as_plain_value():
 
     blob, _ = serialize({"s": Marked("x")})
     assert blob == {"s": "x"}
+
+
+@pytest.mark.parametrize("error", [TypeError, AttributeError, RuntimeError])
+def test_restore_skips_any_unrestorable_attribute(caplog, monkeypatch, error):
+    """Any failure restoring one attribute skips it; the others still load."""
+    import logging
+    from types import SimpleNamespace
+
+    from nooa.storage import snapshot as snapshot_module
+    from nooa.storage.snapshot import AgentSnapshot
+
+    real = snapshot_module.deserialize
+
+    def failing(blob, *args, **kwargs):
+        if blob == "BAD":
+            raise error("schema drift")
+        return real(blob, *args, **kwargs)
+
+    monkeypatch.setattr(snapshot_module, "deserialize", failing)
+    snapshot = AgentSnapshot(attributes={"memory": ["a"], "broken": "BAD", "n": 3})
+    agent = SimpleNamespace()
+    with caplog.at_level(logging.WARNING, logger="nooa.storage.snapshot"):
+        snapshot.restore(agent)
+    assert agent.memory == ["a"]
+    assert agent.n == 3
+    assert not hasattr(agent, "broken")
+    (record,) = [r for r in caplog.records if "'broken'" in r.getMessage()]
+    assert "skipping non-restorable attribute" in record.getMessage()
+    assert record.exc_info is not None and record.exc_info[0] is error  # traceback kept
+
+
+@pytest.mark.parametrize("error", [TypeError, AttributeError, RuntimeError])
+def test_restore_returns_skipped_attributes_with_reason(caplog, monkeypatch, error):
+    """restore() reports each skipped attribute with a short reason, and still warns."""
+    import logging
+    from types import SimpleNamespace
+
+    from nooa.storage import snapshot as snapshot_module
+    from nooa.storage.snapshot import AgentSnapshot
+
+    real = snapshot_module.deserialize
+
+    def failing(blob, *args, **kwargs):
+        if blob in ("BAD", "WORSE"):
+            raise error(f"schema drift in {blob}")
+        return real(blob, *args, **kwargs)
+
+    monkeypatch.setattr(snapshot_module, "deserialize", failing)
+    snapshot = AgentSnapshot(
+        attributes={"memory": ["a"], "broken": "BAD", "n": 3, "other": "WORSE"}
+    )
+    agent = SimpleNamespace()
+    with caplog.at_level(logging.WARNING, logger="nooa.storage.snapshot"):
+        skipped = snapshot.restore(agent)
+    assert skipped == {
+        "broken": f"{error.__name__}: schema drift in BAD",
+        "other": f"{error.__name__}: schema drift in WORSE",
+    }
+    assert agent.memory == ["a"] and agent.n == 3
+    assert sum("skipping non-restorable attribute" in r.getMessage() for r in caplog.records) == 2
+
+
+def test_restore_returns_empty_when_nothing_skipped():
+    from types import SimpleNamespace
+
+    from nooa.storage.snapshot import AgentSnapshot
+
+    agent = SimpleNamespace()
+    assert AgentSnapshot(attributes={"n": 3}).restore(agent) == {}
+    assert agent.n == 3

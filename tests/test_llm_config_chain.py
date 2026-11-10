@@ -43,16 +43,8 @@ def project_dir(tmp_path, monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch, tmp_path):
-    """Ensure NEMO_OO_LLM_CONFIG is unset, CWD is a clean temp dir,
-    and bundled-default entry-points are stubbed empty.
-
-    Tests that need to exercise the bundled layer explicitly
-    re-patch :func:`bundled_config_paths`.
-    """
+    """Ensure NEMO_OO_LLM_CONFIG is unset and CWD is a clean temp dir."""
     monkeypatch.delenv("NEMO_OO_LLM_CONFIG", raising=False)
-    # Stub out the entry-point lookup so tests don't pick up the
-    # workspace-installed nemo-oo-agents-nvidia bundled YAML.
-    monkeypatch.setattr("nooa.llm_config.bundled_config_paths", lambda: [])
     monkeypatch.chdir(tmp_path)
 
 
@@ -169,54 +161,6 @@ class TestMissing:
         assert "does not exist" not in caplog.text
 
 
-class TestBundledDefaults:
-    """Bundled defaults are the lowest-priority layer.
-
-    External packages register their YAML under the
-    ``nooa.bundled_configs`` entry-point group; tests
-    monkeypatch :func:`bundled_config_paths` to stub providers in/out.
-    """
-
-    def test_bundled_included_in_chain(self, user_dir, project_dir, tmp_path, monkeypatch):
-        # Stub the entry-point lookup to return one synthetic bundled YAML.
-        synthetic = tmp_path / "synthetic.yaml"
-        _write_yaml(synthetic)
-        monkeypatch.setattr(
-            "nooa.llm_config.bundled_config_paths",
-            lambda: [synthetic],
-        )
-        chain = llm_config_chain()
-        assert chain[0] == synthetic.resolve()
-
-    def test_bundled_absent_chain_empty(self, user_dir, project_dir):
-        # The autouse fixture already stubs bundled to [].
+class TestNoFiles:
+    def test_no_files_chain_empty(self, user_dir, project_dir):
         assert llm_config_chain() == []
-
-    def test_bundled_then_project(self, user_dir, project_dir, tmp_path, monkeypatch):
-        synthetic = tmp_path / "synthetic.yaml"
-        _write_yaml(synthetic)
-        monkeypatch.setattr(
-            "nooa.llm_config.bundled_config_paths",
-            lambda: [synthetic],
-        )
-        project_yaml = project_dir / "llm_config.yaml"
-        _write_yaml(project_yaml)
-        chain = llm_config_chain()
-        # Bundled is first (lowest), project is last (highest).
-        assert chain[0] == synthetic.resolve()
-        assert chain[-1] == project_yaml.resolve()
-
-    def test_multiple_bundled_providers_all_included(
-        self, user_dir, project_dir, tmp_path, monkeypatch
-    ):
-        """Two providers registered → both load, in the order returned."""
-        first = tmp_path / "first.yaml"
-        second = tmp_path / "second.yaml"
-        _write_yaml(first)
-        _write_yaml(second)
-        monkeypatch.setattr(
-            "nooa.llm_config.bundled_config_paths",
-            lambda: [first, second],
-        )
-        chain = llm_config_chain()
-        assert chain == [first.resolve(), second.resolve()]

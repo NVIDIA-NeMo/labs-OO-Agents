@@ -830,3 +830,31 @@ async def test_require_true_raises_when_unavailable(monkeypatch):
             cell_timeout=5.0,
         )
     ex_mod._CAPS_CACHE = None
+
+
+async def test_never_awaited_warning_in_worker_is_rewritten_by_execute_code():
+    """#447 review finding 4: the worker's raw "coroutine ... was never awaited"
+    warning (plus tracemalloc note) becomes the one-line hint on the parent."""
+    import warnings
+
+    ex = _executor()
+    try:
+        # pytest records warnings instead of printing them, and the forked worker
+        # inherits that; restore stock printing so the worker writes the warning
+        # to the cell's stderr as an uncaptured process does.
+        with warnings.catch_warnings():
+            warnings.simplefilter("always", RuntimeWarning)
+            warnings.showwarning = warnings._showwarning_orig  # type: ignore[attr-defined]
+            warnings._showwarnmsg_impl = lambda msg: sys.stderr.write(  # type: ignore[attr-defined]
+                warnings._formatwarnmsg(msg)  # type: ignore[attr-defined]
+            )
+            result = await ex._agent.runtime.execute_code(
+                "async def fetch():\n    return 1\n\nfetch()\nprint('done')",
+                sandbox_executor=ex,
+            )
+        assert result.stdout == "done\n"
+        assert "fetch(...)` was called without await and never ran" in result.stderr, result.stderr
+        assert "tracemalloc" not in result.stderr
+        assert "RuntimeWarning" not in result.stderr
+    finally:
+        await ex.aclose()

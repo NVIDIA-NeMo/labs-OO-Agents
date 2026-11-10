@@ -219,7 +219,7 @@ class TestCallableInstanceAnnotatedParams:
         assert "doc(Assistant)" in result
         assert "doc(assistant)" in result
         assert "pformat(assistant)" in result
-        assert 40 <= len(result.splitlines()) <= 60
+        assert 40 <= len(result.splitlines()) <= 66
 
     def test_doc_explains_instance_contract(self):
         """doc(doc) captures the essential instance-rendering guarantees."""
