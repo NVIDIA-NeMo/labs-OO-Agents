@@ -83,7 +83,7 @@ from nooa_atom.session.reflection import (
     ReflectionSettings,
     ReflectionTrigger,
     context_fraction,
-    emit_reflection_span,
+    has_queue,
     reflection_enabled,
 )
 from nooa_atom.session.store import SessionHandle
@@ -294,9 +294,8 @@ class Session:
         if isinstance(gate, _ReflectionGate):
             gate.start_session()  # creation/load anchor, not time spent constructing the agent
         self.handle = handle
-        # Reflection (nooa_atom.session.reflection): the trigger when this session
-        # reflects, the id of its queued reflection item, and whether the
-        # current turn is one.
+        # Reflection (nooa_atom.session.reflection): the trigger when this root
+        # session reflects and its agent has a system_messages queue, else None.
         settings = getattr(agent, "_reflection_settings", None)
         self._reflection: ReflectionTrigger | None = (
             ReflectionTrigger(settings or ReflectionSettings())
@@ -306,11 +305,9 @@ class Session:
                 host=options.host,
                 is_root=self.parent_id is None,
             )
+            and has_queue(agent, REFLECTION_CHANNEL)
             else None
         )
-        self._reflection_item: str | None = None
-        self._reflecting = False
-        self._reflection_turn = False  # also the agent's flag (require_role)
         # A deep copy: the Session owns its usage totals and pushes them to
         # the handle, whose metadata other threads read under its lock.
         self.info: SessionInfo = info.model_copy(
@@ -573,11 +570,6 @@ class Session:
         target = self._agent.queue_manager.channels().get(channel)
         if target is None or target.mode != "queue":
             raise ValueError(f"no queue channel {channel!r}")
-        if source == REFLECTION_SOURCE:
-            # A reflection queued before a restart is not replayed: the fresh
-            # session decides again when one is due.
-            self.handle.events.add(ItemWithdrawn(item_id=item_id))
-            return Receipt(session_id=self.id, channel=channel, item_id=item_id, delivered="queued")
         self.handle.events.add(ItemRequeued(item_id=item_id))
         return self._admit(item, channel=channel, source=source, item_id=item_id, record=False)
 
@@ -643,28 +635,9 @@ class Session:
             session_id=self.id, channel="steer", item_id=event.item_id, delivered="steered"
         )
 
-    @property
-    def _reflection_turn(self) -> bool:
-        """Whether the current turn is a quiet reflection turn."""
-        return self._reflecting
-
-    @_reflection_turn.setter
-    def _reflection_turn(self, value: bool) -> None:
-        """Set the reflection flag on the session and the agent."""
-        # The agent's copy relaxes its role's Done rules for this turn only
-        # (require_role); every path that ends a turn clears both.
-        self._reflecting = value
-        with suppress(AttributeError):
-            self._agent._reflection_turn = value
-
     def _flush_steers(self, _event: Any) -> None:
-        """``BeforeTurn`` handler: hand buffered steers to the coming model call.
-
-        A reflection turn takes none: it is quiet and its outcome is no reply,
-        so its steers stay buffered and ``_settle`` admits them on
-        ``user_messages`` for the next ordinary turn.
-        """
-        if self._reflection_turn or not self._pending_steers or not self._agent.turns.running:
+        """``BeforeTurn`` handler: hand buffered steers to the coming model call."""
+        if not self._pending_steers or not self._agent.turns.running:
             return
         while self._pending_steers:
             item_id, text, source = self._pending_steers[0]
@@ -701,11 +674,9 @@ class Session:
         """Whether an item waits on one of the agent's queue channels or as a steer."""
         if self._pending_steers:
             return True
-        reflection = 1 if self._reflection_item is not None else 0
         return any(
-            channel.mode == "queue"
-            and channel.qsize() > (reflection if name == REFLECTION_CHANNEL else 0)
-            for name, channel in self._agent.queue_manager.channels().items()
+            channel.mode == "queue" and channel.qsize() > 0
+            for channel in self._agent.queue_manager.channels().values()
         )
 
     def withdraw(self, receipt: Receipt) -> bool:
@@ -895,62 +866,31 @@ class Session:
     # ---- turns: the agent's TurnLoop runs them, the Session records them ----
 
     async def _prepare_turn(self) -> None:
-        """Before a turn: snapshot usage, apply a pending model, defer any reflection."""
+        """Before a turn: snapshot usage and apply a pending model."""
         self._usage_before = self.info.usage.model_copy()
         await self._apply_pending_model()
-        # The loop claims every queued item right after this returns, with no
-        # await between: a reflection never shares a turn with other input. It
-        # waits, still pending, for the next idle moment (_offer_reflection).
-        self._defer_reflection()
-
-    def _defer_reflection(self) -> None:
-        """Take the queued reflection back off its channel while other input waits."""
-        item_id = self._reflection_item
-        if item_id is None or not self.has_queued_input():
-            return
-        if self._remove_queued(REFLECTION_CHANNEL, item_id):
-            self.handle.events.add(ItemWithdrawn(item_id=item_id))
-            self._reflection_item = None
-
-    def _offer_reflection(self) -> None:
-        """Queue the pending reflection when nothing else waits and none is queued yet."""
-        trigger = self._reflection
-        if (
-            trigger is None
-            or not trigger.pending
-            or self._reflection_item is not None
-            or self._closing
-            or self._closed
-            or self.has_queued_input()
-        ):
-            return
-        receipt = self._admit(
-            trigger.settings.instructions, channel=REFLECTION_CHANNEL, source=REFLECTION_SOURCE
-        )
-        self._reflection_item = receipt.item_id
 
     def _check_reflection(self, kind: str) -> None:
-        """After a turn: count it, queue a reflection when one is due, or re-offer a deferred one."""
+        """After a turn: count it; when a reflection is due, queue its instructions.
+
+        They go on ``system_messages`` as an ordinary item, and the agent
+        handles them in a normal turn. A failure here is logged and ignored:
+        it must not affect the turn that just ended.
+        """
         trigger = self._reflection
-        if trigger is None:
+        if trigger is None or self._closing or self._closed:
             return
-        if self._reflection_turn:
-            trigger.reflected()
-            return
-        fraction = context_fraction(self._agent)
-        turns, minutes = trigger.turns + 1, trigger.minutes()
-        reason = trigger.turn_ended(kind, context_fraction=fraction)
-        if reason is not None:
-            trigger.pending = True
-            emit_reflection_span(
-                reason,
-                turns=turns,
-                minutes=minutes,
-                fraction=fraction,
-                session_id=self.id,
+        try:
+            reason = trigger.turn_ended(kind, context_fraction=context_fraction(self._agent))
+            if reason is None:
+                return
+            self._admit(
+                trigger.settings.instructions, channel=REFLECTION_CHANNEL, source=REFLECTION_SOURCE
             )
-            atom_metrics().reflection_queued(reason)
-        self._offer_reflection()
+            trigger.reflected()
+            atom_metrics().reflection_queued()
+        except Exception:
+            logger.exception("Session %s: the reflection check failed", self.id)
 
     def _commit_turn(self, notification: dict[str, list[Any]]) -> None:
         """No await/observers: atomic ledger first, identity ownership second."""
@@ -981,12 +921,6 @@ class Session:
             )
             del entries[index]
         self._batch_consumed = [(channel, item_id) for channel, _, item_id in selected]
-        reflection = self._reflection_item
-        self._reflection_turn = reflection is not None and item_ids == [reflection]
-        if reflection in item_ids:
-            self._reflection_item = None
-            if not self._reflection_turn and self._reflection is not None:
-                self._reflection.pending = False  # shared a turn after all: counts as done
         self._consumed.extend(item_ids)
         self._user_items.update(
             item_id for channel, _, item_id in selected if channel == "user_messages"
@@ -999,18 +933,11 @@ class Session:
         self._turn_messages.clear()
         for channel, item_id in self._batch_consumed:
             self._emit(ItemConsumedUpdate(session_id=self.id, channel=channel, item_id=item_id))
-        self._emit(
-            TurnStartedUpdate(
-                session_id=self.id,
-                item_ids=list(self._consumed),
-                reflection=self._reflection_turn,
-            )
-        )
+        self._emit(TurnStartedUpdate(session_id=self.id, item_ids=list(self._consumed)))
 
     def _on_turn_settled(self, event: TurnSettled) -> None:
         """``TurnSettled``: record the outcome; if recording fails, fail the turn's prompts."""
         if not event.committed:
-            self._reflection_turn = False  # no turn began; never leave the agent flag set
             if event.kind in ("error", "cancelled"):
                 error = (
                     TurnFailedError(event.message, event.error)
@@ -1046,9 +973,6 @@ class Session:
         self._waiting, self._consumed = [], []
         self._user_items.clear()
         self._replied = False
-        if self._reflection_turn and self._reflection is not None:
-            self._reflection.reflected()
-        self._reflection_turn = False
         if self._pending_steers:
             self._record_failure(exc, owed)
         error = TurnFailedError(f"{type(exc).__name__}: {exc}", exc)
@@ -1117,9 +1041,7 @@ class Session:
             outcome = TurnFailedError(event.message, event.error)
         else:
             outcome = event.result
-        reflecting = self._reflection_turn
-        if not reflecting:  # a reflection is quiet: its Done/Waiting text is not a reply
-            self._send_result_message(outcome)
+        self._send_result_message(outcome)
         consumed = list(self._consumed)
         if self._recording_error is None:
             self._admit_leftover_steers()
@@ -1140,13 +1062,7 @@ class Session:
         )
         self.info.reply_count += 1  # as the store counts it, with each agent message
         waiting = self._waiting + consumed
-        if reflecting:
-            # Only the reflection item ends here; prompts left open by an
-            # earlier Waiting stay open for the turn that answers them.
-            for item_id in consumed:
-                self._resolve(item_id, outcome)
-            waiting = self._waiting
-        elif kind != "waiting":
+        if kind != "waiting":
             for item_id in waiting:
                 self._resolve(item_id, outcome)
                 self._user_items.discard(item_id)
@@ -1165,11 +1081,9 @@ class Session:
                 outcome=data,
                 result_type=result_type,
                 usage=usage,
-                reflection=reflecting,
             )
         )
         self._check_reflection(kind)
-        self._reflection_turn = False
 
         self._maintenance_ready = None
         gate = getattr(self._agent, "_reflection_gate", None)

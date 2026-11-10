@@ -7,17 +7,16 @@ based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
-- `nooa-atom`: reflection turns. When a root session's turn ends with `Done`
-  or `Waiting` and a reflection is due (20 turns or 60 minutes since the last,
-  or the context half full; at least 5 turns apart), the session queues
-  housekeeping instructions on the `slash_commands` channel: rename the
-  session, compact history, delete stale names, tidy todos and `self.v`. It
-  runs only when nothing else waits, at most one is pending, and over ACP the
-  turn is one "Reflected: ..." status card with no reply. On by default for
-  ACP hosts, off headless (benchmarks, Gym, `nooa-bench`); configure
-  it in `atom.reflection` or override with `SessionOptions(reflection=...)`.
-  Child sessions never reflect; a `children:` key left in `atom.reflection`
-  is ignored with a warning. Each one emits an `atom.reflection` span.
+- `nooa-atom`: reflection. When a root session's turn ends with `Done` or
+  `Waiting` and a reflection is due (20 turns or 60 minutes since the last,
+  or the context half full; at least 5 turns apart), the session puts
+  housekeeping instructions on the agent's `system_messages` queue as an
+  ordinary message: rename the session, compact history, delete stale names,
+  tidy todos and `self.v`. The agent handles it in a normal turn. On by
+  default for ACP hosts, off elsewhere (benchmarks, Gym, `nooa-bench`);
+  configure the thresholds and the text in `atom.reflection`, or override
+  with `SessionOptions(reflection=...)`. Child sessions never reflect.
+  Counted in `harness.atom.reflection.count`.
 - `nooa-atom`: a job lost in a restart now reports the launching cell's code
   (at most 40 lines / about 4,000 characters) and the names that cell used
   which are gone after the restart.

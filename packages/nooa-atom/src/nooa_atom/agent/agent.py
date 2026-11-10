@@ -489,18 +489,8 @@ def require_role(agent: Any, result: Any, call: Any) -> None:
     - child: ``Done`` carries a ``TaskResult``; a one-shot child may not ask
       (its session port says so); no running work left at ``Done``;
       ``Waiting`` only on work that will deliver.
-
-    A reflection turn (``agent._reflection_turn``, set by the session) is
-    housekeeping that ends with a result-less ``Done``: under every role it
-    gets only the interactive rule, and unattended/orchestrator still refuse
-    ``NeedInput``.
     """
     policy = getattr(agent, "_turn_policy", "interactive")
-    if getattr(agent, "_reflection_turn", False):
-        if policy in ("unattended", "orchestrator") and isinstance(result, NeedInput):
-            raise InvariantError(_NO_ONE_TO_ASK)
-        require_deliverable_wait(agent, result, call)
-        return
     if policy == "interactive":
         require_deliverable_wait(agent, result, call)
         return
@@ -769,9 +759,6 @@ class AtomAgent(
     _namespace_lifetime: Annotated[str, hidden, nosnapshot]
     _handle_namespace: Annotated[ExecutionNamespace | None, hidden, nosnapshot]
     _done_reflection: Annotated[bool, hidden, nosnapshot]
-    # Whether the current turn is a quiet reflection turn: the session sets it
-    # for the turn's duration, and require_role relaxes the role's Done rules.
-    _reflection_turn: Annotated[bool, hidden, nosnapshot]
     _reflection_candidate: Annotated[Any, hidden, nosnapshot]
     _reflection_gate: Annotated[_ReflectionGate, hidden, nosnapshot]
     _namespace_restart_notified: Annotated[bool, hidden, nosnapshot]
@@ -805,7 +792,6 @@ class AtomAgent(
         self._namespace_lifetime = "session"
         self._handle_namespace = None
         self._done_reflection = experimental_done_reflection
-        self._reflection_turn = False
         self._reflection_candidate = None
         self._namespace_restart_notified = False
         self._session_namespace_was_live = False

@@ -349,33 +349,24 @@ bindings for deletion. It is not an automatic background expiry service.
 
 ## Reflection turns
 
-From time to time a root session gives its agent a quiet housekeeping turn, a
+From time to time a root session sends its agent a housekeeping message, a
 *reflection*: rename the session to what it works on now, compact history it no
 longer needs in full, delete stale Python names, tidy `self.todo` and `self.v`,
-and make sure needed jobs can be relaunched after a restart. This is a turn the
-session queues, unlike `experimental_done_reflection` above (one bounded
-prediction after a `Done`); the two are independent.
+and make sure needed jobs can be relaunched after a restart. This is an ordinary
+message the session sends, unlike `experimental_done_reflection` above (one
+bounded prediction after a `Done`); the two are independent.
 
-Only root sessions reflect; a child session never does, whatever the settings
-or `SessionOptions.reflection` say. When a root session's turn ends with `Done`
-or `Waiting`, a reflection is due if
-at least `min_gap_turns` turns passed since the last one and `every_turns` turns
-or `every_minutes` minutes passed, or the context window is at least
-`context_fraction` full (the share the agent's `context_usage` line shows).
-Reflection turns do not count. The time and turn window starts when the session
-is created or loaded and restarts after each reflection.
-
-The instructions are queued on the agent's `slash_commands` channel (where
-`/compact` goes) with source `reflection`. A reflection runs only when no other
-input waits: if a message, job event or command is queued, the reflection steps
-aside and runs after it. At most one is pending, and one queued before a restart
-is not replayed. The turn is quiet: its `Done` sends no reply, and over ACP the
-whole turn is one status card, `Reflected: <the Done explanation>`
-(`TurnStartedUpdate.reflection`, `TurnEndedUpdate.reflection`). Each queued
-reflection emits an `atom.reflection` span with `nooa.atom.reflection.reason`
-(`turns`, `minutes` or `context`), `.turns_since_last`, `.minutes_since_last`
-and `.context_fraction`, and is counted in `harness.atom.reflection.count` /
-`.reasons`.
+Only root sessions reflect. When a root session's turn ends with `Done` or
+`Waiting`, the session counts it. A reflection is due when at least
+`min_gap_turns` turns passed since the last one, and `every_turns` turns or
+`every_minutes` minutes passed or the context window is at least
+`context_fraction` full (the share the agent's `context_usage` line shows). The
+session then puts the instructions on the agent's `system_messages` queue as an
+ordinary item (source `reflection`) and resets its counters; the agent handles
+it in a normal, visible turn. The counters are in memory: they start when the
+session is created or loaded. An agent without a `system_messages` queue does
+not reflect, and an error in the check is logged and ignored. Each reflection
+sent is counted in `harness.atom.reflection.count`.
 
 Settings, in `atom.reflection` (defaults shown; a partial section overrides
 only the keys it sets):
@@ -383,12 +374,12 @@ only the keys it sets):
 ```yaml
 atom:
   reflection:
-    enabled: null          # null: on for interactive hosts (ACP), off headless
+    enabled: null          # null: on for ACP hosts, off elsewhere
     every_turns: 20        # null turns a trigger off
     every_minutes: 60
     min_gap_turns: 5
     context_fraction: 0.5
-    instructions: "..."    # the queued text (nooa_atom.session.reflection.DEFAULT_INSTRUCTIONS)
+    instructions: "..."    # the message sent (nooa_atom.session.reflection.DEFAULT_INSTRUCTIONS)
 ```
 
 The default follows `SessionOptions.host`: only `"acp"` (Pool, Zed and other

@@ -72,9 +72,9 @@ class SessionOptions(BaseModel):
     experimental_reflection_min_turns: int = 50
     experimental_reflection_min_seconds: float = 3600.0
     reflection: bool | None = None
-    """Reflection turns (``nooa_atom.session.reflection``) for this run: ``None`` keeps
-    the workspace's ``atom.reflection.enabled`` (by default on for interactive hosts,
-    off for ``headless``); ``True``/``False`` overrides it, e.g. for a benchmark arm."""
+    """Reflection (``nooa_atom.session.reflection``) for this run: ``None`` keeps the
+    workspace's ``atom.reflection.enabled`` (by default on for ``acp`` hosts, off
+    elsewhere); ``True``/``False`` overrides it, e.g. for a benchmark arm."""
 
     @field_validator("experimental_reflection_min_turns", mode="before")
     @classmethod

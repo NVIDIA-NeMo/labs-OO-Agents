@@ -511,7 +511,6 @@ class TurnStartedUpdate(_Update):
 
     kind: Literal["turn_started"] = "turn_started"
     item_ids: list[str] = Field(default_factory=list)
-    reflection: bool = False  # a quiet reflection turn (nooa_atom.session.reflection)
 
 
 class TurnEndedUpdate(_Update):
@@ -529,7 +528,6 @@ class TurnEndedUpdate(_Update):
     outcome: dict[str, Any] = Field(default_factory=dict)
     result_type: str | None = None
     usage: Usage = Field(default_factory=Usage)
-    reflection: bool = False  # it ended a reflection turn: one status card, no reply
 
 
 class ItemAdmittedUpdate(_Update):

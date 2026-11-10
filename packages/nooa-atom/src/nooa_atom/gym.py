@@ -115,8 +115,8 @@ class AtomHarness(Agent):
                 if unknown:
                     raise ValueError(f"unknown benchmark/experiment keys: {sorted(unknown)}")
                 if reflection:
-                    # Reflection turns rename sessions: the policy has no titles.
-                    raise ValueError(f"{POLICY} forbids reflection turns (reflection=True)")
+                    # Reflection renames sessions: the policy has no titles.
+                    raise ValueError(f"{POLICY} forbids reflection (reflection=True)")
             except BaseException:
                 self.benchmark_guard.violate("construction_configuration_invalid")
                 self.benchmark_guard.finish(None, "construction_error")
@@ -139,8 +139,8 @@ class AtomHarness(Agent):
             turn_method=self.turn_method,
             sessions_dir=self.sessions_dir,
             name=session_name,
-            # Reflection turns are off headless; True turns them on for an A/B arm.
-            # A guarded episode pins them off, so workspace settings cannot enable them.
+            # Reflection is off headless; True turns it on for an A/B arm.
+            # A guarded episode pins it off, so workspace settings cannot enable it.
             reflection=False if self.benchmark_guard is not None else reflection,
             experimental_reflection_min_turns=experimental_reflection_min_turns,
             experimental_reflection_min_seconds=experimental_reflection_min_seconds,
