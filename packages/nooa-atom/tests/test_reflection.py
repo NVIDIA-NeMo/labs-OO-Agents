@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 from atom_test_agents import CellLLM, cell
+from nooa_atom.agent.agent import require_role
 from nooa_atom.agent.factory import create_session_agent
 from nooa_atom.session.items import ItemAdmittedUpdate, TurnEndedUpdate, TurnStartedUpdate
 from nooa_atom.session.options import SessionOptions
@@ -22,7 +23,8 @@ from nooa_atom.session.registry import SessionRegistry
 from nooa_atom.session.store import SessionStore
 from nooa_atom.workspace.options import AtomOptions
 
-from nooa.interactive import AgentMessage
+from nooa.interactive import AgentMessage, Done, NeedInput, TaskResult
+from nooa.strategy_validation import InvariantError
 
 
 class Clock:
@@ -185,7 +187,9 @@ def slow_done(text, seconds=0.3):
 REFLECT = "REFLECT NOW"
 
 
-async def make_root(tmp_path, responses, *, host="acp", reflection=None, **settings):
+async def make_root(
+    tmp_path, responses, *, host="acp", reflection=None, turn_method=None, **settings
+):
     llm = CellLLM(responses)
     settings = {"every_turns": 2, "min_gap_turns": 1, "instructions": REFLECT, **settings}
 
@@ -202,6 +206,7 @@ async def make_root(tmp_path, responses, *, host="acp", reflection=None, **setti
             llm=llm,
             host=host,
             reflection=reflection,
+            **({"turn_method": turn_method} if turn_method else {}),
         )
     )
     updates = []
@@ -438,5 +443,80 @@ async def test_a_steer_during_a_reflection_waits_for_the_next_ordinary_turn(tmp_
             if isinstance(event, AgentMessage)
         ]
         assert messages == ["one", "two", "steered reply"]
+    finally:
+        await registry.close_all()
+
+
+WORK = (
+    "return_result(Done(explanation='{e}', result=TaskResult(solution_description='s', "
+    "evidence='e', how_to_verify='v', report='R')))"
+)
+
+
+@pytest.mark.parametrize("policy", ["unattended", "orchestrator", "child"])
+def test_a_reflection_turn_ends_with_a_result_less_done_under_any_role(policy):
+    agent = SimpleNamespace(_turn_policy=policy, _reflection_turn=False)
+    done = Done(explanation="tidied")
+    with pytest.raises(InvariantError):
+        require_role(agent, done, None)  # an ordinary turn still needs its result
+    agent._reflection_turn = True
+    require_role(agent, done, None)
+
+
+@pytest.mark.parametrize("policy", ["unattended", "orchestrator"])
+def test_a_reflection_turn_still_may_not_ask_when_no_one_can_answer(policy):
+    agent = SimpleNamespace(_turn_policy=policy, _reflection_turn=True)
+    with pytest.raises(InvariantError, match="Nobody can answer"):
+        require_role(agent, NeedInput(question="which?"), None)
+
+
+async def test_an_unattended_session_finishes_its_reflection_and_clears_the_flag(tmp_path):
+    log = tmp_path / "flags.txt"
+    flag = f"open({str(log)!r}, 'a').write(str(self._reflection_turn) + ' ')\n"
+    registry, root, llm, updates = await make_root(
+        tmp_path,
+        [
+            cell(flag + WORK.format(e="one")),
+            cell(flag + WORK.format(e="two")),
+            cell(flag + "return_result(Done(explanation='tidied'))"),
+            cell(flag + "return_result(Done(explanation='no result'))"),
+            cell(flag + WORK.format(e="three")),
+        ],
+        host="headless",
+        reflection=True,
+        turn_method="handle_batch",
+    )
+    try:
+        assert root._agent._turn_policy == "unattended"
+        await root.prompt("one")
+        await root.prompt("two")
+        await idle(root)
+        ended = [u for u in updates if isinstance(u, TurnEndedUpdate)]
+        assert (ended[-1].reflection, ended[-1].outcome["explanation"]) == (True, "tidied")
+        assert len(llm.calls) == 3  # accepted at once, no postcondition retry
+        assert root._agent._reflection_turn is False
+        # The next ordinary turn is held to the role again: no result, a retry.
+        outcome = await root.prompt("three")
+        assert isinstance(outcome.result, TaskResult) and outcome.explanation == "three"
+        assert len(llm.calls) == 5
+        assert log.read_text().split() == ["False", "False", "True", "False", "False"]
+    finally:
+        await registry.close_all()
+
+
+async def test_a_cancelled_reflection_turn_clears_the_agent_flag(tmp_path):
+    registry, root, llm, updates = await make_root(
+        tmp_path, [done("one"), done("two"), slow_done("tidied", seconds=5)]
+    )
+    try:
+        await root.prompt("one")
+        await root.prompt("two")
+        while not (root._agent.turns.running and root._agent._reflection_turn):
+            await asyncio.sleep(0.005)
+        assert await root.cancel()
+        while root._agent.turns.running:
+            await asyncio.sleep(0.005)
+        await asyncio.sleep(0.02)
+        assert (root._reflection_turn, root._agent._reflection_turn) == (False, False)
     finally:
         await registry.close_all()

@@ -308,7 +308,8 @@ class Session:
             else None
         )
         self._reflection_item: str | None = None
-        self._reflection_turn = False
+        self._reflecting = False
+        self._reflection_turn = False  # also the agent's flag (require_role)
         # A deep copy: the Session owns its usage totals and pushes them to
         # the handle, whose metadata other threads read under its lock.
         self.info: SessionInfo = info.model_copy(
@@ -640,6 +641,19 @@ class Session:
         return Receipt(
             session_id=self.id, channel="steer", item_id=event.item_id, delivered="steered"
         )
+
+    @property
+    def _reflection_turn(self) -> bool:
+        """Whether the current turn is a quiet reflection turn."""
+        return self._reflecting
+
+    @_reflection_turn.setter
+    def _reflection_turn(self, value: bool) -> None:
+        # The agent's copy relaxes its role's Done rules for this turn only
+        # (require_role); every path that ends a turn clears both.
+        self._reflecting = value
+        with suppress(AttributeError):
+            self._agent._reflection_turn = value
 
     def _flush_steers(self, _event: Any) -> None:
         """``BeforeTurn`` handler: hand buffered steers to the coming model call.
@@ -992,6 +1006,7 @@ class Session:
     def _on_turn_settled(self, event: TurnSettled) -> None:
         """``TurnSettled``: record the outcome; if recording fails, fail the turn's prompts."""
         if not event.committed:
+            self._reflection_turn = False  # no turn began; never leave the agent flag set
             if event.kind in ("error", "cancelled"):
                 error = (
                     TurnFailedError(event.message, event.error)
