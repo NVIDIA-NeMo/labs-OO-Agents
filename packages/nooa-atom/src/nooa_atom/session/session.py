@@ -278,7 +278,6 @@ class Session:
         before_close: Callable[[], Awaitable[None]] | None = None,
         llm_in_use: Callable[[Any], bool] | None = None,
     ) -> None:
-        """Wire the session to its agent, handle and options."""
         info = handle.info
         self.id: str = info.id
         self.parent_id: str | None = info.parent_id
@@ -866,7 +865,6 @@ class Session:
     # ---- turns: the agent's TurnLoop runs them, the Session records them ----
 
     async def _prepare_turn(self) -> None:
-        """Before a turn: snapshot usage and apply a pending model."""
         self._usage_before = self.info.usage.model_copy()
         await self._apply_pending_model()
 
@@ -929,7 +927,6 @@ class Session:
         self.info.status = "running"
 
     def _on_turn_began(self, _event: Any) -> None:
-        """``TurnBegan`` handler: report consumed items and the turn's start."""
         self._turn_messages.clear()
         for channel, item_id in self._batch_consumed:
             self._emit(ItemConsumedUpdate(session_id=self.id, channel=channel, item_id=item_id))
@@ -1027,7 +1024,6 @@ class Session:
         return any(item_id in self._user_items for item_id in self._waiting + self._consumed)
 
     def _settle(self, event: TurnSettled) -> None:
-        """``TurnSettled`` handler: record the turn's outcome and resolve its items."""
         # Items stay in self._consumed / self._waiting until the end, so a
         # failure part way leaves them for _fail_turn to resolve.
         kind: OutcomeKind = event.kind

@@ -335,7 +335,6 @@ class ACPEventBridge:
         resolve_child: Callable[[str], BridgedSession | None] | None = None,
         own_sources: frozenset[str] = OWN_SOURCES,
     ) -> None:
-        """Bridge ``session``'s updates to ``client``, mirroring children found by ``resolve_child``."""
         self.session = session
         self.client = client
         self.session_id = session.id
@@ -652,7 +651,6 @@ class ACPEventBridge:
         )
 
     def _on_session_update(self, update: Any) -> None:
-        """Route one session update to its handler."""
         if isinstance(update, AgentEventUpdate):
             self._on_agent_event(update.event, None)
         elif isinstance(update, ItemConsumedUpdate):
@@ -702,7 +700,6 @@ class ACPEventBridge:
             self._start_close()
 
     def _on_turn_ended(self, update: TurnEndedUpdate) -> None:
-        """Close the turn's open cards and render its outcome."""
         self._reset_rolling("Turn ended before this finished.")
         if update.outcome_kind == "need_input":
             # Rendered once per turn, here; the next prompt answers it as text.

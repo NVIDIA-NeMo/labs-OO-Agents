@@ -76,7 +76,6 @@ class AtomHarness(Agent):
         reflection: bool | None = None,
         **extra: Any,
     ) -> None:
-        """Configure the gym's model, turn method, directories and benchmark policy."""
         if turn_method not in TURN_METHODS:
             raise ValueError(f"turn_method must be one of {TURN_METHODS}, got {turn_method!r}")
         super().__init__(llm=llm)

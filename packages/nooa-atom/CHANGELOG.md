@@ -17,9 +17,6 @@ based on [Keep a Changelog](https://keepachangelog.com/).
   configure the thresholds and the text in `atom.reflection`, or override
   with `SessionOptions(reflection=...)`. Child sessions never reflect.
   Counted in `harness.atom.reflection.count`.
-- `nooa-atom`: a job lost in a restart now reports the launching cell's code
-  (at most 40 lines / about 4,000 characters) and the names that cell used
-  which are gone after the restart.
 - `nooa-atom`: AtomAgent drops the core `<events_api>` guidance block (added on
   main for agents that expose `self.events`). `self.events` stays exposed, and
   Atom's `context_usage` block already names `self.events.collapse(...)` and

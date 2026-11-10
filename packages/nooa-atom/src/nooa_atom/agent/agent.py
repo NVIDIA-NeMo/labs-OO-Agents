@@ -40,9 +40,7 @@ from nooa_atom.tools.repo_tools import RepoTools
 from nooa_atom.tools.todo_list import Todo, TodoList  # noqa: F401
 
 with hidden:
-    import ast
     import inspect
-    import json
     import re
     import sys
     import time
@@ -549,14 +547,8 @@ def _work_label(work: Any, kind: str) -> dict[str, str]:
 
 
 @hidden
-def _lost_notice(
-    record: dict[str, Any], code: str | None = None, gone: list[str] | tuple[str, ...] = ()
-) -> str:
-    """The lost-on-restart text for one saved job record: where it was launched, what it ran.
-
-    ``code`` is the launching cell's source (shown bounded by ``_bounded_cell``)
-    and ``gone`` the names that cell used which the restarted session no longer has.
-    """
+def _lost_notice(record: dict[str, Any]) -> str:
+    """The lost-on-restart text for one saved job record: where it was launched, what it ran."""
     what = _bounded(record.get("what") or _LOST_LABELS.get(str(record.get("kind")), "job"), 40)
     tag = str(record.get("tag") or "")
     tag = tag if tag and len(tag) <= 20 and all(c.isdigit() or c == "." for c in tag) else ""
@@ -567,84 +559,9 @@ def _lost_notice(
     if summary:  # a Shell's "$ command · cwd dir": bound each half, keep the cwd
         command, sep, cwd = summary.partition(" · cwd ")
         parts.append(_bounded(command, 100) + (f" in {_bounded(cwd, 100)}" if sep else ""))
-    text = (
+    return (
         f"lost: the session restarted while it ran ({'; '.join(parts)}). Relaunch if still needed."
     )
-    if code:
-        text += f"\nThe cell that launched it:\n```python\n{_bounded_cell(code)}\n```"
-    if gone:
-        text += f"\nNames it used that are gone now: {_bounded(', '.join(gone), 400)}"
-    return text
-
-
-_CELL_LINES: Annotated[int, hidden] = 40
-_CELL_CHARS: Annotated[int, hidden] = 4000
-
-
-@hidden
-def _bounded_cell(code: str, max_lines: int = _CELL_LINES, max_chars: int = _CELL_CHARS) -> str:
-    """At most ``max_lines`` lines and about ``max_chars`` characters, then "… N more lines"."""
-    lines = code.rstrip().splitlines()
-    kept: list[str] = []
-    size = 0
-    for line in lines[:max_lines]:
-        if size + len(line) + 1 > max_chars:
-            if not kept:  # one huge line: keep its head
-                kept.append(line[: max_chars - 1] + "…")
-            break
-        kept.append(line)
-        size += len(line) + 1
-    rest = len(lines) - len(kept)
-    return "\n".join(kept) + (f"\n… {rest} more lines" if rest else "")
-
-
-@hidden
-def _free_names(code: str) -> list[str]:
-    """Names ``code`` reads without binding them anywhere in it, in first-use order."""
-    try:
-        tree = ast.parse(code)
-    except SyntaxError:
-        return []
-    bound: set[str] = set()
-    loads: list[ast.Name] = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Name):
-            if isinstance(node.ctx, ast.Load):
-                loads.append(node)
-            else:
-                bound.add(node.id)
-        elif isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
-            bound.add(node.name)
-        elif isinstance(node, ast.arg):
-            bound.add(node.arg)
-        elif isinstance(node, ast.alias):
-            bound.add((node.asname or node.name).split(".")[0])
-        elif isinstance(node, ast.ExceptHandler) and node.name:
-            bound.add(node.name)
-        elif isinstance(node, ast.Global | ast.Nonlocal):
-            bound.update(node.names)
-        elif isinstance(node, ast.MatchAs | ast.MatchStar) and node.name:
-            bound.add(node.name)
-    loads.sort(key=lambda node: (node.lineno, node.col_offset))
-    used = dict.fromkeys(node.id for node in loads)
-    return [name for name in used if name not in bound]
-
-
-@hidden
-def _cell_code(agent: Any, tag: str) -> str | None:
-    """The code of the python cell whose tool-call event is ``tag`` (None when unknown)."""
-    try:
-        event = agent.events[tag]
-    except Exception:
-        return None
-    arguments = getattr(event, "arguments", None)
-    if isinstance(arguments, str):
-        try:
-            arguments = json.loads(arguments)
-        except ValueError:
-            return None
-    code = arguments.get("code") if isinstance(arguments, dict) else None
-    return code if isinstance(code, str) and code.strip() else None
 
 
 @hidden
@@ -972,46 +889,6 @@ class AtomAgent(
 
     @hidden
     @no_trace
-    def _lost_cell(self, record: dict[str, Any]) -> tuple[str | None, list[str]]:
-        """A lost job's launching cell code, and the names it used that a fresh namespace lacks.
-
-        Called after a restart, before the new namespace exists: a name is gone
-        unless the cell binds it, or it is a builtin, a runtime facility, a
-        name the agent's modules provide to every cell or a turn method's
-        parameter (``notification``), which every turn passes in fresh.
-        """
-        import builtins
-        import inspect
-
-        from nooa.agentdoc.visibility import filter_mro_module_globals
-        from nooa.runtime.execution_namespace import RUNTIME_NAMES
-
-        tag = str(record.get("tag") or "")
-        code = _cell_code(self, tag) if tag else None
-        if code is None:
-            return None, []
-        available = set(dir(builtins)) | RUNTIME_NAMES | {"asyncio", "typing", "doc"}
-        try:
-            available |= set(filter_mro_module_globals(type(self)))
-        except Exception:
-            pass
-        # The overrides here take ``*args, **kwargs``: the MRO's explicit
-        # signatures (``AtomAgentBase``) carry the real parameter names.
-        variadic = (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
-        for cls in type(self).__mro__:
-            for method in ("handle", "handle_batch", "handle_work", "handle_orchestrate"):
-                func = cls.__dict__.get(method)
-                if func is None:
-                    continue
-                try:
-                    params = inspect.signature(func).parameters.values()
-                except Exception:
-                    continue
-                available |= {p.name for p in params if p.kind not in variadic} - {"self"}
-        return code, [name for name in _free_names(code) if name not in available]
-
-    @hidden
-    @no_trace
     def _status(self) -> str:
         """Unread counts and senders, read hints, running and idle work, cancel hint."""
         now = time.monotonic()
@@ -1116,9 +993,8 @@ class AtomAgent(
         self.skills.after_restore()
         lost, self._work_records = list(self._work_records or []), []
         for record in lost:
-            record = record if isinstance(record, dict) else {}
             name = str(record.get("name", "?"))
-            notice = _lost_notice(record, *self._lost_cell(record))
+            notice = _lost_notice(record if isinstance(record, dict) else {})
             self._jobs_in.put(JobEvent(name, 0, "failed", notice))
         # An earlier Atom's JobsApi records (name -> record of each running job).
         legacy, self._jobs_running = dict(self._jobs_running or {}), {}
