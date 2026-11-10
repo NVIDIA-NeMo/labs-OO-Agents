@@ -662,7 +662,18 @@ def _deserialize_envelope(blob: dict[str, Any], allowlist: set[str], depth: int)
 
     if envelope_type == _DICT_CLASS:
         # @snapshotable: deserialize data, filter extra keys to __init__ params
-        deserialized_data = _deserialize_fields(data, allowlist, depth)
+        lenient = getattr(cls, "__snapshot_lenient_dict__", None)
+        if isinstance(data.get(lenient), dict):
+            data = dict(data)
+            entries = data.pop(lenient)
+            if entries.get("__type__") == _PLAIN_DICT and isinstance(entries.get("data"), dict):
+                entries = entries["data"]  # escaped: its keys look like an envelope
+            deserialized_data = _deserialize_fields(data, allowlist, depth)
+            deserialized_data[lenient] = _deserialize_lenient_dict(
+                cls.__name__, lenient, entries, allowlist, depth + 1
+            )
+        else:
+            deserialized_data = _deserialize_fields(data, allowlist, depth)
         accepted = {p.name for p in inspect.signature(cls.__init__).parameters.values()} - {"self"}
         filtered = {k: v for k, v in deserialized_data.items() if k in accepted}
         obj = cls(**filtered)
@@ -673,6 +684,30 @@ def _deserialize_envelope(blob: dict[str, Any], allowlist: set[str], depth: int)
         return obj
 
     raise DeserializationError(f"Unknown envelope type: {envelope_type!r}")
+
+
+def _deserialize_lenient_dict(
+    owner: str, name: str, entries: dict[str, Any], allowlist: set[str], depth: int
+) -> dict[str, Any]:
+    """Restore a ``__snapshot_lenient_dict__`` attribute entry by entry.
+
+    The restore half of :func:`_serialize_lenient_dict`: an entry that cannot
+    be restored (its class is gone, e.g. one a cell defined in an earlier
+    process) is skipped with a warning naming its key; the others survive.
+    """
+    result = {}
+    for k, v in entries.items():
+        try:
+            result[k] = v if type(v) in _PRIMITIVE_TYPES else _deserialize(v, allowlist, depth)
+        except (_PathError, DeserializationError, TypeError, ValueError, RecursionError) as exc:
+            logger.warning(
+                "%s.%s: value for %r could not be restored and is dropped: %s",
+                owner,
+                name,
+                k,
+                exc,
+            )
+    return result
 
 
 def _validate_model_snapshot(cls: type[BaseModel], data: dict[str, Any]) -> BaseModel:
