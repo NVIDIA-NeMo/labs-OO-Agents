@@ -16,7 +16,8 @@ based on [Keep a Changelog](https://keepachangelog.com/).
   turn is one "Reflected: ..." status card with no reply. On by default for
   ACP hosts, off headless (benchmarks, Gym, `nooa-bench`); configure
   it in `atom.reflection` or override with `SessionOptions(reflection=...)`.
-  Each one emits an `atom.reflection` span.
+  Child sessions never reflect; a `children:` key left in `atom.reflection`
+  is ignored with a warning. Each one emits an `atom.reflection` span.
 - `nooa-atom`: a job lost in a restart now reports the launching cell's code
   (at most 40 lines / about 4,000 characters) and the names that cell used
   which are gone after the restart.

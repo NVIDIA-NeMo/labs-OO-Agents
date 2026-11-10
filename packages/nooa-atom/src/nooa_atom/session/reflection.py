@@ -16,11 +16,14 @@ for one run (a benchmark arm). The default is on for interactive hosts only.
 
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Callable
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+logger = logging.getLogger(__name__)
 
 REFLECTION_SOURCE = "reflection"
 """The ``source`` of a reflection item on the ``slash_commands`` channel."""
@@ -61,8 +64,8 @@ class ReflectionSettings(BaseModel):
     ``enabled``: ``None`` (the default) turns it on for interactive hosts
     (``INTERACTIVE_HOSTS``: ACP clients such as Pool and Zed)
     and off for headless runs (benchmarks, Gym, ``nooa_bench``); ``True`` or
-    ``False`` decides for every host. Only root sessions reflect unless
-    ``children`` is true. A reflection is due when a turn ends with ``Done``
+    ``False`` decides for every host. Only root sessions reflect: a child
+    session never does, whatever these settings say. A reflection is due when a turn ends with ``Done``
     or ``Waiting`` and at least ``min_gap_turns`` turns passed since the last
     one, and ``every_turns`` turns or ``every_minutes`` minutes passed, or the
     context window is ``context_fraction`` full. ``None`` turns a trigger off.
@@ -71,12 +74,23 @@ class ReflectionSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool | None = None
-    children: bool = False
     every_turns: int | None = Field(default=20, ge=1)
     every_minutes: float | None = Field(default=60.0, gt=0)
     min_gap_turns: int = Field(default=5, ge=0)
     context_fraction: float | None = Field(default=0.5, gt=0)
     instructions: str = Field(default=DEFAULT_INSTRUCTIONS, min_length=1)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_removed_children(cls, values: Any) -> Any:
+        """Ignore the removed ``children`` key, with a warning, so old settings still load."""
+        if isinstance(values, dict) and "children" in values:
+            values = {key: value for key, value in values.items() if key != "children"}
+            logger.warning(
+                "atom.reflection.children is no longer supported and is ignored: "
+                "only root sessions reflect; remove it from your settings"
+            )
+        return values
 
 
 def reflection_enabled(
@@ -86,12 +100,13 @@ def reflection_enabled(
     host: str,
     is_root: bool,
 ) -> bool:
-    """Whether a session reflects: an explicit choice wins, else the host decides.
+    """Whether a session reflects: never a child; else an explicit choice wins, else the host.
 
     ``override`` is ``SessionOptions.reflection``; ``settings`` is ``None`` for
-    an agent without Atom settings, which reflects only when told to.
+    an agent without Atom settings, which reflects only when told to. A child
+    session (``is_root`` false) never reflects, whatever the override or settings.
     """
-    if not is_root and not (settings is not None and settings.children):
+    if not is_root:
         return False
     if override is not None:
         return override

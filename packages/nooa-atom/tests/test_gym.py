@@ -238,7 +238,7 @@ async def test_solve_cancels_and_rejects_children_with_unfinished_work_when_the_
 def _enable_reflection_in(workspace):
     (workspace / ".nooa").mkdir()
     (workspace / ".nooa" / "settings.yaml").write_text(
-        "atom:\n  reflection:\n    enabled: true\n    children: true\n    every_turns: 1\n"
+        "atom:\n  reflection:\n    enabled: true\n    every_turns: 1\n"
     )
 
 

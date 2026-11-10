@@ -3,6 +3,7 @@
 """Reflection turns: when they are queued, how they are delivered, and what they show."""
 
 import asyncio
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -44,7 +45,8 @@ def _trigger(clock=None, **values):
 
 def test_defaults():
     settings = ReflectionSettings()
-    assert (settings.enabled, settings.children) == (None, False)
+    assert settings.enabled is None
+    assert "children" not in ReflectionSettings.model_fields  # only roots reflect
     assert (settings.every_turns, settings.every_minutes) == (20, 60.0)
     assert (settings.min_gap_turns, settings.context_fraction) == (5, 0.5)
     assert settings.instructions == DEFAULT_INSTRUCTIONS
@@ -121,8 +123,12 @@ def test_hysteresis_after_a_reflection():
         ("headless", ReflectionSettings(), None, True, False),
         ("acp", ReflectionSettings(), None, True, True),
         ("tui", ReflectionSettings(), None, True, False),  # only ACP counts as interactive
-        ("acp", ReflectionSettings(), None, False, False),  # children are off
-        ("acp", ReflectionSettings(children=True), None, False, True),
+        # a child never reflects, whatever the settings or the override say
+        ("acp", ReflectionSettings(), None, False, False),
+        ("acp", ReflectionSettings(enabled=True), None, False, False),
+        ("headless", ReflectionSettings(enabled=True), True, False, False),
+        ("acp", ReflectionSettings(), True, False, False),
+        ("headless", None, True, False, False),
         ("headless", ReflectionSettings(enabled=True), None, True, True),
         ("acp", ReflectionSettings(enabled=False), None, True, False),
         ("headless", ReflectionSettings(), True, True, True),  # a benchmark arm turns it on
@@ -171,6 +177,20 @@ def test_workspace_settings_configure_it(tmp_path):
     settings = AtomOptions.load(tmp_path).reflection
     assert (settings.enabled, settings.every_turns, settings.instructions) == (True, 3, "Tidy.")
     assert settings.min_gap_turns == 5
+
+
+def test_a_removed_children_key_is_ignored_with_a_warning(tmp_path, caplog):
+    (tmp_path / ".nooa").mkdir()
+    (tmp_path / ".nooa" / "settings.yaml").write_text(
+        "atom:\n  reflection:\n    enabled: true\n    children: true\n    every_turns: 3\n"
+    )
+    with caplog.at_level(logging.WARNING, logger="nooa_atom.session.reflection"):
+        settings = AtomOptions.load(tmp_path).reflection
+    assert (settings.enabled, settings.every_turns) == (True, 3)  # the rest still loads
+    assert "children" not in settings.model_dump()
+    assert any("children" in r.getMessage() for r in caplog.records)
+    with pytest.raises(ValueError, match="extra"):
+        ReflectionSettings(childern=True)  # other unknown keys still fail loudly
 
 
 # ---- sessions ---------------------------------------------------------------

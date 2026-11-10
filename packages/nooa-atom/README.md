@@ -356,7 +356,9 @@ and make sure needed jobs can be relaunched after a restart. This is a turn the
 session queues, unlike `experimental_done_reflection` above (one bounded
 prediction after a `Done`); the two are independent.
 
-When a root session's turn ends with `Done` or `Waiting`, a reflection is due if
+Only root sessions reflect; a child session never does, whatever the settings
+or `SessionOptions.reflection` say. When a root session's turn ends with `Done`
+or `Waiting`, a reflection is due if
 at least `min_gap_turns` turns passed since the last one and `every_turns` turns
 or `every_minutes` minutes passed, or the context window is at least
 `context_fraction` full (the share the agent's `context_usage` line shows).
@@ -382,7 +384,6 @@ only the keys it sets):
 atom:
   reflection:
     enabled: null          # null: on for interactive hosts (ACP), off headless
-    children: false        # child sessions reflect too
     every_turns: 20        # null turns a trigger off
     every_minutes: 60
     min_gap_turns: 5
