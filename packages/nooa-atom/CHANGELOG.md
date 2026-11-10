@@ -9,14 +9,16 @@ based on [Keep a Changelog](https://keepachangelog.com/).
 
 - `nooa-atom`: reflection. When a root session's turn ends with `Done` or
   `Waiting` and a reflection is due (20 turns or 60 minutes since the last,
-  or the context half full; at least 5 turns apart), the session puts
-  housekeeping instructions on the agent's `system_messages` queue as an
-  ordinary message: rename the session, compact history, delete stale names,
-  tidy todos and `self.v`. The agent handles it in a normal turn. On by
-  default for ACP hosts, off elsewhere (benchmarks, Gym, `nooa-bench`);
-  configure the thresholds and the text in `atom.reflection`, or override
-  with `SessionOptions(reflection=...)`. Child sessions never reflect.
-  Counted in `harness.atom.reflection.count`.
+  or the context half full; at least 5 turns apart), the session's
+  `Reflection` puts a housekeeping message on the agent's `system_messages`
+  queue as an ordinary item. The agent handles it in a normal turn. The
+  message is made of bullets registered by name: core registers rename the
+  session, compact history, delete stale names, tidy todos and tidy `self.v`;
+  skills add and remove their own through `agent.reflection`, and
+  `atom.reflection.bullets` adds, replaces or removes them. On by default for
+  ACP hosts, off elsewhere (benchmarks, Gym, `nooa-bench`); configure it in
+  `atom.reflection`, or override with `SessionOptions(reflection=...)`. Child
+  sessions never reflect.
 - `nooa-atom`: AtomAgent drops the core `<events_api>` guidance block (added on
   main for agents that expose `self.events`). `self.events` stays exposed, and
   Atom's `context_usage` block already names `self.events.collapse(...)` and

@@ -351,22 +351,43 @@ bindings for deletion. It is not an automatic background expiry service.
 
 From time to time a root session sends its agent a housekeeping message, a
 *reflection*: rename the session to what it works on now, compact history it no
-longer needs in full, delete stale Python names, tidy `self.todo` and `self.v`,
-and make sure needed jobs can be relaunched after a restart. This is an ordinary
-message the session sends, unlike `experimental_done_reflection` above (one
-bounded prediction after a `Done`); the two are independent.
+longer needs in full, delete stale Python names, and tidy `self.todo` and
+`self.v`. This is an ordinary message the session sends, unlike
+`experimental_done_reflection` above (one bounded prediction after a `Done`);
+the two are independent.
 
-Only root sessions reflect. When a root session's turn ends with `Done` or
-`Waiting`, the session counts it. A reflection is due when at least
-`min_gap_turns` turns passed since the last one, and `every_turns` turns or
-`every_minutes` minutes passed or the context window is at least
-`context_fraction` full (the share the agent's `context_usage` line shows). The
-session then puts the instructions on the agent's `system_messages` queue as an
-ordinary item (source `reflection`) and resets its counters; the agent handles
+Only root sessions reflect, each through one `Reflection`
+(`nooa_atom.session.reflection`) that the session creates. When a root
+session's turn ends with `Done` or `Waiting`, it counts the turn. A reflection
+is due when at least `min_gap_turns` turns passed since the last one, and
+`every_turns` turns or `every_minutes` minutes passed or the context window is
+at least `context_fraction` full (the share the agent's `context_usage` line
+shows). The message then goes on the agent's `system_messages` queue as an
+ordinary item (source `reflection`) and the counters reset; the agent handles
 it in a normal, visible turn. The counters are in memory: they start when the
 session is created or loaded. An agent without a `system_messages` queue does
-not reflect, and an error in the check is logged and ignored. Each reflection
-sent is counted in `harness.atom.reflection.count`.
+not reflect, and an error in the check is logged and ignored.
+
+The message is a fixed header line, then the registered bullets numbered in
+registration order, then "Then finish with a short Done." Core registers
+`rename`, `compact`, `variables`, `todo` and `vars`
+(`nooa_atom.session.reflection.DEFAULT_BULLETS`). A skill reaches the
+session's `Reflection` as `agent.reflection` (`None` when the session does not
+reflect) and can add its own bullet in `attach()` and remove it in `detach()`:
+
+```python
+def attach(self, agent):
+    if agent.reflection is not None:
+        agent.reflection.add("memory", "Save what you learned to memory.")
+
+def detach(self):
+    if self._agent.reflection is not None:
+        self._agent.reflection.remove("memory")
+```
+
+The session sets `agent.reflection` when it is created, after
+`create_session_agent()` attaches the workspace's skills: a skill attached
+before that sees `None`.
 
 Settings, in `atom.reflection` (defaults shown; a partial section overrides
 only the keys it sets):
@@ -379,7 +400,7 @@ atom:
     every_minutes: 60
     min_gap_turns: 5
     context_fraction: 0.5
-    instructions: "..."    # the message sent (nooa_atom.session.reflection.DEFAULT_INSTRUCTIONS)
+    bullets: {}            # name: text adds or replaces a bullet; name: "" removes it
 ```
 
 The default follows `SessionOptions.host`: only `"acp"` (Pool, Zed and other

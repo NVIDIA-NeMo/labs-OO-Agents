@@ -1,9 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Reflection: when the session sends it, where it goes, and who gets it.
-
-The Gym pin (a guarded episode keeps it off) is in test_gym.py.
-"""
+"""Reflection: when the session sends it, what it says, where it goes, and who gets it."""
 
 import asyncio
 import logging
@@ -12,13 +9,14 @@ from types import SimpleNamespace
 import pytest
 from atom_test_agents import CellLLM, cell
 from nooa_atom.agent.factory import create_session_agent
-from nooa_atom.agent.metrics import AtomHarnessMetrics
 from nooa_atom.session.items import ItemAdmittedUpdate, TurnStartedUpdate
 from nooa_atom.session.options import SessionOptions
 from nooa_atom.session.reflection import (
-    DEFAULT_INSTRUCTIONS,
+    DEFAULT_BULLETS,
+    FOOTER,
+    HEADER,
+    Reflection,
     ReflectionSettings,
-    ReflectionTrigger,
     context_fraction,
     has_queue,
     reflection_enabled,
@@ -36,15 +34,20 @@ class Clock:
         return self.now
 
 
-# ---- the trigger ------------------------------------------------------------
+# ---- the hysteresis -----------------------------------------------------------
 
 
-def _trigger(clock=None, **values):
-    return ReflectionTrigger(ReflectionSettings(**values), clock=clock or Clock())
+def _reflection(clock=None, posted=None, context=lambda: None, **values):
+    return Reflection(
+        ReflectionSettings(**values),
+        post=(posted if posted is not None else []).append,
+        context=context,
+        clock=clock or Clock(),
+    )
 
 
-def _ends(trigger, count, kind="done", fraction=None):
-    return [trigger.turn_ended(kind, context_fraction=fraction) for _ in range(count)]
+def _ends(reflection, count, kind="done", fraction=None):
+    return [reflection.due(kind, context_fraction=fraction) for _ in range(count)]
 
 
 def test_defaults():
@@ -52,57 +55,119 @@ def test_defaults():
     assert settings.enabled is None
     assert (settings.every_turns, settings.every_minutes) == (20, 60.0)
     assert (settings.min_gap_turns, settings.context_fraction) == (5, 0.5)
-    assert settings.instructions == DEFAULT_INSTRUCTIONS
-    for step in ("rename_session", "self.events.collapse", "del", "self.v", "self.todo"):
-        assert step in DEFAULT_INSTRUCTIONS
-    assert "not a request from the user" in DEFAULT_INSTRUCTIONS
-    assert DEFAULT_INSTRUCTIONS.endswith("finish with a short Done.")
+    assert settings.bullets == {}
     assert AtomOptions().reflection == settings
     with pytest.raises(ValueError, match="extra"):
         ReflectionSettings(children=True)  # root only: there is no setting for children
+    with pytest.raises(ValueError, match="extra"):
+        ReflectionSettings(instructions="Tidy.")  # replaced by bullets
 
 
 def test_turns_trigger():
-    assert _ends(_trigger(), 20) == [None] * 19 + ["turns"]
+    assert _ends(_reflection(), 20) == [None] * 19 + ["turns"]
 
 
 def test_minutes_trigger_needs_the_minimum_gap():
     clock = Clock()
-    trigger = _trigger(clock)
+    reflection = _reflection(clock)
     clock.now = 3600
-    assert _ends(trigger, 5) == [None] * 4 + ["minutes"]
+    assert _ends(reflection, 5) == [None] * 4 + ["minutes"]
 
 
 def test_context_trigger_needs_the_minimum_gap():
-    assert _ends(_trigger(), 5, "waiting", 0.7) == [None] * 4 + ["context"]
-    assert _ends(_trigger(), 6, "done", 0.49) == [None] * 6
+    assert _ends(_reflection(), 5, "waiting", 0.7) == [None] * 4 + ["context"]
+    assert _ends(_reflection(), 6, "done", 0.49) == [None] * 6
 
 
 def test_only_done_and_waiting_turns_count():
-    trigger = _trigger(every_turns=2, min_gap_turns=0)
+    reflection = _reflection(every_turns=2, min_gap_turns=0)
     for kind in ("need_input", "cancelled", "error"):
-        assert trigger.turn_ended(kind, context_fraction=1.0) is None
-    assert trigger.turns == 0
-    assert _ends(trigger, 2) == [None, "turns"]
+        assert reflection.due(kind, context_fraction=1.0) is None
+    assert reflection.turns == 0
+    assert _ends(reflection, 2) == [None, "turns"]
 
 
 def test_a_trigger_set_to_none_is_off():
     clock = Clock()
-    trigger = _trigger(clock, every_turns=None, every_minutes=None, context_fraction=None)
+    reflection = _reflection(clock, every_turns=None, every_minutes=None, context_fraction=None)
     clock.now = 10**6
-    assert _ends(trigger, 50, fraction=1.0) == [None] * 50
+    assert _ends(reflection, 50, fraction=1.0) == [None] * 50
 
 
-def test_reflected_resets_the_counters_and_the_gap_applies_again():
-    clock = Clock()
-    trigger = _trigger(clock, every_turns=3, min_gap_turns=2)
-    assert _ends(trigger, 3)[-1] == "turns"
-    clock.now = 7200
-    trigger.reflected()
-    assert (trigger.turns, trigger.minutes()) == (0, 0)
-    clock.now = 7200 + 3600 * 5  # long overdue by time, and the context is full
-    assert trigger.turn_ended("done", context_fraction=0.9) is None  # 1 turn < min gap 2
-    assert trigger.turn_ended("done", context_fraction=0.9) == "minutes"
+def test_posting_resets_the_counters_and_the_gap_applies_again():
+    clock, posted, fraction = Clock(), [], [None]
+    reflection = _reflection(
+        clock, posted, context=lambda: fraction[0], every_turns=3, min_gap_turns=2
+    )
+    assert [reflection.turn_ended("done") for _ in range(3)] == [None, None, "turns"]
+    assert posted == [reflection.message()]
+    assert (reflection.turns, reflection.minutes()) == (0, 0)
+    clock.now = 3600 * 5  # long overdue by time, and the context is full
+    fraction[0] = 0.9
+    assert reflection.turn_ended("done") is None  # 1 turn < min gap 2
+    assert reflection.turn_ended("done") == "minutes"
+    assert len(posted) == 2 and reflection.turns == 0
+
+
+def test_the_context_callable_feeds_the_context_trigger():
+    posted = []
+    reflection = _reflection(posted=posted, context=lambda: 0.8, min_gap_turns=1)
+    assert reflection.turn_ended("waiting") == "context"
+    assert len(posted) == 1
+
+
+def test_a_failing_check_is_logged_and_ignored(caplog):
+    def boom(text):
+        raise RuntimeError("boom")
+
+    reflection = Reflection(
+        ReflectionSettings(every_turns=1, min_gap_turns=0), post=boom, clock=Clock()
+    )
+    with caplog.at_level(logging.ERROR, logger="nooa_atom.session.reflection"):
+        assert reflection.turn_ended("done") is None
+    assert "reflection check failed" in caplog.text
+
+
+# ---- the message and its bullets ---------------------------------------------------
+
+
+def test_the_default_message():
+    message = Reflection(ReflectionSettings(), post=print).message()
+    lines = message.split("\n")
+    assert lines[0] == HEADER
+    assert HEADER.startswith("[reflection] A housekeeping message from the session")
+    assert "not a request from the user" in HEADER
+    assert lines[-1] == FOOTER == "Then finish with a short Done."
+    assert list(DEFAULT_BULLETS) == ["rename", "compact", "variables", "todo", "vars"]
+    assert lines[1:-1] == [f"{i}. {text}" for i, text in enumerate(DEFAULT_BULLETS.values(), 1)]
+    for step in ("rename_session", "self.events.collapse", "del", "self.v", "self.todo"):
+        assert step in message
+    assert "add new ones for work you've taken on" in DEFAULT_BULLETS["todo"]
+    assert "relaunch" not in message and "Cancel jobs" not in message  # old bullet 5 is gone
+
+
+def test_add_and_remove_bullets_by_name():
+    reflection = Reflection(ReflectionSettings(), post=print)
+    reflection.add("memory", "Save what you learned.")
+    reflection.remove("compact")
+    reflection.remove("unknown")  # ignored
+    reflection.add("rename", "Rename it.")  # replaces in place
+    assert list(reflection.bullets) == ["rename", "variables", "todo", "vars", "memory"]
+    lines = reflection.message().split("\n")
+    assert lines[1] == "1. Rename it."
+    assert lines[-2] == "5. Save what you learned."
+    reflection.remove("memory")
+    assert "memory" not in reflection.bullets
+    with pytest.raises(ValueError):
+        reflection.add("empty", "  ")
+
+
+def test_settings_add_replace_and_remove_bullets():
+    settings = ReflectionSettings(bullets={"todo": "Tidy todos.", "vars": "", "notes": "Notes."})
+    reflection = Reflection(settings, post=print)
+    assert list(reflection.bullets) == ["rename", "compact", "variables", "todo", "notes"]
+    assert reflection.bullets["todo"] == "Tidy todos."
+    assert reflection.message().split("\n")[-2] == "5. Notes."
 
 
 @pytest.mark.parametrize(
@@ -142,18 +207,13 @@ def test_has_queue():
 def test_workspace_settings_configure_it(tmp_path):
     (tmp_path / ".nooa").mkdir()
     (tmp_path / ".nooa" / "settings.yaml").write_text(
-        "atom:\n  reflection:\n    enabled: true\n    every_turns: 3\n    instructions: Tidy.\n"
+        "atom:\n  reflection:\n    enabled: true\n    every_turns: 3\n"
+        "    bullets:\n      rename: ''\n      notes: Tidy notes.\n"
     )
     settings = AtomOptions.load(tmp_path).reflection
-    assert (settings.enabled, settings.every_turns, settings.instructions) == (True, 3, "Tidy.")
+    assert (settings.enabled, settings.every_turns) == (True, 3)
+    assert settings.bullets == {"rename": "", "notes": "Tidy notes."}
     assert settings.min_gap_turns == 5
-
-
-def test_the_counter_metric():
-    metrics = AtomHarnessMetrics()
-    metrics.reflection_queued()
-    metrics.reflection_queued()
-    assert metrics.reflections == 2
 
 
 # ---- sessions ---------------------------------------------------------------
@@ -168,7 +228,7 @@ REFLECT = "REFLECT NOW"
 
 async def make_root(tmp_path, responses, *, host="acp", reflection=None, edit=None, **settings):
     llm = CellLLM(responses)
-    settings = {"every_turns": 2, "min_gap_turns": 1, "instructions": REFLECT, **settings}
+    settings = {"every_turns": 2, "min_gap_turns": 1, **settings}
 
     def factory(options, storage):
         agent = create_session_agent(options, storage)
@@ -220,11 +280,14 @@ async def test_a_due_reflection_lands_on_system_messages_and_runs_a_normal_turn(
         tmp_path, [done("one"), done("two"), done("tidied"), done("three"), done("tidied again")]
     )
     try:
+        assert root._agent.reflection is root._reflection  # how skills reach it
+        root._agent.reflection.add("skill", REFLECT)
         assert (await root.prompt("one")).explanation == "one"
         assert (await root.prompt("two")).explanation == "two"
         await idle(root)
         [admitted] = reflections(updates)
-        assert (admitted.channel, admitted.text) == ("system_messages", REFLECT)
+        assert (admitted.channel, admitted.text) == ("system_messages", root._reflection.message())
+        assert admitted.text.split("\n")[-2] == f"6. {REFLECT}"  # the skill's bullet, last
         assert turn_channels(updates) == [["user_messages"], ["user_messages"], ["system_messages"]]
         assert REFLECT in str(llm.calls[2].messages)
         assert root._reflection.turns == 1  # reset when sent; the reflection turn counted
@@ -257,7 +320,7 @@ async def test_headless_sessions_do_not_reflect_unless_told(tmp_path):
         tmp_path, [done("a"), done("b"), done("c")], host="headless"
     )
     try:
-        assert root._reflection is None
+        assert root._reflection is None and root._agent.reflection is None
         for text in "abc":
             await root.prompt(text)
         await idle(root)
@@ -299,7 +362,7 @@ async def test_only_the_root_session_reflects(tmp_path):
             parent_id=root.id,
         )
         assert child.parent_id == root.id
-        assert child._reflection is None
+        assert child._reflection is None and child._agent.reflection is None
     finally:
         await registry.close_all()
 
@@ -321,9 +384,9 @@ async def test_a_failing_check_is_logged_and_the_turn_is_unaffected(tmp_path, ca
     def boom(kind, *, context_fraction):
         raise RuntimeError("boom")
 
-    root._reflection.turn_ended = boom
+    root._reflection.due = boom
     try:
-        with caplog.at_level(logging.ERROR, logger="nooa_atom.session.session"):
+        with caplog.at_level(logging.ERROR, logger="nooa_atom.session.reflection"):
             assert (await root.prompt("one")).explanation == "one"
             assert (await root.prompt("two")).explanation == "two"
         await idle(root)

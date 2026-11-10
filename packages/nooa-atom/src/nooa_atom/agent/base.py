@@ -176,6 +176,9 @@ class AtomAgentBase(InteractiveAgent):
     # The workspace's atom.reflection settings; the Session reads them
     # (nooa_atom.session.reflection). create_session_agent() sets them.
     _reflection_settings: Annotated[Any, hidden, nosnapshot]
+    # The root session's Reflection (nooa_atom.session.reflection), set by the
+    # Session; None when it does not reflect. Skills add and remove bullets.
+    reflection: Annotated[Any, hidden, nosnapshot]
     shell: Annotated[ActivityShellTools, nosnapshot]
     repo: Annotated[RepoTools, nosnapshot]
     todo: TodoManager
@@ -293,6 +296,7 @@ class AtomAgentBase(InteractiveAgent):
 
         self._summarization = summarization or SummarizationConfig()
         self._reflection_settings = None
+        self.reflection = None
         install_summarizer(self._summarization, self)
 
     @no_trace

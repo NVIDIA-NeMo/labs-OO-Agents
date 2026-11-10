@@ -36,7 +36,6 @@ from nooa.interactive import (
 from nooa.llm_types import LLMResponse
 from nooa.runtime.turn_loop import TurnLoopEnded, TurnSettled
 from nooa.storage.json_snapshot import snapshot_to_json
-from nooa_atom.agent.metrics import atom_metrics
 from nooa_atom.agent.reflection_gate import _ReflectionGate
 from nooa_atom.benchmark_policy import POLICY, BenchmarkPolicyViolation
 from nooa_atom.session.events import (
@@ -80,8 +79,8 @@ from nooa_atom.session.options import SessionOptions
 from nooa_atom.session.reflection import (
     REFLECTION_CHANNEL,
     REFLECTION_SOURCE,
+    Reflection,
     ReflectionSettings,
-    ReflectionTrigger,
     context_fraction,
     has_queue,
     reflection_enabled,
@@ -293,20 +292,26 @@ class Session:
         if isinstance(gate, _ReflectionGate):
             gate.start_session()  # creation/load anchor, not time spent constructing the agent
         self.handle = handle
-        # Reflection (nooa_atom.session.reflection): the trigger when this root
-        # session reflects and its agent has a system_messages queue, else None.
+        # Reflection (nooa_atom.session.reflection): one per root session that
+        # reflects and whose agent has a system_messages queue, else None. The
+        # agent's ``reflection`` attribute lets skills add and remove bullets.
         settings = getattr(agent, "_reflection_settings", None)
-        self._reflection: ReflectionTrigger | None = (
-            ReflectionTrigger(settings or ReflectionSettings())
-            if reflection_enabled(
-                settings,
-                override=options.reflection,
-                host=options.host,
-                is_root=self.parent_id is None,
+        self._reflection: Reflection | None = None
+        if reflection_enabled(
+            settings,
+            override=options.reflection,
+            host=options.host,
+            is_root=self.parent_id is None,
+        ) and has_queue(agent, REFLECTION_CHANNEL):
+            self._reflection = Reflection(
+                settings or ReflectionSettings(),
+                post=lambda text: self._admit(
+                    text, channel=REFLECTION_CHANNEL, source=REFLECTION_SOURCE
+                ),
+                context=lambda: context_fraction(agent),
             )
-            and has_queue(agent, REFLECTION_CHANNEL)
-            else None
-        )
+        if hasattr(agent, "reflection"):
+            agent.reflection = self._reflection
         # A deep copy: the Session owns its usage totals and pushes them to
         # the handle, whose metadata other threads read under its lock.
         self.info: SessionInfo = info.model_copy(
@@ -869,26 +874,9 @@ class Session:
         await self._apply_pending_model()
 
     def _check_reflection(self, kind: str) -> None:
-        """After a turn: count it; when a reflection is due, queue its instructions.
-
-        They go on ``system_messages`` as an ordinary item, and the agent
-        handles them in a normal turn. A failure here is logged and ignored:
-        it must not affect the turn that just ended.
-        """
-        trigger = self._reflection
-        if trigger is None or self._closing or self._closed:
-            return
-        try:
-            reason = trigger.turn_ended(kind, context_fraction=context_fraction(self._agent))
-            if reason is None:
-                return
-            self._admit(
-                trigger.settings.instructions, channel=REFLECTION_CHANNEL, source=REFLECTION_SOURCE
-            )
-            trigger.reflected()
-            atom_metrics().reflection_queued()
-        except Exception:
-            logger.exception("Session %s: the reflection check failed", self.id)
+        """After a turn: let the reflection count it and post its message when due."""
+        if self._reflection is not None and not (self._closing or self._closed):
+            self._reflection.turn_ended(kind)
 
     def _commit_turn(self, notification: dict[str, list[Any]]) -> None:
         """No await/observers: atomic ledger first, identity ownership second."""

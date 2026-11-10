@@ -47,8 +47,6 @@ class AtomHarnessMetrics(HarnessMetricsExtension):
     name_error_hints: list[str] = Field(default_factory=list)
     mcp_tool_name_hints: list[str] = Field(default_factory=list)
     module_not_found_hints: list[str] = Field(default_factory=list)
-    # Reflection messages sent (nooa_atom.session.reflection)
-    reflections: int = 0
 
     span_schema: ClassVar[tuple[SchemaEntry, ...]] = (
         SchemaEntry(
@@ -147,12 +145,6 @@ class AtomHarnessMetrics(HarnessMetricsExtension):
             lambda m: m.module_not_found_hints,
             True,
         ),
-        SchemaEntry(
-            "reflection.count",
-            "Reflection messages sent",
-            "Context Management",
-            lambda m: m.reflections,
-        ),
     )
 
     def waiting_on_person_rejected(self, role: str) -> None:
@@ -192,10 +184,6 @@ class AtomHarnessMetrics(HarnessMetricsExtension):
         ``call`` is ``<server>.<tool>``.
         """
         self._append(self.mcp_tool_name_hints, call)
-
-    def reflection_queued(self) -> None:
-        """A reflection message was put on the agent's system_messages queue."""
-        self.reflections += 1
 
     def module_not_found_hint(self, module: str) -> None:
         """A cell's ModuleNotFoundError got the pointer to the task's python3 behind a Shell."""
