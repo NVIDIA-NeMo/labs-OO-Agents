@@ -581,8 +581,10 @@ def _is_class(value: Any, state: _State) -> bool:
 
 def _plain_entries(
     value: Any, mro: tuple[type[Any], ...], state: _State
-) -> list[tuple[str, Any] | _Omitted] | None:
-    """The public instance attributes of a plain object, read raw; ``None``: not a plain object.
+) -> tuple[list[tuple[str, Any] | _Omitted], int] | None:
+    """The public instance attributes of a plain object, read raw, and its attribute count.
+
+    ``None``: not a plain object.
 
     A plain object is an instance of a class whose MRO defines no
     ``__getattribute__`` (no proxies), with the standard ``__dict__`` slot
@@ -595,6 +597,11 @@ def _plain_entries(
     ``max_string``, ``max_length``). An object
     with no field left whose class defines ``__repr__`` is not a plain
     object either: its repr is all it shows.
+
+    A huge ``__dict__`` is read only up to a quarter of the node budget left (in
+    insertion order; the rest is ``_Omitted("max_items")``), so its first
+    attributes still show; the count is ``len(__dict__)`` plus the filled
+    slots.
     """
     try:
         has_dict = False
@@ -612,14 +619,20 @@ def _plain_entries(
         slots = _slot_names(mro, state)
         if not has_dict and not [name for name in slots if name not in ("__dict__", "__weakref__")]:
             return None
-        storage = _copy_storage(_instance_storage(value, mro, state), state) if has_dict else {}
+        raw = _instance_storage(value, mro, state) if has_dict else {}
+        if type(raw) is not dict:
+            return None
+        total = dict.__len__(raw)
+        # A quarter of the work left: the names cost as much again, the fields the rest.
+        storage = _copy_storage(raw, state, limit=max(1, state.nodes_left // 4))
+        partial = len(storage) < total
         overrides = _visibility_overrides(storage, mro, state)
         hide_empty = _class_hide_empty(mro, state)
         found: list[tuple[str, Any]] = []
         for name, default in _class_defaults(mro, state):
             if name in storage:
                 found.append((name, dict.__getitem__(storage, name)))
-            elif name not in slots:
+            elif name not in slots and not partial:  # beyond a partial copy: unknown
                 found.append((name, default))
         declared = {name for name, _value in found}
         found += [(name, item) for name, item in dict.items(storage) if name not in declared]
@@ -629,6 +642,7 @@ def _plain_entries(
             slot = _slot_value(name, mro, value, state)
             if slot is not _NO_SLOT:
                 found.append((name, slot))
+                total += 1
         entries: list[tuple[str, Any] | _Omitted] = []
         for name, field_value in found:
             if not state.take_node():
@@ -649,11 +663,13 @@ def _plain_entries(
             entry = _field_entry(name, field_value, flags, hide_empty)
             if entry is not None:
                 entries.append(entry)
+        if partial:
+            entries.append(_Omitted("max_items"))
     except _FailClosed:
         return None
     if not entries and defines_repr:
         return None
-    return entries
+    return entries, total
 
 
 @dataclass(frozen=True)

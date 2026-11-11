@@ -603,8 +603,11 @@ def _object_fields(
     kind: str | None = None,
     reserves: list[tuple[int, int]] | None = None,
     capped: bool = True,
+    length: int | None = None,
 ) -> _Built:
     """Emit the (name, value) fields of an object; a reader's ``_FailClosed`` keeps none.
+
+    ``length``: a plain object's attribute count, kept on the node when it is cut.
 
     A field value may be a shape's ``_Part``, built in its field's slot (see
     ``_build_slot``). ``reserves[i]``: (chars, nodes) held back while field
@@ -654,7 +657,7 @@ def _object_fields(
         fields.append((name, built.node))
         box.commit(overhead, built.size)
     reason = box.reason or omitted
-    node = Object(type_name, tuple(fields), reason, kind)
+    node = Object(type_name, tuple(fields), reason, kind, length if reason is not None else None)
     return _Built(node, box.size)
 
 
@@ -1265,8 +1268,9 @@ def _build(value: Any, max_size: int, depth: int, path: str, state: _State) -> _
     view = _mro_view(value, mro, state)
     if view is not None:
         return _build_view(view, value, max_size, depth, path, state)
-    entries = _plain_entries(value, mro, state)
-    if entries is not None:
+    plain = _plain_entries(value, mro, state)
+    if plain is not None:
+        entries, count = plain
         type_name = _bounded_type_name(value, _MAX_TYPE_NAME)
         return _enter(
             value,
@@ -1275,7 +1279,9 @@ def _build(value: Any, max_size: int, depth: int, path: str, state: _State) -> _
             depth,
             path,
             state,
-            lambda: _object_fields(type_name, iter(entries), max_size, depth, path, state),
+            lambda: _object_fields(
+                type_name, iter(entries), max_size, depth, path, state, length=count
+            ),
         )
     return _opaque(value, max_size, depth, path, state)
 

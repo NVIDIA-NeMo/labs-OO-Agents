@@ -332,3 +332,36 @@ def test_deque_and_array_subclasses_that_override_iteration_are_not_read() -> No
 
     assert render_python(capture(Sneaky([1]))).startswith("<opaque: ")
     assert render_python(capture(Plain("i", [1, 2]))) == "Plain([1, 2])"
+
+
+def test_a_million_attributes_list_the_first_and_say_how_many() -> None:
+    class Wide:
+        pass
+
+    wide = Wide()
+    for i in range(1_000_000):
+        setattr(wide, f"a{i}", i)
+    for limits in (_PREFILL, Limits()):
+        start = time.perf_counter()
+        node = capture(wide, limits)
+        assert time.perf_counter() - start < 0.05
+        assert isinstance(node, Object) and node.length == 1_000_000
+        assert node.reason == "max_items"
+        assert node.fields[:3] == capture(wide, Limits(max_items=3)).fields
+    text = render_python(capture(wide, _PREFILL))
+    assert text.startswith("Wide(a0=0, a1=1, a2=2,")
+    assert text.endswith(", a24=24, ... of 1,000,000 attributes)")
+
+
+def test_a_cut_plain_object_says_how_many_attributes_it_has() -> None:
+    class Some:
+        def __init__(self) -> None:
+            self._private = 0
+            self.a, self.b, self.c = 1, 2, 3
+
+    assert render_python(capture(Some(), Limits(max_items=2))) == (
+        "Some(a=1, b=2, ... of 4 attributes)"
+    )
+    whole = capture(Some())
+    assert isinstance(whole, Object) and whole.length is None
+    assert render_python(whole) == "Some(a=1, b=2, c=3)"

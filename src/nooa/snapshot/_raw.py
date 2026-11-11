@@ -176,14 +176,21 @@ def _namespace(cls: type[Any], state: _State) -> dict[str, Any]:
     return namespace
 
 
-def _copy_storage(obj_dict: Any, state: _State) -> dict[str, Any]:
-    """A copy of raw instance storage after checking every key (``_FailClosed``)."""
+def _copy_storage(obj_dict: Any, state: _State, limit: int | None = None) -> dict[str, Any]:
+    """A copy of raw instance storage after checking every key (``_FailClosed``).
+
+    ``limit``: copy only the first ``limit`` entries (insertion order), and
+    stop quietly there; ``None``: all of them, failing closed when the node
+    budget runs out first.
+    """
     if type(obj_dict) is not dict:
         raise _FailClosed
     # Storage can be mutated directly. Copy only after validating every key so
     # later fixed-string lookups cannot collide with hostile key objects.
     safe: dict[str, Any] = {}
     for stored_name, stored_value in dict.items(obj_dict):
+        if limit is not None and len(safe) >= limit:
+            break
         if not state.take_node() or type(stored_name) is not str:
             raise _FailClosed
         safe[stored_name] = stored_value

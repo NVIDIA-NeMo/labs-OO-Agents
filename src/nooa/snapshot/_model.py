@@ -279,6 +279,8 @@ class Object:
     - ``kind``: the rendering key a shape set (``kind="numpy.ndarray"``), a
       standard ``python.*`` key, or ``None``. ``render_python`` looks up its
       hook by it.
+    - ``length``: for a cut plain object, how many instance attributes it
+      has (private ones included); ``None`` otherwise.
 
     ``complete`` is ``reason is None``. ``field(name)`` looks a field up.
     """
@@ -287,6 +289,7 @@ class Object:
     fields: tuple[tuple[str, Snapshot], ...]
     reason: Reason | None = None
     kind: str | None = None
+    length: int | None = None
 
     @property
     def complete(self) -> bool:

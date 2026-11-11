@@ -522,7 +522,7 @@ def test_pydantic_and_dataclasses_are_internal_object_shapes() -> None:
     snapshot = capture([Model(), Data(Model())], Limits(max_items=1))
     assert repr(snapshot) == (
         "Sequence(type_name='list', length=2, head=(Object(type_name='Model', fields=(('a', "
-        "Scalar(value=1)),), reason='max_items', kind=None),), reason='max_items', tail=())"
+        "Scalar(value=1)),), reason='max_items', kind=None, length=None),), reason='max_items', tail=())"
     )
     assert render_python(capture(Data(Model()))) == "Data(x=Model(a=1, b=[1, 2]))"
 

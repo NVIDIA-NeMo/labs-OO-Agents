@@ -365,7 +365,7 @@ class PythonRenderer:
     def _object(self, node: Object) -> str:
         parts = [f"{name}={self.render(value)}" for name, value in node.fields]
         if not node.complete:
-            parts.append("...")
+            parts.append("..." if node.length is None else f"... of {node.length:,} attributes")
         return f"{node.type_name}(" + ", ".join(parts) + ")"
 
 
