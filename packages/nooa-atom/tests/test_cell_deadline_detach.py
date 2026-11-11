@@ -286,6 +286,39 @@ async def test_a_shell_command_awaited_at_the_deadline_runs_on_as_a_job(
     assert "harness.atom.child_detached_at_deadline.count" not in attrs
 
 
+async def test_a_queued_shell_command_handed_over_keeps_its_job_name(
+    registry, options, models, root_metrics
+):
+    # Two runs on one Shell, gathered: at the deadline the running one becomes
+    # job sh and the queued one sh_2; when sh_2 gets the Shell, it is named busy.
+    models.scripts[None] = [
+        cell(
+            "import asyncio\n"
+            "sh = Shell()\n"
+            "await asyncio.gather(sh.run('sleep 1.5; echo a'), sh.run('sleep 3; echo b'))"
+        ),
+        cell("return_result(Waiting(explanation='sh runs', on=['sh']))"),
+        cell(
+            "try:\n"
+            "    await sh.run('echo hi')\n"
+            "except RuntimeError as e:\n"
+            "    self.v.busy = str(e)\n"
+            "return_result(Waiting(explanation='sh_2 runs', on=['sh_2']))"
+        ),
+        cell(
+            "[event] = notification['jobs']\n"
+            "assert (event.name, event.value.stdout) == ('sh_2', 'b\\n'), event\n"
+            "return_result(Done(explanation='ok'))"
+        ),
+    ]
+    root = await registry.create(options)
+    outcome = await asyncio.wait_for(root.prompt("go"), TIMEOUT)
+    assert outcome == Done(explanation="ok")
+    assert "(job sh_2)" in root._agent.v.busy, root._agent.v.busy
+    attrs = root_metrics[0].to_span_attributes()
+    assert attrs["harness.atom.shell_detached_at_deadline.count"] == 2
+
+
 async def test_a_user_cancel_still_stops_an_awaited_shell_command(registry, options, models):
     models.scripts[None] = [
         cell("await Shell().run('(echo $BASHPID > pid; exec sleep 30)')"),

@@ -467,6 +467,9 @@ class Shell:
         self._confirmed_cwd: str | None = None
         self._busy: str | None = None  # the command running now
         self._busy_job: str | None = None  # the job it runs in (None: a direct run)
+        self._busy_task: asyncio.Task | None = None  # the task running it
+        # Runs handed over at the cell deadline while still queued: their job names.
+        self._handed_jobs: dict[asyncio.Future, str] = {}
         self._queued = 0  # commands waiting for their turn behind it
         self._lost = False  # restarted since the last command: state was lost
         # The user's shell options (of "euxvp", p: pipefail) and whether a user
@@ -535,8 +538,11 @@ class Shell:
             return False
         if job._task is not None:  # cancelled before it ran: stop the command all the same
             job._task.add_done_callback(lambda _: body.cancel())
-        if self._busy is command:
+        if self._busy_task is body:
             self._busy_job = job.name  # a later inline run is refused, naming the job
+        else:  # still queued: it takes the name when it gets the lock
+            self._handed_jobs[body] = job.name
+            body.add_done_callback(lambda done: self._handed_jobs.pop(done, None))
         atom_metrics().shell_detached()
         deadline = deadline_cancel()
         if deadline is not None:
@@ -572,13 +578,15 @@ class Shell:
             if self._generation != generation:
                 raise RuntimeError(_CLOSED_BEFORE)
             # Busy from first use on: a cell's run behind a job starting bash fails too.
-            self._busy, self._busy_job = command, current_name()
+            task = asyncio.current_task()
+            self._busy, self._busy_task = command, task
+            self._busy_job = current_name() or self._handed_jobs.pop(task, None)
             try:
                 if self._session is None:
                     await self._start(generation)
                 result = await self._send_locked(command, stdin, timeout, generation)
             finally:
-                self._busy = self._busy_job = None
+                self._busy = self._busy_job = self._busy_task = None
                 session = self._session
                 if session is not None:
                     self._confirmed_cwd = str(session.cwd)  # bash reports it after each command
