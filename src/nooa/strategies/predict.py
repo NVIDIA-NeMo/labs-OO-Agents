@@ -406,16 +406,13 @@ class PredictStrategy(GenerationStrategy):
         wrong output with no indication of failure.  Fail loudly instead so callers can
         chunk, summarise, or raise max_param_chars in their PredictConfig.
 
-        Size is measured by writing repr(value) into a TruncatingStringIO and checking
-        was_truncated — the same mechanism used throughout the formatting pipeline.
-        repr() matches the conservative lower bound of what format_parameters_as_code
-        puts into the prompt (truncating_pformat can produce larger output for complex objects).
+        Size is ``len(repr(value))``: repr() matches the conservative lower bound of
+        what format_parameters_as_code puts into the prompt (truncating_pformat can
+        produce larger output for complex objects).
 
         String fast-path: plain strings skip the repr() allocation.  len(s) ≤ len(repr(s))
         always, so a string that already exceeds the limit certainly has an oversized repr.
         """
-        from nooa.agentdoc import TruncatingStringIO
-
         limit = self.config.max_param_chars
         # ``None`` disables the guard entirely — used by the summarizer.
         if limit is None:
@@ -434,11 +431,10 @@ class PredictStrategy(GenerationStrategy):
                     f"Chunk or summarise the input before calling this method, "
                     f"or raise PredictConfig(max_param_chars=...) if the size is intentional."
                 )
-            stream = TruncatingStringIO(limit=limit)
-            stream.write(repr(value))
-            if stream.was_truncated:
+            size = len(repr(value))
+            if size > limit:
                 raise ValueError(
-                    f"PredictStrategy: parameter '{name}' is {stream.chars_written:,} chars (repr), "
+                    f"PredictStrategy: parameter '{name}' is {size:,} chars (repr), "
                     f"exceeding max_param_chars={limit:,}. "
                     f"Chunk or summarise the input before calling this method, "
                     f"or raise PredictConfig(max_param_chars=...) if the size is intentional."
