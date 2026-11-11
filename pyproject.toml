@@ -69,7 +69,7 @@ trace-explorer = "nooa.trace_explorer:main"
 "nemo.events" = "nooa.runtime.events:EventsApi"
 "nemo.producers" = "nooa.runtime.producers_skill:ProducersSkill"
 "nemo.web" = "nooa.tools.web_publisher:WebPublisher"
-"nemo.libwriting" = "nooa.tools.library_writing_lib:SkillWriting"
+"nemo.skill_writing" = "nooa.tools.library_writing_lib:SkillWriting"
 "nemo.methodwriting" = "nooa.tools.method_writing_lib:MethodWriting"
 
 [tool.uv.sources]
@@ -78,6 +78,7 @@ nooa-cli = { workspace = true }
 nooa-acp = { workspace = true }
 nooa-memory = { workspace = true }
 nooa-bench = { workspace = true }
+nooa-atom = { workspace = true }
 
 [tool.uv]
 # Extra index URLs to search for packages (in addition to PyPI)
@@ -102,6 +103,7 @@ members = [
     "packages/nooa-acp",
     "packages/nooa-memory",
     "packages/nooa-bench",
+    "packages/nooa-atom",
 ]
 
 
@@ -119,6 +121,7 @@ cli = ["nooa-cli"]
 memory = ["nooa-memory"]
 bench = ["nooa-bench"]
 acp = ["nooa-acp"]
+atom = ["nooa-atom"]
 # ARC-AGI-3 example agent (examples/arc_agi_3): the public ARC-AGI-3 SDK + deps.
 # Install from the repo root with `uv sync --extra arc`.
 arc = [
@@ -233,6 +236,7 @@ dev = [
     "nooa-acp",
     "nooa-memory",
     "nooa-bench",
+    "nooa-atom",
     "pre-commit>=4.5.0",
     "pyright>=1.1.408",
     "pytest-cov>=7.1.0",
@@ -262,11 +266,14 @@ testpaths = [
     "packages/nooa-cli/tests",
     "packages/nooa-acp/tests",
     "packages/nooa-bench/tests",
+    "packages/nooa-atom/tests",
     "tests/trace_explorer",
 ]
 pythonpath = [
     "src",
     "packages/nooa-cli/src",
+    "packages/nooa-atom/src",
+    "packages/nooa-atom/tests",
 ]
 addopts = "-v --tb=short --import-mode=importlib -m 'not integration and not stress and not sandbox'"
 markers = [
@@ -360,6 +367,7 @@ venv = ".venv"
 extraPaths = [
     "src",
     "packages/nooa-cli/src",
+    "packages/nooa-atom/src",
 ]
 include = [
     "src",

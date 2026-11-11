@@ -39,7 +39,6 @@ def _isolate_registry(tmp_path, monkeypatch):
     project.mkdir()
     monkeypatch.setenv("NEMO_OO_USER_DIR", str(user))
     monkeypatch.setenv("NEMO_OO_PROJECT_DIR", str(project))
-    monkeypatch.setattr("nooa.llm_config.bundled_config_paths", lambda: [])
     monkeypatch.delenv("NEMO_OO_LLM_CONFIG", raising=False)
     monkeypatch.chdir(tmp_path)
 

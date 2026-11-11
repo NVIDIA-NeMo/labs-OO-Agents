@@ -9,9 +9,8 @@ same precedence rules, and are discovered through the helpers here.
 
 Precedence (low → high, last wins):
 
-1. **Bundled defaults** — supplied by the caller as *prepend* paths
-   (e.g. the entry-point YAMLs for LLM config). Nothing is bundled for
-   settings or secrets.
+1. **Prepended paths** — lowest-priority paths a caller supplies as
+   *prepend* (none by default).
 2. **User** — ``get_user_dir(filename)``
    (``~/.config/nooa/<filename>``).
 3. **Project** — ``get_project_dir(filename)``
@@ -96,8 +95,8 @@ def layered_paths(
         env_var: Optional environment variable holding a comma-separated
             list of override paths (highest priority). ``None`` disables
             the env-var layer.
-        prepend: Lowest-priority paths placed before the user layer
-            (e.g. entry-point bundled defaults). Already in priority
+        prepend: Lowest-priority paths placed before the user layer.
+            Already in priority
             order; non-existent entries are dropped.
         project_dir: Explicit directory containing the project layer. When
             omitted, the process-global :func:`nooa.paths.get_project_dir`
@@ -175,6 +174,7 @@ def load_layered_yaml(
     *,
     prepend: Iterable[Path] = (),
     project_dir: Path | None = None,
+    base: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Load and deep-merge every layer of *filename* into a single dict.
 
@@ -182,12 +182,13 @@ def load_layered_yaml(
     ``null`` values delete keys. A file whose YAML doesn't parse to a mapping
     is skipped with a warning so one bad layer never takes down the rest.
 
-    *prepend* supplies lowest-priority paths (e.g. entry-point bundled
-    defaults) just like :func:`layered_paths`; omit it for settings / secrets.
+    *prepend* supplies lowest-priority paths just like :func:`layered_paths`.
+    *base*, when given, is merged under every layer, as if it were one more
+    lowest-priority file.
     """
     import yaml
 
-    merged: dict[str, Any] = {}
+    merged: dict[str, Any] = _deep_merge({}, base) if base else {}
     for path in layered_paths(
         filename,
         env_var,
@@ -210,4 +211,7 @@ def load_layered_yaml(
     return merged
 
 
-__all__ = ["layered_paths", "load_layered_yaml"]
+__all__ = [
+    "layered_paths",
+    "load_layered_yaml",
+]

@@ -11,12 +11,11 @@ from nooa.unifiedllm import CompletionClient, ResponsesClient, load_llm, reload_
 
 @pytest.fixture(autouse=True)
 def _isolate_registry(tmp_path, monkeypatch):
-    """A clean registry with no user, project or bundled entries."""
+    """A clean registry with no user or project entries."""
     for name in ("user", "project"):
         (tmp_path / name).mkdir()
     monkeypatch.setenv("NEMO_OO_USER_DIR", str(tmp_path / "user"))
     monkeypatch.setenv("NEMO_OO_PROJECT_DIR", str(tmp_path / "project"))
-    monkeypatch.setattr("nooa.llm_config.bundled_config_paths", lambda: [])
     monkeypatch.delenv("NEMO_OO_LLM_CONFIG", raising=False)
     monkeypatch.chdir(tmp_path)
     reload_registry()
