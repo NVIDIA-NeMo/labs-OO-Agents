@@ -20,6 +20,7 @@ from nooa.llm_types import AssistantReasoning, LLMResponse
 from nooa.unifiedllm import replay_state
 from nooa.unifiedllm.adapters.base import Capabilities
 from nooa.unifiedllm.cache_policy import add_session_affinity_header
+from nooa.unifiedllm.errors import _parse_reply
 from nooa.unifiedllm.limits import REPLY_CAP_KEYS
 from nooa.unifiedllm.request import LLMRequest
 from nooa.unifiedllm.structured_output import anthropic_output_format
@@ -556,18 +557,21 @@ class LiteLLMChatAdapter:
                 tools=prepared.api_params.get("tools"),
             )
 
+    def _finish(self, prepared: PreparedChatCall, raw_response: Any) -> LLMResponse:
+        """Calibrate and parse a reply that arrived; ``send`` marks its errors."""
+        self._calibrate(prepared, raw_response)
+        return self.parse(prepared, raw_response)
+
     def send_sync(self, request: LLMRequest, **options: Any) -> LLMResponse:
         """One attempt, sync. ``options`` are LiteLLM call settings (temporary)."""
         call_config, native_output = self._settings(request, options)
         prepared = self.prepare(request, call_config, native_output=native_output, is_async=False)
         raw_response = self.transmit_sync(prepared)
-        self._calibrate(prepared, raw_response)
-        return self.parse(prepared, raw_response)
+        return _parse_reply(lambda: self._finish(prepared, raw_response))
 
     async def send(self, request: LLMRequest, **options: Any) -> LLMResponse:
         """One attempt, async. ``options`` are LiteLLM call settings (temporary)."""
         call_config, native_output = self._settings(request, options)
         prepared = self.prepare(request, call_config, native_output=native_output, is_async=True)
         raw_response = await self.transmit(prepared)
-        self._calibrate(prepared, raw_response)
-        return self.parse(prepared, raw_response)
+        return _parse_reply(lambda: self._finish(prepared, raw_response))

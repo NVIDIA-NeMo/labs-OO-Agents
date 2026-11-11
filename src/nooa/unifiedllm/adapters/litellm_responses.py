@@ -31,6 +31,7 @@ from nooa.unifiedllm.cache_policy import (
     reject_boundary_dict,
     wrap_responses_text,
 )
+from nooa.unifiedllm.errors import _parse_reply
 from nooa.unifiedllm.media_inputs import attachment_kind
 from nooa.unifiedllm.request import LLMRequest
 from nooa.unifiedllm.unifiedllm import (
@@ -470,10 +471,14 @@ class LiteLLMResponsesAdapter:
         """One attempt, sync. ``options`` are LiteLLM call settings (temporary)."""
         prepared = self.prepare(request, self._call_config(request, options), is_async=False)
         raw_response = self.transmit_sync(prepared)
-        return self.parse(prepared, raw_response, self._finish(prepared, raw_response))
+        return _parse_reply(
+            lambda: self.parse(prepared, raw_response, self._finish(prepared, raw_response))
+        )
 
     async def send(self, request: LLMRequest, **options: Any) -> LLMResponse:
         """One attempt, async. ``options`` are LiteLLM call settings (temporary)."""
         prepared = self.prepare(request, self._call_config(request, options), is_async=True)
         raw_response = await self.transmit(prepared)
-        return self.parse(prepared, raw_response, self._finish(prepared, raw_response))
+        return _parse_reply(
+            lambda: self.parse(prepared, raw_response, self._finish(prepared, raw_response))
+        )

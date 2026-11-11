@@ -31,6 +31,9 @@ class Adapter(Protocol):
     """Translate one request into one wire call and the reply back.
 
     Adapters hold no retry, metrics or tracing logic; the calling client does.
+    A failure to parse a reply that arrived is raised wrapped in
+    ``errors._ReplyParseError``, which the client's retry never re-sends and
+    unwraps to the original exception.
     """
 
     @property

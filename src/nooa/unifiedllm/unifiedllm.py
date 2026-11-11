@@ -39,7 +39,7 @@ from nooa.unifiedllm.media_inputs import (
 )
 
 from .admission import _current_admission_controller, _run_admitted_attempt
-from .errors import EmptyContentError
+from .errors import EmptyContentError, _aunwrap_parse_errors, _unwrap_parse_errors
 from .http_config import HttpConfig
 from .limits import REPLY_CAP_KEYS, ContextLimits
 from .reasoning import ReasoningConfig, apply_reasoning_level
@@ -2446,10 +2446,12 @@ class CompletionClient(UnifiedLLM):
 
         # Track LLM call for debugging (visible via SIGUSR2 if nooa debug handler installed)
         with _track_llm_call(model=model, endpoint=self.config.get("api_base")):
-            response = (
-                sync_retry(_make_call, config=self.retry_config)
-                if self.retry_config
-                else _make_call()
+            response = _unwrap_parse_errors(
+                lambda: (
+                    sync_retry(_make_call, config=self.retry_config)
+                    if self.retry_config
+                    else _make_call()
+                )
             )
         if response.usage:
             _record_llm_metric("token_usage", response.usage)
@@ -2483,10 +2485,12 @@ class CompletionClient(UnifiedLLM):
 
         # Track LLM call for debugging (visible via SIGUSR2 if nooa debug handler installed)
         with _track_llm_call(model=model, endpoint=self.config.get("api_base")):
-            response = (
-                await with_retry(_make_call, config=self.retry_config)
-                if self.retry_config
-                else await _make_call()
+            response = await _aunwrap_parse_errors(
+                lambda: (
+                    with_retry(_make_call, config=self.retry_config)
+                    if self.retry_config
+                    else _make_call()
+                )
             )
         if response.usage:
             _record_llm_metric("token_usage", response.usage)
@@ -2689,10 +2693,12 @@ class ResponsesClient(UnifiedLLM):
 
         # Track LLM call for debugging (visible via SIGUSR2 if nooa debug handler installed)
         with _track_llm_call(model=model, endpoint=self.config.get("api_base")):
-            return (
-                sync_retry(_make_call, config=self.retry_config)
-                if self.retry_config
-                else _make_call()
+            return _unwrap_parse_errors(
+                lambda: (
+                    sync_retry(_make_call, config=self.retry_config)
+                    if self.retry_config
+                    else _make_call()
+                )
             )
 
     async def _acall_once(
@@ -2717,10 +2723,12 @@ class ResponsesClient(UnifiedLLM):
 
         # Track LLM call for debugging (visible via SIGUSR2 if nooa debug handler installed)
         with _track_llm_call(model=model, endpoint=self.config.get("api_base")):
-            return (
-                await with_retry(_make_call, config=self.retry_config)
-                if self.retry_config
-                else await _make_call()
+            return await _aunwrap_parse_errors(
+                lambda: (
+                    with_retry(_make_call, config=self.retry_config)
+                    if self.retry_config
+                    else _make_call()
+                )
             )
 
     def _prepare_input(
