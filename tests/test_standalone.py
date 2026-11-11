@@ -96,15 +96,15 @@ def _ret(result: Any, call_id: str = "call_ret") -> ToolCall:
     return ToolCall(id=call_id, name="return_result", arguments=json.dumps({"result": result}))
 
 
-def _get_system_prompt(call: dict[str, Any]) -> str:
-    """Extract system prompt text from a recorded LLM call dict."""
+def _get_prompt_text(call: dict[str, Any]) -> str:
+    """Join the text of every message in a recorded LLM call."""
+    texts = []
     for msg in call["messages"]:
-        if msg.get("role") == "system":
-            content = msg.get("content", "")
-            if isinstance(content, list):
-                return " ".join(part.get("text", "") for part in content if isinstance(part, dict))
-            return content
-    return ""
+        content = msg.get("content") or ""
+        if isinstance(content, list):
+            content = " ".join(part.get("text", "") for part in content if isinstance(part, dict))
+        texts.append(content)
+    return "\n".join(texts)
 
 
 # ---------------------------------------------------------------------------
@@ -591,8 +591,8 @@ class TestStandaloneHistoryIsolation:
 
 class TestStandaloneScopedContext:
     @pytest.mark.asyncio
-    async def test_context_block_in_system_prompt(self) -> None:
-        """ScopedContext(context={...}) injects the key/value into the system prompt."""
+    async def test_context_block_in_prompt(self) -> None:
+        """ScopedContext(context={...}) adds the key/value to the prompt."""
         MARKER = "CONTEXT_BLOCK_MARKER_u8v2k"
         recording_llm = RecordingFakeLLM(scripted_responses=[_resp('{"value": "ok"}')])
 
@@ -608,10 +608,10 @@ class TestStandaloneScopedContext:
         await fn("some input")
 
         assert len(recording_llm.all_calls) == 1
-        system_prompt = _get_system_prompt(recording_llm.all_calls[0])
-        assert MARKER in system_prompt, (
-            f"Context marker '{MARKER}' missing from system prompt.\n"
-            f"System prompt (first 400 chars): {system_prompt[:400]}"
+        prompt = _get_prompt_text(recording_llm.all_calls[0])
+        assert MARKER in prompt, (
+            f"Context marker '{MARKER}' missing from the prompt.\n"
+            f"Prompt (first 400 chars): {prompt[:400]}"
         )
 
     @pytest.mark.asyncio
@@ -639,8 +639,8 @@ class TestStandaloneScopedContext:
 
         assert len(recording_llm.all_calls) == 2
         for i, call in enumerate(recording_llm.all_calls):
-            system_prompt = _get_system_prompt(call)
-            assert MARKER in system_prompt, f"Call {i}: context marker missing from system prompt"
+            prompt = _get_prompt_text(call)
+            assert MARKER in prompt, f"Call {i}: context marker missing from the prompt"
 
     @pytest.mark.asyncio
     async def test_scoped_context_runs_end_to_end(self) -> None:

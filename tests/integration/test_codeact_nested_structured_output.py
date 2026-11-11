@@ -82,7 +82,7 @@ class RecordingFakeLLM(FakeLLMClient):
         return await super().acall(messages, tools, output_model, **kwargs)
 
 
-# Unique marker that user-supplied blocks inject into the system prompt.
+# Unique marker that user-supplied blocks add to the prompt.
 USER_BLOCK_MARKER = "CUSTOM_USER_BLOCK_MARKER_e7b3f9a2"
 
 
@@ -96,6 +96,17 @@ def _get_system_prompt(call: dict[str, Any]) -> str:
                 return " ".join(part.get("text", "") for part in content if isinstance(part, dict))
             return content
     return ""
+
+
+def _get_prompt_text(call: dict[str, Any]) -> str:
+    """Join the text of every message in a recorded LLM call."""
+    texts = []
+    for msg in call["messages"]:
+        content = msg.get("content") or ""
+        if isinstance(content, list):
+            content = " ".join(part.get("text", "") for part in content if isinstance(part, dict))
+        texts.append(content)
+    return "\n".join(texts)
 
 
 # --- Tests ---
@@ -166,18 +177,20 @@ async def test_strategy_blocks_dont_leak_and_user_blocks_pass_through():
         f"Total calls: {len(llm.all_calls)}"
     )
 
-    predict_prompt = _get_system_prompt(predict_strategy_calls[0])
+    predict_prompt = _get_prompt_text(predict_strategy_calls[0])
 
     # --- Assertion 1: User-supplied blocks PASS THROUGH ---
     assert USER_BLOCK_MARKER in predict_prompt, (
         f"User-supplied block content '{USER_BLOCK_MARKER}' should be present in "
-        f"PredictStrategy system prompt, but was not found.\n"
-        f"System prompt preview: {predict_prompt[:500]}..."
+        f"the PredictStrategy prompt, but was not found.\n"
+        f"Prompt preview: {predict_prompt[:500]}..."
     )
 
     # --- Assertion 2: Strategy blocks do NOT leak ---
     # CodeAct's execution_context produces content containing these markers.
-    # If the block leaked, these would appear in the PredictStrategy prompt.
+    # If the block leaked, these would appear in the PredictStrategy system
+    # prompt. (History may still quote the parent's CodeAct task.)
+    predict_prompt = _get_system_prompt(predict_strategy_calls[0])
     assert "Execution Context" not in predict_prompt, (
         "CodeAct's 'execution_context' block content leaked to PredictStrategy. "
         "Strategy-specific blocks should be filtered out for nested calls with "

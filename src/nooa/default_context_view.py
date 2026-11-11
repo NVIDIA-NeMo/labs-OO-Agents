@@ -263,7 +263,8 @@ async def apply_block_overrides(
         elif existing_static is not None:
             is_static = existing_static
         else:
-            is_static = not isinstance(value, DynamicContext)
+            # A new bare value lands in the volatile suffix, as with self.context.
+            is_static = False
 
         content = await _resolve_value(key, value, owner=agent, call=call)
         metadata = BlockMetadata(
