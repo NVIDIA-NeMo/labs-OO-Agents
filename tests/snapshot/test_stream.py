@@ -56,6 +56,39 @@ def test_memory_stays_bounded_with_huge_writes() -> None:
     assert stream.snapshot().length == 10_000_000
 
 
+def test_one_large_write_copies_only_what_it_keeps() -> None:
+    import tracemalloc
+
+    data = "x" * 20_000_000
+    stream = _stream("chars", head=15_000, tail=15_000)
+    tracemalloc.start()
+    try:
+        stream.write(data)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert peak < 1_000_000  # the head and tail slices, not a 20 MB copy past the head
+    text = stream.snapshot()
+    assert (len(text.head), len(text.tail), text.length) == (15_000, 15_000, 20_000_000)
+
+
+@pytest.mark.parametrize("unit", ["chars", "bytes"])
+def test_window_matches_a_reference_on_random_writes(unit: str) -> None:
+    rng = random.Random(f"window-{unit}")
+    for _ in range(2000):
+        head, tail = rng.randint(0, 6), rng.randint(0, 6)
+        stream = _stream(unit, head=head, tail=tail)
+        data = "".join(rng.choice("ab") * rng.randint(0, 9) for _ in range(rng.randint(0, 5)))
+        whole = data if unit == "chars" else data.encode()
+        cuts = sorted(rng.choices(range(len(whole) + 1), k=rng.randint(0, 4)))
+        for i, j in zip([0, *cuts], [*cuts, len(whole)], strict=True):
+            stream.write(whole[i:j])
+        window = stream._window
+        assert window.head() == whole[:head]
+        assert window.tail() == (whole[head:][-tail:] if tail else whole[:0])
+
+
 def test_tail_only_stream() -> None:
     stream = _stream("chars", head=0, tail=3)
     stream.write("abcdef")

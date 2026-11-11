@@ -287,10 +287,13 @@ class _Window:
             part = data[:room]
             self._head.append(part)
             self.head_len += len(part)
-            data = data[room:]
-        if not data or self._tail_room == 0:
+        else:
+            room = 0
+        if self._tail_room == 0 or len(data) <= room:
             return
-        data = data[-self._tail_room :]
+        # One slice: copying ``data[room:]`` first would copy everything past
+        # the head of a large write only to keep its last ``tail`` units.
+        data = data[max(room, len(data) - self._tail_room) :]
         self._tail.append(data)
         self.tail_len += len(data)
         while self.tail_len > self._tail_room:
