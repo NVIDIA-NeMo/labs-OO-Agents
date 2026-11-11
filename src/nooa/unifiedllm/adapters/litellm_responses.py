@@ -337,10 +337,12 @@ class LiteLLMResponsesAdapter:
     """
 
     def __init__(self, client: "ResponsesClient"):
+        """Wrap ``client``, whose settings and hooks every call reads."""
         self._client = client
 
     @property
     def capabilities(self) -> Capabilities:
+        """The capabilities the client declares."""
         return client_capabilities(self._client)
 
     def prepare(
@@ -420,6 +422,7 @@ class LiteLLMResponsesAdapter:
         """One async provider attempt under admission and the request deadline."""
 
         async def call_provider():
+            """The LiteLLM call."""
             return cast(
                 "litellm.ResponsesAPIResponse", await litellm.aresponses(**prepared.api_params)
             )
@@ -440,6 +443,7 @@ class LiteLLMResponsesAdapter:
         )
 
     def _call_config(self, request: LLMRequest, options: Mapping[str, Any]) -> dict[str, Any]:
+        """Resolve and check the call config for one attempt."""
         call_config = self._client._prepare_call_config(request_options(request, options))
         self._client._validate_request_config("input", call_config)
         return call_config

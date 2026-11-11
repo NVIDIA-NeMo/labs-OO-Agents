@@ -2210,6 +2210,7 @@ class CompletionClient(UnifiedLLM):
 
     @staticmethod
     def _response_from_chat(raw_response, scope, tools, output_model, *, native_output=False):
+        """Turn a Chat Completions reply into an LLMResponse (adapter hook)."""
         from .adapters import litellm_chat
 
         return litellm_chat.response_from_chat(
@@ -2318,6 +2319,7 @@ class CompletionClient(UnifiedLLM):
         retry_on_empty = self.retry_config.retry_on_empty_content if self.retry_config else False
 
         def _make_call():
+            """One attempt; an empty reply with reasoning may raise for a retry."""
             response = self._adapter.send_sync(request, **kwargs)
             _raise_if_empty_content(response, retry_on_empty)
             return response
@@ -2354,6 +2356,7 @@ class CompletionClient(UnifiedLLM):
         retry_on_empty = self.retry_config.retry_on_empty_content if self.retry_config else False
 
         async def _make_call():
+            """One attempt; an empty reply with reasoning may raise for a retry."""
             response = await self._adapter.send(request, **kwargs)
             _raise_if_empty_content(response, retry_on_empty)
             return response
@@ -2528,6 +2531,7 @@ class ResponsesClient(UnifiedLLM):
         self._adapter = LiteLLMResponsesAdapter(self)
 
     def _prepare_call_config(self, overrides: dict[str, Any]) -> dict[str, Any]:
+        """Merge the call config as the base class does, spelling the cap max_output_tokens."""
         params = super()._prepare_call_config(overrides)
         caps = REPLY_CAP_KEYS & params.keys()
         if caps:
@@ -2560,6 +2564,7 @@ class ResponsesClient(UnifiedLLM):
         request, model = self._dispatch_request(messages, tools, output_model, kwargs, "input")
 
         def _make_call():
+            """One attempt."""
             return self._adapter.send_sync(request, **kwargs)
 
         # Track LLM call for debugging (visible via SIGUSR2 if nooa debug handler installed)
@@ -2587,6 +2592,7 @@ class ResponsesClient(UnifiedLLM):
         request, model = self._dispatch_request(messages, tools, output_model, kwargs, "input")
 
         async def _make_call():
+            """One attempt."""
             return await self._adapter.send(request, **kwargs)
 
         # Track LLM call for debugging (visible via SIGUSR2 if nooa debug handler installed)
@@ -2611,6 +2617,7 @@ class ResponsesClient(UnifiedLLM):
     def _response_from_output(
         self, raw_response, scope, usage, output_model, native_encrypted_reasoning=False
     ):
+        """Turn a Responses reply into an LLMResponse (adapter hook)."""
         from .adapters import litellm_responses
 
         return litellm_responses.response_from_output(
@@ -2640,6 +2647,7 @@ class ResponsesClient(UnifiedLLM):
         )
 
     def _extract_text_from_output(self, response: Any) -> str:
+        """The reply text of a Responses reply."""
         from .adapters import litellm_responses
 
         return litellm_responses.extract_text_from_output(response)

@@ -370,10 +370,12 @@ class LiteLLMChatAdapter:
     """
 
     def __init__(self, client: "CompletionClient"):
+        """Wrap ``client``, whose settings and hooks every call reads."""
         self._client = client
 
     @property
     def capabilities(self) -> Capabilities:
+        """The capabilities the client declares."""
         return client_capabilities(self._client)
 
     def http_client(self, call_config: dict[str, Any], *, is_async: bool, max_retries: int) -> Any:
@@ -509,6 +511,7 @@ class LiteLLMChatAdapter:
         """One async provider attempt under admission and the request deadline."""
 
         async def provider_call():
+            """The LiteLLM call, under the native-output request check."""
             with self._client._native_output_request_scope(
                 prepared.api_params, prepared.output_model, prepared.native_output, is_async=True
             ):
@@ -530,6 +533,7 @@ class LiteLLMChatAdapter:
         )
 
     def _settings(self, request: LLMRequest, options: Mapping[str, Any]):
+        """Resolve and check the call config and native-output mode for one attempt."""
         options = request_options(request, options)
         call_config = self._client._prepare_call_config(options)
         self._client._validate_request_config("messages", call_config)
