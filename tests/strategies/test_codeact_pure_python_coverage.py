@@ -273,7 +273,7 @@ class TestSanitizeCode:
         fenced = "```python\nasync def helper(self, x):\n    return x * 2\n```"
         cleaned, token = strip_code_fences(fenced)
         assert token == "```python"
-        # Must be valid Python (HelperFunctionManager.apply calls ast.parse)
+        # Must be valid Python (the cell compiler parses it)
         tree = ast.parse(cleaned)
         assert any(isinstance(n, ast.AsyncFunctionDef) for n in tree.body)
 
@@ -1644,7 +1644,7 @@ class TestPurePythonHelperMethodErrors:
                 ...
 
         # Define a compute helper with the SAME name alongside other code.
-        # The HelperFunctionManager will see 'compute' as a helper (separate from target body)
+        # The cell defines 'compute' as a helper (separate from target body)
         # and reject it because it conflicts with the method being implemented.
         # Note: pure function definitions without 'self' as first arg won't trigger
         # the rejection; we need async def compute(self) as a standalone helper.
@@ -3657,47 +3657,6 @@ class TestPurePythonHelperErrors:
 # ---------------------------------------------------------------------------
 # CodeActStrategy._execute_code - helpers installed logging (lines 1877-1878)
 # ---------------------------------------------------------------------------
-
-
-class TestCodeActHelperInstalledLogging:
-    """Tests for _execute_code helper installation."""
-
-    @pytest.mark.asyncio
-    async def test_execute_code_with_helper_that_gets_installed(self):
-        """When helper is installed, _execute_code should log it (lines 1877-1878)."""
-        from nooa.events import ExecutionResult
-        from nooa.strategies.generated_code import (
-            HelperApplyResult,
-            HelperFunctionManager,
-        )
-
-        strat = CodeActStrategy()
-        em = MagicMock()
-        em.add = MagicMock(return_value="evt1")
-        session = CodeActSession(
-            max_iterations=5, max_retries=3, target_method_name="compute", event_manager=em
-        )
-
-        rt = MagicMock()
-        rt.agent = MagicMock()
-        rt.event_manager = em
-        rt.execute_code = AsyncMock(
-            return_value=ExecutionResult(stdout="42", error=None, defined_methods={})
-        )
-
-        installed_result = HelperApplyResult(installed=["my_helper"], errors=[])
-        with patch.object(HelperFunctionManager, "apply", return_value=installed_result):
-            result = await strat._execute_code(
-                rt,
-                "async def my_helper(self): return 42",
-                {},
-                session,
-                "compute",
-                tool_call_id="t1",
-            )
-
-        # Should have executed (returned the mocked result)
-        assert result is not None
 
 
 # ---------------------------------------------------------------------------
