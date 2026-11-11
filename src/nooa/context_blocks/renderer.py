@@ -47,7 +47,7 @@ class RenderResult(NamedTuple):
     """Result of :func:`render_context`: provider output + utilization stats.
 
     ``messages`` is the neutral ``list[RenderedMessage]`` produced by the
-    BlockFormatter *after* truncation and *before* provider formatting.
+    BlockFormatter *before* provider formatting.
     Block-aware formatters populate ``RenderedMessage.parts`` on this list,
     which the journal publisher walks to build a content-addressed skeleton.
     """

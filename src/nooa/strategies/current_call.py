@@ -94,9 +94,9 @@ class CurrentCall:
     param_names: list[str] | None = None
     # Display tag of CodeAct's Task event, separate from the correlation UUID.
     task_tag: str | None = None
-    # Resolved per-request facts for views, not client/provider configuration.
-    # Runtime owners are excluded from repr/comparison so this remains an
-    # immutable invocation snapshot.
+    # Per-request facts for views, filled in by the runtime for each model
+    # request; never client/provider configuration. Runtime owners are
+    # excluded from repr and comparison, which use the call id.
     agent: Any | None = field(default=None, repr=False, compare=False)
     strategy: Any | None = field(default=None, repr=False, compare=False)
     model: str | None = None

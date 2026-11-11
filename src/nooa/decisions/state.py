@@ -50,7 +50,7 @@ def _decision_event_payload(event: EventBase) -> dict[str, Any]:
     replay_content = getattr(event, "replay_content", None)
     if not data and isinstance(replay_content, str):
         data = {"content": replay_content}
-    return {"type": event.event_type, "role": event._role.value, "data": data}
+    return {"type": event.event_type, "role": event.event_role.value, "data": data}
 
 
 __all__ = ["decision_context_from_items"]
