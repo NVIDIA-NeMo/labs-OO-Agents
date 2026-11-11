@@ -35,6 +35,7 @@ if TYPE_CHECKING:
         UnifiedDecisionModel,
     )
     from nooa.runtime.restrictions import RestrictionsConfig
+    from nooa.unifiedllm.limits import ContextLimits
 
 from nooa.events import (
     DecisionCallEnd,
@@ -2978,22 +2979,11 @@ class ActorRuntime:
                     # Authoritative ordered names from the live signature (excludes
                     # 'self') so format_parameters_as_code never re-parses the string.
                     param_names=[p for p in sig.parameters if p != "self"],
-                    agent=self.agent,
+                    # Per-request facts (model, window, budget, formatting,
+                    # scoped context) are filled in by _prepare_context().
                     strategy=strategy,
-                    model=(
-                        getattr(decision_model, "model", None)
-                        if uses_decision_model
-                        else llm_model_name or None
-                    ),
-                    context_window=getattr(
-                        decision_model if uses_decision_model else llm_client,
-                        "context_window",
-                        None,
-                    ),
-                    _context_format=resolved_truncation.context_block_format,
                     _method=method,
                     _decorator_context=merged_ctx,
-                    _scoped_context=_scoped_blocks_var.get(),
                     # Preserve Annotated parameter overrides on top-level calls,
                     # just as the nested method wrapper does.
                     param_specs=CurrentCall.from_method(method).param_specs,
@@ -3134,17 +3124,22 @@ class ActorRuntime:
         call_args: tuple[Any, ...] = (),
         call_kwargs: dict[str, Any] | None = None,
         *,
-        context_limit: int | None = None,
+        llm_client: Any = None,
+        limits: "ContextLimits | None" = None,
+        context_budget: int | None = None,
         count_tokens: Callable[[str], int] | None = None,
     ) -> Any:
         """Snapshot call facts, resolve the view, and collect its ordered items.
 
+        This is the one place per-request facts are resolved: the model and
+        window come from the client and ``limits`` the request is sent with.
         Content selection and ordering belong entirely to the selected view.
         """
         from dataclasses import replace
 
         from nooa.context_view import collect_context_items
         from nooa.strategies.current_call import CurrentCall
+        from nooa.unifiedllm.limits import context_limits_for
 
         call = _current_call_var.get()
         if call is None:
@@ -3174,34 +3169,23 @@ class ActorRuntime:
             from nooa.strategies import get_default_strategy
 
             strategy = get_default_strategy()
-        llm_client = _current_llm_var.get() or getattr(self.agent, "_llm", None)
-        if getattr(strategy, "uses_decision_model", False):
-            llm_client = _current_decision_model_var.get()
+        if llm_client is None:
+            llm_client = _current_llm_var.get() or getattr(self.agent, "_llm", None)
+            if getattr(strategy, "uses_decision_model", False):
+                llm_client = _current_decision_model_var.get()
+        if limits is None:
+            limits = context_limits_for(llm_client)
         strategy = strategy.context_strategy
-        model = base_call.model or getattr(llm_client, "model", None)
-        context_window = base_call.context_window
-        if context_window is None:
-            context_window = getattr(llm_client, "context_window", None)
-        context_format = base_call.context_format
-        if context_format is None:
-            current_truncation = _current_truncation_config_var.get()
-            context_format = (
-                current_truncation.context_block_format
-                if current_truncation is not None
-                else self.agent._truncation.context_block_format
-            )
 
         call = replace(
             base_call,
             agent=self.agent,
             strategy=strategy,
-            model=model,
-            context_window=context_window,
-            context_budget=(
-                context_limit if context_limit is not None else base_call.context_budget
-            ),
-            _context_format=context_format,
-            _context_token_counter=count_tokens or base_call.context_token_counter,
+            model=getattr(llm_client, "model", None) or None,
+            context_window=limits.context_window,
+            context_budget=context_budget,
+            _context_format=self.truncation_config.context_block_format,
+            _context_token_counter=count_tokens,
             _method=method,
             _decorator_context=decorator_context,
             _scoped_context=_scoped_blocks_var.get(),
@@ -3307,7 +3291,9 @@ class ActorRuntime:
                 method,
                 call_args,
                 call_kwargs,
-                context_limit=effective_context_limit,
+                llm_client=llm_client,
+                limits=limits,
+                context_budget=effective_context_limit,
                 count_tokens=count_tokens,
             )
         try:
