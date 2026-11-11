@@ -284,7 +284,7 @@ async def test_the_factory_activates_the_skill_with_the_core_blocks(tmp_path):
         agent = root._agent
         assert isinstance(agent.reflection, Reflection)
         assert list(agent.reflection.blocks) == ["rename", "compact", "variables", "todo", "vars"]
-        assert "nemo.reflection" in agent.skills.activated()
+        assert "nemo.reflection" not in agent.skills.activated()  # not in the model's prompt
         assert "reflection" in {c.name for c in root.commands()}
         reply = (await root.invoke_command("reflection", "")).text
         assert reply.startswith("Reflection: on\n")

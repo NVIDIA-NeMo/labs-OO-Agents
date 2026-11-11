@@ -118,8 +118,8 @@ def create_session_agent(options: SessionOptions, storage: StorageManager) -> In
             override=options.reflection,
         )
         reflection.blocks.update(CORE_BLOCKS)
+        # Registered, not activated: /reflection works, the model's prompt stays as it was.
         agent.skills.register("nemo.reflection", reflection)
-        agent.skills.registry.activate(["nemo.reflection"])
         for warning in configure_session_skills(agent, atom_options):
             logger.warning("Session in %s: %s", options.workspace, warning)
         # The /skills and /mcp controls belong to the agent, not to one host:
