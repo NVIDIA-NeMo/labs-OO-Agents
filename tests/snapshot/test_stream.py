@@ -208,7 +208,7 @@ def test_chars_stream_spills_utf8(tmp_path: Path) -> None:
 
 
 def test_chars_spill_cut_lands_on_a_code_point(tmp_path: Path) -> None:
-    # Severin's repro (#515): max_bytes=3 used to keep b"\xc3\xa9\xc3".
+    # max_bytes=3 keeps b"\xc3\xa9", never a split code point such as b"\xc3\xa9\xc3".
     path = tmp_path / "s2.txt"
     stream = _stream("chars", 1, 1, spill=SpillTarget(path=str(path), max_bytes=3))
     stream.write("ééé")
@@ -238,7 +238,7 @@ def test_chars_spill_file_is_valid_utf8_for_any_max_bytes(tmp_path: Path, max_by
 
 
 def test_existing_spill_path_is_refused_not_truncated(tmp_path: Path) -> None:
-    # Severin's repro (#515): an existing file used to be truncated, then kept.
+    # An existing file is refused with FileExistsError and left as it was.
     path = tmp_path / "precious.txt"
     path.write_text("precious")
 
@@ -437,7 +437,7 @@ def test_chars_stream_rejects_bytes(data: object) -> None:
 
 @pytest.mark.parametrize("data", [10, [1, 2], 1.5, None, object()])
 def test_bytes_stream_rejects_non_bytes(data: object) -> None:
-    # Severin's repro (#515): write(10) used to record ten NUL bytes.
+    # write(10) raises TypeError rather than recording ten NUL bytes (bytes(10)).
     stream = _stream("bytes", head=100, tail=10)
 
     with pytest.raises(TypeError, match="bytes TextStream"):
@@ -544,7 +544,7 @@ def test_context_manager_closes() -> None:
         stream.write("d")
 
 
-# --- review findings: short tails, split U+FFFD, merge units ------------------------
+# --- short tails, split U+FFFD, merge units ---------------------------------------
 
 
 def test_merge_keeps_raw_bytes_exactly() -> None:

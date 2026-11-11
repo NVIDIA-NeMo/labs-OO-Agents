@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""``merge`` equals the former two-loop implementation on random deltas (kept here as the reference)."""
+"""``merge`` equals a direct two-loop reference implementation (below) on random deltas."""
 
 from __future__ import annotations
 

@@ -236,8 +236,8 @@ def _every_spill(node: Snapshot) -> list[str]:
 
 
 def test_spill_paths_do_not_depend_on_the_budget() -> None:
-    # The reviewer's check: spill files collected in their own walk equal those the
-    # JSON walk collected (cut items, tails, wrappers), for every budget, order included.
+    # Spill files collected in their own walk equal those the JSON walk collected
+    # (cut items, tails, wrappers), for every budget, order included.
     with_spills = 0
     for seed in range(3_000):
         tree = random_tree(random.Random(seed))
@@ -249,11 +249,9 @@ def test_spill_paths_do_not_depend_on_the_budget() -> None:
     assert with_spills > 1_000  # the corpus exercises spills
 
 
-def test_render_trace_equals_the_former_preview() -> None:
-    # Digests of the former ``_render._preview`` (text and attributes) and of its spill
-    # files on 1,000 random trees, computed before it was replaced (P3a). P3b updated
-    # the preview digest once: a cut ``Text`` whose spill file is cut now has reason
-    # ``max_length`` (``file_limit`` was removed), which changes ``.reasons`` only.
+def test_render_trace_matches_its_golden_digests() -> None:
+    # Golden digests of render_trace's text and attributes, and of the spill files,
+    # on 1,000 random trees: any change to the trace preview notation shows up here.
     import hashlib
     import json
 
