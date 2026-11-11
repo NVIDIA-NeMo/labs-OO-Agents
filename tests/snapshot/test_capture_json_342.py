@@ -1,10 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""#342's contract tests for bounded JSON previews, ported to capture + render_json.
+"""Contract tests for bounded JSON trace previews, through capture + render_json.
 
-Ported from ``tests/tracing/test_trace_json.py`` of PR #342 (Severin Klingler):
-``trace_json(value)`` is now ``capture(value)`` then ``render_json`` and
-``render_trace``'s attributes; ``trace_fields`` is ``capture_fields``.
+``trace_json(value)`` below is ``capture(value)`` then ``render_json`` and
+``render_trace``'s attributes; ``trace_fields`` is ``capture_fields`` then the
+same. The tests pin the trace preview semantics: valid JSON within the
+budget, typed fallbacks, opaque labels, incomplete paths and wrapper fields.
 """
 
 from __future__ import annotations
@@ -49,12 +50,12 @@ def _preview(snapshot: Any, limits: Limits) -> TraceJSON:
 
 
 def trace_json(value: object, *, limits: Limits = _DEFAULT) -> TraceJSON:
-    """#342's ``trace_json`` expressed with the snapshot API."""
+    """A value's trace preview: its JSON text and incomplete paths, from the snapshot API."""
     return _preview(capture(value, limits), limits)
 
 
 def trace_fields(*, limits: Limits = _DEFAULT, **fields: object) -> TraceJSON:
-    """#342's ``trace_fields`` expressed with the snapshot API."""
+    """A wrapper's trace preview (``capture_fields``): its JSON text and incomplete paths."""
     return _preview(capture_fields(limits=limits, **fields), limits)
 
 
@@ -94,8 +95,8 @@ def test_framework_fields_and_types_survive_truncation() -> None:
 
 
 def test_wrapper_keeps_a_root_inf_field_at_the_capture_budget() -> None:
-    # A non-finite float reserves #342's 0.0; render_json once reserved null
-    # for its opaque node, overflowed the skeleton and dropped f2.
+    # A non-finite float reserves 0.0 in both capture and render_json, so the
+    # skeleton fits and f2 is kept.
     limits = Limits(max_chars=31, max_nodes=32, max_depth=2, tail_share=0.0)
     inner = {"k0": {"k0": math.inf}, "k1": {"k0": -7, "k1": True}, "k2": None}
     inner |= {"k3": {"k0": 2**70}, "k4": {"k0": 0, "k1": None}}

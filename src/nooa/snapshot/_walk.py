@@ -2,15 +2,27 @@
 # SPDX-License-Identifier: Apache-2.0
 """The capture builder: one bounded walk over a live value, each node sized as canonical JSON.
 
-What lives here: dispatch (exact built-in types natively, then the shape of
-the nearest MRO entry: a ``capture.register`` registration, Pydantic's
-``BaseModel``, a dataclass), the container, text and object builders, the
-builders of the registered shapes and the typed fallbacks. Every node's
-size is its exact ``render_json`` size, so the walk stays within
-``Limits.max_chars``; every step charges ``Limits.max_nodes``.
+What lives here: dispatch (``_build``), the container, text and object
+builders, the builders of the registered shapes and the typed fallbacks.
+Every node's size is its exact ``render_json`` size, so the walk stays
+within ``Limits.max_chars``; every step charges ``Limits.max_nodes``.
 
-Live classes and instances are read through ``_raw``. Shape accessors are
-the only extension code that runs, and only here (see ``_raw``).
+Dispatch order, for one value:
+
+1. exact built-in types (``str``, ``None``, ``bool``, ``int``, ``float``,
+   ``bytes``, ``list``, ``tuple``, ``dict``), read natively;
+2. exact standard types (``_std._exact_view``);
+3. the shape of the nearest MRO entry that has one: a ``capture.register``
+   registration, Pydantic's ``BaseModel``, a dataclass;
+4. standard bases in the MRO (``_std._mro_view``);
+5. with ``Limits(fallback="repr")``, a class's own ``__repr__``;
+6. a plain object's public attributes (``_fields._plain_entries``);
+7. the fallback (``_opaque``): an opaque label, or with ``"repr"`` the
+   value's ``repr``.
+
+Live classes and instances are read through ``_raw``. The code that runs
+here is the accessors of registered shapes and, with ``"repr"``, the
+value's ``repr`` (``_run_repr``); neither is bounded in time or memory.
 """
 
 from __future__ import annotations
@@ -93,6 +105,8 @@ from nooa.snapshot._std import (
 
 
 class _Built(NamedTuple):
+    """A built node and its exact size as canonical JSON (what ``render_json`` would print)."""
+
     node: Snapshot
     size: int
 
@@ -100,7 +114,7 @@ class _Built(NamedTuple):
 # --- fallbacks -------------------------------------------------------------
 
 
-_log = logging.getLogger(__name__)
+_log = logging.getLogger(__name__)  # the slow / large repr warnings
 
 SLOW_REPR_SECONDS = 0.1
 """A ``repr`` the fallback runs that takes longer than this logs a developer warning."""
@@ -111,10 +125,12 @@ LARGE_REPR_CHARS = 1_000_000
 def _run_repr(value: Any, state: _State) -> str | None:
     """``repr(value)`` for the ``"repr"`` fallback; ``None`` when it raises or is not a ``str``.
 
-    The value's own code runs here, unbounded before the cut: one slower than
-    ``SLOW_REPR_SECONDS`` or longer than ``LARGE_REPR_CHARS`` logs a warning
-    naming the type, the time and the size, so a developer can give the type
-    a cheaper reading.
+    The value's own code runs here, with no bound on its time or memory
+    (only the kept text is bounded, later), and it may show private data. A
+    ``repr`` slower than ``SLOW_REPR_SECONDS`` or longer than
+    ``LARGE_REPR_CHARS`` logs a warning naming the type, the time and the
+    size after it returns, so a developer can give the type a cheaper
+    reading; nothing interrupts it.
     """
     start = time.perf_counter()
     try:
@@ -135,7 +151,13 @@ def _run_repr(value: Any, state: _State) -> str | None:
 
 
 def _fallback(value: Any, reason: Reason, max_size: int) -> _Built:
-    """A valid, type-oriented fallback node that fits ``max_size``."""
+    """The smallest node that still says ``value``'s type, cut with ``reason``, within ``max_size``.
+
+    An exact ``str``, ``list``, ``tuple`` or ``dict`` keeps its length in an
+    empty ``Text`` / ``Sequence`` / ``Mapping`` when 2 characters fit;
+    anything else is an ``Unavailable(reason)`` sized as its smallest JSON
+    fallback (``_codec.fallback_json``).
+    """
     value_type = type(value)
     _candidate, size = fallback_json(_builtin_name(value), max_size)
     if size == 2 and value_type is str:
@@ -153,17 +175,27 @@ def _fallback(value: Any, reason: Reason, max_size: int) -> _Built:
 
 
 def _string_cost(head: str, tail: str) -> int:
-    """JSON cost of a kept string: the encoded head plus the tail's characters."""
+    """The size charged for a kept string: the encoded head plus the tail's characters.
+
+    Only the head is printed by ``render_json``; the tail is charged its
+    length so that model-facing renderings stay within the budget too.
+    """
     return len(dumps(head)) + len(tail)
 
 
 def _slicer(value: str | bytes) -> Callable[[int, int], Any]:
-    """``read(start, stop)`` of an exact ``str`` or ``bytes``: a native slice."""
+    """``read(start, stop)`` for ``_cut_text`` over an exact ``str`` or ``bytes``: a native slice."""
     return lambda start, stop: value[start:stop]
 
 
 def _largest(fits: Callable[[int], bool], high: int) -> int:
-    """The largest ``k`` in ``0..high`` with ``fits(k)``, for a ``fits`` that turns false as ``k`` grows."""
+    """The largest ``k`` in ``0..high`` with ``fits(k)`` (binary search), for a ``fits`` that turns false as ``k`` grows.
+
+    Returns 0 when nothing larger fits (``fits(0)`` is assumed).
+
+    >>> _largest(lambda k: k * k <= 50, 100)
+    7
+    """
     if fits(high):
         return high
     low = 0
@@ -177,11 +209,12 @@ def _largest(fits: Callable[[int], bool], high: int) -> int:
 
 
 def _at(_data: Any, index: int) -> int:
-    """Any index of a ``str`` is a cut point (``safe_end`` / ``safe_start`` for bytes)."""
+    """Cut-point function of a ``str``: every index is one (bytes use ``safe_end`` / ``safe_start``)."""
     return index
 
 
 def _same(text: str) -> str:
+    """The identity, the ``show`` of a chars text (bytes use ``decode``)."""
     return text
 
 
@@ -200,7 +233,21 @@ def _cut_text(
     kept: the whole text when it is short enough, else the tail and the head
     (one byte longer for bytes, to see whether the head ends on a code point
     boundary). Every smaller cut is a part of what was read, so the text is
-    never read again. ``whole_scalar``: complete bytes are a ``Scalar``.
+    never read again.
+
+    Args:
+        length: the text's size in ``unit``.
+        read: ``read(start, stop)`` returns that slice (exactly
+            ``stop - start`` units).
+        unit: ``"chars"`` or ``"bytes"``.
+        max_size: the room, in JSON characters.
+        limits: for ``max_string`` and ``tail_share``.
+        whole_scalar: a complete bytes text becomes a ``Scalar``.
+
+    Returns:
+        The ``Text`` (or ``Scalar``) and its size; ``Unavailable`` when
+        fewer than 2 characters are left. A bytes cut lands on code point
+        boundaries.
     """
     chars = unit == "chars"
     if max_size < 2:
@@ -231,6 +278,7 @@ def _cut_text(
     end, start, show = (_at, _at, _same) if chars else (safe_end, safe_start, decode)
 
     def parts(kept: int) -> tuple[Any, Any]:
+        """The head and tail kept when ``kept`` units are kept in all (code point boundaries for bytes)."""
         head_n, tail_n = _split(limits, kept)
         head_end = end(head_src, head_n)
         tail_start = start(tail_src, length - tail_n - tail_offset) + tail_offset
@@ -238,6 +286,7 @@ def _cut_text(
         return head_src[:head_end], tail_src[tail_start - tail_offset :]
 
     def cost(kept: int) -> int:
+        """The JSON cost of keeping ``kept`` units."""
         head, tail = parts(kept)
         return _string_cost(show(head), show(tail))
 
@@ -249,7 +298,12 @@ def _cut_text(
 
 
 def _build_integer(value: int, max_size: int, depth: int, path: str, state: _State) -> _Built:
-    """Encode an integer only when decimal conversion is itself bounded; else its digit count."""
+    """An exact ``int`` as a ``Scalar`` when its decimal form fits ``max_size``, else its digit count.
+
+    The digit count is estimated from the bit length first, so a huge int is
+    never converted to decimal (which is quadratic and refused by Python past
+    4,300 digits); see ``_big_integer``.
+    """
     bits = int.bit_length(value)
     # Decimal digits are approximately bits * log10(2). The upper bound keeps
     # conversion below both the output budget and Python's default digit guard.
@@ -285,7 +339,11 @@ def _big_integer(value: int, max_size: int, depth: int, path: str, state: _State
 
 
 def _repr_object(value: Any, max_size: int, depth: int, path: str, state: _State) -> _Built | None:
-    """``repr(value)`` (bounded, see ``_run_repr``) as an ``Object(kind="python.repr")``; ``None``: none."""
+    """``repr(value)`` (see ``_run_repr``) as an ``Object(kind="python.repr")`` with one ``repr`` field.
+
+    The ``repr`` field is a ``Text`` cut like any string. ``None`` when fewer
+    than 2 characters are left, or the ``repr`` raised or was not a ``str``.
+    """
     if max_size < 2:
         return None
     text = _run_repr(value, state)
@@ -299,7 +357,7 @@ def _repr_object(value: Any, max_size: int, depth: int, path: str, state: _State
 
 
 def _defines_repr(mro: tuple[type[Any], ...], state: _State) -> bool:
-    """Whether a class in ``mro`` other than ``object`` defines ``__repr__`` (raw namespaces)."""
+    """Whether a class in ``mro`` other than ``object`` defines ``__repr__`` in its raw namespace."""
     for base in mro:
         if base is object:
             continue
@@ -315,7 +373,7 @@ def _opaque(value: Any, max_size: int, depth: int, path: str, state: _State) -> 
     ``"opaque"``: an ``Unavailable("opaque")`` node sized as its bounded
     label, named ``module.QualName`` (``builtins`` left out). ``builtin``:
     the value's type is an exact built-in one (a non-finite ``float``), so
-    its typed #342 fallback applies when the label does not fit.
+    its typed fallback (``0.0``) applies when the label does not fit.
     ``"repr"``: ``repr(value)``, kept as an ``Object`` (``kind="python.repr"``)
     whose ``repr`` field is cut like a string; a raising ``repr`` gives the
     opaque node.
@@ -342,10 +400,20 @@ def _enter(
     state: _State,
     build: Callable[[], _Built],
 ) -> _Built:
-    """``build()`` the container ``value`` while it is active.
+    """``build()`` the container ``value`` while it is marked active, for cycle detection.
 
-    At ``max_depth`` it is ``empty`` (a node without entries, cut ``max_depth``),
-    unless it has no entries to cut; inside itself, a ``Ref`` to its active ancestor.
+    At ``max_depth`` it is ``empty`` (a node without entries, cut
+    ``max_depth``), unless it has no entries to cut. Met again while active
+    (inside itself), it is a ``Ref`` to the JSON Pointer of that ancestor.
+    Identity (``id``) only: no user code runs.
+
+    Args:
+        value: the live container.
+        kind: the node kind a ``Ref`` to it names.
+        empty: the node it becomes at ``max_depth``.
+        depth, path: where it is in the snapshot.
+        state: the capture's state.
+        build: builds the node.
     """
     empty_container = (type(empty) is Sequence or type(empty) is Mapping) and empty.length == 0
     if depth >= state.limits.max_depth and not empty_container:  # an empty one is whole anyway
@@ -362,9 +430,11 @@ def _enter(
 
 
 def _plan(length: int, limits: Limits, has_tail: bool) -> tuple[int, int]:
-    """The (head, tail) entries of a container of ``length`` that ``max_items`` keeps.
+    """The ``(head, tail)`` entries of a container of ``length`` that ``max_items`` keeps.
 
-    A source that can only be read forwards (``has_tail=False``) keeps a head only.
+    Everything when ``max_items`` is ``None`` or not exceeded; else
+    ``max_items`` split by ``tail_share``. A source that can only be read
+    forwards (``has_tail=False``) keeps a head only.
     """
     max_items = limits.max_items
     if max_items is None or length <= max_items:
@@ -372,65 +442,39 @@ def _plan(length: int, limits: Limits, has_tail: bool) -> tuple[int, int]:
     return _split(limits, max_items) if has_tail else (max_items, 0)
 
 
-def _build_sequence(
-    value: list[Any] | tuple[Any, ...], max_size: int, depth: int, path: str, state: _State
-) -> _Built:
-    """Build a bounded sequence node from an exact list or tuple."""
-    type_name = "list" if type(value) is list else "tuple"
-    length = len(value)  # an exact built-in: no user hook
+def _builtin_collection(value: list[Any] | tuple[Any, ...] | dict[Any, Any]) -> _CollectionView:
+    """The ``_CollectionView`` of an exact ``list``, ``tuple`` or ``dict``.
+
+    Entries are read with the built-in type's own methods (``list.__getitem__``,
+    ``tuple.__getitem__``, ``dict.items``), so no user code runs. The view's
+    ``forward`` and ``backward`` are lazy: ``_container`` pulls only the
+    entries it keeps.
+
+    Args:
+        value: a value whose type is exactly ``list``, ``tuple`` or ``dict``.
+
+    Returns:
+        A keyed view (``type_name`` ``"dict"``) for a dict, else an unkeyed
+        one named ``"list"`` or ``"tuple"``, both readable from either end.
+    """
+    if type(value) is dict:
+        mapping = value
+        return _CollectionView(
+            "dict",
+            dict.__len__(mapping),
+            True,
+            lambda: iter(dict.items(mapping)),
+            lambda: reversed(dict.items(mapping)),
+        )
+    items = cast(Any, value)
     get = list.__getitem__ if type(value) is list else tuple.__getitem__
-    head_n, tail_n = _plan(length, state.limits, has_tail=True)
-    empty = Sequence(type_name, length, (), "max_depth")
-    return _enter(
-        value,
-        "sequence",
-        empty,
-        depth,
-        path,
-        state,
-        lambda: _container(
-            (get(cast(Any, value), index) for index in range(head_n)),
-            length=length,
-            type_name=type_name,
-            keyed=False,
-            max_size=max_size,
-            depth=depth,
-            path=path,
-            state=state,
-            head_n=head_n,
-            tail_n=tail_n,
-            backwards=lambda: (get(cast(Any, value), index) for index in range(length - 1, -1, -1)),
-        ),
-    )
-
-
-def _build_dict(
-    value: dict[Any, Any], max_size: int, depth: int, path: str, state: _State
-) -> _Built:
-    """Build a bounded mapping node without visiting rejected tail entries."""
-    length = dict.__len__(value)
-    head_n, tail_n = _plan(length, state.limits, has_tail=True)
-    empty = Mapping("dict", length, (), "max_depth")
-    return _enter(
-        value,
-        "mapping",
-        empty,
-        depth,
-        path,
-        state,
-        lambda: _container(
-            dict.items(value),
-            length=length,
-            type_name="dict",
-            keyed=True,
-            max_size=max_size,
-            depth=depth,
-            path=path,
-            state=state,
-            head_n=head_n,
-            tail_n=tail_n,
-            backwards=lambda: reversed(dict.items(value)),
-        ),
+    length = len(items)
+    return _CollectionView(
+        type(value).__name__,
+        length,
+        False,
+        lambda: (get(items, index) for index in range(length)),
+        lambda: (get(items, index) for index in range(length - 1, -1, -1)),
     )
 
 
@@ -467,7 +511,10 @@ def _container(
     ``tail_share`` of it, and the tail is filled from the end with what is
     left (``tail_n``, when ``max_items`` cut, also bounds it). So a
     container that fits is kept as it is, and every entry is built once.
-    ``tail_share`` 0 keeps a head only, as #342 does.
+    ``tail_share`` 0 keeps a head only.
+
+    Returns the node and its size; its reason is the budget's, the first
+    ``_Omitted`` note's, or ``"max_items"`` when entries were left out.
     """
     fill = _Fill(Container(max_size), keyed, depth, path, state)
     head, omitted = fill.head(entries, head_n)
@@ -495,6 +542,12 @@ class _Fill:
     Each entry is built once, by ``add``. ``head`` fills from the start;
     ``shorten_head`` gives back the last head entries to make room for a
     tail, and ``tail`` fills from the end.
+
+    Args:
+        box: the container's size accounting.
+        keyed: entries are ``(key, value)`` pairs (a ``Mapping``).
+        depth, path: where the container is in the snapshot.
+        state: the capture's state.
     """
 
     def __init__(self, box: Container, keyed: bool, depth: int, path: str, state: _State) -> None:
@@ -508,7 +561,12 @@ class _Fill:
         self.head_costs: list[tuple[int, str | None]] = []
 
     def head(self, entries: Iterable[Any], head_n: int) -> tuple[list[Any], Reason | None]:
-        """Up to ``head_n`` entries from the start, and the reason of the first ``_Omitted`` note."""
+        """Build up to ``head_n`` entries from the start of ``entries``.
+
+        Returns the kept nodes (pairs when keyed) and the reason of the
+        first ``_Omitted`` note met, or ``None``. Stops early when the box
+        stops (budget, work, a bad key).
+        """
         head: list[Any] = []
         omitted: Reason | None = None
         iterator = iter(entries)
@@ -547,7 +605,16 @@ class _Fill:
         return tail
 
     def add(self, entry: Any, index: int, kept: list[Any], *, in_head: bool) -> bool:
-        """Build ``entry`` into the room left and append it to ``kept``; ``False``: the box stopped."""
+        """Build ``entry`` into the room left and append it to ``kept``.
+
+        A mapping entry first costs one node for its key; a key with no JSON
+        form, or whose JSON form an earlier kept key has, stops the box
+        with ``"key"``.
+
+        Returns:
+            ``True`` when the entry was kept, ``False`` when the box stopped
+            (nothing appended).
+        """
         box, state = self.box, self.state
         if state.nodes_left <= 0:
             box.stop("max_nodes")
@@ -584,7 +651,7 @@ class _Fill:
 
 
 _KEY_LIMITS = Limits(max_chars=400, max_nodes=50, max_depth=2, max_items=8, max_string=50)
-"""The bounds of a node key: a key is a label, so it is kept small."""
+"""The bounds of a node key (a tuple or enum member used as a dict key): a key is a label, so it is kept small."""
 
 
 def _key_node(key: Any, state: _State) -> Snapshot | None:
@@ -611,6 +678,11 @@ class _Part:
     ``exhausted(max_size)``: what a structural part (an items sequence, an
     ndarray level) becomes when no node work is left for it; ``None`` for a
     part that captures a value (``_lazy``), whose ``_build`` charges itself.
+
+    Args:
+        build: ``build(max_size, depth, path) -> _Built``.
+        min_nodes: the work a later sibling holds back for it.
+        exhausted: see above.
     """
 
     __slots__ = ("build", "exhausted", "min_nodes")
@@ -627,7 +699,7 @@ class _Part:
 
 
 def _build_slot(child: Any, max_size: int, depth: int, path: str, state: _State) -> _Built:
-    """``child`` in a container slot: built when it is a shape's ``_Part``, else captured.
+    """``child`` in a container slot: a shape's ``_Part`` is built, a ``_Scoped`` built under its limits, anything else captured.
 
     A structural part is one node of the shared work; a part that captures a
     value is charged by that capture.
@@ -642,7 +714,7 @@ def _build_slot(child: Any, max_size: int, depth: int, path: str, state: _State)
 
 
 def _scoped_limits(outer: Limits, limits: dict[str, Any]) -> Limits:
-    """``outer`` with a field's ``spec()`` ``max_string`` / ``max_length`` (as ``max_items``)."""
+    """``outer`` with a field's ``spec()`` limits: ``max_string`` replaced, ``max_length`` as ``max_items``."""
     changes: dict[str, Any] = {}
     if "max_string" in limits:
         changes["max_string"] = limits["max_string"]
@@ -652,17 +724,20 @@ def _scoped_limits(outer: Limits, limits: dict[str, Any]) -> Limits:
 
 
 def _build_scoped(child: _Scoped, max_size: int, depth: int, path: str, state: _State) -> _Built:
-    """A field with its own ``spec(max_string=..., max_length=...)``: built under them, subtree-wide."""
+    """Build a ``_Scoped`` field (a value or a shape part) under its own limits, for its whole subtree.
+
+    The outer limits are restored afterwards, also when building raises.
+    """
     outer = state.limits
     state.limits = _scoped_limits(outer, child.limits)
     try:
-        return _build(child.value, max_size, depth, path, state)
+        return _build_slot(child.value, max_size, depth, path, state)
     finally:
         state.limits = outer
 
 
 def _closed(type_name: str) -> _Built:
-    """A model whose fields cannot be read safely: no field at all (fail closed)."""
+    """An object whose fields cannot be read safely: no field at all, reason ``"unreadable"`` (fail closed)."""
     return _Built(Object(type_name, (), "unreadable"), 2)
 
 
@@ -678,9 +753,13 @@ def _object_fields(
     capped: bool = True,
     length: int | None = None,
 ) -> _Built:
-    """Emit the (name, value) fields of an object; a reader's ``_FailClosed`` keeps none.
+    """Build an ``Object`` from a field reader's ``(name, value)`` entries, within ``max_size``.
 
-    ``length``: a plain object's attribute count, kept on the node when it is cut.
+    When reading ``entries`` raises ``_FailClosed``, the object keeps no
+    field (``_closed``). ``_Omitted`` notes are skipped; the first one's
+    reason is the object's when nothing else cut it. ``kind`` is stored on
+    the node. ``length``: a plain object's attribute count, kept on the node
+    when it is cut.
 
     A field value may be a shape's ``_Part``, built in its field's slot (see
     ``_build_slot``). ``reserves[i]``: (chars, nodes) held back while field
@@ -735,22 +814,22 @@ def _object_fields(
 
 
 def _min_size(child: Any) -> int:
-    """The size of the minimal type-oriented fallback a captured value can always keep.
+    """The size of the smallest fallback ``child`` can always keep (2 for a part or an unknown type).
 
     Only identity checks against exact built-in types: the type of an unknown
     value is never compared, hashed or asked for attributes (a metaclass
     ``__eq__`` must not run).
     """
-    if type(child) is _Part:
-        return 2
     if type(child) is _Scoped:
         child = child.value
+    if type(child) is _Part:
+        return 2
     name = _builtin_name(child)
     return len(dumps(fallback_candidates(name)[0])) if name else 2
 
 
 _OBJECT_MIN_NODES = 16
-"""Nodes held back for a later field whose value is not known yet (its MRO and a few fields)."""
+"""Work held back for a later field whose value is not known yet (its MRO and a few fields)."""
 
 _NDARRAY_ELEMENT_CHARS = 6
 """Characters ``ndarray_like`` assumes per shown element (a short number and its separator)."""
@@ -760,14 +839,16 @@ class _ShapeError(Exception):
     """An accessor failed in a way that leaves no sensible part: the whole value is an error.
 
     Raised for the whole-value accessors (``length``, ``shape``, ``slice``) and
-    the value checks on their results. A part's accessor (a field, an element,
-    a label) that raises becomes that part's ``Unavailable("error")``; a shape's
-    ``items`` that raise end the items with an ``error`` omission (``_guarded``).
+    the value checks on their results; the builder turns it into
+    ``Unavailable("error")`` for the whole value. A part's accessor (a
+    field, an element, a label) that raises becomes that part's
+    ``Unavailable("error")``; a shape's ``items`` that raise end the items
+    with an ``error`` omission (``_guarded``).
     """
 
 
 def _call(function: Callable[..., Any], *args: Any) -> Any:
-    """Call an accessor; any exception becomes ``_ShapeError``."""
+    """``function(*args)`` for a whole-value accessor; any ``Exception`` it raises becomes ``_ShapeError``."""
     try:
         return function(*args)
     except Exception as error:
@@ -775,6 +856,7 @@ def _call(function: Callable[..., Any], *args: Any) -> Any:
 
 
 def _shape_length(function: Callable[[Any], Any], value: Any) -> int:
+    """A shape's ``length(value)``; raises ``_ShapeError`` when it raises or is not a non-negative exact ``int``."""
     length = _call(function, value)
     if type(length) is not int or length < 0:
         raise _ShapeError("length must be a non-negative int")
@@ -782,14 +864,15 @@ def _shape_length(function: Callable[[Any], Any], value: Any) -> int:
 
 
 def _error(type_name: str, max_size: int) -> _Built:
-    """An accessor failed: ``Unavailable("error")``, sized as its fallback."""
+    """``Unavailable("error", type_name)`` for a failed accessor, sized as the smallest fallback that fits ``max_size``."""
     return _Built(Unavailable("error", type_name), fallback_json("", max_size)[1])
 
 
 def _guarded(iterator: typing.Iterator[Any], pairs: bool) -> typing.Iterator[Any]:
-    """A shape's items until they end, or raise (``pairs``: or one is not an exact 2-tuple).
+    """A shape's items until they end, or until one fails.
 
-    A failure ends them with an ``error`` omission.
+    A failure is ``iterator`` raising, or (``pairs``) an item that is not an
+    exact 2-tuple; it yields ``_Omitted("error")`` and ends the items.
     """
     while True:
         try:
@@ -815,7 +898,12 @@ def _collection(
     path: str,
     state: _State,
 ) -> _Built:
-    """The items of an ``array_like`` / ``mapping_like`` value, with the list / dict builders."""
+    """The items of an ``array_like`` / ``mapping_like`` value as a ``Sequence`` / ``Mapping``.
+
+    ``items(value)`` is read forwards only, as far as the kept entries plus
+    at most one; a head only is kept. ``Unavailable("error")`` when calling
+    ``items`` raises.
+    """
     try:
         source = iter(shape.items(value))
     except Exception:
@@ -855,7 +943,11 @@ def _lazy(read: Callable[[], Any], state: _State) -> _Part:
 def _structure_part(
     node_type: Any, length: int, build: Callable[[int, int, str], _Built], state: _State
 ) -> _Part:
-    """A ``Sequence`` / ``Mapping`` field of a shape (``items``, ``data``, ``labels``): one node."""
+    """A structural part of a shape (``items``, ``data``, a ``labels`` axis): a ``Sequence`` / ``Mapping`` built by ``build``.
+
+    It costs one node; with no work left, at ``max_depth``, or with fewer
+    than 2 characters, it is an empty node of ``length`` cut for that reason.
+    """
     name = "list" if node_type is Sequence else "dict"
 
     def empty(max_size: int, reason: Reason) -> _Built:
@@ -883,7 +975,7 @@ def _shape_fields(
     path: str,
     state: _State,
 ) -> _Built:
-    """A registered shape's ``Object``: its accessor fields, then its structure.
+    """A registered shape's ``Object``: its accessor fields, then its structure (``items``, ``shape`` / ``labels`` / ``data``).
 
     A ``spec(cls, name, ...)`` override on the class applies to the accessor
     field ``name``: ``hidden=True`` leaves it out (its accessor never runs),
@@ -896,7 +988,7 @@ def _shape_fields(
         if flags.get("hidden"):
             continue
         part = _lazy(functools.partial(function, value), state)
-        entries.append((name, _scoped_part(part, flags, state)))
+        entries.append((name, _scoped_part(part, flags)))
     max_items = state.limits.max_items
     cut = max_items is not None and len(entries) > max_items
     del entries[max_items if cut else len(entries) :]
@@ -929,28 +1021,17 @@ def _shape_fields(
 
 
 def _class_overrides(mro: tuple[type[Any], ...], state: _State) -> dict[str, dict[str, Any]]:
-    """The ``spec(cls, name, ...)`` overrides of the classes of ``mro``; none when unreadable."""
+    """The ``spec(cls, name, ...)`` overrides of the classes of ``mro``; ``{}`` when they cannot be read."""
     try:
         return _visibility_overrides({}, mro, state)
     except _FailClosed:
         return {}
 
 
-def _scoped_part(part: _Part, flags: dict[str, Any], state: _State) -> _Part:
-    """``part`` built under a field's own ``max_string`` / ``max_length`` (when it has them)."""
+def _scoped_part(part: _Part, flags: dict[str, Any]) -> _Part | _Scoped:
+    """``part`` under a field's own ``max_string`` / ``max_length``, when ``flags`` has them."""
     limits = {key: flags[key] for key in ("max_string", "max_length") if key in flags}
-    if not limits:
-        return part
-
-    def build(max_size: int, depth: int, path: str) -> _Built:
-        outer = state.limits
-        state.limits = _scoped_limits(outer, limits)
-        try:
-            return part.build(max_size, depth, path)
-        finally:
-            state.limits = outer
-
-    return _Part(build, part.min_nodes, part.exhausted)
+    return _Scoped(part, limits) if limits else part
 
 
 def _structure(
@@ -977,6 +1058,7 @@ def _structure(
 
 
 def _ndarray_dims(shape: _NdarrayLike, value: Any) -> tuple[int, ...]:
+    """An ``ndarray_like``'s ``shape(value)``; raises ``_ShapeError`` unless it is a tuple of non-negative exact ``int``."""
     dims = _call(shape.shape, value)
     if type(dims) is not tuple or any(type(n) is not int or n < 0 for n in dims):
         raise _ShapeError("shape must be a tuple of non-negative ints")
@@ -1004,6 +1086,7 @@ def _ndarray_selection(
     nodes = state.nodes_left * 3 // 4
 
     def fits(k: int) -> bool:
+        """Whether ``k`` entries per axis fit three quarters of the characters and of the work left."""
         kept = [min(n, k) for n in dims]
         elements = math.prod(kept)
         levels = 0
@@ -1055,7 +1138,10 @@ def _indexed(
 def _ndarray_structure(
     shape: _NdarrayLike, value: Any, max_size: int, state: _State
 ) -> list[tuple[str, Any]]:
-    """``shape``, ``labels`` and ``data`` of an ``ndarray_like`` value."""
+    """The structure fields of an ``ndarray_like`` value: ``shape``, ``labels`` (when declared) and ``data``.
+
+    Raises ``_ShapeError`` when ``shape`` fails.
+    """
     dims = _ndarray_dims(shape, value)
     selection = _ndarray_selection(dims, len(shape.labels), max_size, state)
     entries: list[tuple[str, Any]] = [("shape", dims)]
@@ -1158,10 +1244,16 @@ def _build_text(
 
 
 def _text_parts(shape: _TextLike, value: Any, max_size: int, limits: Limits) -> _Built:
+    """A ``text_like`` value's ``Text``, reading only the slices ``_cut_text`` keeps.
+
+    Raises ``_ShapeError`` when ``length`` or ``slice`` fails, or a slice has the
+    wrong type or size.
+    """
     length = _shape_length(shape.length, value)
     chars = shape.unit == "chars"
 
     def fetch(start: int, stop: int) -> Any:
+        """One checked slice: an exact ``str`` (chars) or ``bytes`` (bytes) of exactly ``stop - start`` units."""
         part = _call(shape.slice, value, start, stop)
         if chars:
             if type(part) is not str:
@@ -1254,9 +1346,15 @@ def _build_shape(
 
 
 def _field_reserves(pairs: list[tuple[Any, Any]]) -> list[tuple[int, int]]:
-    """Per field: the (chars, nodes) every later field needs for its minimal fallback."""
+    """Per field of ``pairs``: the ``(chars, nodes)`` every later field needs for its minimal fallback.
+
+    ``_object_fields`` holds these back while it builds a field, so a large
+    early field cannot starve the later ones.
+    """
     needs: list[tuple[int, int]] = []
     for name, child in pairs:
+        if type(child) is _Scoped:
+            child = child.value
         # separator + "name": + minimal value; one node for the field, some for its value.
         nodes = 1 + (child.min_nodes if type(child) is _Part else 1)
         needs.append((2 + len(dumps(name)) + 2 + _min_size(child), nodes))
@@ -1294,7 +1392,20 @@ def _find_shape(
 
 
 def _build(value: Any, max_size: int, depth: int, path: str, state: _State) -> _Built:
-    """Recursively build one bounded snapshot node (sized as its JSON encoding)."""
+    """Build ``value`` as one bounded snapshot node, recursively; the dispatch of capture.
+
+    Args:
+        value: the live value.
+        max_size: the room for it, in JSON characters.
+        depth: its nesting depth (the root is 0).
+        path: its JSON Pointer in the snapshot.
+        state: the capture's state; one unit of work is spent here.
+
+    Returns:
+        The node and its exact JSON size, at most ``max_size``. Never
+        raises for a value it cannot read: that becomes a node. See the
+        module docstring for the dispatch order.
+    """
     if not state.take_node():
         return _fallback(value, "max_nodes", max_size)
 
@@ -1322,9 +1433,7 @@ def _build(value: Any, max_size: int, depth: int, path: str, state: _State) -> _
     if value_type is list or value_type is tuple or value_type is dict:
         if max_size < 2:
             return _fallback(value, "max_length", max_size)
-        if value_type is dict:
-            return _build_dict(value, max_size, depth, path, state)
-        return _build_sequence(value, max_size, depth, path, state)
+        return _build_view(_builtin_collection(value), value, max_size, depth, path, state)
 
     if max_size < 2:
         return _fallback(value, "max_length", max_size)
@@ -1368,7 +1477,7 @@ def _build(value: Any, max_size: int, depth: int, path: str, state: _State) -> _
 def _build_view(
     view: _View, value: Any, max_size: int, depth: int, path: str, state: _State
 ) -> _Built:
-    """Build a standard type's view (``_std``) with the usual builders."""
+    """Build a ``_std`` view of ``value`` with the usual text, container and object builders."""
     match view:
         case _TextView():
             return _cut_text(view.length, view.read, "chars", max_size, state.limits)

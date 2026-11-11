@@ -208,7 +208,7 @@ def test_chars_stream_spills_utf8(tmp_path: Path) -> None:
 
 
 def test_chars_spill_cut_lands_on_a_code_point(tmp_path: Path) -> None:
-    # Severin's repro (#515): max_bytes=3 used to keep b"\xc3\xa9\xc3".
+    # max_bytes=3 keeps b"\xc3\xa9", never a split code point such as b"\xc3\xa9\xc3".
     path = tmp_path / "s2.txt"
     stream = _stream("chars", 1, 1, spill=SpillTarget(path=str(path), max_bytes=3))
     stream.write("ééé")
@@ -238,7 +238,7 @@ def test_chars_spill_file_is_valid_utf8_for_any_max_bytes(tmp_path: Path, max_by
 
 
 def test_existing_spill_path_is_refused_not_truncated(tmp_path: Path) -> None:
-    # Severin's repro (#515): an existing file used to be truncated, then kept.
+    # An existing file is refused with FileExistsError and left as it was.
     path = tmp_path / "precious.txt"
     path.write_text("precious")
 
@@ -395,18 +395,29 @@ def test_spill_flush_failure_falls_back_to_memory(tmp_path: Path) -> None:
     assert (text.head, text.tail, text.length) == (b"ab", b"gh", 8)
 
 
-def test_text_reads_do_not_rebind_the_writer_buffers() -> None:
-    stream = _stream("chars", head=4, tail=4)
-    for piece in ("ab", "cd", "ef", "gh", "ij"):
-        stream.write(piece)
-    head, tail = stream._window._head, stream._window._tail
-    pieces = (list(head), list(tail))
+@pytest.mark.parametrize("unit", ["chars", "bytes"])
+def test_snapshots_interleaved_with_writes_see_every_write(unit: str) -> None:
+    stream = _stream(unit, head=4, tail=4)
+    whole = "" if unit == "chars" else b""
+    taken: list[tuple[Text, str | bytes]] = []
+    for piece in ("ab", "cd", "ef", "gh", "ij", "k", "lmnopq"):
+        data = piece if unit == "chars" else piece.encode()
+        stream.write(data)
+        whole += data  # type: ignore[operator]
+        for _ in range(2):  # reading twice changes nothing
+            text = stream.snapshot()
+            assert text.length == len(whole)
+            if len(whole) <= 8:
+                assert (text.head, text.tail, text.complete) == (whole, whole[:0], True)
+            else:
+                assert (text.head, text.tail) == (whole[:4], whole[-4:])
+        taken.append((text, whole))
 
-    stream.snapshot()
-    stream.snapshot()
-
-    assert stream._window._head is head and stream._window._tail is tail
-    assert (list(head), list(tail)) == pieces
+    final = stream.close()
+    assert (final.head, final.tail, final.length) == (whole[:4], whole[-4:], len(whole))
+    for text, seen in taken:  # earlier snapshots still describe the stream as it was
+        assert text.length == len(seen)
+        assert text.head + text.tail == (seen if len(seen) <= 8 else seen[:4] + seen[-4:])
 
 
 # --- write types / merge -----------------------------------------------------------------
@@ -426,7 +437,7 @@ def test_chars_stream_rejects_bytes(data: object) -> None:
 
 @pytest.mark.parametrize("data", [10, [1, 2], 1.5, None, object()])
 def test_bytes_stream_rejects_non_bytes(data: object) -> None:
-    # Severin's repro (#515): write(10) used to record ten NUL bytes.
+    # write(10) raises TypeError rather than recording ten NUL bytes (bytes(10)).
     stream = _stream("bytes", head=100, tail=10)
 
     with pytest.raises(TypeError, match="bytes TextStream"):
@@ -533,7 +544,7 @@ def test_context_manager_closes() -> None:
         stream.write("d")
 
 
-# --- review findings: short tails, split U+FFFD, merge units ------------------------
+# --- short tails, split U+FFFD, merge units ---------------------------------------
 
 
 def test_merge_keeps_raw_bytes_exactly() -> None:

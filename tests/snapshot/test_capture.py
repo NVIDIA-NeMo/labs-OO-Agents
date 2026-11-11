@@ -434,7 +434,7 @@ def test_dataclass_hints_that_cannot_be_evaluated_fail_closed_field_by_field(nam
 def test_one_type_checking_only_annotation_keeps_the_other_fields(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Severin's repro (#515): one unresolvable annotation used to drop every field.
+    # One unresolvable annotation costs only its own field, not every field.
     (tmp_path / "snapshot_type_checking_only.py").write_text(
         "from __future__ import annotations\n"
         "from dataclasses import dataclass\n"
@@ -987,7 +987,7 @@ def test_register_needs_a_type() -> None:
         capture.register("Animal", object_like({}))  # type: ignore[arg-type]
 
 
-# --- review findings: untrusted equality ------------------------------------
+# --- untrusted equality ------------------------------------------------------
 
 
 def test_unknown_field_type_metaclass_eq_never_runs() -> None:
@@ -1038,7 +1038,7 @@ class _CollidingKey:
     [{1: "a", "1": "b"}, {"1": "a", 1: "b"}, {True: "a", "true": "b"}, {None: 1, "null": 2}],
 )
 def test_mapping_keys_that_collide_in_json_stop_the_mapping_at_capture(value: dict) -> None:
-    # Severin's repro (#515): capture was complete, render_json silently kept one.
+    # Capture stops at the colliding key, so it and render_json agree on what is kept.
     limits = Limits()
     snapshot = capture(value, limits)
 
@@ -1068,7 +1068,7 @@ def test_mapping_key_collision_between_head_and_tail_stops_the_tail() -> None:
 
 
 def test_tail_share_keeps_both_ends_when_the_budget_cuts_a_list() -> None:
-    # Paul's probe (#515): a 400-char string keeps 99 + 99, a 200-item list kept 0-51 and no tail.
+    # A 400-char string keeps 99 + 99 under this budget; a 200-item list keeps both ends too.
     limits = Limits(max_chars=200, tail_share=0.5)
     text = capture("x" * 400, limits)
     assert isinstance(text, Text) and (len(text.head), len(text.tail)) == (99, 99)
@@ -1196,7 +1196,7 @@ def test_module_namespace_hostile_key_fails_closed(monkeypatch) -> None:
     assert "s3cret" not in render_json(snapshot, max_chars=1000)
 
 
-# --- review findings: caps
+# --- caps
 
 
 def test_bytes_capture_omits_a_code_point_beyond_max_string() -> None:

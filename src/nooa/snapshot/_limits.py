@@ -2,9 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """The budget of one capture: the public ``Limits`` and the private traversal ``_State``.
 
-The lowest of the capture layers (``_limits`` <- ``_raw`` <- {``_fields``,
-``_shapes``, ``_std``} <- ``_walk`` <- ``_capture``). Every layer charges the same
-``_State``, so it lives below them all. Nothing here reads a live value.
+This is the lowest of the capture layers (``_limits`` <- ``_raw`` <-
+{``_fields``, ``_shapes``, ``_std``} <- ``_walk`` <- ``_capture``). Every
+layer charges the same ``_State``, so it lives below them all. Nothing here
+reads a live value.
 """
 
 from __future__ import annotations
@@ -15,27 +16,31 @@ from typing import Any, Literal
 
 @dataclass(frozen=True)
 class Limits:
-    """The one shared budget of a ``capture`` or ``capture_fields`` call.
+    """The bounds of one ``capture`` or ``capture_fields`` call.
 
-    Every knob bounds the whole snapshot, not one value. The defaults are
-    the bounds of #342's trace previews.
+    Two kinds of bound: ``max_chars`` and ``max_nodes`` are one budget shared
+    by the whole capture, while ``max_depth``, ``max_items`` and
+    ``max_string`` cap each value separately (every container, every
+    string). So ``Limits(max_items=2)`` keeps two items of *each* list, not
+    two items in all. The defaults suit trace previews.
 
     - ``max_chars`` (default 50,000): the size of the snapshot as canonical
       JSON (``render_json``'s encoding), counted exactly, so
       ``render_json(capture(v, limits), max_chars=limits.max_chars)`` cuts
-      nothing further. At least 4.
+      nothing further. Whole capture. At least 4.
     - ``max_nodes`` (default 2,000): inspection work. Each value, container
       entry, MRO entry, stored instance field and visibility marker read
-      costs one unit. Greater than 0.
+      costs one unit. Whole capture. Greater than 0.
     - ``max_depth`` (default 16): nesting. The root is depth 0; a container
-      at ``max_depth`` keeps no entries (reason ``"max_depth"``).
+      at ``max_depth`` keeps no entries (reason ``"max_depth"``). Per value.
       Non-negative.
     - ``max_items`` (default ``None``): the items kept per container, and
-      the fields kept per object (the first ones). ``None``: only the shared
-      budget limits them. Non-negative.
+      the fields kept per object (the first ones). Per value. ``None``: only
+      the shared budget limits them. Non-negative.
     - ``max_string`` (default ``None``): the units kept per string or bytes
       value, an upper bound (a cut byte value keeps only whole UTF-8 code
-      points). ``None``: only the shared budget limits it. Non-negative.
+      points). Per value. ``None``: only the shared budget limits it.
+      Non-negative.
     - ``tail_share`` (default 0.0): the part of a cut string or container
       kept from its end, whether ``max_items``, ``max_string`` or the shared
       ``max_chars`` budget cuts it. 0.0 keeps a prefix (trace previews);
@@ -46,14 +51,18 @@ class Limits:
       ``mapping_like``, a ``set``) keeps a head only. From 0 to 1.
     - ``fallback`` (default ``"opaque"``): what a value capture cannot read
       becomes. ``"opaque"``: ``Unavailable("opaque")``, rendered
-      ``<opaque: module.QualName>`` (traces: no code runs). ``"repr"``: the
-      caller asks capture to run ``repr(value)``, and the result is kept as
-      an ``Object`` with ``kind="python.repr"`` and one ``repr`` field, a
+      ``<opaque: module.QualName>``; no ``repr`` runs (for traces).
+      ``"repr"``: capture runs ``repr(value)`` and keeps the result as an
+      ``Object`` with ``kind="python.repr"`` and one ``repr`` field, a
       ``Text`` cut like any string (``max_string``, ``tail_share``, the
-      budget). This runs the value's own code, unbounded in time and memory
-      before the cut: it is for model-facing previews, where a bounded view
+      budget). With ``"repr"``, a class that defines its own ``__repr__``
+      is shown through it before its public attributes are read. This runs
+      the value's own code: its time and memory are not bounded (only the
+      kept text is), and it may print private data that the field readers
+      would hide. It is for model-facing previews, where a bounded view
       beats ``<opaque: T>`` (which a model answers with ``print(x)``). A
-      ``repr`` that raises gives the opaque node.
+      slow or large ``repr`` logs a warning after it returns; nothing
+      interrupts it. A ``repr`` that raises gives the opaque node.
 
     ``Limits`` does not check itself: ``capture`` and ``capture_fields``
     raise ``ValueError`` for values outside these ranges.
@@ -73,16 +82,28 @@ class Limits:
 
 
 def _split(limits: Limits, kept: int) -> tuple[int, int]:
-    """``kept`` units as (head, tail) under ``limits.tail_share``."""
+    """Split ``kept`` units into ``(head, tail)`` by ``limits.tail_share``.
+
+    The tail gets ``int(kept * tail_share)`` (rounded down), the head the
+    rest, so the head takes the odd unit.
+    """
     tail = int(kept * limits.tail_share)
     return kept - tail, tail
 
 
 DEFAULT_LIMITS = Limits()
+"""The ``Limits()`` that ``capture`` and ``capture_fields`` use by default."""
 
 
 def _validate_limits(limits: Limits) -> None:
-    """Reject configurations that cannot produce a useful valid root value."""
+    """Check ``limits`` before a capture starts.
+
+    Raises:
+        ValueError: ``max_chars`` below 4 (the smallest valid root), a
+            ``max_nodes`` of 0 or less, a negative ``max_depth``,
+            ``max_items`` or ``max_string``, a ``tail_share`` outside 0..1,
+            or a ``fallback`` other than ``"opaque"`` or ``"repr"``.
+    """
     if limits.max_chars < 4:
         raise ValueError("snapshot max_chars must be at least 4")
     if limits.max_nodes <= 0:
@@ -100,7 +121,20 @@ def _validate_limits(limits: Limits) -> None:
 
 
 class _State:
-    """Mutable bounded traversal state shared by one capture."""
+    """The mutable state of one capture, shared by every layer that reads the value.
+
+    - ``limits``: the ``Limits`` in force; a field with its own
+      ``spec(max_string=..., max_length=...)`` swaps it for its subtree.
+    - ``nodes_left``: the ``max_nodes`` work not spent yet.
+    - ``active``: the containers being built, for cycle detection.
+    - ``namespaces``: checked copies of class and instance namespaces, so
+      each is read once per capture.
+    - ``unreadable_hints``: classes whose ``typing.get_type_hints`` failed in
+      this capture, with the hints that resolved one by one.
+
+    Args:
+        limits: the capture's checked ``Limits``.
+    """
 
     def __init__(self, limits: Limits) -> None:
         self.limits = limits
@@ -115,7 +149,12 @@ class _State:
         self.unreadable_hints: dict[int, tuple[type[Any], dict[str, tuple[Any, ...]]]] = {}
 
     def take_node(self) -> bool:
-        """Consume one inspection unit, returning false when exhausted."""
+        """Spend one unit of ``max_nodes`` work.
+
+        Returns:
+            ``True`` when a unit was left (and is now spent), ``False`` when
+            the work is used up (nothing is spent).
+        """
         if self.nodes_left <= 0:
             return False
         self.nodes_left -= 1

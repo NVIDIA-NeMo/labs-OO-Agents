@@ -77,7 +77,7 @@ def test_each_file_is_capped_at_file_bytes(tmp_path: Path) -> None:
 
 
 def test_replace_keeps_the_folder(tmp_path: Path) -> None:
-    # Severin's repro (#515): ``replace`` used to drop the private folder link.
+    # ``dataclasses.replace`` of a folder's target keeps its link to the folder.
     with SpillDir(str(tmp_path), max_files=5, file_bytes=1000) as spills:
         target = spills.target()
         assert target is not None and target.path is not None
@@ -134,7 +134,7 @@ def test_budget_by_count_evicts_the_oldest_closed_file(tmp_path: Path) -> None:
         fourth = _cut(spills)
         assert not os.path.exists(second)
         assert os.path.exists(third) and os.path.exists(fourth)
-        with pytest.raises(FileNotFoundError):  # how a reader tells it is no longer kept
+        with pytest.raises(FileNotFoundError):  # how a reader tells the full output is gone
             Path(first).open("rb").close()
 
 
