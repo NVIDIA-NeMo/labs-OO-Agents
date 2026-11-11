@@ -706,15 +706,6 @@ class TestRenderContextEventSerialization:
 class TestRendererContract:
     """Rendering reports limits but owns no budget policy."""
 
-    def test_accepts_context_limit_without_counter(self):
-        result = render_context(
-            [],
-            block_formatter=XMLBlockFormatter(),
-            provider_formatter=OpenAIProviderFormatter(),
-            context_limit=10_000,
-        )
-        assert result.output == []
-
     def test_accepts_no_token_limits(self):
         """No error when context_limit is not set."""
         result = render_context(

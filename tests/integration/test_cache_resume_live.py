@@ -29,10 +29,9 @@ import pytest
 
 from nooa._immutable_json import json_containers
 from nooa.context_blocks.events import EventBase, ToolCallEvent, ToolResult, UserEvent
-from nooa.context_blocks.formatter import OpenAIProviderFormatter
+from nooa.context_blocks.formatter import OpenAIProviderFormatter, XMLBlockFormatter
 from nooa.context_blocks.models import BlockMetadata, Role
 from nooa.context_blocks.renderer import render_context
-from nooa.context_blocks.renderers.cached import CachedBlockFormatter
 from nooa.context_view import Block
 from nooa.storage import SQLiteStorageManager
 from nooa.unifiedllm import CacheBoundary, CompletionClient, LLMResponse, ResponsesClient, Tool
@@ -147,7 +146,7 @@ def _render(family, events, instructions, live_state, *, stable_image=False):
     ]
     messages = render_context(
         blocks,
-        block_formatter=CachedBlockFormatter(),
+        block_formatter=XMLBlockFormatter(),
         provider_formatter=OpenAIProviderFormatter(),
     ).output
     if stable_image:

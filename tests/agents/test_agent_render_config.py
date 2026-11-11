@@ -2,9 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for Agent.__init__ render_config= parameter (Task 17)."""
 
-from nooa.context_blocks.formatter import MarkdownBlockFormatter
+from nooa.context_blocks.formatter import MarkdownBlockFormatter, XMLBlockFormatter
 from nooa.context_blocks.render_config import RenderConfig
-from nooa.context_blocks.renderers import CachedBlockFormatter
 from nooa.unifiedllm import FakeLLMClient
 
 
@@ -33,4 +32,4 @@ def test_agent_default_render_config():
 
     agent = MyAgent()
     assert isinstance(agent.render_config, RenderConfig)
-    assert isinstance(agent.render_config.block_formatter, CachedBlockFormatter)
+    assert isinstance(agent.render_config.block_formatter, XMLBlockFormatter)

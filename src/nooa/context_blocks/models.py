@@ -173,8 +173,8 @@ class BlockMetadata(BaseModel):
     static: bool = Field(
         default=False,
         description="Author's declaration that the block's content is stable across "
-        "turns. Renderers use this to place the block in a cacheable prefix. "
-        "Does not affect truncation or correctness — only caching behavior.",
+        "turns. The default context views use this to place the block in the "
+        "cacheable prefix. Does not affect truncation or correctness — only caching behavior.",
     )
 
 

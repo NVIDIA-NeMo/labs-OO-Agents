@@ -9,11 +9,11 @@ Pipeline:
 3. Hand the ordered list of blocks to ``block_formatter`` — it produces a
    neutral ``list[RenderedMessage]`` covering system + events + any extra
    trailing messages the formatter chooses to emit.
-5. Hand the neutral list to ``provider_formatter`` to reshape into the
+4. Hand the neutral list to ``provider_formatter`` to reshape into the
    provider-specific wire format.
 
-``render_context()`` never mutates its input blocks — truncation and
-serialization produce new :class:`ResolvedBlock` instances via ``model_copy()``.
+``render_context()`` never mutates, reorders, or evicts its input items —
+serialization produces new :class:`ResolvedBlock` instances via ``model_copy()``.
 """
 
 from collections.abc import Callable, Sequence
@@ -84,13 +84,11 @@ def render_context(
     *,
     block_formatter: BlockFormatter,
     provider_formatter: ProviderFormatter,
-    context_limit: int | None = None,
     context_format: "FormatConfig | None" = None,
     event_format: "FormatConfig | None" = None,
     event_format_resolver: Callable[[Any], "FormatConfig | None"] | None = None,
     model_context_window: int | None = None,
     reserved_output_tokens: int | None = None,
-    context_blocks_dropped: int = 0,
 ) -> RenderResult:
     """Render resolved blocks into provider-specific output with utilization stats.
 
@@ -195,9 +193,8 @@ def render_context(
         prompt_tokens=None,
         context_blocks_chars=sum(len(b.content) for b in context_blocks),
         events_chars=sum(len(b.content) for b in event_blocks),
-        max_context_tokens=context_limit,
         model_context_window=model_context_window,
-        context_blocks_dropped=context_blocks_dropped,
+        context_blocks_dropped=sum(block.metadata.truncated for block in context_blocks),
         events_dropped=0,
         reserved_output_tokens=reserved_output_tokens,
     )

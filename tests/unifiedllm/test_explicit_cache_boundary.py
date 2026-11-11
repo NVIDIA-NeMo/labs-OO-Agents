@@ -14,14 +14,13 @@ import pytest
 
 from nooa.context_blocks.events import UserEvent
 from nooa.context_blocks.exceptions import UnsupportedContextLayout
-from nooa.context_blocks.formatter import OpenAIProviderFormatter
+from nooa.context_blocks.formatter import OpenAIProviderFormatter, XMLBlockFormatter
 from nooa.context_blocks.models import (
     BlockMetadata,
     RenderedMessage,
     Role,
 )
 from nooa.context_blocks.renderer import RenderResult, render_context
-from nooa.context_blocks.renderers.cached import CachedBlockFormatter
 from nooa.context_view import Block
 from nooa.llm_types import AssistantReasoning, LLMResponse
 from nooa.unifiedllm import CacheBoundary, CompletionClient, ResponsesClient
@@ -53,7 +52,7 @@ def _render_result(dynamic: str) -> RenderResult:
     ]
     return render_context(
         blocks,
-        block_formatter=CachedBlockFormatter(),
+        block_formatter=XMLBlockFormatter(),
         provider_formatter=OpenAIProviderFormatter(),
     )
 
