@@ -305,3 +305,35 @@ def test_request_tool_choice_reaches_the_wire(calls, make, choice):
     expected = None if choice == "auto" and make is chat_client else choice
     assert body.get("tool_choice") == expected
     client.close()
+
+
+@pytest.mark.parametrize(
+    ("make", "wire"),
+    [
+        (chat_client, {"type": "function", "function": {"name": "lookup"}}),
+        (responses_client, {"type": "function", "name": "lookup"}),
+    ],
+)
+@pytest.mark.asyncio
+async def test_named_tool_choice_uses_the_wire_form(calls, make, wire):
+    client = make()
+    request = LLMRequest(messages=MESSAGES, tools=[TOOL], tool_choice="lookup")
+    client._adapter.send_sync(request)
+    await client._adapter.send(request)
+    client.call(MESSAGES, [TOOL], tool_choice="lookup")
+    assert [json.loads(call)["tool_choice"] for call in calls] == [wire] * 3
+    await client.aclose()
+
+
+@pytest.mark.parametrize("make", [chat_client, responses_client])
+@pytest.mark.parametrize("tools", [[TOOL], []])
+@pytest.mark.asyncio
+async def test_named_tool_choice_must_name_a_request_tool(calls, make, tools):
+    client = make()
+    request = LLMRequest(messages=MESSAGES, tools=tools, tool_choice="search")
+    with pytest.raises(ValueError, match="tool_choice 'search' names no tool"):
+        client._adapter.send_sync(request)
+    with pytest.raises(ValueError, match="tool_choice 'search' names no tool"):
+        await client._adapter.send(request)
+    assert calls == []
+    await client.aclose()

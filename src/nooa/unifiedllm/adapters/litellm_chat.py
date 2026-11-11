@@ -82,6 +82,27 @@ def request_options(request: LLMRequest, options: Mapping[str, Any]) -> dict[str
     return merged
 
 
+# Tool choices that are not tool names; any other str names a tool.
+RESERVED_TOOL_CHOICES = frozenset({"auto", "required", "none"})
+
+
+def named_tool_choice(choice: Any, tools: list[Tool] | None) -> str | None:
+    """The tool a str ``tool_choice`` names, or None for reserved values and mappings.
+
+    Raises:
+        ValueError: If the name is not one of ``tools``.
+    """
+    if not isinstance(choice, str) or choice in RESERVED_TOOL_CHOICES:
+        return None
+    names = [tool.name for tool in tools or ()]
+    if choice not in names:
+        raise ValueError(
+            f"tool_choice {choice!r} names no tool of this request; "
+            f"tools: {', '.join(names) or 'none'}"
+        )
+    return choice
+
+
 @dataclass
 class PreparedChatCall:
     """Everything one Chat Completions attempt needs, built once per call."""
@@ -425,6 +446,8 @@ class LiteLLMChatAdapter:
         if tools:
             api_params["tools"] = [client._convert_tool_to_schema(tool) for tool in tools]
             api_params["parallel_tool_calls"] = False
+        if (name := named_tool_choice(api_params.get("tool_choice"), tools)) is not None:
+            api_params["tool_choice"] = {"type": "function", "function": {"name": name}}
 
         client._normalize_chat_extensions(api_params, effective_model)
         client._set_output_format(api_params, output_model, effective_model, native_output)

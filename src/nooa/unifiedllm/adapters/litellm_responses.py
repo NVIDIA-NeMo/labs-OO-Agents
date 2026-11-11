@@ -20,7 +20,11 @@ from nooa.llm_types import CacheBoundary, LLMResponse
 from nooa.unifiedllm import replay_state, response_parts
 from nooa.unifiedllm import unifiedllm as _core
 from nooa.unifiedllm.adapters.base import Capabilities
-from nooa.unifiedllm.adapters.litellm_chat import client_capabilities, request_options
+from nooa.unifiedllm.adapters.litellm_chat import (
+    client_capabilities,
+    named_tool_choice,
+    request_options,
+)
 from nooa.unifiedllm.cache_policy import (
     add_session_affinity_header,
     enable_openai_explicit_cache,
@@ -377,6 +381,8 @@ class LiteLLMResponsesAdapter:
         if "base_url" in api_params:
             api_params["api_base"] = api_params.pop("base_url")
 
+        if (name := named_tool_choice(api_params.get("tool_choice"), tools)) is not None:
+            api_params["tool_choice"] = {"type": "function", "name": name}
         if tools:
             api_params["tools"] = [client._convert_tool_to_schema(tool) for tool in tools]
             # Honour the requested choice; "auto" when the call names none.
