@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Output that arrives over time: ``TextStream``, and ``merge``.
+"""Output that arrives over time: ``TextStream``.
 
 The second producer of snapshots, next to ``capture``: it builds a ``Text``
 incrementally, so the whole output is never held in memory. It reads no
@@ -21,7 +21,7 @@ from nooa.snapshot._codec import complete_prefix, encode_text, safe_end, safe_st
 from nooa.snapshot._model import Spill, Text
 from nooa.snapshot._spill import SpillTarget, _SpillFile
 
-__all__ = ["TextStream", "merge"]
+__all__ = ["TextStream"]
 
 _log = logging.getLogger(__name__)
 
@@ -311,79 +311,3 @@ class _Window:
 
     def tail(self) -> str | bytes:
         return self._empty.join(self._tail)  # type: ignore[arg-type]
-
-
-# --- merging deltas ----------------------------------------------------------------
-
-
-def merge(a: Text, b: Text, head: int, tail: int) -> Text:
-    """``a`` followed by ``b`` as one ``Text`` keeping at most ``head`` + ``tail`` units.
-
-    For two batches of output read one after the other (progress deltas).
-
-    - ``a``, ``b``: two ``Text`` of the same unit.
-    - ``head``, ``tail``: the units the result may keep from its start and
-      its end.
-
-    The result's ``length`` is ``a.length + b.length``. What either input
-    already omitted stays omitted: the head comes only from what was kept
-    before the first gap, the tail only from what was kept after the last
-    one. Counts are exact in the inputs' unit (bytes stay bytes). A bytes
-    cut keeps whole code points and never moves across the joint of two
-    inputs' parts. ``reason``: ``None`` when everything fits, else the
-    first input's reason, or ``"max_length"``. ``full``: ``b.full`` when
-    both inputs spilled to the same path, else ``None``.
-
-    Raises ``ValueError`` when the units differ or ``head`` / ``tail`` is
-    negative.
-
-    >>> from nooa.snapshot import Text, merge
-    >>> merge(Text(head="hello", length=5, unit="chars"), Text(head=" world", length=6, unit="chars"), 3, 3)
-    Text(head='hel', tail='rld', length=11, unit='chars', reason='max_length', full=None)
-    """
-    if a.unit != b.unit:
-        raise ValueError(f"cannot merge {a.unit} with {b.unit}")
-    if head < 0 or tail < 0:
-        raise ValueError("head and tail must be non-negative")
-    length = a.length + b.length
-    same_file = a.full is not None and b.full is not None and a.full.path == b.full.path
-    full = b.full if same_file else None
-    # The joints: where one input's part ends and the next begins. A bytes
-    # cut never moves across one, so each part is cut on its own code points.
-    gapless = a.complete and b.complete
-    if gapless:
-        whole = a.head + b.head  # type: ignore[operator]
-        if len(whole) <= head + tail:
-            return Text(head=whole, length=length, unit=a.unit, full=full)
-        left = right = whole
-        left_joints = right_joints = (len(a.head),)
-    else:
-        left = a.head if not a.complete else a.head + b.head  # type: ignore[operator]
-        right = b.tail if not b.complete else a.tail + b.head  # type: ignore[operator]
-        left_joints = () if not a.complete else (len(a.head),)
-        right_joints = () if not b.complete else (len(a.tail),)
-    kept_head = left[: _head_end(left, head, left_joints)]
-    low = len(kept_head) if gapless else 0  # the tail starts after the kept head
-    start = _tail_start(right, max(low, len(right) - tail), (*right_joints, low))
-    return Text(
-        head=kept_head,
-        tail=right[start:],
-        length=length,
-        unit=a.unit,
-        reason=a.reason or b.reason or "max_length",
-        full=full,
-    )
-
-
-def _head_end(text: str | bytes, end: int, joints: tuple[int, ...]) -> int:
-    """Where a head of at most ``end`` units of ``text`` stops (bytes: on a code point, not before a joint)."""
-    if isinstance(text, str):
-        return min(end, len(text))
-    return max([safe_end(text, end), *(joint for joint in joints if joint <= end)])
-
-
-def _tail_start(text: str | bytes, start: int, joints: tuple[int, ...]) -> int:
-    """Where a tail from ``start`` begins (bytes: on a code point, not past a joint)."""
-    if isinstance(text, str):
-        return start
-    return min([safe_start(text, start), *(joint for joint in joints if joint >= start)])
