@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """The budget of one capture: the public ``Limits`` and the private traversal ``_State``.
 
-The lowest of the capture layers (``_limits`` <- ``_raw`` <- ``_visibility``
-<- ``_shapes`` <- ``_walk`` <- ``_capture``). Every layer charges the same
+The lowest of the capture layers (``_limits`` <- ``_raw`` <- {``_fields``,
+``_shapes``, ``_std``} <- ``_walk`` <- ``_capture``). Every layer charges the same
 ``_State``, so it lives below them all. Nothing here reads a live value.
 """
 
@@ -111,7 +111,7 @@ class _State:
         self.namespaces: dict[int, tuple[Any, dict[str, Any] | None]] = {}
         # id(class) -> (class, the metadata of the hints that resolved one by one)
         # for a class whose ``get_type_hints`` failed in this capture; kept alive
-        # for the call and retried by the next one (see ``_visibility``).
+        # for the call and retried by the next one (see ``_fields``).
         self.unreadable_hints: dict[int, tuple[type[Any], dict[str, tuple[Any, ...]]]] = {}
 
     def take_node(self) -> bool:

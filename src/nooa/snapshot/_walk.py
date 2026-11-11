@@ -38,6 +38,14 @@ from nooa.snapshot._codec import (
     safe_end,
     safe_start,
 )
+from nooa.snapshot._fields import (
+    _DATACLASS,
+    _PYDANTIC,
+    _FieldReader,
+    _plain_entries,
+    _Scoped,
+    _visibility_overrides,
+)
 from nooa.snapshot._limits import Limits, _split, _State
 from nooa.snapshot._model import (
     Key,
@@ -56,15 +64,15 @@ from nooa.snapshot._raw import (
     _bounded_type_name,
     _builtin_name,
     _FailClosed,
+    _Fields,
+    _Omitted,
     _raw_namespace,
     _safe_mro,
 )
 from nooa.snapshot._render import key_text
 from nooa.snapshot._shapes import (
-    _DATACLASS,
-    _PYDANTIC,
+    _REGISTRY,
     _Collection,
-    _FieldReader,
     _metadata,
     _NdarrayLike,
     _ObjectLike,
@@ -79,13 +87,6 @@ from nooa.snapshot._std import (
     _qualified_type_name,
     _TextView,
     _View,
-)
-from nooa.snapshot._visibility import (
-    _Fields,
-    _Omitted,
-    _plain_entries,
-    _Scoped,
-    _visibility_overrides,
 )
 
 
@@ -1191,14 +1192,6 @@ def _field_reserves(pairs: list[tuple[Any, Any]]) -> list[tuple[int, int]]:
         nodes += need_nodes
     reserves.reverse()
     return reserves
-
-
-_REGISTRY: list[tuple[type[Any], _Shape]] = []
-"""The process-wide ``capture.register(T, shape)`` registrations, matched by class identity.
-
-Scanned with ``is``: a class is never hashed or compared with ``==``, so a
-metaclass ``__hash__`` / ``__eq__`` cannot run during dispatch.
-"""
 
 
 def _find_shape(

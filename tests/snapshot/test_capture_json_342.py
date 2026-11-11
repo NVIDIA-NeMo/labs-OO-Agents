@@ -26,8 +26,8 @@ from nooa.snapshot import (
     render_json,
     render_trace,
 )
+from nooa.snapshot._fields import _pydantic_fields
 from nooa.snapshot._limits import _State
-from nooa.snapshot._visibility import _pydantic_fields
 from tests.snapshot._trace import _attributes
 
 _DEFAULT = Limits()

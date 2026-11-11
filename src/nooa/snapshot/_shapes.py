@@ -4,9 +4,9 @@
 
 ``array_like``, ``mapping_like``, ``ndarray_like``, ``object_like`` and
 ``text_like`` check and copy their arguments into frozen shape objects, the
-only things ``capture.register`` accepts. ``_FieldReader`` is the internal
-shape of Pydantic models and dataclasses. Nothing here reads a captured
-value: ``_walk`` builds the snapshot nodes from these shapes.
+only things ``capture.register`` accepts, and ``_REGISTRY``, where it
+keeps them. Nothing here reads a captured value: ``_walk`` builds the
+snapshot nodes from these shapes.
 """
 
 from __future__ import annotations
@@ -15,9 +15,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Any, Literal, cast
 
-from nooa.snapshot._limits import _State
 from nooa.snapshot._raw import _MAX_TYPE_NAME, _TYPE_MRO, _bounded_type_name
-from nooa.snapshot._visibility import _dataclass_entries, _Fields, _pydantic_entries
 
 # --- shapes: the extension API -------------------------------------------------------
 #
@@ -397,16 +395,9 @@ def text_like(
     return _TextLike(_accessor(length, "length"), _accessor(slice, "slice"), unit, _kind(kind))
 
 
-@dataclass(frozen=True)
-class _FieldReader:
-    """The internal shape of Pydantic models and dataclasses: a privileged field reader.
+_REGISTRY: list[tuple[type[Any], _Shape]] = []
+"""The process-wide ``capture.register(T, shape)`` registrations, matched by class identity.
 
-    ``read(value, mro, carrier, state)`` yields the fields of the class
-    ``carrier`` (the MRO entry that matched). Never registered by users.
-    """
-
-    read: Callable[[Any, tuple[type[Any], ...], type[Any], _State], _Fields]
-
-
-_PYDANTIC = _FieldReader(_pydantic_entries)
-_DATACLASS = _FieldReader(_dataclass_entries)
+Scanned with ``is``: a class is never hashed or compared with ``==``, so a
+metaclass ``__hash__`` / ``__eq__`` cannot run during dispatch.
+"""

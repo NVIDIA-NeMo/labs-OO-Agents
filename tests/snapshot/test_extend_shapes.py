@@ -20,7 +20,7 @@ from nooa.snapshot import (
     Sequence,
     Text,
     Unavailable,
-    _shapes,
+    _fields,
     array_like,
     capture,
     mapping_like,
@@ -507,8 +507,8 @@ def test_starved_structure_parts_say_max_nodes(registered) -> None:
 
 
 def test_pydantic_and_dataclasses_are_internal_object_shapes() -> None:
-    for shape in (_shapes._PYDANTIC, _shapes._DATACLASS):
-        assert type(shape) is _shapes._FieldReader
+    for shape in (_fields._PYDANTIC, _fields._DATACLASS):
+        assert type(shape) is _fields._FieldReader
 
     class Model(BaseModel):
         a: int = 1

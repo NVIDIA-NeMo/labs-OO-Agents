@@ -31,6 +31,7 @@ import sys
 import typing
 import weakref
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any, cast
 
 from pydantic import BaseModel
@@ -39,15 +40,16 @@ from pydantic.fields import FieldInfo
 from nooa.agentdoc._docs import SpecAnnotation
 from nooa.agentdoc._visibility import hidden
 from nooa.snapshot._limits import _State
-from nooa.snapshot._model import Reason
 from nooa.snapshot._raw import (
     _BASE_MODEL_DICT,
     _NO_SLOT,
     _TYPE_MRO,
     _copy_storage,
     _FailClosed,
+    _Fields,
     _instance_storage,
     _namespace,
+    _Omitted,
     _raw_namespace,
     _slot_value,
 )
@@ -331,25 +333,6 @@ def _pydantic_fields(mro: tuple[type[Any], ...], state: _State) -> dict[str, Fie
                     raise _FailClosed
                 return fields
     raise _FailClosed
-
-
-class _Omitted:
-    """An entry stream's note that something was left out here, and why.
-
-    The one way a field reader or a shape's items say "incomplete because":
-    the builder keeps reading, and the first such reason is the node's when
-    the builder's own limits left it complete.
-    """
-
-    __slots__ = ("reason",)
-    reason: Reason
-
-    def __init__(self, reason: Reason) -> None:
-        self.reason = reason
-
-
-_Fields = typing.Iterator[tuple[str, Any] | _Omitted]
-"""A field reader's (name, value) fields and ``_Omitted`` notes; it raises ``_FailClosed``."""
 
 
 class _Scoped:
@@ -671,3 +654,18 @@ def _plain_entries(
     if not entries and defines_repr:
         return None
     return entries
+
+
+@dataclass(frozen=True)
+class _FieldReader:
+    """The internal shape of Pydantic models and dataclasses: a privileged field reader.
+
+    ``read(value, mro, carrier, state)`` yields the fields of the class
+    ``carrier`` (the MRO entry that matched). Never registered by users.
+    """
+
+    read: Callable[[Any, tuple[type[Any], ...], type[Any], _State], _Fields]
+
+
+_PYDANTIC = _FieldReader(_pydantic_entries)
+_DATACLASS = _FieldReader(_dataclass_entries)
