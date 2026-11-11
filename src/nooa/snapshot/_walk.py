@@ -212,21 +212,40 @@ def _cut_text(
     return _Built(node, cost(kept))
 
 
-def _build_integer(value: int, max_size: int) -> _Built:
-    """Encode an integer only when decimal conversion is itself bounded."""
+def _build_integer(value: int, max_size: int, depth: int, path: str, state: _State) -> _Built:
+    """Encode an integer only when decimal conversion is itself bounded; else its digit count."""
     bits = int.bit_length(value)
     # Decimal digits are approximately bits * log10(2). The upper bound keeps
     # conversion below both the output budget and Python's default digit guard.
     estimated_digits = (bits * 30_103) // 100_000 + 1 + (1 if value < 0 else 0)
     if estimated_digits > max_size or estimated_digits > 4_000:
-        return _fallback(value, "max_length", max_size)
+        return _big_integer(value, max_size, depth, path, state)
     try:
         encoded = dumps(value)
     except (ValueError, OverflowError):
-        return _fallback(value, "max_length", max_size)
+        return _big_integer(value, max_size, depth, path, state)
     if len(encoded) > max_size:
-        return _fallback(value, "max_length", max_size)
+        return _big_integer(value, max_size, depth, path, state)
     return _Built(Scalar(value), len(encoded))
+
+
+def _big_integer(value: int, max_size: int, depth: int, path: str, state: _State) -> _Built:
+    """An int too long to keep: an ``Object`` (``kind="python.int"``) of its digit count, cut.
+
+    The count comes from ``math.log10`` (no decimal conversion): exact but
+    within float precision of a power of ten, where it may be one off.
+    """
+    negative = value < 0
+    entries: list[tuple[str, Any]] = [
+        ("digits", int(math.log10(-value if negative else value)) + 1)
+    ]
+    if negative:
+        entries.append(("negative", True))
+    built = _object_fields("int", iter(entries), max_size, depth, path, state, "python.int")
+    node = cast(Object, built.node)
+    if len(node.fields) < len(entries):
+        return _fallback(value, "max_length", max_size)
+    return _Built(dataclasses.replace(node, reason="max_length"), built.size)
 
 
 def _opaque(value: Any, max_size: int, depth: int, path: str, state: _State) -> _Built:
@@ -1235,7 +1254,7 @@ def _build(value: Any, max_size: int, depth: int, path: str, state: _State) -> _
             return _Built(Scalar(value), len(encoded))
         return _fallback(value, "max_length", max_size)
     if value_type is int:
-        return _build_integer(value, max_size)
+        return _build_integer(value, max_size, depth, path, state)
     if value_type is float:
         if not math.isfinite(value):
             return _opaque(value, max_size, depth, path, state)

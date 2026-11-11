@@ -365,3 +365,24 @@ def test_a_cut_plain_object_says_how_many_attributes_it_has() -> None:
     whole = capture(Some())
     assert isinstance(whole, Object) and whole.length is None
     assert render_python(whole) == "Some(a=1, b=2, c=3)"
+
+
+@pytest.mark.parametrize(
+    ("value", "python"),
+    [
+        (10**200_000, "int(200,001 digits)"),
+        (-(10**5000), "int(5,001 digits, negative)"),
+        (1 << 1_000_000, "int(301,030 digits)"),
+    ],
+    ids=["10**200000", "-10**5000", "2**1000000"],
+)
+def test_a_huge_int_says_how_many_digits_it_has(value: int, python: str) -> None:
+    for limits in (_PREFILL, Limits()):
+        start = time.perf_counter()
+        node = capture(value, limits)
+        assert time.perf_counter() - start < 0.01  # never converted to decimal
+        assert isinstance(node, Object) and node.kind == "python.int"
+        assert node.reason == "max_length"
+        assert render_python(node) == python
+    assert json.loads(render_json(capture(value), max_chars=50_000))["digits"] > 4000
+    assert render_python(capture(10**30)) == str(10**30)  # a small one stays a number
