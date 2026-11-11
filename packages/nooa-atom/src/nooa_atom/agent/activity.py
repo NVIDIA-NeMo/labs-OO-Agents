@@ -16,11 +16,12 @@ from uuid import uuid4
 
 from pydantic import Field
 
-from nooa.agentdoc import TruncatingStringIO, hidden, pformat, spec
+from nooa.agentdoc import hidden, spec
 from nooa.context_blocks import EventBase
 from nooa.context_blocks.roles import Role
 from nooa.runtime.event_manager import EventManager
 from nooa.skill import Skill
+from nooa.snapshot import Limits, TextStream, capture, render_output, render_python
 from nooa.tools import BashSession, StreamDone, StreamEvent
 from nooa.tools.shell_tools import (
     FileWrite,
@@ -37,6 +38,41 @@ _MAX_COMMAND_OUTPUT_CHARS = 30_000
 (``MAX_OUTPUT_CHARS`` of the core shell session), so the card shows what the model got."""
 _MAX_DIFF_INPUT_CHARS = 1_000_000
 _MAX_DIFF_INPUT_LINES = 20_000
+# Keep both ends of a cut text; ``max_chars`` (JSON size, 12 per escaped astral
+# char) is big enough that only ``max_string`` cuts.
+_EVENT_TEXT_LIMITS = Limits(
+    max_string=_MAX_EVENT_TEXT_CHARS, tail_share=0.5, max_chars=12 * _MAX_EVENT_TEXT_CHARS + 2
+)
+
+
+def _event_text(text: str) -> str:
+    """``text`` itself, or past ``_MAX_EVENT_TEXT_CHARS`` its ``str(len=N, [:h]=..., [-t:]=...)`` cut."""
+    if len(text) <= _MAX_EVENT_TEXT_CHARS:
+        return text
+    return render_python(capture(text, _EVENT_TEXT_LIMITS))
+
+
+def _output_stream() -> TextStream:
+    """One stream of a terminal card: the first and last halves of ``_MAX_COMMAND_OUTPUT_CHARS``."""
+    tail = _MAX_COMMAND_OUTPUT_CHARS // 2
+    return TextStream(unit="chars", head=_MAX_COMMAND_OUTPUT_CHARS - tail, tail=tail)
+
+
+def _command_output(
+    command_id: str, stdout: TextStream, stderr: TextStream
+) -> tuple[TerminalCommandOutput | None, bool]:
+    """The card's output event (``None`` when nothing was written) and whether it was cut."""
+    out, err = stdout.snapshot(), stderr.snapshot()
+    truncated = not (out.complete and err.complete)
+    if not (out.length or err.length):
+        return None, truncated
+    event = TerminalCommandOutput(
+        command_id=command_id,
+        stdout=render_output(out),
+        stderr=render_output(err),
+        truncated=truncated,
+    )
+    return event, truncated
 
 
 def _line_count(value: str) -> int:
@@ -201,11 +237,11 @@ class TerminalCommandStarted(EventBase):  # type: ignore[misc]
     ] = None
     command_truncated: Annotated[
         bool,
-        Field(description="Whether command was truncated by pformat for this event"),
+        Field(description="Whether command was cut for this event"),
     ] = False
     stdin_truncated: Annotated[
         bool,
-        Field(description="Whether stdin was truncated by pformat for this event"),
+        Field(description="Whether stdin was cut for this event"),
     ] = False
 
 
@@ -321,12 +357,12 @@ class ActivityShellTools(Skill):
         ] = None,
     ) -> ShellResult:
         command_id = str(uuid4())
-        bounded_command = pformat(command, max_string=_MAX_EVENT_TEXT_CHARS, unquote_strings=True)
+        bounded_command = _event_text(command)
         command_truncated = len(command) > _MAX_EVENT_TEXT_CHARS
         bounded_stdin: str | None = None
         stdin_truncated = False
         if stdin is not None:
-            bounded_stdin = pformat(stdin, max_string=_MAX_EVENT_TEXT_CHARS, unquote_strings=True)
+            bounded_stdin = _event_text(stdin)
             stdin_truncated = len(stdin) > _MAX_EVENT_TEXT_CHARS
         self._emit(
             TerminalCommandStarted(
@@ -351,20 +387,13 @@ class ActivityShellTools(Skill):
             )
             raise
 
-        stdout_buffer = TruncatingStringIO(limit=_MAX_COMMAND_OUTPUT_CHARS)
-        stderr_buffer = TruncatingStringIO(limit=_MAX_COMMAND_OUTPUT_CHARS)
+        stdout_buffer = _output_stream()
+        stderr_buffer = _output_stream()
         stdout_buffer.write(result.stdout)
         stderr_buffer.write(result.stderr)
-        output_truncated = stdout_buffer.was_truncated or stderr_buffer.was_truncated
-        if result.stdout or result.stderr:
-            self._emit(
-                TerminalCommandOutput(
-                    command_id=command_id,
-                    stdout=stdout_buffer.getvalue(),
-                    stderr=stderr_buffer.getvalue(),
-                    truncated=output_truncated,
-                )
-            )
+        output, output_truncated = _command_output(command_id, stdout_buffer, stderr_buffer)
+        if output is not None:
+            self._emit(output)
         self._emit(
             TerminalCommandFinished(
                 command_id=command_id,
@@ -391,7 +420,7 @@ class ActivityShellTools(Skill):
         ] = None,
     ) -> AsyncIterator[StreamEvent | StreamDone]:
         command_id = str(uuid4())
-        bounded_command = pformat(command, max_string=_MAX_EVENT_TEXT_CHARS, unquote_strings=True)
+        bounded_command = _event_text(command)
         command_truncated = len(command) > _MAX_EVENT_TEXT_CHARS
         self._emit(
             TerminalCommandStarted(
@@ -399,31 +428,22 @@ class ActivityShellTools(Skill):
                 command=bounded_command,
                 working_directory=self._command_directory(cwd),
                 command_truncated=command_truncated,
-                stdin=(
-                    pformat(stdin, max_string=_MAX_EVENT_TEXT_CHARS, unquote_strings=True)
-                    if stdin is not None
-                    else None
-                ),
+                stdin=(_event_text(stdin) if stdin is not None else None),
                 stdin_truncated=stdin is not None and len(stdin) > _MAX_EVENT_TEXT_CHARS,
             )
         )
         finished = False
-        stdout_buffer = TruncatingStringIO(limit=_MAX_COMMAND_OUTPUT_CHARS)
-        stderr_buffer = TruncatingStringIO(limit=_MAX_COMMAND_OUTPUT_CHARS)
+        stdout_buffer = _output_stream()
+        stderr_buffer = _output_stream()
         stream = self._shell.run_stream(command, stdin=stdin, timeout=timeout, cwd=cwd)
         try:
             async for item in stream:
                 if isinstance(item, StreamDone):
-                    output_truncated = stdout_buffer.was_truncated or stderr_buffer.was_truncated
-                    if stdout_buffer.chars_written or stderr_buffer.chars_written:
-                        self._emit(
-                            TerminalCommandOutput(
-                                command_id=command_id,
-                                stdout=stdout_buffer.getvalue(),
-                                stderr=stderr_buffer.getvalue(),
-                                truncated=output_truncated,
-                            )
-                        )
+                    output, output_truncated = _command_output(
+                        command_id, stdout_buffer, stderr_buffer
+                    )
+                    if output is not None:
+                        self._emit(output)
                     self._emit(
                         TerminalCommandFinished(
                             command_id=command_id,
@@ -439,16 +459,9 @@ class ActivityShellTools(Skill):
                 yield item
         except BaseException as error:
             if not finished:
-                output_truncated = stdout_buffer.was_truncated or stderr_buffer.was_truncated
-                if stdout_buffer.chars_written or stderr_buffer.chars_written:
-                    self._emit(
-                        TerminalCommandOutput(
-                            command_id=command_id,
-                            stdout=stdout_buffer.getvalue(),
-                            stderr=stderr_buffer.getvalue(),
-                            truncated=output_truncated,
-                        )
-                    )
+                output, output_truncated = _command_output(command_id, stdout_buffer, stderr_buffer)
+                if output is not None:
+                    self._emit(output)
                 cancelled = isinstance(error, asyncio.CancelledError)
                 self._emit(
                     TerminalCommandFinished(
@@ -526,12 +539,12 @@ class ActivityShellTools(Skill):
         end_line: int | None,
     ) -> FileWrite:
         """Emit the FileEdit event for a finished replace()."""
-        bounded_old = pformat(old_text, max_string=_MAX_EVENT_TEXT_CHARS, unquote_strings=True)
+        bounded_old = _event_text(old_text)
         old_truncated = len(old_text) > _MAX_EVENT_TEXT_CHARS
         # The edit may re-terminate the region, so report what it wrote rather
         # than what it was handed.
         written_text = result.new_text
-        bounded_new = pformat(written_text, max_string=_MAX_EVENT_TEXT_CHARS, unquote_strings=True)
+        bounded_new = _event_text(written_text)
         new_truncated = len(written_text) > _MAX_EVENT_TEXT_CHARS
         diff, diff_complete = await _edit_diff_off_loop(
             self._diff_path(resolved),
@@ -574,16 +587,8 @@ class ActivityShellTools(Skill):
                 old_content_complete = False
 
         result = await self._shell.write_file(path, content)
-        bounded_old = (
-            pformat(
-                old_diff_text,
-                max_string=_MAX_EVENT_TEXT_CHARS,
-                unquote_strings=True,
-            )
-            if old_diff_text is not None
-            else None
-        )
-        bounded_content = pformat(content, max_string=_MAX_EVENT_TEXT_CHARS, unquote_strings=True)
+        bounded_old = _event_text(old_diff_text) if old_diff_text is not None else None
+        bounded_content = _event_text(content)
         content_truncated = len(content) > _MAX_EVENT_TEXT_CHARS
         if existed and old_diff_text is None:
             diff, diff_complete = _omitted_diff(

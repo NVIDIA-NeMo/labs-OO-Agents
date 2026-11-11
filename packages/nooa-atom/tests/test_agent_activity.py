@@ -299,7 +299,8 @@ async def test_activity_payloads_are_bounded(tmp_path):
     assert (starts[0].stdin or "").startswith("str(len=50000,")
     assert starts[0].stdin_truncated is True
     assert sum(len(event.stdout) + len(event.stderr) for event in stream_outputs) <= 31_000
-    assert stream_outputs[0].stdout.startswith("<truncated-output>")
+    assert stream_outputs[0].stdout.startswith("y" * 15_000 + "\n[... ")
+    assert "chars omitted; full output not kept]\n" in stream_outputs[0].stdout
     assert stream_finished.output_truncated is True
     assert streamed[-1].kind == "done"
 
@@ -434,7 +435,7 @@ async def test_overwrite_reads_the_previous_content_boundedly(tmp_path):
     """The bound must be on the read, not only on what is emitted.
 
     The other activity tests assert on the emitted event, which is produced by
-    pformat/TruncatingStringIO *after* the read — so reverting to an unbounded
+    the snapshot renderers *after* the read — so reverting to an unbounded
     read_text() of a workspace-controlled file is invisible to them.
     """
     reads: list[int] = []
