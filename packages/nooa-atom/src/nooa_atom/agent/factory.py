@@ -81,8 +81,6 @@ def create_session_agent(options: SessionOptions, storage: StorageManager) -> In
             "skills_dirs": atom_options.skills_dirs,
             "summarization": atom_options.summarization,
             "libs_dir": workspace / ".nooa" / "skills",
-            # Applied in the constructor, before any skill attaches.
-            "reflection_bullets": atom_options.reflection.bullets,
         }
         if issubclass(agent_class, AtomAgent):
             # One turn method (handle): the session's turn_method selects the role.
@@ -111,12 +109,8 @@ def create_session_agent(options: SessionOptions, storage: StorageManager) -> In
     agent = agent_class(**kwargs)
 
     if atom_options is not None and isinstance(agent, AtomAgentBase):
-        # Read by the Session (nooa_atom.session.reflection), not by the agent.
+        # Read by the Session (nooa_atom.session.reflection) and /reflection.
         agent._reflection_settings = atom_options.reflection
-        if "reflection_bullets" not in kwargs:
-            # A narrow __init__ did not take the overrides: apply them now,
-            # before the workspace's skills attach.
-            agent.reflection.apply(atom_options.reflection.bullets)
         for warning in configure_session_skills(agent, atom_options):
             logger.warning("Session in %s: %s", options.workspace, warning)
         # The /skills and /mcp controls belong to the agent, not to one host:

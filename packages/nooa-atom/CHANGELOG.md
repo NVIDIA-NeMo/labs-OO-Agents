@@ -12,13 +12,16 @@ based on [Keep a Changelog](https://keepachangelog.com/).
   or the context half full; at least 5 turns apart), the session's
   `Reflection` puts a housekeeping message on the agent's `system_messages`
   queue as an ordinary item. The agent handles it in a normal turn. The
-  message is made of bullets registered by name: core registers rename the
-  session, compact history, delete stale names, tidy todos and tidy `self.v`.
-  The agent owns the bullets from construction as `agent.reflection` (a
-  `ReflectionBullets` registry): `atom.reflection.bullets` adds, replaces or
-  removes them before any skill attaches, and skills add and remove their own
-  in `attach()`/`detach()`. A session that does not reflect keeps the
-  registry and never posts. On by default for
+  message is made of blocks registered by name on `agent.reflection` (a
+  `ReflectionBlocks` registry): each is text or a snippet, a Python
+  expression evaluated like a dynamic context block's right before the
+  message is posted. Core registers rename the session, compact history,
+  delete stale names, tidy todos and tidy `self.v`, switched on; skills
+  `register()` their own in `attach()` and `unregister()` them in
+  `detach()`, off until the user switches them on. `/reflection on|off`
+  turns it on or off, `/reflection config [BLOCK on|off]` lists and switches
+  blocks, saved in `atom.reflection.enabled` and `atom.reflection.blocks`.
+  The triggers keep their defaults and are set in YAML. On by default for
   ACP hosts, off elsewhere (benchmarks, Gym, `nooa-bench`); configure it in
   `atom.reflection`, or override with `SessionOptions(reflection=...)`. Child
   sessions never reflect.

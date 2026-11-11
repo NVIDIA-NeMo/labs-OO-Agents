@@ -12,19 +12,22 @@ from nooa_atom.agent.factory import create_session_agent
 from nooa_atom.session.items import ItemAdmittedUpdate, TurnStartedUpdate
 from nooa_atom.session.options import SessionOptions
 from nooa_atom.session.reflection import (
-    DEFAULT_BULLETS,
+    CORE_BLOCKS,
     FOOTER,
     HEADER,
     Reflection,
-    ReflectionBullets,
+    ReflectionBlock,
+    ReflectionBlocks,
     ReflectionSettings,
     context_fraction,
     has_queue,
     reflection_enabled,
+    runtime_evaluator,
 )
 from nooa_atom.session.registry import SessionRegistry
 from nooa_atom.session.store import SessionStore
 from nooa_atom.workspace.options import AtomOptions
+from nooa_atom.workspace.settings import settings_path
 
 
 class Clock:
@@ -38,13 +41,24 @@ class Clock:
 # ---- the hysteresis -----------------------------------------------------------
 
 
+async def no_snippets(expr):
+    raise AssertionError(f"unexpected snippet {expr!r}")
+
+
 def _reflection(clock=None, posted=None, context=lambda: None, **values):
     return Reflection(
         ReflectionSettings(**values),
-        bullets=ReflectionBullets(),
+        blocks=ReflectionBlocks(),
         post=(posted if posted is not None else []).append,
+        evaluate=no_snippets,
         context=context,
         clock=clock or Clock(),
+    )
+
+
+def core_message():
+    return "\n".join(
+        [HEADER, *(f"{i}. {text}" for i, text in enumerate(CORE_BLOCKS.values(), 1)), FOOTER]
     )
 
 
@@ -57,12 +71,12 @@ def test_defaults():
     assert settings.enabled is None
     assert (settings.every_turns, settings.every_minutes) == (20, 60.0)
     assert (settings.min_gap_turns, settings.context_fraction) == (5, 0.5)
-    assert settings.bullets == {}
+    assert settings.blocks == {}
     assert AtomOptions().reflection == settings
     with pytest.raises(ValueError, match="extra"):
         ReflectionSettings(children=True)  # root only: there is no setting for children
     with pytest.raises(ValueError, match="extra"):
-        ReflectionSettings(instructions="Tidy.")  # replaced by bullets
+        ReflectionSettings(bullets={})  # replaced by blocks
 
 
 def test_turns_trigger():
@@ -96,83 +110,174 @@ def test_a_trigger_set_to_none_is_off():
     assert _ends(reflection, 50, fraction=1.0) == [None] * 50
 
 
-def test_posting_resets_the_counters_and_the_gap_applies_again():
+async def test_a_due_reflection_is_pending_until_sent_and_the_gap_applies_again():
     clock, posted, fraction = Clock(), [], [None]
     reflection = _reflection(
         clock, posted, context=lambda: fraction[0], every_turns=3, min_gap_turns=2
     )
     assert [reflection.turn_ended("done") for _ in range(3)] == [None, None, "turns"]
-    assert posted == [reflection.bullets.message()]
+    assert reflection.pending == "turns" and posted == []
     assert (reflection.turns, reflection.minutes()) == (0, 0)
+    assert await reflection.send() == core_message()
+    assert posted == [core_message()] and reflection.pending is None
+    assert await reflection.send() is None  # nothing pending: nothing sent
     clock.now = 3600 * 5  # long overdue by time, and the context is full
     fraction[0] = 0.9
     assert reflection.turn_ended("done") is None  # 1 turn < min gap 2
     assert reflection.turn_ended("done") == "minutes"
+    await reflection.send()
     assert len(posted) == 2 and reflection.turns == 0
 
 
-def test_the_context_callable_feeds_the_context_trigger():
+async def test_the_context_callable_feeds_the_context_trigger():
     posted = []
     reflection = _reflection(posted=posted, context=lambda: 0.8, min_gap_turns=1)
     assert reflection.turn_ended("waiting") == "context"
+    await reflection.send()
     assert len(posted) == 1
 
 
-def test_a_failing_check_is_logged_and_ignored(caplog):
+def test_while_off_nothing_counts():
+    on = [False]
+    reflection = _reflection(every_turns=2, min_gap_turns=0)
+    reflection.enabled = lambda: on[0]
+    assert [reflection.turn_ended("done") for _ in range(5)] == [None] * 5
+    assert reflection.turns == 0 and reflection.pending is None
+    on[0] = True  # /reflection on: a fresh window
+    assert [reflection.turn_ended("done") for _ in range(2)] == [None, "turns"]
+
+
+async def test_a_failing_send_is_logged_and_ignored(caplog):
     def boom(text):
         raise RuntimeError("boom")
 
     reflection = Reflection(
         ReflectionSettings(every_turns=1, min_gap_turns=0),
-        bullets=ReflectionBullets(),
+        blocks=ReflectionBlocks(),
         post=boom,
+        evaluate=no_snippets,
         clock=Clock(),
     )
+    assert reflection.turn_ended("done") == "turns"
     with caplog.at_level(logging.ERROR, logger="nooa_atom.session.reflection"):
-        assert reflection.turn_ended("done") is None
-    assert "reflection check failed" in caplog.text
+        assert await reflection.send() is None
+    assert "Sending the reflection failed" in caplog.text and reflection.pending is None
 
 
-# ---- the message and its bullets ---------------------------------------------------
+# ---- the message and its blocks ---------------------------------------------------
 
 
-def test_the_default_message():
-    message = ReflectionBullets().message()
+async def test_the_default_message():
+    message = await ReflectionBlocks().message(ReflectionSettings(), no_snippets)
     lines = message.split("\n")
-    assert lines[0] == HEADER
+    assert message == core_message()
     assert HEADER.startswith("[reflection] A housekeeping message from the session")
     assert "not a request from the user" in HEADER
     assert lines[-1] == FOOTER == "Then finish with a short Done."
-    assert list(DEFAULT_BULLETS) == ["rename", "compact", "variables", "todo", "vars"]
-    assert lines[1:-1] == [f"{i}. {text}" for i, text in enumerate(DEFAULT_BULLETS.values(), 1)]
+    assert list(CORE_BLOCKS) == ["rename", "compact", "variables", "todo", "vars"]
     for step in ("rename_session", "self.events.collapse", "del", "self.v", "self.todo"):
         assert step in message
-    assert "add new ones for work you've taken on" in DEFAULT_BULLETS["todo"]
-    assert "relaunch" not in message and "Cancel jobs" not in message  # old bullet 5 is gone
+    for block in ("context_usage", "python_cell_state", "todo_status"):
+        assert block in message  # points at what the agent already sees
+    assert "add new ones for work you've taken on" in CORE_BLOCKS["todo"]
 
 
-def test_add_and_remove_bullets_by_name():
-    reflection = ReflectionBullets()
-    reflection.add("memory", "Save what you learned.")
-    reflection.remove("compact")
-    reflection.remove("unknown")  # ignored
-    reflection.add("rename", "Rename it.")  # replaces in place
-    assert list(reflection.bullets) == ["rename", "variables", "todo", "vars", "memory"]
-    lines = reflection.message().split("\n")
-    assert lines[1] == "1. Rename it."
-    assert lines[-2] == "5. Save what you learned."
-    reflection.remove("memory")
-    assert "memory" not in reflection.bullets
+def test_register_text_and_snippet_blocks_by_name():
+    blocks = ReflectionBlocks()
+    blocks.register("memory", text=" Save what you learned. ")
+    blocks.register("notes", expr="self.notes.reflection()")
+    blocks.register("rename", text="Rename it.")  # replaces in place
+    blocks.unregister("compact")
+    blocks.unregister("unknown")  # ignored
+    assert list(blocks.blocks) == ["rename", "variables", "todo", "vars", "memory", "notes"]
+    assert blocks.blocks["memory"] == ReflectionBlock("memory", text="Save what you learned.")
+    assert blocks.blocks["notes"] == ReflectionBlock("notes", expr="self.notes.reflection()")
+    assert blocks.blocks["rename"].text == "Rename it."
+    blocks.register("awaited", expr="await self.notes.reflection()")  # as a context block's expr
+    blocks.unregister("notes")
+    assert "notes" not in blocks.blocks
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {},  # neither
+        {"text": "a", "expr": "b"},  # both
+        {"text": "  "},
+        {"expr": "self.notes.reflection("},  # does not parse
+        {"expr": "x = 1"},  # a statement, not an expression
+    ],
+)
+def test_a_block_needs_text_or_a_valid_snippet(kwargs):
+    blocks = ReflectionBlocks()
     with pytest.raises(ValueError):
-        reflection.add("empty", "  ")
+        blocks.register("bad", **kwargs)
+    assert "bad" not in blocks.blocks
 
 
-def test_settings_add_replace_and_remove_bullets():
-    settings = ReflectionSettings(bullets={"todo": "Tidy todos.", "vars": "", "notes": "Notes."})
-    reflection = ReflectionBullets(settings.bullets)
-    assert list(reflection.bullets) == ["rename", "compact", "variables", "todo", "notes"]
-    assert reflection.bullets["todo"] == "Tidy todos."
-    assert reflection.message().split("\n")[-2] == "5. Notes."
+async def test_snippets_are_evaluated_when_the_message_is_built():
+    values = {
+        "a()": "FROM A",
+        "none()": None,
+        "empty()": "",
+        "boom()": ZeroDivisionError("division by zero"),
+        "items()": [1, 2],
+    }
+    seen = []
+
+    async def evaluate(expr):
+        seen.append(expr)
+        value = values[expr]
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    blocks = ReflectionBlocks()
+    for name in list(CORE_BLOCKS):
+        blocks.unregister(name)
+    blocks.register("first", text="Fixed text.")
+    for expr in values:
+        blocks.register(expr, expr=expr)
+    settings = ReflectionSettings(blocks=dict.fromkeys(["first", *values], True))
+    assert seen == []  # registering evaluates nothing
+    message = await blocks.message(settings, evaluate)
+    assert seen == list(values)
+    assert message.split("\n")[1:-1] == [
+        "1. Fixed text.",
+        "2. FROM A",  # None and "" leave their blocks out
+        "3. ZeroDivisionError: division by zero",  # inline, as a context block shows it
+        "4. [1, 2]",
+    ]
+
+
+async def test_only_switched_on_blocks_are_sent():
+    blocks = ReflectionBlocks()
+    blocks.register("memory", text="SAVE MEMORY")
+    blocks.register("notes", text="NOTES")
+    # Core blocks start on, others off; the settings switch either way.
+    settings = ReflectionSettings(blocks={"rename": False, "memory": True})
+    assert [settings.block_on(name) for name in blocks.blocks] == [
+        False,
+        True,
+        True,
+        True,
+        True,
+        True,
+        False,
+    ]
+    message = await blocks.message(settings, no_snippets)
+    assert "rename_session" not in message and "NOTES" not in message
+    assert message.split("\n")[-2] == "5. SAVE MEMORY"
+    nothing = ReflectionSettings(blocks=dict.fromkeys(blocks.blocks, False))
+    assert await blocks.message(nothing, no_snippets) is None
+
+
+async def test_nothing_to_say_posts_nothing():
+    posted = []
+    reflection = _reflection(posted=posted, every_turns=1, min_gap_turns=0)
+    reflection.settings.blocks = dict.fromkeys(CORE_BLOCKS, False)
+    assert reflection.turn_ended("done") == "turns"
+    assert await reflection.send() is None and posted == []
 
 
 @pytest.mark.parametrize(
@@ -213,11 +318,11 @@ def test_workspace_settings_configure_it(tmp_path):
     (tmp_path / ".nooa").mkdir()
     (tmp_path / ".nooa" / "settings.yaml").write_text(
         "atom:\n  reflection:\n    enabled: true\n    every_turns: 3\n"
-        "    bullets:\n      rename: ''\n      notes: Tidy notes.\n"
+        "    blocks:\n      rename: false\n      notes: true\n"
     )
     settings = AtomOptions.load(tmp_path).reflection
     assert (settings.enabled, settings.every_turns) == (True, 3)
-    assert settings.bullets == {"rename": "", "notes": "Tidy notes."}
+    assert settings.blocks == {"rename": False, "notes": True}
     assert settings.min_gap_turns == 5
 
 
@@ -282,20 +387,23 @@ def reflections(updates):
 
 async def test_a_due_reflection_lands_on_system_messages_and_runs_a_normal_turn(tmp_path):
     registry, root, llm, updates = await make_root(
-        tmp_path, [done("one"), done("two"), done("tidied"), done("three"), done("tidied again")]
+        tmp_path,
+        [done("one"), done("two"), done("tidied"), done("three"), done("tidied again")],
+        blocks={"skill": True},
     )
     try:
-        assert root._reflection.bullets is root._agent.reflection  # the agent's bullets
-        root._agent.reflection.add("skill", REFLECT)
+        assert root._reflection.blocks is root._agent.reflection  # the agent's blocks
+        assert root._agent._reflection_timer is root._reflection  # what /reflection reads
+        root._agent.reflection.register("skill", text=REFLECT)
+        root._agent.reflection.register("off", text="NOT SWITCHED ON")
         assert (await root.prompt("one")).explanation == "one"
         assert (await root.prompt("two")).explanation == "two"
         await idle(root)
         [admitted] = reflections(updates)
-        assert (admitted.channel, admitted.text) == (
-            "system_messages",
-            root._agent.reflection.message(),
-        )
-        assert admitted.text.split("\n")[-2] == f"6. {REFLECT}"  # the skill's bullet, last
+        assert admitted.channel == "system_messages"
+        assert admitted.text.startswith(core_message().rsplit("\n", 1)[0])
+        assert admitted.text.split("\n")[-2] == f"6. {REFLECT}"  # the skill's block, last
+        assert "NOT SWITCHED ON" not in admitted.text
         assert turn_channels(updates) == [["user_messages"], ["user_messages"], ["system_messages"]]
         assert REFLECT in str(llm.calls[2].messages)
         assert root._reflection.turns == 1  # reset when sent; the reflection turn counted
@@ -328,8 +436,8 @@ async def test_headless_sessions_do_not_reflect_unless_told(tmp_path):
         tmp_path, [done("a"), done("b"), done("c")], host="headless"
     )
     try:
-        assert root._reflection is None
-        assert isinstance(root._agent.reflection, ReflectionBullets)  # kept, never posted
+        assert not root._reflection.enabled()
+        assert isinstance(root._agent.reflection, ReflectionBlocks)  # kept, never posted
         for text in "abc":
             await root.prompt(text)
         await idle(root)
@@ -351,7 +459,7 @@ async def test_headless_sessions_do_not_reflect_unless_told(tmp_path):
 async def test_explicit_false_turns_it_off_in_an_acp_host(tmp_path):
     registry, root, _llm, _updates = await make_root(tmp_path, [], reflection=False)
     try:
-        assert root._reflection is None
+        assert not root._reflection.enabled()
     finally:
         await registry.close_all()
 
@@ -372,7 +480,7 @@ async def test_only_the_root_session_reflects(tmp_path):
         )
         assert child.parent_id == root.id
         assert child._reflection is None
-        assert isinstance(child._agent.reflection, ReflectionBullets)
+        assert isinstance(child._agent.reflection, ReflectionBlocks)
     finally:
         await registry.close_all()
 
@@ -407,37 +515,46 @@ async def test_a_failing_check_is_logged_and_the_turn_is_unaffected(tmp_path, ca
         await registry.close_all()
 
 
-_SKILL_AGENT = """\
+_SKILL_AGENT = """\\
 from nooa.skill import Skill
 from nooa_atom.agent.agent import AtomAgent
 
 
 class Memory(Skill):
-    '''Registers a reflection bullet while it is attached.'''
+    '''Registers reflection blocks while it is attached.'''
 
     def attach(self, agent):
         super().attach(agent)
-        agent.reflection.add("memory", "SAVE MEMORY")
+        agent.reflection.register("memory", text="SAVE MEMORY")
+        agent.reflection.register("memo", expr="self.memory_note()")
+        agent.reflection.register("broken", expr="1 / 0")
+        agent.reflection.register("silent", expr="None")
 
     def detach(self):
-        self._agent.reflection.remove("memory")
+        for name in ("memory", "memo", "broken", "silent"):
+            self._agent.reflection.unregister(name)
         super().detach()
 
 
 class SkillAgent(AtomAgent):
     def __init__(self, llm=None, storage=None, **kwargs):
         super().__init__(llm=llm, storage=storage, **kwargs)
+        self.notes = 0
         self.skills.register("test.memory", Memory())
+
+    def memory_note(self):
+        self.notes += 1
+        return f"NOTE {self.notes} FROM {type(self).__name__}"
 """
 
 
-async def test_a_skill_attached_at_construction_adds_a_bullet_on_top_of_the_settings(tmp_path):
+async def test_a_skill_registers_blocks_and_their_snippets_run_when_sent(tmp_path):
     (tmp_path / "skill_agent.py").write_text(_SKILL_AGENT)
     (tmp_path / ".nooa").mkdir()
     (tmp_path / ".nooa" / "settings.yaml").write_text(
         "atom:\n  active_skills: [test.memory]\n"
         "  reflection:\n    every_turns: 2\n    min_gap_turns: 0\n"
-        "    bullets:\n      rename: ''\n      todo: Tidy todos.\n      notes: Tidy notes.\n"
+        "    blocks: {rename: false, memory: true, memo: true, broken: true, silent: true}\n"
     )
     llm = CellLLM([done("one"), done("two"), done("tidied")])
     registry = SessionRegistry(
@@ -453,22 +570,86 @@ async def test_a_skill_attached_at_construction_adds_a_bullet_on_top_of_the_sett
     agent = root._agent
     try:
         assert "test.memory" in agent.skills.activated()
-        # Defaults, then the settings' overrides, then the skill's bullet.
-        assert list(agent.reflection.bullets) == [
-            "compact",
-            "variables",
-            "todo",
-            "vars",
-            "notes",
+        assert list(agent.reflection.blocks) == [
+            *CORE_BLOCKS,
             "memory",
+            "memo",
+            "broken",
+            "silent",
         ]
-        assert agent.reflection.bullets["todo"] == "Tidy todos."
+        assert agent.notes == 0  # registered, not evaluated
         assert (await root.prompt("one")).explanation == "one"
         assert (await root.prompt("two")).explanation == "two"
         await idle(root)
         [admitted] = reflections(updates)
-        assert admitted.text == agent.reflection.message()
-        assert admitted.text.split("\n")[-2] == "6. SAVE MEMORY"
+        assert agent.notes == 1  # evaluated once, right before posting
+        assert admitted.text.split("\n")[1:-1] == [
+            f"1. {CORE_BLOCKS['compact']}",
+            f"2. {CORE_BLOCKS['variables']}",
+            f"3. {CORE_BLOCKS['todo']}",
+            f"4. {CORE_BLOCKS['vars']}",
+            "5. SAVE MEMORY",
+            "6. NOTE 1 FROM SkillAgent",  # the context blocks' evaluator: self is the agent
+            "7. ZeroDivisionError: division by zero",
+        ]  # "silent" returned None: left out
+        assert "NOTE 1 FROM SkillAgent" in str(llm.calls[2].messages)  # the agent got the text
     finally:
         await registry.close_all()
-    assert "memory" not in agent.reflection.bullets  # closing detached the skill
+    assert "memo" not in agent.reflection.blocks  # closing detached the skill
+
+
+async def test_the_runtime_evaluator_is_the_context_block_one(tmp_path):
+    registry, root, _llm, _updates = await make_root(tmp_path, [])
+    try:
+        evaluate = runtime_evaluator(root._agent)
+        assert await evaluate("self.cwd") == root._agent.cwd
+        with pytest.raises(ZeroDivisionError):
+            await evaluate("1 / 0")
+    finally:
+        await registry.close_all()
+
+
+# ---- /reflection ---------------------------------------------------------------
+
+
+async def test_reflection_command_on_off_config_and_persistence(tmp_path):
+    registry, root, _llm, _updates = await make_root(tmp_path, [], host="headless")
+
+    async def command(args=""):
+        return (await root.invoke_command("reflection", args)).text
+
+    path = settings_path("project", workspace=tmp_path)
+    try:
+        agent = root._agent
+        agent.reflection.register("memory", expr="self.memory_note()")
+        assert "reflection" in {c.name for c in root.commands()}
+        status = await command()
+        assert status.startswith(
+            "Reflection: off\nBlocks on: rename, compact, variables, todo, vars"
+        )
+        assert "Triggers: every 2 turns, every 60 minutes, at 50% context" in status
+        assert not root._reflection.enabled()
+
+        assert "Reflection is on" in await command("on")
+        assert root._reflection.enabled()  # at once, in this session
+        assert (await command()).splitlines()[0] == "Reflection: on"
+        assert "Next: in 2 turns, or in 60 minutes, or at 50% context" in await command()
+
+        config = await command("config")
+        assert "[on ] rename" in config and "[off] memory" in config
+        assert "snippet: self.memory_note()" in config
+        assert "Reflection block memory is on" in await command("config memory on")
+        assert "Reflection block rename is off" in await command("config rename off")
+        assert "[on ] memory" in await command("config")
+        assert "No reflection block 'nope'" in await command("config nope on")
+        assert "Usage: /reflection" in await command("sideways")
+
+        saved = AtomOptions.load(tmp_path).reflection
+        assert (saved.enabled, saved.blocks) == (True, {"memory": True, "rename": False})
+        assert "every_turns" not in path.read_text()  # triggers stay YAML-only
+
+        assert "Reflection is off" in await command("off")
+        assert not root._reflection.enabled()
+        assert AtomOptions.load(tmp_path).reflection.enabled is False
+    finally:
+        await registry.close_all()

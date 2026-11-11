@@ -358,41 +358,65 @@ the two are independent.
 
 Only root sessions reflect, each through one `Reflection`
 (`nooa_atom.session.reflection`) that the session creates: the mechanics.
-The bullets the message is made of belong to the agent (below). When a root
-session's turn ends with `Done` or `Waiting`, it counts the turn. A reflection
-is due when at least `min_gap_turns` turns passed since the last one, and
-`every_turns` turns or `every_minutes` minutes passed or the context window is
-at least `context_fraction` full (the share the agent's `context_usage` line
-shows). The message then goes on the agent's `system_messages` queue as an
-ordinary item (source `reflection`) and the counters reset; the agent handles
-it in a normal, visible turn. The counters are in memory: they start when the
-session is created or loaded. An agent without a `system_messages` queue does
-not reflect, and an error in the check is logged and ignored.
+The blocks the message is made of belong to the agent (below). When a root
+session's turn ends with `Done` or `Waiting` and reflection is on, it counts
+the turn. A reflection is due when at least `min_gap_turns` turns passed since
+the last one, and `every_turns` turns or `every_minutes` minutes passed or the
+context window is at least `context_fraction` full (the share the agent's
+`context_usage` line shows). The counters then reset, and right after the turn
+settles the session builds the message and puts it on the agent's
+`system_messages` queue as an ordinary item (source `reflection`); the agent
+handles it in a normal, visible turn. The counters are in memory: they start
+when the session is created or loaded, and stay at zero while reflection is
+off. An agent without a `system_messages` queue does not reflect, and an error
+in the check is logged and ignored.
 
-The message is a fixed header line, then the registered bullets numbered in
+The message is a fixed header line, then the switched-on blocks numbered in
 registration order, then "Then finish with a short Done." Every Atom agent
-owns its bullets from construction as `agent.reflection`, a
-`ReflectionBullets` registry with `add(name, text)`, `remove(name)`,
-`bullets` and `message()`. It starts with `rename`, `compact`, `variables`,
-`todo` and `vars` (`nooa_atom.session.reflection.DEFAULT_BULLETS`), then
-`create_session_agent()` applies `atom.reflection.bullets` on top, before
-any skill attaches. A skill can then add its own bullet in `attach()` and
-remove it in `detach()`:
+owns its blocks from construction as `agent.reflection`, a `ReflectionBlocks`
+registry. A block is a name and either text or a snippet: a Python expression,
+like a dynamic context block's `expr`, checked to parse when it is registered.
+Core registers `rename`, `compact`, `variables`, `todo` and `vars`
+(`nooa_atom.session.reflection.CORE_BLOCKS`); they point at the context blocks
+the agent already sees (`context_usage`, `python_cell_state`, `todo_status`).
+A skill registers its own in `attach()` and unregisters them in `detach()`.
+Skills add blocks only, never triggers:
 
 ```python
 def attach(self, agent):
-    agent.reflection.add("memory", "Save what you learned to memory.")
+    super().attach(agent)
+    agent.reflection.register("memory", text="Save what you learned to memory.")
+    agent.reflection.register("notes", expr="self.notes.reflection()")
 
 def detach(self):
-    self._agent.reflection.remove("memory")
+    self._agent.reflection.unregister("memory")
+    self._agent.reflection.unregister("notes")
+    super().detach()
 ```
 
-When a reflection is due, the session posts `agent.reflection.message()`. A
-session that does not reflect (a child, a host where it is off) still has
-`agent.reflection`; it just never posts.
+Snippets are evaluated when the message is built, with the evaluator dynamic
+context blocks use (`agent.runtime.evaluate_expression`: `self` is the agent,
+`await` works). The agent gets plain text: a string as it is, another value
+pretty-printed, an exception inline as `ExceptionType: message`; `None` or
+`""` leaves the block out of that message, and a message with no blocks is
+not sent.
+
+Core blocks start switched on; every other block starts off until the user
+switches it on. The user controls it with `/reflection`:
+
+- `/reflection`: on or off, the blocks that are on, the triggers, and when
+  the next reflection is due;
+- `/reflection on` / `/reflection off`: set `atom.reflection.enabled`;
+- `/reflection config`: every registered block with its state;
+- `/reflection config BLOCK on|off`: switch one block
+  (`atom.reflection.blocks.BLOCK`).
+
+Changes apply to the running session at once and are saved in the
+workspace's `.nooa/settings.yaml`. Over ACP the list is plain text: the
+server's only form today is the verbosity picker.
 
 Settings, in `atom.reflection` (defaults shown; a partial section overrides
-only the keys it sets):
+only the keys it sets; the triggers are YAML-only):
 
 ```yaml
 atom:
@@ -402,7 +426,7 @@ atom:
     every_minutes: 60
     min_gap_turns: 5
     context_fraction: 0.5
-    bullets: {}            # name: text adds or replaces a bullet; name: "" removes it
+    blocks: {}             # name: true/false; unnamed core blocks are on, others off
 ```
 
 The default follows `SessionOptions.host`: only `"acp"` (Pool, Zed and other

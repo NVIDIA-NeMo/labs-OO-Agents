@@ -80,11 +80,12 @@ from nooa_atom.session.reflection import (
     REFLECTION_CHANNEL,
     REFLECTION_SOURCE,
     Reflection,
-    ReflectionBullets,
+    ReflectionBlocks,
     ReflectionSettings,
     context_fraction,
     has_queue,
     reflection_enabled,
+    runtime_evaluator,
 )
 from nooa_atom.session.store import SessionHandle
 
@@ -293,30 +294,31 @@ class Session:
         if isinstance(gate, _ReflectionGate):
             gate.start_session()  # creation/load anchor, not time spent constructing the agent
         self.handle = handle
-        # Reflection (nooa_atom.session.reflection): one per root session that
-        # reflects and whose agent has a system_messages queue, else None. It
-        # posts the bullets the agent owns (``agent.reflection``); an agent
-        # without them gets the defaults plus the settings' overrides.
+        # Reflection (nooa_atom.session.reflection): one per root session whose
+        # agent has a system_messages queue, else None. It reads the agent's
+        # settings at every turn, so /reflection on|off counts at once, and
+        # sends the blocks the agent owns (``agent.reflection``), their
+        # snippets evaluated as dynamic context blocks are.
         settings = getattr(agent, "_reflection_settings", None)
         self._reflection: Reflection | None = None
-        if reflection_enabled(
-            settings,
-            override=options.reflection,
-            host=options.host,
-            is_root=self.parent_id is None,
-        ) and has_queue(agent, REFLECTION_CHANNEL):
-            settings = settings or ReflectionSettings()
-            bullets = getattr(agent, "reflection", None)
-            if not isinstance(bullets, ReflectionBullets):
-                bullets = ReflectionBullets(settings.bullets)
+        if self.parent_id is None and has_queue(agent, REFLECTION_CHANNEL):
+            blocks = getattr(agent, "reflection", None)
+            if not isinstance(blocks, ReflectionBlocks):
+                blocks = ReflectionBlocks()
             self._reflection = Reflection(
-                settings,
-                bullets=bullets,
+                settings or ReflectionSettings(),
+                blocks=blocks,
                 post=lambda text: self._admit(
                     text, channel=REFLECTION_CHANNEL, source=REFLECTION_SOURCE
                 ),
+                evaluate=runtime_evaluator(agent),
+                enabled=lambda: reflection_enabled(
+                    settings, override=options.reflection, host=options.host, is_root=True
+                ),
                 context=lambda: context_fraction(agent),
             )
+            if hasattr(agent, "_reflection_timer"):
+                agent._reflection_timer = self._reflection
         # A deep copy: the Session owns its usage totals and pushes them to
         # the handle, whose metadata other threads read under its lock.
         self.info: SessionInfo = info.model_copy(
@@ -429,11 +431,15 @@ class Session:
             prepare=self._prepare_turn,
             commit=self._commit_turn,
             after_settle=self._after_turn_settled
-            if self.options.experimental_done_reflection
+            if self.options.experimental_done_reflection or self._reflection is not None
             else None,
         )
 
     async def _after_turn_settled(self, event: TurnSettled) -> None:
+        # A reflection _settle found due: evaluated and posted here, between
+        # turns, because its snippets may await.
+        if self._reflection is not None and not self.closing:
+            await self._reflection.send()
         # _settle set this only after successful delivery and durable settlement.
         # Clear before awaiting; failure/timeout cannot recursively retry cleanup.
         pending = self._maintenance_ready
@@ -879,7 +885,7 @@ class Session:
         await self._apply_pending_model()
 
     def _check_reflection(self, kind: str) -> None:
-        """After a turn: let the reflection count it and post its message when due."""
+        """After a turn: let the reflection count it; a due one is sent after settlement."""
         if self._reflection is not None and not (self._closing or self._closed):
             self._reflection.turn_ended(kind)
 
