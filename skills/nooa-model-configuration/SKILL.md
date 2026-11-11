@@ -65,6 +65,8 @@ same scope and evidence rules as the headless skill.
   use it to bypass LiteLLM; older runtimes ignore it. Preserve explicit transport
   choices when editing. Check the installed runtime before describing probes as
   direct-transport validation: inspect the actual request path used by the checks.
+- `adapter:` is optional. `litellm` is the default and the only accepted value;
+  today only `load_llm` reads it.
 - Explicit user choices win; endpoint-reported limits take precedence over
   public catalogue suggestions. Do not add input/output limits to invent a total
   context window. Record unknown context capacity as unverified.

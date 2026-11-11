@@ -781,6 +781,8 @@ Add `--show-diagnostics` in the wizard to see full details.
 - Editing a saved model runs fresh checks. Keep diagnostic reports separately
   if you need a record of earlier results.
 - To load a config file from another path, add it to `NEMO_OO_LLM_CONFIG`.
+- An entry may set `adapter:`. It is optional; `litellm` is the default and the
+  only accepted value, and today only `load_llm` reads it.
 
 ## Choose media inputs during setup
 
