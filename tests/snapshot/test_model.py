@@ -142,6 +142,8 @@ def test_text_derives_complete_and_omitted() -> None:
         {"head": "abc", "length": 2, "unit": "chars", "reason": "max_length"},  # keeps > length
         {"head": "ab", "tail": "z", "length": 3, "unit": "chars"},  # complete with a tail
         {"head": "ab", "length": 9, "unit": "chars"},  # complete with omitted units
+        {"head": b"a", "length": 3, "unit": "octets", "reason": "max_length"},  # unknown unit
+        {"head": "a", "length": 1, "unit": "lines"},  # unknown unit
     ],
 )
 def test_an_inconsistent_text_cannot_be_built(fields: dict[str, Any]) -> None:

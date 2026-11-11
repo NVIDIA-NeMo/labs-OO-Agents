@@ -141,9 +141,10 @@ class Text:
     by this package ends and starts on UTF-8 code point boundaries.
     Renderers decode bytes (UTF-8, with replacement) only when they print.
 
-    Raises ``ValueError`` when the parts are inconsistent: a part of the
-    wrong type for ``unit``, more kept units than ``length``, or a complete
-    text with a ``tail`` or omitted units.
+    Raises ``ValueError`` when ``unit`` is neither ``"chars"`` nor
+    ``"bytes"``, or when the parts are inconsistent: a part of the wrong type
+    for ``unit``, more kept units than ``length``, or a complete text with a
+    ``tail`` or omitted units.
 
     >>> t = Text(head="ab", tail="yz", length=10, unit="chars", reason="max_length")
     >>> t.omitted, t.complete
@@ -158,6 +159,8 @@ class Text:
     full: Spill | None = None
 
     def __post_init__(self) -> None:
+        if self.unit != "chars" and self.unit != "bytes":
+            raise ValueError(f'unit must be "chars" or "bytes", not {self.unit!r}')
         kept = str if self.unit == "chars" else bytes
         if not self.tail:
             object.__setattr__(self, "tail", self.head[:0])
