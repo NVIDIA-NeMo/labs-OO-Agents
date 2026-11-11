@@ -58,11 +58,26 @@ class _CaptureFunction:
       kept whole, else a bytes ``Text`` of the original bytes;
     - exact ``list`` / ``tuple``: a ``Sequence``; exact ``dict``: a
       ``Mapping``;
+    - the standard types, read natively (``_std``): ``set`` / ``frozenset``
+      (a ``Sequence``, head only), ``Counter`` / ``OrderedDict`` /
+      ``defaultdict`` and other container subclasses that override no
+      iteration method (a ``Sequence`` / ``Mapping`` / ``Text`` named after
+      their class), and ``Object`` nodes with a ``python.*`` ``kind`` for
+      ``range``, ``complex``, ``datetime`` / ``date`` / ``time`` /
+      ``timedelta``, ``Decimal``, ``UUID``, ``pathlib`` paths, ``re.Pattern``,
+      exceptions (their ``args``), enum members, functions, methods,
+      built-in functions, modules and classes; a namedtuple is an
+      ``Object`` of its fields;
     - a Pydantic v2 model or a dataclass: an ``Object`` of its visible
       declared fields;
     - an instance of a class registered with ``capture.register``: what its
       shape describes;
-    - anything else, a non-finite ``float`` included: ``Unavailable("opaque")``.
+    - a plain object (no ``__getattribute__`` in its MRO, the standard
+      ``__dict__`` slot or ``__slots__``): an ``Object`` of its public
+      instance attributes;
+    - anything else, a non-finite ``float`` included: ``Unavailable("opaque")``
+      named ``module.QualName``, or with ``Limits(fallback="repr")`` its
+      bounded ``repr``.
 
     Guarantees:
 
@@ -75,6 +90,9 @@ class _CaptureFunction:
       include_extras=True)`` for a dataclass with string annotations; a
       success is cached by class identity, a failure is retried by the next
       ``capture``) and the accessors of registered shapes.
+    - agentdoc's ``spec(max_string=..., max_length=...)`` on a field bounds
+      that field's subtree; ``spec(hide_empty=True)`` (on the class or the
+      field) leaves out a ``None`` or empty field.
     - Hidden fields are never read: agentdoc ``hidden`` /
       ``spec(hidden=True)`` markers and ``spec()`` overrides, Pydantic
       ``exclude=True`` / ``repr=False``, dataclass ``repr=False``,

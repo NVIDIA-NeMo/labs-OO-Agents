@@ -11,7 +11,6 @@ import pytest
 from nooa.snapshot import (
     Object,
     Scalar,
-    Unavailable,
     _shapes,
     array_like,
     capture,
@@ -44,7 +43,7 @@ def test_register_decorator_form_and_unregister() -> None:
         assert render_python(capture(Gadget())) == "'gadget'"
     finally:
         capture.unregister(Gadget)
-    assert capture(Gadget()) == Unavailable("opaque", "Gadget")
+    assert capture(Gadget()) == Object("Gadget", ())  # a plain object again
     capture.unregister(Gadget)  # absent: a no-op
 
 
@@ -68,7 +67,7 @@ def test_register_needs_a_shape() -> None:
             capture.register(Widget, not_a_shape)
     with pytest.raises(TypeError):
         capture.register(Widget)  # type: ignore[call-arg]
-    assert capture(Widget()) == Unavailable("opaque", "Widget")  # nothing was registered
+    assert capture(Widget()) == Object("Widget", ())  # nothing was registered: a plain object
 
 
 @pytest.mark.parametrize(
@@ -98,7 +97,7 @@ def test_register_matches_the_class_not_its_name(registered) -> None:
 
     assert render_python(capture(Inner())) == "'inner'"
     # Another class with the same module and qualname is not registered.
-    assert capture(_named("Inner", qualname="Outer.Inner")()) == Unavailable("opaque", "Inner")
+    assert capture(_named("Inner", qualname="Outer.Inner")()) == Object("Inner", ())
 
 
 def test_subclass_matches_and_unregistered_stays_opaque(registered) -> None:
@@ -107,7 +106,7 @@ def test_subclass_matches_and_unregistered_stays_opaque(registered) -> None:
     registered(Base, _text("base"))
 
     assert render_python(capture(Child())) == "'base'"
-    assert capture(_named("Other")()) == Unavailable("opaque", "Other")
+    assert capture(_named("Other")()) == Object("Other", ())  # unregistered: a plain object
 
 
 def test_nearest_registered_class_in_the_mro_wins(registered) -> None:
@@ -178,19 +177,17 @@ def test_metaclass_hooks_never_run_during_dispatch(registered) -> None:
     _Recording.calls.clear()
 
     # Before any registration, the hostile classes are looked up and miss.
-    assert render_python(capture([Hostile(), Unregistered()])) == (
-        "[<opaque: Hostile>, <opaque: Unregistered>]"
-    )
+    assert render_python(capture([Hostile(), Unregistered()])) == "[Hostile(), Unregistered()]"
     registered(int, _text(0))  # a non-empty registry to compare against
-    assert render_python(capture([Unregistered()])) == "[<opaque: Unregistered>]"
+    assert render_python(capture([Unregistered()])) == "[Unregistered()]"
     registered(Hostile, _text("matched"))
 
     for _ in range(2):
         assert render_python(capture(Hostile())) == "'matched'"
         assert render_python(capture(Sub())) == "'matched'"
-        assert render_python(capture([Unregistered()])) == "[<opaque: Unregistered>]"
+        assert render_python(capture([Unregistered()])) == "[Unregistered()]"
     capture.unregister(Hostile)
-    assert render_python(capture(Sub())) == "<opaque: Sub>"
+    assert render_python(capture(Sub())) == "Sub()"
     assert _Recording.calls == []
 
 

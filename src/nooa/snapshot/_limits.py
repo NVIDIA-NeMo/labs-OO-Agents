@@ -43,7 +43,17 @@ class Limits:
       A container the budget cuts keeps its head within the budget less
       ``tail_share`` of it, and its tail from the end with the rest; one
       that fits is kept whole. A shape read only forwards (``array_like``,
-      ``mapping_like``) keeps a head only. From 0 to 1.
+      ``mapping_like``, a ``set``) keeps a head only. From 0 to 1.
+    - ``fallback`` (default ``"opaque"``): what a value capture cannot read
+      becomes. ``"opaque"``: ``Unavailable("opaque")``, rendered
+      ``<opaque: module.QualName>`` (traces: no code runs). ``"repr"``: the
+      caller asks capture to run ``repr(value)``, and the result is kept as
+      an ``Object`` with ``kind="python.repr"`` and one ``repr`` field, a
+      ``Text`` cut like any string (``max_string``, ``tail_share``, the
+      budget). This runs the value's own code, unbounded in time and memory
+      before the cut: it is for model-facing previews, where a bounded view
+      beats ``<opaque: T>`` (which a model answers with ``print(x)``). A
+      ``repr`` that raises gives the opaque node.
 
     ``Limits`` does not check itself: ``capture`` and ``capture_fields``
     raise ``ValueError`` for values outside these ranges.
@@ -59,6 +69,7 @@ class Limits:
     max_items: int | None = None
     max_string: int | None = None
     tail_share: float = 0.0
+    fallback: Literal["opaque", "repr"] = "opaque"
 
 
 def _split(limits: Limits, kept: int) -> tuple[int, int]:
@@ -84,6 +95,8 @@ def _validate_limits(limits: Limits) -> None:
         raise ValueError("snapshot max_string must be non-negative or None")
     if not 0.0 <= limits.tail_share <= 1.0:
         raise ValueError("snapshot tail_share must be between 0 and 1")
+    if limits.fallback != "opaque" and limits.fallback != "repr":
+        raise ValueError('snapshot fallback must be "opaque" or "repr"')
 
 
 class _State:

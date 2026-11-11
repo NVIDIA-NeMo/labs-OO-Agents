@@ -217,8 +217,8 @@ def test_type_classification_does_not_call_metaclass_hooks() -> None:
 
     parsed, paths, _text = _parsed(Unknown())
 
-    assert parsed == "<opaque: Unknown>"
-    assert paths == ("",)
+    assert parsed == {}  # a plain object with no attributes, read without the metaclass
+    assert paths == ()
     assert calls == []
 
 

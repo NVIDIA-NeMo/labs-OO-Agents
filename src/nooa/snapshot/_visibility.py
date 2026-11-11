@@ -53,6 +53,7 @@ from nooa.snapshot._raw import (
 )
 
 _FIELD_METADATA_ATTR = "_agentdoc_fields_docs"
+_CLASS_METADATA_ATTR = "_agentdoc_docs"
 _DATACLASS_FIELD_TYPE = cast(Any, dataclasses)._FIELD
 _ANNOTATED_ALIAS = type(typing.Annotated[int, "x"])
 """The type of an ``Annotated[...]`` hint, compared by identity (``type(hint) is ...``)."""
@@ -61,30 +62,52 @@ _ANNOTATED_ALIAS = type(typing.Annotated[int, "x"])
 # --- visibility (agentdoc ``hidden`` / ``spec(hidden=...)``) ------------------------
 
 
-def _hidden_flag(raw: Any, state: _State) -> bool | None:
-    """The ``hidden`` entry of raw metadata keywords: a ``bool``, ``None`` when absent.
+_SPEC_KEYS = ("hidden", "max_string", "max_length", "hide_empty")
+"""The ``spec()`` keywords capture honours: visibility, per-field limits, ``hide_empty``."""
+
+
+def _spec_flags(raw: Any, state: _State) -> dict[str, Any]:
+    """The ``spec()`` keywords capture honours, from raw metadata keywords.
 
     ``_FailClosed`` unless ``raw`` is an exact ``dict`` with exact ``str``
     keys, each charged one node, whose ``hidden`` is absent or a ``bool``.
+    ``hide_empty`` must be a ``bool`` and ``max_string`` / ``max_length``
+    ``None`` or a non-negative exact ``int``; another value is ignored.
     """
     if type(raw) is not dict:
         raise _FailClosed
-    found = None
+    found: dict[str, Any] = {}
     for name, value in dict.items(raw):
         if not state.take_node() or type(name) is not str:
             raise _FailClosed
         if name == "hidden":
-            found = value
-    if found is not None and type(found) is not bool:
-        raise _FailClosed
+            if value is not None and type(value) is not bool:
+                raise _FailClosed
+            if value is not None:
+                found[name] = value
+        elif name == "hide_empty":
+            if type(value) is bool:
+                found[name] = value
+        elif name == "max_string" or name == "max_length":
+            if value is None or (type(value) is int and value >= 0):
+                found[name] = value
     return found
+
+
+def _hidden_flag(raw: Any, state: _State) -> bool | None:
+    """The ``hidden`` entry of raw metadata keywords: a ``bool``, ``None`` when absent."""
+    return _spec_flags(raw, state).get("hidden")
 
 
 def _visibility_overrides(
     obj_dict: dict[str, Any], mro: tuple[type[Any], ...], state: _State
-) -> dict[str, bool]:
-    """Read complete raw hidden overrides before exposing fields (``_FailClosed``)."""
-    class_overrides: dict[str, bool] = {}
+) -> dict[str, dict[str, Any]]:
+    """Read the complete raw ``spec(cls, name, ...)`` overrides before exposing fields (``_FailClosed``).
+
+    Field name -> the ``spec()`` keywords capture honours (``_SPEC_KEYS``);
+    the instance's own overrides win, then the nearest class's.
+    """
+    overrides: dict[str, dict[str, Any]] = {}
 
     def read_map(raw: Any, *, overwrite: bool) -> None:
         if raw is None:
@@ -94,57 +117,70 @@ def _visibility_overrides(
         for field_name, metadata in dict.items(raw):
             if not state.take_node() or type(field_name) is not str:
                 raise _FailClosed
-            flag = _hidden_flag(metadata, state)
-            if flag is not None and (overwrite or field_name not in class_overrides):
-                class_overrides[field_name] = flag
+            flags = _spec_flags(metadata, state)
+            merged = overrides.setdefault(field_name, {})
+            for key, value in flags.items():
+                if overwrite or key not in merged:
+                    merged[key] = value
 
     for base in mro:
         if not state.take_node():
             raise _FailClosed
         read_map(dict.get(_namespace(base, state), _FIELD_METADATA_ATTR), overwrite=False)
     read_map(dict.get(obj_dict, _FIELD_METADATA_ATTR), overwrite=True)
-    return class_overrides
+    return overrides
 
 
-def _metadata_hidden(metadata: Any, state: _State) -> bool:
-    """Whether recognized marker metadata hides a field (``_FailClosed``: malformed)."""
+def _metadata_spec(metadata: Any, state: _State) -> dict[str, Any]:
+    """The ``spec()`` keywords of recognized marker metadata (``_FailClosed``: malformed).
+
+    ``hidden`` is the agentdoc marker; a ``SpecAnnotation`` gives its
+    keywords (a later one wins).
+    """
     if type(metadata) is not list and type(metadata) is not tuple:
         raise _FailClosed
-    annotated_hidden = False
+    found: dict[str, Any] = {}
     for item in metadata:
         if not state.take_node():
             raise _FailClosed
         if item is hidden:
-            annotated_hidden = True
+            found["hidden"] = True
         elif type(item) is SpecAnnotation:
             try:
                 kwargs = object.__getattribute__(item, "kwargs")
             except Exception:
                 raise _FailClosed from None
-            if _hidden_flag(kwargs, state):
-                annotated_hidden = True
+            flags = _spec_flags(kwargs, state)
+            if flags.get("hidden") is False and found.get("hidden"):
+                flags.pop("hidden")  # an earlier ``hidden`` marker is not undone
+            found.update(flags)
         # Foreign constraint metadata is deliberately ignored.
-    return annotated_hidden
+    return found
 
 
-def _field_hidden(field_info: FieldInfo, state: _State) -> bool:
-    """Read only recognized resolved visibility metadata of a Pydantic field."""
+def _metadata_hidden(metadata: Any, state: _State) -> bool:
+    """Whether recognized marker metadata hides a field (``_FailClosed``: malformed)."""
+    return bool(_metadata_spec(metadata, state).get("hidden"))
+
+
+def _field_spec(field_info: FieldInfo, state: _State) -> dict[str, Any]:
+    """Read only the recognized resolved ``spec()`` metadata of a Pydantic field."""
     try:
         metadata = object.__getattribute__(field_info, "metadata")
     except Exception:
         raise _FailClosed from None
     if type(metadata) is not list:
         raise _FailClosed
-    return _metadata_hidden(metadata, state)
+    return _metadata_spec(metadata, state)
 
 
-def _annotation_hidden(
+def _annotation_spec(
     name: str,
     annotation: Any,
     hints: Callable[[], dict[str, tuple[Any, ...]]],
     state: _State,
-) -> bool:
-    """Whether a dataclass field's annotation hides it (``_FailClosed``: unreadable).
+) -> dict[str, Any]:
+    """The ``spec()`` keywords a field's annotation carries (``_FailClosed``: unreadable).
 
     A string annotation reads the class's resolved hint metadata, ``hints()``.
     Otherwise only an exact ``typing`` ``Annotated`` alias (type identity) is
@@ -154,14 +190,14 @@ def _annotation_hidden(
         metadata = dict.get(hints(), name)
         if metadata is None:
             raise _FailClosed
-        return _metadata_hidden(metadata, state)
+        return _metadata_spec(metadata, state)
     if type(annotation) is not _ANNOTATED_ALIAS:
-        return False
+        return {}
     try:
         metadata = object.__getattribute__(annotation, "__metadata__")
     except Exception:
         raise _FailClosed from None
-    return _metadata_hidden(metadata, state)
+    return _metadata_spec(metadata, state)
 
 
 _HINTS: dict[int, tuple[weakref.ref[type[Any]], dict[str, tuple[Any, ...]]]] = {}
@@ -316,6 +352,66 @@ _Fields = typing.Iterator[tuple[str, Any] | _Omitted]
 """A field reader's (name, value) fields and ``_Omitted`` notes; it raises ``_FailClosed``."""
 
 
+class _Scoped:
+    """A field value with its own ``spec(max_string=..., max_length=...)`` limits.
+
+    A field reader yields ``(name, _Scoped(value, limits))``; ``_walk`` builds
+    ``value`` under ``limits`` (``max_string`` / ``max_items`` replaced) for
+    its whole subtree. Private: only the readers here make it.
+    """
+
+    __slots__ = ("limits", "value")
+
+    def __init__(self, value: Any, limits: dict[str, int | None]) -> None:
+        self.value = value
+        self.limits = limits
+
+
+def _is_empty(value: Any) -> bool:
+    """``None`` or an empty exact ``str``, ``bytes``, ``list``, ``tuple``, ``dict``, ``set``, ``frozenset``."""
+    if value is None:
+        return True
+    value_type = type(value)
+    if value_type in _EMPTY_TYPES:  # exact built-in types: their own ``__len__``
+        return len(value) == 0
+    return False
+
+
+_EMPTY_TYPES = (str, bytes, list, tuple, dict, set, frozenset)
+
+
+def _class_hide_empty(mro: tuple[type[Any], ...], state: _State) -> bool:
+    """A class-level ``@spec(hide_empty=True)``: the nearest ``_agentdoc_docs`` in the MRO that sets it."""
+    for base in mro:
+        if base is object:
+            continue
+        raw = dict.get(_namespace(base, state), _CLASS_METADATA_ATTR)
+        if raw is None:
+            continue
+        flag = _spec_flags(raw, state).get("hide_empty")
+        if flag is not None:
+            return flag
+    return False
+
+
+def _field_entry(
+    name: str, value: Any, flags: dict[str, Any], hide_empty: bool
+) -> tuple[str, Any] | None:
+    """A visible field as its reader yields it: ``None`` when ``hide_empty`` leaves it out."""
+    if flags.get("hide_empty", hide_empty) and _is_empty(value):
+        return None
+    limits = {key: flags[key] for key in ("max_string", "max_length") if key in flags}
+    return (name, _Scoped(value, limits) if limits else value)
+
+
+def _merged(base: dict[str, Any], override: dict[str, Any] | None) -> dict[str, Any]:
+    if not override:
+        return base
+    merged = dict(base)
+    merged.update(override)
+    return merged
+
+
 def _pydantic_entries(
     value: BaseModel, mro: tuple[type[Any], ...], carrier: type[Any], state: _State
 ) -> _Fields:
@@ -329,6 +425,7 @@ def _pydantic_entries(
         overrides = _visibility_overrides(storage, mro, state)
     finally:  # the field map is read (and charged) even when the overrides fail closed
         fields = _pydantic_fields(mro, state)
+    hide_empty = _class_hide_empty(mro, state)
     for name, field_info in dict.items(fields):
         if not state.take_node():
             yield _Omitted("max_nodes")
@@ -346,9 +443,12 @@ def _pydantic_entries(
             raise _FailClosed
         if excluded is True or represented is False:
             continue
-        if overrides.get(name, _field_hidden(field_info, state)) or name not in storage:
+        flags = _merged(_field_spec(field_info, state), overrides.get(name))
+        if flags.get("hidden") or name not in storage:
             continue
-        yield name, dict.__getitem__(storage, name)
+        entry = _field_entry(name, dict.__getitem__(storage, name), flags, hide_empty)
+        if entry is not None:
+            yield entry
 
 
 def _dataclass_entries(
@@ -360,6 +460,7 @@ def _dataclass_entries(
     if type(fields) is not dict:
         raise _FailClosed
     overrides = _visibility_overrides(storage, mro, state)
+    hide_empty = _class_hide_empty(mro, state)
     # The class's resolved hints, read once, at the first string annotation.
     hints = functools.cache(functools.partial(_resolved_metadata, carrier, state))
     for name, field in dict.items(fields):
@@ -381,16 +482,139 @@ def _dataclass_entries(
         if represented is False or name.startswith("_"):
             continue
         try:
-            annotation_hidden = _annotation_hidden(name, annotation, hints, state)
+            annotation_flags = _annotation_spec(name, annotation, hints, state)
         except _FailClosed:
             # This field can't be shown safely: omit it, the object is incomplete.
             yield _Omitted("unreadable")
             continue
-        if overrides.get(name, annotation_hidden):
+        flags = _merged(annotation_flags, overrides.get(name))
+        if flags.get("hidden"):
             continue
         if name in storage:
-            yield name, dict.__getitem__(storage, name)
+            field_value = dict.__getitem__(storage, name)
+        else:
+            field_value = _slot_value(name, mro, value, state)
+            if field_value is _NO_SLOT:
+                continue
+        entry = _field_entry(name, field_value, flags, hide_empty)
+        if entry is not None:
+            yield entry
+
+
+# --- plain objects ----------------------------------------------------------------
+
+
+def _slot_names(mro: tuple[type[Any], ...], state: _State) -> list[str]:
+    """The ``__slots__`` names the classes of ``mro`` declare, in MRO order (``_FailClosed``)."""
+    names: list[str] = []
+    for base in mro:
+        if base is object:
             continue
-        slot = _slot_value(name, mro, value, state)
-        if slot is not _NO_SLOT:
-            yield name, slot
+        declared = dict.get(_namespace(base, state), "__slots__")
+        if declared is None:
+            continue
+        if type(declared) is str:
+            declared = (declared,)
+        if type(declared) is not tuple and type(declared) is not list:
+            raise _FailClosed
+        for name in declared:
+            if type(name) is not str:
+                raise _FailClosed
+            if name not in names:
+                names.append(name)
+    return names
+
+
+def _plain_annotation_spec(name: str, mro: tuple[type[Any], ...], state: _State) -> dict[str, Any]:
+    """The ``spec()`` keywords of the nearest class annotation of ``name`` in the MRO."""
+    for base in mro:
+        if base is object:
+            continue
+        annotations = dict.get(_namespace(base, state), "__annotations__")
+        if type(annotations) is not dict:
+            continue
+        for key, annotation in dict.items(annotations):
+            if type(key) is str and key == name:
+                hints = functools.partial(_resolved_metadata, base, state)
+                return _annotation_spec(name, annotation, hints, state)
+    return {}
+
+
+def _is_class(value: Any, state: _State) -> bool:
+    """Whether ``value`` is a class: ``type`` in its type's raw MRO (``isinstance`` reads ``__class__``)."""
+    cls = type(value)
+    try:
+        mro = _TYPE_MRO.__get__(cls, type(cls))
+    except Exception:
+        return False
+    return type(mro) is tuple and any(base is type for base in mro)
+
+
+def _plain_entries(
+    value: Any, mro: tuple[type[Any], ...], state: _State
+) -> list[tuple[str, Any] | _Omitted] | None:
+    """The public instance attributes of a plain object, read raw; ``None``: not a plain object.
+
+    A plain object is an instance of a class whose MRO defines no
+    ``__getattribute__`` (no proxies), with the standard ``__dict__`` slot
+    (a native getset descriptor) or declared ``__slots__``. Its fields are
+    the instance ``__dict__`` entries, in insertion order, then the filled
+    slots: never a ``_private`` name, a callable other than a class, or a
+    field agentdoc hides (``hidden`` / ``spec(hidden=True)`` in a class
+    annotation or a ``spec(cls, name, hidden=True)`` override). The other
+    ``spec()`` keywords apply as for dataclasses (``hide_empty``,
+    ``max_string``, ``max_length``). An object
+    with no field left whose class defines ``__repr__`` is not a plain
+    object either: its repr is all it shows.
+    """
+    try:
+        has_dict = False
+        defines_repr = False
+        for base in mro:
+            if base is object:
+                continue
+            namespace = _namespace(base, state)
+            if "__getattribute__" in namespace:
+                return None
+            if "__dict__" in namespace:
+                has_dict = True
+            if "__repr__" in namespace:
+                defines_repr = True
+        slots = _slot_names(mro, state)
+        if not has_dict and not [name for name in slots if name not in ("__dict__", "__weakref__")]:
+            return None
+        storage = _copy_storage(_instance_storage(value, mro, state), state) if has_dict else {}
+        overrides = _visibility_overrides(storage, mro, state)
+        hide_empty = _class_hide_empty(mro, state)
+        found: list[tuple[str, Any]] = list(dict.items(storage))
+        for name in slots:
+            if name in storage or name in ("__dict__", "__weakref__"):
+                continue
+            slot = _slot_value(name, mro, value, state)
+            if slot is not _NO_SLOT:
+                found.append((name, slot))
+        entries: list[tuple[str, Any] | _Omitted] = []
+        for name, field_value in found:
+            if not state.take_node():
+                entries.append(_Omitted("max_nodes"))
+                break
+            if name.startswith("_"):
+                continue
+            if callable(field_value) and not _is_class(field_value, state):
+                continue
+            try:
+                annotation_flags = _plain_annotation_spec(name, mro, state)
+            except _FailClosed:
+                entries.append(_Omitted("unreadable"))
+                continue
+            flags = _merged(annotation_flags, overrides.get(name))
+            if flags.get("hidden"):
+                continue
+            entry = _field_entry(name, field_value, flags, hide_empty)
+            if entry is not None:
+                entries.append(entry)
+    except _FailClosed:
+        return None
+    if not entries and defines_repr:
+        return None
+    return entries

@@ -15,6 +15,7 @@ the only extension code that runs, and only here (see ``_raw``).
 
 from __future__ import annotations
 
+import dataclasses
 import functools
 import math
 import operator
@@ -69,7 +70,16 @@ from nooa.snapshot._shapes import (
     _Shape,
     _TextLike,
 )
-from nooa.snapshot._visibility import _Fields, _Omitted
+from nooa.snapshot._std import (
+    _CollectionView,
+    _exact_view,
+    _mro_view,
+    _ObjectView,
+    _qualified_type_name,
+    _TextView,
+    _View,
+)
+from nooa.snapshot._visibility import _Fields, _Omitted, _plain_entries, _Scoped
 
 
 class _Built(NamedTuple):
@@ -211,13 +221,29 @@ def _build_integer(value: int, max_size: int) -> _Built:
     return _Built(Scalar(value), len(encoded))
 
 
-def _opaque(value: Any, max_size: int) -> _Built:
-    """An ``Unavailable("opaque")`` node for an unsupported value, sized as its bounded label.
+def _opaque(value: Any, max_size: int, depth: int, path: str, state: _State) -> _Built:
+    """What a value capture cannot read becomes, as ``Limits.fallback`` asks.
 
-    ``builtin``: the value's type is an exact built-in one (a non-finite
-    ``float``), so its typed #342 fallback applies when the label does not fit.
+    ``"opaque"``: an ``Unavailable("opaque")`` node sized as its bounded
+    label, named ``module.QualName`` (``builtins`` left out). ``builtin``:
+    the value's type is an exact built-in one (a non-finite ``float``), so
+    its typed #342 fallback applies when the label does not fit.
+    ``"repr"``: ``repr(value)``, kept as an ``Object`` (``kind="python.repr"``)
+    whose ``repr`` field is cut like a string; a raising ``repr`` gives the
+    opaque node.
     """
-    name = _bounded_type_name(value, opaque_name_budget(max_size))
+    if state.limits.fallback == "repr" and max_size >= 2:
+        try:
+            text = repr(value)
+        except Exception:
+            text = None
+        if type(text) is str:
+            type_name = _bounded_type_name(value, _MAX_TYPE_NAME)
+            entries = iter([("repr", text)])
+            return _object_fields(
+                type_name, entries, max_size, depth, path, state, "python.repr", capped=False
+            )
+    name = _qualified_type_name(value, state)[: opaque_name_budget(max_size)]
     fallback_type = _builtin_name(value)
     _label, size = opaque_json(name, fallback_type, max_size)
     return _Built(Unavailable("opaque", name, builtin=bool(fallback_type)), size)
@@ -476,7 +502,24 @@ def _build_slot(child: Any, max_size: int, depth: int, path: str, state: _State)
         if child.exhausted is not None and not state.take_node():
             return child.exhausted(max_size)
         return child.build(max_size, depth, path)
+    if type(child) is _Scoped:
+        return _build_scoped(child, max_size, depth, path, state)
     return _build(child, max_size, depth, path, state)
+
+
+def _build_scoped(child: _Scoped, max_size: int, depth: int, path: str, state: _State) -> _Built:
+    """A field with its own ``spec(max_string=..., max_length=...)``: built under them, subtree-wide."""
+    outer = state.limits
+    changes: dict[str, Any] = {}
+    if "max_string" in child.limits:
+        changes["max_string"] = child.limits["max_string"]
+    if "max_length" in child.limits:
+        changes["max_items"] = child.limits["max_length"]
+    state.limits = dataclasses.replace(outer, **changes)
+    try:
+        return _build(child.value, max_size, depth, path, state)
+    finally:
+        state.limits = outer
 
 
 def _closed(type_name: str) -> _Built:
@@ -558,6 +601,8 @@ def _min_size(child: Any) -> int:
     """
     if type(child) is _Part:
         return 2
+    if type(child) is _Scoped:
+        child = child.value
     name = _builtin_name(child)
     return len(dumps(fallback_candidates(name)[0])) if name else 2
 
@@ -1074,7 +1119,7 @@ def _build(value: Any, max_size: int, depth: int, path: str, state: _State) -> _
         return _build_integer(value, max_size)
     if value_type is float:
         if not math.isfinite(value):
-            return _opaque(value, max_size)
+            return _opaque(value, max_size, depth, path, state)
         encoded = dumps(value)
         if len(encoded) <= max_size:
             return _Built(Scalar(value), len(encoded))
@@ -1089,11 +1134,86 @@ def _build(value: Any, max_size: int, depth: int, path: str, state: _State) -> _
             return _build_dict(value, max_size, depth, path, state)
         return _build_sequence(value, max_size, depth, path, state)
 
-    mro = _safe_mro(value, state)
-    found = None if mro is None else _find_shape(mro, state)
-    if mro is None or found is None:
-        return _opaque(value, max_size)
     if max_size < 2:
         return _fallback(value, "max_length", max_size)
-    carrier, shape = found
-    return _build_shape(shape, value, mro, carrier, max_size, depth, path, state)
+    view = _exact_view(value, state)
+    if view is not None:
+        return _build_view(view, value, max_size, depth, path, state)
+    mro = _safe_mro(value, state)
+    if mro is None:
+        return _opaque(value, max_size, depth, path, state)
+    found = _find_shape(mro, state)
+    if found is not None:
+        carrier, shape = found
+        return _build_shape(shape, value, mro, carrier, max_size, depth, path, state)
+    view = _mro_view(value, mro, state)
+    if view is not None:
+        return _build_view(view, value, max_size, depth, path, state)
+    entries = _plain_entries(value, mro, state)
+    if entries is not None:
+        type_name = _bounded_type_name(value, _MAX_TYPE_NAME)
+        return _enter(
+            value,
+            "object",
+            Object(type_name, (), "max_depth"),
+            depth,
+            path,
+            state,
+            lambda: _object_fields(type_name, iter(entries), max_size, depth, path, state),
+        )
+    return _opaque(value, max_size, depth, path, state)
+
+
+def _build_view(
+    view: _View, value: Any, max_size: int, depth: int, path: str, state: _State
+) -> _Built:
+    """Build a standard type's view (``_std``) with the usual builders."""
+    match view:
+        case _TextView():
+            return _cut_text(view.length, view.read, "chars", max_size, state.limits)
+        case _CollectionView():
+            collection = view
+            has_tail = collection.backward is not None
+            head_n, tail_n = _plan(collection.length, state.limits, has_tail=has_tail)
+            node_type = Mapping if collection.keyed else Sequence
+            return _enter(
+                value,
+                "mapping" if collection.keyed else "sequence",
+                node_type(collection.type_name, collection.length, (), "max_depth"),
+                depth,
+                path,
+                state,
+                lambda: _container(
+                    collection.forward(),
+                    collection.length,
+                    collection.type_name,
+                    collection.keyed,
+                    max_size,
+                    depth,
+                    path,
+                    state,
+                    head_n,
+                    tail_n,
+                    collection.backward,
+                ),
+            )
+        case _ObjectView():
+            record = view
+            capped = record.kind is None  # a namedtuple's fields are its items
+
+            def build() -> _Built:
+                return _object_fields(
+                    record.type_name,
+                    iter(record.entries),
+                    max_size,
+                    depth,
+                    path,
+                    state,
+                    record.kind,
+                    capped=capped,
+                )
+
+            if not record.enter:
+                return build()
+            empty = Object(record.type_name, (), "max_depth", record.kind)
+            return _enter(value, "object", empty, depth, path, state, build)

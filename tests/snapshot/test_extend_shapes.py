@@ -71,7 +71,7 @@ def test_array_like_without_fields_is_a_sequence(registered) -> None:
     registered(Bag, array_like(lambda v: 3, lambda v: ["a", 1, None]))
 
     assert capture(Bag()) == Sequence("Bag", 3, (_text("a"), Scalar(1), Scalar(None)))
-    assert render_python(capture(Bag())) == "['a', 1, None]"
+    assert render_python(capture(Bag())) == "Bag(['a', 1, None])"
     assert render_json(capture(Bag()), max_chars=100) == '["a", 1, null]'
 
 
@@ -164,7 +164,7 @@ def test_mapping_like_nodes_and_bounded_pulls(registered) -> None:
     registered(_Counted, MAPPING)
     small = capture(_Counted(2))
     assert small == Mapping("_Counted", 2, (("k0", Scalar(0)), ("k1", Scalar(1))))
-    assert render_python(small) == "{'k0': 0, 'k1': 1}"
+    assert render_python(small) == "_Counted({'k0': 0, 'k1': 1})"
 
     value = _Counted(10**9)
     cut = capture(value, Limits(max_items=3))
