@@ -379,7 +379,7 @@ class TestRenderContextNoMutation:
 
         # Original block must be unchanged
         assert block.content == original_content
-        assert block.metadata.truncated is False
+        assert block.metadata.evicted is False
 
     def test_event_block_truncation_preserves_original(self):
         """Truncating message blocks must not modify the original ResolvedBlock."""
@@ -399,7 +399,7 @@ class TestRenderContextNoMutation:
 
         # Original block must be unchanged
         assert block.content == original_content
-        assert block.metadata.truncated is False
+        assert block.metadata.evicted is False
 
     def test_render_twice_produces_same_result(self):
         """Calling render_context() twice must produce identical results (no state leakage)."""

@@ -479,7 +479,7 @@ async def test_default_view_partitions_and_evicts_manager_blocks():
     assert tail.role == Role.USER
     assert tail.metadata is not None
     assert tail.metadata.static is False
-    assert tail.metadata.truncated is True
+    assert tail.metadata.evicted is True
 
 
 async def test_default_skill_shorthand_keeps_legacy_trailing_order():
@@ -703,7 +703,7 @@ def test_budget_counts_replacement_notice_and_ignores_boundary():
     assert result[1] == CacheBoundary()
     assert result[0].content.startswith("EVICTED:")
     assert result[0].content in counted
-    assert result[0].metadata.truncated is True
+    assert result[0].metadata.evicted is True
     assert block.metadata is None
 
 
@@ -721,12 +721,12 @@ async def test_budget_evictions_are_counted_with_or_without_metadata(monkeypatch
         _context_token_counter=len,
     )
     items = apply_context_budget((block,), call=call, evictable=(block,))
-    assert items[0].metadata.truncated is True
+    assert items[0].metadata.evicted is True
     assert block.metadata is metadata
     if metadata is not None:
         assert items[0].metadata.expr == "source"
         assert items[0].metadata.user_block is True
-        assert not metadata.truncated
+        assert not metadata.evicted
 
     async def prepared(*args, **kwargs):
         return items

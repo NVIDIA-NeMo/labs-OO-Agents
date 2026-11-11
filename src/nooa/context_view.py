@@ -194,7 +194,7 @@ def apply_context_budget(
         replacement = f"EVICTED: over context budget (block_tokens={size:,})"
         update: dict[str, Any] = {"content": replacement}
         metadata = block.metadata if block.metadata is not None else BlockMetadata()
-        update["metadata"] = metadata.model_copy(update={"truncated": True})
+        update["metadata"] = metadata.model_copy(update={"evicted": True})
         result[index] = block.model_copy(update=update)
         total += counter(replacement) - size
     return tuple(result)

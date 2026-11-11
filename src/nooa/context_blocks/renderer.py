@@ -185,7 +185,7 @@ def render_context(
 
     # Stats — structural only. Token figures are NOT estimated here; the
     # runtime writes the provider-reported prompt_tokens back after the call.
-    # We record raw character sizes (post-eviction) so the provider total can
+    # We record raw character sizes (after the view's eviction) so the provider total can
     # later be attributed across context blocks vs. events by character share.
     stats = ContextWindowStats(
         context_blocks_count=len(context_blocks),
@@ -194,7 +194,7 @@ def render_context(
         context_blocks_chars=sum(len(b.content) for b in context_blocks),
         events_chars=sum(len(b.content) for b in event_blocks),
         model_context_window=model_context_window,
-        context_blocks_dropped=sum(block.metadata.truncated for block in context_blocks),
+        context_blocks_dropped=sum(block.metadata.evicted for block in context_blocks),
         events_dropped=0,
         reserved_output_tokens=reserved_output_tokens,
     )

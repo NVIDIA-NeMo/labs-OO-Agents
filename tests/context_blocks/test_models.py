@@ -113,7 +113,7 @@ class TestBlockMetadata:
         meta = BlockMetadata()
         assert meta.expr is None
         assert meta.tag is None
-        assert meta.truncated is False
+        assert meta.evicted is False
 
     def test_with_expr(self):
         """BlockMetadata with expr field."""
@@ -135,10 +135,10 @@ class TestBlockMetadata:
         from nooa.context_blocks.models import BlockMetadata
 
         meta = BlockMetadata(expr="test")
-        updated = meta.model_copy(update={"truncated": True})
-        assert updated.truncated is True
+        updated = meta.model_copy(update={"evicted": True})
+        assert updated.evicted is True
         assert updated.expr == "test"
-        assert meta.truncated is False  # original unchanged
+        assert meta.evicted is False  # original unchanged
 
 
 class TestResolvedBlock:
@@ -168,10 +168,10 @@ class TestResolvedBlock:
         block = ResolvedBlock(
             key="test",
             content="hello",
-            metadata=BlockMetadata(expr="self.value", truncated=False),
+            metadata=BlockMetadata(expr="self.value", evicted=False),
         )
         assert block.metadata.expr == "self.value"
-        assert block.metadata.truncated is False
+        assert block.metadata.evicted is False
 
     def test_metadata_default_is_independent(self):
         """Each ResolvedBlock gets its own default BlockMetadata instance."""
