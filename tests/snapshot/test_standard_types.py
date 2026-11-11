@@ -425,3 +425,60 @@ def test_repr_warning_thresholds_are_module_constants() -> None:
     from nooa.snapshot import _walk
 
     assert _walk.SLOW_REPR_SECONDS == 0.1 and _walk.LARGE_REPR_CHARS == 1_000_000
+
+
+class _Response:
+    def __init__(self) -> None:
+        self.status_code = 200
+        self.headers = {"a": "b"}
+
+    def __repr__(self) -> str:
+        return f"<Response [{self.status_code}]>"
+
+
+def test_own_repr_wins_in_previews_and_attributes_in_traces() -> None:
+    assert render_python(capture(_Response(), _PREFILL)) == "<Response [200]>"
+    assert render_python(capture(_Response())) == "_Response(status_code=200, headers={'a': 'b'})"
+
+
+def test_model_facing_precedence() -> None:
+    @dataclass
+    class Declared:  # a generated repr is not the class's own
+        x: int = 1
+
+        def __repr__(self) -> str:
+            return "custom"
+
+    class Point(collections.namedtuple("Point", "x y")):
+        def __repr__(self) -> str:
+            return "custom"
+
+    class Raising:
+        def __init__(self) -> None:
+            self.a = 1
+
+        def __repr__(self) -> str:
+            raise RuntimeError
+
+    class NoRepr:
+        def __init__(self) -> None:
+            self.a = 1
+
+    # declared structure beats an own __repr__; so do the standard types
+    assert render_python(capture(Declared(), _PREFILL)) == "Declared(x=1)"
+    assert render_python(capture(Point(1, 2), _PREFILL)) == "Point(x=1, y=2)"
+    # an own __repr__ that raises falls back to the public attributes
+    assert render_python(capture(Raising(), _PREFILL)) == "Raising(a=1)"
+    # no __repr__ of its own: public attributes, not object.__repr__
+    assert render_python(capture(NoRepr(), _PREFILL)) == "NoRepr(a=1)"
+
+
+def test_traces_never_run_an_own_repr() -> None:
+    class Loud:
+        def __init__(self) -> None:
+            self.a = 1
+
+        def __repr__(self) -> str:
+            raise AssertionError("repr must not run in traces")
+
+    assert render_python(capture(Loud())) == "Loud(a=1)"

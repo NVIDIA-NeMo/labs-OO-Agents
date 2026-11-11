@@ -284,6 +284,31 @@ def _big_integer(value: int, max_size: int, depth: int, path: str, state: _State
     return _Built(dataclasses.replace(node, reason="max_length"), built.size)
 
 
+def _repr_object(value: Any, max_size: int, depth: int, path: str, state: _State) -> _Built | None:
+    """``repr(value)`` (bounded, see ``_run_repr``) as an ``Object(kind="python.repr")``; ``None``: none."""
+    if max_size < 2:
+        return None
+    text = _run_repr(value, state)
+    if text is None:
+        return None
+    type_name = _bounded_type_name(value, _MAX_TYPE_NAME)
+    entries = iter([("repr", text)])
+    return _object_fields(
+        type_name, entries, max_size, depth, path, state, "python.repr", capped=False
+    )
+
+
+def _defines_repr(mro: tuple[type[Any], ...], state: _State) -> bool:
+    """Whether a class in ``mro`` other than ``object`` defines ``__repr__`` (raw namespaces)."""
+    for base in mro:
+        if base is object:
+            continue
+        namespace = _raw_namespace(base, state)
+        if namespace is not None and "__repr__" in namespace:
+            return True
+    return False
+
+
 def _opaque(value: Any, max_size: int, depth: int, path: str, state: _State) -> _Built:
     """What a value capture cannot read becomes, as ``Limits.fallback`` asks.
 
@@ -295,14 +320,10 @@ def _opaque(value: Any, max_size: int, depth: int, path: str, state: _State) -> 
     whose ``repr`` field is cut like a string; a raising ``repr`` gives the
     opaque node.
     """
-    if state.limits.fallback == "repr" and max_size >= 2:
-        text = _run_repr(value, state)
-        if text is not None:
-            type_name = _bounded_type_name(value, _MAX_TYPE_NAME)
-            entries = iter([("repr", text)])
-            return _object_fields(
-                type_name, entries, max_size, depth, path, state, "python.repr", capped=False
-            )
+    if state.limits.fallback == "repr":
+        built = _repr_object(value, max_size, depth, path, state)
+        if built is not None:
+            return built
     name = _qualified_type_name(value, state)[: opaque_name_budget(max_size)]
     fallback_type = _builtin_name(value)
     _label, size = opaque_json(name, fallback_type, max_size)
@@ -1320,6 +1341,12 @@ def _build(value: Any, max_size: int, depth: int, path: str, state: _State) -> _
     view = _mro_view(value, mro, state)
     if view is not None:
         return _build_view(view, value, max_size, depth, path, state)
+    if limits.fallback == "repr" and _defines_repr(mro, state):
+        # A deliberate ``__repr__`` beats the attribute reader in model-facing
+        # previews (``<Response [200]>``); traces never run it.
+        built = _repr_object(value, max_size, depth, path, state)
+        if built is not None:
+            return built
     plain = _plain_entries(value, mro, state)
     if plain is not None:
         entries, count = plain

@@ -73,6 +73,10 @@ class _CaptureFunction:
       declared fields;
     - an instance of a class registered with ``capture.register``: what its
       shape describes;
+    - with ``Limits(fallback="repr")`` (model-facing previews), a value
+      whose class defines its own ``__repr__`` (a generated dataclass or
+      Pydantic repr does not count: those were read above): its bounded
+      ``repr``, as below; traces never run it;
     - a plain object (no ``__getattribute__`` in its MRO, the standard
       ``__dict__`` slot or ``__slots__``): an ``Object`` of its public
       instance attributes;
