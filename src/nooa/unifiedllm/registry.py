@@ -410,12 +410,16 @@ SUPPORTED_ADAPTERS = ("litellm",)
 def load_llm(name: str, **overrides) -> UnifiedLLM:
     """Load the LLM for a registry entry (or a LiteLLM model name).
 
-    Reads the entry's optional ``adapter:`` field. Only ``litellm`` is
-    supported now, and it is the default; any other value raises ValueError.
-    Everything else is as in :func:`get_llm_client`, including ``overrides``.
+    The adapter is ``overrides["adapter"]``, else the entry's optional
+    ``adapter:`` field, else ``litellm``. Only ``litellm`` is supported now;
+    any other value raises ValueError. The adapter choice is removed before
+    the client is built, so it never reaches the provider. Everything else is
+    as in :func:`get_llm_client`, including ``overrides``.
     """
     config = get_registry_config(name)
-    adapter = config.get("adapter")
+    adapter = overrides.pop("adapter", None)
+    if adapter is None:
+        adapter = config.get("adapter")
     if adapter is None:
         adapter = "litellm"
     if adapter not in SUPPORTED_ADAPTERS:

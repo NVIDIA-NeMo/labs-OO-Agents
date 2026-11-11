@@ -80,3 +80,35 @@ def test_plain_model_name_passes_through():
     client = load_llm("openai/gpt-4o-mini", api_key="test")
     assert type(client) is CompletionClient and client.model == "openai/gpt-4o-mini"
     client.close()
+
+
+def test_adapter_override_is_validated_and_never_sent(monkeypatch):
+    with pytest.raises(ValueError, match="unsupported adapter 'bogus'.*litellm"):
+        load_llm("openai/gpt-4o-mini", api_key="test", adapter="bogus")
+    client = load_llm("openai/gpt-4o-mini", api_key="test", adapter="litellm")
+    assert type(client) is CompletionClient and "adapter" not in client.config
+    client.close()
+
+
+def test_adapter_override_wins_over_the_registry(tmp_path):
+    _registry(
+        tmp_path,
+        """
+        models:
+          odd:
+            model_name: openai/x
+            api_key: test
+            media_inputs: []
+            adapter: anthropic-messages
+          plain:
+            model_name: openai/y
+            api_key: test
+            media_inputs: []
+            adapter: litellm
+        """,
+    )
+    client = load_llm("odd", adapter="litellm")
+    assert "adapter" not in client.config
+    client.close()
+    with pytest.raises(ValueError, match="unsupported adapter 'other'"):
+        load_llm("plain", adapter="other")
