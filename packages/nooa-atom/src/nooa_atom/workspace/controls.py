@@ -569,7 +569,7 @@ class ReflectionControl(BehaviorControl):
             state = "on" if timer.enabled() else "off"
         else:
             state = {True: "on", False: "off"}.get(settings.enabled, "default (on in ACP hosts)")
-        on = [name for name in blocks.blocks if settings.block_on(name)]
+        on = [name for name, block in blocks.blocks.items() if settings.block_on(name, block.on)]
         triggers = [
             f"every {settings.every_turns} turns" if settings.every_turns else None,
             f"every {settings.every_minutes:g} minutes" if settings.every_minutes else None,
@@ -593,7 +593,7 @@ def _reflection_config(settings: Any, blocks: Any) -> str:
     width = max((len(name) for name in registered), default=0)
     lines = ["Reflection blocks (/reflection config BLOCK on|off):"]
     for name, block in registered.items():
-        state = "on " if settings.block_on(name) else "off"
+        state = "on " if settings.block_on(name, block.on) else "off"
         what = f"snippet: {block.expr}" if block.expr else (block.text or "")
         if len(what) > 60:
             what = what[:57] + "..."

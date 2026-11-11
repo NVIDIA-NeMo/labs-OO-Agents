@@ -5,9 +5,9 @@
 Two parts. ``ReflectionBlocks`` is the registry of blocks the message is
 made of; every Atom agent owns one from construction as ``agent.reflection``.
 A block is a name and either text or a snippet: a Python expression, like a
-dynamic context block's ``expr``. Core registers ``CORE_BLOCKS``; a skill
-registers its own in ``attach()`` and unregisters it in ``detach()``. Skills
-add blocks only: the triggers belong to the session.
+dynamic context block's ``expr``. A bare registry is empty: the Atom factory
+(``create_session_agent()``) registers ``CORE_BLOCKS``, switched on by
+default. The triggers belong to the session.
 
 ``Reflection`` is the mechanics: a root session with a ``system_messages``
 queue owns one. When a turn ends with ``Done`` or ``Waiting`` the session
@@ -17,8 +17,8 @@ the evaluator context blocks use and posts the text on ``system_messages``.
 The agent handles it in a normal turn.
 
 Settings live in the workspace's ``atom.reflection`` (``ReflectionSettings``),
-which ``/reflection`` edits: ``enabled`` and which ``blocks`` are on. Core
-blocks start on, other blocks off. ``SessionOptions.reflection`` overrides
+which ``/reflection`` edits: ``enabled`` and which ``blocks`` are on. A block
+starts on if it was registered with ``on=True``, else off. ``SessionOptions.reflection`` overrides
 ``enabled`` for one run (a benchmark arm). The default is on for ACP hosts.
 """
 
@@ -73,7 +73,11 @@ CORE_BLOCKS: dict[str, str] = {
     ),
     "vars": "Delete `self.v` keys for finished work.",
 }
-"""The blocks core registers, by name, in message order. They start switched on."""
+"""The core blocks, by name, in message order.
+
+The Atom factory (``create_session_agent()``) registers them, switched on by
+default (``on=True``).
+"""
 
 
 class ReflectionSettings(BaseModel):
@@ -86,7 +90,8 @@ class ReflectionSettings(BaseModel):
     passed since the last one, and ``every_turns`` turns or ``every_minutes``
     minutes passed or the context window is ``context_fraction`` full.
     ``None`` turns a trigger off. ``blocks`` switches registered blocks on or
-    off by name; a block it does not name is on if core registers it, else off.
+    off by name; a block it does not name is on if it was registered with
+    ``on=True``, else off.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -98,9 +103,9 @@ class ReflectionSettings(BaseModel):
     context_fraction: float | None = Field(default=0.5, gt=0)
     blocks: dict[str, bool] = Field(default_factory=dict)
 
-    def block_on(self, name: str) -> bool:
-        """Whether block ``name`` is switched on: the user's choice, else on for core blocks."""
-        return self.blocks.get(name, name in CORE_BLOCKS)
+    def block_on(self, name: str, default: bool) -> bool:
+        """Whether block ``name`` is switched on: the user's choice, else its ``default``."""
+        return self.blocks.get(name, default)
 
 
 def reflection_enabled(
@@ -142,11 +147,15 @@ def context_fraction(agent: object) -> float | None:
 
 @dataclass(frozen=True)
 class ReflectionBlock:
-    """One block of the reflection message: fixed ``text``, or a snippet (``expr``)."""
+    """One block of the reflection message: fixed ``text``, or a snippet (``expr``).
+
+    ``on`` is its default state, for settings that do not name it.
+    """
 
     name: str
     text: str | None = None
     expr: str | None = None
+    on: bool = False
 
 
 Evaluate = Callable[[str], Awaitable[Any]]
@@ -156,19 +165,23 @@ Evaluate = Callable[[str], Awaitable[Any]]
 class ReflectionBlocks:
     """The blocks of the reflection message, by name: an agent's ``agent.reflection``.
 
-    It starts with ``CORE_BLOCKS``. ``register(name, text=...)`` or
-    ``register(name, expr="self.<skill>.reflection()")`` adds a block (a known
-    name is replaced in place); ``unregister(name)`` removes one.
+    It starts empty; the Atom factory registers ``CORE_BLOCKS``, switched on.
+    ``register(name, text=...)`` or ``register(name, expr="...")`` adds a
+    block (a known name is replaced in place); ``unregister(name)`` removes one.
     """
 
     def __init__(self) -> None:
-        """Register the core blocks."""
+        """Start empty."""
         self._blocks: dict[str, ReflectionBlock] = {}
-        for name, text in CORE_BLOCKS.items():
-            self.register(name, text=text)
 
-    def register(self, name: str, *, text: str | None = None, expr: str | None = None) -> None:
-        """Register block ``name`` with either ``text`` or a snippet ``expr`` (checked to parse)."""
+    def register(
+        self, name: str, *, text: str | None = None, expr: str | None = None, on: bool = False
+    ) -> None:
+        """Register block ``name`` with either ``text`` or a snippet ``expr`` (checked to parse).
+
+        ``on`` is its default state: whether it is sent while the settings do
+        not name it.
+        """
         if (text is None) == (expr is None):
             raise ValueError("a reflection block needs either text or expr")
         if text is not None and not text.strip():
@@ -179,7 +192,7 @@ class ReflectionBlocks:
             except SyntaxError as exc:
                 raise ValueError(f"reflection block {name!r}: not an expression: {expr!r}") from exc
         self._blocks[name] = ReflectionBlock(
-            name, text.strip() if text else None, expr.strip() if expr else None
+            name, text.strip() if text else None, expr.strip() if expr else None, on
         )
 
     def unregister(self, name: str) -> None:
@@ -200,7 +213,7 @@ class ReflectionBlocks:
         """
         texts = []
         for block in self._blocks.values():
-            if not settings.block_on(block.name):
+            if not settings.block_on(block.name, block.on):
                 continue
             text = block.text if block.expr is None else await _evaluate(block, evaluate)
             if text:

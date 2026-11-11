@@ -15,10 +15,9 @@ based on [Keep a Changelog](https://keepachangelog.com/).
   message is made of blocks registered by name on `agent.reflection` (a
   `ReflectionBlocks` registry): each is text or a snippet, a Python
   expression evaluated like a dynamic context block's right before the
-  message is posted. Core registers rename the session, compact history,
-  delete stale names, tidy todos and tidy `self.v`, switched on; skills
-  `register()` their own in `attach()` and `unregister()` them in
-  `detach()`, off until the user switches them on. `/reflection on|off`
+  message is posted. The Atom factory registers the core blocks (rename the
+  session, compact history, delete stale names, tidy todos and tidy
+  `self.v`), switched on by default. `/reflection on|off`
   turns it on or off, `/reflection config [BLOCK on|off]` lists and switches
   blocks, saved in `atom.reflection.enabled` and `atom.reflection.blocks`.
   The triggers keep their defaults and are set in YAML. On by default for

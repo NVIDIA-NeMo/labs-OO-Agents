@@ -376,23 +376,12 @@ registration order, then "Then finish with a short Done." Every Atom agent
 owns its blocks from construction as `agent.reflection`, a `ReflectionBlocks`
 registry. A block is a name and either text or a snippet: a Python expression,
 like a dynamic context block's `expr`, checked to parse when it is registered.
-Core registers `rename`, `compact`, `variables`, `todo` and `vars`
-(`nooa_atom.session.reflection.CORE_BLOCKS`); they point at the context blocks
-the agent already sees (`context_usage`, `python_cell_state`, `todo_status`).
-A skill registers its own in `attach()` and unregisters them in `detach()`.
-Skills add blocks only, never triggers:
-
-```python
-def attach(self, agent):
-    super().attach(agent)
-    agent.reflection.register("memory", text="Save what you learned to memory.")
-    agent.reflection.register("notes", expr="self.notes.reflection()")
-
-def detach(self):
-    self._agent.reflection.unregister("memory")
-    self._agent.reflection.unregister("notes")
-    super().detach()
-```
+The Atom factory (`create_session_agent()`) registers the five core blocks,
+`rename`, `compact`, `variables`, `todo` and `vars`
+(`nooa_atom.session.reflection.CORE_BLOCKS`), through
+`agent.reflection.register(..., on=True)`, so they are on by default; they
+point at the context blocks the agent already sees (`context_usage`,
+`python_cell_state`, `todo_status`).
 
 Snippets are evaluated when the message is built, with the evaluator dynamic
 context blocks use (`agent.runtime.evaluate_expression`: `self` is the agent,
@@ -401,8 +390,9 @@ pretty-printed, an exception inline as `ExceptionType: message`; `None` or
 `""` leaves the block out of that message, and a message with no blocks is
 not sent.
 
-Core blocks start switched on; every other block starts off until the user
-switches it on. The user controls it with `/reflection`:
+A block registered with `on=True`, like the core blocks, starts switched on;
+every other block starts off until the user switches it on. The user controls
+it with `/reflection`:
 
 - `/reflection`: on or off, the blocks that are on, the triggers, and when
   the next reflection is due;

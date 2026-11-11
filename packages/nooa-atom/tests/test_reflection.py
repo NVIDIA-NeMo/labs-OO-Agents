@@ -45,10 +45,18 @@ async def no_snippets(expr):
     raise AssertionError(f"unexpected snippet {expr!r}")
 
 
+def core_blocks():
+    """The blocks the Atom factory registers: the core ones, switched on."""
+    blocks = ReflectionBlocks()
+    for name, text in CORE_BLOCKS.items():
+        blocks.register(name, text=text, on=True)
+    return blocks
+
+
 def _reflection(clock=None, posted=None, context=lambda: None, **values):
     return Reflection(
         ReflectionSettings(**values),
-        blocks=ReflectionBlocks(),
+        blocks=core_blocks(),
         post=(posted if posted is not None else []).append,
         evaluate=no_snippets,
         context=context,
@@ -153,7 +161,7 @@ async def test_a_failing_send_is_logged_and_ignored(caplog):
 
     reflection = Reflection(
         ReflectionSettings(every_turns=1, min_gap_turns=0),
-        blocks=ReflectionBlocks(),
+        blocks=core_blocks(),
         post=boom,
         evaluate=no_snippets,
         clock=Clock(),
@@ -168,7 +176,7 @@ async def test_a_failing_send_is_logged_and_ignored(caplog):
 
 
 async def test_the_default_message():
-    message = await ReflectionBlocks().message(ReflectionSettings(), no_snippets)
+    message = await core_blocks().message(ReflectionSettings(), no_snippets)
     lines = message.split("\n")
     assert message == core_message()
     assert HEADER.startswith("[reflection] A housekeeping message from the session")
@@ -182,8 +190,12 @@ async def test_the_default_message():
     assert "add new ones for work you've taken on" in CORE_BLOCKS["todo"]
 
 
+def test_a_bare_registry_is_empty():
+    assert ReflectionBlocks().blocks == {}
+
+
 def test_register_text_and_snippet_blocks_by_name():
-    blocks = ReflectionBlocks()
+    blocks = core_blocks()
     blocks.register("memory", text=" Save what you learned. ")
     blocks.register("notes", expr="self.notes.reflection()")
     blocks.register("rename", text="Rename it.")  # replaces in place
@@ -192,7 +204,7 @@ def test_register_text_and_snippet_blocks_by_name():
     assert list(blocks.blocks) == ["rename", "variables", "todo", "vars", "memory", "notes"]
     assert blocks.blocks["memory"] == ReflectionBlock("memory", text="Save what you learned.")
     assert blocks.blocks["notes"] == ReflectionBlock("notes", expr="self.notes.reflection()")
-    assert blocks.blocks["rename"].text == "Rename it."
+    assert blocks.blocks["rename"] == ReflectionBlock("rename", text="Rename it.")  # off now
     blocks.register("awaited", expr="await self.notes.reflection()")  # as a context block's expr
     blocks.unregister("notes")
     assert "notes" not in blocks.blocks
@@ -233,8 +245,6 @@ async def test_snippets_are_evaluated_when_the_message_is_built():
         return value
 
     blocks = ReflectionBlocks()
-    for name in list(CORE_BLOCKS):
-        blocks.unregister(name)
     blocks.register("first", text="Fixed text.")
     for expr in values:
         blocks.register(expr, expr=expr)
@@ -251,12 +261,18 @@ async def test_snippets_are_evaluated_when_the_message_is_built():
 
 
 async def test_only_switched_on_blocks_are_sent():
-    blocks = ReflectionBlocks()
+    blocks = core_blocks()
     blocks.register("memory", text="SAVE MEMORY")
-    blocks.register("notes", text="NOTES")
-    # Core blocks start on, others off; the settings switch either way.
+    blocks.register("notes", expr="self.notes()")
+
+    async def notes(expr):
+        assert expr == "self.notes()"
+        return "NOTES"
+
+    # Blocks registered with on=True start on, others off; the settings switch either way.
+    assert ReflectionSettings().block_on("memory", blocks.blocks["memory"].on) is False
     settings = ReflectionSettings(blocks={"rename": False, "memory": True})
-    assert [settings.block_on(name) for name in blocks.blocks] == [
+    assert [settings.block_on(name, block.on) for name, block in blocks.blocks.items()] == [
         False,
         True,
         True,
@@ -268,6 +284,8 @@ async def test_only_switched_on_blocks_are_sent():
     message = await blocks.message(settings, no_snippets)
     assert "rename_session" not in message and "NOTES" not in message
     assert message.split("\n")[-2] == "5. SAVE MEMORY"
+    settings.blocks["notes"] = True  # switched on: the snippet is evaluated and sent
+    assert (await blocks.message(settings, notes)).split("\n")[-2] == "6. NOTES"
     nothing = ReflectionSettings(blocks=dict.fromkeys(blocks.blocks, False))
     assert await blocks.message(nothing, no_snippets) is None
 
@@ -570,12 +588,14 @@ async def test_a_skill_registers_blocks_and_their_snippets_run_when_sent(tmp_pat
     agent = root._agent
     try:
         assert "test.memory" in agent.skills.activated()
+        # The skill attached while the agent was built, before the factory
+        # registered the core blocks: its blocks come first.
         assert list(agent.reflection.blocks) == [
-            *CORE_BLOCKS,
             "memory",
             "memo",
             "broken",
             "silent",
+            *CORE_BLOCKS,
         ]
         assert agent.notes == 0  # registered, not evaluated
         assert (await root.prompt("one")).explanation == "one"
@@ -584,18 +604,28 @@ async def test_a_skill_registers_blocks_and_their_snippets_run_when_sent(tmp_pat
         [admitted] = reflections(updates)
         assert agent.notes == 1  # evaluated once, right before posting
         assert admitted.text.split("\n")[1:-1] == [
-            f"1. {CORE_BLOCKS['compact']}",
-            f"2. {CORE_BLOCKS['variables']}",
-            f"3. {CORE_BLOCKS['todo']}",
-            f"4. {CORE_BLOCKS['vars']}",
-            "5. SAVE MEMORY",
-            "6. NOTE 1 FROM SkillAgent",  # the context blocks' evaluator: self is the agent
-            "7. ZeroDivisionError: division by zero",
+            "1. SAVE MEMORY",
+            "2. NOTE 1 FROM SkillAgent",  # the context blocks' evaluator: self is the agent
+            "3. ZeroDivisionError: division by zero",
+            f"4. {CORE_BLOCKS['compact']}",
+            f"5. {CORE_BLOCKS['variables']}",
+            f"6. {CORE_BLOCKS['todo']}",
+            f"7. {CORE_BLOCKS['vars']}",
         ]  # "silent" returned None: left out
         assert "NOTE 1 FROM SkillAgent" in str(llm.calls[2].messages)  # the agent got the text
     finally:
         await registry.close_all()
     assert "memo" not in agent.reflection.blocks  # closing detached the skill
+
+
+async def test_the_atom_factory_registers_exactly_the_core_blocks_switched_on(tmp_path):
+    registry, root, _llm, _updates = await make_root(tmp_path, [])
+    try:
+        assert root._agent.reflection.blocks == {
+            name: ReflectionBlock(name, text=text, on=True) for name, text in CORE_BLOCKS.items()
+        }
+    finally:
+        await registry.close_all()
 
 
 async def test_the_runtime_evaluator_is_the_context_block_one(tmp_path):

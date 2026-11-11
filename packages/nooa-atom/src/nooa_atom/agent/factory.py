@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 from nooa.interactive import InteractiveAgent
 from nooa_atom.agent.slash_commands import SlashCommand
 from nooa_atom.session.loader import load_agent_class
+from nooa_atom.session.reflection import CORE_BLOCKS
 from nooa_atom.workspace.controls import behavior_commands
 from nooa_atom.workspace.models import workspace_llm_client
 from nooa_atom.workspace.options import AtomOptions, configure_session_skills
@@ -111,6 +112,9 @@ def create_session_agent(options: SessionOptions, storage: StorageManager) -> In
     if atom_options is not None and isinstance(agent, AtomAgentBase):
         # Read by the Session (nooa_atom.session.reflection) and /reflection.
         agent._reflection_settings = atom_options.reflection
+        # The core reflection blocks are registered here, and only here.
+        for name, text in CORE_BLOCKS.items():
+            agent.reflection.register(name, text=text, on=True)
         for warning in configure_session_skills(agent, atom_options):
             logger.warning("Session in %s: %s", options.workspace, warning)
         # The /skills and /mcp controls belong to the agent, not to one host:
