@@ -243,13 +243,22 @@ def done(text):
     return cell(f"return_result(Done(explanation={text!r}))")
 
 
-async def make_root(tmp_path, responses, *, host="acp", **config):
+def quick_factory(**config):
+    """``create_session_agent`` with these triggers on top of the saved settings."""
+
     def factory(options, storage):
         agent = create_session_agent(options, storage)
-        agent.reflection.config = ReflectionConfig(**{"min_gap_turns": 0, **config})
+        reflection = agent.reflection
+        reflection.config = reflection.config.model_copy(update={"min_gap_turns": 0, **config})
         return agent
 
-    registry = SessionRegistry(SessionStore(tmp_path / "sessions"), agent_factory=factory)
+    return factory
+
+
+async def make_root(tmp_path, responses, *, host="acp", **config):
+    registry = SessionRegistry(
+        SessionStore(tmp_path / "sessions"), agent_factory=quick_factory(**config)
+    )
     llm = CellLLM(responses)
     root = await registry.create(
         SessionOptions(
@@ -342,6 +351,43 @@ async def test_c_a_waiting_prompt_gets_its_own_result_before_any_reflection(tmp_
             ["system_messages"],
         ]  # [] is the job
         assert len(llm.calls) == 3
+    finally:
+        await registry.close_all()
+
+
+async def test_the_saved_choice_and_reflection_survive_a_restart(tmp_path):
+    registry, root, llm, updates = await make_root(tmp_path, [done("one")], every_turns=1)
+    try:
+        assert (await root.invoke_command("reflection", "off")).text.startswith("Reflection is off")
+        assert AtomOptions.load(tmp_path).reflection.enabled is False
+        assert (await root.prompt("one")).explanation == "one"
+        await idle(root)
+        session_id = root.id
+    finally:
+        await registry.close_all()  # the process ends: the session is saved and closed
+    assert len(llm.calls) == 1 and not [
+        u for u in updates if getattr(u, "source", None) == "reflection"
+    ]
+
+    # A new process: a new registry loads the session from disk (built by the factory).
+    registry = SessionRegistry(
+        SessionStore(tmp_path / "sessions"), agent_factory=quick_factory(every_turns=1)
+    )
+    llm = CellLLM([done("two"), done("tidied")])
+    try:
+        loaded = await registry.load(session_id, llm=llm)
+        agent = loaded._agent
+        assert isinstance(agent.reflection, Reflection) and not agent.reflection.enabled()
+        assert agent.reflection.config.enabled is False  # the saved choice stuck
+        assert (await loaded.invoke_command("reflection", "")).text.startswith("Reflection: off")
+        updates = []
+        loaded.subscribe(updates.append)
+        assert "Reflection is on" in (await loaded.invoke_command("reflection", "on")).text
+        assert (await loaded.prompt("two")).explanation == "two"
+        await idle(loaded)
+        [item] = [u for u in updates if getattr(u, "source", None) == "reflection"]
+        assert item.channel == "system_messages" and item.text.startswith(HEADER)
+        assert len(llm.calls) == 2
     finally:
         await registry.close_all()
 
