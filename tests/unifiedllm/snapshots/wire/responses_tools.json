@@ -77,7 +77,7 @@
           "instructions": "You are terse.",
           "model": "openai/gpt-5.6",
           "parallel_tool_calls": false,
-          "tool_choice": "auto",
+          "tool_choice": "required",
           "tools": [
             {
               "description": "Look something up.",
@@ -231,7 +231,7 @@
           "instructions": "You are terse.",
           "model": "openai/gpt-5.6",
           "parallel_tool_calls": false,
-          "tool_choice": "auto",
+          "tool_choice": "required",
           "tools": [
             {
               "description": "Look something up.",

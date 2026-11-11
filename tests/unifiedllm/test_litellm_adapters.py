@@ -122,6 +122,8 @@ async def test_send_matches_the_client_wire_body(calls, make, adapter_type):
     result = await adapter.send(request)
     assert result.content == "ok"
     assert len(calls) == 4 and len(set(calls)) == 1
+    # Equal bodies alone would hide a choice both paths drop.
+    assert json.loads(calls[0])["tool_choice"] == "required"
     await client.aclose()
 
 
@@ -291,3 +293,15 @@ async def test_empty_content_retry_checks_the_returned_response():
     assert (await client.acall(MESSAGES)).content == "ok"
     assert len(client._adapter.seen) == 4
     await client.aclose()
+
+
+@pytest.mark.parametrize("make", [chat_client, responses_client])
+@pytest.mark.parametrize("choice", ["auto", "required", "none"])
+def test_request_tool_choice_reaches_the_wire(calls, make, choice):
+    client = make()
+    client._adapter.send_sync(LLMRequest(messages=MESSAGES, tools=[TOOL], tool_choice=choice))
+    [body] = [json.loads(call) for call in calls]
+    # Chat leaves "auto" implicit beside parallel_tool_calls=False.
+    expected = None if choice == "auto" and make is chat_client else choice
+    assert body.get("tool_choice") == expected
+    client.close()

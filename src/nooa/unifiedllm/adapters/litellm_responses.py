@@ -379,7 +379,8 @@ class LiteLLMResponsesAdapter:
 
         if tools:
             api_params["tools"] = [client._convert_tool_to_schema(tool) for tool in tools]
-            api_params["tool_choice"] = "auto"
+            # Honour the requested choice; "auto" when the call names none.
+            api_params["tool_choice"] = api_params.get("tool_choice") or "auto"
             api_params["parallel_tool_calls"] = False
 
         if output_model is not None:
