@@ -10,6 +10,7 @@ import datetime
 import decimal
 import enum
 import json
+import logging
 import pathlib
 import re
 import time
@@ -386,3 +387,41 @@ def test_a_huge_int_says_how_many_digits_it_has(value: int, python: str) -> None
         assert render_python(node) == python
     assert json.loads(render_json(capture(value), max_chars=50_000))["digits"] > 4000
     assert render_python(capture(10**30)) == str(10**30)  # a small one stays a number
+
+
+def test_a_slow_or_large_repr_fallback_warns_the_developer(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from nooa.snapshot import _walk
+
+    class Slow:
+        __slots__ = ()
+
+        def __repr__(self) -> str:
+            time.sleep(0.02)
+            return "Slow()"
+
+    class Large:
+        __slots__ = ()
+
+        def __repr__(self) -> str:
+            return "x" * 2_000
+
+    monkeypatch.setattr(_walk, "SLOW_REPR_SECONDS", 0.01)
+    monkeypatch.setattr(_walk, "LARGE_REPR_CHARS", 1_000)
+    with caplog.at_level(logging.WARNING, logger="nooa.snapshot._walk"):
+        assert render_python(capture(Slow(), _PREFILL)) == "Slow()"
+        capture(Large(), _PREFILL)
+        capture(Slow())  # traces never run repr: no warning
+    messages = [r.getMessage() for r in caplog.records]
+    assert len(messages) == 2
+    assert "repr() of tests.snapshot.test_standard_types." in messages[0]
+    assert "Slow took 0.0" in messages[0] and "returned 6 characters" in messages[0]
+    assert "Large took" in messages[1] and "returned 2,000 characters" in messages[1]
+    assert all(r.levelno == logging.WARNING for r in caplog.records)
+
+
+def test_repr_warning_thresholds_are_module_constants() -> None:
+    from nooa.snapshot import _walk
+
+    assert _walk.SLOW_REPR_SECONDS == 0.1 and _walk.LARGE_REPR_CHARS == 1_000_000

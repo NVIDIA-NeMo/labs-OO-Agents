@@ -17,8 +17,10 @@ from __future__ import annotations
 
 import dataclasses
 import functools
+import logging
 import math
 import operator
+import time
 import typing
 from collections.abc import Callable, Iterable
 from typing import Any, Literal, NamedTuple, cast
@@ -96,6 +98,40 @@ class _Built(NamedTuple):
 
 
 # --- fallbacks -------------------------------------------------------------
+
+
+_log = logging.getLogger(__name__)
+
+SLOW_REPR_SECONDS = 0.1
+"""A ``repr`` the fallback runs that takes longer than this logs a developer warning."""
+LARGE_REPR_CHARS = 1_000_000
+"""A ``repr`` the fallback runs that returns more characters than this logs a developer warning."""
+
+
+def _run_repr(value: Any, state: _State) -> str | None:
+    """``repr(value)`` for the ``"repr"`` fallback; ``None`` when it raises or is not a ``str``.
+
+    The value's own code runs here, unbounded before the cut: one slower than
+    ``SLOW_REPR_SECONDS`` or longer than ``LARGE_REPR_CHARS`` logs a warning
+    naming the type, the time and the size, so a developer can give the type
+    a cheaper reading.
+    """
+    start = time.perf_counter()
+    try:
+        text = repr(value)
+    except Exception:
+        return None
+    elapsed = time.perf_counter() - start
+    if type(text) is not str:
+        return None
+    if elapsed > SLOW_REPR_SECONDS or str.__len__(text) > LARGE_REPR_CHARS:
+        _log.warning(
+            "snapshot: repr() of %s took %.3f s and returned %s characters",
+            _qualified_type_name(value, state),
+            elapsed,
+            f"{str.__len__(text):,}",
+        )
+    return text
 
 
 def _fallback(value: Any, reason: Reason, max_size: int) -> _Built:
@@ -260,11 +296,8 @@ def _opaque(value: Any, max_size: int, depth: int, path: str, state: _State) -> 
     opaque node.
     """
     if state.limits.fallback == "repr" and max_size >= 2:
-        try:
-            text = repr(value)
-        except Exception:
-            text = None
-        if type(text) is str:
+        text = _run_repr(value, state)
+        if text is not None:
             type_name = _bounded_type_name(value, _MAX_TYPE_NAME)
             entries = iter([("repr", text)])
             return _object_fields(
