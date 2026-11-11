@@ -146,15 +146,22 @@ def test_render_python_models_match_agentdoc() -> None:
 
 
 class Widget:
-    """A type NOOA does not inspect."""
+    """A type NOOA does not inspect: no instance ``__dict__`` and no slots."""
+
+    __slots__ = ()
 
 
 @pytest.mark.parametrize(
     ("value", "python", "json_by_budget", "path"),
     [
-        (Widget(), "<opaque: Widget>", ["0", '""', '"<"', '"<op"', '"<opaque: >"'], ""),
+        (
+            Widget(),
+            "<opaque: tests.snapshot.test_render_text.Widget>",
+            ["0", '""', '"<"', '"<op"', '"<opaque: >"'],
+            "",
+        ),
         (float("inf"), "<opaque: float>", ["0", '""', '"<"', '"<op"', '"<opaque: >"'], ""),
-        (Widget, "<opaque: type>", ["0", '""', '"<"', '"<op"', '"<opaque: >"'], ""),
+        (iter(()), "<opaque: tuple_iterator>", ["0", '""', '"<"', '"<op"', '"<opaque: >"'], ""),
         ([object(), 1], "[<opaque: object>, 1]", ["0", "[]", "[0]", '["<"]', '["<opaque:"]'], "/0"),
     ],
 )

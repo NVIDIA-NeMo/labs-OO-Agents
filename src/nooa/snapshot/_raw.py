@@ -20,10 +20,10 @@ these ways:
 - native operations on a value whose exact type was checked first
   (``type(v) is ...``): the built-in ``str``, ``bytes``, ``int``,
   ``float``, ``bool``, ``list``, ``tuple`` and ``dict`` in ``_walk`` and
-  ``_codec``, and, in ``_visibility``, ``object.__getattribute__`` on a
+  ``_codec``, and, in ``_fields``, ``object.__getattribute__`` on a
   Pydantic ``FieldInfo``, a ``dataclasses.Field``, an ``Annotated`` alias
   and agentdoc's ``SpecAnnotation``;
-- class metadata, the way Python reads it: ``_visibility`` calls
+- class metadata, the way Python reads it: ``_fields`` calls
   ``typing.get_type_hints(cls, include_extras=True)`` for a dataclass
   that has string annotations (a success is cached by class identity; an
   exception fails closed for that capture and is retried by the next one).
@@ -42,13 +42,14 @@ registers a shape, not from a captured value.
 from __future__ import annotations
 
 import types
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from types import MappingProxyType
 from typing import Any
 
 from pydantic import BaseModel
 
 from nooa.snapshot._limits import _State
+from nooa.snapshot._model import Reason
 
 _MAX_TYPE_NAME = 200
 _TYPE_DICT = type.__dict__["__dict__"]
@@ -175,14 +176,21 @@ def _namespace(cls: type[Any], state: _State) -> dict[str, Any]:
     return namespace
 
 
-def _copy_storage(obj_dict: Any, state: _State) -> dict[str, Any]:
-    """A copy of raw instance storage after checking every key (``_FailClosed``)."""
+def _copy_storage(obj_dict: Any, state: _State, limit: int | None = None) -> dict[str, Any]:
+    """A copy of raw instance storage after checking every key (``_FailClosed``).
+
+    ``limit``: copy only the first ``limit`` entries (insertion order), and
+    stop quietly there; ``None``: all of them, failing closed when the node
+    budget runs out first.
+    """
     if type(obj_dict) is not dict:
         raise _FailClosed
     # Storage can be mutated directly. Copy only after validating every key so
     # later fixed-string lookups cannot collide with hostile key objects.
     safe: dict[str, Any] = {}
     for stored_name, stored_value in dict.items(obj_dict):
+        if limit is not None and len(safe) >= limit:
+            break
         if not state.take_node() or type(stored_name) is not str:
             raise _FailClosed
         safe[stored_name] = stored_value
@@ -229,3 +237,22 @@ def _slot_value(name: str, mro: tuple[type[Any], ...], value: Any, state: _State
         except Exception:
             return _NO_SLOT
     return _NO_SLOT
+
+
+class _Omitted:
+    """An entry stream's note that something was left out here, and why.
+
+    The one way a field reader or a shape's items say "incomplete because":
+    the builder keeps reading, and the first such reason is the node's when
+    the builder's own limits left it complete.
+    """
+
+    __slots__ = ("reason",)
+    reason: Reason
+
+    def __init__(self, reason: Reason) -> None:
+        self.reason = reason
+
+
+_Fields = Iterator[tuple[str, Any] | _Omitted]
+"""A field reader's (name, value) fields and ``_Omitted`` notes; it raises ``_FailClosed``."""
