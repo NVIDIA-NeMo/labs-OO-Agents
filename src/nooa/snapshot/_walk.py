@@ -372,65 +372,39 @@ def _plan(length: int, limits: Limits, has_tail: bool) -> tuple[int, int]:
     return _split(limits, max_items) if has_tail else (max_items, 0)
 
 
-def _build_sequence(
-    value: list[Any] | tuple[Any, ...], max_size: int, depth: int, path: str, state: _State
-) -> _Built:
-    """Build a bounded sequence node from an exact list or tuple."""
-    type_name = "list" if type(value) is list else "tuple"
-    length = len(value)  # an exact built-in: no user hook
+def _builtin_collection(value: list[Any] | tuple[Any, ...] | dict[Any, Any]) -> _CollectionView:
+    """The ``_CollectionView`` of an exact ``list``, ``tuple`` or ``dict``.
+
+    Entries are read with the built-in type's own methods (``list.__getitem__``,
+    ``tuple.__getitem__``, ``dict.items``), so no user code runs. The view's
+    ``forward`` and ``backward`` are lazy: ``_container`` pulls only the
+    entries it keeps.
+
+    Args:
+        value: a value whose type is exactly ``list``, ``tuple`` or ``dict``.
+
+    Returns:
+        A keyed view (``type_name`` ``"dict"``) for a dict, else an unkeyed
+        one named ``"list"`` or ``"tuple"``, both readable from either end.
+    """
+    if type(value) is dict:
+        mapping = value
+        return _CollectionView(
+            "dict",
+            dict.__len__(mapping),
+            True,
+            lambda: iter(dict.items(mapping)),
+            lambda: reversed(dict.items(mapping)),
+        )
+    items = cast(Any, value)
     get = list.__getitem__ if type(value) is list else tuple.__getitem__
-    head_n, tail_n = _plan(length, state.limits, has_tail=True)
-    empty = Sequence(type_name, length, (), "max_depth")
-    return _enter(
-        value,
-        "sequence",
-        empty,
-        depth,
-        path,
-        state,
-        lambda: _container(
-            (get(cast(Any, value), index) for index in range(head_n)),
-            length=length,
-            type_name=type_name,
-            keyed=False,
-            max_size=max_size,
-            depth=depth,
-            path=path,
-            state=state,
-            head_n=head_n,
-            tail_n=tail_n,
-            backwards=lambda: (get(cast(Any, value), index) for index in range(length - 1, -1, -1)),
-        ),
-    )
-
-
-def _build_dict(
-    value: dict[Any, Any], max_size: int, depth: int, path: str, state: _State
-) -> _Built:
-    """Build a bounded mapping node without visiting rejected tail entries."""
-    length = dict.__len__(value)
-    head_n, tail_n = _plan(length, state.limits, has_tail=True)
-    empty = Mapping("dict", length, (), "max_depth")
-    return _enter(
-        value,
-        "mapping",
-        empty,
-        depth,
-        path,
-        state,
-        lambda: _container(
-            dict.items(value),
-            length=length,
-            type_name="dict",
-            keyed=True,
-            max_size=max_size,
-            depth=depth,
-            path=path,
-            state=state,
-            head_n=head_n,
-            tail_n=tail_n,
-            backwards=lambda: reversed(dict.items(value)),
-        ),
+    length = len(items)
+    return _CollectionView(
+        type(value).__name__,
+        length,
+        False,
+        lambda: (get(items, index) for index in range(length)),
+        lambda: (get(items, index) for index in range(length - 1, -1, -1)),
     )
 
 
@@ -1322,9 +1296,7 @@ def _build(value: Any, max_size: int, depth: int, path: str, state: _State) -> _
     if value_type is list or value_type is tuple or value_type is dict:
         if max_size < 2:
             return _fallback(value, "max_length", max_size)
-        if value_type is dict:
-            return _build_dict(value, max_size, depth, path, state)
-        return _build_sequence(value, max_size, depth, path, state)
+        return _build_view(_builtin_collection(value), value, max_size, depth, path, state)
 
     if max_size < 2:
         return _fallback(value, "max_length", max_size)
