@@ -137,7 +137,7 @@ class CommandResult:
     """One command's outcome: exit code, output, and bash's directory after it.
 
     ``stdout``/``stderr``: whole up to 1 MiB, else head+tail around a
-    ``[... N bytes omitted; ...]`` line; ``*_path``: that file (to 3.2 MiB),
+    ``[... N bytes omitted; ...]`` line; ``*_path``: that file (to 64 MiB),
     kept while the job is listed (direct ``run``: until its Shell/session
     closes) or evicted.
     """
