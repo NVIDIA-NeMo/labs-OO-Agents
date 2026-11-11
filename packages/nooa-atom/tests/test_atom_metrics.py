@@ -131,11 +131,12 @@ def test_atom_counters_live_in_the_atom_namespace():
 async def test_an_awaited_shell_command_over_the_limit_counts_as_a_long_await(monkeypatch):
     from nooa_atom.agent import work_shell
 
-    monkeypatch.setattr(work_shell, "_LONG_AWAIT_SECONDS", 0.2)
-    with harness_metrics_session() as metrics:
-        async with work_shell.Shell() as sh:
-            await sh.run("true")
-            await sh.run("sleep 0.4")
+    monkeypatch.setattr(work_shell, "_LONG_AWAIT_SECONDS", 1.0)
+    async with work_shell.Shell() as sh:
+        await sh.run("true")  # starts bash outside the session: startup is not timed
+        with harness_metrics_session() as metrics:
+            await sh.run("true")  # well under the limit once bash runs
+            await sh.run("sleep 1.5")
     assert metrics.atom.shell_long_awaits == 1
 
 
