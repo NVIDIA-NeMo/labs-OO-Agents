@@ -28,6 +28,7 @@ caller then tries the next reader.
 
 from __future__ import annotations
 
+import array
 import collections
 import datetime
 import decimal
@@ -419,6 +420,27 @@ def _container_view(
         return _CollectionView(
             type_name, native.__len__(value), False, lambda: _guard(native.__iter__(value)), None
         )
+    if native is collections.deque:
+        deque = collections.deque
+        return _CollectionView(
+            type_name,
+            deque.__len__(value),
+            False,
+            lambda: _guard(deque.__iter__(value)),
+            lambda: _guard(deque.__reversed__(value)),
+        )
+    if native is array.array:
+        length = array.array.__len__(value)
+        get = array.array.__getitem__
+        return _CollectionView(
+            type_name,
+            length,
+            False,
+            lambda: (get(value, i) for i in range(min(length, array.array.__len__(value)))),
+            lambda: (
+                get(value, i) for i in range(min(length, array.array.__len__(value)) - 1, -1, -1)
+            ),
+        )
     if native is str:
         return _TextView(
             str.__len__(value), lambda start, stop: str.__getitem__(value, slice(start, stop))
@@ -426,7 +448,17 @@ def _container_view(
     return None
 
 
-_CONTAINER_BASES = (collections.OrderedDict, dict, list, tuple, set, frozenset, str)
+_CONTAINER_BASES = (
+    collections.OrderedDict,
+    dict,
+    list,
+    tuple,
+    set,
+    frozenset,
+    str,
+    collections.deque,
+    array.array,
+)
 
 
 def _namedtuple_fields(
@@ -466,8 +498,9 @@ def _mro_view(value: Any, mro: tuple[type[Any], ...], state: _State) -> _View | 
     ``enum.Enum`` anywhere in the MRO first; then in MRO order, the first of: ``BaseException`` (its
     ``args``); ``type`` (the value is a class); a namedtuple (a ``tuple``
     whose class declares ``_fields``); a built-in container (``dict``,
-    ``OrderedDict``, ``list``, ``tuple``, ``set``, ``frozenset``, ``str``)
-    that no class above it in the MRO overrides an iteration method of.
+    ``OrderedDict``, ``list``, ``tuple``, ``set``, ``frozenset``, ``str``,
+    ``collections.deque``, ``array.array``) that no class above it in the
+    MRO overrides an iteration method of.
     """
     if any(base is enum.Enum for base in mro):  # before ``str`` / ``int`` (a StrEnum, an IntEnum)
         try:

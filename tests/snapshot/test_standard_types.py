@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import array
 import collections
 import datetime
 import decimal
@@ -11,6 +12,7 @@ import enum
 import json
 import pathlib
 import re
+import time
 import uuid
 from dataclasses import dataclass
 from typing import Annotated, Any
@@ -287,3 +289,46 @@ def test_empty_containers_at_max_depth_are_whole() -> None:
     snapshot = capture([[], {}, [1]], Limits(max_depth=1))
 
     assert render_python(snapshot) == "[[], {}, [list: 1 items]]"
+
+
+_PREFILL = Limits(max_items=25, max_string=2000, max_depth=4, tail_share=0.5, fallback="repr")
+
+
+@pytest.mark.parametrize(
+    ("value", "python"),
+    [
+        (collections.deque([1, "a"]), "deque([1, 'a'])"),
+        (collections.deque(), "deque([])"),
+        (array.array("d", [1.5, 2.0]), "array([1.5, 2.0])"),
+        (array.array("b"), "array([])"),
+    ],
+)
+def test_deque_and_array_are_native_sequences(value: Any, python: str) -> None:
+    for limits in (Limits(), _PREFILL):  # traces and prefill alike: no repr
+        assert render_python(capture(value, limits)) == python
+
+
+@pytest.mark.parametrize(
+    "value",
+    [collections.deque(range(10_000_000)), array.array("i", range(10_000_000))],
+    ids=["deque", "array"],
+)
+def test_huge_deque_and_array_are_read_from_both_ends_quickly(value: Any) -> None:
+    start = time.perf_counter()
+    text = render_python(capture(value, _PREFILL))
+    assert time.perf_counter() - start < 0.1  # the repr fallback took ~1 s
+    name = type(value).__name__
+    assert text.startswith(f"{name}(len=10000000, [:13]=[0, 1, 2,")
+    assert text.endswith("9999998, 9999999])")
+
+
+def test_deque_and_array_subclasses_that_override_iteration_are_not_read() -> None:
+    class Sneaky(collections.deque):  # type: ignore[type-arg]
+        def __iter__(self):  # noqa: ANN204
+            raise AssertionError("user iteration must not run")
+
+    class Plain(array.array):
+        pass
+
+    assert render_python(capture(Sneaky([1]))).startswith("<opaque: ")
+    assert render_python(capture(Plain("i", [1, 2]))) == "Plain([1, 2])"
