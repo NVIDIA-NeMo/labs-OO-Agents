@@ -263,7 +263,8 @@ async def test_override_placement_inherits_or_uses_explicit_policy():
 
     assert by_key["system_prompt"].role is Role.SYSTEM
     assert by_key["new_dynamic"].role is Role.USER
-    assert by_key["new_literal"].role is Role.SYSTEM
+    # A new bare value lands in the suffix, as with self.context["key"] = value.
+    assert by_key["new_literal"].role is Role.USER
     assert by_key["forced_suffix"].role is Role.USER
     assert by_key["new_dynamic"].metadata.expr == "'dynamic'"
     assert by_key["new_literal"].metadata.expr is None
