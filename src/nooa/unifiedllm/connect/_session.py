@@ -6,6 +6,7 @@ import asyncio
 import json
 import uuid
 from copy import deepcopy
+from typing import Any, cast
 
 from . import REASONING_CHECK_PROMPT
 
@@ -184,7 +185,7 @@ async def session_steps(alias, entry, *, api_key, budget_tokens):
     from nooa.context_blocks.renderers.cached import CachedBlockFormatter
     from nooa.context_view import Block
     from nooa.unifiedllm import CacheBoundary, RetryConfig, Tool
-    from nooa.unifiedllm.connect import ProbeUpdate, _include_rejected
+    from nooa.unifiedllm.connect import ProbeRecord, ProbeUpdate, _include_rejected
     from nooa.unifiedllm.http_config import HttpConfig
     from nooa.unifiedllm.registry import client_from_config
 
@@ -299,13 +300,16 @@ async def session_steps(alias, entry, *, api_key, budget_tokens):
         bodies.append(json.loads(request.content))
 
     try:
-        client = client_from_config(
-            alias,
-            entry,
-            api_key=api_key,
-            num_retries=0,
-            http_config=HttpConfig(read_timeout=120),
-            retry_config=RetryConfig(max_retries=0, rate_limit_extra_retries=0),
+        client = cast(
+            Any,
+            client_from_config(
+                alias,
+                entry,
+                api_key=api_key,
+                num_retries=0,
+                http_config=HttpConfig(read_timeout=120),
+                retry_config=RetryConfig(max_retries=0, rate_limit_extra_retries=0),
+            ),
         )
     except Exception as exc:
         yield ProbeUpdate("session", {"outcome": "not_confirmed", "error": type(exc).__name__})
@@ -314,8 +318,8 @@ async def session_steps(alias, entry, *, api_key, budget_tokens):
     hooks = client._http.httpx_async.event_hooks["request"]
     hooks.append(capture)
     spent = 0
-    first = None
-    replay = None
+    first: Any = None
+    replay: list[Any] = []
     readings = []
     observations = []
     settings_ok = True
@@ -365,7 +369,7 @@ async def session_steps(alias, entry, *, api_key, budget_tokens):
                 async with asyncio.timeout(120):
                     response = await client.acall(call_messages, **params)
             except Exception as exc:
-                record = {
+                record: ProbeRecord = {
                     "outcome": "not_confirmed",
                     "error": type(exc).__name__,
                     "tokens_charged_to_budget": spent,
@@ -388,7 +392,7 @@ async def session_steps(alias, entry, *, api_key, budget_tokens):
             # never put a reasoning item on the wire, so there is nothing for
             # capture_parts to attach and parts stays empty.
             observed = any(p.kind == "reasoning" for p in response.parts)
-            record = {
+            record: ProbeRecord = {
                 "outcome": "accepted",
                 "reasoning_observed": observed,
                 "input_tokens": usage.input_tokens if usage else None,
