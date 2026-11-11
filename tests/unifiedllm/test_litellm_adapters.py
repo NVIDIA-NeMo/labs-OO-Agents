@@ -181,3 +181,36 @@ def test_client_builds_request_from_call(monkeypatch, calls):
     assert request.reasoning_level == "low"
     assert request.max_output_tokens == 50
     client.close()
+
+
+@pytest.mark.parametrize("make", [chat_client, responses_client])
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"max_completion_tokens": 512},
+        {"max_output_tokens": 512},
+        {"extra_body": {"max_tokens": 512}},
+    ],
+)
+def test_option_reply_cap_wins_over_the_request_cap(calls, make, options):
+    """A cap in the options, under any spelling, keeps the request's cap off the wire."""
+    client = make()
+    client._adapter.send_sync(LLMRequest(messages=MESSAGES, max_output_tokens=256), **options)
+    [body] = [json.loads(call) for call in calls]
+    caps = {
+        k: v
+        for k, v in body.items()
+        if k in {"max_tokens", "max_completion_tokens", "max_output_tokens"}
+    }
+    caps.update({k: v for k, v in (body.get("extra_body") or {}).items() if k.startswith("max_")})
+    assert list(caps.values()) == [512]
+    client.close()
+
+
+@pytest.mark.parametrize("make", [chat_client, responses_client])
+def test_request_reply_cap_fills_in_when_options_have_none(calls, make):
+    client = make()
+    client._adapter.send_sync(LLMRequest(messages=MESSAGES, max_output_tokens=256))
+    [body] = [json.loads(call) for call in calls]
+    assert 256 in (body.get("max_tokens"), body.get("max_output_tokens"))
+    client.close()

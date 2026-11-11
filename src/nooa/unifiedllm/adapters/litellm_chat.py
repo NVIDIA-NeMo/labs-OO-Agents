@@ -20,6 +20,7 @@ from nooa.llm_types import AssistantReasoning, LLMResponse
 from nooa.unifiedllm import replay_state
 from nooa.unifiedllm.adapters.base import Capabilities
 from nooa.unifiedllm.cache_policy import add_session_affinity_header
+from nooa.unifiedllm.limits import REPLY_CAP_KEYS
 from nooa.unifiedllm.request import LLMRequest
 from nooa.unifiedllm.structured_output import anthropic_output_format
 from nooa.unifiedllm.unifiedllm import (
@@ -60,14 +61,23 @@ def client_capabilities(client: "UnifiedLLM") -> Capabilities:
 
 
 def request_options(request: LLMRequest, options: Mapping[str, Any]) -> dict[str, Any]:
-    """Call options for ``send``: request fields fill in what options leave out."""
+    """Call options for ``send``: request fields fill in what options leave out.
+
+    The request's reply cap is added only when no reply-cap spelling is in the
+    options or their ``extra_body``; a second spelling would be rejected.
+    """
     merged = dict(options)
     if request.tool_choice != "auto":
         merged.setdefault("tool_choice", request.tool_choice)
     if request.reasoning_level is not None:
         merged.setdefault("reasoning_level", request.reasoning_level)
-    if request.max_output_tokens is not None:
-        merged.setdefault("max_tokens", request.max_output_tokens)
+    extra = merged.get("extra_body")
+    if (
+        request.max_output_tokens is not None
+        and not REPLY_CAP_KEYS & merged.keys()
+        and not (isinstance(extra, Mapping) and REPLY_CAP_KEYS & extra.keys())
+    ):
+        merged["max_tokens"] = request.max_output_tokens
     return merged
 
 
