@@ -740,12 +740,8 @@ async def test_budget_evictions_are_counted_with_or_without_metadata(monkeypatch
         await agent.aclose()
 
 
-async def test_current_call_exposes_call_overridden_model_and_budget():
-    from nooa.runtime.actor import (
-        _current_call_var,
-        _current_context_view_var,
-        _current_llm_var,
-    )
+async def test_current_call_facts_come_from_the_request_client_and_limits():
+    from nooa.runtime.actor import _current_context_view_var
 
     captured: list[CurrentCall] = []
 
@@ -755,38 +751,28 @@ async def test_current_call_exposes_call_overridden_model_and_budget():
             yield Block(key="capture", content="capture")
 
     class LLM:
-        def __init__(self, model, window):
+        def __init__(self, model, **window):
             self.model = model
-            self.context_window = window
+            self.__dict__.update(window)
 
-    class Example(Agent, llm=LLM("agent/model", 100)):
+    class Example(Agent, llm=LLM("agent/model", context_window=100)):
         async def run(self) -> str: ...
 
     agent = Example()
-    resolved_call = CurrentCall(
-        id="1",
-        method_name="run",
-        decorator="plan",
-        agent=agent,
-        model="call/model",
-        context_window=300,
-    )
-    tokens = (
-        (_current_call_var, _current_call_var.set(resolved_call)),
-        (_current_context_view_var, _current_context_view_var.set(CaptureView())),
-        (_current_llm_var, _current_llm_var.set(LLM("call/model", 300))),
-    )
+    # Only the legacy window attribute: the view must see the window the request uses.
+    request_client = LLM("call/model", context_limit=100_000)
+    token = _current_context_view_var.set(CaptureView())
     try:
-        await agent.runtime._prepare_context(Example.run, context_limit=17, count_tokens=len)
+        await agent.runtime._build_messages(Example.run, llm_client=request_client)
     finally:
-        for variable, token in reversed(tokens):
-            variable.reset(token)
+        _current_context_view_var.reset(token)
 
     call = captured[-1]
+    reserve = agent.runtime.truncation_config.response_reserve_tokens
     assert (call.model, call.context_window, call.context_budget) == (
         "call/model",
-        300,
-        17,
+        100_000,
+        (100_000 - reserve) // 2,
     )
 
 

@@ -35,7 +35,7 @@ class ContextView[Owner](Protocol):
 
 The runtime assembles the selected view for every model request and collects it into a `tuple[ContextItem, ...]`. Rendering preserves that item order except when expanding an atomic tool-call replay group. No additional assembled-context type is needed.
 
-`CurrentCall` is a per-request snapshot of an invocation. Its invocation identity and method inputs stay stable; mutable manager and scoped state are captured again for each request. Views may read the resolved strategy, `model`, `context_window`, and `context_budget`. Internal formatting and token-counting data support the helpers. It contains no LLM client or credentials.
+`CurrentCall` is a per-request snapshot of an invocation. Its invocation identity and method inputs stay stable; mutable manager and scoped state are captured again for each request. Views may read the resolved strategy, `model`, `context_window`, and `context_budget`; the runtime resolves these once per request from the client and limits the request is sent with, so the window and budget always agree. Internal formatting and token-counting data support the helpers. It contains no LLM client or credentials.
 
 ## Resolution
 
